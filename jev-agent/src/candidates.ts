@@ -29,6 +29,8 @@ import { resourceMatches } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { planVerticalApproach } from './verticalPlan.ts'
+import { pickBestDescendStep } from './descendPlan.ts'
+import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 
 export type CandidateKind =
@@ -586,7 +588,11 @@ function descendCandidates(
   descendTargetY: number | null = null,
 ): Candidate[] {
   if (focusItem === null && descendTargetY === null) return []
-  if (state.signals.descendLimitReached === true) return []
+  // #41: the no-progress latch caps runaway descent for *item* goals. A predicate
+  // `descend_to:Y=<n>` is the objective itself; suppressing its only body change
+  // is exactly the permanent WAIT this issue fixes. The controller's stall
+  // assertion bounds a genuinely impossible descent instead.
+  if (state.signals.descendLimitReached === true && descendTargetY === null) return []
   const steps = (state.descent ?? []).filter((step) => step.safe)
   if (steps.length === 0) return []
 
@@ -621,23 +627,22 @@ function descendCandidates(
   if (pool.length === 0) pool = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
   if (pool.length === 0) return []
 
-  let best: DescentOption | null = null
-  let bestScore = Number.POSITIVE_INFINITY
-  for (const step of pool) {
-    if (failureCount(state.signals.failedCandidates, descendId(step)) >= DESCEND_FAILURE_LIMIT) continue
-    const modePenalty = step.mode === 'down' ? (wantDown ? 0 : 2) : wantDown && (hasTunnelTarget || descendTargetY !== null) ? 2 : 0
-    let alignment = 0
-    if (target !== null) {
-      const tdx = target.position.x - feet.x
-      const tdz = target.position.z - feet.z
-      const dot = step.dx * Math.sign(tdx) + step.dz * Math.sign(tdz)
-      alignment = dot > 0 ? -1 : dot < 0 ? 1 : 0
-    }
-    const score = modePenalty * 10 + alignment * 4 + distance(step.step, state.self.position) * 0.1
-    if (score < bestScore) {
-      bestScore = score
-      best = step
-    }
+  const scoreInput: DescendScoreInput = {
+    wantDown,
+    hasTunnelTarget,
+    predicateDescend: descendTargetY !== null,
+    target: target === null ? null : target.position,
+    feet,
+  }
+  const notFailed = pool.filter(
+    (step) => failureCount(state.signals.failedCandidates, descendId(step)) < DESCEND_FAILURE_LIMIT,
+  )
+  let best = pickBestDescendStep(notFailed, scoreInput)
+  if (best === null && descendTargetY !== null) {
+    // A predicate goal must yield a body change rather than WAIT. Retry over the
+    // full safe pool even when stale failure memory suppressed every step; the
+    // controller's DESCEND_STALLED assertion bounds a genuinely impossible descent.
+    best = pickBestDescendStep(pool, scoreInput)
   }
   if (best === null) return []
 
@@ -657,7 +662,7 @@ function descendCandidates(
     {
       id: descendId(best),
       kind: 'DESCEND',
-      label: `${best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${focusItem} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})`,
+      label: `${best.dir === 'D' ? 'dig straight down' : best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${focusItem ?? (descendTargetY === null ? 'unknown' : `descend_to:Y=${descendTargetY}`)} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})`,
       targetName: focusItem,
       target: primary,
       targetEntityId: null,

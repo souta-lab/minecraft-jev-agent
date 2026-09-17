@@ -31,7 +31,7 @@ export function resolveRetrievalStallTicks(
   return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : RETRIEVAL_STALL_TICKS_DEFAULT
 }
 
-export type VerticalDir = 'E' | 'W' | 'N' | 'S'
+export type VerticalDir = DescentOption['dir']
 
 export type VerticalPlan =
   | {

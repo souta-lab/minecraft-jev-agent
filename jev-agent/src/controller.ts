@@ -52,6 +52,8 @@ import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, reso
 import type { ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import { evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
+import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
+import type { DescendProgressState } from './descendPlan.ts'
 import { DigMemory } from './worldMemory.ts'
 import type { DigDir } from './worldMemory.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
@@ -294,6 +296,10 @@ export const MAX_BLOCK_REACH = 5
 const WAIT_REPLAN_LIMIT = 4
 /** Issue #45: an active RETRIEVE that stops closing distance for this many ticks escalates. */
 const RETRIEVAL_STALL_TICKS = resolveRetrievalStallTicks()
+/** Issue #41: a descend goal with no vertical progress for this many ticks escalates. */
+const DESCEND_STALL_TICKS = resolveDescendStallTicks()
+/** Issue #41: a descend goal with no executable descend candidate this long escalates. */
+const DESCEND_NO_CANDIDATE_TICKS = resolveDescendNoCandidateTicks()
 /** Distance decrease (m) that counts as real retrieval progress. */
 const RETRIEVAL_PROGRESS_EPSILON = 0.5
 
@@ -351,6 +357,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCEND_LIMIT',
   'STAIRCASE',
   'REUSE_TUNNEL',
+  'DESCEND_STALLED',
+  'DESCEND_PROGRESS',
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
   'RETURN_TO_KNOWN_RESOURCE',
@@ -422,6 +430,10 @@ export class JevController {
   private candidateFailureAt = new Map<string, number>()
   private readonly digMemory = new DigMemory()
   private descendHaveBaseline = 0
+  private descendProgress: DescendProgressState | null = null
+  private descendStallTicks = 0
+  private descendProgressTicks = 0
+  private descendGoalKey: string | null = null
   private actionStart: Vec3Json | null = null
   private positionWindow: Vec3Json[] = []
   private lastEscalationAt = new Map<EscalationReason, number>()
@@ -924,6 +936,14 @@ export class JevController {
         if (productive.length > 0) candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
       }
       this.retrievalEscalationPending = false
+      // Issue #41: while a `descend_to:Y=<n>` predicate goal is active, WAIT is
+      // never acceptable - it leaves the bot above the target forever. Suppress it
+      // whenever any alternative exists (including ESCALATE), so the policy must
+      // pick the staircase / dig-down step or hand control to System 2.
+      if (this.queue.current?.kind === 'descend' && candidates.some((candidate) => candidate.kind !== 'WAIT')) {
+        candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
+      }
+      this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
 
@@ -1547,7 +1567,8 @@ export class JevController {
     }
     if (mode === 'down' && this.digMemory.dirCount === 0) {
       const from = Math.floor(this.bot.entity.position.y)
-      const to = this.digMemory.knownStoneY ?? from - 8
+      const predicateY = this.queue.current?.kind === 'descend' ? this.queue.current.targetY : null
+      const to = typeof predicateY === 'number' ? predicateY : (this.digMemory.knownStoneY ?? from - 8)
       this.logger.info('agent', `STAIRCASE from_y=${from} to_y=${to}`, { actionId: candidate.id }, this.tickCounter)
     }
   }
@@ -1555,7 +1576,7 @@ export class JevController {
   private onDescendComplete(result: ExecutionResult, candidate: Candidate): void {
     const target = candidate.target
     const dir = candidate.meta.dir
-    if (target !== null && (dir === 'E' || dir === 'W' || dir === 'N' || dir === 'S')) {
+    if (target !== null && (dir === 'E' || dir === 'W' || dir === 'N' || dir === 'S' || dir === 'D')) {
       this.digMemory.record({
         x: target.x,
         y: target.y,
@@ -2163,6 +2184,83 @@ export class JevController {
 
   private retrievalKey(active: { knownName: string; target: Vec3Json }): string {
     return resourceKey({ name: active.knownName, position: active.target })
+  }
+
+  /**
+   * Issue #41 progress + stall assertion for an active `descend_to:Y=<n>` goal.
+   * The feet Y must keep decreasing. If the generator offers no DESCEND candidate
+   * (or the decision made no progress) for DESCEND_STALL_TICKS ticks, this logs
+   * `DESCEND_STALLED`, drops the latched descent budget so a different column can
+   * be tried, and escalates to System 2 - WAIT is never the answer for a descend
+   * goal. Tracking resets whenever the goal changes or is satisfied.
+   */
+  private observeDescendProgress(candidates: readonly Candidate[]): void {
+    const current = this.queue.current
+    const entity = this.bot.entity
+    if (current === null || current.kind !== 'descend' || typeof current.targetY !== 'number' || entity === undefined) {
+      this.resetDescendTracking()
+      return
+    }
+    const targetY: number = current.targetY
+    const y = entity.position.y
+    const goalKey = `${current.id}:${targetY}`
+    if (this.descendGoalKey !== goalKey) {
+      this.descendGoalKey = goalKey
+      this.descendProgress = { bestY: y, ticks: 0 }
+      this.descendStallTicks = 0
+      this.descendProgressTicks = 0
+    }
+    const previous = this.descendProgress ?? { bestY: y, ticks: 0 }
+    const decision = evaluateDescendProgress({ previous, y, stallTicks: DESCEND_STALL_TICKS })
+    this.descendProgress = { bestY: decision.bestY, ticks: decision.ticks }
+    const delta = Math.round((decision.bestY - y) * 10) / 10
+    if (decision.outcome === 'progress') {
+      this.descendProgressTicks = 0
+      this.descendStallTicks = 0
+      this.logger.info(
+        'agent',
+        formatDescendProgress(Math.floor(y), targetY, delta, 0),
+        { y, targetY, delta, outcome: decision.outcome },
+        this.tickCounter,
+      )
+      return
+    }
+    const hasDescendCandidate = candidates.some((candidate) => candidate.kind === 'DESCEND')
+    this.descendStallTicks = hasDescendCandidate ? 0 : this.descendStallTicks + 1
+    this.descendProgressTicks += 1
+    if (this.descendProgressTicks % DESCEND_PROGRESS_LOG_TICKS === 0) {
+      this.logger.info(
+        'agent',
+        formatDescendProgress(Math.floor(y), targetY, delta, this.descendStallTicks),
+        { y, targetY, delta, hasDescendCandidate, stallTicks: this.descendStallTicks },
+        this.tickCounter,
+      )
+    }
+    const noCandidateStalled = this.descendStallTicks >= DESCEND_NO_CANDIDATE_TICKS
+    if (!noCandidateStalled && decision.outcome !== 'stalled') return
+    const stallTicks = noCandidateStalled ? this.descendStallTicks : DESCEND_STALL_TICKS
+    this.logger.warn(
+      'agent',
+      formatDescendStalled(Math.floor(y), targetY, stallTicks),
+      { y, targetY, stallTicks, hasDescendCandidate },
+      this.tickCounter,
+    )
+    // Strategy switch: forget the latched descent budget and chosen direction so
+    // the next tick can pick a different column/step, then wake System 2.
+    this.digMemory.markResourceProgress()
+    this.descendProgress = { bestY: y, ticks: 0 }
+    this.descendStallTicks = 0
+    this.escalate(
+      'progress_stall',
+      `descend goal ${current.id} stuck at y=${Math.floor(y)} (target ${targetY}) for ${stallTicks} ticks; switching strategy`,
+    )
+  }
+
+  private resetDescendTracking(): void {
+    this.descendProgress = null
+    this.descendStallTicks = 0
+    this.descendProgressTicks = 0
+    this.descendGoalKey = null
   }
 
   private retrievalTargetExists(): boolean {
