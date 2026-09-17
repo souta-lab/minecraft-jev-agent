@@ -59,6 +59,15 @@ import { DigMemory } from './worldMemory.ts'
 import type { DigDir } from './worldMemory.ts'
 import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
+import {
+  classifyAbandonReason,
+  evaluatePlaceRetry,
+  formatAbandonReason,
+  PLACE_RETRY_LIMIT,
+  prerequisiteOptionName,
+  shouldAdoptAbandon,
+} from './placementGuard.ts'
+import type { AbandonReason } from './placementGuard.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -368,6 +377,9 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
+  'PRECONDITION_PROTECTED',
+  'PLACE_RETRY',
+  'ABANDON_REASON',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -488,6 +500,10 @@ export class JevController {
   private readonly unreachableResources = new Set<string>()
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
+  /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
+  private readonly placementRetries = new Map<string, number>()
+  /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
+  private lastPlacedFurnaceCount = 0
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -911,6 +927,7 @@ export class JevController {
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
+      this.lastPlacedFurnaceCount = state.furnaces?.length ?? 0
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -1140,6 +1157,21 @@ export class JevController {
       { action, abandon, decision: replan ? 'replan' : 'continue', chainId },
       this.tickCounter,
     )
+    if (replan) {
+      const reason = this.abandonReason(action, abandon)
+      const option = action === 'WAIT' ? 'none' : prerequisiteOptionName(action)
+      this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
+    }
+  }
+
+  /** Why beta/controller chose abandon, from the deterministic failure signals. */
+  private abandonReason(actionId: string, beta: number | null): AbandonReason {
+    return classifyAbandonReason({
+      beta,
+      lastFailureCode: this.signals.lastFailureCode,
+      candidateFailures: this.candidateFailureCount(actionId),
+      escalationRecommended: this.signals.escalationRecommended,
+    })
   }
 
   /**
@@ -1224,7 +1256,94 @@ export class JevController {
   private adoptAbandon(decision: JevResult): void {
     if (!abandonRequested(decision)) return
     const probability = decision.answers.abandon_option?.probability ?? null
+    const actionId = decisionIdFrom(decision)
+    const guard = shouldAdoptAbandon({
+      actionId,
+      goal: this.queue.current,
+      placedFurnaceCount: this.lastPlacedFurnaceCount,
+      abandonRequested: true,
+    })
+    if (!guard.adopt) {
+      this.logger.warn(
+        'heads',
+        guard.protection.line,
+        { option: guard.protection.option, because: guard.protection.because, actionId, abandon: probability },
+        this.tickCounter,
+      )
+      return
+    }
     this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
+  }
+
+  /**
+   * #46: a required precondition is deterministic code, not a model vote. When
+   * the last chosen action is the furnace prerequisite of the ready smelt, a
+   * replan is suppressed (and logged) until the bounded placement retries run out.
+   */
+  private protectedReplanSuppressed(reason: LlmSummonReason): boolean {
+    if (reason !== 'no_progress' && reason !== 'action_impossible' && reason !== 'unknown_situation') return false
+    const guard = shouldAdoptAbandon({
+      actionId: this.lastDecisionId,
+      goal: this.queue.current,
+      placedFurnaceCount: this.lastPlacedFurnaceCount,
+      abandonRequested: true,
+    })
+    if (guard.adopt) return false
+    if (this.placeRetryExhausted()) return false
+    this.logger.warn(
+      'heads',
+      guard.protection.line,
+      { option: guard.protection.option, because: guard.protection.because, reason },
+      this.tickCounter,
+    )
+    return true
+  }
+
+  private placeRetryExhausted(): boolean {
+    for (const count of this.placementRetries.values()) {
+      if (count > PLACE_RETRY_LIMIT) return true
+    }
+    return false
+  }
+
+  private placeRetryCount(item: string | null): number {
+    if (item === null) return 0
+    return this.placementRetries.get(item) ?? 0
+  }
+
+  /**
+   * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
+   * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
+   * and only give up after PLACE_RETRY_LIMIT attempts.
+   */
+  private schedulePlaceRetry(result: ExecutionResult, candidate: Candidate): boolean {
+    const at =
+      candidate.target ??
+      ({
+        x: Math.floor(this.bot.entity.position.x),
+        y: Math.floor(this.bot.entity.position.y),
+        z: Math.floor(this.bot.entity.position.z),
+      } satisfies Vec3Json)
+    const item = candidate.itemName
+    const prior = this.placeRetryCount(item)
+    const decision = evaluatePlaceRetry({ at, reason: result.failure ?? 'place_failed', priorRetries: prior })
+    if (!decision.retry) {
+      this.logger.warn(
+        'agent',
+        `${decision.line} retry_exhausted=${prior}/${PLACE_RETRY_LIMIT} -> allow replan`,
+        { actionId: result.actionId, count: prior, limit: PLACE_RETRY_LIMIT, reason: result.failure },
+        this.tickCounter,
+      )
+      return false
+    }
+    if (item !== null) this.placementRetries.set(item, decision.count)
+    this.logger.warn(
+      'agent',
+      decision.line,
+      { actionId: result.actionId, count: decision.count, limit: PLACE_RETRY_LIMIT, reason: result.failure },
+      this.tickCounter,
+    )
+    return true
   }
 
   private criticalArrivedDuringFlight(): boolean {
@@ -1425,6 +1544,9 @@ export class JevController {
     }
 
     if (result.status === 'done') {
+      if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
+        this.placementRetries.delete(candidate.itemName)
+      }
       if (result.kind === 'MINE' && result.verified) {
         this.noteCandidateSuccess(result.actionId)
         this.verifiedDigs += 1
@@ -1492,6 +1614,8 @@ export class JevController {
       this.actionStart = null
       this.failureStreak = 0
       this.signals.consecutiveFailures = 0
+    } else if (result.kind === 'PLACE' && this.schedulePlaceRetry(result, candidate)) {
+      this.noteCandidateFailure(result.actionId)
     } else {
       this.noteCandidateFailure(result.actionId)
       this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
@@ -1915,6 +2039,9 @@ export class JevController {
    */
   private summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
     if (!this.running) return null
+    if (this.protectedReplanSuppressed(reason)) {
+      return { triggered: false, reason, detail: 'protected prerequisite: replan suppressed (#46)' }
+    }
     if (this.options.singleShotPlanner && this.planSupplied) {
       this.logger.warn(
         'system2',

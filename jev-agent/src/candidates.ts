@@ -807,17 +807,31 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
 }
 
 /**
+ * #46: pick the placement spot with the fewest recorded failures so a failed
+ * placement retries at a different nearby block instead of re-failing in place.
+ */
+function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | null {
+  const failed = state.signals.failedCandidates
+  let best: Vec3Json | null = null
+  let bestCount = Number.POSITIVE_INFINITY
+  for (const spot of state.placementSpots) {
+    const count = failed[`PLACE:${item}:${blockId('p', spot)}`] ?? 0
+    if (count < bestCount) {
+      best = spot
+      bestCount = count
+    }
+  }
+  return best
+}
+
+/**
  * PLACE candidate for a `place` subgoal (e.g. the M2 furnace). The item is in
  * the inventory and there is a grounded placement spot within reach.
  */
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
   if ((state.inventory.counts[focusItem] ?? 0) <= 0) return []
-  const failed = state.signals.failedCandidates
-  const spot =
-    state.placementSpots.find((candidate) => (failed[`PLACE:${focusItem}:${blockId('p', candidate)}`] ?? 0) < 2) ??
-    state.placementSpots[0] ??
-    null
+  const spot = leastFailedPlacementSpot(state, focusItem)
   if (spot === null) return []
   return [
     {
