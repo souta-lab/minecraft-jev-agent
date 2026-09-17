@@ -1,12 +1,12 @@
 # AGENTS.md — mc-ai グローバル指示（全エージェント必読）
 
 > このファイルは `/home/s0u7a/mc-ai` で作業する**すべてのエージェント**に対する最上位の指示。
-> 作業前に必ず読むこと。詳細は `buddy-driver/AGENTS.md`、設計は `RESIDENT-MODE.md`、現状は `ARCHITECTURE.md`。
+> 作業前に必ず読むこと。詳細は `buddy-driver/AGENTS.md`、設計は `RESIDENT-MODE.md` / `PLANNERS.md`、現状は `ARCHITECTURE.md`。
 
 ## 0. 標準指令（ユーザー指示・恒久）
 1. **最終目標は M4（Ender Dragon 討伐）**。M2（鉄器時代）は通過点。
 2. **ユーザーの発言を待たない。指示待ちをしない。** やることが無ければ**自分で仕事を考えて着手する**。
-3. 判断に迷ったら「**P1 durability を壊さない**」を優先し、次に「M4への距離を縮める」を基準にする。
+3. 判断に迷ったら「**P1 durability / actuation safety を壊さない**」を最優先し、次に「将来の二重実装を避ける」、次に「M4への距離を縮める」を基準にする。
 4. 進捗は必ず一次証拠（ログ行・在庫・コミット）で残す。主観や推測で「できた」と言わない。
 5. 作業単位ごとに小さくコミット＆push（秘密スキャン必須）。
 6. 人間は基本不在。危険操作（サーバー停止・world削除・履歴改変・force push）はしない。
@@ -14,34 +14,84 @@
 ## 1. システム概要
 ```
 Mineflayer   = メカニクス実行（連続モーター）
-Jev          = 接地された局所方針・唯一の行動権限（現在: action Choice ＋ 各種意味質問）
-LLM/Mercury  = 上位の意図生成・計画修復（例外駆動。System2Brain）
-Code         = 安全性・物理的真実・事前条件・成功述語
-常駐ホスト   = 接続保持＋世代ホットリロード＋制御ソケット＋状態ストア（HOSTだけが durable writer）
+Jev          = 接地された強い局所判断器・唯一のAction選択権限
+Mercury      = 例外駆動の上位意図/Option/plan repair
+Option/Skill = 上位意図を実行可能な時間的抽象へコンパイルする層
+Code         = 安全性・物理的真実・事前条件・成功述語・capability dependency
+常駐ホスト   = 接続保持＋世代ホットリロード＋制御ソケット＋authoritative resident state＋actuation lease
 ```
-設計の本命: **Issue #11 Grounded Options**（Jev = π action ＋ β abandon_option、事前条件/成功述語はコード）。
+
+**設計の本命: Issue #11 Grounded Options**
+```
+Jev π = grounded action/skill Choice
+Jev β = abandon_option probability
+Option initiation/success = deterministic code
+Mercury = sparse Option/plan repair
+```
+
+重要な移行原則:
+
+> **early schema/control-surface migration, late authority migration**
+
+#11を後回しにしてM3/M4機能を旧Goal表現へ大量追加しない。先にOption/Skillの契約を作り、既存のGoalQueue/Guard/Executorをその下で再利用する。
 
 ## 2. 優先順（この順で前へ進める）
 ```
-1. P1 durability/atomicity の確定
-   ledger復元(done維持・rung後退防止) / lease前のdurable書き込み禁止 / listenerリーク0 /
-   リロード<2s / 単一インスタンス強制 / worldEpoch名前空間 / server truth と durable state の分離
-2. #12 PRECONDITION_MISSING → 前提チェーン差し替え（LADDER_PREREQ）。世代が長生きするようにする
-3. movement root cause（#7 resourceTier / #8 hop順序・failure memory / #9 DESCEND暴走 / ジグザグ→階段掘り）
-4. System2: Mercury 2.5 を例外駆動で稼働（mercury-calls.jsonl に error=null の実応答）
-5. Issue #11 Grounded Options へ段階移行（旧質問は shadow へ降格）
-6. M2 完走（furnace→charcoal→iron_ore→iron_ingot×3→iron_pickaxe を在庫で証明）
-7. M3/M4（ダイヤ、ネザー、ブレイズ、エンダーパール、エンダーアイ、要塞、ジ・エンド、ドラゴン）
+0. P1 safety/durability は常時ブロッカー
+   #5 atomic state / #13 listener leak / #28 disconnect lease / #38 nested actuation bypass /
+   #40 authoritative snapshot など。壊れている場合は他作業より先に直す。
+
+1. #11 Grounded Options の骨格を前倒し
+   #21 OptionSpec + PlannedGoal->Option compiler
+   #20 SkillCandidate contract
+   #14 known-resource coordinates + #29 strategy grounding
+   ※ GoalQueue / Guard / Executor / resident は捨てない。
+
+2. #11 shadow/評価基盤
+   #22 abandon_option β shadow
+   #32 raw Boolean probability保持
+   #36 causal IDs
+   #23 replay A/B harness
+
+3. 現行Mercury correctnessを並行で最小修正
+   #15 cache replay / #30 patch tail / #18 retry accounting / #16 world scope / #19 explicit operation
+   旧plannerを大規模拡張しない。
+
+4. #24 β termination controller
+   replay/calibrationで勝ってからauthorityを与える。hysteresis/corroboration/cooldown必須。
+
+5. M2を新しいOption境界の上で完走
+   furnace -> charcoal -> raw_iron -> iron_ingot×3 -> iron_pickaxe
+
+6. #35 semantic planner重複を整理
+   #11が実測で勝った後だけ Advisor/PlannerBrain/Jev/Mercury の重複責務を削る。
+
+7. #41 predicate-based capability graph
+   M3/M4の非item objectiveを追加する前に依存関係/成功述語の表現を一般化。
+
+8. M3/M4
+   ダイヤ -> ネザー -> ブレイズ/パール -> エンダーアイ -> 要塞 -> End -> Dragon
 ```
 
-## 3. 現在の既知ブロッカー（2026-09-18 01:55 JST）
+### #11前倒しで「やらない」こと
 ```
-#12 PRECONDITION_MISSING が停止条件になっている（PRECONDITION_MISSING=128 / LADDER_PREREQ=0）
-    → 世代が1tickで停止→回復を回転（generations=208 / recoveries=83）。これが critical path
-listenerLeak=true（physicsTick が baseline を超過）
-RETURN_TO_KNOWN_ORE 未実装（discoveredOres に iron_ore があるのに探索で停滞）
-PR #2（Mercury adapter + CI）は CI が failure。mergeable でも CI green まで merge しない
-movement 修正はコミット済み（f68224c）だが、#12 で掘削が始まるまで実効を観測できない
+・いきなりβにreplan authorityを与えない
+・今までのM1/M2 mechanicsを全面書き直さない
+・GoalQueueを削除しない（execution ledgerとして残す）
+・Guard / VERIFYをモデル権限へ移さない
+・現在の多質問Jev diagnosticsをすぐ削除しない（shadow比較に使う）
+・M3/M4の新機能をfake targetItemや自然言語strategyだけで増やさない
+```
+
+## 3. 現在の重要状態（2026-09-18）
+```
+#12 LADDER_PREREQ 修正は main に landed（3866d3d）。live acceptanceは継続確認する。
+movement root cause #7/#8/#9 の修正も landed。live挙動はresident安定後に再検証する。
+Mercury System2 は live。現行 correctness issue #15/#30/#18 等は残る。
+listenerLeak=true の観測あり (#13)。
+RETURN_TO_KNOWN_ORE は WorldMemory が ore座標を持たないため未接地 (#14)。
+Advisor の複数strategyが身体側で同一goalへ潰れる (#29)。
+actuation lease はあるが nested capability bypass が残る (#38)。
 ```
 
 ## 4. 運用手順（必ず守る）
@@ -61,39 +111,80 @@ movement 修正はコミット済み（f68224c）だが、#12 で掘削が始ま
 
 ## 5. 完了の定義（M4までの到達点）
 ```
-M1: 3 log → crafting_table → wooden_pickaxe → cobblestone（検証済み・維持）
-M2: furnace → charcoal → iron_ore → iron_ingot×3 → iron_pickaxe（在庫で証明）
-M3: ダイヤ入手 → ダイヤ装備 → ネザー到達 → ブレイズロッド・エンダーパール確保
-M4: エンダーアイ生成 → 要塞発見 → ジ・エンド到達 → ドラゴン討伐
+M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone（検証済み・維持）
+M2: furnace -> charcoal -> iron_ore -> iron_ingot×3 -> iron_pickaxe（在庫で証明）
+M3: ダイヤ入手 -> ダイヤ装備 -> ネザー到達 -> ブレイズロッド・エンダーパール確保
+M4: エンダーアイ生成 -> 要塞発見 -> ジ・エンド到達 -> ドラゴン討伐
 ```
-各段で「一次ログ＋在庫」を証拠として残し、`ARCHITECTURE.md` と issue を更新する。
+各段で「一次ログ＋在庫/述語」を証拠として残し、`ARCHITECTURE.md` と issue を更新する。
 
-## 6. Issue キュー（Sol監査 #13〜#36・推奨順に固定）
-外部共同監査が24本のissueをコード根拠付きで起票済み。**次の順で潰す**（この順序はユーザー推奨に基づく）:
+## 6. Issueキュー（アーキ前倒し版）
+
+### A. substrate correctness — いつでも最優先
 ```
-1. #12 PRECONDITION_MISSING → 1tick stop → recovery ループ（critical path。これが直らないと他が観測不能）
-2. #13 listener leak（physicsTick 3 vs baseline 2）
-3. #15 Mercury cache hit で cached plan を捨てて continue [] にしている ／
-   #30 patch/replace の tail を PlannerBrain が丸ごと捨て得る
-4. #14 WorldMemory が iron_ore を覚えているのに座標を捨てている（RETURN_TO_KNOWN_ORE が実質不能だった理由）／
-   #29 advisor の explore_cave / branch_mine / return_to_known_ore が身体行動では全部 collect raw_iron x3 に潰れて区別不能
-5. #20 grounded skill candidates → #21 OptionSpec → #22 β shadow → #23 replay A/B harness → #24 β termination controller
-   （= #11 Grounded Options を実装可能な単位に分解したもの）
+#5  speculative generation durable mutation
+#13 listener leak
+#28 disconnect lease revoke
+#38 nested actuation capability bypass
+#40 authoritative AgentSnapshot / state classes
 ```
-その他の既知issue（優先度は上記の後、または関連作業時に同時に）:
+
+### B. #11 architecture skeleton — 新機能より先
 ```
-#25 worldEpoch切替の世代不整合 / #27 reconnect storm / #28 disconnect時lease revoke
-#16 cacheのworld scope不足 / #18 retry accounting / #19 PLACE furnaceがschema上表現不能
-#31 station memory が add-only（消えた炉を永遠に覚え得る）
-#26 simdeath を同じ安全地点で2回やると real hazard count に加算され永久危険地帯化し得る
-#34 simdeath の lostInventory ログ取得タイミング
-#32 Jev Boolean probability を 0.5 で即bool化せず生値保持 / #35 semantic planner 三重化の整理 /
-#36 System2 → Option → Jev → ACTION → VERIFY の end-to-end causal IDs
-#5 （再監査で生存確認済み）createGeneration 中の WorldMemory proposal が HOST で即 save される／
-    generation 側の ledger renameSync が commit 前に起こり得る
-#37 M3/M4 ロードマップ（テンプレート＋必要プリミティブ）
+#21 OptionSpec / deterministic predicates / PlannedGoal compiler
+#20 grounded SkillCandidate contract
+#14 known resource coordinates
+#29 strategy -> executable skill grounding
 ```
-**#37 補足（M4の設定ブロッカー）**: `difficulty=peaceful` では敵対mobが湧かず、blaze_rod と ender_pearl が入手不能
-＝ eye_of_ender が作れず M4 は原理的に不可能。M3d 段に入る前に difficulty を normal へ切り替える（または
-AI_Buddy を op にして自律的に `/difficulty` を実行できるようにする）。それまでは M2 durability 検証を優先し、
-mob死とdurabilityバグを混同しないこと。
+
+### C. shadow + evaluation
+```
+#22 β shadow
+#32 raw Jev Boolean probability
+#36 end-to-end causal IDs
+#23 replay A/B harness
+```
+
+### D. current Mercury correctness — 並行・最小修正
+```
+#15 cache hit plan replay
+#30 patch/replace tail preservation
+#18 retry accounting
+#16/#17/#33 cache world/schema namespacing
+#19 explicit operation/capability id
+```
+
+### E. authority / consolidation
+```
+#24 β meta-controller
+#35 semantic planner consolidation（#11が勝った後）
+#41 predicate-based capability graph
+```
+
+### F. その他resident/world correctness
+```
+#25 worldEpoch switch lifecycle
+#27 reconnect storm
+#31 stale station memory
+#26/#34 simdeath semantics/telemetry
+#39 explicit JevController integration API
+```
+
+## 7. M4設定ブロッカー
+`difficulty=peaceful` では blaze / enderman farming が成立せず、eye_of_ender 経路が止まる。
+M3dへ入る前に明示的にdifficulty変更方針を決め、証拠を残す。それまではresident/Option architectureの検証とM2を優先し、mob由来の失敗とdurabilityバグを混同しない。
+
+## 8. 設計判定ルール
+新しい機能を追加する前に「どの層の責務か」を決める。
+
+```
+Mission predicate / dependency -> capability graph
+時間的にまとまった行動        -> Option / Skill
+瞬間的な候補選択              -> Jev π
+Option継続可否のsemantic判断  -> Jev β + deterministic meta-controller
+安全性 / 成功 / world truth   -> deterministic code
+物理実行                      -> Executor / Mineflayer
+接続 / durable authority      -> HOST
+```
+
+**2つ以上のsemantic layerが同じ問いに答え始めたら設計臭。**
