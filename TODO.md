@@ -115,6 +115,14 @@
 ```
 
 ## 進捗ログ（一次証拠つき）```
+2026-09-18 02:44 JST — ★#15 ゲートgreen（キャッシュループ恒久修正が main で機能）
+  node tools/verify-mercury.mjs → PASS 5/5
+    has_successful_call: ok=39 errored=3 total=42
+    no_cached_strategy_loop: cachedAdvisorLines=13  maxConsecutiveSameStrategy=2（以前112）  bypasses=5  refusals=9
+  → 同一キャッシュ戦略の連続適用が解消。grounding による実行不能戦略の拒否（refusals=9）も機能
+  → P1回帰も全緑（typecheck / audit 9/9 / step-pipeline 6/6 / guard 12/12 / gating 6/6 / loop 7/7 / m1 5/5 / movement-patch）
+    ＋ #21 の新規テスト（option-spec 17/17 / option-ladder 6/6）
+
 2026-09-18 02:38 JST — churnほぼ解消／停滞の性質が変化
   issue12 4/6: precond=459 ladderPrereq=312 maxTicks=319（202→319へ延伸） gensLast5min=1（9→1）
   ★新発見: 在庫に charcoal:1 があるのに rung=charcoal で「燃料の丸太→木炭」を再計画し WAIT
