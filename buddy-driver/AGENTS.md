@@ -394,4 +394,23 @@ GENERATION_STOP id=... stopped=stopped-by-caller success=false ticks=1 verifiedD
 ・1時間あたりの generations/recoveries が大幅に減る（現状 178/75 → 目標 1桁台）
 ```
 5. 併せて未解決: `listenerLeak=true`（physicsTick 3 vs baseline 2）、`RETURN_TO_KNOWN_ORE`（discoveredOres に iron_ore あり）。
+
+---
+
+## 追記10（01:51 実測）— 制御チャネルの実コマンド仕様（照会のみ／実行のみ）
+
+`agent-runner.mts` のハンドラから確認した実装済みコマンド一覧:
+```
+照会系（値を返すだけ。差し替えはできない）: report / status / goal / milestone / acceptance
+実行系（状態を変える）                    : freeze / resume / reload / gc / leakcheck / simdeath / worldreset / quit
+```
+実測で確認した挙動:
+- `goal {item,count}` → ledger mirror を返すだけ（before/set/after で `collect 3 x raw_iron` のまま変化なし）
+- `milestone {milestone|index}` → 現在値（raw_iron, index=7）を返すだけ
+- `freeze {reason}` → `{frozen:true, report:<path>}` ／ `resume` → `{frozen:false, started:true}` ／ `report` で世代数・listener等が取れる
+
+**含意（自律運転の重要制約）**: 目標・マイルストーンを外部から注入する手段は無い。
+停滞（PRECONDITION_MISSING の1tick回転）を解くには**コード修正（#12 / #11 の前提チェーン差し替え）が唯一の道**。
+`simdeath` は死亡復帰の決定的な再現に使える（kill相当を任意に起こせる）。
+`worldreset` は破壊的（worldEpochが変わる）ので、人間不在の自律運転では使わない。
 ```
