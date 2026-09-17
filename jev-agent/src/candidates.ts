@@ -587,9 +587,14 @@ function descendCandidates(
   }
   const knownStoneY = state.signals.knownStoneY ?? null
   const goalIsUnderground = STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined
+  const stoneGoal = STONE_YIELDS.has(focusItem)
   const targetBelow = target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
-  const downEvidence = targetBelow || knownStoneBelow
+  // Positive evidence for a downward step: a visible target below, a remembered
+  // stone/ore level below, or a stone-collection goal whose surface stone is
+  // absent (the explicit staircase case from #4). "No target" alone is not
+  // evidence (#9); ore goals keep the stricter rule so they cannot dig blindly.
+  const downEvidence = targetBelow || (target === null && (knownStoneBelow || stoneGoal))
   const wantDown = targetBelow || (target === null && downEvidence)
   const hasTunnelTarget = tunnelTargets.length > 0
   const oscillate = state.signals.digOscillate === true
@@ -954,7 +959,11 @@ function pickRetreat(
  *     resource beyond the move band instead of wandering away from it.
  */
 function pickExplore(state: WorldState, standable: Vec3Json[], focusItem: string | null): Vec3Json | null {
-  const options = standable.filter((spot) => distance(spot, state.self.position) > 1.5)
+  const options = standable.filter(
+    (spot) =>
+      distance(spot, state.self.position) > 1.5 &&
+      failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < MOVE_FAILURE_LIMIT,
+  )
   if (options.length === 0) return null
 
   const resource = nearestResource(state, focusItem)

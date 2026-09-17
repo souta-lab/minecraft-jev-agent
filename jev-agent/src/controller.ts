@@ -298,6 +298,8 @@ export class JevController {
   private candidateFailureAt = new Map<string, number>()
   private readonly digMemory = new DigMemory()
   private descendHaveBaseline = 0
+  private actionStart: Vec3Json | null = null
+  private positionWindow: Vec3Json[] = []
   private lastEscalationAt = new Map<EscalationReason, number>()
   private lastEscalationMs = 0
 
@@ -745,6 +747,7 @@ export class JevController {
         sensorOptions(this.options),
       )
       this.syncTerrainSignals(state)
+      this.sampleMovement(state.self.position)
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -863,6 +866,7 @@ export class JevController {
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
 
       const claim = this.executor.claim(guarded.candidate)
+      if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
       if (claim.kept) {
         this.logger.info(
           'executor',
@@ -1184,6 +1188,26 @@ export class JevController {
         }
       }
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
+      if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
+        const moved = Math.hypot(
+          this.bot.entity.position.x - this.actionStart.x,
+          this.bot.entity.position.y - this.actionStart.y,
+          this.bot.entity.position.z - this.actionStart.z,
+        )
+        if (moved < 0.5) {
+          const p = this.bot.entity.position
+          const region = `${Math.floor(p.x)}_${Math.floor(p.y)}_${Math.floor(p.z)}`
+          const value = Math.round(moved * 100) / 100
+          this.logger.warn(
+            'agent',
+            `MOVE_OSCILLATE travelled=${value} net=${value} progress=0 region=${region} -> spatial_failure`,
+            { actionId: result.actionId, region },
+            this.tickCounter,
+          )
+          this.noteCandidateFailure(result.actionId)
+        }
+      }
+      this.actionStart = null
       this.failureStreak = 0
       this.signals.consecutiveFailures = 0
     } else {
@@ -1223,6 +1247,30 @@ export class JevController {
     this.signals.lastTunnel = memory.lastTunnel
     this.signals.descendNoProgress = memory.descendNoProgress
     this.signals.descendLimitReached = memory.descendLimitReached
+  }
+
+  private sampleMovement(position: Vec3Json): void {
+    this.positionWindow.push({ x: position.x, y: position.y, z: position.z })
+    while (this.positionWindow.length > 40) this.positionWindow.shift()
+    if (this.positionWindow.length < 40) return
+    const first = this.positionWindow[0]
+    const last = this.positionWindow[this.positionWindow.length - 1]
+    if (first === undefined || last === undefined) return
+    let traveled = 0
+    for (let index = 1; index < this.positionWindow.length; index += 1) {
+      const a = this.positionWindow[index - 1]
+      const b = this.positionWindow[index]
+      if (a === undefined || b === undefined) continue
+      traveled += Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z)
+    }
+    const net = Math.hypot(last.x - first.x, last.y - first.y, last.z - first.z)
+    const efficiency = traveled > 0.01 ? Math.round((net / traveled) * 100) : 100
+    this.logger.info(
+      'agent',
+      `MOVE_EFFICIENCY samples=40 traveled=${Math.round(traveled * 100) / 100} net=${Math.round(net * 100) / 100} efficiency=${efficiency}%`,
+      { traveled, net, efficiency, windowStart: first, windowEnd: last },
+      this.tickCounter,
+    )
   }
 
   private logDescendPlan(candidate: Candidate): void {
@@ -1655,9 +1703,10 @@ export class JevController {
   }
 
   /**
-   * If every actionable candidate has exhausted its retries, clear the memory
-   * and escalate so System 2 gets a chance to change the approach instead of
-   * the agent looping on a dead candidate set forever.
+   * If every actionable candidate has exhausted its retries, escalate so System 2
+   * gets a chance to change the approach. Failure memory is NOT cleared: it decays
+   * on its own, and wiping it would let a nearby coordinate evade the spatial
+   * memory that #8a introduced.
    */
   private breakFailureDeadlock(candidates: readonly Candidate[]): void {
     const actionable = candidates.filter(
@@ -1670,11 +1719,9 @@ export class JevController {
     if (!allExhausted) return
     this.escalate(
       'all_candidates_invalid',
-      `all ${actionable.length} actionable candidate(s) exceeded ${this.options.candidateFailureLimit} failures; clearing failure memory`,
+      `all ${actionable.length} actionable candidate(s) exceeded ${this.options.candidateFailureLimit} failures; letting decay/suppression reroute instead of clearing memory`,
     )
-    this.candidateFailures.clear()
-    this.signals.failedCandidates = {}
-    this.recentEvents.push('cleared failure memory after all candidates failed')
+    this.recentEvents.push('all local candidates exhausted; waiting for decay/spatial suppression to reroute')
   }
 
   private updateStallSignal(): void {

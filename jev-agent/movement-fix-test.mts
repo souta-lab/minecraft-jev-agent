@@ -126,9 +126,17 @@ check(
   `count=${evidenceDescend.length} tool=${evidenceDescend[0]?.toolName} reason=${String(evidenceDescend[0]?.meta.toolReason)}`,
 )
 
-const noEvidence = state({ signals: signals(), descent: [downStep('E', 1, 0)] })
+const stoneStaircase = state({ signals: signals(), descent: [downStep('E', 1, 0)] })
+const staircaseDescend = descendOf(stoneStaircase)
 check(
-  'no target and no known stone level: no downward DESCEND (target==null != wantDown)',
+  'stone goal with no surface stone: bounded staircase is offered (down evidence)',
+  staircaseDescend.length === 1 && staircaseDescend[0]?.meta.mode === 'down' && staircaseDescend[0]?.meta.staircase === true,
+  `count=${staircaseDescend.length} mode=${String(staircaseDescend[0]?.meta.mode)}`,
+)
+
+const noEvidence = state({ signals: signals(), goal: makeGoal('raw_iron', 3), descent: [downStep('E', 1, 0)] })
+check(
+  'ore goal, no target and no known stone level: no downward DESCEND (target==null != wantDown)',
   descendOf(noEvidence).length === 0,
   `count=${descendOf(noEvidence).length}`,
 )
@@ -174,5 +182,5 @@ const straight: DigStep[] = zig.map((step, index) => ({ ...step, x: 22 + index, 
 check('DIG_OSCILLATE detects the constant-y zigzag', isOscillatingSteps(zig), `zig=${isOscillatingSteps(zig)}`)
 check('a straight tunnel is not flagged as oscillation', !isOscillatingSteps(straight), `straight=${isOscillatingSteps(straight)}`)
 
-process.stdout.write(`\n${16 - failures}/16 movement-fix cases passed\n`)
+process.stdout.write(`\n${17 - failures}/17 movement-fix cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)

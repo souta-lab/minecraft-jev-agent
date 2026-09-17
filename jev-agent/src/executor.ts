@@ -977,7 +977,7 @@ export class Executor {
           const hopOk = dy >= 0.75 || occupiedTarget
           this.logger.info(
             'executor',
-            `JUMP_ATTEMPT dy=1 ok=${hopOk} attempts=${recoveries} from=(${round2(beforeHop.x)},${round2(beforeHop.y)},${round2(beforeHop.z)}) to=(${round2(afterHop.x)},${round2(afterHop.y)},${round2(afterHop.z)}) rise=${round2(dy)} target=(${node.x},${node.y},${node.z}) occupiedTarget=${occupiedTarget}`,
+            `JUMP_ATTEMPT dy=1 ok=${hopOk} attempts=${hopAttempts} from=(${round2(beforeHop.x)},${round2(beforeHop.y)},${round2(beforeHop.z)}) to=(${round2(afterHop.x)},${round2(afterHop.y)},${round2(afterHop.z)}) rise=${round2(dy)} target=(${node.x},${node.y},${node.z}) occupiedTarget=${occupiedTarget}`,
             { target, anchor },
           )
           if (hopOk) {
