@@ -8,7 +8,9 @@
   "scripts": {
     "build": "node build.mts",
     "start": "node agent-runner.mts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "mercury-test": "node test-mercury.mts",
+    "mercury:last": "tail -1 logs/jev/mercury-calls.jsonl | python3 -m json.tool"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

@@ -13,12 +13,22 @@
 // reload path are untouched.
 import type { Bot } from 'mineflayer'
 import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
+import type { System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
+import {
+  MERCURY_ALLOWED_GOALS,
+  MERCURY_MODEL_DEFAULT,
+  MercurySystem2,
+  mercuryCallsPath,
+  resolveMercuryEnablement,
+} from './mercury-system2.ts'
+import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import {
   PlannerBrain,
@@ -249,6 +259,58 @@ function restoreLedgerIntoController(
   }
 }
 
+function buildMercurySummary(
+  bot: Bot,
+  world: ResidentWorldMemory,
+  request: System2PlanRequest,
+  trigger: MercuryTriggerReason,
+): MercuryStateSummary {
+  const counts = inventoryCounts(bot)
+  const entity = bot.entity
+  const frontier = computeFrontier(counts, world)
+  const inventory: Record<string, number> = {}
+  for (const [name, n] of Object.entries(counts)) if (n > 0) inventory[name] = n
+  let wait = 0
+  for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
+    const outcome = request.recentOutcomes[i]
+    if (outcome === undefined || outcome.actionId !== 'WAIT') break
+    wait += 1
+  }
+  const recentFailures = request.recentOutcomes
+    .slice(-6)
+    .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`)
+  return {
+    trigger,
+    wakeReason: request.reason,
+    wakeDetail: request.detail.slice(0, 200),
+    rung: frontier.rungId,
+    rungIndex: frontier.rungIndex,
+    position:
+      entity === undefined
+        ? null
+        : { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) },
+    dimension: bot.game?.dimension ?? null,
+    health: entity === undefined ? null : bot.health,
+    toolRank: bestPickaxeRank(counts),
+    inventory,
+    stations: { craftingTables: world.craftingTables.length, furnaces: world.furnaces.length },
+    knownOres: [...world.discoveredOres],
+    recentFailures,
+    consecutiveWait: wait,
+    queue: {
+      depth: request.goalQueueState.depth,
+      done: request.goalQueueState.done,
+      current: request.goalQueueState.current?.description ?? null,
+      hasImpossible: request.goalQueueState.hasImpossible,
+    },
+    objective: request.objective,
+    deathHistory: world.hazards.map(
+      (hazard) => `${hazard.reason}@${Math.round(hazard.x)},${Math.round(hazard.y)},${Math.round(hazard.z)}x${hazard.count}`,
+    ),
+    allowedGoals: MERCURY_ALLOWED_GOALS,
+  }
+}
+
 export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const startedAt = Date.now()
   assertCraftCapability(ctx.bot, ctx.log)
@@ -327,6 +389,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mode: resolveAdvisorMode(plannerMode),
   })
 
+  const postDeathRecovery = ctx.resetReason === 'death'
+  const mercuryConfigPath = process.env.BUDDY_SYSTEM2_CONFIG ?? join(process.cwd(), 'system2.config.json')
+  const mercuryEnablement = resolveMercuryEnablement(plannerMode, mercuryConfigPath)
+  const mercuryCachePath = fileURLToPath(new URL('./mercury-cache.json', import.meta.url))
+  const mercury = mercuryEnablement.enabled
+    ? new MercurySystem2({
+        summarize: (request, trigger) => buildMercurySummary(bot, world, request, trigger),
+        log: (event, detail) => ctx.log(event, detail),
+        callsPath: mercuryCallsPath(ctx.logDir),
+        cachePath: mercuryCachePath,
+        postDeathRecovery,
+      })
+    : undefined
+
   const options: Partial<JevAgentOptions> = {
     goalItem: ctx.goalItem,
     goalCount: ctx.goalCount,
@@ -375,6 +451,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     cachePath,
     mode: plannerMode,
     advisor,
+    mercury,
+    postDeathRecovery,
   })
   controller.setSystem2(brain)
 
@@ -388,6 +466,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     planner: brain.mode,
     plannerModel: brain.model,
     plannerCache: cachePath,
+    advisor: mercuryEnablement.enabled ? `mercury:${MERCURY_MODEL_DEFAULT}` : resolveAdvisorMode(plannerMode),
+    advisorSource: mercuryEnablement.source,
     futureRungs: ladder.futureRungIds,
     craftingTables: world.craftingTables.length,
     furnaces: world.furnaces.length,

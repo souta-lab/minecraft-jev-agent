@@ -1,0 +1,160 @@
+// test-mercury.mts - deterministic, no-network safety tests for MercurySystem2.
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  MERCURY_ALLOWED_GOALS,
+  mercuryCostUsd,
+  mercuryGoalKind,
+  mercuryStrategyLabel,
+  plannedGoalsFromMercury,
+  resolveMercuryEnablement,
+  validateMercuryPlan,
+} from './mercury-system2.ts'
+
+interface Case {
+  name: string
+  run: () => { pass: boolean; detail: string }
+}
+
+const cases: Case[] = []
+function addCase(name: string, run: Case['run']): void {
+  cases.push({ name, run })
+}
+
+addCase('maps a valid patch plan onto PlannedGoal records', () => {
+  const checked = validateMercuryPlan({
+    op: 'patch',
+    goals: [{ item: 'stone', count: 12 }],
+    reason: 'need stone for the furnace',
+  })
+  if (!checked.ok) return { pass: false, detail: checked.error }
+  const goals = plannedGoalsFromMercury(checked.plan)
+  const goal = goals[0]
+  const pass =
+    goals.length === 1 &&
+    goal?.kind === 'collect' &&
+    goal.targetItem === 'stone' &&
+    goal.requiredCount === 12 &&
+    goal.description === 'collect 12 x stone'
+  return { pass, detail: JSON.stringify(goals) }
+})
+
+addCase('infers craft and smelt kinds from the grounded item', () => {
+  const craft = mercuryGoalKind('stone_pickaxe')
+  const smelt = mercuryGoalKind('iron_ingot')
+  const collect = mercuryGoalKind('raw_iron')
+  return {
+    pass: craft === 'craft' && smelt === 'smelt' && collect === 'collect',
+    detail: `craft=${craft} smelt=${smelt} collect=${collect}`,
+  }
+})
+
+addCase('rejects motor-level / coordinate-like items', () => {
+  const bad = validateMercuryPlan({ op: 'replace', goals: [{ item: 'raw iron at 12,64,8', count: 3 }], reason: 'bad' })
+  const motor = validateMercuryPlan({ op: 'replace', goals: [{ item: 'MOVE', count: 1 }], reason: 'bad' })
+  return { pass: !bad.ok && !motor.ok, detail: `${bad.ok ? 'accepted' : bad.error} | ${motor.ok ? 'accepted' : motor.error}` }
+})
+
+addCase('rejects ungrounded items', () => {
+  const checked = validateMercuryPlan({ op: 'patch', goals: [{ item: 'imaginary_ore', count: 3 }], reason: 'x' })
+  return { pass: !checked.ok, detail: checked.ok ? 'unexpectedly grounded' : checked.error }
+})
+
+addCase('abort requires an empty goal list', () => {
+  const bad = validateMercuryPlan({ op: 'abort', goals: [{ item: 'stone', count: 1 }], reason: 'x' })
+  const good = validateMercuryPlan({ op: 'abort', goals: [], reason: 'no executable recovery' })
+  const goals = good.ok ? plannedGoalsFromMercury(good.plan) : ['invalid']
+  return { pass: !bad.ok && good.ok && goals.length === 0, detail: `${bad.ok ? 'accepted' : bad.error}; goals=${goals.length}` }
+})
+
+addCase('rejects out-of-range counts and too many goals', () => {
+  const zero = validateMercuryPlan({ op: 'patch', goals: [{ item: 'stone', count: 0 }], reason: 'x' })
+  const huge = validateMercuryPlan({ op: 'patch', goals: [{ item: 'stone', count: 65 }], reason: 'x' })
+  const many = validateMercuryPlan({
+    op: 'patch',
+    goals: Array.from({ length: 9 }, () => ({ item: 'stone', count: 1 })),
+    reason: 'x',
+  })
+  return { pass: !zero.ok && !huge.ok && !many.ok, detail: `zero=${zero.ok} huge=${huge.ok} many=${many.ok}` }
+})
+
+addCase('strategy label encodes op + kind + item', () => {
+  const checked = validateMercuryPlan({ op: 'patch', goals: [{ item: 'raw_iron', count: 3 }], reason: 'x' })
+  const label = checked.ok ? mercuryStrategyLabel(checked.plan) : 'invalid'
+  const empty = mercuryStrategyLabel({ op: 'continue', goals: [], reason: 'x' })
+  return { pass: label === 'mercury_patch_collect_raw_iron' && empty === 'mercury_continue', detail: `${label} | ${empty}` }
+})
+
+addCase('cost table uses the gateway input/output rates', () => {
+  const cost = mercuryCostUsd('inception/mercury-2.5', { inputTokens: 1000, outputTokens: 1000 })
+  const expected = 1000 * 0.00000004 + 1000 * 0.00000015
+  const unknown = mercuryCostUsd('some/unknown', { inputTokens: 1000, outputTokens: 1000 })
+  return { pass: Math.abs(cost - expected) < 1e-12 && unknown === 0, detail: `cost=${cost} unknown=${unknown}` }
+})
+
+addCase('mercury is off by default and not enabled by key presence', () => {
+  const previous = process.env.BUDDY_SYSTEM2
+  delete process.env.BUDDY_SYSTEM2
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'))
+  const configPath = join(dir, 'system2.config.json')
+  writeFileSync(configPath, '{"mercury":false}\n')
+  const off = resolveMercuryEnablement('llm', configPath)
+  const on = resolveMercuryEnablement('llm', join(dir, 'missing.json'))
+  if (previous === undefined) delete process.env.BUDDY_SYSTEM2
+  else process.env.BUDDY_SYSTEM2 = previous
+  return { pass: !off.enabled && !on.enabled, detail: `off=${off.source} missing=${on.source}` }
+})
+
+addCase('env BUDDY_SYSTEM2=mercury enables it, deterministic planner overrides', () => {
+  const previous = process.env.BUDDY_SYSTEM2
+  process.env.BUDDY_SYSTEM2 = 'mercury'
+  const enabled = resolveMercuryEnablement('llm', '/nonexistent.json')
+  const overridden = resolveMercuryEnablement('deterministic', '/nonexistent.json')
+  process.env.BUDDY_SYSTEM2 = 'off'
+  const forcedOff = resolveMercuryEnablement('llm', '/nonexistent.json')
+  if (previous === undefined) delete process.env.BUDDY_SYSTEM2
+  else process.env.BUDDY_SYSTEM2 = previous
+  return {
+    pass: enabled.enabled && !overridden.enabled && !forcedOff.enabled,
+    detail: `enabled=${enabled.source} deterministic=${overridden.source} off=${forcedOff.source}`,
+  }
+})
+
+addCase('config file { mercury: true } enables it', () => {
+  const previous = process.env.BUDDY_SYSTEM2
+  delete process.env.BUDDY_SYSTEM2
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'))
+  const configPath = join(dir, 'system2.config.json')
+  writeFileSync(configPath, '{"mercury":true}\n')
+  const result = resolveMercuryEnablement('llm', configPath)
+  if (previous === undefined) delete process.env.BUDDY_SYSTEM2
+  else process.env.BUDDY_SYSTEM2 = previous
+  return { pass: result.enabled, detail: result.source }
+})
+
+addCase('allowed goal sets are disjoint and non-empty', () => {
+  const collect = new Set(MERCURY_ALLOWED_GOALS.collect)
+  const craft = new Set(MERCURY_ALLOWED_GOALS.craft)
+  const smelt = new Set(MERCURY_ALLOWED_GOALS.smelt)
+  let overlaps = 0
+  for (const item of craft) if (collect.has(item) || smelt.has(item)) overlaps += 1
+  for (const item of smelt) if (collect.has(item)) overlaps += 1
+  return {
+    pass: collect.size > 0 && craft.size > 0 && smelt.size > 0 && overlaps === 0,
+    detail: `collect=${collect.size} craft=${craft.size} smelt=${smelt.size} overlaps=${overlaps}`,
+  }
+})
+
+let failures = 0
+process.stdout.write('Mercury System 2 - bounded structured planner tests\n')
+process.stdout.write(`${'-'.repeat(72)}\n`)
+for (const testCase of cases) {
+  const observed = testCase.run()
+  if (!observed.pass) failures += 1
+  process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
+  process.stdout.write(`      ${observed.detail}\n`)
+}
+process.stdout.write(`${'-'.repeat(72)}\n`)
+process.stdout.write(`${cases.length - failures}/${cases.length} Mercury cases passed\n`)
+if (failures > 0) process.exit(1)

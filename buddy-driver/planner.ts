@@ -37,6 +37,7 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
+import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 
 export type Counts = Record<string, number>
 
@@ -603,6 +604,14 @@ export interface PlannerOptions {
   maxCalls?: number
   /** P1.5 advisor; when present it supplies the next strategy on a stall. */
   advisor?: Advisor
+  /**
+   * Mercury 2.5 System2Brain for EXCEPTION-DRIVEN plan repair. When present it
+   * takes precedence over the Jev advisor on a stall and falls back immediately
+   * to the deterministic ladder on any failure. Explicitly enabled only.
+   */
+  mercury?: MercurySystem2
+  /** true when this generation was created fresh because the bot died. */
+  postDeathRecovery?: boolean
 }
 
 type PlannerReason = 'start' | 'queue_empty' | 'impossible' | 'stuck'
@@ -651,6 +660,9 @@ export class PlannerBrain implements System2Brain {
   private firstCall = true
   private lastMilestoneId: string | null = null
   private readonly advisor: Advisor | undefined
+  private readonly mercury: MercurySystem2 | undefined
+  private readonly postDeathRecovery: boolean
+  private postDeathHandled = false
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -663,6 +675,8 @@ export class PlannerBrain implements System2Brain {
     this.maxCalls = options.maxCalls ?? Number(process.env.BUDDY_PLANNER_MAX_CALLS ?? 200)
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.advisor = options.advisor
+    this.mercury = options.mercury
+    this.postDeathRecovery = options.postDeathRecovery === true
     this.cache = this.loadCache()
   }
 
@@ -677,6 +691,28 @@ export class PlannerBrain implements System2Brain {
 
     const waitStreak = trailingWaitStreak(request.recentOutcomes)
     const adviseReason = advisorReasonFor(reason, waitStreak)
+    const mercuryTrigger = this.mercuryTriggerFor(adviseReason)
+    if (this.mercury !== undefined && mercuryTrigger !== null) {
+      const repair = await this.mercury.tryRepair(request, mercuryTrigger)
+      if (repair !== null) {
+        if (mercuryTrigger === 'no_candidate' || mercuryTrigger === 'action_impossible') {
+          this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: repair.strategy, reason: mercuryTrigger })
+        }
+        if (mercuryTrigger === 'wait_limit') this.log('WAIT_LIMIT', { n: waitStreak, strategy: repair.strategy })
+        if (mercuryTrigger === 'post_death') this.log('POST_DEATH_REPLAN', { strategy: repair.strategy })
+        this.log('STRATEGY_SET', {
+          strategy: repair.strategy,
+          source: 'mercury',
+          goals: repair.goals.map((goal) => goal.description),
+        })
+        const option: PlanOption = { id: `mercury_${repair.op}`, title: `mercury ${repair.op}`, goals: repair.goals }
+        return this.finishPlanOp(option, request, repair.op, `mercury ${repair.op}: ${repair.strategy}`)
+      }
+      // Mercury already logged ADVISOR source=fallback; never use the Jev advisor here.
+      this.logPlan('fallback', fallbackOption, reason, started, 0, 'mercury unavailable -> deterministic ladder')
+      return this.finishPlan(fallbackOption, request, 'mercury unavailable')
+    }
+
     if (this.advisor !== undefined && adviseReason !== null) {
       const decision = await this.advisor.decide(this.advisorState(counts, request, waitStreak), adviseReason)
       if (adviseReason === 'no_candidate') this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: decision.strategy, reason: adviseReason })
@@ -746,6 +782,35 @@ export class PlannerBrain implements System2Brain {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
     return { goals: option.goals, note, op: 'replace' }
+  }
+
+  private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
+    if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
+    const queue = request.goalQueueState
+    const first = option.goals[0]
+    const current = queue.current
+    const alreadyActive =
+      queue.depth > 0 &&
+      current !== null &&
+      first !== undefined &&
+      current.kind === first.kind &&
+      (current.targetItem ?? null) === (first.targetItem ?? null)
+    if (alreadyActive && op !== 'continue') {
+      return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
+    }
+    return { goals: option.goals, note, op }
+  }
+
+  private mercuryTriggerFor(adviseReason: AdvisorReason | null): MercuryTriggerReason | null {
+    if (this.postDeathRecovery && !this.postDeathHandled) {
+      this.postDeathHandled = true
+      return 'post_death'
+    }
+    if (adviseReason === 'wait_limit') return 'wait_limit'
+    if (adviseReason === 'no_candidate') return 'no_candidate'
+    if (adviseReason === 'no_progress') return 'no_progress'
+    if (adviseReason === 'action_impossible') return 'action_impossible'
+    return null
   }
 
   private logPlan(
