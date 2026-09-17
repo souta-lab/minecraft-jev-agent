@@ -40,6 +40,26 @@ const checks = [
   { id: 'retry_accounting_present', pass: retryVisible.length === records.length && records.length > 0, detail: `recordsWithRetriesField=${retryVisible.length}/${records.length}` },
 ]
 
+// Advisor-layer cache loop detection (issue #15): consecutive identical cached strategies
+// mean the cache replays a label that never changes the body.
+const LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
+const advisorLines = existsSync(LOG)
+  ? readFileSync(LOG, 'utf8').split('\n').filter((l) => l.includes('ADVISOR') && l.includes('cached=true'))
+  : []
+const advisorStrategies = advisorLines.map((l) => (l.match(/strategy=([a-z_]+)/) || [])[1]).filter(Boolean)
+let maxRun = 0
+let run = 0
+for (let i = 0; i < advisorStrategies.length; i++) {
+  run = i > 0 && advisorStrategies[i] === advisorStrategies[i - 1] ? run + 1 : 1
+  if (run > maxRun) maxRun = run
+}
+const MAX_ALLOWED_RUN = 2
+checks.push({
+  id: 'no_cached_strategy_loop',
+  pass: maxRun <= MAX_ALLOWED_RUN,
+  detail: `cachedAdvisorLines=${advisorLines.length} maxConsecutiveSameStrategy=${maxRun} (allowed<=${MAX_ALLOWED_RUN})`,
+})
+
 const passCount = checks.filter((c) => c.pass).length
 const last = ok[ok.length - 1]
 const out = {
