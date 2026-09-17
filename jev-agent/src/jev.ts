@@ -498,6 +498,121 @@ export function abandonRequested(result: JevResult, threshold = resolveAbandonTh
   return typeof probability === 'number' && probability >= threshold
 }
 
+// ---------------------------------------------------------------------------
+// #32: keep the raw Boolean probability, never collapse it to `> 0.5`
+// ---------------------------------------------------------------------------
+
+/**
+ * A boolean answer kept as a probability plus the derived booleans, so the raw
+ * value survives API parse -> internal result -> JSONL. `0.51` and `0.99` stay
+ * distinguishable, and so do `0.01` and `0.49`; `atHalf` is the legacy `> 0.5`
+ * view, `would` is this question's own named threshold.
+ */
+export interface BooleanEstimate {
+  /** raw P(true), exactly as the primitive returned it */
+  probability: number
+  /** the old binary view (probability >= 0.5), kept for existing consumers */
+  atHalf: boolean
+  /** the named, configurable threshold applied to this question */
+  threshold: number
+  /** the decision at `threshold`; authority is never granted implicitly */
+  would: boolean
+}
+
+/** One boolean question's estimate, or null when no usable probability exists. */
+export function booleanEstimate(probability: number | null | undefined, threshold: number): BooleanEstimate | null {
+  if (typeof probability !== 'number' || !Number.isFinite(probability)) return null
+  return { probability, atHalf: probability >= 0.5, threshold, would: probability >= threshold }
+}
+
+/** The named thresholds for the boolean questions. Raw P(true) is always kept. */
+export function booleanThresholds(): Record<string, number> {
+  return {
+    abandon_option: resolveAbandonThreshold(),
+    should_retreat: BOOLEAN_HIGH,
+  }
+}
+
+/**
+ * Every boolean answer as a raw-probability estimate. Score/choice answers are
+ * skipped: this block exists only so a 0.08 never becomes an indistinguishable
+ * `false` in the decision record (#32). Unknown questions default to 0.5.
+ */
+export function booleanEstimates(
+  answers: Record<string, JevAnswer>,
+  thresholds: Record<string, number> = booleanThresholds(),
+): Record<string, BooleanEstimate> {
+  const out: Record<string, BooleanEstimate> = {}
+  for (const [name, answer] of Object.entries(answers)) {
+    if (answer.type !== 'boolean') continue
+    const raw =
+      typeof answer.probability === 'number'
+        ? answer.probability
+        : typeof answer.value === 'number'
+          ? answer.value
+          : null
+    const estimate = booleanEstimate(raw, thresholds[name] ?? 0.5)
+    if (estimate !== null) out[name] = estimate
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// #22: beta (`abandon_option`) SHADOW comparison
+// ---------------------------------------------------------------------------
+
+/** `BUDDY_BETA_SHADOW=1` turns the beta shadow comparison on and strips beta's authority. */
+export const BETA_SHADOW_ENV = 'BUDDY_BETA_SHADOW'
+
+/**
+ * Resolve the shadow mode. Default OFF so resident behavior is byte-identical:
+ * when off, beta keeps its current replan authority; when on, beta only votes
+ * and the ladder/advisor/controller keeps driving.
+ */
+export function resolveBetaShadow(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  const raw = (env[BETA_SHADOW_ENV] ?? '').trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes'
+}
+
+export type BetaVerdict = 'abandon' | 'continue'
+
+/**
+ * The comparable pair per decision: what beta WOULD have decided (raw
+ * probability + named threshold) next to what the controller actually did.
+ * Agreement is measurable offline; `actual` is never derived from beta itself
+ * when beta is in shadow mode.
+ */
+export interface BetaShadow {
+  optionId: string | null
+  beta: number | null
+  threshold: number
+  would: BetaVerdict
+  actual: BetaVerdict
+  agree: boolean
+}
+
+export interface BetaShadowInput {
+  optionId: string | null
+  beta: number | null
+  actualReplan: boolean
+  threshold?: number
+}
+
+export function betaShadowDecision(input: BetaShadowInput): BetaShadow {
+  const threshold = input.threshold ?? resolveAbandonThreshold()
+  const would: BetaVerdict = input.beta !== null && input.beta >= threshold ? 'abandon' : 'continue'
+  const actual: BetaVerdict = input.actualReplan ? 'abandon' : 'continue'
+  return { optionId: input.optionId, beta: input.beta, threshold, would, actual, agree: would === actual }
+}
+
+/** `BETA_SHADOW option=<id> beta=<p> threshold=<t> would=<abandon|continue> actual=<...>` */
+export function formatBetaShadow(shadow: BetaShadow): string {
+  return (
+    `BETA_SHADOW option=${shadow.optionId ?? 'null'} beta=${shadow.beta ?? 'null'} ` +
+    `threshold=${shadow.threshold} would=${shadow.would} actual=${shadow.actual}`
+  )
+}
+
 /** Map exactly one requested question's raw answer to the defensive JevAnswer shape. */
 function mapAnswer(name: QuestionName, raw: unknown, providerMetadata: unknown): JevAnswer {
   const confidence = readCalibratedConfidence(providerMetadata, name)

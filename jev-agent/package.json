@@ -18,6 +18,7 @@
     "loop-test": "tsx test-loop.mts",
     "audit-test": "tsx test-audit.mts",
     "option-spec-test": "tsx test-option-spec.mts",
+    "observability-test": "tsx test-observability.mts",
     "m1-test": "tsx test-m1.mts",
     "issue43-test": "tsx test-issue43.mts",
     "step-pipeline-test": "tsx data/step-pipeline-test.mts",

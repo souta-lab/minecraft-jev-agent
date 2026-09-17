@@ -18,7 +18,8 @@ import { createHash } from 'node:crypto'
 import type { Candidate } from './candidates.ts'
 import type { GatedScore } from './gating.ts'
 import type { GoalQueueStateLog } from './goalQueue.ts'
-import type { JevAnswer, JevPolicyKind, JevQuestionType, JevSource, JevUsage } from './jev.ts'
+import { booleanEstimates } from './jev.ts'
+import type { BooleanEstimate, JevAnswer, JevPolicyKind, JevQuestionType, JevSource, JevUsage } from './jev.ts'
 import type { DecisionTrigger } from './scheduler.ts'
 import type { WorldState } from './state.ts'
 import type { LlmSummonReason } from './system2.ts'
@@ -108,6 +109,12 @@ export interface DecisionRecord {
   tick: number
   trigger: DecisionTrigger
   source: JevSource
+  /** #36: stable causal chain id linking plan/Option -> candidate -> action -> VERIFY */
+  chainId: string | null
+  /** #36: OptionSpec id compiled from the plan row driving this decision */
+  optionId: string | null
+  /** #36: high-level strategy/plan provenance that produced the row */
+  strategy: string | null
   candidates: DecisionCandidateLog[]
   jev: DecisionJevLog
   chosenAction: string
@@ -118,6 +125,8 @@ export interface DecisionRecord {
   needLlm: number | null
   /** true when P(need_llm) >= NEED_LLM_THRESHOLD - Jev's interrupt line to System 2 */
   needLlmAdopted: boolean
+  /** #32: every boolean answer as a raw probability + named threshold (0.08 stays 0.08) */
+  booleanEstimates: Record<string, BooleanEstimate>
   /** the goal queue as Jev saw it (depth + current goal) */
   goalQueueState: GoalQueueStateLog
   /** whether an LLM re-summon was triggered by this decision, and why */
@@ -194,6 +203,9 @@ export interface DecisionRecordInput {
   tick: number
   trigger: DecisionTrigger
   stateHash: string
+  chainId?: string | null
+  optionId?: string | null
+  strategy?: string | null
   candidates: readonly Candidate[]
   failedCandidates: Record<string, number>
   jev: DecisionJevLog
@@ -218,6 +230,9 @@ export function makeDecisionRecord(input: DecisionRecordInput): DecisionRecord {
     tick: input.tick,
     trigger: input.trigger,
     source: input.jev.source,
+    chainId: input.chainId ?? null,
+    optionId: input.optionId ?? null,
+    strategy: input.strategy ?? null,
     candidates: logCandidates(input.candidates, input.failedCandidates),
     jev: input.jev,
     chosenAction: input.chosenAction,
@@ -225,6 +240,7 @@ export function makeDecisionRecord(input: DecisionRecordInput): DecisionRecord {
     dangerOverride: input.dangerOverride,
     needLlm: input.needLlm,
     needLlmAdopted: input.needLlmAdopted,
+    booleanEstimates: booleanEstimates(input.jev.answers),
     goalQueueState: input.goalQueueState,
     llmResummon: input.llmResummon,
     llm: input.llm,

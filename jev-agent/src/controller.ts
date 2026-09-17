@@ -26,6 +26,8 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { countBlockedLogs, defaultCandidateOptions, generateCandidates } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
+import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
+import type { CausalGoalRef } from './causal.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -36,7 +38,7 @@ import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, 
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
-import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, writeOutcome } from './jev.ts'
+import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaShadow, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
@@ -127,6 +129,12 @@ export interface JevAgentOptions {
   jevRateLimitBaseDelayMs: number
   logDir: string
   forceFallbackPolicy: boolean
+  /**
+   * #22: when true, `abandon_option` only votes (BETA_SHADOW logging) and the
+   * ladder/advisor/controller keeps driving; when false (default) beta keeps its
+   * current replan authority, so resident behavior is unchanged.
+   */
+  betaShadow: boolean
   verbose: boolean
   scanRadius: number
   reach: number
@@ -174,6 +182,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   jevRateLimitBaseDelayMs: 7000,
   logDir: 'logs',
   forceFallbackPolicy: false,
+  betaShadow: resolveBetaShadow(),
   verbose: true,
   scanRadius: 48,
   reach: 4.5,
@@ -308,6 +317,8 @@ interface PendingDecision {
 
 const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'JEV_HEADS',
+  'BETA_SHADOW',
+  'CAUSAL',
   'SHADOW_METRICS',
   'TOOL_CHOICE',
   'DIG_PATH',
@@ -900,13 +911,17 @@ export class JevController {
         this.summonLlm('queue_empty', 'goal queue is empty; no long-horizon goal to consume')
       }
 
-      const decision = await this.decide(state, candidates, trigger)
+      const planGoal: CausalGoalRef | null = state.goalQueue.current
+      const causalStamp = makeCausalStamp({ chainId: makeChainId(), goal: planGoal })
+
+      const decision = await this.decide(state, candidates, trigger, causalStamp.chainId)
       const semantic = this.semanticEscalation(decision)
       const needLlmAdopted = semantic.escalate
       if (needLlmAdopted) {
         this.needLlmDecisions += 1
         this.summonLlm('need_llm', semantic.reason)
       }
+      this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
       const dangerGate = gateDanger(decision.answers.danger)
@@ -963,6 +978,9 @@ export class JevController {
         tick: this.tickCounter,
         trigger,
         stateHash: stableStateHash(state),
+        chainId: causalStamp.chainId,
+        optionId: causalStamp.optionId,
+        strategy: causalStamp.strategy,
         candidates,
         failedCandidates: this.failureSnapshot(),
         jev: this.jevLog(decision, dangerGate, trigger),
@@ -1036,14 +1054,32 @@ export class JevController {
   }
 
   /** The two authoritative heads, logged every decision (issue #11). */
-  private logHeads(result: JevResult): void {
+  private logHeads(result: JevResult, chainId: string | null = null): void {
     const action = decisionIdFrom(result) ?? 'WAIT'
     const abandon = result.answers.abandon_option?.probability ?? null
     const replan = abandonRequested(result)
     this.logger.info(
       'heads',
       `JEV_HEADS action=${action} abandon=${abandon ?? 'null'} -> ${replan ? 'replan' : 'continue'}`,
-      { action, abandon, decision: replan ? 'replan' : 'continue' },
+      { action, abandon, decision: replan ? 'replan' : 'continue', chainId },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * #22: log what beta WOULD have decided next to the controller's actual replan
+   * behavior. Pure logging: when `betaShadow` is off, beta keeps its authority and
+   * `actual` includes it; when on, beta only votes and the ladder/advisor drives.
+   */
+  private logBetaShadow(optionId: string | null, decision: JevResult, actualReplanAdopted: boolean): void {
+    const beta = decision.answers.abandon_option?.probability ?? null
+    const actualReplan =
+      actualReplanAdopted || this.queue.isEmpty || (!this.options.betaShadow && abandonRequested(decision))
+    const shadow = betaShadowDecision({ optionId, beta, actualReplan })
+    this.logger.info(
+      'beta-shadow',
+      formatBetaShadow(shadow),
+      { ...shadow, mode: this.options.betaShadow ? 'shadow' : 'authority' },
       this.tickCounter,
     )
   }
@@ -1124,7 +1160,12 @@ export class JevController {
     )
   }
 
-  private async decide(state: WorldState, candidates: readonly Candidate[], trigger: DecisionTrigger): Promise<JevResult> {
+  private async decide(
+    state: WorldState,
+    candidates: readonly Candidate[],
+    trigger: DecisionTrigger,
+    chainId: string,
+  ): Promise<JevResult> {
     const now = Date.now()
     const stateHash = stableStateHash(state)
     if (
@@ -1168,6 +1209,7 @@ export class JevController {
           policy: result.policy,
           model: result.model,
           callId: result.callId,
+          chainId,
           latencyMs: result.latencyMs,
           inputTokens: result.usage?.inputTokens ?? null,
           actionConfidence: result.answers.action?.confidence ?? null,
@@ -1178,9 +1220,9 @@ export class JevController {
         },
         this.tickCounter,
       )
-      this.logHeads(result)
+      this.logHeads(result, chainId)
       this.logShadowMetrics(state)
-      this.adoptAbandon(result)
+      if (!this.options.betaShadow) this.adoptAbandon(result)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {
@@ -1223,7 +1265,7 @@ export class JevController {
       this.logger.info(
         'guard',
         `deferred ${guarded.candidateId} -> ${guarded.reason}`,
-        { code: guarded.code, decisionCallId: decision.callId },
+        { code: guarded.code, decisionCallId: decision.callId, chainId: record.chainId },
         this.tickCounter,
       )
       return
@@ -1232,7 +1274,7 @@ export class JevController {
     this.logger.warn(
       'guard',
       `REJECTED ${guarded.candidateId} code=${guarded.code} :: ${guarded.reason}`,
-      { code: guarded.code, policy: decision.policy, callId: decision.callId },
+      { code: guarded.code, policy: decision.policy, callId: decision.callId, chainId: record.chainId },
       this.tickCounter,
     )
     this.recentEvents.push(`guard ${guarded.code} on ${guarded.candidateId}`)
@@ -1277,6 +1319,23 @@ export class JevController {
         dropObserved: result.dropObserved,
       })
       this.decisionWriter.write(pending.record)
+      const chain = completeCausalChain(
+        {
+          chainId: pending.record.chainId ?? 'unknown',
+          optionId: pending.record.optionId,
+          planId: pending.record.goalQueueState.current?.id ?? null,
+          strategy: pending.record.strategy,
+        },
+        {
+          candidateId: pending.record.chosenAction,
+          actionId: result.actionId,
+          verified: result.verified,
+          status: result.status,
+          resource: result.yieldItem ?? result.targetName ?? null,
+          progressDelta: result.itemsGained,
+        },
+      )
+      this.logger.info('causal', formatCausalLine(chain), causalRecord(chain), this.tickCounter)
     }
 
     if (result.status === 'cancelled' || result.failure === 'cancelled') {

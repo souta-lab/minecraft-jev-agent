@@ -30,8 +30,10 @@ import { Executor, defaultExecutorOptions } from './executor.ts'
 import type { ActuationMode, ClaimResult, CurrentAction, ExecutionResult, ExecutorHooks, ExecutorOptions, FailureCode, PathCompletedEvent, PathFailedEvent } from './executor.ts'
 import { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, applyDangerGate, dangerRequiresSafeAction, gateDanger, gateScore, preserveCurrentSafeAction } from './gating.ts'
 import type { DangerGateDecision, DangerGateOutcome, GatedScore } from './gating.ts'
-import { abandonRequested, AUTHORITATIVE_QUESTION_NAMES, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, shouldRetreatFrom, writeOutcome } from './jev.ts'
-import type { JevAnswer, JevCallRecord, JevOutcomeRecord, JevPolicy, JevQuestionType, JevRequest, JevResult, JevSource, JevUsage, QuestionName, QuestionSetKind } from './jev.ts'
+import { abandonRequested, AUTHORITATIVE_QUESTION_NAMES, betaShadowDecision, booleanEstimate, booleanEstimates, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, QUESTION_NAMES, resolveBetaShadow, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, shouldRetreatFrom, writeOutcome } from './jev.ts'
+import type { BooleanEstimate, BetaShadow, JevAnswer, JevCallRecord, JevOutcomeRecord, JevPolicy, JevQuestionType, JevRequest, JevResult, JevSource, JevUsage, QuestionName, QuestionSetKind } from './jev.ts'
+import { causalRecord, completeCausalChain, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal } from './causal.ts'
+import type { CausalChain, CausalGoalRef, CausalStamp } from './causal.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions } from './scheduler.ts'
 import type { DecisionTrigger, SchedulerOptions as JevSchedulerOptions, TriggerEvent } from './scheduler.ts'
 import { buildStubPlan, evaluateSummonConditions, FixedPlanSystem2, LLM_SUMMON_REASONS, M1_PLAN_JSON, planFromJson, SINGLE_SHOT_PLANNER_MODEL, STUB_HORIZON_TAIL, STUB_SYSTEM2_MODEL, StubSystem2 } from './system2.ts'
@@ -63,6 +65,9 @@ export { generateCandidates, defaultCandidateOptions, ACTING_KINDS }
 export { guardCandidate, guardDecision }
 export { createJevPolicy, EventLogger, JsonlWriter, writeOutcome, decisionIdFrom }
 export { QUESTION_NAMES, AUTHORITATIVE_QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, questionNamesFor, shouldRetreatFrom, abandonRequested }
+export { booleanEstimate, booleanEstimates, betaShadowDecision, formatBetaShadow, resolveBetaShadow }
+export { makeChainId, makeCausalStamp, completeCausalChain, optionIdForGoal, formatCausalLine, causalRecord }
+export type { BooleanEstimate, BetaShadow, CausalChain, CausalGoalRef, CausalStamp }
 export type { QuestionName, QuestionSetKind }
 export { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions }
 export { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, dangerRequiresSafeAction, gateDanger, gateScore }

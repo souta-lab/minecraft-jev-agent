@@ -644,6 +644,8 @@ interface LlmChoice {
   costUsd: number
   planFit: number | null
   strategyChange: boolean | null
+  /** #32: raw P(strategy_change=true); kept alongside the derived boolean */
+  strategyChangeProbability: number | null
   unknownChoice: string | null
 }
 
@@ -662,9 +664,22 @@ function readScore(answer: unknown): number | null {
   return typeof value === 'number' ? value : null
 }
 
-function readBoolean(answer: unknown): boolean | null {
+/**
+ * #32: the raw strategy_change P(true), never collapsed. The derived boolean is
+ * computed at the named threshold and both are logged, so calibration data (and
+ * a 0.08 vs 0.49 distinction) survives API parse -> internal result -> JSONL.
+ */
+export function readBooleanProbability(answer: unknown): number | null {
   const value = member(answer, 'probability')
-  return typeof value === 'number' ? value >= 0.5 : null
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+export const STRATEGY_CHANGE_THRESHOLD_DEFAULT = 0.5
+
+/** `BUDDY_STRATEGY_CHANGE_THRESHOLD` overrides the named strategy_change threshold. */
+export function resolveStrategyChangeThreshold(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = Number(env.BUDDY_STRATEGY_CHANGE_THRESHOLD ?? STRATEGY_CHANGE_THRESHOLD_DEFAULT)
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : STRATEGY_CHANGE_THRESHOLD_DEFAULT
 }
 
 function isRateLimitError(error: unknown, depth = 0): boolean {
@@ -960,6 +975,12 @@ export class PlannerBrain implements System2Brain {
       ...(llmMs > 0 ? { llmMs } : {}),
       ...(detail !== undefined && detail.planFit !== null ? { fit: detail.planFit } : {}),
       ...(detail !== undefined && detail.strategyChange !== null ? { strategyChange: detail.strategyChange } : {}),
+      ...(detail !== undefined && detail.strategyChangeProbability !== null
+        ? {
+            strategyChangeProbability: detail.strategyChangeProbability,
+            strategyChangeAtHalf: detail.strategyChangeProbability >= 0.5,
+          }
+        : {}),
       note,
     })
   }
@@ -1133,7 +1154,8 @@ export class PlannerBrain implements System2Brain {
     const answers = response.answers as Record<string, unknown>
     const chosenId = readChoice(answers.horizon)
     const planFit = readScore(answers.plan_fit)
-    const strategyChange = readBoolean(answers.strategy_change)
+    const strategyChangeProbability = readBooleanProbability(answers.strategy_change)
+    const strategyChange = strategyChangeProbability === null ? null : strategyChangeProbability >= resolveStrategyChangeThreshold()
     const match = chosenId === null ? undefined : options.find((option) => option.id === chosenId)
     const inputTokens = response.usage.inputTokens ?? 0
     const outputTokens = response.usage.outputTokens ?? 0
@@ -1144,6 +1166,7 @@ export class PlannerBrain implements System2Brain {
       costUsd,
       planFit,
       strategyChange,
+      strategyChangeProbability,
       unknownChoice: chosenId !== null && match === undefined ? chosenId : null,
     }
   }
