@@ -1,10 +1,11 @@
 // test-system2.mts - deterministic safety/shape tests for the real Gateway System 2 adapter.
 // No network, no Minecraft server, no API key required.
 import {
-  DEFAULT_SYSTEM2_TARGETS,
+  DEFAULT_SYSTEM2_CAPABILITIES,
   plannedGoalsFromGateway,
+  resolveGatewayCapabilities,
   validateGatewayPlanOutput,
-  validateGroundedTargets,
+  validateGroundedGoals,
 } from './src/gatewaySystem2.ts'
 
 interface Case {
@@ -24,7 +25,7 @@ addCase('accepts a bounded patch plan and converts it to PlannedGoal', () => {
     note: 'Search for iron before changing the rest of the ladder.',
   })
   if (!checked.success) return { pass: false, detail: checked.error.message }
-  const grounded = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  const grounded = validateGroundedGoals(checked.value, DEFAULT_SYSTEM2_CAPABILITIES)
   if (!grounded.success) return { pass: false, detail: grounded.error.message }
   const goals = plannedGoalsFromGateway(checked.value)
   const goal = goals[0]
@@ -62,25 +63,58 @@ addCase('rejects syntactically valid but ungrounded target names', () => {
     note: 'hallucinated target',
   })
   if (!checked.success) return { pass: false, detail: `shape unexpectedly failed: ${checked.error.message}` }
-  const grounded = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  const grounded = validateGroundedGoals(checked.value, DEFAULT_SYSTEM2_CAPABILITIES)
   return {
     pass: !grounded.success,
     detail: grounded.success ? 'unexpectedly grounded' : grounded.error.message,
   }
 })
 
-addCase('custom allowlist can enable a newly implemented capability explicitly', () => {
+addCase('rejects real items paired with unsupported verbs', () => {
+  const placeDiamond = validateGatewayPlanOutput({
+    op: 'patch',
+    goals: [{ kind: 'place', targetItem: 'diamond', requiredCount: 1 }],
+    note: 'valid item, invalid capability pair',
+  })
+  const smeltPickaxe = validateGatewayPlanOutput({
+    op: 'patch',
+    goals: [{ kind: 'smelt', targetItem: 'wooden_pickaxe', requiredCount: 1 }],
+    note: 'valid item, invalid capability pair',
+  })
+  if (!placeDiamond.success || !smeltPickaxe.success) {
+    return { pass: false, detail: 'shape validator unexpectedly rejected a syntactically valid goal' }
+  }
+  const placeGrounded = validateGroundedGoals(placeDiamond.value, DEFAULT_SYSTEM2_CAPABILITIES)
+  const smeltGrounded = validateGroundedGoals(smeltPickaxe.value, DEFAULT_SYSTEM2_CAPABILITIES)
+  return {
+    pass: !placeGrounded.success && !smeltGrounded.success,
+    detail: `placeDiamond=${placeGrounded.success} smeltPickaxe=${smeltGrounded.success}`,
+  }
+})
+
+addCase('capability override can expose one new verb-target pair without widening others', () => {
   const checked = validateGatewayPlanOutput({
     op: 'patch',
     goals: [{ kind: 'collect', targetItem: 'obsidian', requiredCount: 10 }],
     note: 'future capability',
   })
   if (!checked.success) return { pass: false, detail: checked.error.message }
-  const defaultGrounding = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
-  const extendedGrounding = validateGroundedTargets(checked.value, new Set([...DEFAULT_SYSTEM2_TARGETS, 'obsidian']))
+  const defaults = resolveGatewayCapabilities(undefined)
+  const extended = resolveGatewayCapabilities({ collect: [...DEFAULT_SYSTEM2_CAPABILITIES.collect, 'obsidian'] })
+  const defaultGrounding = validateGroundedGoals(checked.value, defaults)
+  const extendedGrounding = validateGroundedGoals(checked.value, extended)
+
+  const wrongVerb = validateGatewayPlanOutput({
+    op: 'patch',
+    goals: [{ kind: 'place', targetItem: 'obsidian', requiredCount: 1 }],
+    note: 'should remain disallowed for place',
+  })
+  if (!wrongVerb.success) return { pass: false, detail: wrongVerb.error.message }
+  const wrongVerbGrounding = validateGroundedGoals(wrongVerb.value, extended)
+
   return {
-    pass: !defaultGrounding.success && extendedGrounding.success,
-    detail: `default=${defaultGrounding.success} extended=${extendedGrounding.success}`,
+    pass: !defaultGrounding.success && extendedGrounding.success && !wrongVerbGrounding.success,
+    detail: `default=${defaultGrounding.success} extendedCollect=${extendedGrounding.success} placeStill=${wrongVerbGrounding.success}`,
   }
 })
 
@@ -112,7 +146,7 @@ addCase('rejects unreasonable counts', () => {
   return { pass: !zero.success && !huge.success, detail: `zero=${zero.success} huge=${huge.success}` }
 })
 
-addCase('allows current resource-class names without special model privileges', () => {
+addCase('allows current resource-class collect goals', () => {
   const checked = validateGatewayPlanOutput({
     op: 'continue',
     goals: [
@@ -122,7 +156,7 @@ addCase('allows current resource-class names without special model privileges', 
     note: 'Continue the deterministic capability ladder.',
   })
   if (!checked.success) return { pass: false, detail: checked.error.message }
-  const grounded = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  const grounded = validateGroundedGoals(checked.value, DEFAULT_SYSTEM2_CAPABILITIES)
   if (!grounded.success) return { pass: false, detail: grounded.error.message }
   const goals = plannedGoalsFromGateway(checked.value)
   return {
