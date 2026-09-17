@@ -4,8 +4,8 @@
 //   * it is only called through the existing exception-driven System2Brain interface;
 //   * it may change HIGH-LEVEL goals only (collect/craft/place/smelt);
 //   * it never chooses block/entity coordinates or Mineflayer/Jev action ids;
-//   * output is schema-constrained, locally validated, target-grounded, and only
-//     then converted into PlannedGoal records by code.
+//   * output is schema-constrained, locally validated, capability-grounded, and
+//     only then converted into PlannedGoal records by code.
 //
 // Default model: Inception Mercury 2.5. The model remains configurable so the same
 // interface can A/B-test other Gateway models without changing controller logic.
@@ -26,47 +26,55 @@ export type GatewayReasoningEffort =
   | 'high'
   | 'xhigh'
 
-type ExecutableGoalKind = 'collect' | 'craft' | 'place' | 'smelt'
+export type ExecutableGoalKind = 'collect' | 'craft' | 'place' | 'smelt'
+export type GatewayGoalCapabilities = Readonly<Record<ExecutableGoalKind, readonly string[]>>
 
 /**
- * Targets currently understood by the M1/M2 executor + resource-class resolver.
- * Callers may extend/replace this list when a new capability lands, but a model
- * never gets to invent arbitrary item ids by default.
+ * Verbs and targets the CURRENT executor/candidate generator can ground.
+ *
+ * Important: this is deliberately stricter than "valid Minecraft item names".
+ * A diamond is a valid item but `place diamond` is not an implemented action; a
+ * wooden_pickaxe is craftable but not a valid smelting target. System 2 only gets
+ * combinations the lower layers already understand.
+ *
+ * Add a target here only after the corresponding deterministic capability exists.
  */
-export const DEFAULT_SYSTEM2_TARGETS = [
-  'log',
-  'planks',
-  'stone',
-  'fuel',
-  'food',
-  'pickaxe',
-  'oak_log',
-  'birch_log',
-  'spruce_log',
-  'jungle_log',
-  'acacia_log',
-  'dark_oak_log',
-  'mangrove_log',
-  'cherry_log',
-  'pale_oak_log',
-  'cobblestone',
-  'crafting_table',
-  'wooden_pickaxe',
-  'furnace',
-  'stone_pickaxe',
-  'charcoal',
-  'coal',
-  'raw_iron',
-  'iron_ingot',
-  'iron_pickaxe',
-  'diamond',
-  'diamond_pickaxe',
-  'iron_chestplate',
-  'iron_leggings',
-  'iron_helmet',
-  'iron_boots',
-  'iron_sword',
-] as const
+export const DEFAULT_SYSTEM2_CAPABILITIES: GatewayGoalCapabilities = {
+  collect: [
+    'log',
+    'stone',
+    'oak_log',
+    'birch_log',
+    'spruce_log',
+    'jungle_log',
+    'acacia_log',
+    'dark_oak_log',
+    'mangrove_log',
+    'cherry_log',
+    'pale_oak_log',
+    'cobblestone',
+    'coal',
+    'raw_iron',
+    'raw_copper',
+    'raw_gold',
+    'diamond',
+  ],
+  craft: [
+    'crafting_table',
+    'wooden_pickaxe',
+    'furnace',
+    'stone_pickaxe',
+    'iron_pickaxe',
+    'diamond_pickaxe',
+    'iron_chestplate',
+    'iron_leggings',
+    'iron_helmet',
+    'iron_boots',
+    'iron_sword',
+  ],
+  place: ['crafting_table', 'furnace'],
+  smelt: ['charcoal', 'iron_ingot', 'gold_ingot', 'copper_ingot'],
+}
 
 export interface GatewayPlanGoal {
   kind: ExecutableGoalKind
@@ -88,8 +96,12 @@ export interface GatewaySystem2Options {
   timeoutMs?: number
   maxRetries?: number
   reasoning?: GatewayReasoningEffort
-  /** Explicitly grounded targets the model may put into returned goals. */
-  allowedTargets?: readonly string[]
+  /**
+   * Optional per-verb overrides. An override REPLACES that verb's default list;
+   * omitted verbs keep DEFAULT_SYSTEM2_CAPABILITIES. This lets a caller expose a
+   * newly implemented capability explicitly without weakening unrelated verbs.
+   */
+  capabilities?: Partial<Record<ExecutableGoalKind, readonly string[]>>
 }
 
 const PLAN_OPS = new Set<PlanOp>(['continue', 'patch', 'replace', 'abort'])
@@ -165,14 +177,37 @@ export function validateGatewayPlanOutput(
   return { success: true, value: { op: op as PlanOp, goals, note } }
 }
 
-export function validateGroundedTargets(
+export function resolveGatewayCapabilities(
+  overrides: Partial<Record<ExecutableGoalKind, readonly string[]>> | undefined,
+): GatewayGoalCapabilities {
+  const unique = (values: readonly string[]): readonly string[] => [...new Set(values)]
+  return {
+    collect: unique(overrides?.collect ?? DEFAULT_SYSTEM2_CAPABILITIES.collect),
+    craft: unique(overrides?.craft ?? DEFAULT_SYSTEM2_CAPABILITIES.craft),
+    place: unique(overrides?.place ?? DEFAULT_SYSTEM2_CAPABILITIES.place),
+    smelt: unique(overrides?.smelt ?? DEFAULT_SYSTEM2_CAPABILITIES.smelt),
+  }
+}
+
+export function validateGroundedGoals(
   output: GatewayPlanOutput,
-  allowedTargets: ReadonlySet<string>,
+  capabilities: GatewayGoalCapabilities,
 ): { success: true } | { success: false; error: Error } {
+  const sets: Record<ExecutableGoalKind, ReadonlySet<string>> = {
+    collect: new Set(capabilities.collect),
+    craft: new Set(capabilities.craft),
+    place: new Set(capabilities.place),
+    smelt: new Set(capabilities.smelt),
+  }
   for (let index = 0; index < output.goals.length; index += 1) {
-    const target = output.goals[index]?.targetItem
-    if (target === undefined || !allowedTargets.has(target)) {
-      return { success: false, error: new Error(`goal[${index}] target is not grounded: ${String(target)}`) }
+    const goal = output.goals[index]
+    if (goal === undefined || !sets[goal.kind].has(goal.targetItem)) {
+      return {
+        success: false,
+        error: new Error(
+          `goal[${index}] is not a grounded executable capability: ${goal?.kind ?? 'missing'}:${goal?.targetItem ?? 'missing'}`,
+        ),
+      }
     }
   }
   return { success: true }
@@ -217,7 +252,7 @@ You do NOT control the body. Mineflayer owns mechanics and Jev owns the next gro
 
 Allowed goal kinds are exactly: collect, craft, place, smelt.
 Never emit MOVE/MINE/ATTACK coordinates, block ids, entity ids, yaw/pitch, paths, or free-form motor instructions.
-Choose targetItem ONLY from the allowedTargets list supplied in the request.
+Choose each kind + targetItem pair ONLY from allowedCapabilities supplied in the request.
 Do not invent a new capability merely to escape a failure. Prefer the smallest plan change that can make progress.
 Do not re-add completed work unless it is genuinely required again because the resource was consumed.
 
@@ -229,14 +264,14 @@ Plan operation semantics:
 
 Return only the schema-constrained plan.`
 
-function compactPlannerState(request: System2PlanRequest, allowedTargets: readonly string[]): unknown {
+function compactPlannerState(request: System2PlanRequest, capabilities: GatewayGoalCapabilities): unknown {
   const goals = request.goalQueueState.goals
   return {
     reason: request.reason,
     detail: request.detail,
     tick: request.tick,
     objective: request.objective,
-    allowedTargets,
+    allowedCapabilities: capabilities,
     queue: {
       depth: request.goalQueueState.depth,
       current: request.goalQueueState.current,
@@ -299,8 +334,7 @@ export class GatewaySystem2 implements System2Brain {
   private readonly timeoutMs: number
   private readonly maxRetries: number
   private readonly reasoning: GatewayReasoningEffort
-  private readonly allowedTargets: readonly string[]
-  private readonly allowedTargetSet: ReadonlySet<string>
+  private readonly capabilities: GatewayGoalCapabilities
   private calls = 0
 
   constructor(options: GatewaySystem2Options) {
@@ -310,8 +344,7 @@ export class GatewaySystem2 implements System2Brain {
     this.timeoutMs = options.timeoutMs ?? 15000
     this.maxRetries = options.maxRetries ?? 1
     this.reasoning = options.reasoning ?? 'low'
-    this.allowedTargets = [...new Set(options.allowedTargets ?? DEFAULT_SYSTEM2_TARGETS)]
-    this.allowedTargetSet = new Set(this.allowedTargets)
+    this.capabilities = resolveGatewayCapabilities(options.capabilities)
 
     // Reuse the project's proven 0600 key-file/env resolution. The AI SDK Gateway
     // provider reads AI_GATEWAY_API_KEY at request time; never log the key itself.
@@ -335,7 +368,7 @@ export class GatewaySystem2 implements System2Brain {
     const result = await generateText({
       model: this.model,
       system: SYSTEM_PROMPT,
-      prompt: JSON.stringify(compactPlannerState(request, this.allowedTargets)),
+      prompt: JSON.stringify(compactPlannerState(request, this.capabilities)),
       reasoning: this.reasoning,
       maxOutputTokens: this.maxOutputTokens,
       maxRetries: this.maxRetries,
@@ -348,7 +381,7 @@ export class GatewaySystem2 implements System2Brain {
     })
 
     const output = result.output
-    const grounded = validateGroundedTargets(output, this.allowedTargetSet)
+    const grounded = validateGroundedGoals(output, this.capabilities)
     if (!grounded.success) throw grounded.error
 
     const goals = plannedGoalsFromGateway(output)
