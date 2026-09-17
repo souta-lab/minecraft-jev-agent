@@ -30,7 +30,7 @@ import { Executor, defaultExecutorOptions } from './executor.ts'
 import type { ActuationMode, ClaimResult, CurrentAction, ExecutionResult, ExecutorHooks, ExecutorOptions, FailureCode, PathCompletedEvent, PathFailedEvent } from './executor.ts'
 import { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, applyDangerGate, dangerRequiresSafeAction, gateDanger, gateScore, preserveCurrentSafeAction } from './gating.ts'
 import type { DangerGateDecision, DangerGateOutcome, GatedScore } from './gating.ts'
-import { createJevPolicy, CORE_QUESTION_NAMES, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, QUESTION_NAMES, shouldRetreatFrom, STALL_QUESTION_NAMES, THREAT_QUESTION_NAMES, writeOutcome } from './jev.ts'
+import { abandonRequested, AUTHORITATIVE_QUESTION_NAMES, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, shouldRetreatFrom, writeOutcome } from './jev.ts'
 import type { JevAnswer, JevCallRecord, JevOutcomeRecord, JevPolicy, JevQuestionType, JevRequest, JevResult, JevSource, JevUsage, QuestionName, QuestionSetKind } from './jev.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions } from './scheduler.ts'
 import type { DecisionTrigger, SchedulerOptions as JevSchedulerOptions, TriggerEvent } from './scheduler.ts'
@@ -62,7 +62,7 @@ export { buildWorldState, makeGoal, toVec3, defaultSensorOptions }
 export { generateCandidates, defaultCandidateOptions, ACTING_KINDS }
 export { guardCandidate, guardDecision }
 export { createJevPolicy, EventLogger, JsonlWriter, writeOutcome, decisionIdFrom }
-export { QUESTION_NAMES, CORE_QUESTION_NAMES, THREAT_QUESTION_NAMES, STALL_QUESTION_NAMES, questionNamesFor, shouldRetreatFrom }
+export { QUESTION_NAMES, AUTHORITATIVE_QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, questionNamesFor, shouldRetreatFrom, abandonRequested }
 export type { QuestionName, QuestionSetKind }
 export { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions }
 export { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, dangerRequiresSafeAction, gateDanger, gateScore }

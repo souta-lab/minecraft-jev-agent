@@ -10,7 +10,7 @@
 //
 // Run: npm run loop-test
 import type { Candidate } from './src/candidates.ts'
-import { buildQuestions, CORE_QUESTION_NAMES, QUESTION_NAMES, questionNamesFor, STALL_QUESTION_NAMES, THREAT_QUESTION_NAMES } from './src/jev.ts'
+import { buildQuestions, AUTHORITATIVE_QUESTION_NAMES, QUESTION_NAMES, questionNamesFor, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES } from './src/jev.ts'
 import type { JevAnswer, JevQuestionType, JevResult } from './src/jev.ts'
 import { GoalQueue } from './src/goalQueue.ts'
 import { buildStubPlan, evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2.ts'
@@ -93,7 +93,7 @@ function stubRequest(): System2PlanRequest {
   }
 }
 
-addCase('batched questions: the 8 CORE + trigger-specific names with the right primitives', () => {
+addCase('batched questions: exactly two authoritative heads (action, abandon_option) + safety', () => {
   const questions = buildQuestions([mineCandidate()])
   const types: Record<string, JevQuestionType> = {}
   for (const name of QUESTION_NAMES) {
@@ -102,35 +102,37 @@ addCase('batched questions: the 8 CORE + trigger-specific names with the right p
   }
   const expected: Record<string, JevQuestionType> = {
     action: 'choice',
+    abandon_option: 'boolean',
     danger: 'score',
     should_retreat: 'boolean',
-    goal_progress: 'score',
-    plan_still_valid: 'score',
-    situation_understood: 'score',
-    goal_blocked: 'boolean',
-    strategy_change_needed: 'boolean',
   }
+  const shadowAbsent = SHADOW_QUESTION_NAMES.every((name) => !(name in types))
   const pass =
-    Object.keys(types).length === 8 &&
+    Object.keys(types).length === 4 &&
+    AUTHORITATIVE_QUESTION_NAMES.length === 2 &&
     QUESTION_NAMES.every((name) => types[name] === expected[name]) &&
     Object.keys(questions.action?.criteria ?? {}).includes('MINE:b6_63_-67') &&
+    shadowAbsent &&
     !('need_llm' in types) &&
     !('target' in types)
-  return { pass, detail: `types=${JSON.stringify(types)}` }
+  return { pass, detail: `types=${JSON.stringify(types)} shadowAbsent=${shadowAbsent}` }
 })
 
-addCase('trigger class selects the CORE + trigger-specific subset', () => {
+addCase('trigger class selects the authoritative heads + safety subset', () => {
   const core = questionNamesFor('core')
   const threat = questionNamesFor('threat')
   const stall = questionNamesFor('stall')
   const pass =
-    core.length === CORE_QUESTION_NAMES.length &&
+    core.length === AUTHORITATIVE_QUESTION_NAMES.length &&
+    core.includes('action') &&
+    core.includes('abandon_option') &&
     !core.includes('danger') &&
-    !core.includes('goal_blocked') &&
-    THREAT_QUESTION_NAMES.every((name) => threat.includes(name)) &&
-    !threat.includes('goal_blocked') &&
-    STALL_QUESTION_NAMES.every((name) => stall.includes(name)) &&
-    !stall.includes('danger')
+    !core.includes('should_retreat') &&
+    SAFETY_QUESTION_NAMES.every((name) => threat.includes(name)) &&
+    AUTHORITATIVE_QUESTION_NAMES.every((name) => threat.includes(name)) &&
+    stall.length === AUTHORITATIVE_QUESTION_NAMES.length &&
+    !stall.includes('danger') &&
+    SHADOW_QUESTION_NAMES.every((name) => !(core as readonly string[]).includes(name) && !(threat as readonly string[]).includes(name) && !(stall as readonly string[]).includes(name))
   return {
     pass,
     detail: `core=[${core.join(',')}] threat=[${threat.join(',')}] stall=[${stall.join(',')}]`,

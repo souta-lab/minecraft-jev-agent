@@ -299,23 +299,42 @@ export const SITUATION_LEVELS = [
  * `need_llm` / `need_replan` are deliberately NOT asked: "should the LLM run" is a
  * deterministic controller decision, not a model meta-judgement.
  */
-export const CORE_QUESTION_NAMES = ['action', 'goal_progress', 'plan_still_valid', 'situation_understood'] as const
-export const THREAT_QUESTION_NAMES = ['danger', 'should_retreat'] as const
-export const STALL_QUESTION_NAMES = ['goal_blocked', 'strategy_change_needed'] as const
-export const QUESTION_NAMES = [...CORE_QUESTION_NAMES, ...THREAT_QUESTION_NAMES, ...STALL_QUESTION_NAMES] as const
+export const AUTHORITATIVE_QUESTION_NAMES = ['action', 'abandon_option'] as const
+export const SAFETY_QUESTION_NAMES = ['danger', 'should_retreat'] as const
+/**
+ * Demoted to shadow metrics (issue #11): still defined and logged by code, but
+ * never sent as steering questions and never consumed by the controller.
+ */
+export const SHADOW_QUESTION_NAMES = [
+  'goal_progress',
+  'plan_still_valid',
+  'situation_understood',
+  'goal_blocked',
+  'strategy_change_needed',
+] as const
+export const QUESTION_NAMES = [...AUTHORITATIVE_QUESTION_NAMES, ...SAFETY_QUESTION_NAMES] as const
 
 export type QuestionName = (typeof QUESTION_NAMES)[number]
+export type ShadowQuestionName = (typeof SHADOW_QUESTION_NAMES)[number]
 export type QuestionSetKind = 'core' | 'threat' | 'stall' | 'all'
+
+export const ABANDON_THRESHOLD_DEFAULT = 0.5
+
+/** `BUDDY_ABANDON_THRESHOLD` overrides the binary beta threshold for replans. */
+export function resolveAbandonThreshold(): number {
+  const raw = Number(process.env.BUDDY_ABANDON_THRESHOLD ?? ABANDON_THRESHOLD_DEFAULT)
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : ABANDON_THRESHOLD_DEFAULT
+}
 
 /** Resolve a trigger class to the exact question set that is sent. */
 export function questionNamesFor(kind: QuestionSetKind): readonly QuestionName[] {
   switch (kind) {
     case 'core':
-      return CORE_QUESTION_NAMES
+      return AUTHORITATIVE_QUESTION_NAMES
     case 'threat':
-      return [...CORE_QUESTION_NAMES, ...THREAT_QUESTION_NAMES]
+      return [...AUTHORITATIVE_QUESTION_NAMES, ...SAFETY_QUESTION_NAMES]
     case 'stall':
-      return [...CORE_QUESTION_NAMES, ...STALL_QUESTION_NAMES]
+      return AUTHORITATIVE_QUESTION_NAMES
     case 'all':
       return QUESTION_NAMES
   }
@@ -343,6 +362,17 @@ export function buildQuestions(
       instructions: PRIMARY_INSTRUCTIONS,
       criteria: actionCriteria,
     },
+    abandon_option: {
+      type: 'boolean',
+      instructions:
+        'Should the current Option (the current subgoal/plan) be abandoned and replanned now, given ' +
+        'the live inventory, tool rank and repeated failures? Answer with P(true). Code owns ' +
+        'preconditions and success predicates; this is the only vote on whether to give up on the option.',
+      criteria: {
+        true: 'abandon the current option and hand control back for a replan',
+        false: 'keep pursuing the current option',
+      },
+    },
     danger: {
       type: 'score',
       instructions:
@@ -359,41 +389,6 @@ export function buildQuestions(
       criteria: {
         true: 'retreat to safety now',
         false: 'the current action is safe enough to continue',
-      },
-    },
-    goal_progress: {
-      type: 'score',
-      instructions: `How much progress has been made toward the goal queue's current goal? Use the ordered levels: ${GOAL_PROGRESS_LEVELS.join(' | ')}.`,
-      criteria: [...GOAL_PROGRESS_LEVELS],
-    },
-    plan_still_valid: {
-      type: 'score',
-      instructions: `Is the long-horizon plan from System 2 still meaningful for the current situation (right targets, right resources, not blocked)? Use the ordered levels: ${PLAN_VALID_LEVELS.join(' | ')}. Do not judge whether the LLM should be called; judge only whether the existing plan still makes sense.`,
-      criteria: [...PLAN_VALID_LEVELS],
-    },
-    situation_understood: {
-      type: 'score',
-      instructions: `Does the current world situation match something the bot understands well enough to keep acting? Use the ordered levels: ${SITUATION_LEVELS.join(' | ')}.`,
-      criteria: [...SITUATION_LEVELS],
-    },
-    goal_blocked: {
-      type: 'boolean',
-      instructions:
-        'Is the current subgoal blocked right now (target unreachable, required resource ' +
-        'missing, repeated failure)? Answer true only when a deterministic retry would fail again.',
-      criteria: {
-        true: 'the current subgoal cannot make progress',
-        false: 'the current subgoal can still make progress',
-      },
-    },
-    strategy_change_needed: {
-      type: 'boolean',
-      instructions:
-        'Does reaching the current goal require changing approach (different resource, route, ' +
-        'or order of subgoals)? Answer true when the plan must be patched or replaced.',
-      criteria: {
-        true: 'the remaining plan should change',
-        false: 'the remaining plan is still the right approach',
       },
     },
   }
@@ -495,9 +490,12 @@ function mapBooleanAnswer(name: string, answer: unknown, confidence: number | nu
 
 const SCORE_LEGENDS: Partial<Record<QuestionName, readonly string[]>> = {
   danger: DANGER_LEVELS,
-  goal_progress: GOAL_PROGRESS_LEVELS,
-  plan_still_valid: PLAN_VALID_LEVELS,
-  situation_understood: SITUATION_LEVELS,
+}
+
+/** Whether the model's `abandon_option` beta crosses the replan threshold. */
+export function abandonRequested(result: JevResult, threshold = resolveAbandonThreshold()): boolean {
+  const probability = result.answers.abandon_option?.probability
+  return typeof probability === 'number' && probability >= threshold
 }
 
 /** Map exactly one requested question's raw answer to the defensive JevAnswer shape. */
@@ -874,7 +872,6 @@ class FallbackJevPolicy implements JevPolicy {
     const nearestHazard = request.state.blocks.find((block) => block.kind === 'hazard')
     const level = progressLevel(request.state.goal.progress, request.state.goal.complete)
     const dangerScore = dangerLevel(request.state.self.health, nearestHazard?.distance ?? null)
-
     // Deterministic answers: action confidence stays null (a rule-based pick is
     // not a measurable distribution), while `danger` carries confidence 1 because
     // the level is *computed* from mechanical state, not estimated. `note` tags
@@ -883,6 +880,7 @@ class FallbackJevPolicy implements JevPolicy {
     const note = 'deterministic-fallback'
     const shouldRetreat = request.state.self.health <= 6 || (nearestHazard !== undefined && nearestHazard.distance <= 2)
     const escalating = request.state.signals.escalationRecommended
+    const abandon = escalating ? 1 : 0
     const planValidLevel = escalating ? 1 : 4
     const situationLevel = request.state.goalQueue.empty && !request.state.goal.complete ? 2 : 4
 
@@ -917,55 +915,15 @@ class FallbackJevPolicy implements JevPolicy {
         legend: null,
         note: `${note}; boolean P(true)`,
       },
-      goal_progress: {
-        name: 'goal_progress',
-        type: 'score',
-        value: level,
-        probability: null,
-        confidence: 1,
-        probabilities: { [String(level)]: 1 },
-        legend: [...GOAL_PROGRESS_LEVELS],
-        note: `${note}; level computed mechanically, certainty 1 by construction`,
-      },
-      plan_still_valid: {
-        name: 'plan_still_valid',
-        type: 'score',
-        value: planValidLevel,
-        probability: null,
-        confidence: 1,
-        probabilities: { [String(planValidLevel)]: 1 },
-        legend: [...PLAN_VALID_LEVELS],
-        note: `${note}; level computed mechanically, certainty 1 by construction`,
-      },
-      situation_understood: {
-        name: 'situation_understood',
-        type: 'score',
-        value: situationLevel,
-        probability: null,
-        confidence: 1,
-        probabilities: { [String(situationLevel)]: 1 },
-        legend: [...SITUATION_LEVELS],
-        note: `${note}; level computed mechanically, certainty 1 by construction`,
-      },
-      goal_blocked: {
-        name: 'goal_blocked',
+      abandon_option: {
+        name: 'abandon_option',
         type: 'boolean',
-        value: escalating ? 1 : 0,
-        probability: escalating ? 1 : 0,
+        value: abandon ? 1 : 0,
+        probability: abandon ? 1 : 0,
         confidence: null,
-        probabilities: { true: escalating ? 1 : 0, false: escalating ? 0 : 1 },
+        probabilities: { true: abandon ? 1 : 0, false: abandon ? 0 : 1 },
         legend: null,
-        note: `${note}; boolean P(true)`,
-      },
-      strategy_change_needed: {
-        name: 'strategy_change_needed',
-        type: 'boolean',
-        value: escalating ? 1 : 0,
-        probability: escalating ? 1 : 0,
-        confidence: null,
-        probabilities: { true: escalating ? 1 : 0, false: escalating ? 0 : 1 },
-        legend: null,
-        note: `${note}; boolean P(true)`,
+        note: `${note}; deterministic beta (escalation/stall), threshold ${resolveAbandonThreshold()}`,
       },
     }
 
