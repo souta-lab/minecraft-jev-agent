@@ -46,7 +46,8 @@ function callSock(cmd, args = {}) {
 
 const MARKERS = ['LADDER_PREREQ', 'PRECONDITION_MISSING', 'JEV_HEADS', 'ADVISOR source=mercury',
   'ADVISOR source=llm', 'ADVISOR source=fallback', 'TOOL_CHOICE', 'JUMP_ATTEMPT', 'DIG_PATH',
-  'STAIRCASE', 'REUSE_TUNNEL', 'DIG_OSCILLATE', 'DESCEND_LIMIT', 'MOVE_OSCILLATE', 'DEATH', 'LADDER_RESET']
+  'STAIRCASE', 'REUSE_TUNNEL', 'DIG_OSCILLATE', 'DESCEND_LIMIT', 'MOVE_OSCILLATE', 'DEATH', 'LADDER_RESET',
+  'RECONNECT', 'RECONNECT_SUCCESS', 'LEASE_ACQUIRED', 'LEASE_REVOKED', 'DISCONNECT', 'HOST_LOCK']
 
 function markerCounts() {
   if (!existsSync(LOG)) return {}
@@ -84,6 +85,9 @@ const summary = {
   reloadsFailed: d?.stats?.reloadsFailed ?? null,
   recoveries: d?.recoveries ?? null,
   reconnects: d?.stats?.reconnects ?? null,
+  reconnectsLastHour: d?.stats?.reconnectsLastHour ?? d?.reconnect?.reconnectsLastHour ?? null,
+  leaseActiveId: d?.lease?.activeId ?? d?.generationId ?? null,
+  hostLock: d?.hostLock ?? null,
   wedge: d?.stats?.wedge ?? null,
   goalComplete: d?.stats?.goalComplete ?? null,
   listenerLeak: d?.listenerLeak ?? null,
@@ -107,7 +111,8 @@ if (JSON_OUT) {
   row('connected', d ? `${d.connected}  frozen=${d.frozen}` : 'NO CONTROL SOCKET')
   row('milestone', `${d?.milestone}  policy=${d?.status?.policyKind}`)
   row('generations', `${d?.generations}  reloads(hash)=${d?.stats?.reloadsChangedHash} failed=${d?.stats?.reloadsFailed}`)
-  row('recoveries', `${d?.recoveries}  reconnects=${d?.stats?.reconnects}  wedge=${d?.stats?.wedge}`)
+  row('recoveries', `${d?.recoveries}  reconnects=${d?.stats?.reconnects} lastHour=${d?.stats?.reconnectsLastHour} wedge=${d?.stats?.wedge}`)
+  row('lease', `${d?.lease?.activeId || '(none)'}  lock=${d?.hostLock?.present ? `held pid=${d?.hostLock?.filePid}` : 'MISSING'}`)
   row('listenerLeak', `${d?.listenerLeak}${d?.listenerLeak ? '  (!! fix pending)' : ''}`)
   row('ores', JSON.stringify(d?.worldMemory?.discoveredOres ?? []))
   row('craftTables', d?.worldMemory?.craftingTables)
