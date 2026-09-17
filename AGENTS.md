@@ -108,6 +108,11 @@ actuation lease はあるが nested capability bypass が残る (#38)。
         共有ツリーを checkout で切り替えると稼働中のエージェントが別ブランチのコードで動き出し、他のタスクの編集も壊れる
   （実例: #21 は /tmp/opencode/wt21 を使用。これが正しい）
 ・main へ直接コミットするのは「単一の作業者しか触っていない」ことが明確な場合のみ（例: tools/, docs のみ）
+・★**ブランチ上の修正は main にマージされるまで稼働中エージェントに反映されない**
+  （常駐ホストは main ツリーからバンドルを生成するため）。したがって修正の「着地」＝ マージまでを含む。
+  マージは一度に1本ずつ、他タスクが未コミットのファイルを持つ間は行わない。
+  マージ手順: `git worktree` 側で push → main ツリーで `git fetch && git merge --no-ff origin/task/<name> && git push`
+  → 直後に `RELOAD ok=true` と該当ゲート（tools/verify-*.mjs）を確認する
 ・作業完了時に main へ取り込む（`git checkout main && git pull --rebase && git merge --no-ff <branch> && git push`）。
   force push・履歴改変は禁止
 ・**作業ツリーに他タスクの未コミット変更（WIP）があるときは rebase/pull しない**
