@@ -115,6 +115,17 @@
 ```
 
 ## 進捗ログ（一次証拠つき）```
+2026-09-18 03:42 JST — ★P1ロールバックが実障害で機能（#45 cherry-pick コンフリクト事件）
+  経緯: #45(6d614fd) を cherry-pick → コンフリクトで作業ツリーに <<<<<<< が混入
+  一次ログ: RELOAD ok=false trigger=source-changed ms=12 message=Build failed:
+            ../jev-agent/src/executor.ts:709:2: ERROR: Unexpected "<<"
+    → ホストが壊れたバンドルを拒否し、旧世代のまま稼働継続（ダウンタイム0）
+  復旧: git cherry-pick --abort → beac6f6 へ戻し typecheck ok → RELOAD ok=true skipped=unchanged
+  学び: mainツリーでの cherry-pick/merge は危険。必ず worktree で行い、mainはビルド元として清潔に保つ
+  → 統合は bg_ae6616bd（worktree /tmp/opencode/wt45i でコンフリクト解消）
+  検証ツール精度の欠陥を計4件修正（window判定・churn0=PASS・直近停止なし=PASS・all-time maxTicks）
+  → 正確なゲート: 5/6（残りは raw_iron_obtained のみ）
+
 2026-09-18 03:28 JST — ★#14 着地で「既知資源の取得」が動き始めた（残るは raw_iron のみ）
   RETURN_TO_KNOWN_RESOURCE item=raw_iron name=iron_ore target=25,49,36 dist=9
   ACTION n=844 id=RETRIEVE:known:raw_iron:b25_49_36 kind=RETRIEVE   ← 新アクションが実行された
