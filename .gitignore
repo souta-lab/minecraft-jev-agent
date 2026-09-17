@@ -40,3 +40,6 @@ launch/game-*/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# symlinked node_modules dirs (pattern with slash does not match symlinks)
+node_modules

@@ -17,6 +17,9 @@ import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
+import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
+import { Advisor, resolveAdvisorMode } from './advisor.ts'
+import { installDescendAwarePolicy } from './system-one-policy.ts'
 import {
   PlannerBrain,
   bestPickaxeRank,
@@ -221,6 +224,31 @@ function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number
   }
 }
 
+/**
+ * In llm-planner mode the controller's own ledger restore is gated behind the
+ * single-shot planner, so the durable `done` count is restored here instead.
+ * jev-agent is imported read-only, so the queue is reached through a narrow cast;
+ * the HOST has already validated/archived the ledger against the live inventory.
+ */
+function restoreLedgerIntoController(
+  controller: JevController,
+  ledgerPath: string | null,
+  log: (event: string, detail?: Record<string, unknown>) => void,
+): void {
+  if (ledgerPath === null || !existsSync(ledgerPath)) return
+  try {
+    const snapshot = JSON.parse(readFileSync(ledgerPath, 'utf8')) as GoalQueueSnapshot
+    if (!Array.isArray(snapshot.goals) || typeof snapshot.counter !== 'number') return
+    const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
+    holder.queue.restore(snapshot)
+    const done = snapshot.goals.filter((goal) => goal.status === 'done').length
+    const current = snapshot.goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
+    log('LEDGER_RESTORED', { done, total: snapshot.goals.length, current: current?.description ?? null })
+  } catch (error) {
+    log('ERROR', { where: 'restoreLedgerIntoController', message: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const startedAt = Date.now()
   assertCraftCapability(ctx.bot, ctx.log)
@@ -230,6 +258,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mined: { ...ctx.worldMemory.mined },
     discoveredOres: [...ctx.worldMemory.discoveredOres],
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+    hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const bot = withActuationLease(ctx.bot, ctx.lease, id)
@@ -269,15 +298,34 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   const counts = inventoryCounts(ctx.bot)
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
-  const ladder = buildLadder(counts, world)
+  const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail))
+
+  // Death (or any explicit reset) recomputes the ladder from the LIVE inventory.
+  // An empty inventory means restart at wood; the queue is never given a goal
+  // whose prerequisite is missing.
+  if (ctx.resetReason !== null) {
+    ctx.log('LADDER_RESET', {
+      reason: ctx.resetReason,
+      invEmpty: Object.keys(counts).length === 0,
+      rungIndex: ladder.rungIndex,
+      rungId: ladder.rungId,
+      goals: ladder.goals.map((goal) => goal.description),
+    })
+  }
 
   // The planner IS the env switch: deterministic keeps the original single-shot
   // contract, so every decision record truthfully reports `llm.called == false`.
   // `llm` turns the controller's exception paths into bounded replans.
   const plannerMode = resolvePlannerMode()
 
-  // Durable plan cache (survives hot reloads; keyed by world-state hash).
+  // Durable caches (survive hot reloads; keyed by world-state hash).
   const cachePath = fileURLToPath(new URL('./planner-cache.json', import.meta.url))
+  const advisorCachePath = fileURLToPath(new URL('./advisor-cache.json', import.meta.url))
+  const advisor = new Advisor({
+    log: (event, detail) => ctx.log(event, detail),
+    cachePath: advisorCachePath,
+    mode: resolveAdvisorMode(plannerMode),
+  })
 
   const options: Partial<JevAgentOptions> = {
     goalItem: ctx.goalItem,
@@ -315,12 +363,18 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   const controller = new JevController(bot, options)
+  // The stock fallback has no DESCEND branch; without this wrapper a stalled
+  // stone/iron goal whose only productive candidate is a descent step WAITs
+  // forever and wedges. Hazards from death are excluded here.
+  installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
+  restoreLedgerIntoController(controller, ledgerPath, ctx.log)
   const brain = new PlannerBrain({
     bot,
     world,
     log: (event, detail) => ctx.log(event, detail),
     cachePath,
     mode: plannerMode,
+    advisor,
   })
   controller.setSystem2(brain)
 
@@ -494,5 +548,3 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 }
 
 export default createGeneration
-
-// reload-probe: 0
