@@ -54,6 +54,20 @@ export interface TraversalFailure {
   lastSeenAt: number
 }
 
+/** A coordinate that killed the bot. Registered on death; a coordinate that
+ * kills twice is excluded permanently from dig/descent candidates. */
+export interface DeathHazard {
+  x: number
+  y: number
+  z: number
+  /** best-effort inferred cause: void | lava | water | fall | suffocation | unknown */
+  reason: string
+  /** how many deaths happened at/next to this coordinate */
+  count: number
+  firstSeenAt: number
+  lastSeenAt: number
+}
+
 /** Durable world model that must survive reloads/reconnects. Inventory and
  * position are NOT mirrored here - they are SERVER TRUTH, live on the bot, and
  * are re-observed from sensors after every reload/reconnect, never restored from
@@ -70,10 +84,25 @@ export interface ResidentWorldMemory {
   discoveredOres: string[]
   /** thin 2-block-wall / stuck memory; suppress repeat attempts */
   traversalFailures: TraversalFailure[]
+  /** death coordinates; a coordinate that kills twice is excluded (hard hazard) */
+  hazards: DeathHazard[]
 }
 
 export function emptyWorldMemory(): ResidentWorldMemory {
-  return { craftingTables: [], furnaces: [], mined: {}, discoveredOres: [], traversalFailures: [] }
+  return { craftingTables: [], furnaces: [], mined: {}, discoveredOres: [], traversalFailures: [], hazards: [] }
+}
+
+/** Fill in any missing collection on a (possibly older) memory object. This is
+ * the ONE normalisation point: call it before any read so a partially-written
+ * mirror can never surface `undefined` to a `craftingTables`/`furnaces` read. */
+export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
+  memory.craftingTables = Array.isArray(memory.craftingTables) ? memory.craftingTables : []
+  memory.furnaces = Array.isArray(memory.furnaces) ? memory.furnaces : []
+  memory.mined = memory.mined ?? {}
+  memory.discoveredOres = Array.isArray(memory.discoveredOres) ? memory.discoveredOres : []
+  memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
+  memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
+  return memory
 }
 
 /** What the generation proposes; the HOST is the only writer that commits it. */
@@ -83,6 +112,7 @@ export interface WorldMemoryDelta {
   discoveredOres?: string[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
+  hazards?: DeathHazard[]
 }
 
 /** The atomic mirror written to buddy-state.json (tmp -> rename). HOST-only writer. */
@@ -263,6 +293,8 @@ export interface GenerationContext {
   /** configured objective seed. */
   goalItem: string
   goalCount: number
+  /** why this generation was created fresh (e.g. "death"); drives LADDER_RESET. */
+  resetReason: string | null
 }
 
 export interface GenerationModule {

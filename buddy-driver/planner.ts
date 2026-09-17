@@ -30,11 +30,13 @@ import type { Bot } from 'mineflayer'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import { matchesResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
+import { Advisor } from './advisor.ts'
+import type { AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
 
 export type Counts = Record<string, number>
 
@@ -275,8 +277,62 @@ export function executableRungs(): readonly Rung[] {
   return RUNGS.filter((rung) => rung.future !== true)
 }
 
-/** The full ladder (executable first, then the future M3/M4 road) as goal lists. */
-export function buildLadder(counts: Counts, world: ResidentWorldMemory): Ladder {
+export interface PreconditionResult {
+  ok: boolean
+  need: string
+}
+
+/** A rung's prerequisite, checked before its goal is ever emitted. A goal whose
+ * tool/material prerequisite is missing must never enter the queue: that is what
+ * wedged the resident on `collect raw_iron` with an empty inventory. */
+export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory): PreconditionResult {
+  switch (rung.id) {
+    case 'cobblestone':
+      return { ok: bestPickaxeRank(c) >= 1, need: 'wooden_pickaxe' }
+    case 'furnace':
+      return { ok: countClass(c, 'stone') >= 8 || has(c, 'furnace') || w.furnaces.length > 0, need: '8 x stone' }
+    case 'stone_pickaxe':
+      return { ok: countClass(c, 'stone') >= 3 && bestPickaxeRank(c) >= 1, need: '3 x stone + wooden_pickaxe' }
+    case 'charcoal':
+      return { ok: has(c, 'furnace') || w.furnaces.length > 0, need: 'placed furnace' }
+    case 'raw_iron':
+      return { ok: bestPickaxeRank(c) >= 2, need: 'stone_pickaxe' }
+    case 'iron_ingot':
+      return {
+        ok: (has(c, 'furnace') || w.furnaces.length > 0) && (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 1,
+        need: 'furnace + raw_iron',
+      }
+    case 'iron_pickaxe':
+      return { ok: (c['iron_ingot'] ?? 0) >= 3, need: '3 x iron_ingot' }
+    case 'iron_gear':
+      return { ok: (c['iron_ingot'] ?? 0) >= 3, need: 'iron_ingot' }
+    case 'diamond':
+      return { ok: bestPickaxeRank(c) >= 2, need: 'stone_pickaxe' }
+    case 'diamond_pickaxe':
+      return { ok: has(c, 'diamond'), need: 'diamond' }
+    default:
+      return { ok: true, need: '' }
+  }
+}
+
+/** Unsatisfied executable rungs reachable right now: stop at the first rung whose
+ * prerequisite is not met, so a plan never contains an impossible goal. */
+export function reachableUnsatisfiedRungs(c: Counts, w: ResidentWorldMemory): Rung[] {
+  const out: Rung[] = []
+  for (const rung of RUNGS) {
+    if (rung.future === true || rung.satisfied(c, w)) continue
+    if (!rungPrecondition(rung, c, w).ok) break
+    out.push(rung)
+  }
+  return out
+}
+
+/** The executable ladder as a goal list, gated by per-rung preconditions. */
+export function buildLadder(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): Ladder {
   const goals: PlannedGoal[] = []
   let rungIndex = RUNGS.length
   let rungId = 'complete'
@@ -288,10 +344,19 @@ export function buildLadder(counts: Counts, world: ResidentWorldMemory): Ladder 
       rungIndex = i
       rungId = rung.id
     }
+    const precondition = rungPrecondition(rung, counts, world)
+    if (!precondition.ok) {
+      log?.('PRECONDITION_MISSING', {
+        goal: rung.goals(counts, world)[0]?.description ?? rung.id,
+        need: precondition.need,
+        rungId: rung.id,
+      })
+      break
+    }
     for (const goal of rung.goals(counts, world)) goals.push(goal)
   }
   if (goals.length === 0) {
-    // Everything executable is satisfied: keep the resident meaningfully busy.
+    // Everything reachable is satisfied: keep the resident meaningfully busy.
     goals.push({ kind: 'collect', description: 'collect 16 x raw_iron (resident upkeep)', targetItem: 'raw_iron', requiredCount: 16 })
   }
   return {
@@ -346,7 +411,7 @@ function dedupeOptions(options: PlanOption[]): PlanOption[] {
 
 /** Deterministic, grounded options. Option 0 is always the ladder front (fallback). */
 export function buildPlanOptions(counts: Counts, world: ResidentWorldMemory): PlanOption[] {
-  const unsat = executableRungs().filter((rung) => !rung.satisfied(counts, world))
+  const unsat = reachableUnsatisfiedRungs(counts, world)
   if (unsat.length === 0) {
     return [
       {
@@ -396,6 +461,30 @@ const UPKEEP_GOAL: PlannedGoal = {
 }
 
 const FRONT_FALLBACK: PlanOption = { id: 'front_fallback', title: 'deterministic ladder front', goals: [UPKEEP_GOAL] }
+
+/**
+ * Map a strategy id chosen by the upper LLM onto a bounded, grounded goal list.
+ * This is the ONLY thing the LLM influences: System One still decides every
+ * action, and every goal maps to an existing candidate kind.
+ */
+export function goalsForStrategy(strategy: AdvisorStrategy, counts: Counts, world: ResidentWorldMemory): PlannedGoal[] {
+  const rank = bestPickaxeRank(counts)
+  const ladderFront = buildLadder(counts, world).goals
+  const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x stone`, targetItem: 'stone', requiredCount: n })
+  const iron = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x raw_iron`, targetItem: 'raw_iron', requiredCount: n })
+  switch (strategy) {
+    case 'descend_to_y16':
+      return rank < 1 ? ladderFront : [stone(24)]
+    case 'explore_cave':
+      return rank < 1 ? ladderFront : rank < 2 ? [stone(16)] : [iron(3)]
+    case 'branch_mine':
+      return rank < 1 ? ladderFront : rank < 2 ? [stone(32)] : [iron(3)]
+    case 'return_to_known_ore':
+      return rank < 2 ? (rank < 1 ? ladderFront : [stone(16)]) : [iron(3)]
+    case 'smelt_and_craft':
+      return ladderFront
+  }
+}
 
 // ---------------------------------------------------------------------------
 // compact state + question set for the bounded Jev call
@@ -512,6 +601,8 @@ export interface PlannerOptions {
   model?: string
   /** hard cap on LLM calls in this generation's lifetime. */
   maxCalls?: number
+  /** P1.5 advisor; when present it supplies the next strategy on a stall. */
+  advisor?: Advisor
 }
 
 type PlannerReason = 'start' | 'queue_empty' | 'impossible' | 'stuck'
@@ -521,6 +612,23 @@ function mapReason(request: System2PlanRequest, firstCall: boolean): PlannerReas
   if (request.reason === 'action_impossible') return 'impossible'
   if (request.reason === 'no_progress' || request.reason === 'need_llm' || request.reason === 'unknown_situation') return 'stuck'
   return 'queue_empty'
+}
+
+function trailingWaitStreak(outcomes: readonly System2Outcome[]): number {
+  let streak = 0
+  for (let i = outcomes.length - 1; i >= 0; i -= 1) {
+    const outcome = outcomes[i]
+    if (outcome === undefined || outcome.actionId !== 'WAIT') break
+    streak += 1
+  }
+  return streak
+}
+
+function advisorReasonFor(reason: PlannerReason, waitStreak: number): AdvisorReason | null {
+  if (waitStreak >= 3) return 'wait_limit'
+  if (reason === 'impossible') return 'no_candidate'
+  if (reason === 'stuck') return 'no_progress'
+  return null
 }
 
 /**
@@ -542,6 +650,7 @@ export class PlannerBrain implements System2Brain {
   private calls = 0
   private firstCall = true
   private lastMilestoneId: string | null = null
+  private readonly advisor: Advisor | undefined
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -553,6 +662,7 @@ export class PlannerBrain implements System2Brain {
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_PLANNER_TIMEOUT_MS ?? 9000)
     this.maxCalls = options.maxCalls ?? Number(process.env.BUDDY_PLANNER_MAX_CALLS ?? 200)
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    this.advisor = options.advisor
     this.cache = this.loadCache()
   }
 
@@ -564,6 +674,18 @@ export class PlannerBrain implements System2Brain {
     this.firstCall = false
     this.emitMilestones(counts)
     const fallbackOption = options[0] ?? FRONT_FALLBACK
+
+    const waitStreak = trailingWaitStreak(request.recentOutcomes)
+    const adviseReason = advisorReasonFor(reason, waitStreak)
+    if (this.advisor !== undefined && adviseReason !== null) {
+      const decision = await this.advisor.decide(this.advisorState(counts, request, waitStreak), adviseReason)
+      if (adviseReason === 'no_candidate') this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: decision.strategy, reason: adviseReason })
+      if (waitStreak >= 3) this.log('WAIT_LIMIT', { n: waitStreak, strategy: decision.strategy })
+      const goals = goalsForStrategy(decision.strategy, counts, this.world)
+      const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals }
+      this.log('STRATEGY_SET', { strategy: decision.strategy, source: decision.source, goals: goals.map((goal) => goal.description) })
+      return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`)
+    }
 
     if (this.mode === 'deterministic') {
       this.logPlan('fallback', fallbackOption, reason, started, 0, 'planner disabled (deterministic mode)')
@@ -672,6 +794,38 @@ export class PlannerBrain implements System2Brain {
       objectiveHave: request.objective.haveCount,
     }
     return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+  }
+
+  private advisorState(counts: Counts, request: System2PlanRequest, waitStreak: number): AdvisorState {
+    const entity = this.bot.entity
+    const frontier = computeFrontier(counts, this.world)
+    const relevant: Record<string, number> = {}
+    for (const [name, n] of Object.entries(counts)) if (n > 0) relevant[name] = n
+    const failedCandidates: Record<string, number> = {}
+    for (const outcome of request.recentOutcomes) {
+      if (outcome.failure !== null) failedCandidates[outcome.actionId] = (failedCandidates[outcome.actionId] ?? 0) + 1
+    }
+    return {
+      rung: frontier.rungId,
+      rungIndex: frontier.rungIndex,
+      position:
+        entity === undefined
+          ? null
+          : { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) },
+      dimension: this.bot.game?.dimension ?? null,
+      inventory: relevant,
+      toolRank: bestPickaxeRank(counts),
+      stations: { craftingTables: this.world.craftingTables.length, furnaces: this.world.furnaces.length },
+      discoveredOres: this.world.discoveredOres,
+      queueCurrent: request.goalQueueState.current?.description ?? null,
+      queueDepth: request.goalQueueState.depth,
+      queueDone: request.goalQueueState.done,
+      waitStreak,
+      failedCandidates,
+      recentFailures: request.recentOutcomes
+        .slice(-6)
+        .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`),
+    }
   }
 
   private compactState(request: System2PlanRequest): EvaluationState {

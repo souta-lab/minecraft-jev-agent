@@ -19,12 +19,14 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import mineflayer from 'mineflayer'
 import type { Bot } from 'mineflayer'
+import { Vec3 } from 'vec3'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { buildGeneration } from './build.mts'
 import type {
   AcceptanceRecord,
   ActuationLease,
+  DeathHazard,
   GenerationContext,
   GenerationModule,
   GenerationStatus,
@@ -36,7 +38,7 @@ import type {
   WorldKey,
   WorldMemoryDelta,
 } from './resident-types.ts'
-import { emptyWorldMemory, worldKeyString } from './resident-types.ts'
+import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 
 const CONTRACT_VERSION = 2
 const STATE_SCHEMA_VERSION = 2
@@ -136,19 +138,21 @@ function currentWorldKey(): WorldKey {
 function keyedMemory(): ResidentWorldMemory {
   const key = worldKeyString(currentWorldKey())
   const existing = state.worldMemoryByKey[key]
-  if (existing !== undefined) return existing
+  if (existing !== undefined) return normalizeWorldMemory(existing)
   const created = emptyWorldMemory()
   state.worldMemoryByKey[key] = created
   return created
 }
 
 function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
+  const normal = normalizeWorldMemory(memory)
   return {
-    craftingTables: memory.craftingTables.map((p) => ({ ...p })),
-    furnaces: memory.furnaces.map((p) => ({ ...p })),
-    mined: { ...memory.mined },
-    discoveredOres: [...memory.discoveredOres],
-    traversalFailures: memory.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+    craftingTables: normal.craftingTables.map((p) => ({ ...p })),
+    furnaces: normal.furnaces.map((p) => ({ ...p })),
+    mined: { ...normal.mined },
+    discoveredOres: [...normal.discoveredOres],
+    traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+    hazards: normal.hazards.map((h) => ({ ...h })),
   }
 }
 
@@ -194,13 +198,7 @@ function loadState(): ResidentState {
         traversalFailures: parsed.worldMemory.traversalFailures ?? [],
       }
     }
-    for (const memory of Object.values(merged.worldMemoryByKey)) {
-      memory.craftingTables = memory.craftingTables ?? []
-      memory.furnaces = memory.furnaces ?? []
-      memory.mined = memory.mined ?? {}
-      memory.discoveredOres = memory.discoveredOres ?? []
-      memory.traversalFailures = memory.traversalFailures ?? []
-    }
+    for (const memory of Object.values(merged.worldMemoryByKey)) normalizeWorldMemory(memory)
     merged.dimension = normalizeDimension(merged.dimension)
     const remapped: Record<string, ResidentWorldMemory> = {}
     for (const [key, memory] of Object.entries(merged.worldMemoryByKey)) {
@@ -248,7 +246,39 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
   if (delta.traversalFailures !== undefined) {
     memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
   }
+  if (delta.hazards !== undefined) {
+    for (const hazard of delta.hazards) mergeHazard(memory.hazards, hazard)
+  }
   saveState('world-memory')
+}
+
+function hazardKey(h: { x: number; y: number; z: number }): string {
+  return `${Math.round(h.x)},${Math.round(h.y)},${Math.round(h.z)}`
+}
+
+/** Merge a death coordinate. The HOST is the only writer; two deaths at the same
+ * rounded coordinate make the hazard permanent (`count >= 2`). */
+function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHazard {
+  const key = hazardKey(found)
+  const existing = target.find((h) => hazardKey(h) === key)
+  if (existing === undefined) {
+    const created: DeathHazard = {
+      x: Math.round(found.x),
+      y: Math.round(found.y),
+      z: Math.round(found.z),
+      reason: found.reason,
+      count: Math.max(1, found.count),
+      firstSeenAt: found.firstSeenAt || Date.now(),
+      lastSeenAt: found.lastSeenAt || Date.now(),
+    }
+    target.push(created)
+    if (target.length > 128) target.splice(0, target.length - 128)
+    return created
+  }
+  existing.count += Math.max(1, found.count)
+  existing.reason = found.reason
+  existing.lastSeenAt = found.lastSeenAt || Date.now()
+  return existing
 }
 
 function mergeStationDtos(target: Vec3Json[], found: Vec3Json[]): number {
@@ -298,6 +328,11 @@ let baselineCaptured = false
 let startPosition: Vec3Json | null = null
 let lastStatus: GenerationStatus | null = null
 let hasConnected = false
+let deathResetPending = false
+let pendingResetReason: string | null = null
+let lastDeathAt = 0
+let lastHealth: number | null = null
+let lastSeenDeathPosition: Vec3Json | null = null
 
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
 const stats = {
@@ -406,6 +441,7 @@ function makeGenerationContext(b: Bot): GenerationContext {
     logDir: JEV_LOGS,
     goalItem: GOAL_ITEM,
     goalCount: GOAL_COUNT,
+    resetReason: pendingResetReason,
   }
 }
 
@@ -422,7 +458,7 @@ function watchGenerationStop(gen: ResidentGeneration): void {
     if (activeGenerationId === gen.id) activeGenerationId = null
     if (stopped === 'wedge') stats.wedge = true
     if (stopped === 'goal-complete') stats.goalComplete = true
-    if (shuttingDown || frozen) return
+    if (shuttingDown || frozen || deathResetPending) return
     log('RECOVERY', { reason: 'generation-stopped', stopped })
     state.recoveries += 1
     if (stopped === 'goal-complete') archiveLedger('goal-complete')
@@ -436,12 +472,27 @@ async function startGeneration(trigger: string): Promise<boolean> {
     log('ERROR', { where: 'startGeneration', message: 'no spawned bot', trigger })
     return false
   }
+  if (generation !== null) {
+    // Never run two generations on one bot: a respawn/hot path that starts a
+    // generation while one is alive would double the bot listeners and race the
+    // actuation lease. Dispose the old one first.
+    const old = generation
+    generation = null
+    if (activeGenerationId === old.id) activeGenerationId = null
+    try {
+      await old.quiesce()
+    } catch {
+      // best effort
+    }
+    old.dispose()
+  }
   const mod = await loadGenerationModule(false)
   if (mod === null) {
     scheduleGenerationRestart('module-unavailable')
     return false
   }
   const gen = mod.createGeneration(makeGenerationContext(bot))
+  pendingResetReason = null
   gen.attach()
   runStructuralSmoke(gen)
   const preflight = runMissionPreflight(gen)
@@ -470,13 +521,109 @@ async function startGeneration(trigger: string): Promise<boolean> {
 }
 
 function scheduleGenerationRestart(reason: string): void {
-  if (generationRestartTimer !== null || shuttingDown || frozen) return
+  if (generationRestartTimer !== null || shuttingDown || frozen || deathResetPending) return
   generationRestartTimer = setTimeout(() => {
     generationRestartTimer = null
     if (shuttingDown || frozen) return
     if (generation !== null) return
     void startGeneration(`recovery:${reason}`)
   }, GEN_RESTART_MS)
+}
+
+function inventorySummary(b: Bot): Record<string, number> {
+  const out: Record<string, number> = {}
+  try {
+    for (const item of b.inventory.items()) out[item.name] = (out[item.name] ?? 0) + item.count
+  } catch {
+    // entity/inventory not readable at the death moment
+  }
+  return out
+}
+
+function blockNameAt(b: Bot, x: number, y: number, z: number): string {
+  try {
+    return b.blockAt(new Vec3(x, y, z))?.name ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** Best-effort death cause from the pre-death position and surroundings. */
+function inferDeathCause(b: Bot, pos: Vec3Json | null, healthBefore: number | null): string {
+  if (pos === null) return 'unknown'
+  if (pos.y <= -64) return 'void'
+  const x = Math.floor(pos.x)
+  const feet = Math.floor(pos.y)
+  const z = Math.floor(pos.z)
+  for (const [dx, dy, dz] of [
+    [0, 0, 0],
+    [0, -1, 0],
+    [0, 1, 0],
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+  ] as const) {
+    const name = blockNameAt(b, x + dx, feet + dy, z + dz)
+    if (name.includes('lava')) return 'lava'
+    if (name.includes('water')) return 'water'
+  }
+  if (healthBefore !== null && healthBefore > 0) return 'damage'
+  return 'unknown'
+}
+
+function registerDeathHazard(pos: Vec3Json, reason: string): DeathHazard {
+  const memory = keyedMemory()
+  const hazard = mergeHazard(memory.hazards, {
+    x: pos.x,
+    y: pos.y,
+    z: pos.z,
+    reason,
+    count: 1,
+    firstSeenAt: Date.now(),
+    lastSeenAt: Date.now(),
+  })
+  saveState('death-hazard')
+  return hazard
+}
+
+/** Death handling: log DEATH + lost inventory, register the hazard, stop the
+ * current generation, and archive the ledger so the next respawn recomputes the
+ * ladder from the LIVE (empty) inventory instead of resuming an impossible goal. */
+function handleBotDeath(b: Bot): void {
+  const entity = b.entity
+  const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+  const lost = inventorySummary(b)
+  const healthBefore = lastHealth
+  const cause = inferDeathCause(b, pos, healthBefore)
+  log('DEATH', {
+    pos: pos === null ? '?' : fmtPos(pos),
+    dimension: state.dimension,
+    lostInventory: lost,
+    itemsLost: Object.values(lost).reduce((sum, n) => sum + n, 0),
+    cause,
+    healthBefore,
+  })
+  lastDeathAt = Date.now()
+  lastSeenDeathPosition = pos
+  if (pos !== null) registerDeathHazard(pos, cause)
+  deathResetPending = true
+  pendingResetReason = 'death'
+  const oldGeneration = generation
+  generation = null
+  activeGenerationId = null
+  if (oldGeneration !== null) {
+    try {
+      // dispose saves the ledger; archive it afterwards so the next respawn
+      // cannot resume an impossible goal.
+      oldGeneration.dispose()
+    } catch {
+      // best effort
+    }
+  }
+  archiveLedger('death')
+  saveState('death')
+  log('LADDER_RESET', { reason: 'death', invEmpty: Object.keys(lost).length === 0, cause })
 }
 
 function connect(): void {
@@ -495,12 +642,15 @@ function connect(): void {
   created.loadPlugin(pathfinderModule.pathfinder)
   created.loadPlugin(collectBlockPlugin)
 
-  created.once('spawn', () => {
+  created.on('spawn', () => {
     reconnecting = false
     hasConnected = true
+    const wasDeath = deathResetPending
+    deathResetPending = false
+    pendingResetReason = wasDeath ? 'death' : null
     const entity = created.entity
     const game = created.game as unknown as { dimension?: string; levelName?: string } | undefined
-    if (entity !== undefined) {
+    if (entity !== undefined && startPosition === null) {
       startPosition = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
     }
     const observedDimension = normalizeDimension(game?.dimension)
@@ -517,12 +667,19 @@ function connect(): void {
       username: created.username,
       dimension: state.dimension,
       worldEpoch: state.worldEpoch,
+      respawn: wasDeath,
       listeners: listenerBaseline,
     })
     saveState('spawn')
     lastHeartbeatAt = Date.now()
-    void startGeneration('spawn')
+    void startGeneration(wasDeath ? 'respawn' : 'spawn')
   })
+
+  created.on('health', () => {
+    if (created.health > 0) lastHealth = created.health
+  })
+
+  created.on('death', () => handleBotDeath(created))
 
   created.on('kicked', (reason: string) => {
     log('ERROR', { where: 'bot.kicked', reason: typeof reason === 'string' ? reason : JSON.stringify(reason) })
@@ -782,6 +939,16 @@ async function performReload(trigger: string): Promise<void> {
     next.attach()
     const smoke = runStructuralSmoke(next)
     log('SMOKE', { id: next.id, ok: smoke.ok, checks: smoke.checks.length, failures: smoke.failures })
+    if (frozen) {
+      // Frozen: validate and remember the new module, but do NOT swap/start it.
+      // `resume` commits and starts exactly this module.
+      generationModule = mod
+      currentBundle = built.outfile
+      generationHash = built.hash
+      stats.reloadsChangedHash += 1
+      log('RELOAD', { ok: true, trigger, deferred: 'frozen', ms: Date.now() - started, hash: built.hash, contractVersion: mod.CONTRACT_VERSION })
+      return
+    }
     if (previous !== null) await previous.quiesce()
     state.reloads += 1
     state.generations += 1
@@ -895,6 +1062,8 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
         furnaces: memory.furnaces.length,
         discoveredOres: memory.discoveredOres,
         traversalFailures: memory.traversalFailures.length,
+        hazards: memory.hazards.length,
+        hardHazards: memory.hazards.filter((h) => h.count >= 2).length,
       },
       listeners: listenerCounts(),
       listenerBaseline,
