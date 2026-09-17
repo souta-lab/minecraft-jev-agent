@@ -62,7 +62,8 @@ bot.once('spawn', async () => {
   const spawn = feet()
   const knownBelow = KNOWN_IRON.map((r) => r.position.y).filter((y) => y < Math.floor(spawn.y))
   const oreLevel = knownBelow.length > 0 ? Math.min(...knownBelow) : Math.floor(spawn.y) - 6
-  const targetY = oreLevel - 2
+  const override = process.env.PRED41_TARGET_Y
+  const targetY = override === undefined ? oreLevel - 2 : Number(override)
   process.stdout.write(`[41] spawn=${JSON.stringify(spawn)} user=${username} oreLevel=${oreLevel} targetY=${targetY}\n`)
 
   const plan: PlannedGoal[] = [
