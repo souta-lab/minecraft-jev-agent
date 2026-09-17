@@ -1,8 +1,10 @@
 // test-system2.mts - deterministic safety/shape tests for the real Gateway System 2 adapter.
 // No network, no Minecraft server, no API key required.
 import {
+  DEFAULT_SYSTEM2_TARGETS,
   plannedGoalsFromGateway,
   validateGatewayPlanOutput,
+  validateGroundedTargets,
 } from './src/gatewaySystem2.ts'
 
 interface Case {
@@ -22,6 +24,8 @@ addCase('accepts a bounded patch plan and converts it to PlannedGoal', () => {
     note: 'Search for iron before changing the rest of the ladder.',
   })
   if (!checked.success) return { pass: false, detail: checked.error.message }
+  const grounded = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  if (!grounded.success) return { pass: false, detail: grounded.error.message }
   const goals = plannedGoalsFromGateway(checked.value)
   const goal = goals[0]
   const pass =
@@ -49,6 +53,35 @@ addCase('rejects coordinate-like / free-form target names', () => {
     note: 'bad target',
   })
   return { pass: !checked.success, detail: checked.success ? 'unexpectedly accepted' : checked.error.message }
+})
+
+addCase('rejects syntactically valid but ungrounded target names', () => {
+  const checked = validateGatewayPlanOutput({
+    op: 'patch',
+    goals: [{ kind: 'collect', targetItem: 'imaginary_ore', requiredCount: 3 }],
+    note: 'hallucinated target',
+  })
+  if (!checked.success) return { pass: false, detail: `shape unexpectedly failed: ${checked.error.message}` }
+  const grounded = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  return {
+    pass: !grounded.success,
+    detail: grounded.success ? 'unexpectedly grounded' : grounded.error.message,
+  }
+})
+
+addCase('custom allowlist can enable a newly implemented capability explicitly', () => {
+  const checked = validateGatewayPlanOutput({
+    op: 'patch',
+    goals: [{ kind: 'collect', targetItem: 'obsidian', requiredCount: 10 }],
+    note: 'future capability',
+  })
+  if (!checked.success) return { pass: false, detail: checked.error.message }
+  const defaultGrounding = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  const extendedGrounding = validateGroundedTargets(checked.value, new Set([...DEFAULT_SYSTEM2_TARGETS, 'obsidian']))
+  return {
+    pass: !defaultGrounding.success && extendedGrounding.success,
+    detail: `default=${defaultGrounding.success} extended=${extendedGrounding.success}`,
+  }
 })
 
 addCase('abort requires an empty goal list', () => {
@@ -89,6 +122,8 @@ addCase('allows current resource-class names without special model privileges', 
     note: 'Continue the deterministic capability ladder.',
   })
   if (!checked.success) return { pass: false, detail: checked.error.message }
+  const grounded = validateGroundedTargets(checked.value, new Set(DEFAULT_SYSTEM2_TARGETS))
+  if (!grounded.success) return { pass: false, detail: grounded.error.message }
   const goals = plannedGoalsFromGateway(checked.value)
   return {
     pass: goals.map((goal) => goal.targetItem).join(',') === 'log,stone',
