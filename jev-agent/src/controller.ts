@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { countBlockedLogs, defaultCandidateOptions, generateCandidates, staleKnownResources } from './candidates.ts'
+import { countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -42,6 +42,7 @@ import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, 
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
+import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
@@ -485,6 +486,8 @@ export class JevController {
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
+  private fuelSatisfiedKey: string | null = null
+  private readonly loggedUnreachableMoves = new Set<string>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -946,6 +949,7 @@ export class JevController {
       this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
+      this.logFuelSatisfaction(state)
 
       const actionable = candidates.filter(
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
@@ -1074,6 +1078,7 @@ export class JevController {
 
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
+      this.checkUnreachableMove(guarded.candidate, state)
 
       const claim = this.executor.claim(guarded.candidate)
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
@@ -1812,7 +1817,20 @@ export class JevController {
     // is actually in the inventory. A dig whose drop was not picked up simply
     // leaves the subgoal open and the bot mines another block. A wood goal counts
     // every `*_log` the bot holds, so `birch_log` satisfies an `oak_log` goal.
+    // Issue #43: a fuel subgoal (`collect N x log (fuel)`) is satisfied by any
+    // accepted fuel item (log/planks/coal/charcoal/blaze_rod), not only logs. A
+    // smelt goal still counts its own output, never the fuel it consumes.
+    if (goalCollectsFuel(current)) return this.countFuelSubstitutes()
     return this.countGoalCategory(current.targetItem)
+  }
+
+  private countFuelSubstitutes(): number {
+    let total = 0
+    for (const item of this.bot.inventory.items()) {
+      if (item.name === 'stick') continue
+      if (matchesResourceClass(item.name, 'fuel')) total += item.count
+    }
+    return total
   }
 
   private countGoalCategory(name: string): number {
@@ -2515,6 +2533,51 @@ export class JevController {
       { ids: candidates.map((candidate) => candidate.id), detail: candidates.map((candidate) => candidate.label) },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Issue #43: the fuel subgoal is inventory-first. When the live inventory
+   * already holds a valid fuel item the plan must not obtain another one, so the
+   * skip is logged once per goal+item and retrieval is suppressed downstream.
+   */
+  private logFuelSatisfaction(state: WorldState): void {
+    const current = this.queue.current
+    if (!goalWantsFuel(current)) return
+    const satisfaction = fuelSatisfaction(state)
+    if (satisfaction === null) return
+    const key = `${current?.id ?? 'none'}:${satisfaction.item}:${satisfaction.count}`
+    if (this.fuelSatisfiedKey === key) return
+    this.fuelSatisfiedKey = key
+    this.logger.warn(
+      'agent',
+      formatFuelSatisfied(satisfaction.item, satisfaction.count),
+      { item: satisfaction.item, have: satisfaction.count, goal: current?.description ?? null, action: 'skip' },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Issue #43: a MOVE/RETRIEVE target above the climb limit is unreachable with
+   * `canDig=false`. Log it and charge the failure memory so repeated selection
+   * exhausts MOVE_FAILURE_LIMIT and the generator stops re-issuing it, letting
+   * another candidate (descend/explore/reachable target) win instead.
+   */
+  private checkUnreachableMove(candidate: Candidate, state: WorldState): void {
+    if (candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE') return
+    if (candidate.target === null) return
+    const dy = Math.round(candidate.target.y - state.self.position.y)
+    if (dy <= MOVE_VERTICAL_GAP_LIMIT) return
+    const key = `${candidate.id}:${dy}`
+    if (!this.loggedUnreachableMoves.has(key)) {
+      this.loggedUnreachableMoves.add(key)
+      this.logger.warn(
+        'agent',
+        formatMoveUnreachable(candidate.target, dy),
+        { actionId: candidate.id, dy, kind: candidate.kind, limit: MOVE_VERTICAL_GAP_LIMIT },
+        this.tickCounter,
+      )
+    }
+    this.noteCandidateFailure(candidate.id)
   }
 
   private syntheticWait(): JevResult {

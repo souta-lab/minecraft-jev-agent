@@ -25,7 +25,8 @@ import type { RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, KnownResource, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance } from './state.ts'
-import { resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, resourceMatches } from './resourceClass.ts'
+import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { planVerticalApproach } from './verticalPlan.ts'
@@ -946,6 +947,48 @@ function retrievalWant(focusItem: string | null): RetrievalWant | null {
 
 const RETRIEVAL_NEED_CAP = 6
 
+/** Issue #43: the live-inventory fuel, or null. */
+export function fuelSatisfaction(state: WorldState): InventoryFuel | null {
+  return findInventoryFuel(state.inventory.counts)
+}
+
+/** The exact skip line emitted when a fuel need is already covered by the inventory. */
+export function formatFuelSatisfied(item: string, have: number): string {
+  return `FUEL_SATISFIED item=${item} have=${have} -> skip`
+}
+
+/** True when the current subgoal exists only to obtain furnace fuel. */
+export function goalWantsFuel(goal: { kind?: string; description?: string; targetItem?: string | null } | null): boolean {
+  if (goal === null) return false
+  if (goal.kind === 'smelt') return true
+  return goalCollectsFuel(goal)
+}
+
+/** True when the subgoal is a collect whose completion is a fuel substitute. */
+export function goalCollectsFuel(goal: { kind?: string; description?: string; targetItem?: string | null } | null): boolean {
+  if (goal === null || goal.kind !== 'collect') return false
+  if (goal.targetItem === 'fuel' || goal.targetItem === 'planks') return true
+  return typeof goal.description === 'string' && /\(fuel\)/i.test(goal.description)
+}
+
+/**
+ * Issue #43: a retrieval need that a held fuel item already satisfies, so the
+ * surface/known trip must not be emitted. The caller only consults this for a
+ * fuel need; a `charcoal` smelt still needs its own log input to be held.
+ */
+export function fuelNeedSatisfiedByInventory(state: WorldState, item: string): boolean {
+  const fuel = fuelSatisfaction(state)
+  if (fuel === null) return false
+  if (item === 'charcoal') return hasLogInInventory(state)
+  return true
+}
+
+function hasLogInInventory(state: WorldState): boolean {
+  return Object.entries(state.inventory.counts).some(
+    ([name, count]) => count > 0 && (name.endsWith('_log') || name.endsWith('_wood')),
+  )
+}
+
 /**
  * Issue #14: the ordered list of items the body actually needs next - the
  * current subgoal first, then the queued goals. A `collect cobblestone (descend
@@ -954,17 +997,19 @@ const RETRIEVAL_NEED_CAP = 6
  * `focusItem`. Pure.
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalWant[] {
-  const items: string[] = []
-  const push = (item: string | null | undefined): void => {
-    if (typeof item !== 'string' || item.length === 0 || items.includes(item)) return
-    items.push(item)
+  const current = state.goalQueue?.current ?? null
+  const needs: Array<{ item: string; fuel: boolean }> = []
+  const push = (item: string | null | undefined, fuel: boolean): void => {
+    if (typeof item !== 'string' || item.length === 0 || needs.some((need) => need.item === item)) return
+    needs.push({ item, fuel })
   }
-  push(focusItem)
-  push(state.goal.targetItem)
-  for (const queued of state.goalQueue.goals) push(queued.targetItem)
+  push(focusItem, goalWantsFuel(current))
+  push(state.goal.targetItem, goalWantsFuel(current))
+  for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued))
   const wants: RetrievalWant[] = []
-  for (const item of items) {
-    const want = retrievalWant(item)
+  for (const need of needs) {
+    if (need.fuel && fuelNeedSatisfiedByInventory(state, need.item)) continue
+    const want = retrievalWant(need.item)
     if (want !== null) wants.push(want)
     if (wants.length >= RETRIEVAL_NEED_CAP) break
   }
