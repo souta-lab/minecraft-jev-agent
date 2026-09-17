@@ -39,7 +39,7 @@ addCase('PRECONDITION_MISSING is immediately followed by LADDER_PREREQ and does 
   const prereq = log.findIndex((entry) => entry.event === 'LADDER_PREREQ')
   const adjacent = missing >= 0 && prereq === missing + 1
   const chainIncludesOre = ladder.goals.some((goal) => goal.targetItem === 'raw_iron')
-  const chainIncludesDescent = ladder.goals.some((goal) => goal.targetItem === 'cobblestone')
+  const chainIncludesDescent = ladder.goals.some((goal) => goal.kind === 'descend')
   const keptGoing = ladder.prereqReplaced && ladder.unsatisfiable === null && ladder.goals.length > 1
   return {
     pass: adjacent && chainIncludesOre && chainIncludesDescent && keptGoing,
@@ -47,13 +47,16 @@ addCase('PRECONDITION_MISSING is immediately followed by LADDER_PREREQ and does 
   }
 })
 
-addCase('the descent prerequisite is emitted before its ore goal', () => {
+addCase('the predicate descent prerequisite is emitted before its ore goal', () => {
   const goals = rungGoalsWithPrereq(rung('raw_iron'), M2_LIVE, world())
-  const descent = goals.findIndex((goal) => goal.targetItem === 'cobblestone')
-  const ore = goals.findIndex((goal) => goal.targetItem === 'raw_iron')
-  const needed = M2_LIVE.cobblestone + 8
-  const bounded = goals[0]?.requiredCount === needed
-  return { pass: descent === 0 && ore === 1 && bounded, detail: `order=[${goals.map((g) => g.targetItem).join(',')}] required=${goals[0]?.requiredCount}` }
+  const descent = goals.findIndex((goal) => goal.kind === 'descend')
+  const ore = goals.findIndex((goal) => goal.kind === 'collect' && goal.targetItem === 'raw_iron')
+  const bounded = typeof goals[0]?.targetY === 'number' && Number.isFinite(goals[0]?.targetY)
+  const named = (goals[0]?.description ?? '').startsWith('descend_to:Y=')
+  return {
+    pass: descent === 0 && ore === 1 && bounded && named,
+    detail: `order=[${goals.map((g) => `${g.kind}:${g.targetItem ?? '-'}`).join(',')}] targetY=${goals[0]?.targetY}`,
+  }
 })
 
 addCase('a provably unsatisfiable ore precondition is the only stop', () => {
@@ -68,9 +71,9 @@ addCase('a provably unsatisfiable ore precondition is the only stop', () => {
 
 addCase('advisory ore strategies carry the descent prerequisite', () => {
   const goals = goalsForStrategy('return_to_known_ore', M2_LIVE, world({ furnaces: [{ x: 1, y: 64, z: 1 }] }))
-  const descent = goals.some((goal) => goal.targetItem === 'cobblestone')
+  const descent = goals.some((goal) => goal.kind === 'descend')
   const ore = goals.some((goal) => goal.targetItem === 'raw_iron')
-  return { pass: descent && ore, detail: `goals=[${goals.map((g) => g.targetItem).join(',')}]` }
+  return { pass: descent && ore, detail: `goals=[${goals.map((g) => `${g.kind}:${g.targetItem ?? '-'}`).join(',')}]` }
 })
 
 addCase('held furnace with none placed becomes a place-furnace prerequisite', () => {
@@ -83,6 +86,18 @@ addCase('held furnace with none placed becomes a place-furnace prerequisite', ()
   return {
     pass: placeIndex >= 0 && smeltIndex > placeIndex && skippedWhenPlaced,
     detail: `place@${placeIndex} charcoal@${smeltIndex} skippedWhenPlaced=${skippedWhenPlaced}`,
+  }
+})
+
+addCase('a known iron ore coordinate grounds the descent target below it (#14 + #41)', () => {
+  const known = world({
+    knownResources: [{ name: 'iron_ore', kind: 'ore', x: 25, y: 49, z: 36, dimension: 'minecraft:overworld', worldEpoch: 1 }],
+  })
+  const goals = rungGoalsWithPrereq(rung('raw_iron'), M2_LIVE, known)
+  const descent = goals[0]
+  return {
+    pass: descent?.kind === 'descend' && descent.targetY === 47 && descent.targetItem === 'raw_iron',
+    detail: `first=${descent?.kind}:${descent?.targetY} desc=${descent?.description}`,
   }
 })
 

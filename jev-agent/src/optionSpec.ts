@@ -51,6 +51,7 @@ export type OptionKind =
   | 'place'
   | 'goto'
   | 'explore'
+  | 'descend'
   | 'combat'
   | 'custom'
 
@@ -61,6 +62,7 @@ export const OPTION_KINDS: readonly OptionKind[] = [
   'place',
   'goto',
   'explore',
+  'descend',
   'combat',
   'custom',
 ]
@@ -73,6 +75,10 @@ export interface OptionTarget {
   count?: number
   /** named non-item objective (e.g. "end_portal_room") */
   predicate?: string
+  /** spatial predicate goal (#41): complete when position.y <= targetY */
+  targetY?: number
+  /** dimension the targetY predicate must be evaluated in */
+  dimension?: string
 }
 
 /**
@@ -314,6 +320,12 @@ export function validateOptionSpec(spec: OptionSpec): string[] {
   else {
     const count = (target as Record<string, unknown>).count
     if (count !== undefined && !isPositiveInt(count)) errors.push('target.count must be an integer >= 1')
+    if (kind === 'descend') {
+      const targetY = (target as Record<string, unknown>).targetY
+      if (typeof targetY !== 'number' || !Number.isFinite(targetY)) {
+        errors.push('descend target.targetY must be a finite number')
+      }
+    }
   }
   const threshold = record.abortThreshold
   if (typeof threshold !== 'number' || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
@@ -362,6 +374,8 @@ export function optionKindForGoal(kind: GoalKind): OptionKind {
       return 'smelt'
     case 'explore':
       return 'explore'
+    case 'descend':
+      return 'descend'
     case 'recover':
       return 'combat'
     case 'unknown':
@@ -381,6 +395,8 @@ export function goalKindForOption(kind: OptionKind): GoalKind {
       return 'place'
     case 'explore':
       return 'explore'
+    case 'descend':
+      return 'descend'
     case 'combat':
       return 'recover'
     case 'goto':
@@ -397,6 +413,7 @@ const SKILLS_BY_KIND: Readonly<Record<OptionKind, readonly string[]>> = {
   place: ['PLACE_STATION'],
   goto: ['PATHFIND_TO'],
   explore: ['EXPLORE_FRONTIER'],
+  descend: ['STAIRCASE', 'REUSE_TUNNEL', 'BRANCH_MINE'],
   combat: ['ENGAGE_TARGET'],
   custom: [],
 }
@@ -478,6 +495,10 @@ function successForGoal(goal: PlannedGoal): Predicate[] {
       if (item === 'furnace') return [{ kind: 'stationKnown', station: 'furnace' }]
       if (item === 'crafting_table') return [{ kind: 'stationKnown', station: 'crafting_table' }]
       return [{ kind: 'custom', id: `station:${item ?? 'unknown'}` }]
+    case 'descend':
+      return typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)
+        ? [{ kind: 'levelAtMost', y: goal.targetY }]
+        : [{ kind: 'custom', id: `descend:${item ?? 'unknown'}` }]
     default:
       return [{ kind: 'custom', id: `done:${goal.kind}:${item ?? 'unknown'}` }]
   }
@@ -488,6 +509,8 @@ export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
   const kind = optionKindForGoal(goal.kind)
   const target: OptionTarget = { count: goalCount(goal) }
   if (typeof goal.targetItem === 'string' && goal.targetItem.length > 0) target.item = goal.targetItem
+  if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) target.targetY = goal.targetY
+  if (typeof goal.dimension === 'string' && goal.dimension.length > 0) target.dimension = goal.dimension
   return {
     id: stableOptionId(goal),
     intent: goal.description,
@@ -531,6 +554,8 @@ export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
     requiredCount: spec.target.count ?? 1,
   }
   if (typeof spec.target.item === 'string' && spec.target.item.length > 0) goal.targetItem = spec.target.item
+  if (typeof spec.target.targetY === 'number' && Number.isFinite(spec.target.targetY)) goal.targetY = spec.target.targetY
+  if (typeof spec.target.dimension === 'string' && spec.target.dimension.length > 0) goal.dimension = spec.target.dimension
   return goal
 }
 

@@ -54,6 +54,8 @@ import { decayedFailureCount, failureCount, spatialFailureKey } from './failureM
 import { evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { DigMemory } from './worldMemory.ts'
 import type { DigDir } from './worldMemory.ts'
+import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
+import type { PredicateEvaluation } from './predicateGoal.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -1425,7 +1427,7 @@ export class JevController {
           { actionId: result.actionId, ms: result.ms },
           this.tickCounter,
         )
-        if (this.goal.complete && !this.options.singleShotPlanner) {
+        if (this.goal.complete && this.queue.current?.kind !== 'descend' && !this.options.singleShotPlanner) {
           this.onObjectiveComplete()
           return
         }
@@ -1566,9 +1568,15 @@ export class JevController {
     }
     const have = this.effectiveHave()
     const delta = have - this.descendHaveBaseline
-    if (delta > 0) {
+    const y = this.bot.entity.position.y
+    const yProgressed = this.actionStart !== null && y < this.actionStart.y - 0.5
+    const descending = this.queue.current?.kind === 'descend'
+    if (delta > 0 || (descending && yProgressed)) {
       this.descendHaveBaseline = have
       this.digMemory.markResourceProgress()
+      // A descending predicate goal makes progress by losing altitude, not by
+      // gaining items, so a verified drop must also reset the progress-stall clock.
+      if (descending && yProgressed) this.lastProgressAt = Date.now()
     } else {
       const budget = this.digMemory.markDescend(false)
       this.logger.info(
@@ -1646,6 +1654,56 @@ export class JevController {
   private syncQueue(trigger: DecisionTrigger): void {
     const current = this.queue.current
     if (current === null) return
+    if (current.kind === 'descend') {
+      const evaluation = this.evaluateDescendGoal(current)
+      if (evaluation === null) {
+        const impossible = this.queue.markImpossible(`descend goal '${current.id}' has no targetY predicate`)
+        if (impossible !== null) {
+          this.recentEvents.push(`goal impossible: ${impossible.description}`)
+          this.summonLlm('action_impossible', `current goal is not executable: ${impossible.description}`)
+        }
+        return
+      }
+      this.logger.info(
+        'queue',
+        `PREDICATE_EVAL [${current.id}] ${evaluation.detail}`,
+        {
+          id: current.id,
+          predicate: 'descend_to',
+          targetY: current.targetY,
+          y: evaluation.y,
+          dimensionOk: evaluation.dimensionOk,
+          satisfied: evaluation.satisfied,
+        },
+        this.tickCounter,
+      )
+      if (!evaluation.satisfied) return
+      const beforeId = current.id
+      const beforeDescription = current.description
+      this.queue.markDone()
+      const after = this.queue.current
+      this.pendingTransition = {
+        fromId: beforeId,
+        fromDescription: beforeDescription,
+        toId: after?.id ?? null,
+        toDescription: after?.description ?? null,
+        trigger,
+        inventory: this.inventorySnapshot(),
+      }
+      this.harvestedGoalCount = 0
+      this.lastProgressAt = Date.now()
+      this.lastProgress = 0
+      this.descendHaveBaseline = 0
+      this.digMemory.markResourceProgress()
+      this.logger.warn(
+        'queue',
+        `subgoal COMPLETE [${beforeDescription}] -> [${after?.description ?? 'plan complete'}] trigger=${trigger} reached=${evaluation.y} targetY=${current.targetY} inventory=${JSON.stringify(this.pendingTransition.inventory)}`,
+        { from: beforeId, to: after?.id ?? null, trigger, y: evaluation.y, targetY: current.targetY },
+        this.tickCounter,
+      )
+      if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}`)
+      return
+    }
     if (current.targetItem !== null && (current.kind === 'collect' || current.kind === 'craft' || current.kind === 'smelt')) {
       const have = this.effectiveHave()
       const beforeId = current.id
@@ -1711,6 +1769,21 @@ export class JevController {
     }
   }
 
+  private predicateSnapshot(): { position: Vec3Json | null; dimension: string | null } {
+    const entity = this.bot.entity
+    if (entity === undefined) return { position: null, dimension: null }
+    return {
+      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+      dimension: this.bot.game?.dimension ?? null,
+    }
+  }
+
+  private evaluateDescendGoal(goal: QueuedGoal): PredicateEvaluation | null {
+    const predicate = predicateForGoal(goal)
+    if (predicate === null) return null
+    return evaluateSpatialPredicate(predicate, this.predicateSnapshot())
+  }
+
   private effectiveHave(): number {
     const current = this.queue.current
     if (current === null || current.targetItem === null) return 0
@@ -1732,7 +1805,24 @@ export class JevController {
 
   private syncGoalToQueue(): void {
     const current = this.queue.current
-    if (current === null || current.targetItem === null) return
+    if (current === null) return
+    if (current.kind === 'descend') {
+      const evaluation = this.evaluateDescendGoal(current)
+      const satisfied = evaluation?.satisfied ?? false
+      this.goal = {
+        id: current.id,
+        description: current.description,
+        targetItem: current.targetItem ?? '',
+        requiredCount: 1,
+        startCount: 0,
+        haveCount: satisfied ? 1 : 0,
+        progress: satisfied ? 1 : 0,
+        complete: satisfied,
+        startedAtMs: current.createdAt,
+      }
+      return
+    }
+    if (current.targetItem === null) return
     const have = this.effectiveHave()
     if (current.kind === 'place') {
       // A place goal is the inverse of the inventory-counted goals: it completes

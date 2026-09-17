@@ -188,6 +188,7 @@ export function hasBodyDelta(planned: readonly GoalLike[], current: GoalLike | n
   const currentItem = current.targetItem ?? null
   return planned.some((goal) => {
     if (goal.kind === 'explore') return true
+    if (goal.kind === 'descend') return true
     if (goal.kind !== 'collect') return false
     const item = goal.targetItem ?? null
     if (item === null) return false
