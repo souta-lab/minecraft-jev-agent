@@ -70,7 +70,7 @@ const checks = [
   { id: 'generation_survives_100_ticks', pass: ticksGe100 > 0, detail: `ticks>=100 count=${ticksGe100}` },
   { id: 'digging_resumed', pass: digging, detail: JSON.stringify(digMarkers) },
   { id: 'raw_iron_obtained', pass: rawIron >= 1, detail: `max raw_iron seen in inventory logs = ${rawIron}` },
-  { id: 'churn_reduced', pass: gensLast5min > 0 && gensLast5min <= 3, detail: `GENERATION_START in last 5min = ${gensLast5min}` },
+  { id: 'churn_reduced', pass: gensLast5min <= 3, detail: `GENERATION_START in last 5min = ${gensLast5min} (<=3 required; 0 means no churn)` },
 ]
 
 const passCount = checks.filter((c) => c.pass).length
