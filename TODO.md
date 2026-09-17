@@ -115,6 +115,14 @@
 ```
 
 ## 進捗ログ（一次証拠つき）```
+2026-09-18 03:17 JST — ★#44 着地で空転解消（freeze→resume の実測つき）
+  RESUME ok / RELOAD ok=true deferred=frozen ms=231（凍結中のリロードは解除後に適用）
+  issue12 4/6 復帰: gensLast5min=1（27 → 1）  REPLAN_THROTTLED=6（スロットル機能）
+  最新 ACTION: MINE:b29_57_34 kind=MINE phase=digging pos=29.4,58.0（WAITではなく掘削、y60→y58 へ移動）
+  テスト: typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10
+  残: rawIron=0（鉄未入手）／RETURN_TO_KNOWN_RESOURCE=0（座標は記録済み KNOWN_RESOURCE=512 だが未使用）
+  → #14 タスク（既知資源座標を実際に使って鉄を得る）を起動
+
 2026-09-18 03:06 JST — ★空転を一時停止（freeze）し、#44 を起動
   control.sock: FREEZE {frozen:true, connected:true}（理由=stop spin until #44 replan throttle lands）
   統計が空転を裏付け: generations=401 / reloads=167 / recoveries=206、gensLast5min は 1→7→17→27 と悪化
