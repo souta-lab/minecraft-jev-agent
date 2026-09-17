@@ -546,6 +546,67 @@ export function compileGoalQueue(state: GoalQueueState): OptionSpec[] {
   return compilePlannedGoals(goals)
 }
 
+// ---------------------------------------------------------------------------
+// readiness-first ordering (#46)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable plan-order label for a goal. The iron smelt keeps its historic
+ * `smelt_iron_ingot` id so `PLAN_ORDER` evidence stays comparable to pre-#46
+ * runs; every other goal uses `<kind>_<target|description-slug>`.
+ */
+export function goalReadinessLabel(goal: PlannedGoal): string {
+  if (goal.kind === 'smelt' && goal.targetItem === 'iron_ingot') return 'smelt_iron_ingot'
+  const tail =
+    typeof goal.targetItem === 'string' && goal.targetItem.length > 0 ? goal.targetItem : slug(goal.description)
+  return `${goal.kind}_${tail}`
+}
+
+/** The readiness partition of a plan plus the reorderings that changed order. */
+export interface ReadinessOrderResult {
+  /** ready goals (stable) followed by goals with an unmet precondition (stable) */
+  goals: PlannedGoal[]
+  /** goals whose preconditions ALL hold in the snapshot */
+  ready: PlannedGoal[]
+  /** goals with at least one unmet precondition */
+  blocked: PlannedGoal[]
+  /** ready goals that were moved ahead of a blocked goal (for PLAN_ORDER) */
+  moves: Array<{ preferred: string; over: string }>
+}
+
+/**
+ * Issue #46 requirement 1: stable readiness partition. Ready goals move ahead of
+ * goals with an unmet precondition. Safe because the preconditions encode the
+ * dependency chain, so a producer is never blocked while its consumer is ready.
+ */
+export function orderGoalsByReadiness(
+  goals: readonly PlannedGoal[],
+  snapshot: OptionWorldSnapshot,
+  custom?: CustomPredicateRegistry,
+): ReadinessOrderResult {
+  const ready: PlannedGoal[] = []
+  const blocked: PlannedGoal[] = []
+  const isReady: boolean[] = []
+  for (const goal of goals) {
+    const startable = isOptionStartable(compilePlannedGoal(goal), snapshot, custom)
+    isReady.push(startable)
+    if (startable) ready.push(goal)
+    else blocked.push(goal)
+  }
+  const moves: Array<{ preferred: string; over: string }> = []
+  for (let j = 0; j < goals.length; j += 1) {
+    if (isReady[j] === true) continue
+    const overGoal = goals[j]
+    if (overGoal === undefined) continue
+    for (let i = j + 1; i < goals.length; i += 1) {
+      const candidate = goals[i]
+      if (candidate === undefined || isReady[i] !== true) continue
+      moves.push({ preferred: goalReadinessLabel(candidate), over: overGoal.description })
+    }
+  }
+  return { goals: [...ready, ...blocked], ready, blocked, moves }
+}
+
 /** OptionSpec -> PlannedGoal, so compiled Options seed the existing GoalQueue. */
 export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
   const goal: PlannedGoal = {
