@@ -37,6 +37,7 @@ import {
   buildPlanOptions,
   computeFrontier,
   debugFrontier,
+  goalsForStrategy,
   has,
   inventoryCounts,
   resolvePlannerMode,
@@ -393,6 +394,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     log: (event, detail) => ctx.log(event, detail),
     cachePath: advisorCachePath,
     mode: resolveAdvisorMode(plannerMode),
+    compile: (strategy, state) =>
+      goalsForStrategy(strategy, state.inventory, world, { placedFurnacesNear: world.furnaces.length }),
   })
 
   const postDeathRecovery = ctx.resetReason === 'death'

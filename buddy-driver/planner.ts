@@ -36,7 +36,7 @@ import { matchesResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
-import type { AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
+import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 
 export type Counts = Record<string, number>
@@ -786,6 +786,8 @@ export class PlannerBrain implements System2Brain {
   private readonly mercury: MercurySystem2 | undefined
   private readonly postDeathRecovery: boolean
   private postDeathHandled = false
+  private lastAdvisorStrategy: AdvisorStrategy | null = null
+  private lastAdvisorSignature: string | null = null
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -840,9 +842,9 @@ export class PlannerBrain implements System2Brain {
       const decision = await this.advisor.decide(this.advisorState(counts, request, waitStreak), adviseReason)
       if (adviseReason === 'no_candidate') this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: decision.strategy, reason: adviseReason })
       if (waitStreak >= 3) this.log('WAIT_LIMIT', { n: waitStreak, strategy: decision.strategy })
-      const goals = goalsForStrategy(decision.strategy, counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
+      const goals = decision.goals ?? goalsForStrategy(decision.strategy, counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
       const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals }
-      this.log('STRATEGY_SET', { strategy: decision.strategy, source: decision.source, goals: goals.map((goal) => goal.description) })
+      this.logStrategySet(decision, goals)
       return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`)
     }
 
@@ -959,6 +961,29 @@ export class PlannerBrain implements System2Brain {
       ...(detail !== undefined && detail.planFit !== null ? { fit: detail.planFit } : {}),
       ...(detail !== undefined && detail.strategyChange !== null ? { strategyChange: detail.strategyChange } : {}),
       note,
+    })
+  }
+
+  private logStrategySet(decision: AdvisorDecision, goals: readonly PlannedGoal[]): void {
+    const signature = goalSignature(goals)
+    const strategyChanged = this.lastAdvisorStrategy !== null && this.lastAdvisorStrategy !== decision.strategy
+    const goalsChanged = this.lastAdvisorSignature !== null && this.lastAdvisorSignature !== signature
+    if (strategyChanged && !goalsChanged) {
+      this.log('STRATEGY_NOOP', {
+        strategy: decision.strategy,
+        previous: this.lastAdvisorStrategy,
+        note: 'strategy changed but compiled goals are identical (#29)',
+      })
+    }
+    this.lastAdvisorStrategy = decision.strategy
+    this.lastAdvisorSignature = signature
+    this.log('STRATEGY_SET', {
+      strategy: decision.strategy,
+      source: decision.source,
+      cached: decision.cached,
+      strategyChanged,
+      goalsChanged: strategyChanged ? goalsChanged : false,
+      goals: goals.map((goal) => goal.description),
     })
   }
 

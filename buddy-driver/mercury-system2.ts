@@ -138,6 +138,57 @@ export function plannedGoalsFromMercury(plan: MercuryPlanJson): PlannedGoal[] {
   return goals
 }
 
+const MERCURY_SMELT_INPUTS: Readonly<Record<string, string>> = {
+  charcoal: 'log',
+  iron_ingot: 'raw_iron',
+  gold_ingot: 'raw_gold',
+  copper_ingot: 'raw_copper',
+}
+
+/**
+ * Refuse a plan whose FIRST goal is a `smelt` with no held input (issue #29
+ * analogue for Mercury): the queue would wedge on a smelt candidate that cannot
+ * exist. The goal is replaced with collecting its input, which the executor can
+ * ground. Pure and exported so the refusal rule is testable without a bot.
+ */
+export function groundMercuryPlan(
+  plan: MercuryPlanJson,
+  state: Pick<MercuryStateSummary, 'inventory'>,
+): { plan: MercuryPlanJson; refused: { goal: string; replacement: string; reason: string } | null } {
+  const first = plan.goals[0]
+  if (first === undefined || mercuryGoalKind(first.item) !== 'smelt') return { plan, refused: null }
+  const input = MERCURY_SMELT_INPUTS[first.item]
+  if (input === undefined) return { plan, refused: null }
+  if ((state.inventory[input] ?? 0) > 0) return { plan, refused: null }
+  if (!(MERCURY_ALLOWED_GOALS.collect as readonly string[]).includes(input)) return { plan, refused: null }
+  return {
+    plan: { ...plan, goals: [{ item: input, count: first.count }, ...plan.goals.slice(1)] },
+    refused: {
+      goal: `smelt ${first.item}`,
+      replacement: `collect ${input}`,
+      reason: `no ${input} held to smelt ${first.item}`,
+    },
+  }
+}
+
+/** Stable cache key for a Mercury state summary. Exported so tests can seed the cache. */
+export function hashMercuryState(state: MercuryStateSummary): string {
+  const payload = {
+    trigger: state.trigger,
+    rung: state.rung,
+    inventory: state.inventory,
+    toolRank: state.toolRank,
+    stations: state.stations,
+    ores: [...state.knownOres].sort(),
+    current: state.queue.current,
+    depth: state.queue.depth,
+    hasImpossible: state.queue.hasImpossible,
+    wait: Math.min(state.consecutiveWait, 3),
+    failures: state.recentFailures,
+  }
+  return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+}
+
 /** A compact, human-readable strategy label for the ADVISOR log. */
 export function mercuryStrategyLabel(plan: MercuryPlanJson): string {
   const primary = plan.goals[0]
@@ -255,19 +306,27 @@ interface MercuryCacheEntry {
   strategy: string
   costUsd: number
   ts: number
+  /** How many times this cached plan has been replayed without body progress. */
+  replays?: number
 }
 
 interface MercuryCacheFile {
-  version: 1
+  version: 2
   entries: Record<string, MercuryCacheEntry>
   callTimes: number[]
+  consecutiveStrategy?: string | null
+  consecutiveCount?: number
 }
 
 const MAX_CACHE_ENTRIES = 60
 const HOUR_MS = 60 * 60 * 1000
+/** A cached plan may be replayed at most this many times before it is bypassed. */
+export const MAX_CACHE_REPLAYS = 2
+/** Consecutive cached plans with the same strategy before the cache is bypassed. */
+export const MAX_CONSECUTIVE_CACHED = 2
 
 function emptyCache(): MercuryCacheFile {
-  return { version: 1, entries: {}, callTimes: [] }
+  return { version: 2, entries: {}, callTimes: [], consecutiveStrategy: null, consecutiveCount: 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +513,13 @@ export class MercurySystem2 implements System2Brain {
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
     this.postDeathPending = options.postDeathRecovery === true
     this.cache = this.loadCache()
+    this.log('ADVISOR_CACHE_GUARD', {
+      active: true,
+      version: 2,
+      maxReplays: MAX_CACHE_REPLAYS,
+      maxConsecutive: MAX_CONSECUTIVE_CACHED,
+      source: 'mercury',
+    })
   }
 
   get callCount(): number {
@@ -500,25 +566,52 @@ export class MercurySystem2 implements System2Brain {
 
     const cached = this.cache.entries[stateHash]
     if (cached !== undefined) {
-      const strategy = cached.strategy
-      this.log('ADVISOR', {
-        source: 'mercury',
-        reason: trigger,
-        strategy,
-        cost: 0,
-        ms: Date.now() - started,
-        cached: true,
-        note: 'cached mercury plan still valid',
-      })
-      return {
-        plan: { op: 'continue', goals: [], note: `cached mercury ${strategy}` },
-        strategy,
-        op: 'continue',
-        goals: [],
-        costUsd: 0,
-        ms: Date.now() - started,
-        cached: true,
+      const replays = cached.replays ?? 0
+      const consecutive = this.cache.consecutiveStrategy === cached.strategy ? this.cache.consecutiveCount ?? 0 : 0
+      const replayLimit = replays >= MAX_CACHE_REPLAYS
+      const consecutiveLimit = consecutive >= MAX_CONSECUTIVE_CACHED
+      // Issue #15: reconstruct and re-validate the cached plan; never replay a bare
+      // label with empty goals. A stale schema or a repeated no-progress hit is
+      // invalidated instead of replayed.
+      const restored = validateMercuryPlan({ op: cached.op, goals: cached.goals, reason: cached.reason })
+      if (restored.ok && !replayLimit && !consecutiveLimit) {
+        cached.replays = replays + 1
+        this.bumpConsecutive(cached.strategy)
+        this.saveCache()
+        const plan = restored.plan
+        const goals = plannedGoalsFromMercury(plan)
+        const ms = Date.now() - started
+        this.log('ADVISOR', {
+          source: 'mercury',
+          reason: trigger,
+          strategy: cached.strategy,
+          cost: 0,
+          ms,
+          cached: true,
+          note: `cached mercury plan replayed (${cached.strategy})`,
+        })
+        return {
+          plan: { op: plan.op, goals, note: `cached mercury ${cached.strategy}` },
+          strategy: cached.strategy,
+          op: plan.op,
+          goals,
+          costUsd: 0,
+          ms,
+          cached: true,
+        }
       }
+      const bypass = replayLimit ? 'repeat_no_progress' : consecutiveLimit ? 'consecutive_same_strategy' : 'stale_schema'
+      this.log('ADVISOR_CACHE bypass', {
+        reason: bypass,
+        strategy: cached.strategy,
+        trigger,
+        stateHash,
+        replays,
+        consecutive,
+      })
+      delete this.cache.entries[stateHash]
+      this.resetConsecutive()
+      this.saveCache()
     }
 
     const now = Date.now()
@@ -613,7 +706,16 @@ export class MercurySystem2 implements System2Brain {
         return this.fallback(trigger, started, state, error, costUsd, latencyMs)
       }
 
-      const plan = validated.plan
+      const grounded = groundMercuryPlan(validated.plan, state)
+      const plan = grounded.plan
+      if (grounded.refused !== null) {
+        this.log('STRATEGY_REFUSED', {
+          reason: grounded.refused.reason,
+          goal: grounded.refused.goal,
+          replacement: grounded.refused.replacement,
+          source: 'mercury',
+        })
+      }
       const strategy = mercuryStrategyLabel(plan)
       const goals = plannedGoalsFromMercury(plan)
       this.cache.entries[stateHash] = {
@@ -623,7 +725,9 @@ export class MercurySystem2 implements System2Brain {
         strategy,
         costUsd,
         ts: Date.now(),
+        replays: 0,
       }
+      this.resetConsecutive()
       this.trimCache()
       this.saveCache()
 
@@ -714,20 +818,7 @@ export class MercurySystem2 implements System2Brain {
   }
 
   private hashState(state: MercuryStateSummary): string {
-    const payload = {
-      trigger: state.trigger,
-      rung: state.rung,
-      inventory: state.inventory,
-      toolRank: state.toolRank,
-      stations: state.stations,
-      ores: [...state.knownOres].sort(),
-      current: state.queue.current,
-      depth: state.queue.depth,
-      hasImpossible: state.queue.hasImpossible,
-      wait: Math.min(state.consecutiveWait, 3),
-      failures: state.recentFailures,
-    }
-    return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+    return hashMercuryState(state)
   }
 
   private writeCall(record: MercuryCallRecord): void {
@@ -743,15 +834,31 @@ export class MercurySystem2 implements System2Brain {
     try {
       if (!existsSync(this.cachePath)) return emptyCache()
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as Partial<MercuryCacheFile>
-      if (typeof parsed.entries !== 'object' || parsed.entries === null) return emptyCache()
+      if (parsed.version !== 2 || typeof parsed.entries !== 'object' || parsed.entries === null) return emptyCache()
       return {
-        version: 1,
+        version: 2,
         entries: parsed.entries,
         callTimes: Array.isArray(parsed.callTimes) ? parsed.callTimes.filter((time) => typeof time === 'number') : [],
+        consecutiveStrategy: typeof parsed.consecutiveStrategy === 'string' ? parsed.consecutiveStrategy : null,
+        consecutiveCount: typeof parsed.consecutiveCount === 'number' ? parsed.consecutiveCount : 0,
       }
     } catch {
       return emptyCache()
     }
+  }
+
+  private bumpConsecutive(strategy: string): void {
+    if (this.cache.consecutiveStrategy === strategy) {
+      this.cache.consecutiveCount = (this.cache.consecutiveCount ?? 0) + 1
+    } else {
+      this.cache.consecutiveStrategy = strategy
+      this.cache.consecutiveCount = 1
+    }
+  }
+
+  private resetConsecutive(): void {
+    this.cache.consecutiveStrategy = null
+    this.cache.consecutiveCount = 0
   }
 
   private saveCache(): void {

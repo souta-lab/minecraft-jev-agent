@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
+import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 
 export const ADVISOR_STRATEGIES = [
@@ -80,24 +81,101 @@ export interface AdvisorDecision {
   ms: number
   cached: boolean
   note: string
+  /**
+   * The grounded plan (issue #15/#29): the goal list that was compiled for this
+   * strategy. On a cache hit this is the exact plan stored at decision time, so a
+   * cache hit replays the PLAN and not merely the strategy label.
+   */
+  goals?: PlannedGoal[]
 }
 
 interface AdvisorCacheEntry {
   strategy: AdvisorStrategy
   costUsd: number
   ts: number
+  goals?: PlannedGoal[]
+  replays?: number
 }
 
 interface AdvisorCacheFile {
-  version: 1
+  version: 2
   lastCallAt: number
   entries: Record<string, AdvisorCacheEntry>
+  consecutiveStrategy?: AdvisorStrategy | null
+  consecutiveCount?: number
 }
 
 const MAX_CACHE_ENTRIES = 120
+/**
+ * A cache hit may replay the SAME (state, strategy) plan at most this many times.
+ * The 3rd identical request is a no-progress loop and bypasses the cache (#15).
+ */
+export const MAX_CACHE_REPLAYS = 2
+/** Consecutive cached decisions with the same strategy, across states, before bypass. */
+export const MAX_CONSECUTIVE_CACHED = 2
 
 function emptyCache(): AdvisorCacheFile {
-  return { version: 1, lastCallAt: 0, entries: {} }
+  return { version: 2, lastCallAt: 0, entries: {}, consecutiveStrategy: null, consecutiveCount: 0 }
+}
+
+/**
+ * Grounding result for a strategy (issue #29): a label the lower layer cannot
+ * apply must be refused and replaced with an executable one. Pure so the refusal
+ * rule is unit-testable with no bot and no network.
+ */
+export interface StrategyGrounding {
+  /** Strategy actually handed to the planner (equals `requested` when not refused). */
+  strategy: AdvisorStrategy
+  /** Strategy the model/cache originally proposed. */
+  requested: AdvisorStrategy
+  refused: boolean
+  reason: string
+}
+
+/** The executable strategy to use when `smelt_and_craft` cannot be grounded. */
+function replacementStrategy(state: AdvisorState): AdvisorStrategy {
+  if (state.discoveredOres.some((ore) => ore.includes('iron'))) return 'return_to_known_ore'
+  if (state.toolRank >= 2) return 'branch_mine'
+  if (state.toolRank >= 1) return 'explore_cave'
+  return 'descend_to_y16'
+}
+
+/**
+ * Reject strategies that cannot change the body because their inputs do not
+ * exist yet. `smelt_and_craft` is only applicable when there is something to
+ * smelt AND a furnace to smelt it in; otherwise it is replaced with a strategy
+ * the current world can actually ground (`return_to_known_ore` when iron_ore is
+ * known, else `branch_mine` / `explore_cave` / `descend_to_y16`).
+ */
+export function groundStrategy(strategy: AdvisorStrategy, state: AdvisorState): StrategyGrounding {
+  if (strategy !== 'smelt_and_craft') {
+    return { strategy, requested: strategy, refused: false, reason: 'applicable' }
+  }
+  const rawMaterial = (state.inventory['raw_iron'] ?? 0) + (state.inventory['iron_ingot'] ?? 0)
+  const hasFurnace = (state.stations.furnaces ?? 0) > 0 || (state.inventory['furnace'] ?? 0) > 0
+  if (rawMaterial > 0 && hasFurnace) {
+    return { strategy, requested: strategy, refused: false, reason: 'furnace + raw material held' }
+  }
+  const replacement = replacementStrategy(state)
+  const reason =
+    rawMaterial === 0
+      ? 'no raw_iron/iron_ingot to smelt'
+      : 'no furnace or placed furnace'
+  return { strategy: replacement, requested: strategy, refused: true, reason }
+}
+
+/** Stable cache key for an advisor state. Exported so tests can seed the cache. */
+export function hashAdvisorState(state: AdvisorState): string {
+  const payload = {
+    rung: state.rung,
+    inventory: state.inventory,
+    toolRank: state.toolRank,
+    stations: state.stations,
+    ores: [...state.discoveredOres].sort(),
+    queueCurrent: state.queueCurrent,
+    failed: state.failedCandidates,
+  }
+  return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
 
 export interface AdvisorOptions {
@@ -107,6 +185,11 @@ export interface AdvisorOptions {
   model?: string
   minIntervalMs?: number
   timeoutMs?: number
+  /**
+   * Compile a grounded strategy into executable goals. Injected by the planner so
+   * the cache stores the PLAN (not just the label) and replays it verbatim.
+   */
+  compile?: (strategy: AdvisorStrategy, state: AdvisorState) => PlannedGoal[]
 }
 
 function describeError(error: unknown): string {
@@ -160,6 +243,7 @@ export class Advisor {
   readonly model: string
   private readonly minIntervalMs: number
   private readonly timeoutMs: number
+  private readonly compile: AdvisorOptions['compile']
   private cache: AdvisorCacheFile
   private calls = 0
 
@@ -170,7 +254,14 @@ export class Advisor {
     this.model = options.model ?? process.env.BUDDY_ADVISOR_MODEL ?? DEFAULT_JEV_MODEL
     this.minIntervalMs = options.minIntervalMs ?? Number(process.env.BUDDY_ADVISOR_MIN_INTERVAL_MS ?? 30000)
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_ADVISOR_TIMEOUT_MS ?? 8000)
+    this.compile = options.compile
     this.cache = this.loadCache()
+    this.log('ADVISOR_CACHE_GUARD', {
+      active: true,
+      version: 2,
+      maxReplays: MAX_CACHE_REPLAYS,
+      maxConsecutive: MAX_CONSECUTIVE_CACHED,
+    })
   }
 
   async decide(state: AdvisorState, reason: AdvisorReason): Promise<AdvisorDecision> {
@@ -178,37 +269,31 @@ export class Advisor {
     const fallback = fallbackStrategy(state)
 
     if (this.mode === 'deterministic') {
-      const decision: AdvisorDecision = {
-        strategy: fallback,
-        source: 'fallback',
-        reason,
-        costUsd: 0,
-        ms: Date.now() - started,
-        cached: false,
-        note: 'advisor disabled (deterministic mode)',
-      }
-      this.logDecision(decision)
-      return decision
-    }
-
-    const key = resolveJevApiKey()
-    if (key === null) {
-      const decision: AdvisorDecision = {
-        strategy: fallback,
-        source: 'fallback',
-        reason,
-        costUsd: 0,
-        ms: Date.now() - started,
-        cached: false,
-        note: 'no gateway key',
-      }
-      this.logDecision(decision)
-      return decision
+      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, 'advisor disabled (deterministic mode)', state)
     }
 
     const stateHash = this.hashState(state)
     const cached = this.cache.entries[stateHash]
     if (cached !== undefined) {
+      const replays = cached.replays ?? 0
+      const consecutive = this.cache.consecutiveStrategy === cached.strategy ? this.cache.consecutiveCount ?? 0 : 0
+      const replayLimit = replays >= MAX_CACHE_REPLAYS
+      const consecutiveLimit = consecutive >= MAX_CONSECUTIVE_CACHED
+      if (replayLimit || consecutiveLimit) {
+        const bypass = replayLimit ? 'repeat_no_progress' : 'consecutive_same_strategy'
+        this.log('ADVISOR_CACHE bypass', {
+          reason: bypass,
+          strategy: cached.strategy,
+          stateHash,
+          replays,
+          consecutive,
+        })
+        this.resetConsecutive()
+        return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `cache bypass (${bypass}) -> deterministic ladder`, state)
+      }
+      cached.replays = replays + 1
+      this.bumpConsecutive(cached.strategy)
+      this.saveCache()
       const decision: AdvisorDecision = {
         strategy: cached.strategy,
         source: 'llm',
@@ -216,25 +301,21 @@ export class Advisor {
         costUsd: 0,
         ms: Date.now() - started,
         cached: true,
-        note: `cached advisor strategy (${cached.strategy})`,
+        note: `cached advisor plan (${cached.strategy})`,
+        ...(cached.goals !== undefined ? { goals: cached.goals } : {}),
       }
       this.logDecision(decision)
       return decision
     }
 
+    const key = resolveJevApiKey()
+    if (key === null) {
+      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, 'no gateway key', state)
+    }
+
     const now = Date.now()
     if (this.calls > 0 && now - this.cache.lastCallAt < this.minIntervalMs) {
-      const decision: AdvisorDecision = {
-        strategy: fallback,
-        source: 'fallback',
-        reason,
-        costUsd: 0,
-        ms: Date.now() - started,
-        cached: false,
-        note: `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`,
-      }
-      this.logDecision(decision)
-      return decision
+      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`, state)
     }
 
     try {
@@ -262,46 +343,86 @@ export class Advisor {
       const costUsd = (inputTokens + outputTokens) * COST_PER_TOKEN_USD
       this.cache.lastCallAt = Date.now()
       if (isStrategy(choice)) {
-        this.cache.entries[stateHash] = { strategy: choice, costUsd, ts: Date.now() }
+        const grounded = groundStrategy(choice, state)
+        if (grounded.refused) this.logRefusal(grounded)
+        const goals = this.compile?.(grounded.strategy, state)
+        this.cache.entries[stateHash] = {
+          strategy: grounded.strategy,
+          costUsd,
+          ts: Date.now(),
+          ...(goals !== undefined ? { goals } : {}),
+          replays: 0,
+        }
+        this.resetConsecutive()
         this.trimCache()
         this.saveCache()
         const decision: AdvisorDecision = {
-          strategy: choice,
+          strategy: grounded.strategy,
           source: 'llm',
           reason,
           costUsd,
           ms: Date.now() - started,
           cached: false,
-          note: `llm chose ${choice}`,
+          note: `llm chose ${grounded.strategy}`,
+          ...(goals !== undefined ? { goals } : {}),
         }
         this.logDecision(decision)
         return decision
       }
-      const decision: AdvisorDecision = {
-        strategy: fallback,
-        source: 'fallback',
-        reason,
-        costUsd,
-        ms: Date.now() - started,
-        cached: false,
-        note: `unknown strategy ${String(choice)} -> ${fallback}`,
-      }
-      this.logDecision(decision)
-      return decision
+      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, costUsd, started, false, `unknown strategy ${String(choice)} -> ${fallback}`, state)
     } catch (error) {
       const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
-      const decision: AdvisorDecision = {
-        strategy: fallback,
-        source: 'fallback',
-        reason,
-        costUsd: 0,
-        ms: Date.now() - started,
-        cached: false,
-        note: `${kind}: ${describeError(error)}`,
-      }
-      this.logDecision(decision)
-      return decision
+      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `${kind}: ${describeError(error)}`, state)
     }
+  }
+
+  private deliver(
+    grounded: StrategyGrounding,
+    source: 'llm' | 'fallback',
+    reason: AdvisorReason,
+    costUsd: number,
+    started: number,
+    cached: boolean,
+    note: string,
+    state: AdvisorState,
+  ): AdvisorDecision {
+    if (grounded.refused) this.logRefusal(grounded)
+    const goals = this.compile?.(grounded.strategy, state)
+    this.resetConsecutive()
+    const decision: AdvisorDecision = {
+      strategy: grounded.strategy,
+      source,
+      reason,
+      costUsd,
+      ms: Date.now() - started,
+      cached,
+      note,
+      ...(goals !== undefined ? { goals } : {}),
+    }
+    this.logDecision(decision)
+    return decision
+  }
+
+  private logRefusal(grounded: StrategyGrounding): void {
+    this.log('STRATEGY_REFUSED', {
+      reason: grounded.reason,
+      strategy: grounded.requested,
+      replacement: grounded.strategy,
+    })
+  }
+
+  private bumpConsecutive(strategy: AdvisorStrategy): void {
+    if (this.cache.consecutiveStrategy === strategy) {
+      this.cache.consecutiveCount = (this.cache.consecutiveCount ?? 0) + 1
+    } else {
+      this.cache.consecutiveStrategy = strategy
+      this.cache.consecutiveCount = 1
+    }
+  }
+
+  private resetConsecutive(): void {
+    this.cache.consecutiveStrategy = null
+    this.cache.consecutiveCount = 0
   }
 
   private logDecision(decision: AdvisorDecision): void {
@@ -317,23 +438,14 @@ export class Advisor {
   }
 
   private hashState(state: AdvisorState): string {
-    const payload = {
-      rung: state.rung,
-      inventory: state.inventory,
-      toolRank: state.toolRank,
-      stations: state.stations,
-      ores: [...state.discoveredOres].sort(),
-      queueCurrent: state.queueCurrent,
-      failed: state.failedCandidates,
-    }
-    return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+    return hashAdvisorState(state)
   }
 
   private loadCache(): AdvisorCacheFile {
     try {
       if (!existsSync(this.cachePath)) return emptyCache()
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as Partial<AdvisorCacheFile>
-      if (typeof parsed.lastCallAt !== 'number' || typeof parsed.entries !== 'object' || parsed.entries === null) {
+      if (parsed.version !== 2 || typeof parsed.lastCallAt !== 'number' || typeof parsed.entries !== 'object' || parsed.entries === null) {
         return emptyCache()
       }
       const entries: Record<string, AdvisorCacheEntry> = {}
@@ -342,7 +454,14 @@ export class Advisor {
           entries[hash] = entry as AdvisorCacheEntry
         }
       }
-      return { version: 1, lastCallAt: parsed.lastCallAt, entries }
+      const consecutiveStrategy = isStrategy(parsed.consecutiveStrategy) ? parsed.consecutiveStrategy : null
+      return {
+        version: 2,
+        lastCallAt: parsed.lastCallAt,
+        entries,
+        consecutiveStrategy,
+        consecutiveCount: typeof parsed.consecutiveCount === 'number' ? parsed.consecutiveCount : 0,
+      }
     } catch {
       return emptyCache()
     }
