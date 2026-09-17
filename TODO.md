@@ -115,6 +115,13 @@
 ```
 
 ## 進捗ログ（一次証拠つき）```
+2026-09-18 03:06 JST — ★空転を一時停止（freeze）し、#44 を起動
+  control.sock: FREEZE {frozen:true, connected:true}（理由=stop spin until #44 replan throttle lands）
+  統計が空転を裏付け: generations=401 / reloads=167 / recoveries=206、gensLast5min は 1→7→17→27 と悪化
+  観測: KNOWN_RESOURCE=512（座標は記録）だが RETURN_TO_KNOWN_RESOURCE=0（使われない）、POS は 29.3,60.0,34.3 で不変
+  → #44（replanスロットル：同一(reason,stateHash)は10s窓で1回／新情報ゲート／body-delta必須／retrievalを実際に選択）を起動
+  → 方針: freeze で無駄な世代生成とサーバー負荷を止め、修正着地後に resume して検証する（接続・在庫・WorldMemory は保持）
+
 2026-09-18 02:44 JST — ★#15 ゲートgreen（キャッシュループ恒久修正が main で機能）
   node tools/verify-mercury.mjs → PASS 5/5
     has_successful_call: ok=39 errored=3 total=42
