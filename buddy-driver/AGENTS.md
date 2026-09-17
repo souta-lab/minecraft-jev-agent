@@ -329,4 +329,32 @@ ledger: current=g3:collect:raw_iron  origin="llm"  done=0  hasImpossible=false
 4. **freezeCycles=0**: freeze→dump→reload→resume がまだ一度も実行されていない（P2）。一度実走させて証拠を残す。
 5. **policyKind=fallback**: この世代は決定論で動いている。Mercury/Jev の実使用は設定（system2.config.json）で明示的に有効化し、
    `ADVISOR source=mercury` の実ログを残す（追記6の監査スキーマ）。
+
+---
+
+## 追記8（01:39 実測）— P2 freeze→dump→resume を実走で確認（未実走項目をクローズ）
+
+制御ソケット `data/resident/control.sock` 経由で自律的に実行:
+```
+FREEZE  -> {"ok":true,"data":{"frozen":true,"report":".../logs/resident/freeze-2026-09-17T16-39-46-442Z.json","runId":"run-mu5qd4ah-3xdh"}}
+REPORT  -> frozen:true, connected:true
+RESUME  -> {"ok":true,"data":{"frozen":false,"started":true}}
+REPORT2 -> frozen:false, connected:true, generations 176->178, reloads 73->74
+```
+証拠: `logs/resident/freeze-2026-09-17T16-39-46-442Z.json` が新規生成（既存は 15-44-56）。
+→ **wedge で走行が死なず、凍結→文脈ダンプ→再開できることが実証された**（P2クローズ）。
+
+残る観測: `recoveries=75` / `reloads=74` / `generations=178` と世代交代が非常に多い。
+wedge→recovery の回転が速すぎるので、**世代が短命すぎる原因**（毎回 wedge している）を潰すのが次の本命。
+併せて `listenerLeak=true`（physicsTick 3 vs baseline 2）も未解決のまま。
+
+### 制御チャネル コマンドの実測仕様（自律運転で使える）
+```
+report            -> 全状態（runId/frozen/connected/generations/reloads/recoveries/milestone/worldKey/
+                     stats/worldMemory/listeners/listenerBaseline/listenerLeak/acceptancePath/status）
+goal {item,count} -> 現在の ledger mirror（milestone/goalItem/goalCount/depth/current/done/goals）を返す
+freeze {reason}   -> frozen:true + freeze report パスを返す
+resume            -> frozen:false, started:true
+```
+※ソケットは 0600、JSON Lines（`{"id":<n>,"cmd":"...","args":{...}}\n`）。応答は1行JSON。
 ```
