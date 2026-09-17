@@ -65,7 +65,12 @@ jobs:
         working-directory: jev-agent
         run: npm run m1-test
 
-      - name: Step cut tests
+      # step-cut-test spawns a real Mineflayer bot against 127.0.0.1:25565 and needs
+      # a live Leaf server with spawned terrain, so it cannot run on a hosted runner.
+      # It stays a local integration test; opt in on a self-hosted/live runner by
+      # setting the repository variable MC_LIVE_STEP_TEST=true.
+      - name: Step cut tests (live server, opt-in)
+        if: ${{ vars.MC_LIVE_STEP_TEST == 'true' }}
         working-directory: jev-agent
         run: npm run step-cut-test
 
