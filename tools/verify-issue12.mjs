@@ -90,7 +90,7 @@ if (JSON_OUT) {
   for (const c of checks) console.log(`  [${c.pass ? 'PASS' : 'FAIL'}] ${c.id.padEnd(32)} ${c.detail}`)
   console.log(`  counters: ${JSON.stringify(result.counters)}`)
   if (result.verdict === 'FAIL') {
-    console.log('  note: PRECONDITION_MISSING is still a stop condition -> the agent never digs,')
-    console.log('        so movement fixes (#7/#8/#9) remain unobservable. This is the critical path.')
+    console.log('  note: only raw_iron_obtained should normally remain once the ladder/prereq, churn and')
+    console.log('        digging checks pass. If other checks fail, read their detail lines before acting.')
   }
 }
