@@ -1,77 +1,167 @@
-# PLANNERS.md — 3つの「プランナ」の責務分離（Issue #35 相当）
+# PLANNERS.md — planner / Option / Jev の責務分離
 
-> このプロジェクトには名前が似た層が3つあり、混同すると設計が崩れる。ここで境界を確定する。
-> 関連: `RESIDENT-MODE.md` §14（Grounded Options）、`AGENTS.md`（優先順）、issue #11 / #12 / #15 / #29 / #30 / #35
+> このプロジェクトには名前が似た判断層が複数あり、混同すると設計が崩れる。ここで境界を確定する。
+> 関連: `RESIDENT-MODE.md` §14（Grounded Options）、`AGENTS.md`（優先順）、issue #11 / #20-#24 / #35 / #41
 
-## 1. 三層と責務
+## 1. 層と責務
 ```
-(1) Deterministic ladder      = 通常経路のプランナ。在庫から次の一段を決定論で導出する
-    （wood -> table -> pickaxe -> cobblestone -> furnace -> charcoal -> raw_iron -> iron_ingot -> ...）
-    長所: 再現性・低コスト・デバッグ容易。短所: 状況適応しない
+(1) Deterministic ladder / capability graph
+    = 通常経路の依存関係・前提・成功条件をコードで管理する
+    現在: wood -> table -> pickaxe -> cobblestone -> furnace -> charcoal -> raw_iron -> ...
+    将来: #41 predicate-based capability / Option graph
+    長所: 再現性・低コスト・物理的真実。モデルに委譲しない
 
-(2) Mercury System2Brain      = 例外駆動の plan repair。停滞/楔/死亡復帰など「ladderが詰まった」時だけ呼ぶ
-    返すのは plan データのみ（op=continue|patch|replace|abort, goals[], reason）。行動は返さない
-    長所: 状況に応じた方針転換。短所: 4〜7秒・$0.0002/call・確率的
+(2) Mercury System2Brain
+    = 例外駆動の Option / plan repair。通常hot pathには入らない
+    返すのは接地可能な高レベル意図/Optionだけ。Minecraftの即時Actionは返さない
+    長所: 新しい候補構造を生成できる。短所: 数秒・確率的
 
-(3) Jev                        = Option 内の即時方針。π(action) と β(abandon_option)
-    「この Option の中で次にどの接地候補を選ぶか」と「この Option を放棄すべきか」だけを答える
-    長所: 高速・接地・確率。短所: 長期意図は持てない
+(3) Option / Skill layer
+    = 上位意図を、実行可能な時間的抽象へコンパイルする中間層
+    Option: I(o) / success(s,o) / allowed skills / failure budget
+    Skill: BRANCH_MINE / RETURN_TO_KNOWN_ORE / EXPLORE_FRONTIER 等をコードで接地
+
+(4) Jev
+    = Option 内の強い局所判断器
+    π(action | s,o) : grounded candidate / skill Choice
+    β(s,o)          : abandon_option Boolean probability
+    長期plan生成ではなく、与えられた接地候補から賢く選ぶ
 ```
 
-## 2. あるべきフロー（Issue #11 Grounded Options）
+## 2. 本命フロー（Issue #11 Grounded Options）
 ```
-Mercury or deterministic ladder
-        │  Option（意図）＋ 事前条件 I(o) ＋ 成功述語 success(s,o)（コードが所有）
-        ▼
-   GoalQueue（HOST が唯一の durable writer）
+Mission objective
         │
         ▼
-Jev:  action = π(a|s,o)   ／  abandon_option = β(s,o)
+deterministic capability/dependency graph
+        │                  ▲
+        │ executable Option│ sparse repair
+        ▼                  │
+OptionSpec / OptionRuntime ├──── Mercury System2
+ I(o) / success(s,o)       │
         │
+        ├─ grounded SkillCandidates / primitive candidates
         ▼
-   Guard（決定論・物理的真実・hard hazards） → Executor → VERIFY（座標/在庫で検証）
+Jev: action = π(a|s,o)  +  abandon_option = β(s,o)
+        │                          │
+        ▼                          └─ deterministic meta-controller -> System2 when justified
+Guard -> Executor -> VERIFY
         │
-        └─ β が閾値超え → Mercury へ再計画要求（または決定論 ladder へフォールバック）
+        └─ verified progress / world memory / success predicate
 ```
 
-## 3. 現在の実装状態と既知の欠陥
+`GoalQueue` は移行中も捨てない。**実行台帳/履歴として維持し、PlannedGoal -> OptionSpec compiler を挟む**。
+
+## 3. 移行方針: schemaを早く、authorityを遅く
+
+Issue #11 は従来「P5研究」として後ろに置いていたが、今後 M2/M3/M4 の機能を旧表現へ大量追加してから変更すると二重実装になる。
+
+したがって方針を変更する:
+
+> **early schema/control-surface migration, late authority migration**
+
+先に導入する:
 ```
-・Mercury は live（実測 16/18成功・約4秒・$0.00019・op=replace で GoalQueue 反映）
-・Jev は多質問構成（action / goal_progress / plan_still_valid / situation_understood /
-  goal_blocked / strategy_change_needed）。#11 により action + abandon_option の2ヘッドへ移行予定
-・#12: PRECONDITION_MISSING が停止条件になっていた（前提チェーン差し替えを実装中。LADDER_PREREQ 稼働）
-・#15: cache hit 時に cached plan を捨てて continue [] を返し得る（未検証＝cache 経路が未踏）
-・#30: patch/replace で plan の tail が PlannerBrain に捨てられ得る
-・#29: ★重要 — advisor が explore_cave / branch_mine / return_to_known_ore を別戦略として選んでも、
-        石ツルハシ以降は下位層では全部「collect raw_iron x3」に潰れて区別不能。
-        つまり strategy ログが賢く見えても身体行動に反映されない
+OptionSpec / OptionRuntime の型
+PlannedGoal -> Option compiler
+SkillCandidate contract
+predicate / capability registry
+β の shadow logging / causal ids
 ```
 
-## 4. やってはいけないこと（アンチパターン）
+まだ変更しない:
 ```
-・LLM を通常経路の唯一のプランナにする（再現性・コスト・失敗時の停止が壊れる）
-・LLM に行動（Action）を返させる（行動権限は System One のみ）
-・subgoal_done / goal_done をモデルに決めさせる（決定論的述語であるべき）
-・戦略名だけログに出して、下位層の候補・目標が変わらない（#29）
-・cache hit で plan を空にする（#15）／patch・replace で tail を落とす（#30）
-・plan を lease commit 前に durable へ書く（#5）
-```
-
-## 5. M4 へ向けた拡張順（planner 側）
-```
-1. #12 前提チェーン差し替えを安定化（ticks>=100 が常態、churn 1桁/時）
-2. #29 戦略 → 身体行動の接地（戦略ごとに候補・目標を実際に変える）
-3. #15/#30 Mercury の plan 取り扱い（cache は plan を再生、patch/replace は tail を保持）
-4. #20〜#24 Grounded Options の実装単位（skill candidates → OptionSpec → β shadow → A/B harness → β controller）
-5. 新規 Option テンプレート（M3/M4: ダイヤ、ネザー、ブレイズ、パール、エンダーアイ、要塞、エンド、ドラゴン）
-   → 必要プリミティブは issue #37 を参照
+Guard / VERIFY の権限
+Executor の単一Action所有
+既存 GoalQueue の durable history
+Jev β による自動replan authority
+現在の多質問Jev diagnosticsの削除
 ```
 
-## 6. 検証（proxy signal を避ける）
+これにより、M1/M2で既に動いたコードを捨てず、今後の機能を新しい境界の上へ積める。
+
+## 4. 現在の実装状態と既知の欠陥
 ```
-・通常経路: 決定論 ladder が進んでいること（MILESTONE/在庫で確認）
-・例外経路: PLAN/ADVISOR source=mercury と STRATEGY_SET、mercury-calls.jsonl の error=null
-・接地: 選ばれた戦略に対応する候補/目標が実際に変わっていること（#29 の受け入れ）
-・安全性: Guard が実行直前に再検証していること、hard hazards がコード側にあること
-・道具: node tools/buddy-status.mjs / verify-issue12 / verify-issue13 / verify-mercury
+・Mercury は live。例外駆動 System2Brain として実応答・GoalQueue反映まで確認済み
+・Jev は現在 multi-question 構成。action authorityは既にgrounded Choice
+・#12 LADDER_PREREQ 実装は main に landed。live acceptance は継続確認
+・#15 Mercury cache replay / #30 patch tail は現行correctnessとして修正・検証が必要
+・#29 advisor strategy collapse: 別戦略が下位では同じ collect raw_iron へ潰れる
+・#14 Known ore は名前のみで座標を失うため RETURN_TO_KNOWN_ORE を接地できない
+・#38 actuation capability boundary / #40 authoritative snapshot は P1 substrate として並行して硬化
+```
+
+## 5. やってはいけないこと
+```
+・#11 のために resident / Guard / Executor / GoalQueue を一気に書き直す
+・Mercury を通常hot pathのAction plannerにする
+・Jev/Mercury に subgoal_done / world truth / safety を決めさせる
+・新しいM3/M4機能を fake targetItem と自然言語strategyだけで増やす
+・自由文の座標 / entity id / skill parameters をモデルに生成させる
+・旧Planner/Advisorを大規模refactorしてから #11 でまた置換する
+・現行correctness bug (#5/#13/#15/#30/#38 等) を「どうせアーキ変更するから」で放置する
+```
+
+## 6. 前倒しした実装順
+```
+0. P1 safety/correctness は常に優先
+   #5 / #13 / #28 / #38 / #40 など、state/actuationの破壊につながるものは先に/並行して直す
+
+1. #21 OptionSpec + PlannedGoal -> Option compiler
+   - 既存 collect/craft/place/smelt をそのまま表現
+   - initiation / success は決定論
+   - GoalQueue は台帳として維持
+
+2. #20 SkillCandidate contract + #14/#29 grounding
+   - BRANCH_MINE
+   - RETURN_TO_KNOWN_ORE
+   - EXPLORE/FRONTIER
+   - strategy名が本当に異なる身体行動へコンパイルされること
+
+3. #22 + #32 + #36 shadow instrumentation
+   - abandon_option β を authorityなしで追加
+   - raw probabilityを保持
+   - Option -> Jev -> Action -> VERIFY の causal id
+
+4. #23 replay / A-B
+   - current multi-signal controller vs π/β
+   - guard rejection / progress / useful termination / calibration
+
+5. #24 β termination controller
+   - hysteresis / corroboration / cooldown
+   - hard deterministic invalidity はβを待たず処理
+
+6. #35 consolidation
+   - #11が勝った後だけ PlannerBrain-Jev / Advisor-Jev / Mercury の意味重複を整理
+
+7. #41 predicate-based capability graph
+   - M3/M4の非item objectiveを新表現の上で追加
+```
+
+`#15/#30` など Mercury の現行 correctness bug は上記と**並行して最小修正**する。ただし旧planner表現を大規模に拡張しない。
+
+## 7. M4 へ向けたルール
+
+M3/M4機能を追加する前に、その機能がどの層に属するか決める:
+
+```
+Mission predicate / dependency -> capability graph
+時間的にまとまった行動        -> Option / Skill
+瞬間的な候補選択              -> Jev π
+Option継続可否のsemantic判断  -> Jev β + meta-controller
+安全性 / 成功 / world truth   -> deterministic code
+物理実行                      -> Executor / Mineflayer
+```
+
+M3/M4の具体プリミティブは issue #37、mission表現は #41 を参照。
+
+## 8. 検証（proxy signal を避ける）
+```
+・通常経路: verified progress / 在庫 / predicate が進むこと
+・Option: initiation/successを純粋テストできること
+・Skill: strategyごとに実際のgrounded target/candidateが変わること
+・Jev: actionはgrounded、βはraw probabilityを記録
+・System2: sparse callが本当にplan/Optionを変更し、その後の行動へ因果接続すること
+・安全性: Guard/VERIFY/hard hazards は常にコード権限
+・resident: reload/restart後もOption/GoalQueue/world memoryが矛盾しないこと
 ```
