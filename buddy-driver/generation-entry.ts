@@ -441,6 +441,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     reach: 5,
     scanRadius: 48,
     verbose: true,
+    eventSink: (event, detail) => ctx.log(event, detail),
   }
 
   const controller = new JevController(bot, options)

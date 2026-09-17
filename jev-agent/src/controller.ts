@@ -37,6 +37,7 @@ import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
 import { createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, writeOutcome } from './jev.ts'
+import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
@@ -127,6 +128,13 @@ export interface JevAgentOptions {
   pathTimeoutMs: number
   digTimeoutMs: number
   actuation: ActuationMode
+  /**
+   * Mirror of the movement markers (DIG_PATH/STAIRCASE/DESCEND_LIMIT/...) into an
+   * external sink (the resident log). The controller's own logger writes to the
+   * run JSONL; the resident's acceptance harness reads these markers from
+   * `buddy.log`, so a generation can forward them without the host changing.
+   */
+  eventSink?: (event: string, detail: Record<string, unknown>) => void
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -263,6 +271,42 @@ interface PendingDecision {
   healthAtDecision: number
 }
 
+const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
+  'TOOL_CHOICE',
+  'DIG_PATH',
+  'JUMP_ATTEMPT',
+  'JUMP_FAIL',
+  'DESCEND_LIMIT',
+  'STAIRCASE',
+  'REUSE_TUNNEL',
+  'DIG_OSCILLATE',
+  'MOVE_OSCILLATE',
+])
+
+/** Tees marker-prefixed agent log lines to an external sink (the resident log)
+ * while still writing the full run JSONL. Lets the acceptance harness observe the
+ * executor's movement markers without an executor change. */
+class MirroringEventLogger extends EventLogger {
+  private readonly sink: (event: string, detail: Record<string, unknown>) => void
+
+  constructor(writer: JsonlWriter | null, echo: boolean, sink: (event: string, detail: Record<string, unknown>) => void) {
+    super(writer, echo)
+    this.sink = sink
+  }
+
+  override log(
+    source: string,
+    level: AgentLevel,
+    message: string,
+    detail: Record<string, unknown> = {},
+    tick: number | null = null,
+  ): void {
+    super.log(source, level, message, detail, tick)
+    const token = message.split(' ')[0]
+    if (token !== undefined && MIRRORED_MARKERS.has(token)) this.sink(token, detail)
+  }
+}
+
 export class JevController {
   private readonly bot: Bot
   private options: JevAgentOptions
@@ -364,7 +408,10 @@ export class JevController {
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
     this.decisionWriter = new JsonlWriter(join(this.options.logDir, 'decisions.jsonl'))
     this.system2Writer = new JsonlWriter(join(this.options.logDir, 'system2.jsonl'))
-    this.logger = new EventLogger(this.runWriter, this.options.verbose)
+    this.logger =
+      this.options.eventSink === undefined
+        ? new EventLogger(this.runWriter, this.options.verbose)
+        : new MirroringEventLogger(this.runWriter, this.options.verbose, this.options.eventSink)
     this.jev = createJevPolicy({
       writer: this.jevWriter,
       model: process.env.AI_GATEWAY_MODEL ?? null,
@@ -439,7 +486,10 @@ export class JevController {
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
     this.decisionWriter = new JsonlWriter(join(this.options.logDir, 'decisions.jsonl'))
     this.system2Writer = new JsonlWriter(join(this.options.logDir, 'system2.jsonl'))
-    this.logger = new EventLogger(this.runWriter, this.options.verbose)
+    this.logger =
+      this.options.eventSink === undefined
+        ? new EventLogger(this.runWriter, this.options.verbose)
+        : new MirroringEventLogger(this.runWriter, this.options.verbose, this.options.eventSink)
     this.jev = createJevPolicy({
       writer: this.jevWriter,
       model: process.env.AI_GATEWAY_MODEL ?? null,
