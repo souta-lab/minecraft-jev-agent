@@ -26,13 +26,13 @@ import { buildGeneration } from './build.mts'
 import type {
   AcceptanceRecord,
   ActuationLease,
+  AgentSnapshot,
   DeathHazard,
   GenerationContext,
   GenerationModule,
   GenerationStatus,
   KnownResourceJson,
   ResidentGeneration,
-  ResidentState,
   ResidentWorldMemory,
   StructuralSmokeResult,
   Vec3Json,
@@ -40,9 +40,11 @@ import type {
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
+import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
+import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 
 const CONTRACT_VERSION = 2
-const STATE_SCHEMA_VERSION = 2
+const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
 const LISTENER_EVENTS = [
   'physicsTick',
   'goal_reached',
@@ -158,7 +160,7 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
   }
 }
 
-function defaultState(): ResidentState {
+function defaultState(): AgentSnapshot {
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     revision: 0,
@@ -182,53 +184,52 @@ function defaultState(): ResidentState {
   }
 }
 
-function loadState(): ResidentState {
+function loadState(): AgentSnapshot {
   const base = defaultState()
+  if (!existsSync(STATE_PATH)) return base
+  let raw: unknown
   try {
-    const parsed = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as Partial<ResidentState> & { worldMemory?: ResidentWorldMemory }
-    const merged: ResidentState = {
-      ...base,
-      ...parsed,
-      schemaVersion: STATE_SCHEMA_VERSION,
-      worldMemoryByKey: { ...(parsed.worldMemoryByKey ?? {}) },
-    }
-    delete (merged as unknown as Record<string, unknown>).worldMemory
-    if (parsed.worldMemory !== undefined && Object.keys(merged.worldMemoryByKey).length === 0) {
-      merged.worldMemoryByKey[worldKeyString({ serverId: merged.serverId, dimension: merged.dimension, worldEpoch: merged.worldEpoch })] = {
-        ...emptyWorldMemory(),
-        ...parsed.worldMemory,
-        traversalFailures: parsed.worldMemory.traversalFailures ?? [],
-      }
-    }
-    for (const memory of Object.values(merged.worldMemoryByKey)) normalizeWorldMemory(memory)
-    merged.dimension = normalizeDimension(merged.dimension)
-    const remapped: Record<string, ResidentWorldMemory> = {}
-    for (const [key, memory] of Object.entries(merged.worldMemoryByKey)) {
-      const parts = key.split('|')
-      const canonical = parts.length === 3 ? `${parts[0]}|${normalizeDimension(parts[1])}|${parts[2]}` : key
-      const existing = remapped[canonical]
-      const score = (m: ResidentWorldMemory): number => m.craftingTables.length + m.furnaces.length + m.discoveredOres.length
-      if (existing === undefined || score(memory) > score(existing)) remapped[canonical] = memory
-    }
-    merged.worldMemoryByKey = remapped
-    return merged
-  } catch {
+    raw = JSON.parse(readFileSync(STATE_PATH, 'utf8'))
+  } catch (error) {
+    log('STATE_REJECTED', { reason: 'unparseable JSON', message: error instanceof Error ? error.message : String(error), action: 'default' })
     return base
   }
+  return restoreAgentSnapshot(raw, base, log)
 }
 
 let state = loadState()
 
+/**
+ * Issue #40: the HOST is the only writer of class-A state. Every commit bumps the
+ * revision and writes tmp -> rename atomically. A stale/foreign schema is coerced
+ * (and logged) rather than silently accepted.
+ */
 function saveState(event = 'save'): void {
-  state.updatedAt = Date.now()
-  state.revision += 1
+  if (state.schemaVersion !== STATE_SCHEMA_VERSION) {
+    log('STATE_SCHEMA_MISMATCH', { event, schemaVersion: state.schemaVersion, expected: STATE_SCHEMA_VERSION, action: 'coerce-and-commit' })
+  }
+  const revision = bumpRevision(state)
   try {
     const tmp = `${STATE_PATH}.${process.pid}.tmp`
     writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
     renameSync(tmp, STATE_PATH)
   } catch (error) {
-    log('ERROR', { where: 'saveState', event, message: error instanceof Error ? error.message : String(error) })
+    log('ERROR', { where: 'saveState', event, revision, message: error instanceof Error ? error.message : String(error) })
   }
+}
+
+/**
+ * A generation proposes its ledger; the HOST validates and commits it into the
+ * single class-A snapshot. A proposal from a superseded generation carries a stale
+ * revision and is rejected so split-brain is impossible.
+ */
+function commitLedgerProposal(ledger: GoalQueueSnapshot, proposedRevision: number | null, source: string): void {
+  if (proposedRevision !== null && proposedRevision < state.revision) {
+    log('STATE_PROPOSAL_REJECTED', { kind: 'ledger', source, reason: 'stale-revision', proposedRevision, revision: state.revision })
+    return
+  }
+  state.ledger = ledger
+  saveState('ledger-proposal')
 }
 
 function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
@@ -478,6 +479,8 @@ function makeGenerationContext(b: Bot): GenerationContext {
     worldMemory: cloneMemory(keyedMemory()),
     worldKey: currentWorldKey(),
     proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
+    proposeLedger: (ledger, proposedRevision) => commitLedgerProposal(ledger, proposedRevision ?? null, 'generation'),
+    ledgerSnapshot: state.ledger,
     ledgerPath: LEDGER,
     logDir: JEV_LOGS,
     goalItem: GOAL_ITEM,
@@ -821,8 +824,7 @@ setInterval(() => {
       action: status.currentAction?.kind ?? 'idle',
       inv: shortInv(truth.inventory),
     })
-    state.ledger = status.queue
-    saveState('heartbeat')
+    commitLedgerProposal(goalQueueSnapshotFromState(status.queue), null, 'heartbeat')
   }
 }, OBSERVE_MS)
 

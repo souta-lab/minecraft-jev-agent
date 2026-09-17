@@ -70,6 +70,30 @@ recorded pickaxes/tables/furnaces no longer exist (consumables excluded), so the
 new generation runs from the live inventory frontier instead of mining stone
 bare-handed.
 
+## State classes (issue #40)
+
+Every durable artifact is exactly ONE class. `buddy-state.json` is the single
+class-A snapshot (`AgentSnapshot` in `resident-types.ts`, validated/migrated in
+`state-snapshot.ts`); the HOST is its only writer (tmp→rename, revision and
+`schemaVersion` checked on commit). Generations PROPOSE class-A mutations
+(`proposeWorldMemory`, `proposeLedger`) and the host commits them; the
+generation restores its ledger from `ctx.ledgerSnapshot`, not from a cache/log.
+
+| Artifact | Class | Authority |
+| --- | --- | --- |
+| `buddy-state.json` (`AgentSnapshot`) | A | HOST transactional, single writer |
+| `buddy-ledger.json` | A (derived) | compatibility mirror of `AgentSnapshot.ledger` |
+| position / health / food / inventory / entities | B | never persisted; re-observed from the live bot |
+| `planner-cache.json`, `advisor-cache.json`, `mercury-cache.json` | C | disposable; loss changes cost only |
+| `data/resident/gen-*.mjs` bundles | C | disposable; rebuilt on reload |
+| `logs/jev/*.jsonl`, `buddy.log`, `logs/resident/freeze-*.json`, `acceptance-*.json` | D | append-only evidence; never read back |
+
+On load, class-B keys found in a hand-edited/legacy file are logged as
+`STATE_B_TRUTH_REJECTED` and stripped, never restored. An unknown/newer
+`schemaVersion` is logged as `STATE_REJECTED` and the default snapshot is used;
+known legacy versions (1/2) log `STATE_MIGRATED`. Cache writes stay best-effort
+(try/catch) so a read-only or corrupt cache can never fail a generation.
+
 ## Control channel (§6)
 
 Unix socket `data/resident/control.sock` (0600), newline-JSON
