@@ -115,6 +115,16 @@
 ```
 
 ## 進捗ログ（一次証拠つき）```
+2026-09-18 03:28 JST — ★#14 着地で「既知資源の取得」が動き始めた（残るは raw_iron のみ）
+  RETURN_TO_KNOWN_RESOURCE item=raw_iron name=iron_ore target=25,49,36 dist=9
+  ACTION n=844 id=RETRIEVE:known:raw_iron:b25_49_36 kind=RETRIEVE   ← 新アクションが実行された
+  ACTION n=845 id=WAIT ... pos=28.3,57.0,35.0                        ← 目標 y=49 vs 現在 y=57（垂直経路が無く停止）
+  KNOWN_RESOURCE_STALE=48（古い座標の無効化が機能）／REPLAN_THROTTLED=1084／gensLast5min=0／maxTicks=794
+  ★ゲート 5/6: ladder_prereq / no_1tick(直近window) / ticks>=100(max794) / digging_resumed(TOOL_CHOICE=20,
+    DIG_PATH=10, JUMP_ATTEMPT=103, STAIRCASE=2, REUSE_TUNNEL=6) / churn_reduced(0/5min) ／残: raw_iron_obtained
+  検証ツールの設計欠陥2件を修正（履歴全体での判定→直近10分window／churn 0 を FAIL 扱い→PASSへ）
+  → #45（RETRIEVEの垂直経路：階段掘り/既存坑道再利用→水平接近、RETRIEVE_STALLEDでエスカレーション）を起動
+
 2026-09-18 03:17 JST — ★#44 着地で空転解消（freeze→resume の実測つき）
   RESUME ok / RELOAD ok=true deferred=frozen ms=231（凍結中のリロードは解除後に適用）
   issue12 4/6 復帰: gensLast5min=1（27 → 1）  REPLAN_THROTTLED=6（スロットル機能）
