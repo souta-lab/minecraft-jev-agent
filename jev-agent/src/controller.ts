@@ -1259,11 +1259,11 @@ export class JevController {
     const actionId = decisionIdFrom(decision)
     const guard = shouldAdoptAbandon({
       actionId,
-      goal: this.queue.current,
+      goals: this.unfinishedGoals(),
       placedFurnaceCount: this.lastPlacedFurnaceCount,
       abandonRequested: true,
     })
-    if (!guard.adopt) {
+    if (!guard.adopt && !this.placeRetryExhausted()) {
       this.logger.warn(
         'heads',
         guard.protection.line,
@@ -1284,7 +1284,7 @@ export class JevController {
     if (reason !== 'no_progress' && reason !== 'action_impossible' && reason !== 'unknown_situation') return false
     const guard = shouldAdoptAbandon({
       actionId: this.lastDecisionId,
-      goal: this.queue.current,
+      goals: this.unfinishedGoals(),
       placedFurnaceCount: this.lastPlacedFurnaceCount,
       abandonRequested: true,
     })
@@ -1311,6 +1311,11 @@ export class JevController {
     return this.placementRetries.get(item) ?? 0
   }
 
+  /** Unfinished goals in plan order; the protection guard spans the whole plan. */
+  private unfinishedGoals(): QueuedGoal[] {
+    return this.queue.state.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+  }
+
   /**
    * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
    * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
@@ -1327,6 +1332,7 @@ export class JevController {
     const item = candidate.itemName
     const prior = this.placeRetryCount(item)
     const decision = evaluatePlaceRetry({ at, reason: result.failure ?? 'place_failed', priorRetries: prior })
+    if (item !== null) this.placementRetries.set(item, decision.count)
     if (!decision.retry) {
       this.logger.warn(
         'agent',
@@ -1336,7 +1342,6 @@ export class JevController {
       )
       return false
     }
-    if (item !== null) this.placementRetries.set(item, decision.count)
     this.logger.warn(
       'agent',
       decision.line,
