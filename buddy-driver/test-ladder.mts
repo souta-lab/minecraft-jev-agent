@@ -1,6 +1,6 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
-import { buildLadder, goalsForStrategy, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { buildLadder, deriveResumeRung, goalsForStrategy, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 
@@ -98,6 +98,60 @@ addCase('a known iron ore coordinate grounds the descent target below it (#14 + 
   return {
     pass: descent?.kind === 'descend' && descent.targetY === 47 && descent.targetItem === 'raw_iron',
     detail: `first=${descent?.kind}:${descent?.targetY} desc=${descent?.description}`,
+  }
+})
+
+addCase('a reset with raw_iron resumes at the iron_ingot rung, not wood (#reset-inventory)', () => {
+  const counts = { raw_iron: 8, coal: 7, cobblestone: 112, crafting_table: 1, furnace: 1 }
+  const resume = deriveResumeRung(counts, world())
+  const ladder = buildLadder(counts, world(), undefined, { resumeRungIndex: resume.rungIndex })
+  const expectIndex = RUNGS.findIndex((candidate) => candidate.id === 'iron_ingot')
+  const noWoodGoal = !ladder.goals.some((goal) => goal.targetItem === 'log')
+  const noWoodenPickaxe = !ladder.goals.some((goal) => goal.targetItem === 'wooden_pickaxe')
+  return {
+    pass:
+      resume.rungId === 'iron_ingot' &&
+      resume.rungIndex === expectIndex &&
+      resume.invEmpty === false &&
+      resume.fallbackFrom === null &&
+      ladder.rungId === 'iron_ingot' &&
+      noWoodGoal &&
+      noWoodenPickaxe,
+    detail: `resume=${resume.rungId}@${resume.rungIndex} invEmpty=${resume.invEmpty} ladder=${ladder.rungId} goals=[${ladder.goals.map((g) => g.targetItem).join(',')}]`,
+  }
+})
+
+addCase('a reset with an empty inventory starts at wood (#reset-inventory)', () => {
+  const resume = deriveResumeRung({}, world())
+  const ladder = buildLadder({}, world(), undefined, { resumeRungIndex: resume.rungIndex })
+  const woodGoal = ladder.goals.some((goal) => goal.targetItem === 'log')
+  return {
+    pass: resume.rungId === 'wood' && resume.rungIndex === 0 && resume.invEmpty === true && ladder.rungId === 'wood' && woodGoal,
+    detail: `resume=${resume.rungId}@${resume.rungIndex} invEmpty=${resume.invEmpty} ladder=${ladder.rungId} woodGoal=${woodGoal}`,
+  }
+})
+
+addCase('a reset with only unusable items still starts at wood (#reset-inventory)', () => {
+  const resume = deriveResumeRung({ dirt: 5, gravel: 3 }, world())
+  return {
+    pass: resume.invEmpty === true && resume.rungId === 'wood',
+    detail: `resume=${resume.rungId} invEmpty=${resume.invEmpty}`,
+  }
+})
+
+addCase('a resume rung whose precondition is missing falls back one step and logs it (#reset-inventory)', () => {
+  const counts = { cobblestone: 5, raw_iron: 8, coal: 7, crafting_table: 1, furnace: 1 }
+  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+  const resume = deriveResumeRung(counts, world(), (event, detail) => log.push({ event, detail }))
+  const fallback = log.find((entry) => entry.event === 'LADDER_RESUME_FALLBACK')
+  return {
+    pass:
+      resume.rungId === 'wooden_pickaxe' &&
+      resume.fallbackFrom === 'cobblestone' &&
+      resume.fallbackNeed === 'wooden_pickaxe' &&
+      fallback !== undefined &&
+      fallback.detail?.to === 'wooden_pickaxe',
+    detail: `resume=${resume.rungId} fallbackFrom=${resume.fallbackFrom} need=${resume.fallbackNeed} log=${JSON.stringify(fallback?.detail)}`,
   }
 })
 
