@@ -182,7 +182,12 @@ const LOG_BLOCK_NAMES = [
 
 const KNOWN_RESOURCE_CAP = 256
 
-function mergeKnownResources(target: KnownResourceJson[], found: KnownResourceJson[]): number {
+export function mergeKnownResources(
+  target: KnownResourceJson[],
+  found: KnownResourceJson[],
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+  worldEpoch?: number,
+): number {
   const seen = new Set(target.map((resource) => `${resource.name}@${resource.x},${resource.y},${resource.z}`))
   let added = 0
   for (const resource of found) {
@@ -190,12 +195,19 @@ function mergeKnownResources(target: KnownResourceJson[], found: KnownResourceJs
     if (seen.has(key)) continue
     if (target.length >= KNOWN_RESOURCE_CAP) break
     seen.add(key)
-    target.push({
+    const stored = {
       name: resource.name,
       kind: resource.kind,
       x: Math.round(resource.x),
       y: Math.round(resource.y),
       z: Math.round(resource.z),
+    }
+    target.push(stored)
+    log?.('KNOWN_RESOURCE', {
+      item: stored.name,
+      kind: stored.kind,
+      at: `${stored.x},${stored.y},${stored.z}`,
+      ...(worldEpoch === undefined ? {} : { worldEpoch }),
     })
     added += 1
   }
@@ -389,7 +401,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     const name = bot.blockAt(new Vec3(log.x, log.y, log.z))?.name ?? 'unknown_log'
     foundResources.push({ name, kind: 'log', x: log.x, y: log.y, z: log.z })
   }
-  const newKnownResources = mergeKnownResources(world.knownResources, foundResources)
+  const newKnownResources = mergeKnownResources(
+    world.knownResources,
+    foundResources,
+    (event, detail) => ctx.log(event, detail),
+    ctx.worldKey.worldEpoch,
+  )
   const proposal: WorldMemoryDelta = {
     craftingTables: tables,
     furnaces,

@@ -32,7 +32,7 @@ import type { Experimental_EvaluationQuestion } from 'ai'
 import type { PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
-import { matchesResourceClass } from '../jev-agent/src/resourceClass.ts'
+import { matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
@@ -86,6 +86,52 @@ export function bestPickaxeRank(counts: Counts): number {
     if (name !== undefined && has(counts, name)) rank = Math.max(rank, i + 1)
   }
   return rank
+}
+
+/** Count inventory items matching a concrete item id OR a semantic class. */
+export function countResource(counts: Counts, spec: string): number {
+  let total = 0
+  for (const [name, n] of Object.entries(counts)) if (resourceMatches(name, spec)) total += n
+  return total
+}
+
+/**
+ * Inventory-first planning (#43): a production goal already satisfied by the
+ * LIVE inventory must never be emitted. A fuel step also accepts a substitute
+ * (`log` goal satisfied by held planks / coal / charcoal). Deterministic.
+ */
+export function goalAlreadyMet(goal: PlannedGoal, counts: Counts): boolean {
+  const need = Math.max(1, Math.floor(goal.requiredCount ?? 1))
+  if (goal.kind !== 'collect' && goal.kind !== 'craft' && goal.kind !== 'smelt') return false
+  return goalHave(goal, counts) >= need
+}
+
+/** Live inventory count that satisfies a goal, counting fuel substitutes. */
+export function goalHave(goal: PlannedGoal, counts: Counts): number {
+  const item = goal.targetItem
+  if (typeof item !== 'string' || item.length === 0) return 0
+  if (item === 'log' || item === 'planks' || item === 'fuel') return countClass(counts, 'fuel') - (counts['stick'] ?? 0)
+  return countResource(counts, item)
+}
+
+/** Drop goals already satisfied by the live inventory, logging each skip (#43). */
+export function filterAlreadyMet(
+  goals: readonly PlannedGoal[],
+  counts: Counts,
+  rungId: string,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): PlannedGoal[] {
+  return goals.filter((goal) => {
+    if (!goalAlreadyMet(goal, counts)) return true
+    log?.('PRECONDITION_ALREADY_MET', {
+      item: goal.targetItem ?? goal.description,
+      have: goalHave(goal, counts),
+      goal: goal.description,
+      rungId,
+      action: 'skip',
+    })
+    return false
+  })
 }
 
 function woodUnits(counts: Counts): number {
@@ -354,21 +400,28 @@ function needsOreDescent(rungId: string, counts: Counts): boolean {
   return bestPickaxeRank(counts) >= 1
 }
 
-/**
- * Charcoal needs a furnace that is actually placed near the bot. When the bot
- * only holds one and no furnace is placed nearby, placing it is the inventory-
- * derived prerequisite (otherwise `smelt` has no candidate and the queue wedges).
- */
-function charcoalPrereq(counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
-  if (!has(counts, 'furnace')) return []
+/** Inventory-derived prerequisite chain for a placed furnace (#43). */
+export function furnacePrereqGoals(counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
   if ((placedFurnacesNear ?? 0) > 0) return []
-  return [{ kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 }]
+  const place: PlannedGoal = { kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
+  const craft: PlannedGoal = { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
+  if (has(counts, 'furnace')) return [place]
+  const stoneHave = countClass(counts, 'stone')
+  if (stoneHave >= 8) return [craft, place]
+  const need = Math.max(1, 8 - stoneHave)
+  const collect: PlannedGoal = {
+    kind: 'collect',
+    description: `collect ${need} x cobblestone (furnace material)`,
+    targetItem: 'cobblestone',
+    requiredCount: need,
+  }
+  return [collect, craft, place]
 }
 
 function withFurnacePrereq(goals: PlannedGoal[], counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
   if (!goals.some((goal) => goal.targetItem === 'charcoal')) return goals
   if (goals.some((goal) => goal.targetItem === 'furnace')) return goals
-  const prereq = charcoalPrereq(counts, placedFurnacesNear)
+  const prereq = furnacePrereqGoals(counts, placedFurnacesNear)
   return prereq.length === 0 ? goals : [...prereq, ...goals]
 }
 
@@ -436,12 +489,32 @@ export function buildLadder(
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || rung.future === true) continue
-    if (rung.satisfied(counts, world)) continue
+    if (rung.satisfied(counts, world)) {
+      if (log !== undefined) {
+        for (const goal of rung.goals(counts, world)) {
+          const item = goal.targetItem
+          if (typeof item !== 'string') continue
+          const have = countResource(counts, item)
+          if (have <= 0) continue
+          log('PRECONDITION_ALREADY_MET', {
+            item,
+            have,
+            goal: goal.description,
+            rungId: rung.id,
+            action: 'skip',
+          })
+          break
+        }
+      }
+      continue
+    }
+    const emitted = withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear)
+    const rungGoals = filterAlreadyMet(emitted, counts, rung.id, log)
+    if (rungGoals.length === 0) continue
     if (rungIndex === RUNGS.length) {
       rungIndex = i
       rungId = rung.id
     }
-    const rungGoals = withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear)
     const description = rung.goals(counts, world)[0]?.description ?? rung.id
     const precondition = rungPrecondition(rung, counts, world)
     if (!precondition.ok) {
@@ -502,7 +575,8 @@ export interface PlanOption {
   goals: PlannedGoal[]
 }
 
-function goalSignature(goals: readonly PlannedGoal[]): string {
+/** Stable signature of a compiled goal list, for STRATEGY_BODY_DELTA (#29). */
+export function goalSignature(goals: readonly PlannedGoal[]): string {
   return goals.map((goal) => `${goal.kind}:${goal.targetItem ?? goal.description}:${goal.requiredCount ?? 1}`).join('|')
 }
 
@@ -524,10 +598,10 @@ function dedupeOptions(options: PlanOption[]): PlanOption[] {
 export function buildPlanOptions(
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number },
+  opts?: { placedFurnacesNear?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
 ): PlanOption[] {
   const planGoals = (rung: Rung): PlannedGoal[] =>
-    withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear)
+    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear), counts, rung.id, opts?.log)
   const unsat = reachableUnsatisfiedRungs(counts, world)
   if (unsat.length === 0) {
     return [
@@ -580,6 +654,34 @@ const UPKEEP_GOAL: PlannedGoal = {
 const FRONT_FALLBACK: PlanOption = { id: 'front_fallback', title: 'deterministic ladder front', goals: [UPKEEP_GOAL] }
 
 /**
+ * A replan that MUST change the body (#43 follow-up): its first goal is the
+ * nearest unsatisfied ore rung's descent+ore chain, or a stone-collection
+ * descent, so the compiled candidates change position / resource source
+ * (branch mine, ore descent, known-resource retrieval) instead of re-issuing
+ * the blocked front goal. Deterministic; no LLM.
+ */
+export function buildBodyChangeOption(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: { placedFurnacesNear?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
+): PlanOption {
+  const unsat = reachableUnsatisfiedRungs(counts, world)
+  const planGoals = (rung: Rung): PlannedGoal[] =>
+    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear), counts, rung.id, opts?.log)
+  const goals: PlannedGoal[] = []
+  const pushUnique = (goal: PlannedGoal): void => {
+    if (goals.some((existing) => existing.kind === goal.kind && existing.targetItem === goal.targetItem)) return
+    goals.push(goal)
+  }
+  const oreRung = unsat.find((rung) => ORE_RUNG_ITEM[rung.id] !== undefined)
+  if (oreRung !== undefined) for (const goal of planGoals(oreRung)) pushUnique(goal)
+  const front = unsat[0]
+  if (front !== undefined && front.id !== oreRung?.id) for (const goal of planGoals(front)) pushUnique(goal)
+  if (goals.length === 0) pushUnique(stoneDescentGoal(counts))
+  return { id: `body_change_${front?.id ?? 'upkeep'}`, title: `body-changing replan toward ${oreRung?.id ?? front?.id ?? 'ore'}`, goals }
+}
+
+/**
  * Map a strategy id chosen by the upper LLM onto a bounded, grounded goal list.
  * This is the ONLY thing the LLM influences: System One still decides every
  * action, and every goal maps to an existing candidate kind.
@@ -600,9 +702,9 @@ export function goalsForStrategy(
     case 'descend_to_y16':
       return rank < 1 ? ladderFront : chosen([stone(24)])
     case 'explore_cave':
-      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(16)]) : chosen([iron(3)])
+      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(16)]) : chosen([stone(12), iron(3)])
     case 'branch_mine':
-      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(32)]) : chosen([iron(3)])
+      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(32)]) : chosen([stone(24), iron(3)])
     case 'return_to_known_ore':
       return rank < 2 ? (rank < 1 ? ladderFront : chosen([stone(16)])) : chosen([iron(3)])
     case 'smelt_and_craft':
@@ -803,6 +905,8 @@ export class PlannerBrain implements System2Brain {
   private postDeathHandled = false
   private lastAdvisorStrategy: AdvisorStrategy | null = null
   private lastAdvisorSignature: string | null = null
+  private lastBodySignature: string | null = null
+  private lastBodyGoals: PlannedGoal[] = []
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -823,15 +927,20 @@ export class PlannerBrain implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const started = Date.now()
     const counts = inventoryCounts(this.bot)
-    const options = buildPlanOptions(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
+    const options = buildPlanOptions(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear(), log: this.log })
     const reason = mapReason(request, this.firstCall)
     this.firstCall = false
     this.emitMilestones(counts)
     const fallbackOption = options[0] ?? FRONT_FALLBACK
 
     const waitStreak = trailingWaitStreak(request.recentOutcomes)
+    const stalled = waitStreak >= 3
     const adviseReason = advisorReasonFor(reason, waitStreak)
     const mercuryTrigger = this.mercuryTriggerFor(adviseReason)
+    const stalledOption = stalled
+      ? buildBodyChangeOption(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear(), log: this.log })
+      : null
+    const deterministicOption = stalledOption ?? fallbackOption
     if (this.mercury !== undefined && mercuryTrigger !== null) {
       const repair = await this.mercury.tryRepair(request, mercuryTrigger)
       if (repair !== null) {
@@ -849,8 +958,8 @@ export class PlannerBrain implements System2Brain {
         return this.finishPlanOp(option, request, repair.op, `mercury ${repair.op}: ${repair.strategy}`)
       }
       // Mercury already logged ADVISOR source=fallback; never use the Jev advisor here.
-      this.logPlan('fallback', fallbackOption, reason, started, 0, 'mercury unavailable -> deterministic ladder')
-      return this.finishPlan(fallbackOption, request, 'mercury unavailable')
+      this.logPlan('fallback', deterministicOption, reason, started, 0, 'mercury unavailable -> deterministic ladder')
+      return this.finishPlan(deterministicOption, request, 'mercury unavailable', stalled)
     }
 
     if (this.advisor !== undefined && adviseReason !== null) {
@@ -860,31 +969,32 @@ export class PlannerBrain implements System2Brain {
       const goals = decision.goals ?? goalsForStrategy(decision.strategy, counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
       const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals }
       this.logStrategySet(decision, goals)
-      return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`)
+      return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`, stalled)
     }
 
     if (this.mode === 'deterministic') {
-      this.logPlan('fallback', fallbackOption, reason, started, 0, 'planner disabled (deterministic mode)')
-      return { goals: fallbackOption.goals, note: 'deterministic ladder (planner disabled)', op: 'replace' }
+      this.logPlan('fallback', deterministicOption, reason, started, 0, 'planner disabled (deterministic mode)')
+      this.emitBodyDelta(deterministicOption.id, deterministicOption)
+      return { goals: deterministicOption.goals, note: 'deterministic ladder (planner disabled)', op: 'replace' }
     }
 
     const stateHash = this.hashState(counts, request)
     const bypassCache = reason === 'stuck' || reason === 'impossible'
     const cached = bypassCache ? undefined : this.cache.entries[stateHash]
     if (cached !== undefined) {
-      const option = options.find((entry) => entry.id === cached.optionId) ?? fallbackOption
+      const option = options.find((entry) => entry.id === cached.optionId) ?? deterministicOption
       this.logPlan('llm', option, reason, started, 0, `cached plan (${option.id})`, true)
-      return this.finishPlan(option, request, `cached plan ${option.id}`)
+      return this.finishPlan(option, request, `cached plan ${option.id}`, stalled)
     }
 
     const now = Date.now()
     if (this.calls > 0 && now - this.cache.lastCallAt < this.minIntervalMs) {
-      this.logPlan('fallback', fallbackOption, reason, started, 0, `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`)
-      return this.finishPlan(fallbackOption, request, 'throttled: deterministic ladder')
+      this.logPlan('fallback', deterministicOption, reason, started, 0, `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`)
+      return this.finishPlan(deterministicOption, request, 'throttled: deterministic ladder', stalled)
     }
     if (this.calls >= this.maxCalls) {
-      this.logPlan('fallback', fallbackOption, reason, started, 0, `call budget exhausted (${this.maxCalls})`)
-      return this.finishPlan(fallbackOption, request, 'llm call budget exhausted')
+      this.logPlan('fallback', deterministicOption, reason, started, 0, `call budget exhausted (${this.maxCalls})`)
+      return this.finishPlan(deterministicOption, request, 'llm call budget exhausted', stalled)
     }
 
     try {
@@ -894,21 +1004,22 @@ export class PlannerBrain implements System2Brain {
       this.cache.entries[stateHash] = { optionId: chosen.optionId, costUsd: chosen.costUsd, ts: Date.now() }
       this.trimCache()
       this.saveCache()
-      const option = options.find((entry) => entry.id === chosen.optionId) ?? fallbackOption
+      const option = stalled ? deterministicOption : (options.find((entry) => entry.id === chosen.optionId) ?? fallbackOption)
       const note = chosen.unknownChoice !== null ? `unknown choice ${chosen.unknownChoice} -> ${option.id}` : `llm chose ${option.id}`
       this.logPlan('llm', option, reason, started, chosen.costUsd, note, false, chosen.latencyMs, chosen)
-      return this.finishPlan(option, request, note)
+      return this.finishPlan(option, request, note, stalled)
     } catch (error) {
       const message = describeError(error)
       const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
-      this.logPlan('fallback', fallbackOption, reason, started, 0, `${kind}: ${message}`)
-      return this.finishPlan(fallbackOption, request, `${kind}: ${message}`)
+      this.logPlan('fallback', deterministicOption, reason, started, 0, `${kind}: ${message}`)
+      return this.finishPlan(deterministicOption, request, `${kind}: ${message}`, stalled)
     }
   }
 
   // -- internals ------------------------------------------------------------
 
-  private finishPlan(option: PlanOption, request: System2PlanRequest, note: string): System2Plan {
+  private finishPlan(option: PlanOption, request: System2PlanRequest, note: string, force = false): System2Plan {
+    this.emitBodyDelta(option.id, option)
     const queue = request.goalQueueState
     const first = option.goals[0]
     const current = queue.current
@@ -918,7 +1029,7 @@ export class PlannerBrain implements System2Brain {
       first !== undefined &&
       current.kind === first.kind &&
       (current.targetItem ?? null) === (first.targetItem ?? null)
-    if (alreadyActive) {
+    if (alreadyActive && !force) {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
     return { goals: option.goals, note, op: 'replace' }
@@ -926,6 +1037,7 @@ export class PlannerBrain implements System2Brain {
 
   private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
     if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
+    this.emitBodyDelta(option.id, option)
     const queue = request.goalQueueState
     const first = option.goals[0]
     const current = queue.current
@@ -939,6 +1051,24 @@ export class PlannerBrain implements System2Brain {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
     return { goals: option.goals, note, op }
+  }
+
+  /**
+   * #29: prove that a plan/strategy change actually reaches the body by logging
+   * the compiled goals added/removed relative to the previous plan. A strategy
+   * label that compiles to the same goals logs no delta.
+   */
+  private emitBodyDelta(strategy: string, option: PlanOption): void {
+    const signature = goalSignature(option.goals)
+    if (signature === this.lastBodySignature) return
+    const same = (a: PlannedGoal, b: PlannedGoal): boolean =>
+      a.kind === b.kind && (a.targetItem ?? null) === (b.targetItem ?? null) && (a.requiredCount ?? 1) === (b.requiredCount ?? 1)
+    const added = option.goals.filter((goal) => !this.lastBodyGoals.some((previous) => same(goal, previous))).map((goal) => goal.description)
+    const removed = this.lastBodyGoals.filter((previous) => !option.goals.some((goal) => same(goal, previous))).map((goal) => goal.description)
+    this.lastBodySignature = signature
+    this.lastBodyGoals = option.goals.map((goal) => ({ ...goal }))
+    if (added.length === 0 && removed.length === 0) return
+    this.log('STRATEGY_BODY_DELTA', { strategy, added, removed })
   }
 
   private mercuryTriggerFor(adviseReason: AdvisorReason | null): MercuryTriggerReason | null {

@@ -261,11 +261,10 @@ export function generateCandidates(
     })
   }
 
-  // Exploration only when the subgoal produced nothing to act on, so the list
-  // stays focused on actions that make progress on the plan.
-  if (candidates.length === 0) {
-    candidates.push(...retrievalCandidates(state, options, focusItem))
-  }
+  // A known-resource retrieval is grounded even when other (non-progressing)
+  // candidates exist: if the wanted block is not visible but its coordinate is
+  // remembered, going there is strictly better than re-issuing the front goal.
+  candidates.push(...retrievalCandidates(state, options, focusItem))
   if (candidates.length === 0) {
     const explore = pickExplore(state, state.terrain.standable, focusItem)
     if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < MOVE_FAILURE_LIMIT) {
