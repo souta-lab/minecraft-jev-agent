@@ -590,19 +590,22 @@ function registerDeathHazard(pos: Vec3Json, reason: string): DeathHazard {
 /** Death handling: log DEATH + lost inventory, register the hazard, stop the
  * current generation, and archive the ledger so the next respawn recomputes the
  * ladder from the LIVE (empty) inventory instead of resuming an impossible goal. */
-function handleBotDeath(b: Bot): void {
+/** Shared death/recovery pipeline: log DEATH, register the hazard, drop the
+ * generation, archive the ledger, and force a fresh ladder computation. `simulated`
+ * marks the operator rehearsal (`simdeath`) so it is never mistaken for a real
+ * death; it still exercises the exact same recovery path end to end. */
+function beginDeathRecovery(b: Bot, cause: string, simulated: boolean): { pos: Vec3Json | null; lost: Record<string, number> } {
   const entity = b.entity
   const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
   const lost = inventorySummary(b)
-  const healthBefore = lastHealth
-  const cause = inferDeathCause(b, pos, healthBefore)
   log('DEATH', {
     pos: pos === null ? '?' : fmtPos(pos),
     dimension: state.dimension,
     lostInventory: lost,
     itemsLost: Object.values(lost).reduce((sum, n) => sum + n, 0),
     cause,
-    healthBefore,
+    healthBefore: lastHealth,
+    simulated,
   })
   lastDeathAt = Date.now()
   lastSeenDeathPosition = pos
@@ -614,16 +617,22 @@ function handleBotDeath(b: Bot): void {
   activeGenerationId = null
   if (oldGeneration !== null) {
     try {
-      // dispose saves the ledger; archive it afterwards so the next respawn
-      // cannot resume an impossible goal.
       oldGeneration.dispose()
     } catch {
       // best effort
     }
   }
-  archiveLedger('death')
+  archiveLedger(simulated ? 'death-simulated' : 'death')
   saveState('death')
-  log('LADDER_RESET', { reason: 'death', invEmpty: Object.keys(lost).length === 0, cause })
+  log('LADDER_RESET', { reason: 'death', invEmpty: Object.keys(lost).length === 0, cause, simulated })
+  return { pos, lost }
+}
+
+function handleBotDeath(b: Bot): void {
+  const entity = b.entity
+  const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+  const cause = inferDeathCause(b, pos, lastHealth)
+  beginDeathRecovery(b, cause, false)
 }
 
 function connect(): void {
@@ -1099,6 +1108,39 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     log('RESUME', { ok, reconnect: false })
     writeAcceptance()
     controlReply(socket, request, true, { frozen: false, started: ok })
+    return
+  }
+  if (cmd === 'simdeath') {
+    if (bot === null || bot.entity === undefined) {
+      controlReply(socket, request, false, { error: 'no live bot' })
+      return
+    }
+    const old = generation
+    generation = null
+    activeGenerationId = null
+    if (old !== null) {
+      try {
+        await old.quiesce()
+      } catch {
+        // best effort
+      }
+      old.dispose()
+    }
+    for (const item of bot.inventory.items()) {
+      try {
+        await bot.toss(item.type, null, item.count)
+      } catch {
+        // best effort: keep dropping the rest
+      }
+    }
+    await delay(600)
+    const { lost } = beginDeathRecovery(bot, 'simulated', true)
+    deathResetPending = false
+    saveState('simdeath')
+    setTimeout(() => {
+      if (!shuttingDown) void startGeneration('simdeath')
+    }, 800)
+    controlReply(socket, request, true, { simulated: true, remaining: Object.keys(lost).length })
     return
   }
   if (cmd === 'worldreset') {
