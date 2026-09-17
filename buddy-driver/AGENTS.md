@@ -414,3 +414,16 @@ GENERATION_STOP id=... stopped=stopped-by-caller success=false ticks=1 verifiedD
 `simdeath` は死亡復帰の決定的な再現に使える（kill相当を任意に起こせる）。
 `worldreset` は破壊的（worldEpochが変わる）ので、人間不在の自律運転では使わない。
 ```
+
+追記11（#26/#34）— `simdeath` の semantics:
+```
+・既定は soft（非破壊）: ledger / milestone / hazard memory を snapshot し、
+  死亡復帰パス（DEATH → LADDER_RESET → generation 再起動）を実行した後に復元する。
+  inventory は toss しない。log: SIMDEATH mode=soft ledgerRestored=true hazardsRestored=true
+・破壊的版は明示的にのみ: {cmd:"simdeath --hard"} または {cmd:"simdeath", hard:true}
+  （args:{hard:true} も可）。inventory を toss し後代で ladder を再計算する。
+・simulated hazard は本番 memory に入らない（HAZARD_SKIPPED source=simulation、
+  durableHazards は不変）。rehearsal 専用の非永続 namespace にのみ記録する。
+・DEATH は toss/clear の前に inventory を取得する:
+  lostInventory=<summary> itemsLost=<n> capturedBeforeDrop=true
+```
