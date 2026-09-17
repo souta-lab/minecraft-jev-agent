@@ -8,7 +8,7 @@
 // at instead of "target === null therefore down".
 import type { Vec3Json } from './state.ts'
 
-export type DigDir = 'E' | 'W' | 'N' | 'S'
+export type DigDir = 'E' | 'W' | 'N' | 'S' | 'D'
 export type DigMode = 'down' | 'level'
 
 export interface DigStep {

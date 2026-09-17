@@ -24,6 +24,7 @@
     "vertical-plan-test": "tsx test-vertical-plan.mts",
     "retrieval-stall-test": "tsx test-retrieval-stall.mts",
     "predicate-goal-test": "tsx test-predicate-goal.mts",
+    "descend-plan-test": "tsx test-descend-plan.mts",
     "replan-throttle-test": "tsx test-replan-throttle.mts",
     "step-pipeline-test": "tsx data/step-pipeline-test.mts",
     "step-cut-test": "tsx data/step-cut-test.mts",

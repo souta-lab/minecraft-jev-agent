@@ -165,8 +165,11 @@ export type HeadroomCut = {
   reason: string
 }
 
+/** A cardinal stair direction, plus `D` for digging straight down the bot's column. */
+export type DescentDir = 'E' | 'W' | 'N' | 'S' | 'D'
+
 export type DescentOption = {
-  dir: 'E' | 'W' | 'N' | 'S'
+  dir: DescentDir
   mode: DescentMode
   dx: number
   dz: number
@@ -235,7 +238,7 @@ export type AgentSignals = {
    */
   failedCandidates: Record<string, number>
   /** fixed dig direction once chosen; do not flip until the cap/resource (#4) */
-  digDir?: 'E' | 'W' | 'N' | 'S' | null
+  digDir?: DescentDir | null
   /** consecutive digs already executed in `digDir` (cap `DIG_PATH_CAP`) */
   digDirCount?: number
   /** staircase depth (down steps) for the current dig path */
@@ -865,56 +868,64 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     { dir: 'S', dx: 0, dz: 1 },
   ]
 
-  const out: DescentOption[] = []
-  for (const { dir, dx, dz } of dirs) {
-    for (const mode of ['down', 'level'] as const) {
-      const wall = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
-      const head = { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz }
-      const stepY = mode === 'down' ? feet.y - 1 : feet.y
-      const step = { x: feet.x + dx, y: stepY, z: feet.z + dz }
-      const floor = { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz }
-      const support = { x: feet.x + dx, y: stepY - 1, z: feet.z + dz }
-      const wallSolid = solid(wall.x, wall.y, wall.z)
-      const headSolid = solid(head.x, head.y, head.z)
-      const floorSolid = solid(floor.x, floor.y, floor.z)
-      const supportSolid = solid(support.x, support.y, support.z)
-      const wallOk = clear(wall.x, wall.y, wall.z) || diggableSolid(wall.x, wall.y, wall.z)
-      const headOk = clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
-      const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
-      let reason = 'safe'
-      if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
-      else if (!headOk) reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
-      else if (!floorOk) reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
-      else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
-      else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) reason = 'floor already open (uncontrolled fall)'
-      else if (hazardsAround(hazardous, wall, head, floor, step, support)) reason = 'lava/water in the step column'
-      const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
-      const primaryBlock = at(primary.x, primary.y, primary.z)
-      const primaryHarvest =
-        primaryBlock === null
-          ? { yield: null, harvestTool: null, harvestTier: null }
-          : resolveBlockHarvest(bot, primaryBlock.name)
-      out.push({
-        dir,
-        mode,
-        dx,
-        dz,
-        step,
-        wall,
-        head,
-        floor,
-        wallSolid,
-        headSolid,
-        floorSolid,
-        safe: reason === 'safe',
-        reason,
-        digName: primaryBlock?.name ?? null,
-        digHarvestTool: primaryHarvest.harvestTool,
-        digHarvestTier: primaryHarvest.harvestTier,
-        diggable: primaryBlock?.diggable ?? false,
-      })
+  const makeOption = (dir: DescentDir, mode: DescentMode, dx: number, dz: number): DescentOption => {
+    const ownColumn = dx === 0 && dz === 0
+    const wall = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+    const head = { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz }
+    const stepY = mode === 'down' ? feet.y - 1 : feet.y
+    const step = { x: feet.x + dx, y: stepY, z: feet.z + dz }
+    const floor = { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz }
+    const support = { x: feet.x + dx, y: stepY - 1, z: feet.z + dz }
+    const wallSolid = solid(wall.x, wall.y, wall.z)
+    const headSolid = solid(head.x, head.y, head.z)
+    const floorSolid = solid(floor.x, floor.y, floor.z)
+    const supportSolid = solid(support.x, support.y, support.z)
+    // The bot's own column needs no front/head clearance: it digs the floor.
+    const wallOk = ownColumn || clear(wall.x, wall.y, wall.z) || diggableSolid(wall.x, wall.y, wall.z)
+    const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
+    const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
+    let reason = 'safe'
+    if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
+    else if (!headOk) reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
+    else if (!floorOk) reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
+    else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
+    else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) reason = 'floor already open (uncontrolled fall)'
+    else if (hazardsAround(hazardous, wall, head, floor, step, support)) reason = 'lava/water in the step column'
+    const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
+    const primaryBlock = at(primary.x, primary.y, primary.z)
+    const primaryHarvest =
+      primaryBlock === null
+        ? { yield: null, harvestTool: null, harvestTier: null }
+        : resolveBlockHarvest(bot, primaryBlock.name)
+    return {
+      dir,
+      mode,
+      dx,
+      dz,
+      step,
+      wall,
+      head,
+      floor,
+      wallSolid,
+      headSolid,
+      floorSolid,
+      safe: reason === 'safe',
+      reason,
+      digName: primaryBlock?.name ?? null,
+      digHarvestTool: primaryHarvest.harvestTool,
+      digHarvestTier: primaryHarvest.harvestTier,
+      diggable: primaryBlock?.diggable ?? false,
     }
   }
+
+  const out: DescentOption[] = []
+  for (const { dir, dx, dz } of dirs) {
+    for (const mode of ['down', 'level'] as const) out.push(makeOption(dir, mode, dx, dz))
+  }
+  // #41: the bot's own column is the last-resort descent when every cardinal
+  // staircase step is unsafe (open floor / no support / hazard). It digs the
+  // block under the feet and drops one controlled block.
+  out.push(makeOption('D', 'down', 0, 0))
   return out
 }
 
