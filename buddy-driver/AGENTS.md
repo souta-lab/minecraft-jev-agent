@@ -298,3 +298,35 @@ PY
 ・常駐ホストは単一インスタンスのみ（pidでkill、`pkill -f` 自爆禁止）
 ・人間が居ないので、危険な変更（サーバー停止・world削除・履歴改変・force push）はしない
 ```
+
+---
+
+## 追記7（01:33 実測・control.sock の `report` より）— 自律運転で見えた優先修正
+
+```
+runId=run-mu5qd4ah-3xdh  connected=true frozen=false
+generations=150 reloads=50 recoveries=72  milestone=raw_iron  contractVersion=2
+stats: reconnects=65  reloadsChangedHash=12  reloadsSkippedUnchanged=2  reloadsFailed=0
+       freezeCycles=0  wedge=true  goalComplete=false
+worldMemory: craftingTables=13  furnaces=1  discoveredOres=[coal_ore, copper_ore, iron_ore]
+             traversalFailures=0  hazards=1  hardHazards=0
+listeners: physicsTick=3 (baseline=2)  death=4  end=3  kicked=2   → ★listenerLeak=true
+status: running=true  policyKind=fallback  policyModel=deterministic-local-fallback+descend...
+ledger: current=g3:collect:raw_iron  origin="llm"  done=0  hasImpossible=false
+```
+
+### 優先修正（この順）
+1. **★listenerリークの解消（P1）**: `physicsTick` が baseline 2 に対し 3（`listenerLeak=true`）。
+   reload のたびに executor 系リスナーが増えている疑い。世代 `detach()` で確実に解除し、
+   リロード前後で全イベントの listenerCount が baseline と一致することを assert する。
+   受け入れ: 10回リロード後も `listenerLeak=false`。
+2. **★再接続が多すぎる（reconnects=65）**: 多重起動キック（解消済み）＋サーバー再起動＋ホスト再起動が原因。
+   単一インスタンス強制（追記4）＋「ホスト再起動は最終手段」を徹底し、1時間あたり reconnects<=2 を目標にする。
+3. **★既知鉱石があるのに探索で停滞**: `discoveredOres` に **iron_ore がある**のに `collect 3 x raw_iron` で wedge。
+   → プランナは「目標資源が `discoveredOres`/WorldMemory に存在するなら `RETURN_TO_KNOWN_ORE:<id>` を最優先候補にする」。
+   `ORE_KNOWN item=iron_ore at=<x,y,z> -> strategy=return_to_known_ore` をログ。
+   受け入れ: 既知の鉄鉱石座標へ移動して採掘し、`raw_iron` が在庫に出現する。
+4. **freezeCycles=0**: freeze→dump→reload→resume がまだ一度も実行されていない（P2）。一度実走させて証拠を残す。
+5. **policyKind=fallback**: この世代は決定論で動いている。Mercury/Jev の実使用は設定（system2.config.json）で明示的に有効化し、
+   `ADVISOR source=mercury` の実ログを残す（追記6の監査スキーマ）。
+```
