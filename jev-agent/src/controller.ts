@@ -248,6 +248,8 @@ function emptySignals(): AgentSignals {
 
 /** Mineflayer's own block-interaction cap: `canDigBlock` refuses beyond ~5.1 blocks. */
 export const MAX_BLOCK_REACH = 5
+/** A repeated WAIT becomes a bounded replan first (never an immediate wedge). */
+const WAIT_REPLAN_LIMIT = 4
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750
 const { goals } = pathfinderModule
@@ -336,6 +338,7 @@ export class JevController {
   private chosenCounts = new Map<string, number>()
   private chosenCountsAtProgress = -1
   private wedgeAborted = false
+  private waitReplans = 0
   private wedgeReason: string | null = null
 
   private pendingDecisions = new Map<number, PendingDecision>()
@@ -1579,6 +1582,11 @@ export class JevController {
       .plan(request)
       .then((plan) => {
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+        if (added.length > 0) {
+          this.chosenCounts.clear()
+          this.chosenCountsAtProgress = this.lastProgress
+          this.lastProgressAt = Date.now()
+        }
         this.llmNotes.push(plan.note)
         if (this.llmNotes.length > 12) this.llmNotes.shift()
         this.logger.info(
@@ -1742,9 +1750,20 @@ export class JevController {
     }
     const count = (this.chosenCounts.get(actionId) ?? 0) + 1
     this.chosenCounts.set(actionId, count)
-    if (count > this.options.wedgeRepeatLimit) {
-      this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
+    if (count <= this.options.wedgeRepeatLimit) return
+    if (actionId === 'WAIT' && !this.options.singleShotPlanner && this.waitReplans < WAIT_REPLAN_LIMIT) {
+      const summon = this.summonLlm('no_progress', `WAIT chosen ${count}x with no verified progress; requesting a replan`)
+      this.waitReplans += 1
+      this.chosenCounts.set(actionId, 0)
+      this.logger.warn(
+        'agent',
+        `WAIT_LIMIT n=${count} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT})`,
+        { actionId, count, waitReplans: this.waitReplans, llmSummoned: summon?.triggered ?? false },
+        this.tickCounter,
+      )
+      return
     }
+    this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
   }
 
   private abortWedge(reason: string): void {

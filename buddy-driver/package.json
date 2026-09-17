@@ -9,6 +9,7 @@
     "build": "node build.mts",
     "start": "node agent-runner.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "ladder-test": "node ../jev-agent/node_modules/.bin/tsx test-ladder.mts",
     "mercury-test": "node test-mercury.mts",
     "mercury:last": "tail -1 logs/jev/mercury-calls.jsonl | python3 -m json.tool"
   },

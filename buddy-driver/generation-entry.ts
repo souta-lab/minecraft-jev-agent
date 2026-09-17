@@ -360,7 +360,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   const counts = inventoryCounts(ctx.bot)
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
-  const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail))
+  const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
+    dimension: ctx.bot.game?.dimension ?? null,
+  })
+  if (ladder.unsatisfiable !== null) {
+    ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
+  }
 
   // Death (or any explicit reset) recomputes the ladder from the LIVE inventory.
   // An empty inventory means restart at wood; the queue is never given a goal
@@ -469,6 +474,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     advisor: mercuryEnablement.enabled ? `mercury:${MERCURY_MODEL_DEFAULT}` : resolveAdvisorMode(plannerMode),
     advisorSource: mercuryEnablement.source,
     futureRungs: ladder.futureRungIds,
+    prereqReplaced: ladder.prereqReplaced,
     craftingTables: world.craftingTables.length,
     furnaces: world.furnaces.length,
   })
