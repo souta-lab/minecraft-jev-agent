@@ -434,3 +434,59 @@ not run; stability first). Bundler: **esbuild 0.28.2, pinned** (user decision).
   System One remains the sole action authority. `canDig=false`, no teleports.
 
 Full detail: `buddy-driver/ARCHITECTURE.md`.
+
+---
+
+# UPDATE 2026-09-18 01:58 JST (autonomous run) — what actually changed
+
+## Now working (verified with evidence)
+- **Mercury 2.5 is live as System2Brain** (exception-driven only):
+  `ADVISOR source=mercury reason=no_candidate strategy=mercury_continue_collect_raw_iron cost=0.000329 ms=6870`
+  followed by `STRATEGY_SET ... source=mercury goals=["collect 3 x raw_iron"]`. Transport: Vercel AI Gateway,
+  model id `inception/mercury-2.5`, same gateway key as Jev. Call records: `buddy-driver/logs/jev/mercury-calls.jsonl`
+  (schema: record, callId, ts, model, stage, latencyMs, retries, state, prompt, response, usage, cost, error).
+  An earlier failure mode `aborted due to timeout` at latencyMs=52 was fixed (realistic timeout + retry).
+- **Hot reload is healthy**: reloads with changing hashes at 150-300 ms, watcher covers `jev-agent/src`.
+- **P2 freeze -> context dump -> resume is verified**: control-socket `freeze {reason}` produced
+  `logs/resident/freeze-2026-09-17T16-39-46-442Z.json`, `resume` returned `{frozen:false,started:true}`.
+- **Death recovery exists**: `DEATH` and `LADDER_RESET` markers present; an operator rehearsal command `simdeath`
+  can reproduce a death on demand.
+- **Station reuse works**: `worldMemory.craftingTables=13` (the ~20 abandoned tables from batch runs are now reused).
+- **World memory works**: `discoveredOres=[coal_ore,copper_ore,iron_ore]`.
+- Movement root causes committed: `f68224c` (tool choice by block, spatial failure memory, hop order, dig direction),
+  `2e2496e` (stone staircase evidence, explore failure filtering, no-op MOVE detection).
+
+## The critical blocker (why nothing else can be validated)
+```
+markers: PRECONDITION_MISSING=133  LADDER_PREREQ=0
+resident: generations=213  recoveries=88  wedge=true  listenerLeak=true
+```
+The precondition-gated ladder (added for death recovery) treats a missing precondition as a STOP. When the queue head is
+`smelt 3 x iron_ingot` and the bot lacks `furnace + raw_iron`, the generation stops after 1 tick; the host recovers it
+into the same impossible goal, producing a ~10-15 s rotation. Because the agent never digs, the movement fixes cannot be
+observed at all (`TOOL_CHOICE`, `DIG_PATH`, `JUMP_ATTEMPT`, `DESCEND_LIMIT` are all 0).
+Fix (issue #12, in progress): replace the plan with the prerequisite chain from live inventory
+(`LADDER_PREREQ goal=... need=... -> replace goals=[...]`), only stop when provably unsatisfiable, and do not stop again
+for >= 20 ticks. Acceptance: ticks >= 100 and generations/recoveries per hour in single digits.
+
+## Design direction adopted (issue #11, supersedes #10)
+Grounded Options: `LLM/Mercury` creates or repairs the current Option/intent; `Jev` returns exactly two authoritative
+heads, `action` (Choice over grounded candidate ids = pi) and `abandon_option` (Boolean = beta); `Code` owns safety,
+physical truth, preconditions I(o), success predicates success(s,o) and completion checks; `Mineflayer` executes.
+The older semantic questions (`goal_progress`, `plan_still_valid`, `situation_understood`, `goal_blocked`,
+`strategy_change_needed`) must be demoted to shadow metrics that are logged but never steer. An `abandon_option`
+above a threshold requests a System2 replan. See `RESIDENT-MODE.md` section 14.
+
+## Operating facts for whoever picks this up
+- One-shot health dashboard: `node tools/buddy-status.mjs` (`--json` for machine-readable). It prints host count,
+  control-socket state, churn counters, listener leak, world memory, acceptance/freeze artifact paths, and marker counts.
+- Control socket `buddy-driver/data/resident/control.sock` (0600, JSON lines):
+  query-only `report | status | goal | milestone | acceptance`; actions `freeze | resume | reload | gc | leakcheck |
+  simdeath | quit`. Goal/milestone CANNOT be injected externally: the only way to unstick the agent is a code fix.
+  `worldreset` is destructive and is not used while unattended.
+- Server: Leaf 1.21.11 at 127.0.0.1:25565, offline, peaceful. Java here is 21.0.13-ea, so the server must be started with
+  `-DPaper.IgnoreJavaVersion=true`. `ops.json` now contains `s0u7a` at level 4 (RCON is enabled in properties but Leaf
+  does not actually listen on the rcon port, so ops.json was used instead).
+- Live-test usernames: `AI_M1*` / `AI_M2*`; `AI_Buddy` is owned by the resident host; `s0u7a` is the human.
+- Standing orders are in `/home/s0u7a/mc-ai/AGENTS.md` (autonomous operation, final goal M4/Ender Dragon).
+- PR #2 (CI + bounded Mercury System2 adapter) is open and mergeable but CI is red; do not merge until CI is green.

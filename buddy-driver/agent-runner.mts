@@ -825,6 +825,13 @@ function signatureOfSource(): string {
       }
     }
   }
+  const config = process.env.BUDDY_SYSTEM2_CONFIG ?? join(HERE, 'system2.config.json')
+  try {
+    const info = statSync(config)
+    hash.update(`${config}:${info.mtimeMs}:${info.size}\n`)
+  } catch {
+    // config absent; default-off is not a reload trigger
+  }
   return hash.digest('hex')
 }
 

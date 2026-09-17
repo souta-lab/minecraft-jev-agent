@@ -37,6 +37,7 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
+import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 
 export type Counts = Record<string, number>
 
@@ -270,6 +271,14 @@ export interface Ladder {
   rungIndex: number
   rungId: string
   futureRungIds: string[]
+  /**
+   * True when a rung's precondition was missing and the plan was replaced with
+   * the prerequisite chain derived from the live inventory (#12). The controller
+   * must keep ticking: a missing precondition is a replan, never a stop.
+   */
+  prereqReplaced: boolean
+  /** Non-null only when the missing precondition is provably unsatisfiable. */
+  unsatisfiable: string | null
 }
 
 /** Executable rungs only: the deterministic road the current executor can run. */
@@ -315,13 +324,80 @@ export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory):
   }
 }
 
-/** Unsatisfied executable rungs reachable right now: stop at the first rung whose
- * prerequisite is not met, so a plan never contains an impossible goal. */
+const ORE_RUNG_ITEM: Record<string, string> = { raw_iron: 'raw_iron', diamond: 'diamond' }
+
+const ORE_HOME: Record<string, { item: string; ore: string; dimension: string }> = {
+  raw_iron: { item: 'raw_iron', ore: 'iron_ore', dimension: 'minecraft:overworld' },
+  diamond: { item: 'diamond', ore: 'diamond_ore', dimension: 'minecraft:overworld' },
+}
+
+/**
+ * A bounded descent goal derived from the live inventory. Ore rungs need positive
+ * evidence of a level below (`#9`); a stone-collection goal is that evidence
+ * (`#4`), so digging resumes instead of the `collect raw_iron` WAIT wedge.
+ * `requiredCount` is current+8 so the goal is never instantly complete.
+ */
+export function stoneDescentGoal(counts: Counts): PlannedGoal {
+  const cobble = counts['cobblestone'] ?? 0
+  return {
+    kind: 'collect',
+    description: `collect ${cobble + 8} x cobblestone (descend toward ore levels)`,
+    targetItem: 'cobblestone',
+    requiredCount: cobble + 8,
+  }
+}
+
+function needsOreDescent(rungId: string, counts: Counts): boolean {
+  const ore = ORE_RUNG_ITEM[rungId]
+  if (ore === undefined) return false
+  if ((counts[ore] ?? 0) > 0) return false
+  return bestPickaxeRank(counts) >= 1
+}
+
+/** A rung's goals, with the inventory-derived descent prerequisite prepended for
+ * ore rungs whose ore is not held yet (#12). */
+export function rungGoalsWithPrereq(rung: Rung, c: Counts, w: ResidentWorldMemory): PlannedGoal[] {
+  const base = rung.goals(c, w)
+  if (!needsOreDescent(rung.id, c)) return base
+  return [stoneDescentGoal(c), ...base]
+}
+
+function withOreDescent(goals: PlannedGoal[], counts: Counts): PlannedGoal[] {
+  const first = goals[0]
+  const oreItem = first?.targetItem ?? null
+  if (oreItem === null || !Object.values(ORE_RUNG_ITEM).includes(oreItem)) return goals
+  if (!needsOreDescent(oreItem, counts)) return goals
+  if (goals.some((goal) => goal.targetItem === 'cobblestone')) return goals
+  return [stoneDescentGoal(counts), ...goals]
+}
+
+/**
+ * A precondition is provably unsatisfiable only when the required ore is absent
+ * from the inventory, the world memory and the current dimension. Anything else
+ * is a replan, never a stop (#12).
+ */
+export function prerequisiteUnsatisfiable(
+  rung: Rung,
+  c: Counts,
+  w: ResidentWorldMemory,
+  dimension: string | null,
+): string | null {
+  const home = ORE_HOME[rung.id]
+  if (home === undefined) return null
+  if (dimension === null || dimension.includes('overworld')) return null
+  const held = (c[home.item] ?? 0) > 0
+  const known = w.discoveredOres.some((name) => name.includes(home.ore.replace('_ore', '')))
+  if (held || known) return null
+  return `${home.ore} is absent from inventory, world memory and dimension ${dimension}`
+}
+
+/** Unsatisfied executable rungs reachable right now. A rung whose precondition is
+ * missing is still included: its goals follow the prerequisite goals in order, so
+ * the emitted plan is the full chain rather than stopping at the missing rung. */
 export function reachableUnsatisfiedRungs(c: Counts, w: ResidentWorldMemory): Rung[] {
   const out: Rung[] = []
   for (const rung of RUNGS) {
     if (rung.future === true || rung.satisfied(c, w)) continue
-    if (!rungPrecondition(rung, c, w).ok) break
     out.push(rung)
   }
   return out
@@ -332,10 +408,13 @@ export function buildLadder(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
+  opts?: { dimension?: string | null },
 ): Ladder {
   const goals: PlannedGoal[] = []
   let rungIndex = RUNGS.length
   let rungId = 'complete'
+  let prereqReplaced = false
+  let unsatisfiable: string | null = null
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || rung.future === true) continue
@@ -344,16 +423,28 @@ export function buildLadder(
       rungIndex = i
       rungId = rung.id
     }
+    const rungGoals = rungGoalsWithPrereq(rung, counts, world)
+    const description = rung.goals(counts, world)[0]?.description ?? rung.id
     const precondition = rungPrecondition(rung, counts, world)
     if (!precondition.ok) {
-      log?.('PRECONDITION_MISSING', {
-        goal: rung.goals(counts, world)[0]?.description ?? rung.id,
+      const reason = prerequisiteUnsatisfiable(rung, counts, world, opts?.dimension ?? null)
+      if (reason !== null) {
+        unsatisfiable = reason
+        log?.('PRECONDITION_UNSATISFIABLE', { goal: description, need: precondition.need, rungId: rung.id, reason })
+        break
+      }
+      prereqReplaced = true
+      log?.('PRECONDITION_MISSING', { goal: description, need: precondition.need, rungId: rung.id })
+      log?.('LADDER_PREREQ', {
+        goal: description,
         need: precondition.need,
         rungId: rung.id,
+        replace: rungGoals.map((goal) => goal.description),
       })
-      break
+      for (const goal of rungGoals) goals.push(goal)
+      continue
     }
-    for (const goal of rung.goals(counts, world)) goals.push(goal)
+    for (const goal of rungGoals) goals.push(goal)
   }
   if (goals.length === 0) {
     // Everything reachable is satisfied: keep the resident meaningfully busy.
@@ -364,6 +455,8 @@ export function buildLadder(
     rungIndex,
     rungId,
     futureRungIds: RUNGS.filter((rung) => rung.future === true).map((rung) => rung.id),
+    prereqReplaced,
+    unsatisfiable,
   }
 }
 
@@ -424,31 +517,31 @@ export function buildPlanOptions(counts: Counts, world: ResidentWorldMemory): Pl
   const options: PlanOption[] = []
   const first = unsat[0]
   if (first !== undefined) {
-    options.push({ id: `front_${first.id}`, title: `next milestone: ${first.id}`, goals: first.goals(counts, world) })
+    options.push({ id: `front_${first.id}`, title: `next milestone: ${first.id}`, goals: rungGoalsWithPrereq(first, counts, world) })
   }
-  const two = unsat.slice(0, 2).flatMap((rung) => rung.goals(counts, world))
+  const two = unsat.slice(0, 2).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
   if (two.length > 0) options.push({ id: 'two_rungs', title: `next two milestones (${unsat.slice(0, 2).map((r) => r.id).join(' + ')})`, goals: two })
   const ironIndex = unsat.findIndex((rung) => rung.id === 'iron_pickaxe')
   if (ironIndex >= 0) {
-    const iron = unsat.slice(0, ironIndex + 1).flatMap((rung) => rung.goals(counts, world))
+    const iron = unsat.slice(0, ironIndex + 1).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
     if (iron.length > 0) options.push({ id: 'finish_iron_age', title: 'finish the iron age (raw_iron -> iron_ingot -> iron_pickaxe)', goals: iron })
   }
   const gearIndex = unsat.findIndex((rung) => rung.id === 'iron_gear')
   if (gearIndex >= 0) {
-    const gear = unsat.slice(0, gearIndex + 1).flatMap((rung) => rung.goals(counts, world))
+    const gear = unsat.slice(0, gearIndex + 1).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
     if (gear.length > 0) options.push({ id: 'iron_gear', title: 'full iron gear then diamond', goals: gear })
   }
   const diamondIndex = unsat.findIndex((rung) => rung.id === 'diamond_pickaxe')
   if (diamondIndex >= 0) {
-    const diamond = unsat.slice(0, diamondIndex + 1).flatMap((rung) => rung.goals(counts, world))
+    const diamond = unsat.slice(0, diamondIndex + 1).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
     if (diamond.length > 0) options.push({ id: 'diamond_road', title: 'push to diamond + diamond_pickaxe', goals: diamond })
   }
-  const whole = unsat.flatMap((rung) => rung.goals(counts, world))
+  const whole = unsat.flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
   if (whole.length > 0) options.push({ id: 'full_ladder', title: 'the whole remaining ladder', goals: whole })
   const deduped = dedupeOptions(options)
   if (deduped.length === 0) {
     const front = first ?? unsat[0]
-    if (front !== undefined) deduped.push({ id: `front_${front.id}`, title: `next milestone: ${front.id}`, goals: front.goals(counts, world) })
+    if (front !== undefined) deduped.push({ id: `front_${front.id}`, title: `next milestone: ${front.id}`, goals: rungGoalsWithPrereq(front, counts, world) })
   }
   return deduped
 }
@@ -470,19 +563,20 @@ const FRONT_FALLBACK: PlanOption = { id: 'front_fallback', title: 'deterministic
 export function goalsForStrategy(strategy: AdvisorStrategy, counts: Counts, world: ResidentWorldMemory): PlannedGoal[] {
   const rank = bestPickaxeRank(counts)
   const ladderFront = buildLadder(counts, world).goals
-  const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x stone`, targetItem: 'stone', requiredCount: n })
+  const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x cobblestone`, targetItem: 'cobblestone', requiredCount: n })
   const iron = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x raw_iron`, targetItem: 'raw_iron', requiredCount: n })
+  const chosen = (goals: PlannedGoal[]): PlannedGoal[] => withOreDescent(goals, counts)
   switch (strategy) {
     case 'descend_to_y16':
-      return rank < 1 ? ladderFront : [stone(24)]
+      return rank < 1 ? ladderFront : chosen([stone(24)])
     case 'explore_cave':
-      return rank < 1 ? ladderFront : rank < 2 ? [stone(16)] : [iron(3)]
+      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(16)]) : chosen([iron(3)])
     case 'branch_mine':
-      return rank < 1 ? ladderFront : rank < 2 ? [stone(32)] : [iron(3)]
+      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(32)]) : chosen([iron(3)])
     case 'return_to_known_ore':
-      return rank < 2 ? (rank < 1 ? ladderFront : [stone(16)]) : [iron(3)]
+      return rank < 2 ? (rank < 1 ? ladderFront : chosen([stone(16)])) : chosen([iron(3)])
     case 'smelt_and_craft':
-      return ladderFront
+      return chosen(ladderFront)
   }
 }
 
@@ -603,6 +697,14 @@ export interface PlannerOptions {
   maxCalls?: number
   /** P1.5 advisor; when present it supplies the next strategy on a stall. */
   advisor?: Advisor
+  /**
+   * Mercury 2.5 System2Brain for EXCEPTION-DRIVEN plan repair. When present it
+   * takes precedence over the Jev advisor on a stall and falls back immediately
+   * to the deterministic ladder on any failure. Explicitly enabled only.
+   */
+  mercury?: MercurySystem2
+  /** true when this generation was created fresh because the bot died. */
+  postDeathRecovery?: boolean
 }
 
 type PlannerReason = 'start' | 'queue_empty' | 'impossible' | 'stuck'
@@ -651,6 +753,9 @@ export class PlannerBrain implements System2Brain {
   private firstCall = true
   private lastMilestoneId: string | null = null
   private readonly advisor: Advisor | undefined
+  private readonly mercury: MercurySystem2 | undefined
+  private readonly postDeathRecovery: boolean
+  private postDeathHandled = false
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -663,6 +768,8 @@ export class PlannerBrain implements System2Brain {
     this.maxCalls = options.maxCalls ?? Number(process.env.BUDDY_PLANNER_MAX_CALLS ?? 200)
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.advisor = options.advisor
+    this.mercury = options.mercury
+    this.postDeathRecovery = options.postDeathRecovery === true
     this.cache = this.loadCache()
   }
 
@@ -677,6 +784,28 @@ export class PlannerBrain implements System2Brain {
 
     const waitStreak = trailingWaitStreak(request.recentOutcomes)
     const adviseReason = advisorReasonFor(reason, waitStreak)
+    const mercuryTrigger = this.mercuryTriggerFor(adviseReason)
+    if (this.mercury !== undefined && mercuryTrigger !== null) {
+      const repair = await this.mercury.tryRepair(request, mercuryTrigger)
+      if (repair !== null) {
+        if (mercuryTrigger === 'no_candidate' || mercuryTrigger === 'action_impossible') {
+          this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: repair.strategy, reason: mercuryTrigger })
+        }
+        if (mercuryTrigger === 'wait_limit') this.log('WAIT_LIMIT', { n: waitStreak, strategy: repair.strategy })
+        if (mercuryTrigger === 'post_death') this.log('POST_DEATH_REPLAN', { strategy: repair.strategy })
+        this.log('STRATEGY_SET', {
+          strategy: repair.strategy,
+          source: 'mercury',
+          goals: repair.goals.map((goal) => goal.description),
+        })
+        const option: PlanOption = { id: `mercury_${repair.op}`, title: `mercury ${repair.op}`, goals: repair.goals }
+        return this.finishPlanOp(option, request, repair.op, `mercury ${repair.op}: ${repair.strategy}`)
+      }
+      // Mercury already logged ADVISOR source=fallback; never use the Jev advisor here.
+      this.logPlan('fallback', fallbackOption, reason, started, 0, 'mercury unavailable -> deterministic ladder')
+      return this.finishPlan(fallbackOption, request, 'mercury unavailable')
+    }
+
     if (this.advisor !== undefined && adviseReason !== null) {
       const decision = await this.advisor.decide(this.advisorState(counts, request, waitStreak), adviseReason)
       if (adviseReason === 'no_candidate') this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: decision.strategy, reason: adviseReason })
@@ -746,6 +875,35 @@ export class PlannerBrain implements System2Brain {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
     return { goals: option.goals, note, op: 'replace' }
+  }
+
+  private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
+    if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
+    const queue = request.goalQueueState
+    const first = option.goals[0]
+    const current = queue.current
+    const alreadyActive =
+      queue.depth > 0 &&
+      current !== null &&
+      first !== undefined &&
+      current.kind === first.kind &&
+      (current.targetItem ?? null) === (first.targetItem ?? null)
+    if (alreadyActive && op !== 'continue') {
+      return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
+    }
+    return { goals: option.goals, note, op }
+  }
+
+  private mercuryTriggerFor(adviseReason: AdvisorReason | null): MercuryTriggerReason | null {
+    if (this.postDeathRecovery && !this.postDeathHandled) {
+      this.postDeathHandled = true
+      return 'post_death'
+    }
+    if (adviseReason === 'wait_limit') return 'wait_limit'
+    if (adviseReason === 'no_candidate') return 'no_candidate'
+    if (adviseReason === 'no_progress') return 'no_progress'
+    if (adviseReason === 'action_impossible') return 'action_impossible'
+    return null
   }
 
   private logPlan(

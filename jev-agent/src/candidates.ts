@@ -24,8 +24,11 @@
 import type { RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, Vec3Json, WorldState } from './state.ts'
-import { PICKAXE_RANKS, distance } from './state.ts'
+import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance } from './state.ts'
 import { resourceMatches } from './resourceClass.ts'
+import { failureCount } from './failureMemory.ts'
+import { selectDigTool } from './toolChoice.ts'
+import { DIG_PATH_CAP } from './worldMemory.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -261,7 +264,7 @@ export function generateCandidates(
   // stays focused on actions that make progress on the plan.
   if (candidates.length === 0) {
     const explore = pickExplore(state, state.terrain.standable, focusItem)
-    if (explore !== null && (state.signals.failedCandidates[`MOVE:${blockId('p', explore)}`] ?? 0) < MOVE_FAILURE_LIMIT) {
+    if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < MOVE_FAILURE_LIMIT) {
       candidates.push({
         id: `MOVE:${blockId('p', explore)}`,
         kind: 'MOVE',
@@ -397,7 +400,7 @@ function mineCandidates(state: WorldState, options: CandidateOptions, focusItem:
         continue
       }
       if (moveCount >= maxMoves) continue
-      if ((state.signals.failedCandidates[`MOVE:${blockId('b', block.position)}`] ?? 0) >= MOVE_FAILURE_LIMIT) continue
+      if (failureCount(state.signals.failedCandidates, `MOVE:${blockId('b', block.position)}`) >= MOVE_FAILURE_LIMIT) continue
       if (spot === null || atSpot) continue
       moveCount += 1
       moveActions.push({
@@ -554,10 +557,16 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
 }
 
 /**
- * One grounded staircase/tunnel step toward the nearest target resource (or
- * straight down when the subgoal is a stone/ore resource with no known target).
- * The step comes from the sensor's pre-validated `descent` options, so this
- * function stays pure and the guard can re-check the same step.
+ * One grounded staircase/tunnel step toward the nearest target resource.
+ *
+ * #3: `target === null` no longer means "descend". A downward step needs positive
+ * evidence (a visible target below, or a remembered stone/ore level below for a
+ * stone/ore goal); otherwise only level steps are offered. A per-subgoal
+ * no-progress budget (`signals.descendLimitReached`) stops runaway descent.
+ *
+ * #4: once a dig direction is chosen it is held until the resource appears or the
+ * `DIG_PATH_CAP` is reached, so the path cannot zigzag. Oscillation forces a
+ * straight downward staircase.
  */
 function descendCandidates(
   state: WorldState,
@@ -566,6 +575,7 @@ function descendCandidates(
   tunnelTargets: readonly BlockState[],
 ): Candidate[] {
   if (focusItem === null) return []
+  if (state.signals.descendLimitReached === true) return []
   const steps = (state.descent ?? []).filter((step) => step.safe)
   if (steps.length === 0) return []
 
@@ -575,13 +585,35 @@ function descendCandidates(
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  const wantDown = target === null || target.position.y < feet.y
+  const knownStoneY = state.signals.knownStoneY ?? null
+  const goalIsUnderground = STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined
+  const stoneGoal = STONE_YIELDS.has(focusItem)
+  const targetBelow = target !== null && target.position.y < feet.y
+  const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
+  // Positive evidence for a downward step: a visible target below, a remembered
+  // stone/ore level below, or a stone-collection goal whose surface stone is
+  // absent (the explicit staircase case from #4). "No target" alone is not
+  // evidence (#9); ore goals keep the stricter rule so they cannot dig blindly.
+  const downEvidence = targetBelow || (target === null && (knownStoneBelow || stoneGoal))
+  const wantDown = targetBelow || (target === null && downEvidence)
   const hasTunnelTarget = tunnelTargets.length > 0
+  const oscillate = state.signals.digOscillate === true
+  const fixedDir = state.signals.digDir ?? null
+  const fixedCount = state.signals.digDirCount ?? 0
+
+  let pool = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
+  if (oscillate) {
+    pool = pool.filter((step) => step.mode === 'down' && (fixedDir === null || step.dir === fixedDir))
+  } else if (fixedDir !== null && fixedCount > 0 && fixedCount < DIG_PATH_CAP) {
+    pool = pool.filter((step) => step.dir === fixedDir)
+  }
+  if (pool.length === 0) pool = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
+  if (pool.length === 0) return []
 
   let best: DescentOption | null = null
   let bestScore = Number.POSITIVE_INFINITY
-  for (const step of steps) {
-    if ((state.signals.failedCandidates[descendId(step)] ?? 0) >= DESCEND_FAILURE_LIMIT) continue
+  for (const step of pool) {
+    if (failureCount(state.signals.failedCandidates, descendId(step)) >= DESCEND_FAILURE_LIMIT) continue
     const modePenalty = step.mode === 'down' ? (wantDown ? 0 : 2) : wantDown && hasTunnelTarget ? 2 : 0
     let alignment = 0
     if (target !== null) {
@@ -598,17 +630,17 @@ function descendCandidates(
   }
   if (best === null) return []
 
-  const primary =
-    best.mode === 'down'
-      ? best.floorSolid
-        ? best.floor
-        : best.wall
-      : best.wallSolid
-        ? best.wall
-        : best.head
-  const toolTier = resourceTier(state, primary)
-  const tool = toolTier === null ? null : 'pickaxe'
-  if (tool !== null && !hasTool(state, 'pickaxe', toolTier)) return []
+  const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
+  const choice = selectDigTool(
+    {
+      name: best.digName ?? '',
+      harvestTool: best.digHarvestTool ?? null,
+      harvestTier: best.digHarvestTier ?? null,
+      diggable: best.diggable === true,
+    },
+    (tool, tier) => hasTool(state, tool, tier),
+  )
+  if (!choice.ok) return []
 
   return [
     {
@@ -619,9 +651,9 @@ function descendCandidates(
       target: primary,
       targetEntityId: null,
       itemName: null,
-      requiresTool: tool !== null,
-      toolName: tool,
-      toolTier,
+      requiresTool: choice.tool !== null,
+      toolName: choice.tool,
+      toolTier: choice.tier,
       inReach: distance(primary, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
       meta: {
@@ -631,6 +663,9 @@ function descendCandidates(
         dx: best.dx,
         dz: best.dz,
         focusItem,
+        digBlockName: best.digName ?? 'unknown',
+        toolReason: choice.reason,
+        staircase: oscillate || (best.mode === 'down' && fixedCount === 0),
         stepX: best.step.x,
         stepY: best.step.y,
         stepZ: best.step.z,
@@ -659,15 +694,6 @@ function descendCandidates(
 function descendId(step: DescentOption): string {
   const primary = step.mode === 'down' ? step.floor : step.wall
   return `DESCEND:${step.mode}:${step.dir}:${blockId('b', primary)}`
-}
-
-function resourceTier(state: WorldState, position: Vec3Json): number | null {
-  const block = state.blocks.find(
-    (entry) => entry.position.x === position.x && entry.position.y === position.y && entry.position.z === position.z,
-  )
-  if (block === undefined) return 0
-  if (block.harvestTool === null) return null
-  return block.harvestTier ?? 0
 }
 
 /** PLACE candidate for a held station at a grounded spot (used for self-placed stations). */
@@ -933,7 +959,11 @@ function pickRetreat(
  *     resource beyond the move band instead of wandering away from it.
  */
 function pickExplore(state: WorldState, standable: Vec3Json[], focusItem: string | null): Vec3Json | null {
-  const options = standable.filter((spot) => distance(spot, state.self.position) > 1.5)
+  const options = standable.filter(
+    (spot) =>
+      distance(spot, state.self.position) > 1.5 &&
+      failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < MOVE_FAILURE_LIMIT,
+  )
   if (options.length === 0) return null
 
   const resource = nearestResource(state, focusItem)

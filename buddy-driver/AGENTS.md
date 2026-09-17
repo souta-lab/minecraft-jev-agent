@@ -263,3 +263,154 @@ PY
 ```
 要件: ①`model` が実モデル（`typesafe-ai/jev`）の行だけ抽出できること ②`state` は圧縮サマリ ③`response` に answers/probabilities が入る
 ④cost と rateLimit 情報が残る ⑤失敗時は `error` が入る。Mercury を使う場合も**同じスキーマで記録**する（`model='inception/mercury-2.5'`）。
+
+---
+
+## ★自律運転モード（ユーザー指示: フィードバック無し・指示待ち禁止）
+
+ユーザーはPCを閉じ、以後サーバー参加もフィードバックも無い。**このファイルと各issueを正として自律的に判断し、前進し続けること。** 確認待ち・許可待ちはしない。
+
+### 自律時の優先順（外部共同監査の結論）
+```
+1. P1 durability/atomicity を最新mainで確定
+   ledger復元(done維持・rung後退防止) / lease前のdurable書き込み禁止(HOSTだけがwriter) /
+   craftingTables例外の完全解消 / リロード<2s・listener/タイマー非増加 / 単一インスタンス強制
+2. movement の root cause 修正
+   #7 resourceTier の unknown→0（土にツルハシ）
+   #8 hop recovery の順序（forward=false→jump→解除→forward のその場ジャンプ）＋近傍座標でのfailure memory回避
+   #9 DESCEND暴走（target===null→wantDown=true、土掘りが成功扱いでfailure limit回避）
+   ＋ ジグザグ掘りの方向固定・階段掘り・既存穴再利用（DIG_PATH/STAIRCASE/DIG_OSCILLATE/REUSE_TUNNEL）
+3. System2: Mercury 2.5 を System2Brain として例外駆動で稼働
+   アボート誤設定の修正 / mercury-calls.jsonl に error=null の実応答(plan, latency, usage, cost) /
+   失敗時は決定論ラダーへ即fallback / 決定論モードは llm.called==false
+4. Issue #11 Grounded Options へ段階移行（Jev = π action + β abandon_option、事前条件・成功述語はコード）
+5. M2完走（furnace→charcoal→iron_ore→iron_ingot×3→iron_pickaxe を在庫で証明）→ M3/M4
+```
+
+### 自律時の行動規則
+```
+・判断に迷ったら「P1 durability を壊さない」を優先する
+・各作業単位で commit & push（秘密スキャン: server.properties/*.key/.env/accounts.json が0件であること）
+・証拠は一次ログ/在庫/コミットで残す。テストは typecheck / audit 9/9 / step-pipeline 6/6 / guard 12/12 /
+  gating 6/6 / loop 7/7 / m1 5/5 を維持
+・サーバー再起動は最終手段（今は ops.json に s0u7a level4 を設定済み。RCONはLeafでは実際には開かない）
+・Javaは 21.0.13-ea のため `-DPaper.IgnoreJavaVersion=true` を付けて起動する（付けないと起動失敗）
+・常駐ホストは単一インスタンスのみ（pidでkill、`pkill -f` 自爆禁止）
+・人間が居ないので、危険な変更（サーバー停止・world削除・履歴改変・force push）はしない
+```
+
+---
+
+## 追記7（01:33 実測・control.sock の `report` より）— 自律運転で見えた優先修正
+
+```
+runId=run-mu5qd4ah-3xdh  connected=true frozen=false
+generations=150 reloads=50 recoveries=72  milestone=raw_iron  contractVersion=2
+stats: reconnects=65  reloadsChangedHash=12  reloadsSkippedUnchanged=2  reloadsFailed=0
+       freezeCycles=0  wedge=true  goalComplete=false
+worldMemory: craftingTables=13  furnaces=1  discoveredOres=[coal_ore, copper_ore, iron_ore]
+             traversalFailures=0  hazards=1  hardHazards=0
+listeners: physicsTick=3 (baseline=2)  death=4  end=3  kicked=2   → ★listenerLeak=true
+status: running=true  policyKind=fallback  policyModel=deterministic-local-fallback+descend...
+ledger: current=g3:collect:raw_iron  origin="llm"  done=0  hasImpossible=false
+```
+
+### 優先修正（この順）
+1. **★listenerリークの解消（P1）**: `physicsTick` が baseline 2 に対し 3（`listenerLeak=true`）。
+   reload のたびに executor 系リスナーが増えている疑い。世代 `detach()` で確実に解除し、
+   リロード前後で全イベントの listenerCount が baseline と一致することを assert する。
+   受け入れ: 10回リロード後も `listenerLeak=false`。
+2. **★再接続が多すぎる（reconnects=65）**: 多重起動キック（解消済み）＋サーバー再起動＋ホスト再起動が原因。
+   単一インスタンス強制（追記4）＋「ホスト再起動は最終手段」を徹底し、1時間あたり reconnects<=2 を目標にする。
+3. **★既知鉱石があるのに探索で停滞**: `discoveredOres` に **iron_ore がある**のに `collect 3 x raw_iron` で wedge。
+   → プランナは「目標資源が `discoveredOres`/WorldMemory に存在するなら `RETURN_TO_KNOWN_ORE:<id>` を最優先候補にする」。
+   `ORE_KNOWN item=iron_ore at=<x,y,z> -> strategy=return_to_known_ore` をログ。
+   受け入れ: 既知の鉄鉱石座標へ移動して採掘し、`raw_iron` が在庫に出現する。
+4. **freezeCycles=0**: freeze→dump→reload→resume がまだ一度も実行されていない（P2）。一度実走させて証拠を残す。
+5. **policyKind=fallback**: この世代は決定論で動いている。Mercury/Jev の実使用は設定（system2.config.json）で明示的に有効化し、
+   `ADVISOR source=mercury` の実ログを残す（追記6の監査スキーマ）。
+
+---
+
+## 追記8（01:39 実測）— P2 freeze→dump→resume を実走で確認（未実走項目をクローズ）
+
+制御ソケット `data/resident/control.sock` 経由で自律的に実行:
+```
+FREEZE  -> {"ok":true,"data":{"frozen":true,"report":".../logs/resident/freeze-2026-09-17T16-39-46-442Z.json","runId":"run-mu5qd4ah-3xdh"}}
+REPORT  -> frozen:true, connected:true
+RESUME  -> {"ok":true,"data":{"frozen":false,"started":true}}
+REPORT2 -> frozen:false, connected:true, generations 176->178, reloads 73->74
+```
+証拠: `logs/resident/freeze-2026-09-17T16-39-46-442Z.json` が新規生成（既存は 15-44-56）。
+→ **wedge で走行が死なず、凍結→文脈ダンプ→再開できることが実証された**（P2クローズ）。
+
+残る観測: `recoveries=75` / `reloads=74` / `generations=178` と世代交代が非常に多い。
+wedge→recovery の回転が速すぎるので、**世代が短命すぎる原因**（毎回 wedge している）を潰すのが次の本命。
+併せて `listenerLeak=true`（physicsTick 3 vs baseline 2）も未解決のまま。
+
+### 制御チャネル コマンドの実測仕様（自律運転で使える）
+```
+report            -> 全状態（runId/frozen/connected/generations/reloads/recoveries/milestone/worldKey/
+                     stats/worldMemory/listeners/listenerBaseline/listenerLeak/acceptancePath/status）
+goal {item,count} -> 現在の ledger mirror（milestone/goalItem/goalCount/depth/current/done/goals）を返す
+freeze {reason}   -> frozen:true + freeze report パスを返す
+resume            -> frozen:false, started:true
+```
+※ソケットは 0600、JSON Lines（`{"id":<n>,"cmd":"...","args":{...}}\n`）。応答は1行JSON。
+
+---
+
+## 追記9（01:41 実測）— ★Mercury稼働の証拠 ＋ ★世代短命の原因（PRECONDITION_MISSINGループ）
+
+### Mercury 2.5 が実応答して GoalQueue に反映された（達成）
+```
+ADVISOR source=mercury reason=no_candidate strategy=mercury_continue_collect_raw_iron cost=0.000329 ms=6870 cached=false
+STRATEGY_SET strategy=mercury_continue_collect_raw_iron source=mercury goals=["collect 3 x raw_iron"]
+```
+- 実モデル `inception/mercury-2.5` が **6870ms**（推論モデルとして妥当）で応答、**cost $0.000329**（目標 <$0.001 を満たす）
+- structured output → shape validation → kind×target grounding → PlannedGoal → GoalQueue の経路が通った
+- 以前の `aborted due to timeout`（52ms）は解消
+
+### 世代が短命な原因（新規・最優先で潰す）
+```
+PRECONDITION_MISSING goal=smelt 3 x iron_ingot need=furnace + raw_iron rungId=iron_ingot
+GENERATION_STOP id=... stopped=stopped-by-caller success=false ticks=1 verifiedDigs=0 subgoalsDone=0
+（16:41:17 / 16:41:31 / 16:41:39 … 約10〜15秒ごとに反復）
+```
+診断: 死亡復帰用に入れた **precondition-gated ladder が厳しすぎる**。キュー先頭が `smelt 3 x iron_ingot` で
+前提（furnace + raw_iron）が無いと、**1tickで停止** → ホストが回復 → 同じ目標でまた停止、の無限回転
+（generations=178 / recoveries=75 の正体）。
+
+修正要件:
+1. `PRECONDITION_MISSING` は**停止条件にしない**。代わりに **前提チェーンを在庫から再導出**して計画を差し替える:
+   `smelt iron_ingot` → `collect raw_iron` → （ツルハシが無ければ）`craft stone_pickaxe` → `collect cobblestone` → …
+   `LADDER_PREREQ goal=<g> need=<items> -> replace goals=[...]` をログ。
+2. 前提が **原理的に充足不能**（例: 必要な資源が現在の次元/在庫/既知資源に存在しない）場合のみ停止し、その理由を残す。
+3. 差し替え後は **少なくともN tick（例 20）は再停止しない**（1tick停止→回復の回転を禁止）。
+4. 受け入れ:
+```
+・PRECONDITION_MISSING の直後に LADDER_PREREQ が出て、目標が前提チェーンへ差し替わる
+・generation の ticks が 1 で終わらない（連続稼働 >= 100 ticks が普通になる）
+・1時間あたりの generations/recoveries が大幅に減る（現状 178/75 → 目標 1桁台）
+```
+5. 併せて未解決: `listenerLeak=true`（physicsTick 3 vs baseline 2）、`RETURN_TO_KNOWN_ORE`（discoveredOres に iron_ore あり）。
+
+---
+
+## 追記10（01:51 実測）— 制御チャネルの実コマンド仕様（照会のみ／実行のみ）
+
+`agent-runner.mts` のハンドラから確認した実装済みコマンド一覧:
+```
+照会系（値を返すだけ。差し替えはできない）: report / status / goal / milestone / acceptance
+実行系（状態を変える）                    : freeze / resume / reload / gc / leakcheck / simdeath / worldreset / quit
+```
+実測で確認した挙動:
+- `goal {item,count}` → ledger mirror を返すだけ（before/set/after で `collect 3 x raw_iron` のまま変化なし）
+- `milestone {milestone|index}` → 現在値（raw_iron, index=7）を返すだけ
+- `freeze {reason}` → `{frozen:true, report:<path>}` ／ `resume` → `{frozen:false, started:true}` ／ `report` で世代数・listener等が取れる
+
+**含意（自律運転の重要制約）**: 目標・マイルストーンを外部から注入する手段は無い。
+停滞（PRECONDITION_MISSING の1tick回転）を解くには**コード修正（#12 / #11 の前提チェーン差し替え）が唯一の道**。
+`simdeath` は死亡復帰の決定的な再現に使える（kill相当を任意に起こせる）。
+`worldreset` は破壊的（worldEpochが変わる）ので、人間不在の自律運転では使わない。
+```
