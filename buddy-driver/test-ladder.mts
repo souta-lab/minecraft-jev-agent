@@ -1,6 +1,7 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
 import { buildLadder, deriveResumeRung, goalsForStrategy, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { snapshotGoals } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 
@@ -152,6 +153,54 @@ addCase('a resume rung whose precondition is missing falls back one step and log
       fallback !== undefined &&
       fallback.detail?.to === 'wooden_pickaxe',
     detail: `resume=${resume.rungId} fallbackFrom=${resume.fallbackFrom} need=${resume.fallbackNeed} log=${JSON.stringify(fallback?.detail)}`,
+  }
+})
+
+addCase('a missing ledger snapshot degrades to an empty goal list, never throws (#resume-guard)', () => {
+  let threw: string | null = null
+  let goals: unknown = null
+  try {
+    goals = snapshotGoals(null)
+  } catch (error) {
+    threw = error instanceof Error ? error.message : String(error)
+  }
+  const undefinedSnapshot = snapshotGoals(undefined)
+  const legacyShape = snapshotGoals({ depth: 1, current: { id: 'g5:collect:diamond' } } as never)
+  return {
+    pass:
+      threw === null &&
+      Array.isArray(goals) &&
+      goals.length === 0 &&
+      Array.isArray(undefinedSnapshot) &&
+      undefinedSnapshot.length === 0 &&
+      Array.isArray(legacyShape) &&
+      legacyShape.length === 0,
+    detail: `threw=${threw} null=[] undefined=[] legacy=[]`,
+  }
+})
+
+addCase('the resume path logs LADDER_RESUME_NO_SNAPSHOT and still resumes from live inventory (#resume-guard)', () => {
+  const counts = { raw_iron: 8, coal: 7, cobblestone: 112, crafting_table: 1, furnace: 1 }
+  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+  const emit = (event: string, detail?: Record<string, unknown>): void => {
+    log.push({ event, detail })
+  }
+  const resume = deriveResumeRung(counts, world(), emit)
+  const resumeReason = 'inventory-resume'
+  const resumeGoals = snapshotGoals(null)
+  if (resumeGoals.length === 0) emit('LADDER_RESUME_NO_SNAPSHOT', { reason: resumeReason, goals: resumeGoals.length })
+  emit('LADDER_RESUME', { rung: resume.rungId, rungIndex: resume.rungIndex, reason: resumeReason, invEmpty: resume.invEmpty })
+  const noSnapshot = log.find((entry) => entry.event === 'LADDER_RESUME_NO_SNAPSHOT')
+  const resumed = log.find((entry) => entry.event === 'LADDER_RESUME')
+  return {
+    pass:
+      noSnapshot !== undefined &&
+      noSnapshot.detail?.reason === resumeReason &&
+      noSnapshot.detail?.goals === 0 &&
+      resumed !== undefined &&
+      resumed.detail?.rung === 'iron_ingot' &&
+      resumed.detail?.rungIndex === 8,
+    detail: `noSnapshot=${JSON.stringify(noSnapshot?.detail)} resumed=${JSON.stringify(resumed?.detail)}`,
   }
 })
 

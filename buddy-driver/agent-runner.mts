@@ -1299,6 +1299,7 @@ async function performReload(trigger: string): Promise<void> {
     stats.reloadsFailed += 1
     const message = error instanceof Error ? error.message : String(error)
     log('ERROR', { where: 'performReload', trigger, message })
+    log('RELOAD_REJECTED', { trigger, message, action: 'keep-previous-generation' })
     log('RELOAD', { ok: false, trigger, ms: Date.now() - started, message })
   }
 }
