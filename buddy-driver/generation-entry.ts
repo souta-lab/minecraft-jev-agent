@@ -32,6 +32,7 @@ import {
 } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
+import { withActuationLease } from './resident-safety.ts'
 import {
   PlannerBrain,
   bestPickaxeRank,
@@ -45,7 +46,6 @@ import {
   resolvePlannerMode,
 } from './planner.ts'
 import type {
-  ActuationLease,
   GenerationContext,
   GenerationStatus,
   KnownResourceJson,
@@ -59,76 +59,6 @@ import type {
 } from './resident-types.ts'
 
 export const CONTRACT_VERSION = 2
-
-// jev-agent/ is imported read-only, so the lease is asserted at the generation
-// boundary: the bot handed to the controller is a Proxy that refuses every
-// side-effecting method while this generation is not the active lease owner.
-// Before the host's commit point the new generation cannot cause irreversible
-// actions; after it the old generation cannot.
-const MUTATING_BOT_METHODS = new Set<string>([
-  'dig',
-  'placeBlock',
-  'equip',
-  'unequip',
-  'activateItem',
-  'deactivateItem',
-  'activateBlock',
-  'clickWindow',
-  'putSelectedItemRange',
-  'craft',
-  'openBlock',
-  'openContainer',
-  'closeWindow',
-  'setControlState',
-  'clearControlStates',
-  'look',
-  'lookAt',
-  'toss',
-  'tossStack',
-  'chat',
-  'setQuickBarSlot',
-  'consume',
-  'updateSign',
-  'useOn',
-  'swingArm',
-])
-
-function withActuationLease(bot: Bot, lease: ActuationLease, id: string): Bot {
-  const assert = (what: string): void => lease.assertActive(id, what)
-  let pathfinderProxy: object | null = null
-  return new Proxy(bot, {
-    get(target, prop, receiver): unknown {
-      const value = Reflect.get(target, prop, receiver) as unknown
-      if (typeof prop === 'string' && typeof value === 'function' && MUTATING_BOT_METHODS.has(prop)) {
-        return (...args: unknown[]): unknown => {
-          assert(`bot.${prop}`)
-          return (value as (...a: unknown[]) => unknown).apply(target, args)
-        }
-      }
-      if (prop === 'pathfinder' && value !== null && typeof value === 'object') {
-        if (pathfinderProxy === null) {
-          pathfinderProxy = new Proxy(value, {
-            get(pfTarget, pfProp, pfRecv): unknown {
-              const pfValue = Reflect.get(pfTarget, pfProp, pfRecv) as unknown
-              if (
-                (pfProp === 'setGoal' || pfProp === 'setMovements' || pfProp === 'stop' || pfProp === 'goto') &&
-                typeof pfValue === 'function'
-              ) {
-                return (...args: unknown[]): unknown => {
-                  assert(`pathfinder.${String(pfProp)}`)
-                  return (pfValue as (...a: unknown[]) => unknown).apply(pfTarget, args)
-                }
-              }
-              return pfValue
-            },
-          })
-        }
-        return pathfinderProxy
-      }
-      return value
-    },
-  }) as Bot
-}
 
 // Loud-fail craft capability check: a future Mineflayer bump that removes the
 // private `_syncWindow` API must fail loudly here instead of silently degrading
