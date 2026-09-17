@@ -37,6 +37,9 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
+import type { Vec3Json } from '../jev-agent/src/state.ts'
+import { formatSkillSelected, formatStrategyBodyDelta, generateSkillPlan, skillSignature } from '../jev-agent/src/skillCandidate.ts'
+import type { SkillCandidate, SkillGenerationInput, SkillGoal } from '../jev-agent/src/skillCandidate.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
@@ -763,11 +766,76 @@ export interface PlanOption {
   id: string
   title: string
   goals: PlannedGoal[]
+  /** #20: grounded skills this option compiles to (dependencies first). */
+  skills?: SkillCandidate[]
+  /** #20: strategy id that produced this option, when one did. */
+  strategy?: string
 }
 
 /** Stable signature of a compiled goal list, for STRATEGY_BODY_DELTA (#29). */
 export function goalSignature(goals: readonly PlannedGoal[]): string {
   return goals.map((goal) => `${goal.kind}:${goal.targetItem ?? goal.description}:${goal.requiredCount ?? 1}`).join('|')
+}
+
+/** Adapter options for skill generation from the resident world/bot projection. */
+export interface SkillAdapterOptions {
+  position?: Vec3Json | null
+  dimension?: string | null
+  health?: number | null
+  toolRank?: number
+  goal?: SkillGoal | null
+  lastTunnel?: Vec3Json | null
+  digDir?: string | null
+}
+
+/** Convert one PlannedGoal into the skill-generation goal subset. */
+export function plannedGoalToSkillGoal(goal: PlannedGoal | undefined): SkillGoal | null {
+  if (goal === undefined) return null
+  const skillGoal: SkillGoal = { kind: goal.kind }
+  if (typeof goal.targetItem === 'string') skillGoal.targetItem = goal.targetItem
+  if (typeof goal.requiredCount === 'number') skillGoal.requiredCount = goal.requiredCount
+  if (typeof goal.targetY === 'number') skillGoal.targetY = goal.targetY
+  if (typeof goal.dimension === 'string') skillGoal.dimension = goal.dimension
+  return skillGoal
+}
+
+/** Build the pure generation input from counts + durable world memory + bot state. */
+export function buildSkillGenerationInput(
+  strategy: string | null,
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: SkillAdapterOptions,
+): SkillGenerationInput {
+  return {
+    strategy,
+    goal: opts?.goal ?? null,
+    inventory: counts,
+    world: {
+      knownResources: world.knownResources,
+      craftingTables: world.craftingTables,
+      furnaces: world.furnaces,
+      discoveredOres: world.discoveredOres,
+    },
+    position: opts?.position ?? null,
+    dimension: opts?.dimension ?? null,
+    health: opts?.health ?? null,
+    toolRank: opts?.toolRank ?? bestPickaxeRank(counts),
+    lastTunnel: opts?.lastTunnel ?? null,
+    digDir: opts?.digDir ?? null,
+  }
+}
+
+/**
+ * Issue #20: compile a strategy into its grounded skills. Deterministic and
+ * model-free; unmet preconditions expand into the prerequisite skill chain.
+ */
+export function skillsForStrategy(
+  strategy: string,
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: SkillAdapterOptions,
+): SkillCandidate[] {
+  return generateSkillPlan(buildSkillGenerationInput(strategy, counts, world, opts)).skills
 }
 
 function dedupeOptions(options: PlanOption[]): PlanOption[] {
@@ -1304,7 +1372,9 @@ export class PlannerBrain implements System2Brain {
           source: 'mercury',
           goals: repair.goals.map((goal) => goal.description),
         })
-        const option: PlanOption = { id: `mercury_${repair.op}`, title: `mercury ${repair.op}`, goals: repair.goals }
+        const option: PlanOption = { id: `mercury_${repair.op}`, title: `mercury ${repair.op}`, goals: repair.goals, strategy: repair.strategy }
+        this.withSkills(option)
+        this.logSkills(repair.strategy, option.skills ?? [])
         return this.finishPlanOp(option, request, repair.op, `mercury ${repair.op}: ${repair.strategy}`)
       }
       // Mercury already logged ADVISOR source=fallback; never use the Jev advisor here.
@@ -1322,16 +1392,21 @@ export class PlannerBrain implements System2Brain {
           placedFurnacesNear: this.placedFurnacesNear(),
           knownFurnaces: this.world.furnaces.length,
         })
-      const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals }
+      const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals, strategy: decision.strategy }
+      this.withSkills(option)
       this.logStrategySet(decision, goals)
+      this.logSkills(decision.strategy, option.skills ?? [])
       return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`, stalled)
     }
 
     if (this.mode === 'deterministic') {
       const ordered = this.applySmeltOrder(deterministicOption)
       this.logPlan('fallback', ordered, reason, started, 0, 'planner disabled (deterministic mode)')
-      this.emitBodyDelta(ordered.id, ordered)
-      return { goals: ordered.goals, note: 'deterministic ladder (planner disabled)', op: 'replace' }
+      const option: PlanOption = { ...ordered, strategy: 'deterministic' }
+      this.withSkills(option)
+      this.logSkills('deterministic', option.skills ?? [])
+      this.emitBodyDelta('deterministic', option)
+      return { goals: option.goals, note: 'deterministic ladder (planner disabled)', op: 'replace' }
     }
 
     const stateHash = this.hashState(counts, request)
@@ -1391,7 +1466,8 @@ export class PlannerBrain implements System2Brain {
 
   private finishPlan(option: PlanOption, request: System2PlanRequest, note: string, force = false): System2Plan {
     option = this.applySmeltOrder(option)
-    this.emitBodyDelta(option.id, option)
+    this.withSkills(option)
+    this.emitBodyDelta(option.strategy ?? option.id, option)
     const queue = request.goalQueueState
     const first = option.goals[0]
     const current = queue.current
@@ -1412,7 +1488,8 @@ export class PlannerBrain implements System2Brain {
   private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
     if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
     option = this.applySmeltOrder(option)
-    this.emitBodyDelta(option.id, option)
+    this.withSkills(option)
+    this.emitBodyDelta(option.strategy ?? option.id, option)
     const normalized = normalizePlanTail(option.goals, request.goalQueueState.current, op)
     if (normalized.goals.length === 0) {
       for (const decision of normalized.decisions) {
@@ -1485,12 +1562,14 @@ export class PlannerBrain implements System2Brain {
   }
 
   /**
-   * #29: prove that a plan/strategy change actually reaches the body by logging
-   * the compiled goals added/removed relative to the previous plan. A strategy
-   * label that compiles to the same goals logs no delta.
+   * #29/#20: prove that a plan/strategy change actually reaches the body by
+   * logging the compiled goals added/removed and the grounded skills relative to
+   * the previous plan. A strategy label that compiles to the same goals AND the
+   * same skills logs no delta.
    */
   private emitBodyDelta(strategy: string, option: PlanOption): void {
-    const signature = goalSignature(option.goals)
+    const skills = option.skills ?? []
+    const signature = `${goalSignature(option.goals)}#${skillSignature(skills)}`
     if (signature === this.lastBodySignature) return
     const same = (a: PlannedGoal, b: PlannedGoal): boolean =>
       a.kind === b.kind && (a.targetItem ?? null) === (b.targetItem ?? null) && (a.requiredCount ?? 1) === (b.requiredCount ?? 1)
@@ -1498,8 +1577,59 @@ export class PlannerBrain implements System2Brain {
     const removed = this.lastBodyGoals.filter((previous) => !option.goals.some((goal) => same(goal, previous))).map((goal) => goal.description)
     this.lastBodySignature = signature
     this.lastBodyGoals = option.goals.map((goal) => ({ ...goal }))
-    if (added.length === 0 && removed.length === 0) return
-    this.log('STRATEGY_BODY_DELTA', { strategy, added, removed })
+    if (added.length === 0 && removed.length === 0 && skills.length === 0) return
+    this.log('STRATEGY_BODY_DELTA', {
+      strategy,
+      added,
+      removed,
+      skills: skills.map((skillCandidate) => skillCandidate.id),
+      skillKinds: skills.map((skillCandidate) => skillCandidate.kind),
+      line: formatStrategyBodyDelta(strategy, skills),
+    })
+  }
+
+  /**
+   * #20: attach the grounded skill list to an option (idempotent). Strategy
+   * options compile through the strategy; all others compile from their first goal.
+   */
+  private withSkills(option: PlanOption): PlanOption {
+    if (option.skills !== undefined) return option
+    const strategy =
+      typeof option.strategy === 'string' && option.strategy.length > 0 && option.strategy !== 'deterministic'
+        ? option.strategy
+        : null
+    const input = buildSkillGenerationInput(strategy, this.currentCounts, this.world, {
+      ...this.botSkillOptions(),
+      goal: plannedGoalToSkillGoal(option.goals[0]),
+    })
+    option.skills = generateSkillPlan(input).skills
+    return option
+  }
+
+  /** #20: log every grounded skill the selected strategy/option compiles to. */
+  private logSkills(strategy: string, skills: readonly SkillCandidate[]): void {
+    for (const skillCandidate of skills) {
+      this.log('SKILL_SELECTED', {
+        id: skillCandidate.id,
+        kind: skillCandidate.kind,
+        strategy,
+        source: skillCandidate.source,
+        line: formatSkillSelected(skillCandidate, strategy),
+      })
+    }
+  }
+
+  private botSkillOptions(): SkillAdapterOptions {
+    const entity = this.bot.entity
+    return {
+      position:
+        entity === undefined
+          ? null
+          : { x: Math.floor(entity.position.x), y: Math.floor(entity.position.y), z: Math.floor(entity.position.z) },
+      dimension: this.bot.game?.dimension ?? null,
+      health: this.bot.health ?? null,
+      toolRank: bestPickaxeRank(this.currentCounts),
+    }
   }
 
   private mercuryTriggerFor(adviseReason: AdvisorReason | null): MercuryTriggerReason | null {
