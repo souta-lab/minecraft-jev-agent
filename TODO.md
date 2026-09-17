@@ -98,7 +98,10 @@
   provider.commandcode → baseURL https://api.commandcode.ai/provider/v1
   （プラグイン: @brainervirus/opencode-commandcode）
 
-指示: opencode-go の利用制限に達したら **Command Code の deepseek v4.1 flash に切り替える**
+指示（2026-09-18 更新）: **16時間は opencode-go で耐える。commandcode も同時に制限中のため切替不可**（解除後の選択肢として手順は残す）
+節約優先度: 制限中は「文脈とトークンを消費しない」ことが最優先 →
+  ・ポーリング禁止（タスクに任せて通知待ち）／返答は短く／大きい調査は librarian/explore へ委譲
+  ・ゲート確認は tools/*.mjs の1コマンドに集約／長文トランスクリプトは読まない（成果物ファイルで検証）
 切替手順（制限に達した時点で実行。実行中セッションが落ちる可能性があるので事前には書き換えない）:
   1) opencode.jsonc の "model" と "small_model" を `commandcode/deepseek-v4.1-flash` に変更
      （プロバイダIDが異なる場合は `opencode models | grep -i deepseek` 等で正確なIDを確認）
