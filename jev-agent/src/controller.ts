@@ -477,6 +477,8 @@ export class JevController {
   private lastJevAt = 0
   private lastDecisionStateHash = ''
   private lastDecisionId: string | null = null
+  /** whether the last beta abandon vote actually led to a replan (#46 guard). */
+  private lastAbandonAdopted = false
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastProgress = 0
@@ -1181,8 +1183,7 @@ export class JevController {
    */
   private logBetaShadow(optionId: string | null, decision: JevResult, actualReplanAdopted: boolean): void {
     const beta = decision.answers.abandon_option?.probability ?? null
-    const actualReplan =
-      actualReplanAdopted || this.queue.isEmpty || (!this.options.betaShadow && abandonRequested(decision))
+    const actualReplan = actualReplanAdopted || this.queue.isEmpty || this.lastAbandonAdopted
     const shadow = betaShadowDecision({ optionId, beta, actualReplan })
     this.logger.info(
       'beta-shadow',
@@ -1253,8 +1254,8 @@ export class JevController {
    * (#11): it hands control to System 2 (Mercury when enabled, else the
    * deterministic ladder). Code still owns preconditions and completion.
    */
-  private adoptAbandon(decision: JevResult): void {
-    if (!abandonRequested(decision)) return
+  private adoptAbandon(decision: JevResult): boolean {
+    if (!abandonRequested(decision)) return false
     const probability = decision.answers.abandon_option?.probability ?? null
     const actionId = decisionIdFrom(decision)
     const guard = shouldAdoptAbandon({
@@ -1270,9 +1271,10 @@ export class JevController {
         { option: guard.protection.option, because: guard.protection.because, actionId, abandon: probability },
         this.tickCounter,
       )
-      return
+      return false
     }
     this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
+    return true
   }
 
   /**
@@ -1366,6 +1368,7 @@ export class JevController {
     trigger: DecisionTrigger,
     chainId: string,
   ): Promise<JevResult> {
+    this.lastAbandonAdopted = false
     const now = Date.now()
     const stateHash = stableStateHash(state)
     if (
@@ -1422,7 +1425,7 @@ export class JevController {
       )
       this.logHeads(result, chainId)
       this.logShadowMetrics(state)
-      if (!this.options.betaShadow) this.adoptAbandon(result)
+      if (!this.options.betaShadow) this.lastAbandonAdopted = this.adoptAbandon(result)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {
