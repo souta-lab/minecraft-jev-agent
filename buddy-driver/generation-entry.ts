@@ -458,6 +458,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
     dimension: ctx.bot.game?.dimension ?? null,
     placedFurnacesNear: furnaces.length,
+    knownFurnaces: world.furnaces.length,
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
@@ -489,7 +490,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     cachePath: advisorCachePath,
     mode: resolveAdvisorMode(plannerMode),
     compile: (strategy, state) =>
-      goalsForStrategy(strategy, state.inventory, world, { placedFurnacesNear: world.furnaces.length }),
+      goalsForStrategy(strategy, state.inventory, world, {
+        placedFurnacesNear: furnaces.length,
+        knownFurnaces: world.furnaces.length,
+      }),
   })
 
   const postDeathRecovery = ctx.resetReason === 'death'
@@ -541,13 +545,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     scanRadius: 48,
     verbose: true,
     eventSink: (event, detail) => ctx.log(event, detail),
-    knownResources: world.knownResources.map((resource) => ({
-      name: resource.name,
-      kind: resource.kind,
-      position: { x: resource.x, y: resource.y, z: resource.z },
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-    })),
+    knownResources: [
+      ...world.knownResources.map((resource) => ({
+        name: resource.name,
+        kind: resource.kind,
+        position: { x: resource.x, y: resource.y, z: resource.z },
+        ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+        ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      })),
+      ...world.furnaces.map((furnace) => ({
+        name: 'furnace',
+        kind: 'station' as const,
+        position: { x: furnace.x, y: furnace.y, z: furnace.z },
+      })),
+    ],
   }
 
   const controller = new JevController(bot, options)

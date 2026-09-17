@@ -32,7 +32,7 @@ import type { Experimental_EvaluationQuestion } from 'ai'
 import type { PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
-import { matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
+import { findInventoryFuel, matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
@@ -139,6 +139,41 @@ export function filterAlreadyMet(
 
 function woodUnits(counts: Counts): number {
   return countClass(counts, 'log') + Math.floor(countClass(counts, 'planks') / 4)
+}
+
+// M2 smelt priority: when the smelt inputs are held, no descend/collect goal
+// may preempt the smelt (measured 2026-09-18: raw_iron:8 + coal:7 sat behind
+// `descend:diamond`, so iron_ingot was never produced).
+
+export function smeltPriorityGoal(counts: Counts): PlannedGoal | null {
+  const missing = 3 - (counts['iron_ingot'] ?? 0)
+  if (missing <= 0) return null
+  if ((counts['raw_iron'] ?? 0) < missing) return null
+  if (findInventoryFuel(counts) === null) return null
+  return {
+    kind: 'smelt',
+    description: `smelt ${missing} x iron_ingot`,
+    targetItem: 'iron_ingot',
+    requiredCount: missing,
+  }
+}
+
+export function enforceSmeltPriority(
+  goals: readonly PlannedGoal[],
+  counts: Counts,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): PlannedGoal[] {
+  const priority = smeltPriorityGoal(counts)
+  if (priority === null) return [...goals]
+  const first = goals[0]
+  if (first !== undefined && first.kind === 'smelt' && first.targetItem === priority.targetItem) {
+    return [...goals]
+  }
+  const index = goals.findIndex((goal) => goal.kind === 'smelt' && goal.targetItem === priority.targetItem)
+  const over = first?.description ?? 'empty-plan'
+  const rest = goals.filter((_, i) => i !== index)
+  log?.('PLAN_ORDER', { preferred: 'smelt_iron_ingot', over })
+  return [priority, ...rest]
 }
 
 // ---------------------------------------------------------------------------
@@ -426,12 +461,17 @@ function needsOreDescent(rungId: string, counts: Counts): boolean {
   return bestPickaxeRank(counts) >= 1
 }
 
-/** Inventory-derived prerequisite chain for a placed furnace (#43). */
-export function furnacePrereqGoals(counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
+/** Furnace acquisition chain: sense/known needs none, held needs a place, else craft from 8 cobblestone. */
+export function furnacePrereqGoals(
+  counts: Counts,
+  placedFurnacesNear: number | undefined,
+  knownFurnaces: number | undefined = 0,
+): PlannedGoal[] {
   if ((placedFurnacesNear ?? 0) > 0) return []
   const place: PlannedGoal = { kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
-  const craft: PlannedGoal = { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
   if (has(counts, 'furnace')) return [place]
+  if ((knownFurnaces ?? 0) > 0) return []
+  const craft: PlannedGoal = { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
   const stoneHave = countClass(counts, 'stone')
   if (stoneHave >= 8) return [craft, place]
   const need = Math.max(1, 8 - stoneHave)
@@ -444,10 +484,15 @@ export function furnacePrereqGoals(counts: Counts, placedFurnacesNear: number | 
   return [collect, craft, place]
 }
 
-function withFurnacePrereq(goals: PlannedGoal[], counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
-  if (!goals.some((goal) => goal.targetItem === 'charcoal')) return goals
+function withFurnacePrereq(
+  goals: PlannedGoal[],
+  counts: Counts,
+  placedFurnacesNear: number | undefined,
+  knownFurnaces: number | undefined = 0,
+): PlannedGoal[] {
+  if (!goals.some((goal) => goal.kind === 'smelt')) return goals
   if (goals.some((goal) => goal.targetItem === 'furnace')) return goals
-  const prereq = furnacePrereqGoals(counts, placedFurnacesNear)
+  const prereq = furnacePrereqGoals(counts, placedFurnacesNear, knownFurnaces)
   return prereq.length === 0 ? goals : [...prereq, ...goals]
 }
 
@@ -509,7 +554,7 @@ export function buildLadder(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
-  opts?: { dimension?: string | null; placedFurnacesNear?: number },
+  opts?: { dimension?: string | null; placedFurnacesNear?: number; knownFurnaces?: number },
 ): Ladder {
   const goals: PlannedGoal[] = []
   let rungIndex = RUNGS.length
@@ -538,7 +583,7 @@ export function buildLadder(
       }
       continue
     }
-    const emitted = withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear)
+    const emitted = withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces)
     const rungGoals = filterAlreadyMet(emitted, counts, rung.id, log)
     if (rungGoals.length === 0) continue
     if (rungIndex === RUNGS.length) {
@@ -628,10 +673,10 @@ function dedupeOptions(options: PlanOption[]): PlanOption[] {
 export function buildPlanOptions(
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
+  opts?: { placedFurnacesNear?: number; knownFurnaces?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
 ): PlanOption[] {
   const planGoals = (rung: Rung): PlannedGoal[] =>
-    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear), counts, rung.id, opts?.log)
+    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
   const unsat = reachableUnsatisfiedRungs(counts, world)
   if (unsat.length === 0) {
     return [
@@ -751,11 +796,11 @@ export function normalizePlanTail(
 export function buildBodyChangeOption(
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
+  opts?: { placedFurnacesNear?: number; knownFurnaces?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
 ): PlanOption {
   const unsat = reachableUnsatisfiedRungs(counts, world)
   const planGoals = (rung: Rung): PlannedGoal[] =>
-    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear), counts, rung.id, opts?.log)
+    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
   const goals: PlannedGoal[] = []
   const pushUnique = (goal: PlannedGoal): void => {
     if (goals.some((existing) => existing.kind === goal.kind && existing.targetItem === goal.targetItem)) return
@@ -778,14 +823,14 @@ export function goalsForStrategy(
   strategy: AdvisorStrategy,
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number },
+  opts?: { placedFurnacesNear?: number; knownFurnaces?: number },
 ): PlannedGoal[] {
   const rank = bestPickaxeRank(counts)
   const ladderFront = buildLadder(counts, world, undefined, opts).goals
   const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x cobblestone`, targetItem: 'cobblestone', requiredCount: n })
   const iron = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x raw_iron`, targetItem: 'raw_iron', requiredCount: n })
   const chosen = (goals: PlannedGoal[]): PlannedGoal[] =>
-    withFurnacePrereq(withOreDescent(goals, counts, world), counts, opts?.placedFurnacesNear)
+    withFurnacePrereq(withOreDescent(goals, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces)
   switch (strategy) {
     case 'descend_to_y16':
       return rank < 1 ? ladderFront : chosen([descendGoal(16, 'raw_iron'), iron(3)])
@@ -1109,7 +1154,11 @@ export class PlannerBrain implements System2Brain {
     const started = Date.now()
     const counts = inventoryCounts(this.bot)
     this.currentCounts = counts
-    const options = buildPlanOptions(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear(), log: this.log })
+    const options = buildPlanOptions(counts, this.world, {
+      placedFurnacesNear: this.placedFurnacesNear(),
+      knownFurnaces: this.world.furnaces.length,
+      log: this.log,
+    })
     const reason = mapReason(request, this.firstCall)
     this.firstCall = false
     this.emitMilestones(counts)
@@ -1120,7 +1169,11 @@ export class PlannerBrain implements System2Brain {
     const adviseReason = advisorReasonFor(reason, waitStreak)
     const mercuryTrigger = this.mercuryTriggerFor(adviseReason)
     const stalledOption = stalled
-      ? buildBodyChangeOption(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear(), log: this.log })
+      ? buildBodyChangeOption(counts, this.world, {
+          placedFurnacesNear: this.placedFurnacesNear(),
+          knownFurnaces: this.world.furnaces.length,
+          log: this.log,
+        })
       : null
     const deterministicOption = stalledOption ?? fallbackOption
     if (this.mercury !== undefined && mercuryTrigger !== null) {
@@ -1148,16 +1201,22 @@ export class PlannerBrain implements System2Brain {
       const decision = await this.advisor.decide(this.advisorState(counts, request, waitStreak), adviseReason)
       if (adviseReason === 'no_candidate') this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: decision.strategy, reason: adviseReason })
       if (waitStreak >= 3) this.log('WAIT_LIMIT', { n: waitStreak, strategy: decision.strategy })
-      const goals = decision.goals ?? goalsForStrategy(decision.strategy, counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
+      const goals =
+        decision.goals ??
+        goalsForStrategy(decision.strategy, counts, this.world, {
+          placedFurnacesNear: this.placedFurnacesNear(),
+          knownFurnaces: this.world.furnaces.length,
+        })
       const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals }
       this.logStrategySet(decision, goals)
       return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`, stalled)
     }
 
     if (this.mode === 'deterministic') {
-      this.logPlan('fallback', deterministicOption, reason, started, 0, 'planner disabled (deterministic mode)')
-      this.emitBodyDelta(deterministicOption.id, deterministicOption)
-      return { goals: deterministicOption.goals, note: 'deterministic ladder (planner disabled)', op: 'replace' }
+      const ordered = this.applySmeltOrder(deterministicOption)
+      this.logPlan('fallback', ordered, reason, started, 0, 'planner disabled (deterministic mode)')
+      this.emitBodyDelta(ordered.id, ordered)
+      return { goals: ordered.goals, note: 'deterministic ladder (planner disabled)', op: 'replace' }
     }
 
     const stateHash = this.hashState(counts, request)
@@ -1216,6 +1275,7 @@ export class PlannerBrain implements System2Brain {
   // -- internals ------------------------------------------------------------
 
   private finishPlan(option: PlanOption, request: System2PlanRequest, note: string, force = false): System2Plan {
+    option = this.applySmeltOrder(option)
     this.emitBodyDelta(option.id, option)
     const queue = request.goalQueueState
     const first = option.goals[0]
@@ -1236,6 +1296,7 @@ export class PlannerBrain implements System2Brain {
 
   private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
     if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
+    option = this.applySmeltOrder(option)
     this.emitBodyDelta(option.id, option)
     const normalized = normalizePlanTail(option.goals, request.goalQueueState.current, op)
     if (normalized.goals.length === 0) {
@@ -1297,8 +1358,15 @@ export class PlannerBrain implements System2Brain {
   private bodyChangeOption(): PlanOption {
     return buildBodyChangeOption(this.currentCounts, this.world, {
       placedFurnacesNear: this.placedFurnacesNear(),
+      knownFurnaces: this.world.furnaces.length,
       log: this.log,
     })
+  }
+
+  private applySmeltOrder(option: PlanOption): PlanOption {
+    const goals = enforceSmeltPriority(option.goals, this.currentCounts, this.log)
+    if (goalSignature(goals) === goalSignature(option.goals)) return option
+    return { ...option, goals }
   }
 
   /**
