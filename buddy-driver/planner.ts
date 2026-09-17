@@ -40,6 +40,14 @@ import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
 import { formatSkillSelected, formatStrategyBodyDelta, generateSkillPlan, skillSignature } from '../jev-agent/src/skillCandidate.ts'
 import type { SkillCandidate, SkillGenerationInput, SkillGoal } from '../jev-agent/src/skillCandidate.ts'
+import {
+  compilePlannedGoal,
+  goalReadinessLabel,
+  isOptionStartable,
+  makeOptionSnapshot,
+  orderGoalsByReadiness,
+} from '../jev-agent/src/optionSpec.ts'
+import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
@@ -180,6 +188,62 @@ export function enforceSmeltPriority(
   const rest = goals.filter((_, i) => i !== index)
   log?.('PLAN_ORDER', { preferred: 'smelt_iron_ingot', over })
   return [priority, ...rest]
+}
+
+/**
+ * Issue #46: the plain-JSON world a readiness predicate reads. A station counts
+ * as known when it is placed OR held (a held furnace can be placed and used), so
+ * a ready smelt is not misclassified as blocked just because the furnace is still
+ * in the inventory.
+ */
+export function plannerReadinessSnapshot(counts: Counts, world: ResidentWorldMemory): OptionWorldSnapshot {
+  const knownStations: Array<'crafting_table' | 'furnace'> = []
+  if (has(counts, 'crafting_table') || world.craftingTables.length > 0) knownStations.push('crafting_table')
+  if (has(counts, 'furnace') || world.furnaces.length > 0) knownStations.push('furnace')
+  return makeOptionSnapshot({
+    inventory: counts,
+    dimension: null,
+    position: null,
+    health: null,
+    toolRank: bestPickaxeRank(counts),
+    knownStations,
+    knownOres: world.discoveredOres,
+  })
+}
+
+/**
+ * Issue #46: the goal-queue compile/repair entry point. First inject the ready
+ * smelt priority (requirement 2) when its FULL preconditions hold, then
+ * stable-partition the goals by readiness (requirement 1). Every reordering that
+ * changed the order is logged as PLAN_ORDER with reason=preconditions_satisfied.
+ */
+export function orderPlanGoalsByReadiness(
+  goals: readonly PlannedGoal[],
+  counts: Counts,
+  world: ResidentWorldMemory,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): PlannedGoal[] {
+  const snapshot = plannerReadinessSnapshot(counts, world)
+  const priority = smeltPriorityGoal(counts)
+  let base = [...goals]
+  if (priority !== null && isOptionStartable(compilePlannedGoal(priority), snapshot)) {
+    const first = base[0]
+    const alreadyLeading = first !== undefined && first.kind === 'smelt' && first.targetItem === priority.targetItem
+    if (!alreadyLeading) {
+      const index = base.findIndex((goal) => goal.kind === 'smelt' && goal.targetItem === priority.targetItem)
+      base = [priority, ...base.filter((_, i) => i !== index)]
+      log?.('PLAN_ORDER', {
+        preferred: 'smelt_iron_ingot',
+        over: first?.description ?? 'empty-plan',
+        reason: 'preconditions_satisfied',
+      })
+    }
+  }
+  const ordered = orderGoalsByReadiness(base, snapshot)
+  for (const move of ordered.moves) {
+    log?.('PLAN_ORDER', { preferred: move.preferred, over: move.over, reason: 'preconditions_satisfied' })
+  }
+  return ordered.goals
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,7 +1467,7 @@ export class PlannerBrain implements System2Brain {
     }
 
     if (this.mode === 'deterministic') {
-      const ordered = this.applySmeltOrder(deterministicOption)
+      const ordered = this.applyReadinessOrder(deterministicOption)
       this.logPlan('fallback', ordered, reason, started, 0, 'planner disabled (deterministic mode)')
       const option: PlanOption = { ...ordered, strategy: 'deterministic' }
       this.withSkills(option)
@@ -1468,7 +1532,7 @@ export class PlannerBrain implements System2Brain {
   // -- internals ------------------------------------------------------------
 
   private finishPlan(option: PlanOption, request: System2PlanRequest, note: string, force = false): System2Plan {
-    option = this.applySmeltOrder(option)
+    option = this.applyReadinessOrder(option)
     this.withSkills(option)
     this.emitBodyDelta(option.strategy ?? option.id, option)
     const queue = request.goalQueueState
@@ -1490,7 +1554,7 @@ export class PlannerBrain implements System2Brain {
 
   private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
     if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
-    option = this.applySmeltOrder(option)
+    option = this.applyReadinessOrder(option)
     this.withSkills(option)
     this.emitBodyDelta(option.strategy ?? option.id, option)
     const normalized = normalizePlanTail(option.goals, request.goalQueueState.current, op)
@@ -1532,6 +1596,15 @@ export class PlannerBrain implements System2Brain {
   private applyBodyDeltaRequirement(option: PlanOption, request: System2PlanRequest, note: string): PlanOption | null {
     const current = request.goalQueueState.current
     if (hasBodyDelta(option.goals, current)) return option
+    const head = option.goals[0]
+    if (head !== undefined && this.headReadyAndDifferent(head, current)) {
+      this.log('PLAN_READY_APPLY', {
+        preferred: goalReadinessLabel(head),
+        over: current === null ? null : current.description,
+        reason: 'preconditions_satisfied',
+      })
+      return option
+    }
     const substitute = this.bodyChangeOption()
     if (hasBodyDelta(substitute.goals, current)) {
       this.log('REPLAN_BODY_CHANGE', {
@@ -1550,6 +1623,19 @@ export class PlannerBrain implements System2Brain {
     return null
   }
 
+  /**
+   * Issue #46: a ready head that differs from the blocked current goal is
+   * actionable now, so #44's body-delta gate must not reject it.
+   */
+  private headReadyAndDifferent(
+    head: PlannedGoal,
+    current: { kind: string; targetItem: string | null; description: string } | null,
+  ): boolean {
+    if (current === null) return false
+    if (head.kind === current.kind && (head.targetItem ?? null) === current.targetItem) return false
+    return isOptionStartable(compilePlannedGoal(head), plannerReadinessSnapshot(this.currentCounts, this.world))
+  }
+
   private bodyChangeOption(): PlanOption {
     return buildBodyChangeOption(this.currentCounts, this.world, {
       placedFurnacesNear: this.placedFurnacesNear(),
@@ -1558,8 +1644,8 @@ export class PlannerBrain implements System2Brain {
     })
   }
 
-  private applySmeltOrder(option: PlanOption): PlanOption {
-    const goals = enforceSmeltPriority(option.goals, this.currentCounts, this.log)
+  private applyReadinessOrder(option: PlanOption): PlanOption {
+    const goals = orderPlanGoalsByReadiness(option.goals, this.currentCounts, this.world, this.log)
     if (goalSignature(goals) === goalSignature(option.goals)) return option
     return { ...option, goals }
   }

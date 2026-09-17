@@ -5,7 +5,7 @@ node_modules/
 logs/
 *.log
 *.jsonl
-runner.out
+runner*.out
 
 # Resident runtime state / generated bundles
 buddy-state.json
