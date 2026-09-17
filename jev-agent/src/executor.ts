@@ -734,7 +734,16 @@ export class Executor {
 
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'approaching')
-    await this.pathToNear(target, 2, epoch, signal)
+    try {
+      await this.pathToNear(target, 2, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.warn(
+        'executor',
+        `RETRIEVE horizontal approach failed after the vertical leg: ${error instanceof Error ? error.message : String(error)}`,
+        { target, actionId: candidate.id },
+      )
+    }
     this.ensureOwned(epoch, signal)
     const after = this.distanceToFeet(target)
     const endY = this.bot.entity.position.y
