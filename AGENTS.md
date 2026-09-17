@@ -95,6 +95,17 @@ actuation lease はあるが nested capability bypass が残る (#38)。
 ```
 
 ## 4. 運用手順（必ず守る）
+### 4.0-A 並行レーンの分担規則（衝突を構造的に防ぐ）
+```
+・ホスト層（buddy-driver/agent-runner.mts, resident-types.ts, package.json）を触るレーンは
+  **同時に1本まで**。同系統の変更が並行すると必ず衝突する（実例: #26/#34 と #27/#28 が
+  agent-runner.mts と package.json で衝突し、merge を abort する事態になった）
+・それ以外の領域（jev-agent/src/*, tools/, docs）は並行可
+・複数レーンが同領域に触れた場合は、**worktree 内でマージして衝突を解消**し、
+  解消済みブランチを報告してから 1本ずつ main へ取り込む（mainツリーでは絶対に merge/cherry-pick しない）
+・main ツリーは常に「ビルド可能・クリーン」を保つ。壊れた状態をホストに読ませない
+```
+
 ### 4.0 ブランチ運用（競合防止・必須）
 ```
 ・サブエージェント／並行タスクは **必ず専用ブランチを切って作業する**（例: `task/issue-12-precondition-chain`）
