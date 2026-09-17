@@ -73,6 +73,19 @@ addCase('advisory ore strategies carry the descent prerequisite', () => {
   return { pass: descent && ore, detail: `goals=[${goals.map((g) => g.targetItem).join(',')}]` }
 })
 
+addCase('held furnace with none placed becomes a place-furnace prerequisite', () => {
+  const counts = { ...M2_LIVE, charcoal: 0, furnace: 1 }
+  const near = buildLadder(counts, world(), undefined, { placedFurnacesNear: 0 }).goals
+  const placed = buildLadder(counts, world(), undefined, { placedFurnacesNear: 1 }).goals
+  const placeIndex = near.findIndex((goal) => goal.kind === 'place' && goal.targetItem === 'furnace')
+  const smeltIndex = near.findIndex((goal) => goal.targetItem === 'charcoal')
+  const skippedWhenPlaced = !placed.some((goal) => goal.kind === 'place' && goal.targetItem === 'furnace')
+  return {
+    pass: placeIndex >= 0 && smeltIndex > placeIndex && skippedWhenPlaced,
+    detail: `place@${placeIndex} charcoal@${smeltIndex} skippedWhenPlaced=${skippedWhenPlaced}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('ladder precondition regression (#12)\n')
 for (const testCase of cases) {

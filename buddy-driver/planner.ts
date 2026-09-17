@@ -354,6 +354,24 @@ function needsOreDescent(rungId: string, counts: Counts): boolean {
   return bestPickaxeRank(counts) >= 1
 }
 
+/**
+ * Charcoal needs a furnace that is actually placed near the bot. When the bot
+ * only holds one and no furnace is placed nearby, placing it is the inventory-
+ * derived prerequisite (otherwise `smelt` has no candidate and the queue wedges).
+ */
+function charcoalPrereq(counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
+  if (!has(counts, 'furnace')) return []
+  if ((placedFurnacesNear ?? 0) > 0) return []
+  return [{ kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 }]
+}
+
+function withFurnacePrereq(goals: PlannedGoal[], counts: Counts, placedFurnacesNear: number | undefined): PlannedGoal[] {
+  if (!goals.some((goal) => goal.targetItem === 'charcoal')) return goals
+  if (goals.some((goal) => goal.targetItem === 'furnace')) return goals
+  const prereq = charcoalPrereq(counts, placedFurnacesNear)
+  return prereq.length === 0 ? goals : [...prereq, ...goals]
+}
+
 /** A rung's goals, with the inventory-derived descent prerequisite prepended for
  * ore rungs whose ore is not held yet (#12). */
 export function rungGoalsWithPrereq(rung: Rung, c: Counts, w: ResidentWorldMemory): PlannedGoal[] {
@@ -408,7 +426,7 @@ export function buildLadder(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
-  opts?: { dimension?: string | null },
+  opts?: { dimension?: string | null; placedFurnacesNear?: number },
 ): Ladder {
   const goals: PlannedGoal[] = []
   let rungIndex = RUNGS.length
@@ -423,7 +441,7 @@ export function buildLadder(
       rungIndex = i
       rungId = rung.id
     }
-    const rungGoals = rungGoalsWithPrereq(rung, counts, world)
+    const rungGoals = withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear)
     const description = rung.goals(counts, world)[0]?.description ?? rung.id
     const precondition = rungPrecondition(rung, counts, world)
     if (!precondition.ok) {
@@ -503,7 +521,13 @@ function dedupeOptions(options: PlanOption[]): PlanOption[] {
 }
 
 /** Deterministic, grounded options. Option 0 is always the ladder front (fallback). */
-export function buildPlanOptions(counts: Counts, world: ResidentWorldMemory): PlanOption[] {
+export function buildPlanOptions(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: { placedFurnacesNear?: number },
+): PlanOption[] {
+  const planGoals = (rung: Rung): PlannedGoal[] =>
+    withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear)
   const unsat = reachableUnsatisfiedRungs(counts, world)
   if (unsat.length === 0) {
     return [
@@ -517,31 +541,31 @@ export function buildPlanOptions(counts: Counts, world: ResidentWorldMemory): Pl
   const options: PlanOption[] = []
   const first = unsat[0]
   if (first !== undefined) {
-    options.push({ id: `front_${first.id}`, title: `next milestone: ${first.id}`, goals: rungGoalsWithPrereq(first, counts, world) })
+    options.push({ id: `front_${first.id}`, title: `next milestone: ${first.id}`, goals: planGoals(first) })
   }
-  const two = unsat.slice(0, 2).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
+  const two = unsat.slice(0, 2).flatMap((rung) => planGoals(rung))
   if (two.length > 0) options.push({ id: 'two_rungs', title: `next two milestones (${unsat.slice(0, 2).map((r) => r.id).join(' + ')})`, goals: two })
   const ironIndex = unsat.findIndex((rung) => rung.id === 'iron_pickaxe')
   if (ironIndex >= 0) {
-    const iron = unsat.slice(0, ironIndex + 1).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
+    const iron = unsat.slice(0, ironIndex + 1).flatMap((rung) => planGoals(rung))
     if (iron.length > 0) options.push({ id: 'finish_iron_age', title: 'finish the iron age (raw_iron -> iron_ingot -> iron_pickaxe)', goals: iron })
   }
   const gearIndex = unsat.findIndex((rung) => rung.id === 'iron_gear')
   if (gearIndex >= 0) {
-    const gear = unsat.slice(0, gearIndex + 1).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
+    const gear = unsat.slice(0, gearIndex + 1).flatMap((rung) => planGoals(rung))
     if (gear.length > 0) options.push({ id: 'iron_gear', title: 'full iron gear then diamond', goals: gear })
   }
   const diamondIndex = unsat.findIndex((rung) => rung.id === 'diamond_pickaxe')
   if (diamondIndex >= 0) {
-    const diamond = unsat.slice(0, diamondIndex + 1).flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
+    const diamond = unsat.slice(0, diamondIndex + 1).flatMap((rung) => planGoals(rung))
     if (diamond.length > 0) options.push({ id: 'diamond_road', title: 'push to diamond + diamond_pickaxe', goals: diamond })
   }
-  const whole = unsat.flatMap((rung) => rungGoalsWithPrereq(rung, counts, world))
+  const whole = unsat.flatMap((rung) => planGoals(rung))
   if (whole.length > 0) options.push({ id: 'full_ladder', title: 'the whole remaining ladder', goals: whole })
   const deduped = dedupeOptions(options)
   if (deduped.length === 0) {
     const front = first ?? unsat[0]
-    if (front !== undefined) deduped.push({ id: `front_${front.id}`, title: `next milestone: ${front.id}`, goals: rungGoalsWithPrereq(front, counts, world) })
+    if (front !== undefined) deduped.push({ id: `front_${front.id}`, title: `next milestone: ${front.id}`, goals: planGoals(front) })
   }
   return deduped
 }
@@ -560,12 +584,18 @@ const FRONT_FALLBACK: PlanOption = { id: 'front_fallback', title: 'deterministic
  * This is the ONLY thing the LLM influences: System One still decides every
  * action, and every goal maps to an existing candidate kind.
  */
-export function goalsForStrategy(strategy: AdvisorStrategy, counts: Counts, world: ResidentWorldMemory): PlannedGoal[] {
+export function goalsForStrategy(
+  strategy: AdvisorStrategy,
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: { placedFurnacesNear?: number },
+): PlannedGoal[] {
   const rank = bestPickaxeRank(counts)
-  const ladderFront = buildLadder(counts, world).goals
+  const ladderFront = buildLadder(counts, world, undefined, opts).goals
   const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x cobblestone`, targetItem: 'cobblestone', requiredCount: n })
   const iron = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x raw_iron`, targetItem: 'raw_iron', requiredCount: n })
-  const chosen = (goals: PlannedGoal[]): PlannedGoal[] => withOreDescent(goals, counts)
+  const chosen = (goals: PlannedGoal[]): PlannedGoal[] =>
+    withFurnacePrereq(withOreDescent(goals, counts), counts, opts?.placedFurnacesNear)
   switch (strategy) {
     case 'descend_to_y16':
       return rank < 1 ? ladderFront : chosen([stone(24)])
@@ -776,7 +806,7 @@ export class PlannerBrain implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const started = Date.now()
     const counts = inventoryCounts(this.bot)
-    const options = buildPlanOptions(counts, this.world)
+    const options = buildPlanOptions(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
     const reason = mapReason(request, this.firstCall)
     this.firstCall = false
     this.emitMilestones(counts)
@@ -810,7 +840,7 @@ export class PlannerBrain implements System2Brain {
       const decision = await this.advisor.decide(this.advisorState(counts, request, waitStreak), adviseReason)
       if (adviseReason === 'no_candidate') this.log('NO_PRODUCTIVE_CANDIDATE', { strategy: decision.strategy, reason: adviseReason })
       if (waitStreak >= 3) this.log('WAIT_LIMIT', { n: waitStreak, strategy: decision.strategy })
-      const goals = goalsForStrategy(decision.strategy, counts, this.world)
+      const goals = goalsForStrategy(decision.strategy, counts, this.world, { placedFurnacesNear: this.placedFurnacesNear() })
       const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals }
       this.log('STRATEGY_SET', { strategy: decision.strategy, source: decision.source, goals: goals.map((goal) => goal.description) })
       return this.finishPlan(option, request, `advisor ${decision.source} -> ${decision.strategy}`)
@@ -938,6 +968,20 @@ export class PlannerBrain implements System2Brain {
     if (this.lastMilestoneId !== null) this.log('MILESTONE', { name: this.lastMilestoneId, done: true })
     this.log('MILESTONE', { name: frontier.rungId, done: false })
     this.lastMilestoneId = frontier.rungId
+  }
+
+  private placedFurnacesNear(): number {
+    const ids: number[] = []
+    for (const name of ['furnace', 'blast_furnace', 'smoker']) {
+      const block = this.bot.registry.blocksByName[name]
+      if (block !== undefined) ids.push(block.id)
+    }
+    if (ids.length === 0) return 0
+    try {
+      return this.bot.findBlocks({ matching: ids, maxDistance: 48, count: 8 }).length
+    } catch {
+      return 0
+    }
   }
 
   private hashState(counts: Counts, request: System2PlanRequest): string {
