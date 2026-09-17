@@ -51,7 +51,7 @@ import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
-import { evaluateRetrievalProgress } from './verticalPlan.ts'
+import { evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { DigMemory } from './worldMemory.ts'
 import type { DigDir } from './worldMemory.ts'
 import { StubSystem2 } from './system2.ts'
@@ -291,11 +291,14 @@ export const MAX_BLOCK_REACH = 5
 /** A repeated WAIT becomes a bounded replan first (never an immediate wedge). */
 const WAIT_REPLAN_LIMIT = 4
 /** Issue #45: an active RETRIEVE that stops closing distance for this many ticks escalates. */
-const RETRIEVAL_STALL_TICKS = 6
+const RETRIEVAL_STALL_TICKS = resolveRetrievalStallTicks()
 /** Distance decrease (m) that counts as real retrieval progress. */
 const RETRIEVAL_PROGRESS_EPSILON = 0.5
-/** Stall escalations before the retrieval target is force-replanned. */
-const RETRIEVAL_STALL_DETOURS = 2
+
+function resourceKey(resource: { name: string; position: Vec3Json }): string {
+  return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
+}
+
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750
 const { goals } = pathfinderModule
@@ -464,7 +467,10 @@ export class JevController {
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   private readonly loggedStaleResources = new Set<string>()
-  private retrievalTrack: { id: string; best: number; ticks: number; detours: number } | null = null
+  private retrievalTrack: { id: string; best: number; ticks: number } | null = null
+  private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
+  private retrievalEscalationPending = false
+  private readonly unreachableResources = new Set<string>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -829,7 +835,9 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
-      this.signals.knownResources = this.options.knownResources ?? []
+      this.signals.knownResources = (this.options.knownResources ?? []).filter(
+        (resource) => !this.unreachableResources.has(resourceKey(resource)),
+      )
       this.updateStallSignal()
       this.observeRetrievalStall()
 
@@ -902,6 +910,18 @@ export class JevController {
         )
         if (productive.length > 0) candidates = productive
       }
+      // Issue #45: while a retrieval is active (or right after a stall escalation)
+      // WAIT must not win - it is a no-op that would let the loop fall through
+      // without closing distance. Suppress it so Jev must pick a productive body
+      // change (re-select the retrieval, switch resource, branch-mine, descend).
+      const retrievalGoalActive = this.activeRetrieval !== null && this.retrievalTargetExists()
+      if (retrievalGoalActive || this.retrievalEscalationPending) {
+        const productive = candidates.filter(
+          (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
+        )
+        if (productive.length > 0) candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
+      }
+      this.retrievalEscalationPending = false
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
 
@@ -1411,7 +1431,18 @@ export class JevController {
         }
       }
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
-      if (result.kind === 'RETRIEVE' && result.blockRemoved) this.onRetrievalDescent(candidate)
+      if (result.kind === 'RETRIEVE') {
+        if (result.blockRemoved) this.onRetrievalDescent(candidate)
+        // Only a real retrieval (a dug staircase step or an obtained item) retires
+        // the active target. The executor reports `verified=true` for a sub-metre
+        // nudge, so clearing on that would disarm the stall assertion before it
+        // can ever fire.
+        if (result.blockRemoved || result.itemsGained > 0) {
+          this.activeRetrieval = null
+          this.retrievalTrack = null
+          this.noteCandidateSuccess(result.actionId)
+        }
+      }
       if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
         const moved = Math.hypot(
           this.bot.entity.position.x - this.actionStart.x,
@@ -2001,33 +2032,32 @@ export class JevController {
   }
 
   /**
-   * Issue #45 progress assertion: while the last decision was a RETRIEVE and its
-   * distance to the remembered target stops decreasing for RETRIEVAL_STALL_TICKS
-   * ticks, log RETRIEVE_STALLED and force a detour (reopen vertical digging and
-   * re-plan) instead of letting the loop fall through to WAIT.
+   * Issue #45 progress assertion: while a retrieval is active its distance to the
+   * remembered target must keep decreasing. When it does not for
+   * RETRIEVAL_STALL_TICKS the target is dropped as unreachable, RETRIEVE_STALLED
+   * is logged, and the next decision is forced onto a different strategy instead
+   * of WAIT. Tracking is keyed on the active retrieval, not the last chosen action,
+   * so an intervening WAIT no longer resets the assertion.
    */
   private observeRetrievalStall(): void {
-    const id = this.lastDecisionId
+    const active = this.activeRetrieval
     const entity = this.bot.entity
-    const candidate = id === null ? undefined : this.lastCandidates.find((entry) => entry.id === id)
-    if (
-      id === null ||
-      candidate === undefined ||
-      candidate.kind !== 'RETRIEVE' ||
-      candidate.target === null ||
-      entity === undefined
-    ) {
+    if (active === null || entity === undefined) {
       this.retrievalTrack = null
       return
     }
-    const target = candidate.target
+    if (this.goal.complete || this.unreachableResources.has(this.retrievalKey(active))) {
+      this.activeRetrieval = null
+      this.retrievalTrack = null
+      return
+    }
     const current = Math.hypot(
-      entity.position.x - target.x,
-      entity.position.y - target.y,
-      entity.position.z - target.z,
+      entity.position.x - active.target.x,
+      entity.position.y - active.target.y,
+      entity.position.z - active.target.z,
     )
-    if (this.retrievalTrack === null || this.retrievalTrack.id !== id) {
-      this.retrievalTrack = { id, best: current, ticks: 0, detours: 0 }
+    if (this.retrievalTrack === null || this.retrievalTrack.id !== active.id) {
+      this.retrievalTrack = { id: active.id, best: current, ticks: 0 }
       return
     }
     const decision = evaluateRetrievalProgress({
@@ -2038,24 +2068,76 @@ export class JevController {
     })
     this.retrievalTrack.best = decision.best
     this.retrievalTrack.ticks = decision.ticks
-    if (decision.outcome !== 'stalled') return
+    if (decision.outcome === 'stalled') this.onRetrievalStall(active, current)
+  }
 
+  private retrievalKey(active: { knownName: string; target: Vec3Json }): string {
+    return resourceKey({ name: active.knownName, position: active.target })
+  }
+
+  private retrievalTargetExists(): boolean {
+    const active = this.activeRetrieval
+    if (active === null) return false
+    return (this.options.knownResources ?? []).some(
+      (resource) =>
+        resource.name === active.knownName &&
+        resource.position.x === active.target.x &&
+        resource.position.y === active.target.y &&
+        resource.position.z === active.target.z,
+    )
+  }
+
+  private onRetrievalStall(
+    active: { id: string; resource: string; knownName: string; target: Vec3Json },
+    current: number,
+  ): void {
     const ticks = RETRIEVAL_STALL_TICKS
-    this.retrievalTrack.detours += 1
     this.logger.warn(
       'agent',
-      `RETRIEVE_STALLED target=${target.x},${target.y},${target.z} dist=${Math.round(current)} ticks=${ticks}`,
-      { target, dist: Math.round(current), ticks, detours: this.retrievalTrack.detours },
+      formatRetrieveStalled(active.target, Math.round(current), ticks),
+      { target: active.target, dist: Math.round(current), ticks },
       this.tickCounter,
     )
-    // Detour: suppress the stalled target and reopen vertical digging (the
-    // descent budget is reset only through this escalation path).
-    this.noteCandidateFailure(id)
+    this.dropUnreachableResource(active, current)
+    this.noteCandidateFailure(active.id)
     this.digMemory.markResourceProgress()
-    if (this.retrievalTrack.detours >= RETRIEVAL_STALL_DETOURS) {
-      this.retrievalTrack.detours = 0
-      this.escalate('pathfinder_stuck', `retrieval stalled at ${Math.round(current)}m for ${ticks} ticks`)
-    }
+    this.activeRetrieval = null
+    this.retrievalTrack = null
+    this.retrievalEscalationPending = true
+    this.escalate('pathfinder_stuck', `retrieval stalled at ${Math.round(current)}m for ${ticks} ticks`)
+  }
+
+  private dropUnreachableResource(
+    active: { resource: string; knownName: string; target: Vec3Json },
+    current: number,
+  ): void {
+    const key = this.retrievalKey(active)
+    if (this.unreachableResources.has(key)) return
+    this.unreachableResources.add(key)
+    this.logger.warn(
+      'agent',
+      formatKnownResourceUnreachable(active.resource, active.knownName, active.target),
+      { item: active.resource, name: active.knownName, at: active.target, dist: Math.round(current) },
+      this.tickCounter,
+    )
+    const entity = this.bot.entity
+    const escalation = planRetrievalEscalation({
+      failedName: active.knownName,
+      failedTarget: active.target,
+      known: this.options.knownResources ?? [],
+      self:
+        entity === undefined
+          ? { x: 0, y: 0, z: 0 }
+          : { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    })
+    this.logger.info(
+      'agent',
+      escalation.kind === 'switch-resource'
+        ? `RETRIEVAL_ESCALATION kind=switch-resource name=${escalation.name} at=${escalation.position.x},${escalation.position.y},${escalation.position.z}`
+        : `RETRIEVAL_ESCALATION kind=branch-mine y=${escalation.y}`,
+      { escalation },
+      this.tickCounter,
+    )
   }
 
   private checkWedge(actionId: string): void {
@@ -2172,6 +2254,10 @@ export class JevController {
     }
     const dist = this.retrievalDistance(candidate.target)
     const vertical = typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : 'none'
+    const knownName = typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : resource
+    if (candidate.target !== null) {
+      this.activeRetrieval = { id: candidate.id, resource, knownName, target: candidate.target }
+    }
     this.logger.info(
       'agent',
       `RETURN_TO_KNOWN_RESOURCE item=${resource} target=${at ?? 'unknown'} dist=${dist ?? 'unknown'} vertical=${vertical}`,

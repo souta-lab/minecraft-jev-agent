@@ -71,7 +71,7 @@ const JEV_SRC = join(MC_AI, 'jev-agent', 'src')
 
 const HOST = '127.0.0.1'
 const PORT = 25565
-const USERNAME = 'AI_Buddy'
+const USERNAME = process.env.BUDDY_USERNAME ?? 'AI_Buddy'
 const VERSION = '1.21.11'
 const RECONNECT_MS = 5000
 const HEARTBEAT_MS = 15000
