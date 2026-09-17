@@ -173,6 +173,9 @@ export function enforceSmeltPriority(
     return [...goals]
   }
   const index = goals.findIndex((goal) => goal.kind === 'smelt' && goal.targetItem === priority.targetItem)
+  if (index > 0 && goals.slice(0, index).some((goal) => goal.kind === 'place')) {
+    return [...goals]
+  }
   const over = first?.description ?? 'empty-plan'
   const rest = goals.filter((_, i) => i !== index)
   log?.('PLAN_ORDER', { preferred: 'smelt_iron_ingot', over })
