@@ -549,12 +549,123 @@ export function reachableUnsatisfiedRungs(c: Counts, w: ResidentWorldMemory): Ru
   return out
 }
 
+// inventory-aware ladder resume (#reset-inventory): `satisfied()` is not
+// monotone (cobblestone/raw_iron do not satisfy the wood rung), so a reset must
+// derive its starting rung from the LIVE inventory instead of assuming wood.
+const USABLE_INVENTORY_SPECS: readonly string[] = [
+  'log', 'planks', 'stone', 'fuel', 'pickaxe',
+  'stick', 'raw_iron', 'iron_ingot', 'iron_ore', 'diamond', 'diamond_ore',
+  'crafting_table', 'furnace',
+]
+
+/** True when an inventory item can advance the ladder (dirt/gravel cannot). */
+export function isUsableInventoryItem(name: string): boolean {
+  return USABLE_INVENTORY_SPECS.some((spec) => resourceMatches(name, spec))
+}
+
+/**
+ * True only when the LIVE inventory holds no ladder-usable item. Requirement 2:
+ * `invEmpty` must be computed from the live inventory, never assumed from an
+ * `Object.keys(counts).length === 0` shortcut that also counts dirt/gravel.
+ */
+export function inventoryUsableEmpty(counts: Counts): boolean {
+  for (const [name, n] of Object.entries(counts)) {
+    if (n > 0 && isUsableInventoryItem(name)) return false
+  }
+  return true
+}
+
+/**
+ * A rung is behind the resident when the capability it represents is implied by
+ * higher-tier materials already in the live inventory. `satisfied()` alone is not
+ * monotone: holding cobblestone does not satisfy the wood rung even though it
+ * proves the wood tier (and its pickaxe) was already climbed.
+ */
+export function rungBehindInventory(rung: Rung, counts: Counts, world: ResidentWorldMemory): boolean {
+  if (rung.satisfied(counts, world)) return true
+  switch (rung.id) {
+    case 'wood':
+      return bestPickaxeRank(counts) >= 1 || countClass(counts, 'stone') >= 1
+    case 'wooden_pickaxe':
+      return countClass(counts, 'stone') >= 1 || bestPickaxeRank(counts) >= 2
+    case 'stone_pickaxe':
+      return (counts['raw_iron'] ?? 0) + (counts['iron_ingot'] ?? 0) >= 1 || bestPickaxeRank(counts) >= 3
+    case 'cobblestone':
+      return countClass(counts, 'stone') >= 8
+    default:
+      return false
+  }
+}
+
+export interface ResumeRung {
+  rungIndex: number
+  rungId: string
+  /** true only when the live inventory holds no usable item. */
+  invEmpty: boolean
+  /** the rung whose missing precondition forced a fallback, else null. */
+  fallbackFrom: string | null
+  fallbackNeed: string | null
+}
+
+/**
+ * Inventory-aware resume rung for a ladder reset (death, disconnect, restart or a
+ * stale ledger). Requirements: start at wood only when the live inventory is
+ * genuinely empty of usable items; otherwise resume at the first rung that still
+ * has work and whose preconditions hold, falling back one step (and logging) when
+ * a precondition is missing so no ungrounded rung is ever resumed.
+ */
+export function deriveResumeRung(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): ResumeRung {
+  const first = executableRungs()[0]
+  const woodId = first?.id ?? 'wood'
+  if (inventoryUsableEmpty(counts)) {
+    return { rungIndex: 0, rungId: woodId, invEmpty: true, fallbackFrom: null, fallbackNeed: null }
+  }
+  let candidate = -1
+  for (let i = 0; i < RUNGS.length; i += 1) {
+    const rung = RUNGS[i]
+    if (rung === undefined || rung.future === true) continue
+    if (rungBehindInventory(rung, counts, world)) continue
+    candidate = i
+    break
+  }
+  if (candidate < 0) {
+    return { rungIndex: RUNGS.length, rungId: 'complete', invEmpty: false, fallbackFrom: null, fallbackNeed: null }
+  }
+  const candidateRung = RUNGS[candidate]
+  if (candidateRung === undefined) {
+    return { rungIndex: 0, rungId: woodId, invEmpty: false, fallbackFrom: null, fallbackNeed: null }
+  }
+  const precondition = rungPrecondition(candidateRung, counts, world)
+  if (precondition.ok) {
+    return { rungIndex: candidate, rungId: candidateRung.id, invEmpty: false, fallbackFrom: null, fallbackNeed: null }
+  }
+  for (let j = candidate - 1; j >= 0; j -= 1) {
+    const earlier = RUNGS[j]
+    if (earlier === undefined || earlier.future === true) continue
+    if (earlier.satisfied(counts, world)) continue
+    if (!rungPrecondition(earlier, counts, world).ok) continue
+    log?.('LADDER_RESUME_FALLBACK', {
+      from: candidateRung.id,
+      need: precondition.need,
+      to: earlier.id,
+      rungIndex: j,
+    })
+    return { rungIndex: j, rungId: earlier.id, invEmpty: false, fallbackFrom: candidateRung.id, fallbackNeed: precondition.need }
+  }
+  log?.('LADDER_RESUME_FALLBACK', { from: candidateRung.id, need: precondition.need, to: woodId, rungIndex: 0 })
+  return { rungIndex: 0, rungId: woodId, invEmpty: false, fallbackFrom: candidateRung.id, fallbackNeed: precondition.need }
+}
+
 /** The executable ladder as a goal list, gated by per-rung preconditions. */
 export function buildLadder(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
-  opts?: { dimension?: string | null; placedFurnacesNear?: number; knownFurnaces?: number },
+  opts?: { dimension?: string | null; placedFurnacesNear?: number; knownFurnaces?: number; resumeRungIndex?: number },
 ): Ladder {
   const goals: PlannedGoal[] = []
   let rungIndex = RUNGS.length
@@ -564,6 +675,10 @@ export function buildLadder(
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || rung.future === true) continue
+    // Inventory-aware resume (#reset-inventory): rungs the live inventory already
+    // put behind the resident are not re-planned, so a reset resumes at the right
+    // rung instead of climbing from wood again.
+    if (opts?.resumeRungIndex !== undefined && i < opts.resumeRungIndex) continue
     if (rung.satisfied(counts, world)) {
       if (log !== undefined) {
         for (const goal of rung.goals(counts, world)) {

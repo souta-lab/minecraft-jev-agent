@@ -40,6 +40,7 @@ import {
   buildPlanOptions,
   computeFrontier,
   debugFrontier,
+  deriveResumeRung,
   goalsForStrategy,
   has,
   inventoryCounts,
@@ -324,7 +325,7 @@ function buildMercurySummary(
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
-  const frontier = computeFrontier(counts, world)
+  const frontier = deriveResumeRung(counts, world)
   const inventory: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) inventory[name] = n
   let wait = 0
@@ -454,23 +455,33 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   })
 
   const counts = inventoryCounts(ctx.bot)
+  const resume = deriveResumeRung(counts, world, (event, detail) => ctx.log(event, detail))
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
     dimension: ctx.bot.game?.dimension ?? null,
     placedFurnacesNear: furnaces.length,
     knownFurnaces: world.furnaces.length,
+    resumeRungIndex: resume.rungIndex,
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
   }
 
-  // Death (or any explicit reset) recomputes the ladder from the LIVE inventory.
-  // An empty inventory means restart at wood; the queue is never given a goal
-  // whose prerequisite is missing.
+  // A reset resumes from the LIVE inventory; `invEmpty` is computed, not assumed.
+  if (ctx.resetReason !== null || resume.rungIndex > 0) {
+    ctx.log('LADDER_RESUME', {
+      rung: resume.rungId,
+      rungIndex: resume.rungIndex,
+      reason: ctx.resetReason ?? 'inventory-resume',
+      invEmpty: resume.invEmpty,
+      ...(resume.fallbackFrom === null ? {} : { fallbackFrom: resume.fallbackFrom, fallbackNeed: resume.fallbackNeed }),
+      inventory: counts,
+    })
+  }
   if (ctx.resetReason !== null) {
     ctx.log('LADDER_RESET', {
       reason: ctx.resetReason,
-      invEmpty: Object.keys(counts).length === 0,
+      invEmpty: resume.invEmpty,
       rungIndex: ladder.rungIndex,
       rungId: ladder.rungId,
       goals: ladder.goals.map((goal) => goal.description),
@@ -673,7 +684,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   function status(): GenerationStatus {
     const truth = readTruth()
-    const frontier = computeFrontier(truth.inventory, world)
+    const frontier = deriveResumeRung(truth.inventory, world)
     const current = controller.agent.current
     return {
       running: controller.isRunning,
