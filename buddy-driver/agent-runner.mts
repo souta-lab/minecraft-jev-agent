@@ -241,6 +241,7 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
     }
   }
   if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
+  if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {
       memory.mined[key] = (memory.mined[key] ?? 0) + count
@@ -311,10 +312,27 @@ function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourc
       x: Math.round(resource.x),
       y: Math.round(resource.y),
       z: Math.round(resource.z),
+      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
     })
     added += 1
   }
   return added
+}
+
+function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourceJson[]): number {
+  const keys = new Set(gone.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
+  let removed = 0
+  for (let index = target.length - 1; index >= 0; index -= 1) {
+    const resource = target[index]
+    if (resource === undefined) continue
+    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+    if (!keys.has(key)) continue
+    target.splice(index, 1)
+    removed += 1
+  }
+  return removed
 }
 
 function archiveLedger(reason: string): void {

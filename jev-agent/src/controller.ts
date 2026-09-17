@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { countBlockedLogs, defaultCandidateOptions, generateCandidates } from './candidates.ts'
+import { countBlockedLogs, defaultCandidateOptions, generateCandidates, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -341,6 +341,7 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
   'RETURN_TO_KNOWN_RESOURCE',
+  'KNOWN_RESOURCE_STALE',
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
@@ -453,6 +454,7 @@ export class JevController {
   private noProductiveThisTick = false
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
+  private readonly loggedStaleResources = new Set<string>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -872,6 +874,7 @@ export class JevController {
       )
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
+      this.logStaleKnownResources(state)
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -2074,12 +2077,34 @@ export class JevController {
       )
       return
     }
+    const dist = this.retrievalDistance(candidate.target)
     this.logger.info(
       'agent',
-      `RETURN_TO_KNOWN_RESOURCE target=${resource} name=${candidate.targetName ?? 'unknown'} at=${at ?? 'unknown'}`,
-      { target: resource, name: candidate.targetName, at },
+      `RETURN_TO_KNOWN_RESOURCE item=${resource} target=${at ?? 'unknown'} dist=${dist ?? 'unknown'}`,
+      { item: resource, name: candidate.targetName, target: at, dist },
       this.tickCounter,
     )
+  }
+
+  private retrievalDistance(target: Vec3Json | null): number | null {
+    const entity = this.bot.entity
+    if (target === null || entity === undefined) return null
+    return Math.round(Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z))
+  }
+
+  private logStaleKnownResources(state: WorldState): void {
+    for (const resource of staleKnownResources(state)) {
+      const at = `${resource.position.x},${resource.position.y},${resource.position.z}`
+      const key = `${resource.name}@${at}`
+      if (this.loggedStaleResources.has(key)) continue
+      this.loggedStaleResources.add(key)
+      this.logger.info(
+        'agent',
+        `KNOWN_RESOURCE_STALE item=${resource.name} at=${at}`,
+        { item: resource.name, at },
+        this.tickCounter,
+      )
+    }
   }
 
   private abortWedge(reason: string): void {

@@ -929,6 +929,33 @@ function retrievalWant(focusItem: string | null): RetrievalWant | null {
   return null
 }
 
+const RETRIEVAL_NEED_CAP = 6
+
+/**
+ * Issue #14: the ordered list of items the body actually needs next - the
+ * current subgoal first, then the queued goals. A `collect cobblestone (descend
+ * toward ore levels)` proxy must not hide the real need (raw_iron) when a
+ * remembered ore coordinate exists, so callers consult the queue, not only
+ * `focusItem`. Pure.
+ */
+function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalWant[] {
+  const items: string[] = []
+  const push = (item: string | null | undefined): void => {
+    if (typeof item !== 'string' || item.length === 0 || items.includes(item)) return
+    items.push(item)
+  }
+  push(focusItem)
+  push(state.goal.targetItem)
+  for (const queued of state.goalQueue.goals) push(queued.targetItem)
+  const wants: RetrievalWant[] = []
+  for (const item of items) {
+    const want = retrievalWant(item)
+    if (want !== null) wants.push(want)
+    if (wants.length >= RETRIEVAL_NEED_CAP) break
+  }
+  return wants
+}
+
 function visibleBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
   if (want.kind === 'ore') {
     return state.blocks.find((block) => block.kind === 'ore' && resourceMatches(block.yield, want.item)) ?? null
@@ -950,10 +977,14 @@ function knownResourceFor(state: WorldState, want: RetrievalWant): KnownResource
   return best
 }
 
-const DEPLETION_PROOF_DISTANCE = 8
+export const KNOWN_RESOURCE_PROOF_DISTANCE = 8
 
-function resourceDepleted(state: WorldState, resource: KnownResource): boolean {
-  if (distance(resource.position, state.self.position) > DEPLETION_PROOF_DISTANCE) return false
+function resourceDepleted(
+  state: WorldState,
+  resource: KnownResource,
+  proofDistance = KNOWN_RESOURCE_PROOF_DISTANCE,
+): boolean {
+  if (distance(resource.position, state.self.position) > proofDistance) return false
   return !state.blocks.some(
     (block) =>
       block.kind !== 'hazard' &&
@@ -963,9 +994,22 @@ function resourceDepleted(state: WorldState, resource: KnownResource): boolean {
   )
 }
 
-function retrievalCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
-  const want = retrievalWant(focusItem)
-  if (want === null) return []
+/**
+ * Issue #14 staleness: remembered ore/log cells close enough that the sensor
+ * would have seen the block if it still existed, but which are absent from the
+ * current block list (mined/replaced). The controller logs KNOWN_RESOURCE_STALE
+ * for these and the durable store drops them. Pure.
+ */
+export function staleKnownResources(
+  state: WorldState,
+  proofDistance = KNOWN_RESOURCE_PROOF_DISTANCE,
+): KnownResource[] {
+  return (state.signals.knownResources ?? []).filter(
+    (resource) => (resource.kind === 'ore' || resource.kind === 'log') && resourceDepleted(state, resource, proofDistance),
+  )
+}
+
+function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
   if (visibleBlockFor(state, want) !== null) return []
   const known = knownResourceFor(state, want)
   if (known !== null) {
@@ -1025,6 +1069,19 @@ function retrievalCandidates(state: WorldState, options: CandidateOptions, focus
       },
     },
   ]
+}
+
+/**
+ * Issue #14: offer a grounded return-to-known candidate for the earliest need
+ * in the queue that has a remembered coordinate but no visible block. Returns
+ * only the first satisfiable need so the probe stays bounded.
+ */
+function retrievalCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
+  for (const want of retrievalNeeds(state, focusItem)) {
+    const candidates = retrievalCandidatesForWant(state, options, want)
+    if (candidates.length > 0) return candidates
+  }
+  return []
 }
 
 function surfaceSpot(state: WorldState, item: string): Vec3Json | null {

@@ -81,6 +81,11 @@ export interface KnownResourceJson {
   x: number
   y: number
   z: number
+  /** world the cell was scanned in; a coordinate is only valid for this key (#14) */
+  dimension?: string
+  worldEpoch?: number
+  /** epoch ms when the cell was last observed to exist */
+  lastSeenAt?: number
 }
 
 export interface ResidentWorldMemory {
@@ -133,6 +138,8 @@ export interface WorldMemoryDelta {
   furnaces?: Vec3Json[]
   discoveredOres?: string[]
   knownResources?: KnownResourceJson[]
+  /** cells proven gone (mined/replaced); the host drops them from the durable store (#14) */
+  removeKnownResources?: KnownResourceJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   hazards?: DeathHazard[]

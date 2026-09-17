@@ -30,6 +30,14 @@ export type KnownResource = {
   name: string
   kind: 'ore' | 'log' | 'station'
   position: Vec3Json
+  /**
+   * Issue #14: the coordinate is only meaningful in the world it was scanned in.
+   * `dimension` and `worldEpoch` let the planner drop an entry that belongs to a
+   * previous world/dimension instead of pathing to a stale cell. Optional so a
+   * partially-written durable mirror from an older build still loads.
+   */
+  dimension?: string
+  worldEpoch?: number
 }
 
 export type HeldItemState = {

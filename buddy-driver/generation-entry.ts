@@ -201,6 +201,9 @@ export function mergeKnownResources(
       x: Math.round(resource.x),
       y: Math.round(resource.y),
       z: Math.round(resource.z),
+      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
     }
     target.push(stored)
     log?.('KNOWN_RESOURCE', {
@@ -212,6 +215,78 @@ export function mergeKnownResources(
     added += 1
   }
   return added
+}
+
+export const KNOWN_RESOURCE_STALENESS_RADIUS = 24
+
+export function resourceStillPresent(
+  remembered: string,
+  live: string | null | undefined,
+): 'unknown' | 'present' | 'replaced' | 'stale' {
+  if (typeof live !== 'string' || live.length === 0) return 'unknown'
+  if (live === remembered) return 'present'
+  const sameFamily =
+    (remembered.endsWith('_ore') && live.endsWith('_ore')) || (remembered.endsWith('_log') && live.endsWith('_log'))
+  return sameFamily ? 'replaced' : 'stale'
+}
+
+function resourceKey(resource: { name: string; x: number; y: number; z: number }): string {
+  return `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+function resourceAt(resource: { x: number; y: number; z: number }): string {
+  return `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+/**
+ * Issue #14 staleness: a remembered cell close enough that the loaded chunk
+ * still contains it is proof. If the block is gone (air/stone/replaced by a
+ * non-resource) the durable entry is evicted and logged; if it is a different
+ * ore/log variant the entry is refreshed. Out-of-range cells are left alone
+ * (absence there is not proof). Mutates `known` and returns the evicted set.
+ */
+export function evictStaleKnownResources(
+  bot: Bot,
+  known: KnownResourceJson[],
+  worldKey: { dimension: string; worldEpoch: number },
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): KnownResourceJson[] {
+  const entity = bot.entity
+  if (entity === undefined) return []
+  const position = entity.position
+  const stale: KnownResourceJson[] = []
+  const staleKeys = new Set<string>()
+  for (const resource of known) {
+    if (resource.worldEpoch !== undefined && resource.worldEpoch !== worldKey.worldEpoch) {
+      stale.push(resource)
+      staleKeys.add(resourceKey(resource))
+      log?.('KNOWN_RESOURCE_STALE', { item: resource.name, at: resourceAt(resource), reason: 'worldEpoch' })
+      continue
+    }
+    const distance = Math.hypot(resource.x - position.x, resource.y - position.y, resource.z - position.z)
+    if (distance > KNOWN_RESOURCE_STALENESS_RADIUS) continue
+    let live: string | null = null
+    try {
+      live = bot.blockAt(new Vec3(resource.x, resource.y, resource.z))?.name ?? null
+    } catch {
+      live = null
+    }
+    const verdict = resourceStillPresent(resource.name, live)
+    if (verdict === 'stale') {
+      stale.push(resource)
+      staleKeys.add(resourceKey(resource))
+      log?.('KNOWN_RESOURCE_STALE', { item: resource.name, at: resourceAt(resource) })
+    } else if (verdict === 'present' || verdict === 'replaced') {
+      resource.lastSeenAt = Date.now()
+      if (verdict === 'replaced' && typeof live === 'string') resource.name = live
+    }
+  }
+  if (staleKeys.size === 0) return stale
+  for (let index = known.length - 1; index >= 0; index -= 1) {
+    const resource = known[index]
+    if (resource !== undefined && staleKeys.has(resourceKey(resource))) known.splice(index, 1)
+  }
+  return stale
 }
 
 function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] {
@@ -391,16 +466,36 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const newFurnaces = mergeStations(world.furnaces, furnaces)
   const discoveredOres: string[] = []
   const foundResources: KnownResourceJson[] = []
+  const seenAt = Date.now()
   for (const ore of ores) {
     const name = bot.blockAt(new Vec3(ore.x, ore.y, ore.z))?.name ?? 'unknown_ore'
     if (!world.discoveredOres.includes(name)) world.discoveredOres.push(name)
     if (!discoveredOres.includes(name)) discoveredOres.push(name)
-    foundResources.push({ name, kind: 'ore', x: ore.x, y: ore.y, z: ore.z })
+    foundResources.push({
+      name,
+      kind: 'ore',
+      x: ore.x,
+      y: ore.y,
+      z: ore.z,
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
+      lastSeenAt: seenAt,
+    })
   }
   for (const log of logs) {
     const name = bot.blockAt(new Vec3(log.x, log.y, log.z))?.name ?? 'unknown_log'
-    foundResources.push({ name, kind: 'log', x: log.x, y: log.y, z: log.z })
+    foundResources.push({
+      name,
+      kind: 'log',
+      x: log.x,
+      y: log.y,
+      z: log.z,
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
+      lastSeenAt: seenAt,
+    })
   }
+  const staleRemovals = evictStaleKnownResources(bot, world.knownResources, ctx.worldKey, (event, detail) => ctx.log(event, detail))
   const newKnownResources = mergeKnownResources(
     world.knownResources,
     foundResources,
@@ -412,6 +507,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     furnaces,
     discoveredOres,
     knownResources: foundResources,
+    removeKnownResources: staleRemovals,
     traversalFailures: world.traversalFailures,
   }
   // The generation proposes; the HOST is the only writer that commits.
@@ -518,6 +614,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       name: resource.name,
       kind: resource.kind,
       position: { x: resource.x, y: resource.y, z: resource.z },
+      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
     })),
   }
 
