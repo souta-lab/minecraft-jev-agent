@@ -14,6 +14,7 @@
     "retrieval-body-test": "node ../jev-agent/node_modules/.bin/tsx test-retrieval-body.mts",
     "known-resource-test": "node ../jev-agent/node_modules/.bin/tsx test-known-resource.mts",
     "smelt-furnace-test": "node ../jev-agent/node_modules/.bin/tsx test-smelt-furnace.mts",
+    "furnace-place-test": "node ../jev-agent/node_modules/.bin/tsx test-furnace-place.mts",
     "state-snapshot-test": "node ../jev-agent/node_modules/.bin/tsx test-state-snapshot.mts",
     "skill-strategy-test": "node ../jev-agent/node_modules/.bin/tsx test-skill-strategy.mts",
     "observability-test": "node ../jev-agent/node_modules/.bin/tsx test-observability.mts",
