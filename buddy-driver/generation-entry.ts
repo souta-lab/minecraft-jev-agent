@@ -19,8 +19,10 @@ import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
-import type { System2PlanRequest } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
+import { OptionCompilingSystem2, optionSnapshotFromBot } from './option-brain.ts'
 import {
   MERCURY_ALLOWED_GOALS,
   MERCURY_MODEL_DEFAULT,
@@ -460,7 +462,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mercury,
     postDeathRecovery,
   })
-  controller.setSystem2(brain)
+
+  // #21: opt-in Option compiler. OFF by default, so the planner output continues
+  // to enter the GoalQueue verbatim (the ledger and deterministic guarantees are
+  // untouched). When BUDDY_OPTION_COMPILER is enabled, every planned goal is
+  // compiled into a grounded OptionSpec and unmet preconditions are expanded into
+  // their prerequisite chain before the queue is seeded.
+  const optionCompilerEnabled = resolveOptionCompilerEnabled()
+  const system2: System2Brain = optionCompilerEnabled
+    ? new OptionCompilingSystem2(brain, {
+        log: (event, detail) => ctx.log(event, detail),
+        snapshot: () => optionSnapshotFromBot(ctx.bot, world, ctx.bot.game?.dimension ?? null),
+      })
+    : brain
+  controller.setSystem2(system2)
 
   ctx.log('GENERATION_READY', {
     id,
@@ -474,6 +489,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     plannerCache: cachePath,
     advisor: mercuryEnablement.enabled ? `mercury:${MERCURY_MODEL_DEFAULT}` : resolveAdvisorMode(plannerMode),
     advisorSource: mercuryEnablement.source,
+    optionCompiler: optionCompilerEnabled,
     futureRungs: ladder.futureRungIds,
     prereqReplaced: ladder.prereqReplaced,
     craftingTables: world.craftingTables.length,
