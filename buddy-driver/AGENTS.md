@@ -357,4 +357,41 @@ freeze {reason}   -> frozen:true + freeze report パスを返す
 resume            -> frozen:false, started:true
 ```
 ※ソケットは 0600、JSON Lines（`{"id":<n>,"cmd":"...","args":{...}}\n`）。応答は1行JSON。
+
+---
+
+## 追記9（01:41 実測）— ★Mercury稼働の証拠 ＋ ★世代短命の原因（PRECONDITION_MISSINGループ）
+
+### Mercury 2.5 が実応答して GoalQueue に反映された（達成）
+```
+ADVISOR source=mercury reason=no_candidate strategy=mercury_continue_collect_raw_iron cost=0.000329 ms=6870 cached=false
+STRATEGY_SET strategy=mercury_continue_collect_raw_iron source=mercury goals=["collect 3 x raw_iron"]
+```
+- 実モデル `inception/mercury-2.5` が **6870ms**（推論モデルとして妥当）で応答、**cost $0.000329**（目標 <$0.001 を満たす）
+- structured output → shape validation → kind×target grounding → PlannedGoal → GoalQueue の経路が通った
+- 以前の `aborted due to timeout`（52ms）は解消
+
+### 世代が短命な原因（新規・最優先で潰す）
+```
+PRECONDITION_MISSING goal=smelt 3 x iron_ingot need=furnace + raw_iron rungId=iron_ingot
+GENERATION_STOP id=... stopped=stopped-by-caller success=false ticks=1 verifiedDigs=0 subgoalsDone=0
+（16:41:17 / 16:41:31 / 16:41:39 … 約10〜15秒ごとに反復）
+```
+診断: 死亡復帰用に入れた **precondition-gated ladder が厳しすぎる**。キュー先頭が `smelt 3 x iron_ingot` で
+前提（furnace + raw_iron）が無いと、**1tickで停止** → ホストが回復 → 同じ目標でまた停止、の無限回転
+（generations=178 / recoveries=75 の正体）。
+
+修正要件:
+1. `PRECONDITION_MISSING` は**停止条件にしない**。代わりに **前提チェーンを在庫から再導出**して計画を差し替える:
+   `smelt iron_ingot` → `collect raw_iron` → （ツルハシが無ければ）`craft stone_pickaxe` → `collect cobblestone` → …
+   `LADDER_PREREQ goal=<g> need=<items> -> replace goals=[...]` をログ。
+2. 前提が **原理的に充足不能**（例: 必要な資源が現在の次元/在庫/既知資源に存在しない）場合のみ停止し、その理由を残す。
+3. 差し替え後は **少なくともN tick（例 20）は再停止しない**（1tick停止→回復の回転を禁止）。
+4. 受け入れ:
+```
+・PRECONDITION_MISSING の直後に LADDER_PREREQ が出て、目標が前提チェーンへ差し替わる
+・generation の ticks が 1 で終わらない（連続稼働 >= 100 ticks が普通になる）
+・1時間あたりの generations/recoveries が大幅に減る（現状 178/75 → 目標 1桁台）
+```
+5. 併せて未解決: `listenerLeak=true`（physicsTick 3 vs baseline 2）、`RETURN_TO_KNOWN_ORE`（discoveredOres に iron_ore あり）。
 ```
