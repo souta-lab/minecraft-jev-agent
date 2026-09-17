@@ -33,9 +33,16 @@ import { z } from 'zod'
 import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
-import { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT } from './mercury-capabilities.ts'
+import { ORE_SOURCES } from '../jev-agent/src/state.ts'
+import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
+import {
+  MERCURY_ALLOWED_GOALS,
+  MERCURY_EXPLORE_MODES,
+  MERCURY_MODEL_DEFAULT,
+  MERCURY_TYPED_GOAL_KINDS,
+} from './mercury-capabilities.ts'
 
-export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT }
+export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS }
 
 /** Why Mercury was consulted. Exception-driven, never per-tick. */
 export type MercuryTriggerReason =
@@ -54,23 +61,39 @@ export const MERCURY_TRIGGER_REASONS: readonly MercuryTriggerReason[] = [
 ]
 
 /**
- * The strict plan schema. `item` is a grounded Minecraft item; Mercury never
- * returns an action, a kind, or a coordinate. The kind (collect/craft/smelt) is
- * inferred locally from the item so the LLM cannot smuggle in motor semantics.
+ * The strict plan schema (issue #19). A goal is EITHER a legacy item goal
+ * `{ item, count }` (kind inferred locally, backward compatible) OR an explicit
+ * typed goal `{ kind, ... }`. Free-form coordinates are NOT part of the schema:
+ * `goto`/`goto_resource` reference a known resource, never an x/z position
+ * (PLANNERS.md forbids model-generated coordinates). The kind is code-owned and
+ * capability-grounded in `validateMercuryPlan`, so the model cannot smuggle in
+ * motor semantics or an unsupported verb x target pair.
  */
-export const MERCURY_PLAN_SCHEMA = z.object({
-  op: z.enum(['continue', 'patch', 'replace', 'abort']),
-  goals: z
-    .array(
-      z.object({
-        item: z.string().min(1).max(64),
-        count: z.number().int().min(1).max(64),
-      }),
-    )
-    .max(8),
-  reason: z.string().min(1).max(400),
-})
+export const MERCURY_PLAN_SCHEMA = z
+  .object({
+    op: z.enum(['continue', 'patch', 'replace', 'abort']),
+    goals: z
+      .array(
+        z
+          .object({
+            kind: z.enum(MERCURY_TYPED_GOAL_KINDS).optional(),
+            item: z.string().min(1).max(64).optional(),
+            count: z.number().int().min(1).max(64).optional(),
+            /** descend_to predicate target level */
+            y: z.number().int().min(-128).max(512).optional(),
+            /** descend_to dimension (defaults to the overworld) */
+            dimension: z.string().min(1).max(64).optional(),
+            /** explore mode */
+            mode: z.enum(MERCURY_EXPLORE_MODES).optional(),
+          })
+          .strict(),
+      )
+      .max(8),
+    reason: z.string().min(1).max(400),
+  })
+  .strict()
 
+export type MercuryPlanGoalJson = z.infer<typeof MERCURY_PLAN_SCHEMA>['goals'][number]
 export type MercuryPlanJson = z.infer<typeof MERCURY_PLAN_SCHEMA>
 
 export type MercuryValidation =
@@ -89,6 +112,14 @@ function smeltableItems(): ReadonlySet<string> {
   return new Set(MERCURY_ALLOWED_GOALS.smelt)
 }
 
+function placeableItems(): ReadonlySet<string> {
+  return new Set(MERCURY_ALLOWED_GOALS.place)
+}
+
+function gotoResourceItems(): ReadonlySet<string> {
+  return new Set(MERCURY_ALLOWED_GOALS.goto_resources)
+}
+
 /** Infer the queue kind from a grounded item. Unknown items return null. */
 export function mercuryGoalKind(item: string): GoalKind | null {
   if (smeltableItems().has(item)) return 'smelt'
@@ -98,8 +129,99 @@ export function mercuryGoalKind(item: string): GoalKind | null {
 }
 
 /**
- * Shape validation (Zod) + local grounding. Pure and exported so CI can prove
- * planner safety without any network call.
+ * Normalize an ore BLOCK name to its drop item so `goto_resource iron_ore`
+ * grounds on the same resource the retrieval candidates already track
+ * (`raw_iron`). Unknown names pass through unchanged (and then fail grounding).
+ */
+export function normalizeResourceItem(item: string): string {
+  if (Object.prototype.hasOwnProperty.call(ORE_SOURCES, item)) return item
+  for (const [drop, blocks] of Object.entries(ORE_SOURCES)) {
+    if (blocks.includes(item)) return drop
+  }
+  return item
+}
+
+function itemList(set: ReadonlySet<string>): string {
+  return [...set].join(',')
+}
+
+function validateItemGoal(
+  index: number,
+  kind: string,
+  goal: MercuryPlanGoalJson,
+  allowed: ReadonlySet<string>,
+  opts?: { requireCount?: boolean },
+): string | null {
+  const item = typeof goal.item === 'string' ? goal.item : ''
+  if (item.length === 0 || !allowed.has(item)) {
+    return `goal[${index}] impossible ${kind}: ${item.length > 0 ? item : 'missing'} (allowed: ${itemList(allowed)})`
+  }
+  if (goal.count !== undefined && (!Number.isInteger(goal.count) || goal.count < 1 || goal.count > 64)) {
+    return `goal[${index}] ${kind} count must be an integer in [1,64]`
+  }
+  if (opts?.requireCount === true && goal.count === undefined) {
+    return `goal[${index}] ${kind} needs a count in [1,64]`
+  }
+  return null
+}
+
+/**
+ * Ground ONE goal: strict shape + code-owned kind x target capability matrix.
+ * Returns a rejection reason string, or null when the goal is executable.
+ */
+export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): string | null {
+  // Legacy item goal: kind is inferred locally (backward compatible).
+  if (goal.kind === undefined) {
+    if (typeof goal.item !== 'string' || goal.item.length === 0) return `goal[${index}] legacy goal needs an item`
+    if (goal.count === undefined || !Number.isInteger(goal.count) || goal.count < 1 || goal.count > 64) {
+      return `goal[${index}] legacy goal needs count in [1,64]`
+    }
+    if (mercuryGoalKind(goal.item) === null) return `goal[${index}] ungrounded item: ${goal.item}`
+    return null
+  }
+  switch (goal.kind) {
+    case 'collect':
+      return validateItemGoal(index, 'collect', goal, collectableItems(), { requireCount: true })
+    case 'craft':
+      return validateItemGoal(index, 'craft', goal, craftableItems(), { requireCount: true })
+    case 'smelt':
+      return validateItemGoal(index, 'smelt', goal, smeltableItems(), { requireCount: true })
+    case 'place':
+      // count is optional for place; a station is singular.
+      return validateItemGoal(index, 'place', goal, placeableItems())
+    case 'goto':
+    case 'goto_resource': {
+      const raw = typeof goal.item === 'string' ? goal.item : ''
+      const item = normalizeResourceItem(raw)
+      if (item.length === 0 || !gotoResourceItems().has(item)) {
+        return `goal[${index}] impossible ${goal.kind}: ${item.length > 0 ? item : 'missing'} (allowed resources: ${itemList(gotoResourceItems())})`
+      }
+      return null
+    }
+    case 'descend_to': {
+      if (typeof goal.y !== 'number' || !Number.isInteger(goal.y) || goal.y < -59 || goal.y > 320) {
+        return `goal[${index}] descend_to needs an integer y in [-59,320]`
+      }
+      if (goal.dimension !== undefined && (typeof goal.dimension !== 'string' || goal.dimension.length === 0)) {
+        return `goal[${index}] descend_to dimension must be a non-empty string`
+      }
+      return null
+    }
+    case 'explore': {
+      if (goal.mode === undefined || !MERCURY_ALLOWED_GOALS.explore_modes.includes(goal.mode)) {
+        return `goal[${index}] explore needs mode ${MERCURY_ALLOWED_GOALS.explore_modes.join('|')}`
+      }
+      return null
+    }
+    default:
+      return `goal[${index}] unsupported kind: ${String(goal.kind)}`
+  }
+}
+
+/**
+ * Shape validation (Zod) + local capability grounding. Pure and exported so CI
+ * can prove planner safety without any network call. A rejected pair always
+ * carries the exact reason (logged by the caller at PLAN_REJECTED).
  */
 export function validateMercuryPlan(value: unknown): MercuryValidation {
   const parsed = MERCURY_PLAN_SCHEMA.safeParse(value)
@@ -114,26 +236,98 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
   for (let index = 0; index < plan.goals.length; index += 1) {
     const goal = plan.goals[index]
     if (goal === undefined) continue
-    if (mercuryGoalKind(goal.item) === null) {
-      return { ok: false, error: `goal[${index}] ungrounded item: ${goal.item}` }
-    }
+    const error = validateMercuryGoal(index, goal)
+    if (error !== null) return { ok: false, error }
   }
   return { ok: true, plan }
 }
 
-/** Map the validated plan onto the queue's PlannedGoal records (kind inferred). */
+/**
+ * Compile ONE validated goal onto the existing executable machinery:
+ *   place/craft/collect/smelt -> matching PlannedGoal kind (PLACE / CRAFT / ...)
+ *   goto / goto_resource      -> `collect` of the resource (known-resource RETRIEVE)
+ *   descend_to                -> `descend` predicate goal (targetY)
+ *   explore cave             -> `descend` predicate (existing cave/ore descent)
+ *   explore surface          -> `collect log` (existing surface body-change plan)
+ */
+export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | null {
+  if (goal.kind === undefined) {
+    const item = goal.item ?? 'unknown'
+    const count = goal.count ?? 1
+    const kind = mercuryGoalKind(item) ?? 'collect'
+    return {
+      kind,
+      description: `${kind} ${count} x ${item}`,
+      targetItem: item,
+      requiredCount: count,
+      detail: 'mercury plan repair',
+    }
+  }
+  const count = goal.count ?? 1
+  switch (goal.kind) {
+    case 'collect':
+    case 'craft':
+    case 'smelt':
+    case 'place':
+      return {
+        kind: goal.kind,
+        description: `${goal.kind} ${count} x ${goal.item ?? 'unknown'}`,
+        targetItem: goal.item ?? null,
+        requiredCount: count,
+        detail: 'mercury plan repair',
+      }
+    case 'goto':
+    case 'goto_resource': {
+      const item = normalizeResourceItem(goal.item ?? '')
+      return {
+        kind: 'collect',
+        description: `goto ${item} (known-resource retrieval)`,
+        targetItem: item,
+        requiredCount: 1,
+        detail: `mercury ${goal.kind}:${item}`,
+      }
+    }
+    case 'descend_to':
+      return {
+        kind: 'descend',
+        description: `descend_to:Y=${goal.y}`,
+        targetItem: null,
+        requiredCount: 1,
+        targetY: goal.y,
+        dimension: goal.dimension ?? 'minecraft:overworld',
+        detail: 'mercury descend_to',
+      }
+    case 'explore':
+      if (goal.mode === 'surface') {
+        return {
+          kind: 'collect',
+          description: 'explore surface for wood',
+          targetItem: 'log',
+          requiredCount: 1,
+          detail: 'mercury explore:surface',
+        }
+      }
+      return {
+        kind: 'descend',
+        description: `explore cave (descend_to:Y=${ORE_CANONICAL_Y['raw_iron'] ?? 32})`,
+        targetItem: 'raw_iron',
+        requiredCount: 1,
+        targetY: ORE_CANONICAL_Y['raw_iron'] ?? 32,
+        dimension: 'minecraft:overworld',
+        detail: 'mercury explore:cave',
+      }
+    default:
+      return null
+  }
+}
+
+/** Map the validated plan onto the queue's PlannedGoal records. */
 export function plannedGoalsFromMercury(plan: MercuryPlanJson): PlannedGoal[] {
   if (plan.op === 'abort') return []
   const goals: PlannedGoal[] = []
   for (const goal of plan.goals) {
-    const kind = mercuryGoalKind(goal.item) ?? 'collect'
-    goals.push({
-      kind,
-      description: `${kind} ${goal.count} x ${goal.item}`,
-      targetItem: goal.item,
-      requiredCount: goal.count,
-      detail: 'mercury plan repair',
-    })
+    const compiled = compileMercuryGoal(goal)
+    if (compiled !== null) goals.push(compiled)
   }
   return goals
 }
@@ -156,17 +350,22 @@ export function groundMercuryPlan(
   state: Pick<MercuryStateSummary, 'inventory'>,
 ): { plan: MercuryPlanJson; refused: { goal: string; replacement: string; reason: string } | null } {
   const first = plan.goals[0]
-  if (first === undefined || mercuryGoalKind(first.item) !== 'smelt') return { plan, refused: null }
-  const input = MERCURY_SMELT_INPUTS[first.item]
+  if (first === undefined) return { plan, refused: null }
+  const firstKind = first.kind ?? mercuryGoalKind(first.item ?? '')
+  if (firstKind !== 'smelt') return { plan, refused: null }
+  const item = first.item
+  if (typeof item !== 'string') return { plan, refused: null }
+  const input = MERCURY_SMELT_INPUTS[item]
   if (input === undefined) return { plan, refused: null }
   if ((state.inventory[input] ?? 0) > 0) return { plan, refused: null }
   if (!(MERCURY_ALLOWED_GOALS.collect as readonly string[]).includes(input)) return { plan, refused: null }
+  const count = first.count ?? 1
   return {
-    plan: { ...plan, goals: [{ item: input, count: first.count }, ...plan.goals.slice(1)] },
+    plan: { ...plan, goals: [{ kind: 'collect', item: input, count }, ...plan.goals.slice(1)] },
     refused: {
-      goal: `smelt ${first.item}`,
+      goal: `smelt ${item}`,
       replacement: `collect ${input}`,
-      reason: `no ${input} held to smelt ${first.item}`,
+      reason: `no ${input} held to smelt ${item}`,
     },
   }
 }
@@ -197,8 +396,12 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
 export function mercuryStrategyLabel(plan: MercuryPlanJson): string {
   const primary = plan.goals[0]
   if (primary === undefined) return `mercury_${plan.op}`
-  const kind = mercuryGoalKind(primary.item) ?? 'goal'
-  return `mercury_${plan.op}_${kind}_${primary.item}`
+  if (primary.kind !== undefined) {
+    const target = primary.item ?? primary.mode ?? (primary.y !== undefined ? `y${primary.y}` : 'goal')
+    return `mercury_${plan.op}_${primary.kind}_${target}`
+  }
+  const kind = mercuryGoalKind(primary.item ?? '') ?? 'goal'
+  return `mercury_${plan.op}_${kind}_${primary.item ?? 'goal'}`
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +472,14 @@ export interface MercuryStateSummary {
   queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
   objective: { targetItem: string; requiredCount: number; haveCount: number; complete: boolean }
   deathHistory: string[]
-  allowedGoals: { collect: string[]; craft: string[]; smelt: string[] }
+  allowedGoals: {
+    collect: string[]
+    craft: string[]
+    smelt: string[]
+    place?: string[]
+    goto_resources?: string[]
+    explore_modes?: string[]
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +545,7 @@ export function mercuryCacheIdentity(worldKey: MercuryWorldKey = DEFAULT_MERCURY
 
 interface MercuryCacheEntry {
   op: PlanOp
-  goals: Array<{ item: string; count: number }>
+  goals: MercuryPlanGoalJson[]
   reason: string
   strategy: string
   costUsd: number
@@ -437,10 +647,18 @@ export interface MercurySystem2Options {
 const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
-Return ONLY via the emitPlan tool, matching its schema exactly: op, goals (item + count), reason.
-Allowed goal items are exactly the ones in allowedGoals.collect / .craft / .smelt.
-Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions.
-Do not invent an item outside allowedGoals. Do not re-add work that is already done.
+Return ONLY via the emitPlan tool, matching its schema exactly: op, goals, reason.
+A goal is EITHER a legacy item goal { item, count } (the verb is inferred locally) OR an explicit typed goal. Use an explicit kind when the same noun needs different operations (e.g. craft furnace vs place furnace):
+- { kind: 'collect', item, count }   allowed items: allowedGoals.collect
+- { kind: 'craft', item, count }     allowed items: allowedGoals.craft
+- { kind: 'smelt', item, count }     allowed items: allowedGoals.smelt
+- { kind: 'place', item }            allowed stations: allowedGoals.place (count optional, default 1)
+- { kind: 'goto_resource', item }    known-resource retrieval; allowed: allowedGoals.goto_resources
+- { kind: 'descend_to', y }          integer y in [-59, 320]; optional dimension, defaults to overworld
+- { kind: 'explore', mode }          mode is 'cave' or 'surface'
+Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions; goto references a resource name, never an x/z position.
+Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.
+If a furnace is held but the world has no placed furnace, emit { kind: 'place', item: 'furnace' } so the placement is a first-class planned step.
 Choose the smallest plan change that can unblock progress.
 
 Plan operations:
@@ -750,6 +968,12 @@ export class MercurySystem2 implements System2Brain {
 
       if (!validated.ok) {
         const error = `invalid plan: ${validated.error}`
+        this.log('PLAN_REJECTED', {
+          source: 'mercury',
+          reason: validated.error,
+          stage: trigger,
+          callId,
+        })
         this.writeCall({
           record: 'mercury-call',
           callId,
@@ -782,7 +1006,7 @@ export class MercurySystem2 implements System2Brain {
       const goals = plannedGoalsFromMercury(plan)
       this.cache.entries[stateHash] = {
         op: plan.op,
-        goals: plan.goals.map((goal) => ({ item: goal.item, count: goal.count })),
+        goals: plan.goals.map((goal) => ({ ...goal })),
         reason: plan.reason,
         strategy,
         costUsd,
