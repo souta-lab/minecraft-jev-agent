@@ -51,7 +51,9 @@ import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
+import { evaluateRetrievalProgress } from './verticalPlan.ts'
 import { DigMemory } from './worldMemory.ts'
+import type { DigDir } from './worldMemory.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -288,6 +290,12 @@ function emptySignals(): AgentSignals {
 export const MAX_BLOCK_REACH = 5
 /** A repeated WAIT becomes a bounded replan first (never an immediate wedge). */
 const WAIT_REPLAN_LIMIT = 4
+/** Issue #45: an active RETRIEVE that stops closing distance for this many ticks escalates. */
+const RETRIEVAL_STALL_TICKS = 6
+/** Distance decrease (m) that counts as real retrieval progress. */
+const RETRIEVAL_PROGRESS_EPSILON = 0.5
+/** Stall escalations before the retrieval target is force-replanned. */
+const RETRIEVAL_STALL_DETOURS = 2
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750
 const { goals } = pathfinderModule
@@ -341,6 +349,7 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
   'RETURN_TO_KNOWN_RESOURCE',
+  'RETRIEVE_STALLED',
   'KNOWN_RESOURCE_STALE',
   'EXPLORE',
   'REPLAN_THROTTLED',
@@ -455,6 +464,7 @@ export class JevController {
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   private readonly loggedStaleResources = new Set<string>()
+  private retrievalTrack: { id: string; best: number; ticks: number; detours: number } | null = null
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -821,6 +831,7 @@ export class JevController {
       this.signals.failedCandidates = this.failureSnapshot()
       this.signals.knownResources = this.options.knownResources ?? []
       this.updateStallSignal()
+      this.observeRetrievalStall()
 
       if (this.bot.entity === undefined) return
 
@@ -1400,6 +1411,7 @@ export class JevController {
         }
       }
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
+      if (result.kind === 'RETRIEVE' && result.blockRemoved) this.onRetrievalDescent(candidate)
       if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
         const moved = Math.hypot(
           this.bot.entity.position.x - this.actionStart.x,
@@ -1555,6 +1567,29 @@ export class JevController {
       )
       this.digMemory.markStaircase()
     }
+  }
+
+  /**
+   * Issue #45: a RETRIEVE that dug its own staircase records the new tunnel cell
+   * so the next retrieval can prefer `REUSE_TUNNEL` over digging a fresh one.
+   */
+  private onRetrievalDescent(candidate: Candidate): void {
+    if (candidate.meta.vertical !== 'staircase') return
+    const x = candidate.meta.stairStepX
+    const y = candidate.meta.stairStepY
+    const z = candidate.meta.stairStepZ
+    const dir = candidate.meta.stairDir
+    if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return
+    if (typeof dir !== 'string') return
+    this.digMemory.record({
+      x,
+      y,
+      z,
+      dir: dir as DigDir,
+      mode: 'down',
+      target: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : null,
+      atMs: Date.now(),
+    })
   }
 
   // -------------------------------------------------------------------------
@@ -1965,6 +2000,64 @@ export class JevController {
     }
   }
 
+  /**
+   * Issue #45 progress assertion: while the last decision was a RETRIEVE and its
+   * distance to the remembered target stops decreasing for RETRIEVAL_STALL_TICKS
+   * ticks, log RETRIEVE_STALLED and force a detour (reopen vertical digging and
+   * re-plan) instead of letting the loop fall through to WAIT.
+   */
+  private observeRetrievalStall(): void {
+    const id = this.lastDecisionId
+    const entity = this.bot.entity
+    const candidate = id === null ? undefined : this.lastCandidates.find((entry) => entry.id === id)
+    if (
+      id === null ||
+      candidate === undefined ||
+      candidate.kind !== 'RETRIEVE' ||
+      candidate.target === null ||
+      entity === undefined
+    ) {
+      this.retrievalTrack = null
+      return
+    }
+    const target = candidate.target
+    const current = Math.hypot(
+      entity.position.x - target.x,
+      entity.position.y - target.y,
+      entity.position.z - target.z,
+    )
+    if (this.retrievalTrack === null || this.retrievalTrack.id !== id) {
+      this.retrievalTrack = { id, best: current, ticks: 0, detours: 0 }
+      return
+    }
+    const decision = evaluateRetrievalProgress({
+      previous: { best: this.retrievalTrack.best, ticks: this.retrievalTrack.ticks },
+      distance: current,
+      epsilon: RETRIEVAL_PROGRESS_EPSILON,
+      stallTicks: RETRIEVAL_STALL_TICKS,
+    })
+    this.retrievalTrack.best = decision.best
+    this.retrievalTrack.ticks = decision.ticks
+    if (decision.outcome !== 'stalled') return
+
+    const ticks = RETRIEVAL_STALL_TICKS
+    this.retrievalTrack.detours += 1
+    this.logger.warn(
+      'agent',
+      `RETRIEVE_STALLED target=${target.x},${target.y},${target.z} dist=${Math.round(current)} ticks=${ticks}`,
+      { target, dist: Math.round(current), ticks, detours: this.retrievalTrack.detours },
+      this.tickCounter,
+    )
+    // Detour: suppress the stalled target and reopen vertical digging (the
+    // descent budget is reset only through this escalation path).
+    this.noteCandidateFailure(id)
+    this.digMemory.markResourceProgress()
+    if (this.retrievalTrack.detours >= RETRIEVAL_STALL_DETOURS) {
+      this.retrievalTrack.detours = 0
+      this.escalate('pathfinder_stuck', `retrieval stalled at ${Math.round(current)}m for ${ticks} ticks`)
+    }
+  }
+
   private checkWedge(actionId: string): void {
     if (this.lastProgress > this.chosenCountsAtProgress) {
       this.chosenCounts.clear()
@@ -2078,10 +2171,11 @@ export class JevController {
       return
     }
     const dist = this.retrievalDistance(candidate.target)
+    const vertical = typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : 'none'
     this.logger.info(
       'agent',
-      `RETURN_TO_KNOWN_RESOURCE item=${resource} target=${at ?? 'unknown'} dist=${dist ?? 'unknown'}`,
-      { item: resource, name: candidate.targetName, target: at, dist },
+      `RETURN_TO_KNOWN_RESOURCE item=${resource} target=${at ?? 'unknown'} dist=${dist ?? 'unknown'} vertical=${vertical}`,
+      { item: resource, name: candidate.targetName, target: at, dist, vertical },
       this.tickCounter,
     )
   }

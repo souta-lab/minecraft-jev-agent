@@ -705,22 +705,124 @@ export class Executor {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'RETRIEVE candidate has no coordinates')
     const before = this.distanceToFeet(target)
+    const startY = this.bot.entity.position.y
     this.setPhase(candidate, epoch, 'retrieving')
-    await this.pathToNear(target, 2, epoch, signal)
+
+    // Issue #45: close the vertical gap first (reuse a recorded tunnel, else dig
+    // one guarded staircase step), then approach horizontally. Without this the
+    // canDig=false walk stops at the resource's horizontal bearing and stalls.
+    const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    let verticalStep = false
+    if (vertical === 'reuse') {
+      const tunnel = readMetaPoint(candidate, 'tunnelX', 'tunnelY', 'tunnelZ')
+      if (tunnel !== null) {
+        this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id, target })
+        this.setPhase(candidate, epoch, 'reuse-tunnel')
+        await this.pathToNear(tunnel, 1, epoch, signal)
+        this.ensureOwned(epoch, signal)
+      }
+    } else if (vertical === 'staircase') {
+      const dig = readMetaPoint(candidate, 'stairDigX', 'stairDigY', 'stairDigZ')
+      const step = readMetaPoint(candidate, 'stairStepX', 'stairStepY', 'stairStepZ')
+      if (dig !== null && step !== null) {
+        const fromY = Math.floor(startY)
+        const toY = readMetaNumber(candidate, 'stairToY', target.y)
+        this.logger.info('agent', `STAIRCASE from_y=${fromY} to_y=${toY}`, { actionId: candidate.id, dig, step })
+        verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
+      }
+    }
+
+    this.ensureOwned(epoch, signal)
+    this.setPhase(candidate, epoch, 'approaching')
+    try {
+      await this.pathToNear(target, 2, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.warn(
+        'executor',
+        `RETRIEVE horizontal approach failed after the vertical leg: ${error instanceof Error ? error.message : String(error)}`,
+        { target, actionId: candidate.id },
+      )
+    }
     this.ensureOwned(epoch, signal)
     const after = this.distanceToFeet(target)
+    const endY = this.bot.entity.position.y
+    const closed = after < before - 0.01
+    const descended = Math.abs(endY - target.y) < Math.abs(startY - target.y) - 0.01
     this.logger.info(
       'executor',
-      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m`,
+      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${vertical}`,
       { target, actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
-      verified: false,
-      blockRemoved: false,
+      verified: closed || descended || verticalStep,
+      blockRemoved: verticalStep,
       dropObserved: false,
       itemsGained: 0,
       goalItemCount: this.countGoalItem(),
     })
+  }
+
+  private async digRetrievalStaircase(
+    candidate: Candidate,
+    dig: Vec3Json,
+    step: Vec3Json,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (this.distanceToEyes(dig) > this.options.reach) {
+      this.setPhase(candidate, epoch, 'pathing-to-staircase')
+      await this.pathToNear(dig, 2, epoch, signal)
+      this.ensureOwned(epoch, signal)
+    }
+    const block = this.currentBlockAt(dig)
+    if (block === null || block.boundingBox === 'empty') {
+      this.setPhase(candidate, epoch, 'stepping')
+      try {
+        await this.pathTo(step, epoch, signal, 'GoalBlock')
+      } catch (error) {
+        if (error instanceof ActionCancelled) throw error
+      }
+      return false
+    }
+    this.setPhase(candidate, epoch, 'digging')
+    const live = this.resolveLiveDigTool(block)
+    if (!live.ok) {
+      this.logger.warn(
+        'executor',
+        `RETRIEVE staircase cannot dig ${block.name} at (${dig.x},${dig.y},${dig.z}): ${live.reason}`,
+        { actionId: candidate.id },
+      )
+      return false
+    }
+    await this.equipTool(
+      {
+        ...candidate,
+        toolName: live.tool,
+        toolTier: live.tier,
+        requiresTool: live.tool !== null,
+        meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
+      },
+      epoch,
+      signal,
+    )
+    try {
+      await this.digBlock(block, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.warn('executor', `RETRIEVE staircase dig failed: ${error instanceof Error ? error.message : String(error)}`, {
+        actionId: candidate.id,
+      })
+      return false
+    }
+    this.ensureOwned(epoch, signal)
+    this.setPhase(candidate, epoch, 'stepping')
+    try {
+      await this.pathTo(step, epoch, signal, 'GoalBlock')
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+    }
+    return true
   }
 
   private anchorBlock(candidate: Candidate): Vec3Json | null {
@@ -2414,6 +2516,14 @@ function readMetaString(candidate: Candidate, key: string): string | null {
 function readMetaNumber(candidate: Candidate, key: string, fallback: number): number {
   const value = candidate.meta[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function readMetaPoint(candidate: Candidate, xKey: string, yKey: string, zKey: string): Vec3Json | null {
+  const x = candidate.meta[xKey]
+  const y = candidate.meta[yKey]
+  const z = candidate.meta[zKey]
+  if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return null
+  return { x, y, z }
 }
 
 function toPathStatus(outcome: PathOutcome): PathStatus {
