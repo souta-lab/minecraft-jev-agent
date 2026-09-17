@@ -20,8 +20,21 @@ const precond = count('PRECONDITION_MISSING')
 const ladderPrereq = count('LADDER_PREREQ')
 const ladderReset = count('LADDER_RESET')
 
-// 2. generation ticks (from GENERATION_STOP ... ticks=N)
-const tickValues = [...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].map((m) => Number(m[1]))
+// 2. generation ticks (from GENERATION_STOP ... ticks=N) — only the RECENT window,
+//    so historical 1-tick stops before a fix do not poison the verdict forever.
+const WINDOW_MIN = 10
+const tsOf = (line) => {
+  const m = line.match(/\[([\d-]+T[\d:.]+)Z\]/)
+  return m ? Date.parse(m[1] + 'Z') : null
+}
+const allTs = lines.map(tsOf).filter(Boolean)
+const newestTs = allTs.length ? Math.max(...allTs) : 0
+const cutoff = newestTs - WINDOW_MIN * 60 * 1000
+const recentLines = newestTs ? lines.filter((l) => { const t = tsOf(l); return t === null || t >= cutoff }) : lines
+const recentTxt = recentLines.join('\n')
+
+const tickValues = [...recentTxt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].map((m) => Number(m[1]))
+const ticksAllTime = [...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].length
 const ticks1 = tickValues.filter((t) => t <= 1).length
 const ticksGe100 = tickValues.filter((t) => t >= 100).length
 const maxTicks = tickValues.length ? Math.max(...tickValues) : 0
@@ -53,7 +66,7 @@ const gensLast5min = recents.length
 
 const checks = [
   { id: 'ladder_prereq_present', pass: ladderPrereq > 0, detail: `LADDER_PREREQ=${ladderPrereq}` },
-  { id: 'no_1tick_rotation', pass: tickValues.length > 0 && ticks1 === 0, detail: `ticks<=1 count=${ticks1} of ${tickValues.length} stops (max=${maxTicks})` },
+  { id: 'no_1tick_rotation', pass: tickValues.length > 0 && ticks1 === 0, detail: `recent ${WINDOW_MIN}min: ticks<=1 count=${ticks1} of ${tickValues.length} stops (max=${maxTicks}, all-time stops=${ticksAllTime})` },
   { id: 'generation_survives_100_ticks', pass: ticksGe100 > 0, detail: `ticks>=100 count=${ticksGe100}` },
   { id: 'digging_resumed', pass: digging, detail: JSON.stringify(digMarkers) },
   { id: 'raw_iron_obtained', pass: rawIron >= 1, detail: `max raw_iron seen in inventory logs = ${rawIron}` },
