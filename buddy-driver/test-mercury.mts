@@ -3,6 +3,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  describeErrorFull,
+  isTimeoutError,
   MERCURY_ALLOWED_GOALS,
   mercuryCostUsd,
   mercuryGoalKind,
@@ -143,6 +145,37 @@ addCase('allowed goal sets are disjoint and non-empty', () => {
   return {
     pass: collect.size > 0 && craft.size > 0 && smelt.size > 0 && overlaps === 0,
     detail: `collect=${collect.size} craft=${craft.size} smelt=${smelt.size} overlaps=${overlaps}`,
+  }
+})
+
+addCase('retries only abort/timeout errors, never schema errors', () => {
+  const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
+  const wrapper = new Error('outer', { cause: timeout })
+  const status504 = Object.assign(new Error('bad gateway'), { statusCode: 504 })
+  const schemaError = new Error('No object generated: response did not match schema')
+  return {
+    pass: isTimeoutError(timeout) && isTimeoutError(wrapper) && isTimeoutError(status504) && !isTimeoutError(schemaError),
+    detail: `timeout=${isTimeoutError(timeout)} nested=${isTimeoutError(wrapper)} 504=${isTimeoutError(status504)} schema=${isTimeoutError(schemaError)}`,
+  }
+})
+
+addCase('captures the full provider error (status + body + cause chain)', () => {
+  const inner = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
+  const gateway = Object.assign(new Error('GatewayResponseError: Invalid error response format'), {
+    name: 'GatewayResponseError',
+    statusCode: 504,
+    url: 'https://ai-gateway.vercel.sh/v1/ai/language-model',
+    responseBody: '{"error":"upstream timeout"}',
+    cause: inner,
+  })
+  const detail = describeErrorFull(gateway) as Record<string, unknown>
+  const cause = detail.cause as Record<string, unknown> | undefined
+  return {
+    pass:
+      detail.statusCode === 504 &&
+      detail.responseBody === '{"error":"upstream timeout"}' &&
+      cause?.name === 'TimeoutError',
+    detail: JSON.stringify(detail).slice(0, 260),
   }
 })
 

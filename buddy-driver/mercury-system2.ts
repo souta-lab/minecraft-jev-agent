@@ -288,6 +288,8 @@ export interface MercuryCallRecord {
   usage: unknown
   cost: number
   error: string | null
+  /** Full structured error (name, message, statusCode, responseBody, cause chain). */
+  errorDetail?: unknown
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +317,8 @@ export interface MercurySystem2Options {
   model?: string
   maxPerHour?: number
   timeoutMs?: number
+  /** Extra attempts after a timeout/abort (1 = one retry). */
+  retries?: number
   maxOutputTokens?: number
   /** true when this generation was created fresh because the bot died. */
   postDeathRecovery?: boolean
@@ -344,6 +348,52 @@ function describeError(error: unknown): string {
   } catch {
     return '<unserialisable>'
   }
+}
+
+const ERROR_DETAIL_KEYS = ['statusCode', 'status', 'url', 'responseBody', 'responseHeaders', 'requestBodyValues'] as const
+
+function safeSerialize(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * Capture the FULL provider error so mercury-calls.jsonl is auditable: HTTP status,
+ * response body, request URL, plus the cause/lastError chain (the AI SDK nests the
+ * real gateway failure several levels deep).
+ */
+export function describeErrorFull(error: unknown, depth = 0): unknown {
+  if (depth > 6) return '<depth-limit>'
+  if (error instanceof Error) {
+    const record: Record<string, unknown> = { name: error.name, message: error.message }
+    const anyError = error as unknown as Record<string, unknown>
+    for (const key of ERROR_DETAIL_KEYS) {
+      if (anyError[key] !== undefined) record[key] = safeSerialize(anyError[key])
+    }
+    if (anyError.cause !== undefined) record.cause = describeErrorFull(anyError.cause, depth + 1)
+    if (anyError.lastError !== undefined) record.lastError = describeErrorFull(anyError.lastError, depth + 1)
+    if (Array.isArray(anyError.errors)) record.errors = anyError.errors.map((entry) => describeErrorFull(entry, depth + 1))
+    return record
+  }
+  return safeSerialize(error)
+}
+
+/** Abort / timeout errors are worth exactly one retry; schema errors are not. */
+export function isTimeoutError(error: unknown, depth = 0): boolean {
+  if (depth > 6 || error === null || typeof error !== 'object') return false
+  const record = error as Record<string, unknown>
+  const name = record.name
+  if (name === 'AbortError' || name === 'TimeoutError') return true
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (/aborted due to timeout|timed out|ETIMEDOUT|ECONNRESET|socket hang up/i.test(message)) return true
+  if (record.statusCode === 408 || record.statusCode === 504) return true
+  if (isTimeoutError(record.cause, depth + 1)) return true
+  if (isTimeoutError(record.lastError, depth + 1)) return true
+  const errors = record.errors
+  return Array.isArray(errors) && errors.some((entry) => isTimeoutError(entry, depth + 1))
 }
 
 function isRateLimitError(error: unknown, depth = 0): boolean {
@@ -381,6 +431,7 @@ export class MercurySystem2 implements System2Brain {
   private readonly cachePath: string
   private readonly maxPerHour: number
   private readonly timeoutMs: number
+  private readonly maxAttempts: number
   private readonly maxOutputTokens: number
   private cache: MercuryCacheFile
   private callCounter = 0
@@ -395,7 +446,11 @@ export class MercurySystem2 implements System2Brain {
     this.cachePath = options.cachePath
     this.model = options.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT
     this.maxPerHour = options.maxPerHour ?? Number(process.env.BUDDY_SYSTEM2_MAX_PER_HOUR ?? 20)
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 20000)
+    // Mercury is a reasoning model: a correct plan routinely takes several seconds
+    // of hidden reasoning, so the timeout must comfortably exceed that. The
+    // observed failure mode was an abort at ~50ms, so we also retry once.
+    this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 25000)
+    this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 1))
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
     this.postDeathPending = options.postDeathRecovery === true
     this.cache = this.loadCache()
@@ -483,8 +538,11 @@ export class MercurySystem2 implements System2Brain {
     this.cache.callTimes.push(now)
     this.saveCache()
 
-    try {
-      const result = await generateText({
+    // A generation swap / lease event does NOT own this promise and must not abort
+    // it: the only abort signal is the per-attempt timeout below. On a timeout the
+    // call is re-issued with a fresh signal instead of being abandoned.
+    const callOnce = () =>
+      generateText({
         model: this.model,
         system: SYSTEM_PROMPT,
         prompt: userPrompt,
@@ -499,6 +557,34 @@ export class MercurySystem2 implements System2Brain {
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(this.timeoutMs),
       })
+
+    const callModel = async (): Promise<{ result: Awaited<ReturnType<typeof callOnce>>; attempts: number }> => {
+      let lastError: unknown = null
+      for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+        try {
+          const result = await callOnce()
+          return { result, attempts: attempt }
+        } catch (attemptError) {
+          lastError = attemptError
+          if (attempt < this.maxAttempts && isTimeoutError(attemptError)) {
+            this.log('MERCURY_RETRY', {
+              attempt,
+              maxAttempts: this.maxAttempts,
+              trigger,
+              error: describeError(attemptError),
+            })
+            continue
+          }
+          throw attemptError
+        }
+      }
+      throw lastError ?? new Error('mercury: retry loop produced no result')
+    }
+
+    let retriesUsed = 0
+    try {
+      const { result, attempts } = await callModel()
+      retriesUsed = attempts - 1
       this.calls += 1
       const latencyMs = Date.now() - started
       const toolCall = result.toolCalls[0]
@@ -516,7 +602,7 @@ export class MercurySystem2 implements System2Brain {
           model: this.model,
           stage: trigger,
           latencyMs,
-          retries: 0,
+          retries: retriesUsed,
           state,
           prompt: { system: SYSTEM_PROMPT, user: userPrompt },
           response: raw ?? null,
@@ -587,13 +673,14 @@ export class MercurySystem2 implements System2Brain {
         model: this.model,
         stage: trigger,
         latencyMs,
-        retries: 0,
+        retries: retriesUsed,
         state,
         prompt: { system: SYSTEM_PROMPT, user: userPrompt },
         response: null,
         usage: null,
         cost: 0,
         error: message,
+        errorDetail: describeErrorFull(error),
       })
       return this.fallback(trigger, started, state, message, 0, latencyMs)
     }
