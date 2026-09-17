@@ -462,6 +462,28 @@ function guardRetrieve(candidate: Candidate, state: WorldState, context: GuardCo
   if (hazard !== null) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the remembered resource`)
   }
+  const vertical = candidate.meta.vertical
+  if (vertical === 'staircase') {
+    const digX = readMetaNumber(candidate, 'stairDigX', Number.NaN)
+    const digY = readMetaNumber(candidate, 'stairDigY', Number.NaN)
+    const digZ = readMetaNumber(candidate, 'stairDigZ', Number.NaN)
+    const step = (state.descent ?? []).find(
+      (entry) =>
+        (entry.floor.x === digX && entry.floor.y === digY && entry.floor.z === digZ) ||
+        (entry.wall.x === digX && entry.wall.y === digY && entry.wall.z === digZ) ||
+        (entry.head.x === digX && entry.head.y === digY && entry.head.z === digZ),
+    )
+    if (step === undefined) {
+      return deny(
+        candidate.id,
+        'NO_SUPPORT',
+        `no descent step digging (${digX},${digY},${digZ}) in the current state (canDig=false forbids tunnelling)`,
+      )
+    }
+    if (!step.safe) {
+      return deny(candidate.id, 'NO_SUPPORT', `the retrieval staircase step is not safe: ${step.reason}`)
+    }
+  }
   return { ok: true, candidate }
 }
 
