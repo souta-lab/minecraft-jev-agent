@@ -36,7 +36,7 @@ import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, 
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
-import { createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, writeOutcome } from './jev.ts'
+import { abandonRequested, createJevPolicy, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
@@ -272,6 +272,8 @@ interface PendingDecision {
 }
 
 const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
+  'JEV_HEADS',
+  'SHADOW_METRICS',
   'TOOL_CHOICE',
   'DIG_PATH',
   'JUMP_ATTEMPT',
@@ -967,6 +969,35 @@ export class JevController {
     }
   }
 
+  /** The two authoritative heads, logged every decision (issue #11). */
+  private logHeads(result: JevResult): void {
+    const action = decisionIdFrom(result) ?? 'WAIT'
+    const abandon = result.answers.abandon_option?.probability ?? null
+    const replan = abandonRequested(result)
+    this.logger.info(
+      'heads',
+      `JEV_HEADS action=${action} abandon=${abandon ?? 'null'} -> ${replan ? 'replan' : 'continue'}`,
+      { action, abandon, decision: replan ? 'replan' : 'continue' },
+      this.tickCounter,
+    )
+  }
+
+  /** Demoted semantic questions: computed by code, logged, never steering (#11). */
+  private shadowMetrics(state: WorldState): Record<string, number> {
+    const escalating = state.signals.escalationRecommended
+    return {
+      goal_progress: Math.round(state.goal.progress * 4),
+      plan_still_valid: escalating ? 1 : 4,
+      situation_understood: state.goalQueue.empty && !state.goal.complete ? 2 : 4,
+      goal_blocked: escalating ? 1 : 0,
+      strategy_change_needed: escalating ? 1 : 0,
+    }
+  }
+
+  private logShadowMetrics(state: WorldState): void {
+    this.logger.info('shadow', `SHADOW_METRICS ${JSON.stringify(this.shadowMetrics(state))}`, this.shadowMetrics(state), this.tickCounter)
+  }
+
   /**
    * The 2D rule: a `score` answer is (value x certainty). A low-certainty danger
    * score must not change behaviour - the executor keeps the current safe action.
@@ -1000,36 +1031,22 @@ export class JevController {
   }
 
   private semanticEscalation(decision: JevResult): { escalate: boolean; reason: string } {
-    const strongReasons: string[] = []
-    const uncertain: string[] = []
-
-    for (const name of ['goal_blocked', 'strategy_change_needed', 'should_retreat'] as const) {
-      const gate = gateBoolean(decision.answers[name])
-      if (gate.band === 'strong_true') strongReasons.push(`${name} ${gate.reason}`)
-      if (gate.band === 'uncertain') uncertain.push(name)
+    const retreat = gateBoolean(decision.answers.should_retreat)
+    if (retreat.band === 'strong_true') {
+      return { escalate: true, reason: `strong semantic signal: should_retreat ${retreat.reason}` }
     }
-    for (const name of ['plan_still_valid', 'situation_understood'] as const) {
-      const answer = decision.answers[name]
-      if (answer === undefined) continue
-      const gate = gateScore(answer, DANGER_CONFIDENCE_THRESHOLD)
-      if (gate.actionable && gate.value !== null && gate.value <= 1) strongReasons.push(`${name} low (${gate.value})`)
-      if (!gate.actionable) uncertain.push(name)
-    }
-
-    for (const name of ['goal_blocked', 'strategy_change_needed', 'plan_still_valid', 'situation_understood']) {
-      this.uncertainStreaks.set(name, uncertain.includes(name) ? (this.uncertainStreaks.get(name) ?? 0) + 1 : 0)
-    }
-    const repeated = ['goal_blocked', 'strategy_change_needed', 'plan_still_valid', 'situation_understood'].filter(
-      (name) => (this.uncertainStreaks.get(name) ?? 0) >= 2,
-    )
-
-    if (strongReasons.length > 0) return { escalate: true, reason: `strong semantic signal: ${strongReasons.join('; ')}` }
-    if (repeated.length > 0) return { escalate: true, reason: `uncertain semantic signal repeated: ${repeated.join(', ')}` }
-    if (uncertain.length > 0 && this.signals.stalledMs > this.options.stallMs) {
-      return { escalate: true, reason: `uncertain signal ${uncertain.join(', ')} with no-progress (stalledMs=${this.signals.stalledMs})` }
-    }
-    if (uncertain.length > 0) return { escalate: false, reason: `uncertain once, keeping current action: ${uncertain.join(', ')}` }
     return { escalate: false, reason: 'no semantic escalation' }
+  }
+
+  /**
+   * `abandon_option` above the threshold is the ONLY semantic replan trigger
+   * (#11): it hands control to System 2 (Mercury when enabled, else the
+   * deterministic ladder). Code still owns preconditions and completion.
+   */
+  private adoptAbandon(decision: JevResult): void {
+    if (!abandonRequested(decision)) return
+    const probability = decision.answers.abandon_option?.probability ?? null
+    this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
   }
 
   private criticalArrivedDuringFlight(): boolean {
@@ -1091,14 +1108,13 @@ export class JevController {
           dangerScore: result.answers.danger?.value ?? null,
           dangerConfidence: result.answers.danger?.confidence ?? null,
           shouldRetreat: result.answers.should_retreat?.probability ?? null,
-          goalProgressScore: result.answers.goal_progress?.value ?? null,
-          planStillValid: result.answers.plan_still_valid?.value ?? null,
-          situationUnderstood: result.answers.situation_understood?.value ?? null,
-          goalBlocked: result.answers.goal_blocked?.probability ?? null,
-          strategyChangeNeeded: result.answers.strategy_change_needed?.probability ?? null,
+          abandonOption: result.answers.abandon_option?.probability ?? null,
         },
         this.tickCounter,
       )
+      this.logHeads(result)
+      this.logShadowMetrics(state)
+      this.adoptAbandon(result)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {

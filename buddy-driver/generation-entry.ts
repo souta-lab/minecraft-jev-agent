@@ -364,6 +364,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
     dimension: ctx.bot.game?.dimension ?? null,
+    placedFurnacesNear: furnaces.length,
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
