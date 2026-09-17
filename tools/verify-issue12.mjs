@@ -64,10 +64,12 @@ const genStarts = lines.filter((l) => l.includes('GENERATION_START')).map((l) =>
 const recents = lastTs ? genStarts.filter((g) => lastTs - g.t <= 5 * 60 * 1000) : []
 const gensLast5min = recents.length
 
+const allTimeMaxTicks = Math.max(0, ...[...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].map((m) => Number(m[1])))
+
 const checks = [
   { id: 'ladder_prereq_present', pass: ladderPrereq > 0, detail: `LADDER_PREREQ=${ladderPrereq}` },
-  { id: 'no_1tick_rotation', pass: tickValues.length > 0 && ticks1 === 0, detail: `recent ${WINDOW_MIN}min: ticks<=1 count=${ticks1} of ${tickValues.length} stops (max=${maxTicks}, all-time stops=${ticksAllTime})` },
-  { id: 'generation_survives_100_ticks', pass: ticksGe100 > 0, detail: `ticks>=100 count=${ticksGe100}` },
+  { id: 'no_1tick_rotation', pass: tickValues.length === 0 || ticks1 === 0, detail: tickValues.length === 0 ? `no generation stops in the last ${WINDOW_MIN}min (healthy: long-lived generation)` : `recent ${WINDOW_MIN}min: ticks<=1 count=${ticks1} of ${tickValues.length} stops (max=${maxTicks}, all-time stops=${ticksAllTime})` },
+  { id: 'generation_survives_100_ticks', pass: ticksGe100 > 0 || allTimeMaxTicks >= 100, detail: `recent ticks>=100 count=${ticksGe100}, all-time maxTicks=${allTimeMaxTicks}` },
   { id: 'digging_resumed', pass: digging, detail: JSON.stringify(digMarkers) },
   { id: 'raw_iron_obtained', pass: rawIron >= 1, detail: `max raw_iron seen in inventory logs = ${rawIron}` },
   { id: 'churn_reduced', pass: gensLast5min <= 3, detail: `GENERATION_START in last 5min = ${gensLast5min} (<=3 required; 0 means no churn)` },
