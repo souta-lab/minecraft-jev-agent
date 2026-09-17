@@ -46,16 +46,14 @@ const checks = [
 // Advisor-layer cache loop detection (issue #15): consecutive identical cached strategies
 // mean the cache replays a label that never changes the body. The guard in advisor.ts /
 // mercury-system2.ts caps a cached strategy at 2 replays and then emits ADVISOR_CACHE
-// bypass. By default only lines AFTER the most recent ADVISOR_CACHE_GUARD marker are
-// counted, so the check measures the guarded code path; --all reproduces the historical
-// failure across the whole append-only log.
+// bypass. By default only lines AFTER the first ADVISOR_CACHE_GUARD marker are
+// counted, so the check measures the guarded code path from its deploy boundary;
+// --all reproduces the historical failure across the whole append-only log.
 const LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
 const ALL = process.argv.includes('--all')
 const SAMPLES = process.argv.includes('--samples')
 const logLines = existsSync(LOG) ? readFileSync(LOG, 'utf8').split('\n') : []
-const guardIndex = ALL
-  ? -1
-  : logLines.reduce((found, line, index) => (line.includes('ADVISOR_CACHE_GUARD') ? index : found), -1)
+const guardIndex = ALL ? -1 : logLines.findIndex((line) => line.includes('ADVISOR_CACHE_GUARD'))
 const windowLines = guardIndex >= 0 ? logLines.slice(guardIndex) : logLines
 const advisorLines = windowLines.filter((l) => l.includes('ADVISOR') && l.includes('cached=true'))
 const advisorStrategies = advisorLines.map((l) => (l.match(/strategy=([a-z_]+)/) || [])[1]).filter(Boolean)
