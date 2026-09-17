@@ -115,6 +115,12 @@
 ```
 
 ## 進捗ログ（一次証拠つき）```
+2026-09-18 02:38 JST — churnほぼ解消／停滞の性質が変化
+  issue12 4/6: precond=459 ladderPrereq=312 maxTicks=319（202→319へ延伸） gensLast5min=1（9→1）
+  ★新発見: 在庫に charcoal:1 があるのに rung=charcoal で「燃料の丸太→木炭」を再計画し WAIT
+    → 生産ゴールを出す前にライブ在庫/WorldMemoryを確認する必要（PRECONDITION_ALREADY_MET）。#43 に追記済み
+  → 停滞の主因が「掘れない」から「計画が在庫を見ていない」へ移った（前進の証拠）
+
 2026-09-18 02:26 JST — ★節目: 掘削系マーカーが初めて非ゼロになった
   issue12 ゲート 4/6（3/6 から前進）: precond=363 ladderPrereq=216 maxTicks=202 gensLast5min=2 rawIron=0
   TOOL_CHOICE=4  DIG_PATH=4  JUMP_ATTEMPT=24  DESCEND_LIMIT=1  STAIRCASE=1
