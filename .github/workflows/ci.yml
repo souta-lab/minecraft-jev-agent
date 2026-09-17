@@ -53,6 +53,10 @@ jobs:
         working-directory: jev-agent
         run: npm run loop-test
 
+      - name: Gateway System 2 boundary tests
+        working-directory: jev-agent
+        run: npm run system2-test
+
       - name: Architecture audit tests
         working-directory: jev-agent
         run: npm run audit-test
