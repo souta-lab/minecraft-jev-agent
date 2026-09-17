@@ -13,10 +13,15 @@
     "option-ladder-test": "node ../jev-agent/node_modules/.bin/tsx test-option-ladder.mts",
     "retrieval-body-test": "node ../jev-agent/node_modules/.bin/tsx test-retrieval-body.mts",
     "known-resource-test": "node ../jev-agent/node_modules/.bin/tsx test-known-resource.mts",
+    "smelt-furnace-test": "node ../jev-agent/node_modules/.bin/tsx test-smelt-furnace.mts",
+    "state-snapshot-test": "node ../jev-agent/node_modules/.bin/tsx test-state-snapshot.mts",
+    "skill-strategy-test": "node ../jev-agent/node_modules/.bin/tsx test-skill-strategy.mts",
     "observability-test": "node ../jev-agent/node_modules/.bin/tsx test-observability.mts",
     "simdeath-test": "node ../jev-agent/node_modules/.bin/tsx test-simdeath.mts",
+    "reconnect-lease-test": "node ../jev-agent/node_modules/.bin/tsx test-reconnect-lease.mts",
     "mercury-test": "node test-mercury.mts",
     "advisor-cache-test": "node test-advisor-cache.mts",
+    "plan-tail-test": "node ../jev-agent/node_modules/.bin/tsx test-plan-tail.mts",
     "mercury:last": "tail -1 logs/jev/mercury-calls.jsonl | python3 -m json.tool"
   },
   "devDependencies": {

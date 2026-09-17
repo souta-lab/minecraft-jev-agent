@@ -26,6 +26,7 @@ import { buildGeneration } from './build.mts'
 import type {
   AcceptanceRecord,
   ActuationLease,
+  AgentSnapshot,
   DeathHazard,
   GenerationContext,
   GenerationModule,
@@ -33,7 +34,6 @@ import type {
   HazardSource,
   KnownResourceJson,
   ResidentGeneration,
-  ResidentState,
   ResidentWorldMemory,
   StructuralSmokeResult,
   Vec3Json,
@@ -50,9 +50,12 @@ import {
   type DeathTelemetry,
   type RehearsalMode,
 } from './simdeath.ts'
+import { ActuationLeaseManager, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
+import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
+import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 
 const CONTRACT_VERSION = 2
-const STATE_SCHEMA_VERSION = 2
+const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
 const LISTENER_EVENTS = [
   'physicsTick',
   'goal_reached',
@@ -76,6 +79,7 @@ const LEDGER = join(HERE, 'buddy-ledger.json')
 const STATE_PATH = join(HERE, 'buddy-state.json')
 const LOG_PATH = join(HERE, 'buddy.log')
 const SOCK = join(DATA, 'control.sock')
+const LOCK_PATH = join(DATA, 'host.lock')
 const MC_AI = dirname(HERE)
 const JEV_SRC = join(MC_AI, 'jev-agent', 'src')
 
@@ -83,7 +87,6 @@ const HOST = '127.0.0.1'
 const PORT = 25565
 const USERNAME = process.env.BUDDY_USERNAME ?? 'AI_Buddy'
 const VERSION = '1.21.11'
-const RECONNECT_MS = 5000
 const HEARTBEAT_MS = 15000
 const OBSERVE_MS = 1500
 const RELOAD_DEBOUNCE_MS = 1200
@@ -168,7 +171,7 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
   }
 }
 
-function defaultState(): ResidentState {
+function defaultState(): AgentSnapshot {
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     revision: 0,
@@ -192,53 +195,52 @@ function defaultState(): ResidentState {
   }
 }
 
-function loadState(): ResidentState {
+function loadState(): AgentSnapshot {
   const base = defaultState()
+  if (!existsSync(STATE_PATH)) return base
+  let raw: unknown
   try {
-    const parsed = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as Partial<ResidentState> & { worldMemory?: ResidentWorldMemory }
-    const merged: ResidentState = {
-      ...base,
-      ...parsed,
-      schemaVersion: STATE_SCHEMA_VERSION,
-      worldMemoryByKey: { ...(parsed.worldMemoryByKey ?? {}) },
-    }
-    delete (merged as unknown as Record<string, unknown>).worldMemory
-    if (parsed.worldMemory !== undefined && Object.keys(merged.worldMemoryByKey).length === 0) {
-      merged.worldMemoryByKey[worldKeyString({ serverId: merged.serverId, dimension: merged.dimension, worldEpoch: merged.worldEpoch })] = {
-        ...emptyWorldMemory(),
-        ...parsed.worldMemory,
-        traversalFailures: parsed.worldMemory.traversalFailures ?? [],
-      }
-    }
-    for (const memory of Object.values(merged.worldMemoryByKey)) normalizeWorldMemory(memory)
-    merged.dimension = normalizeDimension(merged.dimension)
-    const remapped: Record<string, ResidentWorldMemory> = {}
-    for (const [key, memory] of Object.entries(merged.worldMemoryByKey)) {
-      const parts = key.split('|')
-      const canonical = parts.length === 3 ? `${parts[0]}|${normalizeDimension(parts[1])}|${parts[2]}` : key
-      const existing = remapped[canonical]
-      const score = (m: ResidentWorldMemory): number => m.craftingTables.length + m.furnaces.length + m.discoveredOres.length
-      if (existing === undefined || score(memory) > score(existing)) remapped[canonical] = memory
-    }
-    merged.worldMemoryByKey = remapped
-    return merged
-  } catch {
+    raw = JSON.parse(readFileSync(STATE_PATH, 'utf8'))
+  } catch (error) {
+    log('STATE_REJECTED', { reason: 'unparseable JSON', message: error instanceof Error ? error.message : String(error), action: 'default' })
     return base
   }
+  return restoreAgentSnapshot(raw, base, log)
 }
 
 let state = loadState()
 
+/**
+ * Issue #40: the HOST is the only writer of class-A state. Every commit bumps the
+ * revision and writes tmp -> rename atomically. A stale/foreign schema is coerced
+ * (and logged) rather than silently accepted.
+ */
 function saveState(event = 'save'): void {
-  state.updatedAt = Date.now()
-  state.revision += 1
+  if (state.schemaVersion !== STATE_SCHEMA_VERSION) {
+    log('STATE_SCHEMA_MISMATCH', { event, schemaVersion: state.schemaVersion, expected: STATE_SCHEMA_VERSION, action: 'coerce-and-commit' })
+  }
+  const revision = bumpRevision(state)
   try {
     const tmp = `${STATE_PATH}.${process.pid}.tmp`
     writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
     renameSync(tmp, STATE_PATH)
   } catch (error) {
-    log('ERROR', { where: 'saveState', event, message: error instanceof Error ? error.message : String(error) })
+    log('ERROR', { where: 'saveState', event, revision, message: error instanceof Error ? error.message : String(error) })
   }
+}
+
+/**
+ * A generation proposes its ledger; the HOST validates and commits it into the
+ * single class-A snapshot. A proposal from a superseded generation carries a stale
+ * revision and is rejected so split-brain is impossible.
+ */
+function commitLedgerProposal(ledger: GoalQueueSnapshot, proposedRevision: number | null, source: string): void {
+  if (proposedRevision !== null && proposedRevision < state.revision) {
+    log('STATE_PROPOSAL_REJECTED', { kind: 'ledger', source, reason: 'stale-revision', proposedRevision, revision: state.revision })
+    return
+  }
+  state.ledger = ledger
+  saveState('ledger-proposal')
 }
 
 function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
@@ -381,13 +383,18 @@ let lastSrcSignature = ''
 let lastInventoryHash = ''
 let lastActionId: string | null = null
 let lastHeartbeatAt = 0
-let activeGenerationId: string | null = null
+const leaseManager = new ActuationLeaseManager()
+const reconnectLedger = new ReconnectLedger()
+let hostLockAcquired = false
+let connectedSince = 0
+let reconnectScheduledAt: number | null = null
+let disconnectReasonSeen: DisconnectReason | null = null
+let disconnectDetail: string | null = null
 let generationHash: string | null = null
 let listenerBaseline: Record<string, number> = {}
 let baselineCaptured = false
 let startPosition: Vec3Json | null = null
 let lastStatus: GenerationStatus | null = null
-let hasConnected = false
 let deathResetPending = false
 let pendingResetReason: string | null = null
 let lastDeathAt = 0
@@ -397,6 +404,9 @@ let lastSeenDeathPosition: Vec3Json | null = null
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
 const stats = {
   reconnects: 0,
+  reconnectsLastHour: 0,
+  reconnectAttempt: 0,
+  reconnectReasons: { end: 0, kicked: 0, error: 0 } as Record<DisconnectReason, number>,
   reloadsChangedHash: 0,
   reloadsSkippedUnchanged: 0,
   reloadsFailed: 0,
@@ -409,16 +419,100 @@ const stats = {
 // the reload commit point is exactly this switch. Rollback switches it back.
 const lease: ActuationLease = {
   get activeId(): string {
-    return activeGenerationId ?? ''
+    return leaseManager.activeId
   },
-  isActive: (id: string): boolean => activeGenerationId === id,
-  assertActive: (id: string, what: string): void => {
-    if (activeGenerationId !== id) {
-      throw new Error(
-        `ACTUATION_LEASE_DENIED what=${what} owner=${activeGenerationId ?? 'none'} caller=${id} - refusing a side-effecting call`,
-      )
+  isActive: (id: string): boolean => leaseManager.isActive(id),
+  assertActive: (id: string, what: string): void => leaseManager.assertActive(id, what),
+}
+
+function acquireLease(id: string): void {
+  leaseManager.acquire(id, log)
+}
+
+function revokeLease(reason: string): void {
+  leaseManager.revoke(reason, log)
+}
+
+function syncReconnectStats(): void {
+  const report = reconnectLedger.report()
+  stats.reconnects = report.reconnects
+  stats.reconnectsLastHour = report.reconnectsLastHour
+  stats.reconnectAttempt = report.reconnectAttempt
+  stats.reconnectReasons = report.reconnectReasons
+}
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+function acquireHostLock(): boolean {
+  try {
+    if (existsSync(LOCK_PATH)) {
+      const raw = readFileSync(LOCK_PATH, 'utf8').trim()
+      const holder = Number.parseInt(raw, 10)
+      if (Number.isInteger(holder) && holder !== process.pid && pidAlive(holder)) {
+        log('HOST_LOCK held-by', { pid: holder, action: 'exit' })
+        return false
+      }
+      log('HOST_LOCK stale', { pid: Number.isInteger(holder) ? holder : null, action: 'reclaim' })
     }
-  },
+    writeFileSync(LOCK_PATH, `${process.pid}\n`, { mode: 0o600 })
+    hostLockAcquired = true
+    log('HOST_LOCK acquired', { pid: process.pid, path: LOCK_PATH })
+    return true
+  } catch (error) {
+    log('ERROR', { where: 'acquireHostLock', message: error instanceof Error ? error.message : String(error) })
+    return false
+  }
+}
+
+function releaseHostLock(): void {
+  if (!hostLockAcquired) return
+  hostLockAcquired = false
+  try {
+    if (existsSync(LOCK_PATH)) {
+      const raw = readFileSync(LOCK_PATH, 'utf8').trim()
+      if (Number.parseInt(raw, 10) === process.pid) rmSync(LOCK_PATH, { force: true })
+    }
+  } catch {
+    void 0
+  }
+  log('HOST_LOCK released', { pid: process.pid })
+}
+
+function hostLockReport(): {
+  path: string
+  present: boolean
+  filePid: number | null
+  acquiredByThisProcess: boolean
+  pid: number
+  singleInstance: boolean
+} {
+  let present = false
+  let filePid: number | null = null
+  try {
+    if (existsSync(LOCK_PATH)) {
+      present = true
+      const parsed = Number.parseInt(readFileSync(LOCK_PATH, 'utf8').trim(), 10)
+      filePid = Number.isInteger(parsed) ? parsed : null
+    }
+  } catch {
+    present = false
+  }
+  return {
+    path: LOCK_PATH,
+    present,
+    filePid,
+    acquiredByThisProcess: hostLockAcquired,
+    pid: process.pid,
+    singleInstance: hostLockAcquired || filePid === process.pid,
+  }
 }
 
 function listenerCounts(): Record<string, number> {
@@ -497,6 +591,8 @@ function makeGenerationContext(b: Bot): GenerationContext {
     worldMemory: cloneMemory(keyedMemory()),
     worldKey: currentWorldKey(),
     proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
+    proposeLedger: (ledger, proposedRevision) => commitLedgerProposal(ledger, proposedRevision ?? null, 'generation'),
+    ledgerSnapshot: state.ledger,
     ledgerPath: LEDGER,
     logDir: JEV_LOGS,
     goalItem: GOAL_ITEM,
@@ -515,7 +611,7 @@ function watchGenerationStop(gen: ResidentGeneration): void {
     clearInterval(guard)
     const stopped = gen.stopReason()
     generation = null
-    if (activeGenerationId === gen.id) activeGenerationId = null
+    if (leaseManager.isActive(gen.id)) revokeLease('generation-stopped')
     if (stopped === 'wedge') stats.wedge = true
     if (stopped === 'goal-complete') stats.goalComplete = true
     if (shuttingDown || frozen || deathResetPending) return
@@ -538,7 +634,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     // actuation lease. Dispose the old one first.
     const old = generation
     generation = null
-    if (activeGenerationId === old.id) activeGenerationId = null
+    if (leaseManager.isActive(old.id)) revokeLease('replaced-by-new-generation')
     try {
       await old.quiesce()
     } catch {
@@ -557,11 +653,11 @@ async function startGeneration(trigger: string): Promise<boolean> {
   runStructuralSmoke(gen)
   const preflight = runMissionPreflight(gen)
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
-  activeGenerationId = gen.id
+  acquireLease(gen.id)
   try {
     gen.start()
   } catch (error) {
-    activeGenerationId = null
+    revokeLease('start-failed')
     throw error
   }
   generation = gen
@@ -695,7 +791,7 @@ function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json 
   pendingResetReason = 'death'
   const oldGeneration = generation
   generation = null
-  activeGenerationId = null
+  revokeLease(simulated ? 'death-simulated' : 'death')
   if (oldGeneration !== null) {
     try {
       oldGeneration.dispose()
@@ -725,7 +821,8 @@ function handleBotDeath(b: Bot): void {
 
 interface RehearsalSnapshot {
   ledger: string | null
-  ledgerMirror: unknown
+  /** #40: the simdeath rehearsal must snapshot/restore the typed class-A ledger. */
+  ledgerMirror: GoalQueueSnapshot | null
   milestone: string | null
   milestoneIndex: number
   pendingResetReason: string | null
@@ -791,7 +888,7 @@ function connect(): void {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log('ERROR', { where: 'createBot', message })
-    scheduleReconnect()
+    scheduleReconnect('error', 0)
     return
   }
   bot = created
@@ -800,7 +897,17 @@ function connect(): void {
 
   created.on('spawn', () => {
     reconnecting = false
-    hasConnected = true
+    connectedSince = Date.now()
+    disconnectReasonSeen = null
+    disconnectDetail = null
+    if (reconnectScheduledAt !== null) {
+      log('RECONNECT_SUCCESS', {
+        downtimeMs: Date.now() - reconnectScheduledAt,
+        attempt: reconnectLedger.currentAttempt(),
+        reconnects: reconnectLedger.reconnects,
+      })
+      reconnectScheduledAt = null
+    }
     const wasDeath = deathResetPending
     deathResetPending = false
     pendingResetReason = wasDeath ? 'death' : null
@@ -837,32 +944,64 @@ function connect(): void {
 
   created.on('death', () => handleBotDeath(created))
 
-  created.on('kicked', (reason: string) => {
-    log('ERROR', { where: 'bot.kicked', reason: typeof reason === 'string' ? reason : JSON.stringify(reason) })
+  created.on('kicked', (reason: unknown) => {
+    const text = typeof reason === 'string' ? reason : fmtValue(reason)
+    disconnectReasonSeen = 'kicked'
+    disconnectDetail = text
+    log('ERROR', { where: 'bot.kicked', reason: text })
+    revokeLease('kicked')
   })
   created.on('error', (error: Error) => {
-    log('ERROR', { where: 'bot.error', message: error instanceof Error ? error.message : String(error) })
-  })
-  created.on('end', (reason: string) => {
-    log('RECOVERY', { reason: 'disconnected', detail: reason ?? 'unknown' })
-    if (generation !== null) {
-      generation.dispose()
-      generation = null
+    const message = error instanceof Error ? error.message : String(error)
+    if (disconnectReasonSeen === null) {
+      disconnectReasonSeen = 'error'
+      disconnectDetail = message
     }
-    scheduleReconnect()
+    log('ERROR', { where: 'bot.error', message })
+    revokeLease('error')
+  })
+  created.on('end', (reason: unknown) => {
+    const detail = typeof reason === 'string' ? reason : reason === undefined || reason === null ? 'unknown' : fmtValue(reason)
+    const classified: DisconnectReason = disconnectReasonSeen ?? 'end'
+    const uptimeMs = connectedSince > 0 ? Date.now() - connectedSince : 0
+    const entity = created.entity
+    log('DISCONNECT', {
+      reason: classified,
+      detail,
+      kickedReason: disconnectReasonSeen === 'kicked' ? disconnectDetail : null,
+      uptimeMs,
+      generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+      pos: entity === undefined ? '?' : fmtPos({ x: entity.position.x, y: entity.position.y, z: entity.position.z }),
+      health: lastHealth,
+      dimension: state.dimension,
+    })
+    revokeLease(classified)
+    const old = generation
+    generation = null
+    if (old !== null) {
+      try {
+        old.dispose()
+      } catch {
+        // best effort
+      }
+    }
+    connectedSince = 0
+    scheduleReconnect(classified, uptimeMs)
   })
 }
 
-function scheduleReconnect(): void {
+function scheduleReconnect(reason: DisconnectReason, uptimeMs: number): void {
   if (shuttingDown || reconnecting) return
   reconnecting = true
-  if (hasConnected) stats.reconnects += 1
-  log('RECONNECT', { inMs: RECONNECT_MS, reconnects: stats.reconnects })
+  const episode = reconnectLedger.noteDisconnect(reason, uptimeMs)
+  syncReconnectStats()
+  reconnectScheduledAt = Date.now()
+  log('RECONNECT', { n: episode.n, reason, backoffMs: episode.backoffMs, uptimeMs: episode.uptimeMs })
   setTimeout(() => {
     if (shuttingDown) return
     reconnecting = false
     connect()
-  }, RECONNECT_MS)
+  }, episode.backoffMs)
 }
 
 // ---------------------------------------------------------------------------
@@ -927,8 +1066,7 @@ setInterval(() => {
       action: status.currentAction?.kind ?? 'idle',
       inv: shortInv(truth.inventory),
     })
-    state.ledger = status.queue
-    saveState('heartbeat')
+    commitLedgerProposal(goalQueueSnapshotFromState(status.queue), null, 'heartbeat')
   }
 }, OBSERVE_MS)
 
@@ -1033,7 +1171,7 @@ function writeAcceptance(): string {
     ts: new Date().toISOString(),
     gitCommit: gitCommit(),
     generationHash,
-    generationId: activeGenerationId,
+    generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
     contractVersion: CONTRACT_VERSION,
     stateSchemaVersion: state.schemaVersion,
     stateRevision: state.revision,
@@ -1119,17 +1257,17 @@ async function performReload(trigger: string): Promise<void> {
     saveState('reload-snapshot')
     const preflight = runMissionPreflight(next)
     log('MISSION_PREFLIGHT', { id: next.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason, trigger })
-    activeGenerationId = next.id
+    acquireLease(next.id)
     generation = next
     try {
       next.start()
     } catch (startError) {
       generation = null
-      activeGenerationId = null
+      revokeLease('reload-start-failed')
       if (previous !== null && previousModule !== null) {
         const resumed = previousModule.createGeneration(makeGenerationContext(bot))
         resumed.attach()
-        activeGenerationId = resumed.id
+        acquireLease(resumed.id)
         generation = resumed
         resumed.start()
         log('RELOAD_ROLLBACK', { from: next.id, resumed: resumed.id })
@@ -1161,6 +1299,7 @@ async function performReload(trigger: string): Promise<void> {
     stats.reloadsFailed += 1
     const message = error instanceof Error ? error.message : String(error)
     log('ERROR', { where: 'performReload', trigger, message })
+    log('RELOAD_REJECTED', { trigger, message, action: 'keep-previous-generation' })
     log('RELOAD', { ok: false, trigger, ms: Date.now() - started, message })
   }
 }
@@ -1189,7 +1328,7 @@ function freezeReport(reason: string, status: unknown): string {
     reason,
     bot: USERNAME,
     runId,
-    generationId: activeGenerationId,
+    generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
     worldKey: currentWorldKey(),
     reconcileKey: worldKeyString(currentWorldKey()),
     state,
@@ -1209,6 +1348,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
   if (cmd === 'report' || cmd === 'status') {
     const status = generation === null ? null : generation.status()
     const memory = keyedMemory()
+    syncReconnectStats()
     controlReply(socket, request, true, {
       runId,
       frozen,
@@ -1218,9 +1358,12 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       recoveries: state.recoveries,
       milestone: state.milestone,
       worldKey: currentWorldKey(),
-      generationId: activeGenerationId,
+      generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
       generationHash,
       contractVersion: CONTRACT_VERSION,
+      lease: leaseManager.snapshot(),
+      reconnect: reconnectLedger.report(),
+      hostLock: hostLockReport(),
       stats,
       worldMemory: {
         craftingTables: memory.craftingTables.length,
@@ -1251,7 +1394,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       const status = generation.status()
       path = freezeReport('control', status)
       await generation.quiesce()
-      activeGenerationId = null
+      revokeLease('freeze')
     }
     log('FREEZE', { reason: 'control', report: path, freezeCycles: stats.freezeCycles })
     writeAcceptance()
@@ -1283,7 +1426,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     const snapshot = mode === 'soft' ? snapshotRehearsalState() : null
     const old = generation
     generation = null
-    activeGenerationId = null
+    revokeLease('simdeath')
     if (old !== null) {
       try {
         await old.quiesce()
@@ -1459,6 +1602,7 @@ function shutdown(reason: string): void {
   } catch {
     // ignore
   }
+  releaseHostLock()
   setTimeout(() => process.exit(0), 800)
 }
 
@@ -1470,6 +1614,7 @@ process.on('unhandledRejection', (reason: unknown) => {
 })
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('exit', () => releaseHostLock())
 
 // ---------------------------------------------------------------------------
 // boot
@@ -1491,6 +1636,10 @@ log('BOOT', {
   worldEpoch: state.worldEpoch,
   worldKey: currentWorldKey(),
 })
+if (!acquireHostLock()) {
+  log('BOOT_REFUSED', { reason: 'host-lock-held', path: LOCK_PATH })
+  process.exit(1)
+}
 startControlServer()
 void loadGenerationModule(false).then(() => {
   connect()

@@ -844,7 +844,7 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
 function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
   const furnace = state.furnaces?.[0] ?? null
-  if (furnace === null) return []
+  if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
   if (inputItem === null) return []
   const fuelItem = smeltFuelFor(state)
@@ -911,6 +911,69 @@ function smeltFuelFor(state: WorldState): string | null {
       (name.endsWith('_log') || name.endsWith('_planks') || name.endsWith('_wood')),
   )
   return held ?? null
+}
+
+function furnaceAcquisitionCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  if ((state.inventory.counts.furnace ?? 0) > 0) {
+    return placeCandidates(state, options, 'furnace').map((candidate) => ({
+      ...candidate,
+      meta: { ...candidate.meta, furnaceSource: 'held' },
+    }))
+  }
+  const known = nearestKnownStation(state, 'furnace')
+  if (known !== null) return [knownStationRetrievalCandidate(state, options, known)]
+  return []
+}
+
+function nearestKnownStation(state: WorldState, station: string): KnownResource | null {
+  let best: KnownResource | null = null
+  for (const resource of state.signals.knownResources ?? []) {
+    if (resource.kind !== 'station' || !resource.name.includes(station)) continue
+    if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
+      best = resource
+    }
+  }
+  return best
+}
+
+function knownStationRetrievalCandidate(state: WorldState, options: CandidateOptions, known: KnownResource): Candidate {
+  const vertical = planVerticalApproach({
+    selfFeetY: state.self.position.y,
+    selfPosition: state.self.position,
+    target: known.position,
+    tunnel: state.signals.lastTunnel,
+    descent: state.descent,
+  })
+  const verticalMeta: Record<string, string | number | boolean> = {
+    vertical: vertical?.kind ?? 'none',
+    verticalFromY: vertical?.fromY ?? Math.floor(state.self.position.y),
+    verticalToY: vertical?.toY ?? known.position.y,
+  }
+  return {
+    id: `RETRIEVE:known:station:${known.name}:${blockId('b', known.position)}`,
+    kind: 'RETRIEVE',
+    label: `return to the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) to smelt, ${distance(known.position, state.self.position)}m away`,
+    targetName: known.name,
+    target: known.position,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(known.position, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      retrieval: 'known',
+      resource: 'furnace',
+      resourceKind: 'station',
+      knownName: known.name,
+      furnaceSource: 'known',
+      x: known.position.x,
+      y: known.position.y,
+      z: known.position.z,
+      ...verticalMeta,
+    },
+  }
 }
 
 function nearestResource(state: WorldState, focusItem: string | null): BlockState | null {

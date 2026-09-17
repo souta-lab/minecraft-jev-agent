@@ -196,6 +196,90 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
+export interface SmeltFurnaceWindow {
+  putInput(type: number, metadata: number | null, count: number): Promise<unknown>
+  putFuel(type: number, metadata: number | null, count: number): Promise<unknown>
+  outputItem(): { count: number } | null
+  takeOutput(): Promise<unknown>
+  close(): void
+}
+
+export interface SmeltInventoryItem {
+  name: string
+  type: number
+  count: number
+}
+
+export interface SmeltExecutionDeps {
+  openFurnace(): Promise<SmeltFurnaceWindow>
+  inventoryItems(): SmeltInventoryItem[]
+  countItem(name: string): number
+  wait(ms: number): Promise<void>
+  ensureOwned(): void
+  timeoutMs: number
+  log(event: string, detail: Record<string, unknown>): void
+}
+
+export interface SmeltExecutionParams {
+  inputItem: string
+  fuelItem: string
+  outputItem: string
+  inputCount: number
+  fuelCount: number
+}
+
+export function formatSmeltLog(event: string, detail: Record<string, unknown>): string {
+  if (event === 'SMELT_DONE') {
+    return `SMELT_DONE item=${detail.item} gained=${detail.gained} input=${detail.inputItem} fuel=${detail.fuelItem} output=${detail.outputCount} delta=${detail.gained}`
+  }
+  return `SMELT_PLACED input=${detail.inputItem}:${detail.inputCount} fuel=${detail.fuelItem}:${detail.fuelCount}`
+}
+
+export async function executeFurnaceSmelt(
+  deps: SmeltExecutionDeps,
+  params: SmeltExecutionParams,
+): Promise<{ gained: number; outputCount: number; placedInput: number; placedFuel: number }> {
+  const inputCount = Math.max(1, Math.floor(params.inputCount))
+  const fuelCount = Math.max(1, Math.floor(params.fuelCount))
+  const before = deps.countItem(params.outputItem)
+  const furnace = await deps.openFurnace()
+  try {
+    const input = deps.inventoryItems().find((entry) => entry.name === params.inputItem)
+    const fuel = deps.inventoryItems().find((entry) => entry.name === params.fuelItem)
+    if (input === undefined) throw new ExecutorError('smelt_error', `${params.inputItem} left the inventory`)
+    if (fuel === undefined) throw new ExecutorError('smelt_error', `${params.fuelItem} left the inventory`)
+    const placedInput = Math.min(inputCount, input.count)
+    const placedFuel = Math.min(fuelCount, fuel.count)
+    await furnace.putInput(input.type, null, placedInput)
+    await furnace.putFuel(fuel.type, null, placedFuel)
+    deps.log('SMELT_PLACED', { inputItem: params.inputItem, inputCount: placedInput, fuelItem: params.fuelItem, fuelCount: placedFuel })
+    deps.ensureOwned()
+    const deadline = Date.now() + deps.timeoutMs
+    let after = before
+    while (after <= before && Date.now() < deadline) {
+      await deps.wait(500)
+      deps.ensureOwned()
+      if (furnace.outputItem() !== null) {
+        await furnace.takeOutput()
+        await deps.wait(250)
+      }
+      after = deps.countItem(params.outputItem)
+    }
+    if (after <= before) {
+      throw new ExecutorError('smelt_timeout', `no ${params.outputItem} appeared within ${deps.timeoutMs}ms`)
+    }
+    const gained = after - before
+    deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: params.fuelItem, outputCount: after, beforeCount: before })
+    return { gained, outputCount: after, placedInput, placedFuel }
+  } finally {
+    try {
+      furnace.close()
+    } catch {
+      // the server already closed the window
+    }
+  }
+}
+
 /** Pathfinder goal object used by the control-state walk (typing only). */
 type PathGoal = import('mineflayer-pathfinder').goals.Goal
 
@@ -1420,47 +1504,35 @@ export class Executor {
     }
     const inputCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'inputCount', 1)))
     const fuelCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'fuelCount', 1)))
-    const before = this.countItem(outputItem)
+    const furnaceSource = readMetaString(candidate, 'furnaceSource') ?? 'known'
+    this.logger.info('agent', `FURNACE_READY source=${furnaceSource} at=${target.x},${target.y},${target.z}`, {
+      actionId: candidate.id,
+      target,
+      furnaceSource,
+    })
     this.setPhase(candidate, epoch, 'smelting')
-    const furnace = await this.bot.openFurnace(block)
-    try {
-      const input = this.bot.inventory.items().find((entry) => entry.name === inputItem)
-      const fuel = this.bot.inventory.items().find((entry) => entry.name === fuelItem)
-      if (input === undefined) throw new ExecutorError('smelt_error', `${inputItem} left the inventory`)
-      if (fuel === undefined) throw new ExecutorError('smelt_error', `${fuelItem} left the inventory`)
-      await furnace.putInput(input.type, null, Math.min(inputCount, input.count))
-      await furnace.putFuel(fuel.type, null, Math.min(fuelCount, fuel.count))
-      this.ensureOwned(epoch, signal)
-      const deadline = Date.now() + this.options.smeltTimeoutMs
-      let after = before
-      while (after <= before && Date.now() < deadline) {
-        await delay(500, signal)
-        this.ensureOwned(epoch, signal)
-        if (furnace.outputItem() !== null) {
-          await furnace.takeOutput()
-          await delay(250, signal)
-        }
-        after = this.countItem(outputItem)
-      }
-      if (after <= before) {
-        throw new ExecutorError('smelt_timeout', `no ${outputItem} appeared within ${this.options.smeltTimeoutMs}ms`)
-      }
-      const result = this.buildResult(candidate, epoch, startedAt, 'done', 'smelted', `smelted ${after - before}x ${outputItem}`, null, {
-        verified: true,
-        dropObserved: false,
-        blockRemoved: false,
-        itemsGained: after - before,
-        goalItemCount: after,
-      })
-      result.yieldItem = outputItem
-      return result
-    } finally {
-      try {
-        furnace.close()
-      } catch {
-        // the server already closed the window
-      }
-    }
+    const outcome = await executeFurnaceSmelt(
+      {
+        openFurnace: () => this.bot.openFurnace(block),
+        inventoryItems: () => this.bot.inventory.items().map((entry) => ({ name: entry.name, type: entry.type, count: entry.count })),
+        countItem: (name) => this.countItem(name),
+        wait: (ms) => delay(ms, signal),
+        ensureOwned: () => this.ensureOwned(epoch, signal),
+        timeoutMs: this.options.smeltTimeoutMs,
+        log: (event, detail) => this.logger.info('agent', formatSmeltLog(event, detail), { actionId: candidate.id, ...detail }),
+      },
+      { inputItem, fuelItem, outputItem, inputCount, fuelCount },
+    )
+    const after = outcome.outputCount
+    const result = this.buildResult(candidate, epoch, startedAt, 'done', 'smelted', `smelted ${outcome.gained}x ${outputItem}`, null, {
+      verified: true,
+      dropObserved: false,
+      blockRemoved: false,
+      itemsGained: outcome.gained,
+      goalItemCount: after,
+    })
+    result.yieldItem = outputItem
+    return result
   }
 
   private async runDescend(

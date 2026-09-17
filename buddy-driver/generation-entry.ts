@@ -32,6 +32,7 @@ import {
 } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
+import { withActuationLease } from './resident-safety.ts'
 import {
   PlannerBrain,
   bestPickaxeRank,
@@ -39,13 +40,13 @@ import {
   buildPlanOptions,
   computeFrontier,
   debugFrontier,
+  deriveResumeRung,
   goalsForStrategy,
   has,
   inventoryCounts,
   resolvePlannerMode,
 } from './planner.ts'
 import type {
-  ActuationLease,
   GenerationContext,
   GenerationStatus,
   KnownResourceJson,
@@ -59,76 +60,6 @@ import type {
 } from './resident-types.ts'
 
 export const CONTRACT_VERSION = 2
-
-// jev-agent/ is imported read-only, so the lease is asserted at the generation
-// boundary: the bot handed to the controller is a Proxy that refuses every
-// side-effecting method while this generation is not the active lease owner.
-// Before the host's commit point the new generation cannot cause irreversible
-// actions; after it the old generation cannot.
-const MUTATING_BOT_METHODS = new Set<string>([
-  'dig',
-  'placeBlock',
-  'equip',
-  'unequip',
-  'activateItem',
-  'deactivateItem',
-  'activateBlock',
-  'clickWindow',
-  'putSelectedItemRange',
-  'craft',
-  'openBlock',
-  'openContainer',
-  'closeWindow',
-  'setControlState',
-  'clearControlStates',
-  'look',
-  'lookAt',
-  'toss',
-  'tossStack',
-  'chat',
-  'setQuickBarSlot',
-  'consume',
-  'updateSign',
-  'useOn',
-  'swingArm',
-])
-
-function withActuationLease(bot: Bot, lease: ActuationLease, id: string): Bot {
-  const assert = (what: string): void => lease.assertActive(id, what)
-  let pathfinderProxy: object | null = null
-  return new Proxy(bot, {
-    get(target, prop, receiver): unknown {
-      const value = Reflect.get(target, prop, receiver) as unknown
-      if (typeof prop === 'string' && typeof value === 'function' && MUTATING_BOT_METHODS.has(prop)) {
-        return (...args: unknown[]): unknown => {
-          assert(`bot.${prop}`)
-          return (value as (...a: unknown[]) => unknown).apply(target, args)
-        }
-      }
-      if (prop === 'pathfinder' && value !== null && typeof value === 'object') {
-        if (pathfinderProxy === null) {
-          pathfinderProxy = new Proxy(value, {
-            get(pfTarget, pfProp, pfRecv): unknown {
-              const pfValue = Reflect.get(pfTarget, pfProp, pfRecv) as unknown
-              if (
-                (pfProp === 'setGoal' || pfProp === 'setMovements' || pfProp === 'stop' || pfProp === 'goto') &&
-                typeof pfValue === 'function'
-              ) {
-                return (...args: unknown[]): unknown => {
-                  assert(`pathfinder.${String(pfProp)}`)
-                  return (pfValue as (...a: unknown[]) => unknown).apply(pfTarget, args)
-                }
-              }
-              return pfValue
-            },
-          })
-        }
-        return pathfinderProxy
-      }
-      return value
-    },
-  }) as Bot
-}
 
 // Loud-fail craft capability check: a future Mineflayer bump that removes the
 // private `_syncWindow` API must fail loudly here instead of silently degrading
@@ -362,25 +293,54 @@ function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number
 }
 
 /**
- * In llm-planner mode the controller's own ledger restore is gated behind the
- * single-shot planner, so the durable `done` count is restored here instead.
- * jev-agent is imported read-only, so the queue is reached through a narrow cast;
- * the HOST has already validated/archived the ledger against the live inventory.
+ * A snapshot/plan is only usable when it is an object carrying a `goals` array.
+ * The inventory-aware resume path reads `snapshot.goals`; a missing or malformed
+ * snapshot (e.g. a legacy `buddy-state.json` whose `ledger` is a GoalQueueState
+ * with `depth`/`current` instead of `counter`/`goals`) must degrade to an empty
+ * goal list, never throw `Cannot read properties of undefined (reading 'goals')`.
+ */
+export function snapshotGoals(snapshot: GoalQueueSnapshot | null | undefined): GoalQueueSnapshot['goals'] {
+  return Array.isArray(snapshot?.goals) ? snapshot.goals : []
+}
+
+/**
+ * Restore the durable ledger into the controller. Class A says the HOST snapshot
+ * is the authority (#40): the generation reads `ctx.ledgerSnapshot` first and only
+ * falls back to the derived `buddy-ledger.json` compatibility mirror. A ledger
+ * whose recorded tools/stations are gone from the live bot is refused.
  */
 function restoreLedgerIntoController(
   controller: JevController,
+  hostSnapshot: GoalQueueSnapshot | null,
   ledgerPath: string | null,
+  counts: Record<string, number>,
+  world: ResidentWorldMemory,
   log: (event: string, detail?: Record<string, unknown>) => void,
 ): void {
-  if (ledgerPath === null || !existsSync(ledgerPath)) return
+  const candidates: Array<{ source: string; snapshot: GoalQueueSnapshot }> = []
+  if (hostSnapshot !== null && Array.isArray(hostSnapshot.goals) && typeof hostSnapshot.counter === 'number') {
+    candidates.push({ source: 'host-snapshot', snapshot: hostSnapshot })
+  }
+  if (ledgerPath !== null && existsSync(ledgerPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf8')) as GoalQueueSnapshot
+      if (Array.isArray(parsed.goals) && typeof parsed.counter === 'number') candidates.push({ source: 'derived-file', snapshot: parsed })
+    } catch (error) {
+      log('ERROR', { where: 'restoreLedgerIntoController.read', message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const chosen = candidates.find((candidate) => ledgerIsConsistent(candidate.snapshot, counts, world))
+  if (chosen === undefined) {
+    if (candidates.length > 0) log('LEDGER_STALE', { reason: 'live inventory regressed below recorded goals', source: candidates[0]?.source ?? 'none' })
+    return
+  }
   try {
-    const snapshot = JSON.parse(readFileSync(ledgerPath, 'utf8')) as GoalQueueSnapshot
-    if (!Array.isArray(snapshot.goals) || typeof snapshot.counter !== 'number') return
     const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
-    holder.queue.restore(snapshot)
-    const done = snapshot.goals.filter((goal) => goal.status === 'done').length
-    const current = snapshot.goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
-    log('LEDGER_RESTORED', { done, total: snapshot.goals.length, current: current?.description ?? null })
+    holder.queue.restore(chosen.snapshot)
+    const goals = snapshotGoals(chosen.snapshot)
+    const done = goals.filter((goal) => goal.status === 'done').length
+    const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
+    log('LEDGER_RESTORED', { source: chosen.source, done, total: goals.length, current: current?.description ?? null })
   } catch (error) {
     log('ERROR', { where: 'restoreLedgerIntoController', message: error instanceof Error ? error.message : String(error) })
   }
@@ -394,7 +354,7 @@ function buildMercurySummary(
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
-  const frontier = computeFrontier(counts, world)
+  const frontier = deriveResumeRung(counts, world)
   const inventory: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) inventory[name] = n
   let wait = 0
@@ -524,22 +484,38 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   })
 
   const counts = inventoryCounts(ctx.bot)
+  const resume = deriveResumeRung(counts, world, (event, detail) => ctx.log(event, detail))
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
     dimension: ctx.bot.game?.dimension ?? null,
     placedFurnacesNear: furnaces.length,
+    knownFurnaces: world.furnaces.length,
+    resumeRungIndex: resume.rungIndex,
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
   }
 
-  // Death (or any explicit reset) recomputes the ladder from the LIVE inventory.
-  // An empty inventory means restart at wood; the queue is never given a goal
-  // whose prerequisite is missing.
+  // A reset resumes from the LIVE inventory; `invEmpty` is computed, not assumed.
+  if (ctx.resetReason !== null || resume.rungIndex > 0) {
+    const resumeReason = ctx.resetReason ?? 'inventory-resume'
+    const resumeGoals = snapshotGoals(ctx.ledgerSnapshot)
+    if (ctx.ledgerSnapshot === null || !Array.isArray(ctx.ledgerSnapshot.goals)) {
+      ctx.log('LADDER_RESUME_NO_SNAPSHOT', { reason: resumeReason, goals: resumeGoals.length })
+    }
+    ctx.log('LADDER_RESUME', {
+      rung: resume.rungId,
+      rungIndex: resume.rungIndex,
+      reason: resumeReason,
+      invEmpty: resume.invEmpty,
+      ...(resume.fallbackFrom === null ? {} : { fallbackFrom: resume.fallbackFrom, fallbackNeed: resume.fallbackNeed }),
+      inventory: counts,
+    })
+  }
   if (ctx.resetReason !== null) {
     ctx.log('LADDER_RESET', {
       reason: ctx.resetReason,
-      invEmpty: Object.keys(counts).length === 0,
+      invEmpty: resume.invEmpty,
       rungIndex: ladder.rungIndex,
       rungId: ladder.rungId,
       goals: ladder.goals.map((goal) => goal.description),
@@ -559,7 +535,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     cachePath: advisorCachePath,
     mode: resolveAdvisorMode(plannerMode),
     compile: (strategy, state) =>
-      goalsForStrategy(strategy, state.inventory, world, { placedFurnacesNear: world.furnaces.length }),
+      goalsForStrategy(strategy, state.inventory, world, {
+        placedFurnacesNear: furnaces.length,
+        knownFurnaces: world.furnaces.length,
+      }),
   })
 
   const postDeathRecovery = ctx.resetReason === 'death'
@@ -572,6 +551,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,
+        worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
         postDeathRecovery,
       })
     : undefined
@@ -610,13 +590,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     scanRadius: 48,
     verbose: true,
     eventSink: (event, detail) => ctx.log(event, detail),
-    knownResources: world.knownResources.map((resource) => ({
-      name: resource.name,
-      kind: resource.kind,
-      position: { x: resource.x, y: resource.y, z: resource.z },
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-    })),
+    knownResources: [
+      ...world.knownResources.map((resource) => ({
+        name: resource.name,
+        kind: resource.kind,
+        position: { x: resource.x, y: resource.y, z: resource.z },
+        ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+        ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      })),
+      ...world.furnaces.map((furnace) => ({
+        name: 'furnace',
+        kind: 'station' as const,
+        position: { x: furnace.x, y: furnace.y, z: furnace.z },
+      })),
+    ],
   }
 
   const controller = new JevController(bot, options)
@@ -624,12 +611,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
   installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
-  restoreLedgerIntoController(controller, ledgerPath, ctx.log)
+  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, ctx.log)
   const brain = new PlannerBrain({
     bot,
     world,
     log: (event, detail) => ctx.log(event, detail),
     cachePath,
+    worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
     mode: plannerMode,
     advisor,
     mercury,
@@ -696,6 +684,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           subgoalCount: result.subgoalCount,
           jevCalls: result.jevCalls,
         })
+        proposeLedger()
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
@@ -711,8 +700,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'quiesce.stop', message })
     }
+    proposeLedger()
     // Bounded settle: the executor cancels the in-flight action on stop.
     await Promise.race([runPromise ?? Promise.resolve(), delay(3000)])
+  }
+
+  function proposeLedger(): void {
+    try {
+      const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
+      ctx.proposeLedger(holder.queue.snapshot())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.log('ERROR', { id, where: 'proposeLedger', message })
+    }
   }
 
   function readTruth(): ServerTruth {
@@ -730,7 +730,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   function status(): GenerationStatus {
     const truth = readTruth()
-    const frontier = computeFrontier(truth.inventory, world)
+    const frontier = deriveResumeRung(truth.inventory, world)
     const current = controller.agent.current
     return {
       running: controller.isRunning,

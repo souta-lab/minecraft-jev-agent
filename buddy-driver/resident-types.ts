@@ -15,7 +15,7 @@
 // This file is imported with `import type` only, so the host's native TypeScript
 // stripping removes it completely (no runtime import, no cycle).
 import type { Bot } from 'mineflayer'
-import type { GoalQueueState } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState } from '../jev-agent/src/goalQueue.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
 export const CONTRACT_VERSION = 2
@@ -156,8 +156,34 @@ export interface WorldMemoryDelta {
   hazards?: DeathHazard[]
 }
 
-/** The atomic mirror written to buddy-state.json (tmp -> rename). HOST-only writer. */
-export interface ResidentState {
+/**
+ * Issue #40: every durable artifact is exactly ONE of four state classes. This
+ * distinction is the contract that keeps reload/rollback semantics exact.
+ *
+ *   A. Authoritative mission state - HOST transactional (single writer, atomic
+ *      write, typed). Enough to resume correctly after a process restart with no
+ *      planner/model cache: mission/ledger, worldEpoch, world memory (known
+ *      resources, hazards, traversal/failure memory), milestone + generation
+ *      bookkeeping, schema/revision metadata.
+ *   B. Server truth - NEVER persisted as authority; always re-observed from the
+ *      live Mineflayer bot after reload/reconnect (position/health/food/inventory/
+ *      entities/open windows). See `ServerTruth`.
+ *   C. Disposable optimization state - planner/advisor/Mercury caches, compiled
+ *      generation bundles, replay indexes. Losing them may cost latency only and
+ *      MUST NOT change correctness.
+ *   D. Append-only evidence - JSONL calls/actions/outcomes/acceptance/freeze
+ *      reports. Evidence only; never read back as state.
+ */
+export type StateClass = 'A' | 'B' | 'C' | 'D'
+
+/**
+ * THE authoritative mission snapshot (class A). Exactly one of these is persisted
+ * to `buddy-state.json`; the HOST is its only writer. Generations PROPOSE
+ * mutations (world-memory deltas, ledger) and the host commits them atomically
+ * (tmp -> rename) with schema/revision validation. No field typed `unknown` is
+ * authoritative restore state.
+ */
+export interface AgentSnapshot {
   /** schema version of this JSON file (independent of CONTRACT_VERSION) */
   schemaVersion: number
   /** monotonically increasing commit revision; bumped on every committed write */
@@ -179,8 +205,10 @@ export interface ResidentState {
   milestoneIndex: number
   /** id of that rung (e.g. "iron_pickaxe") */
   milestone: string | null
-  /** last seen goal-queue snapshot (ledger mirror, durable semantic state) */
-  ledger: unknown | null
+  /** last committed goal-queue state - the durable mission ledger (class A). A
+   * generation proposes it via `GenerationContext.proposeLedger`; the host commits.
+   * `buddy-ledger.json` is a DERIVED compatibility mirror of this, never authority. */
+  ledger: GoalQueueSnapshot | null
   /** durable semantic memory, namespaced by server|dimension|worldEpoch */
   worldMemoryByKey: Record<string, ResidentWorldMemory>
   /** how many generations have been attached in this process lifetime */
@@ -193,6 +221,9 @@ export interface ResidentState {
   /** monotonic action counter for ACTION log lines */
   actions: number
 }
+
+/** Back-compat alias: the single class-A snapshot persisted to buddy-state.json. */
+export type ResidentState = AgentSnapshot
 
 /** SERVER TRUTH: re-observed from the live bot after every reload/reconnect. Never persisted. */
 export interface ServerTruth {
@@ -327,7 +358,15 @@ export interface GenerationContext {
   worldKey: WorldKey
   /** the generation proposes memory deltas; the HOST commits them. */
   proposeWorldMemory(delta: WorldMemoryDelta): void
-  /** goal-queue ledger path handed to the controller. */
+  /**
+   * Issue #40: the generation PROPOSES its authoritative ledger (class A); the
+   * HOST is the only writer and commits it atomically. `proposedRevision` lets the
+   * host reject a stale proposal from a superseded generation.
+   */
+  proposeLedger(ledger: GoalQueueSnapshot, proposedRevision?: number): void
+  /** class-A ledger the HOST committed; the generation restores from THIS, not cache/logs. */
+  ledgerSnapshot: GoalQueueSnapshot | null
+  /** goal-queue ledger path handed to the controller (derived compatibility mirror). */
   ledgerPath: string
   /** jsonl log dir handed to the controller. */
   logDir: string
