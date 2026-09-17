@@ -54,6 +54,14 @@ export interface TraversalFailure {
   lastSeenAt: number
 }
 
+/**
+ * Provenance of a death hazard. `production` hazards come from real deaths and
+ * may be persisted / consulted by candidate filtering. `simulation` hazards come
+ * from the operator `simdeath` rehearsal and MUST stay in a separate,
+ * non-durable namespace so a rehearsal can never poison a safe coordinate (#26).
+ */
+export type HazardSource = 'production' | 'simulation'
+
 /** A coordinate that killed the bot. Registered on death; a coordinate that
  * kills twice is excluded permanently from dig/descent candidates. */
 export interface DeathHazard {
@@ -66,6 +74,9 @@ export interface DeathHazard {
   count: number
   firstSeenAt: number
   lastSeenAt: number
+  /** provenance tag. Absent is treated as `production` for old durable state;
+   * `simulation` entries are refused by the production merge path (#26). */
+  source?: HazardSource
 }
 
 /** Durable world model that must survive reloads/reconnects. Inventory and

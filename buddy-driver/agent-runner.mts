@@ -30,6 +30,7 @@ import type {
   GenerationContext,
   GenerationModule,
   GenerationStatus,
+  HazardSource,
   KnownResourceJson,
   ResidentGeneration,
   ResidentState,
@@ -40,6 +41,15 @@ import type {
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
+import {
+  capturePreLossInventory,
+  parseRehearsalMode,
+  partitionHazardsBySource,
+  recordRehearsalHazard,
+  shouldRegisterHazard,
+  type DeathTelemetry,
+  type RehearsalMode,
+} from './simdeath.ts'
 
 const CONTRACT_VERSION = 2
 const STATE_SCHEMA_VERSION = 2
@@ -251,7 +261,11 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
     memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
   }
   if (delta.hazards !== undefined) {
-    for (const hazard of delta.hazards) mergeHazard(memory.hazards, hazard)
+    const { production, simulation } = partitionHazardsBySource(delta.hazards)
+    for (const hazard of production) mergeHazard(memory.hazards, hazard)
+    for (const hazard of simulation) {
+      log('HAZARD_SKIPPED', { source: 'simulation', reason: hazard.reason, pos: `${hazard.x},${hazard.y},${hazard.z}`, where: 'world-memory-delta' })
+    }
   }
   saveState('world-memory')
 }
@@ -263,6 +277,11 @@ function hazardKey(h: { x: number; y: number; z: number }): string {
 /** Merge a death coordinate. The HOST is the only writer; two deaths at the same
  * rounded coordinate make the hazard permanent (`count >= 2`). */
 function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHazard {
+  if (found.source === 'simulation') {
+    // Defense in depth for #26: even if a caller bypasses the source gate, a
+    // rehearsal hazard is returned detached and never merged into the durable set.
+    return { ...found, count: Math.max(1, found.count) }
+  }
   const key = hazardKey(found)
   const existing = target.find((h) => hazardKey(h) === key)
   if (existing === undefined) {
@@ -621,6 +640,7 @@ function registerDeathHazard(pos: Vec3Json, reason: string): DeathHazard {
     z: pos.z,
     reason,
     count: 1,
+    source: 'production',
     firstSeenAt: Date.now(),
     lastSeenAt: Date.now(),
   })
@@ -628,29 +648,49 @@ function registerDeathHazard(pos: Vec3Json, reason: string): DeathHazard {
   return hazard
 }
 
-/** Death handling: log DEATH + lost inventory, register the hazard, stop the
- * current generation, and archive the ledger so the next respawn recomputes the
- * ladder from the LIVE (empty) inventory instead of resuming an impossible goal. */
+interface DeathRecoveryInput {
+  cause: string
+  source: HazardSource
+  telemetry: DeathTelemetry
+  rehearsalMode?: RehearsalMode
+}
+
 /** Shared death/recovery pipeline: log DEATH, register the hazard, drop the
- * generation, archive the ledger, and force a fresh ladder computation. `simulated`
- * marks the operator rehearsal (`simdeath`) so it is never mistaken for a real
- * death; it still exercises the exact same recovery path end to end. */
-function beginDeathRecovery(b: Bot, cause: string, simulated: boolean): { pos: Vec3Json | null; lost: Record<string, number> } {
+ * generation, archive the ledger, and force a fresh ladder computation. The
+ * inventory is pre-captured by the caller (#34) and a `simulation` source never
+ * touches the durable hazard set (#26). */
+function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json | null; lost: Record<string, number> } {
   const entity = b.entity
   const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
-  const lost = inventorySummary(b)
+  const lost = input.telemetry.lostInventory
+  const simulated = input.source === 'simulation'
   log('DEATH', {
     pos: pos === null ? '?' : fmtPos(pos),
     dimension: state.dimension,
     lostInventory: lost,
-    itemsLost: Object.values(lost).reduce((sum, n) => sum + n, 0),
-    cause,
+    itemsLost: input.telemetry.itemsLost,
+    capturedBeforeDrop: input.telemetry.capturedBeforeDrop,
+    cause: input.cause,
     healthBefore: lastHealth,
     simulated,
+    ...(input.rehearsalMode === undefined ? {} : { rehearsalMode: input.rehearsalMode }),
   })
   lastDeathAt = Date.now()
   lastSeenDeathPosition = pos
-  if (pos !== null) registerDeathHazard(pos, cause)
+  if (pos !== null) {
+    if (shouldRegisterHazard(input.source)) {
+      registerDeathHazard(pos, input.cause)
+    } else {
+      const rehearsal = recordRehearsalHazard(pos, input.cause)
+      log('HAZARD_SKIPPED', {
+        source: 'simulation',
+        reason: input.cause,
+        pos: fmtPos(pos),
+        rehearsalCount: rehearsal.count,
+        durableHazards: keyedMemory().hazards.length,
+      })
+    }
+  }
   deathResetPending = true
   pendingResetReason = 'death'
   const oldGeneration = generation
@@ -664,8 +704,14 @@ function beginDeathRecovery(b: Bot, cause: string, simulated: boolean): { pos: V
     }
   }
   archiveLedger(simulated ? 'death-simulated' : 'death')
-  saveState('death')
-  log('LADDER_RESET', { reason: 'death', invEmpty: Object.keys(lost).length === 0, cause, simulated })
+  saveState(simulated ? 'death-simulated' : 'death')
+  log('LADDER_RESET', {
+    reason: 'death',
+    invEmpty: Object.keys(lost).length === 0,
+    cause: input.cause,
+    simulated,
+    ...(input.rehearsalMode === undefined ? {} : { rehearsalMode: input.rehearsalMode }),
+  })
   return { pos, lost }
 }
 
@@ -673,7 +719,67 @@ function handleBotDeath(b: Bot): void {
   const entity = b.entity
   const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
   const cause = inferDeathCause(b, pos, lastHealth)
-  beginDeathRecovery(b, cause, false)
+  const telemetry = capturePreLossInventory(() => inventorySummary(b))
+  beginDeathRecovery(b, { cause, source: 'production', telemetry })
+}
+
+interface RehearsalSnapshot {
+  ledger: string | null
+  ledgerMirror: unknown
+  milestone: string | null
+  milestoneIndex: number
+  pendingResetReason: string | null
+  deathResetPending: boolean
+  hazards: Record<string, DeathHazard[]>
+  durableHazardCount: number
+}
+
+function snapshotRehearsalState(): RehearsalSnapshot {
+  let ledger: string | null = null
+  try {
+    if (existsSync(LEDGER)) ledger = readFileSync(LEDGER, 'utf8')
+  } catch {
+    // best effort: a missing ledger restore is reported as ledgerRestored=false
+  }
+  const hazards: Record<string, DeathHazard[]> = {}
+  for (const [key, memory] of Object.entries(state.worldMemoryByKey)) {
+    hazards[key] = normalizeWorldMemory(memory).hazards.map((hazard) => ({ ...hazard }))
+  }
+  return {
+    ledger,
+    ledgerMirror: state.ledger,
+    milestone: state.milestone,
+    milestoneIndex: state.milestoneIndex,
+    pendingResetReason,
+    deathResetPending,
+    hazards,
+    durableHazardCount: keyedMemory().hazards.length,
+  }
+}
+
+function restoreRehearsalState(snapshot: RehearsalSnapshot): { ledger: boolean; hazards: boolean; hazardsRestoredTo: number } {
+  let ledger = false
+  if (snapshot.ledger !== null) {
+    try {
+      writeFileSync(LEDGER, snapshot.ledger)
+      ledger = true
+    } catch {
+      // best effort
+    }
+  }
+  state.ledger = snapshot.ledgerMirror
+  state.milestone = snapshot.milestone
+  state.milestoneIndex = snapshot.milestoneIndex
+  let hazards = true
+  for (const [key, list] of Object.entries(snapshot.hazards)) {
+    const memory = state.worldMemoryByKey[key]
+    if (memory === undefined) continue
+    memory.hazards = list.map((hazard) => ({ ...hazard }))
+  }
+  if (keyedMemory().hazards.length !== snapshot.durableHazardCount) hazards = false
+  pendingResetReason = snapshot.pendingResetReason
+  deathResetPending = snapshot.deathResetPending
+  return { ledger, hazards, hazardsRestoredTo: keyedMemory().hazards.length }
 }
 
 function connect(): void {
@@ -1163,6 +1269,13 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       controlReply(socket, request, false, { error: 'no live bot' })
       return
     }
+    const liveBot = bot
+    const mode = parseRehearsalMode(request.args)
+    // #34: capture BEFORE any toss/clear so lostInventory is the real pre-loss set.
+    const telemetry = capturePreLossInventory(() => inventorySummary(liveBot))
+    // #26: the default (soft) rehearsal snapshots durable progress and restores it
+    // afterwards, so a rehearsal can never cost the resident its ladder.
+    const snapshot = mode === 'soft' ? snapshotRehearsalState() : null
     const old = generation
     generation = null
     activeGenerationId = null
@@ -1174,21 +1287,61 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       }
       old.dispose()
     }
-    for (const item of bot.inventory.items()) {
-      try {
-        await bot.toss(item.type, null, item.count)
-      } catch {
-        // best effort: keep dropping the rest
+    if (mode === 'hard') {
+      for (const item of liveBot.inventory.items()) {
+        try {
+          await liveBot.toss(item.type, null, item.count)
+        } catch {
+          // best effort: keep dropping the rest
+        }
       }
+      await delay(600)
     }
-    await delay(600)
-    const { lost } = beginDeathRecovery(bot, 'simulated', true)
+    const { pos, lost } = beginDeathRecovery(liveBot, {
+      cause: mode === 'hard' ? 'simulated-hard' : 'simulated',
+      source: 'simulation',
+      telemetry,
+      rehearsalMode: mode,
+    })
+    let restored: { ledger: boolean; hazards: boolean; hazardsRestoredTo: number } | null = null
+    if (snapshot !== null) {
+      restored = restoreRehearsalState(snapshot)
+      log('SIMDEATH_RESTORE', {
+        mode,
+        ledgerRestored: restored.ledger,
+        hazardsRestored: restored.hazards,
+        hazardsBefore: snapshot.durableHazardCount,
+        hazardsAfter: restored.hazardsRestoredTo,
+        milestoneRestored: state.milestone,
+        milestoneIndex: state.milestoneIndex,
+      })
+    }
     deathResetPending = false
-    saveState('simdeath')
+    saveState(mode === 'hard' ? 'simdeath-hard' : 'simdeath-soft')
+    log('SIMDEATH', {
+      mode,
+      destructive: mode === 'hard',
+      simulated: true,
+      pos: pos === null ? '?' : fmtPos(pos),
+      lostInventory: telemetry.lostInventory,
+      itemsLost: telemetry.itemsLost,
+      capturedBeforeDrop: telemetry.capturedBeforeDrop,
+      ledgerRestored: restored?.ledger ?? false,
+      hazardsRestored: restored?.hazards ?? true,
+    })
     setTimeout(() => {
-      if (!shuttingDown) void startGeneration('simdeath')
+      if (!shuttingDown) void startGeneration(mode === 'hard' ? 'simdeath-hard' : 'simdeath-soft')
     }, 800)
-    controlReply(socket, request, true, { simulated: true, remaining: Object.keys(lost).length })
+    controlReply(socket, request, true, {
+      simulated: true,
+      mode,
+      destructive: mode === 'hard',
+      remaining: Object.keys(lost).length,
+      itemsLost: telemetry.itemsLost,
+      capturedBeforeDrop: telemetry.capturedBeforeDrop,
+      ledgerRestored: restored?.ledger ?? false,
+      hazardsRestored: restored?.hazards ?? true,
+    })
     return
   }
   if (cmd === 'worldreset') {
