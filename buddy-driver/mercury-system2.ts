@@ -172,8 +172,12 @@ export function groundMercuryPlan(
 }
 
 /** Stable cache key for a Mercury state summary. Exported so tests can seed the cache. */
-export function hashMercuryState(state: MercuryStateSummary): string {
+export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCacheIdentity = mercuryCacheIdentity()): string {
   const payload = {
+    worldKey: identity.worldKey,
+    worldEpoch: identity.worldEpoch,
+    schemaVersion: identity.schemaVersion,
+    dimension: state.dimension,
     trigger: state.trigger,
     rung: state.rung,
     inventory: state.inventory,
@@ -299,6 +303,36 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 // durable cache + hourly budget
 // ---------------------------------------------------------------------------
 
+/** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
+export const MERCURY_CACHE_SCHEMA_VERSION = 3
+const MERCURY_CACHE_FILE_VERSION = 3
+
+export interface MercuryWorldKey {
+  serverId: string
+  dimension: string
+  worldEpoch: number
+}
+
+export function mercuryWorldKeyString(key: MercuryWorldKey): string {
+  return `${key.serverId}|${key.dimension}|${key.worldEpoch}`
+}
+
+export interface MercuryCacheIdentity {
+  worldKey: string
+  worldEpoch: number
+  schemaVersion: number
+}
+
+export const DEFAULT_MERCURY_WORLD_KEY: MercuryWorldKey = { serverId: 'local', dimension: 'unknown', worldEpoch: 0 }
+
+export function mercuryCacheIdentity(worldKey: MercuryWorldKey = DEFAULT_MERCURY_WORLD_KEY): MercuryCacheIdentity {
+  return {
+    worldKey: mercuryWorldKeyString(worldKey),
+    worldEpoch: worldKey.worldEpoch,
+    schemaVersion: MERCURY_CACHE_SCHEMA_VERSION,
+  }
+}
+
 interface MercuryCacheEntry {
   op: PlanOp
   goals: Array<{ item: string; count: number }>
@@ -306,12 +340,18 @@ interface MercuryCacheEntry {
   strategy: string
   costUsd: number
   ts: number
+  worldKey: string
+  schemaVersion: number
   /** How many times this cached plan has been replayed without body progress. */
   replays?: number
 }
 
 interface MercuryCacheFile {
-  version: 2
+  version: typeof MERCURY_CACHE_FILE_VERSION
+  /** #33 semantic namespace identity; any mismatch invalidates the whole file. */
+  worldKey: string
+  worldEpoch: number
+  schemaVersion: number
   entries: Record<string, MercuryCacheEntry>
   callTimes: number[]
   consecutiveStrategy?: string | null
@@ -325,8 +365,17 @@ export const MAX_CACHE_REPLAYS = 2
 /** Consecutive cached plans with the same strategy before the cache is bypassed. */
 export const MAX_CONSECUTIVE_CACHED = 2
 
-function emptyCache(): MercuryCacheFile {
-  return { version: 2, entries: {}, callTimes: [], consecutiveStrategy: null, consecutiveCount: 0 }
+function emptyCache(identity: MercuryCacheIdentity): MercuryCacheFile {
+  return {
+    version: MERCURY_CACHE_FILE_VERSION,
+    worldKey: identity.worldKey,
+    worldEpoch: identity.worldEpoch,
+    schemaVersion: identity.schemaVersion,
+    entries: {},
+    callTimes: [],
+    consecutiveStrategy: null,
+    consecutiveCount: 0,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +422,8 @@ export interface MercurySystem2Options {
   callsPath: string
   /** absolute path to the durable state-hash cache / hourly budget file. */
   cachePath: string
+  /** #33: world identity (serverId|dimension|worldEpoch) namespacing the cache. */
+  worldKey?: MercuryWorldKey
   model?: string
   maxPerHour?: number
   timeoutMs?: number
@@ -488,6 +539,7 @@ export class MercurySystem2 implements System2Brain {
   private readonly log: MercurySystem2Options['log']
   private readonly callsPath: string
   private readonly cachePath: string
+  private readonly cacheIdentity: MercuryCacheIdentity
   private readonly maxPerHour: number
   private readonly timeoutMs: number
   private readonly maxAttempts: number
@@ -512,13 +564,16 @@ export class MercurySystem2 implements System2Brain {
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 1))
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
     this.postDeathPending = options.postDeathRecovery === true
+    this.cacheIdentity = mercuryCacheIdentity(options.worldKey)
     this.cache = this.loadCache()
     this.log('ADVISOR_CACHE_GUARD', {
       active: true,
-      version: 2,
+      version: MERCURY_CACHE_SCHEMA_VERSION,
       maxReplays: MAX_CACHE_REPLAYS,
       maxConsecutive: MAX_CONSECUTIVE_CACHED,
       source: 'mercury',
+      world: this.cacheIdentity.worldKey,
+      epoch: this.cacheIdentity.worldEpoch,
     })
   }
 
@@ -565,6 +620,13 @@ export class MercurySystem2 implements System2Brain {
     const stateHash = this.hashState(state)
 
     const cached = this.cache.entries[stateHash]
+    this.log('PLANNER_CACHE', {
+      source: 'mercury',
+      key: stateHash,
+      world: this.cacheIdentity.worldKey,
+      epoch: this.cacheIdentity.worldEpoch,
+      hit: cached !== undefined,
+    })
     if (cached !== undefined) {
       const replays = cached.replays ?? 0
       const consecutive = this.cache.consecutiveStrategy === cached.strategy ? this.cache.consecutiveCount ?? 0 : 0
@@ -725,6 +787,8 @@ export class MercurySystem2 implements System2Brain {
         strategy,
         costUsd,
         ts: Date.now(),
+        worldKey: this.cacheIdentity.worldKey,
+        schemaVersion: this.cacheIdentity.schemaVersion,
         replays: 0,
       }
       this.resetConsecutive()
@@ -818,7 +882,7 @@ export class MercurySystem2 implements System2Brain {
   }
 
   private hashState(state: MercuryStateSummary): string {
-    return hashMercuryState(state)
+    return hashMercuryState(state, this.cacheIdentity)
   }
 
   private writeCall(record: MercuryCallRecord): void {
@@ -831,19 +895,52 @@ export class MercurySystem2 implements System2Brain {
   }
 
   private loadCache(): MercuryCacheFile {
+    const identity = this.cacheIdentity
     try {
-      if (!existsSync(this.cachePath)) return emptyCache()
+      if (!existsSync(this.cachePath)) return emptyCache(identity)
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as Partial<MercuryCacheFile>
-      if (parsed.version !== 2 || typeof parsed.entries !== 'object' || parsed.entries === null) return emptyCache()
+      if (parsed.version !== MERCURY_CACHE_FILE_VERSION) {
+        this.log('PLANNER_CACHE_INVALIDATED', {
+          source: 'mercury',
+          reason: 'schema',
+          cachedVersion: parsed.version ?? null,
+          version: MERCURY_CACHE_FILE_VERSION,
+        })
+        return emptyCache(identity)
+      }
+      if (parsed.schemaVersion !== identity.schemaVersion) {
+        this.log('PLANNER_CACHE_INVALIDATED', {
+          source: 'mercury',
+          reason: 'schema',
+          cachedSchema: parsed.schemaVersion ?? null,
+          schemaVersion: identity.schemaVersion,
+        })
+        return emptyCache(identity)
+      }
+      if (parsed.worldKey !== identity.worldKey || parsed.worldEpoch !== identity.worldEpoch) {
+        this.log('PLANNER_CACHE_INVALIDATED', {
+          source: 'mercury',
+          reason: 'world',
+          cachedWorld: parsed.worldKey ?? null,
+          world: identity.worldKey,
+          cachedEpoch: parsed.worldEpoch ?? null,
+          epoch: identity.worldEpoch,
+        })
+        return emptyCache(identity)
+      }
+      if (typeof parsed.entries !== 'object' || parsed.entries === null) return emptyCache(identity)
       return {
-        version: 2,
+        version: MERCURY_CACHE_FILE_VERSION,
+        worldKey: identity.worldKey,
+        worldEpoch: identity.worldEpoch,
+        schemaVersion: identity.schemaVersion,
         entries: parsed.entries,
         callTimes: Array.isArray(parsed.callTimes) ? parsed.callTimes.filter((time) => typeof time === 'number') : [],
         consecutiveStrategy: typeof parsed.consecutiveStrategy === 'string' ? parsed.consecutiveStrategy : null,
         consecutiveCount: typeof parsed.consecutiveCount === 'number' ? parsed.consecutiveCount : 0,
       }
     } catch {
-      return emptyCache()
+      return emptyCache(identity)
     }
   }
 

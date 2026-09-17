@@ -687,6 +687,60 @@ function rejectionPlan(note: string): System2Plan {
   return { goals: [], note: `REPLAN_REJECTED no_body_delta (${note})`, op: 'continue' as PlanOp }
 }
 
+export interface PlanTailDecision {
+  goal: string
+  action: 'kept' | 'skipped'
+  reason: string
+}
+
+export interface NormalizedPlanTail {
+  goals: PlannedGoal[]
+  decisions: PlanTailDecision[]
+}
+
+/**
+ * #30: a Mercury `patch` may redundantly repeat the active goal as its first
+ * item. `GoalQueue.applyPlan(..., 'patch')` keeps the active goal, so the
+ * repeated head must be stripped and the REST of the tail applied - never the
+ * whole repair turned into `continue []`. Every drop is reported (PLAN_TAIL).
+ * `replace` is never downgraded and never dedupes its head.
+ */
+export function normalizePlanTail(
+  goals: readonly PlannedGoal[],
+  current: { kind: string; targetItem?: string | null; requiredCount?: number } | null,
+  op: PlanOp,
+): NormalizedPlanTail {
+  const decisions: PlanTailDecision[] = []
+  const kept: PlannedGoal[] = []
+  const seen = new Set<string>()
+  for (let index = 0; index < goals.length; index += 1) {
+    const goal = goals[index]
+    if (goal === undefined) continue
+    const label = goal.description
+    const count = Math.max(1, Math.floor(goal.requiredCount ?? 1))
+    const duplicateActive =
+      op === 'patch' &&
+      index === 0 &&
+      current !== null &&
+      goal.kind === current.kind &&
+      (goal.targetItem ?? null) === (current.targetItem ?? null) &&
+      count === Math.max(1, Math.floor(current.requiredCount ?? 1))
+    if (duplicateActive) {
+      decisions.push({ goal: label, action: 'skipped', reason: 'duplicate_active' })
+      continue
+    }
+    const signature = `${goal.kind}|${goal.targetItem ?? ''}|${count}`
+    if (seen.has(signature)) {
+      decisions.push({ goal: label, action: 'skipped', reason: 'duplicate_in_plan' })
+      continue
+    }
+    seen.add(signature)
+    kept.push(goal)
+    decisions.push({ goal: label, action: 'kept', reason: 'applied' })
+  }
+  return { goals: kept, decisions }
+}
+
 /**
  * A replan that MUST change the body (#43 follow-up): its first goal is the
  * nearest unsatisfied ore rung's descent+ore chain, or a stone-collection
@@ -843,22 +897,99 @@ function describeError(error: unknown): string {
 // the planner brain
 // ---------------------------------------------------------------------------
 
+/** #33: planner cache schema/contract version. Bump when PlanOption semantics change. */
+export const PLANNER_CACHE_SCHEMA_VERSION = 2
+const PLANNER_CACHE_FILE_VERSION = 2
+
+/** World identity that namespaces the durable planner cache (#33). */
+export interface PlannerWorldKey {
+  serverId: string
+  dimension: string
+  worldEpoch: number
+}
+
+export function plannerWorldKeyString(key: PlannerWorldKey): string {
+  return `${key.serverId}|${key.dimension}|${key.worldEpoch}`
+}
+
+/**
+ * #33: hash of the capability/rung-set contract. If RUNGS changes (an option id
+ * keeps its name but its goals change), the hash changes and old cache entries
+ * are invalidated instead of being reinterpreted under the new semantics.
+ */
+export function plannerCapabilityHash(): string {
+  const contract = RUNGS.map((rung) => `${rung.id}${rung.future === true ? ':future' : ''}`).join(',')
+  return createHash('sha1').update(contract).digest('hex').slice(0, 16)
+}
+
+export interface PlannerCacheIdentity {
+  worldKey: string
+  worldEpoch: number
+  schemaVersion: number
+  capabilityHash: string
+}
+
 export interface PlannerCacheEntry {
   optionId: string
+  worldKey: string
+  schemaVersion: number
+  capabilityHash: string
   costUsd: number
   ts: number
 }
 
 interface PlannerCacheFile {
-  version: 1
+  version: typeof PLANNER_CACHE_FILE_VERSION
+  /** #33 semantic namespace identity; any mismatch invalidates the whole file. */
+  worldKey: string
+  worldEpoch: number
+  schemaVersion: number
+  capabilityHash: string
   lastCallAt: number
   entries: Record<string, PlannerCacheEntry>
 }
 
 const MAX_CACHE_ENTRIES = 80
 
-function emptyCache(): PlannerCacheFile {
-  return { version: 1, lastCallAt: 0, entries: {} }
+function emptyCache(identity: PlannerCacheIdentity): PlannerCacheFile {
+  return {
+    version: PLANNER_CACHE_FILE_VERSION,
+    worldKey: identity.worldKey,
+    worldEpoch: identity.worldEpoch,
+    schemaVersion: identity.schemaVersion,
+    capabilityHash: identity.capabilityHash,
+    lastCallAt: 0,
+    entries: {},
+  }
+}
+
+/**
+ * #33: the durable planner cache key. It mixes the world identity
+ * (serverId|dimension|worldEpoch), the planner schema version and the
+ * capability/rung-set hash with the live state, so a world reset, a dimension
+ * change or a changed option contract can never serve a stale plan.
+ */
+export function plannerStateHash(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  objective: { targetItem: string; haveCount: number },
+  identity: PlannerCacheIdentity,
+): string {
+  const stable: Record<string, number> = {}
+  for (const [name, n] of Object.entries(counts)) if (n > 0) stable[name] = n
+  const payload = {
+    world: identity.worldKey,
+    worldEpoch: identity.worldEpoch,
+    schemaVersion: identity.schemaVersion,
+    capabilityHash: identity.capabilityHash,
+    inventory: stable,
+    frontier: computeFrontier(counts, world).rungId,
+    stations: { tables: world.craftingTables.length, furnaces: world.furnaces.length },
+    ores: [...world.discoveredOres].sort(),
+    objective: objective.targetItem,
+    objectiveHave: objective.haveCount,
+  }
+  return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
 
 export interface PlannerOptions {
@@ -867,6 +998,8 @@ export interface PlannerOptions {
   log: (event: string, detail?: Record<string, unknown>) => void
   /** where the durable plan cache is mirrored (JSON, tmp -> rename). */
   cachePath: string
+  /** #33: world identity (serverId|dimension|worldEpoch) namespacing the cache. */
+  worldKey?: PlannerWorldKey
   /** override the env switch (tests / explicit wiring). */
   mode?: PlannerMode
   /** minimum spacing between real LLM calls. */
@@ -925,6 +1058,8 @@ export class PlannerBrain implements System2Brain {
   private readonly world: ResidentWorldMemory
   private readonly log: (event: string, detail?: Record<string, unknown>) => void
   private readonly cachePath: string
+  private readonly worldKey: PlannerWorldKey
+  private readonly cacheIdentity: PlannerCacheIdentity
   readonly mode: PlannerMode
   private readonly minIntervalMs: number
   private readonly timeoutMs: number
@@ -948,6 +1083,17 @@ export class PlannerBrain implements System2Brain {
     this.world = options.world
     this.log = options.log
     this.cachePath = options.cachePath
+    this.worldKey = options.worldKey ?? {
+      serverId: 'local',
+      dimension: this.bot.game?.dimension ?? 'unknown',
+      worldEpoch: 0,
+    }
+    this.cacheIdentity = {
+      worldKey: plannerWorldKeyString(this.worldKey),
+      worldEpoch: this.worldKey.worldEpoch,
+      schemaVersion: PLANNER_CACHE_SCHEMA_VERSION,
+      capabilityHash: plannerCapabilityHash(),
+    }
     this.mode = options.mode ?? resolvePlannerMode()
     this.minIntervalMs = options.minIntervalMs ?? Number(process.env.BUDDY_PLANNER_MIN_INTERVAL_MS ?? 45000)
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_PLANNER_TIMEOUT_MS ?? 9000)
@@ -1017,6 +1163,14 @@ export class PlannerBrain implements System2Brain {
     const stateHash = this.hashState(counts, request)
     const bypassCache = reason === 'stuck' || reason === 'impossible'
     const cached = bypassCache ? undefined : this.cache.entries[stateHash]
+    this.log('PLANNER_CACHE', {
+      source: 'planner',
+      key: stateHash,
+      world: this.worldShort(),
+      epoch: this.worldKey.worldEpoch,
+      hit: cached !== undefined,
+      bypass: bypassCache,
+    })
     if (cached !== undefined) {
       const option = options.find((entry) => entry.id === cached.optionId) ?? deterministicOption
       this.logPlan('llm', option, reason, started, 0, `cached plan (${option.id})`, true)
@@ -1037,7 +1191,14 @@ export class PlannerBrain implements System2Brain {
       const chosen = await this.askLlm(options, request)
       this.calls += 1
       this.cache.lastCallAt = Date.now()
-      this.cache.entries[stateHash] = { optionId: chosen.optionId, costUsd: chosen.costUsd, ts: Date.now() }
+      this.cache.entries[stateHash] = {
+        optionId: chosen.optionId,
+        worldKey: this.cacheIdentity.worldKey,
+        schemaVersion: this.cacheIdentity.schemaVersion,
+        capabilityHash: this.cacheIdentity.capabilityHash,
+        costUsd: chosen.costUsd,
+        ts: Date.now(),
+      }
       this.trimCache()
       this.saveCache()
       const option = stalled ? deterministicOption : (options.find((entry) => entry.id === chosen.optionId) ?? fallbackOption)
@@ -1076,20 +1237,33 @@ export class PlannerBrain implements System2Brain {
   private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
     if (op === 'abort') return { goals: [], note, op: 'abort' as PlanOp }
     this.emitBodyDelta(option.id, option)
-    const queue = request.goalQueueState
-    const first = option.goals[0]
-    const current = queue.current
-    const alreadyActive =
-      queue.depth > 0 &&
-      current !== null &&
-      first !== undefined &&
-      current.kind === first.kind &&
-      (current.targetItem ?? null) === (first.targetItem ?? null)
-    if (alreadyActive && op !== 'continue') {
-      return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
+    const normalized = normalizePlanTail(option.goals, request.goalQueueState.current, op)
+    if (normalized.goals.length === 0) {
+      for (const decision of normalized.decisions) {
+        this.log('PLAN_TAIL', { op, goal: decision.goal, action: decision.action, reason: decision.reason })
+      }
+      if (op === 'continue' || op === 'patch') {
+        return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
+      }
+      this.log('PLAN_REJECTED', { source: 'mercury', reason: 'empty_plan', op, note })
+      return rejectionPlan(note)
     }
-    const adjusted = this.applyBodyDeltaRequirement(option, request, note)
-    if (adjusted === null) return rejectionPlan(note)
+    const normalizedOption: PlanOption = { id: option.id, title: option.title, goals: normalized.goals }
+    const adjusted = this.applyBodyDeltaRequirement(normalizedOption, request, note)
+    if (adjusted === null) {
+      for (const decision of normalized.decisions) {
+        const reason = decision.action === 'kept' ? 'no_body_delta' : decision.reason
+        this.log('PLAN_TAIL', { op, goal: decision.goal, action: 'skipped', reason })
+      }
+      this.log('PLAN_REJECTED', { source: 'mercury', reason: 'no_body_delta', op, note, requested: option.id })
+      return rejectionPlan(note)
+    }
+    const substituted = adjusted.id !== option.id
+    for (const decision of normalized.decisions) {
+      const action = substituted ? 'skipped' : decision.action
+      const reason = substituted && decision.action === 'kept' ? 'body_change_substitute' : decision.reason
+      this.log('PLAN_TAIL', { op, goal: decision.goal, action, reason })
+    }
     return { goals: adjusted.goals, note, op }
   }
 
@@ -1235,17 +1409,11 @@ export class PlannerBrain implements System2Brain {
   }
 
   private hashState(counts: Counts, request: System2PlanRequest): string {
-    const stable: Record<string, number> = {}
-    for (const [name, n] of Object.entries(counts)) if (n > 0) stable[name] = n
-    const payload = {
-      inventory: stable,
-      frontier: computeFrontier(counts, this.world).rungId,
-      stations: { tables: this.world.craftingTables.length, furnaces: this.world.furnaces.length },
-      ores: [...this.world.discoveredOres].sort(),
-      objective: request.objective.targetItem,
-      objectiveHave: request.objective.haveCount,
-    }
-    return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+    return plannerStateHash(counts, this.world, request.objective, this.cacheIdentity)
+  }
+
+  private worldShort(): string {
+    return `${this.worldKey.serverId}|${this.worldKey.dimension}`
   }
 
   private advisorState(counts: Counts, request: System2PlanRequest, waitStreak: number): AdvisorState {
@@ -1376,13 +1544,55 @@ export class PlannerBrain implements System2Brain {
   }
 
   private loadCache(): PlannerCacheFile {
+    const identity = this.cacheIdentity
     try {
-      if (!existsSync(this.cachePath)) return emptyCache()
+      if (!existsSync(this.cachePath)) return emptyCache(identity)
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as Partial<PlannerCacheFile>
-      if (typeof parsed.lastCallAt !== 'number' || typeof parsed.entries !== 'object' || parsed.entries === null) return emptyCache()
-      return { version: 1, lastCallAt: parsed.lastCallAt, entries: parsed.entries }
+      if (parsed.version !== PLANNER_CACHE_FILE_VERSION) {
+        this.log('PLANNER_CACHE_INVALIDATED', {
+          source: 'planner',
+          reason: 'schema',
+          cachedVersion: parsed.version ?? null,
+          version: PLANNER_CACHE_FILE_VERSION,
+        })
+        return emptyCache(identity)
+      }
+      if (parsed.schemaVersion !== identity.schemaVersion || parsed.capabilityHash !== identity.capabilityHash) {
+        this.log('PLANNER_CACHE_INVALIDATED', {
+          source: 'planner',
+          reason: 'schema',
+          cachedSchema: parsed.schemaVersion ?? null,
+          schemaVersion: identity.schemaVersion,
+          cachedCapability: parsed.capabilityHash ?? null,
+          capabilityHash: identity.capabilityHash,
+        })
+        return emptyCache(identity)
+      }
+      if (parsed.worldKey !== identity.worldKey || parsed.worldEpoch !== identity.worldEpoch) {
+        this.log('PLANNER_CACHE_INVALIDATED', {
+          source: 'planner',
+          reason: 'world',
+          cachedWorld: parsed.worldKey ?? null,
+          world: identity.worldKey,
+          cachedEpoch: parsed.worldEpoch ?? null,
+          epoch: identity.worldEpoch,
+        })
+        return emptyCache(identity)
+      }
+      if (typeof parsed.lastCallAt !== 'number' || typeof parsed.entries !== 'object' || parsed.entries === null) {
+        return emptyCache(identity)
+      }
+      return {
+        version: PLANNER_CACHE_FILE_VERSION,
+        worldKey: identity.worldKey,
+        worldEpoch: identity.worldEpoch,
+        schemaVersion: identity.schemaVersion,
+        capabilityHash: identity.capabilityHash,
+        lastCallAt: parsed.lastCallAt,
+        entries: parsed.entries,
+      }
     } catch {
-      return emptyCache()
+      return emptyCache(identity)
     }
   }
 
