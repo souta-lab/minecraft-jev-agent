@@ -23,7 +23,7 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentOption, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentOption, KnownResource, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance } from './state.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
@@ -38,6 +38,7 @@ export type CandidateKind =
   | 'SMELT'
   | 'DESCEND'
   | 'STEP'
+  | 'RETRIEVE'
   | 'ATTACK'
   | 'EAT'
   | 'RETREAT'
@@ -262,6 +263,9 @@ export function generateCandidates(
 
   // Exploration only when the subgoal produced nothing to act on, so the list
   // stays focused on actions that make progress on the plan.
+  if (candidates.length === 0) {
+    candidates.push(...retrievalCandidates(state, options, focusItem))
+  }
   if (candidates.length === 0) {
     const explore = pickExplore(state, state.terrain.standable, focusItem)
     if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < MOVE_FAILURE_LIMIT) {
@@ -828,7 +832,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (furnace === null) return []
   const inputItem = smeltInputFor(state, focusItem)
   if (inputItem === null) return []
-  const fuelItem = smeltFuelFor(state, focusItem)
+  const fuelItem = smeltFuelFor(state)
   if (fuelItem === null) return []
 
   const haveOutput = state.inventory.counts[focusItem] ?? 0
@@ -882,15 +886,16 @@ function smeltInputFor(state: WorldState, focusItem: string): string | null {
   return (state.inventory.counts[mapped] ?? 0) > 0 ? mapped : null
 }
 
-function smeltFuelFor(state: WorldState, focusItem: string): string | null {
+function smeltFuelFor(state: WorldState): string | null {
   for (const fuel of SMELT_FUELS) {
     if ((state.inventory.counts[fuel] ?? 0) > 0) return fuel
   }
-  if (focusItem === 'charcoal') return null
-  const plank = Object.keys(state.inventory.counts).find(
-    (name) => name.endsWith('_planks') && (state.inventory.counts[name] ?? 0) > 0,
+  const held = Object.keys(state.inventory.counts).find(
+    (name) =>
+      (state.inventory.counts[name] ?? 0) > 0 &&
+      (name.endsWith('_log') || name.endsWith('_planks') || name.endsWith('_wood')),
   )
-  return plank ?? null
+  return held ?? null
 }
 
 function nearestResource(state: WorldState, focusItem: string | null): BlockState | null {
@@ -899,6 +904,135 @@ function nearestResource(state: WorldState, focusItem: string | null): BlockStat
     if (block.kind === 'hazard') continue
     if (focusItem !== null && !resourceMatches(block.yield, focusItem)) continue
     if (best === null || block.distance < best.distance) best = block
+  }
+  return best
+}
+
+interface RetrievalWant {
+  item: string
+  kind: 'ore' | 'log'
+  blockNames: readonly string[]
+}
+
+function retrievalWant(focusItem: string | null): RetrievalWant | null {
+  if (focusItem === null) return null
+  const ores = ORE_SOURCES[focusItem]
+  if (ores !== undefined) return { item: focusItem, kind: 'ore', blockNames: ores }
+  if (
+    focusItem === 'charcoal' ||
+    focusItem === 'log' ||
+    focusItem === 'planks' ||
+    focusItem === 'fuel' ||
+    focusItem.endsWith('_log')
+  ) {
+    return { item: focusItem, kind: 'log', blockNames: [] }
+  }
+  return null
+}
+
+function visibleBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
+  if (want.kind === 'ore') {
+    return state.blocks.find((block) => block.kind === 'ore' && resourceMatches(block.yield, want.item)) ?? null
+  }
+  return state.blocks.find((block) => block.kind === 'log') ?? null
+}
+
+function knownResourceFor(state: WorldState, want: RetrievalWant): KnownResource | null {
+  const known = state.signals.knownResources ?? []
+  let best: KnownResource | null = null
+  for (const resource of known) {
+    const matches = want.kind === 'ore' ? want.blockNames.includes(resource.name) : resource.name.endsWith('_log')
+    if (!matches) continue
+    if (resourceDepleted(state, resource)) continue
+    if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
+      best = resource
+    }
+  }
+  return best
+}
+
+function resourceDepleted(state: WorldState, resource: KnownResource): boolean {
+  if (distance(resource.position, state.self.position) > 24) return false
+  return !state.blocks.some(
+    (block) =>
+      block.kind !== 'hazard' &&
+      block.position.x === resource.position.x &&
+      block.position.y === resource.position.y &&
+      block.position.z === resource.position.z,
+  )
+}
+
+function retrievalCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
+  const want = retrievalWant(focusItem)
+  if (want === null) return []
+  if (visibleBlockFor(state, want) !== null) return []
+  const known = knownResourceFor(state, want)
+  if (known !== null) {
+    const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
+    if (failureCount(state.signals.failedCandidates, id) >= MOVE_FAILURE_LIMIT) return []
+    return [
+      {
+        id,
+        kind: 'RETRIEVE',
+        label: `return to remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}, ${distance(known.position, state.self.position)}m away`,
+        targetName: known.name,
+        target: known.position,
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: distance(known.position, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          retrieval: 'known',
+          resource: want.item,
+          resourceKind: want.kind,
+          knownName: known.name,
+          x: known.position.x,
+          y: known.position.y,
+          z: known.position.z,
+        },
+      },
+    ]
+  }
+  if (want.kind !== 'log') return []
+  const spot = surfaceSpot(state, want.item)
+  if (spot === null) return []
+  return [
+    {
+      id: `RETRIEVE:surface:${want.item}:${blockId('p', spot)}`,
+      kind: 'RETRIEVE',
+      label: `explore the surface for ${want.item} (logs are a surface resource; none visible from y=${Math.round(state.self.position.y)}), stand at (${spot.x},${spot.y},${spot.z})`,
+      targetName: null,
+      target: spot,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(spot, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        retrieval: 'surface',
+        resource: want.item,
+        resourceKind: 'log',
+        surface: true,
+        x: spot.x,
+        y: spot.y,
+        z: spot.z,
+      },
+    },
+  ]
+}
+
+function surfaceSpot(state: WorldState, item: string): Vec3Json | null {
+  let best: Vec3Json | null = null
+  for (const spot of state.terrain.standable) {
+    if (spot.y <= state.self.position.y + 2) continue
+    const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
+    if (failureCount(state.signals.failedCandidates, id) >= MOVE_FAILURE_LIMIT) continue
+    if (best === null || spot.y > best.y) best = spot
   }
   return best
 }

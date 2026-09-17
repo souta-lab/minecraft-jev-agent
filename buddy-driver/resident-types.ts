@@ -73,6 +73,16 @@ export interface DeathHazard {
  * are re-observed from sensors after every reload/reconnect, never restored from
  * JSON. This holds only DURABLE SEMANTIC knowledge the bot cannot re-derive
  * cheaply. All coordinates are DTOs. */
+export interface KnownResourceJson {
+  /** block name at the remembered cell, e.g. "iron_ore" or "oak_log" */
+  name: string
+  /** broad class: ore (underground), log (surface tree), station */
+  kind: 'ore' | 'log' | 'station'
+  x: number
+  y: number
+  z: number
+}
+
 export interface ResidentWorldMemory {
   /** placed crafting_table stations discovered by scanning the loaded world */
   craftingTables: Vec3Json[]
@@ -82,6 +92,9 @@ export interface ResidentWorldMemory {
   mined: Record<string, number>
   /** ore block names seen at least once in the world state */
   discoveredOres: string[]
+  /** remembered coordinates of known resources (issue #43): ores and trees, so a
+   * retrieval skill can navigate back when the resource is out of scan range */
+  knownResources: KnownResourceJson[]
   /** thin 2-block-wall / stuck memory; suppress repeat attempts */
   traversalFailures: TraversalFailure[]
   /** death coordinates; a coordinate that kills twice is excluded (hard hazard) */
@@ -89,7 +102,15 @@ export interface ResidentWorldMemory {
 }
 
 export function emptyWorldMemory(): ResidentWorldMemory {
-  return { craftingTables: [], furnaces: [], mined: {}, discoveredOres: [], traversalFailures: [], hazards: [] }
+  return {
+    craftingTables: [],
+    furnaces: [],
+    mined: {},
+    discoveredOres: [],
+    knownResources: [],
+    traversalFailures: [],
+    hazards: [],
+  }
 }
 
 /** Fill in any missing collection on a (possibly older) memory object. This is
@@ -100,6 +121,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.furnaces = Array.isArray(memory.furnaces) ? memory.furnaces : []
   memory.mined = memory.mined ?? {}
   memory.discoveredOres = Array.isArray(memory.discoveredOres) ? memory.discoveredOres : []
+  memory.knownResources = Array.isArray(memory.knownResources) ? memory.knownResources : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
   return memory
@@ -110,6 +132,7 @@ export interface WorldMemoryDelta {
   craftingTables?: Vec3Json[]
   furnaces?: Vec3Json[]
   discoveredOres?: string[]
+  knownResources?: KnownResourceJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   hazards?: DeathHazard[]

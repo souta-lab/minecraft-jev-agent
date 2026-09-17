@@ -827,6 +827,8 @@ function fallbackPriority(state: WorldState, candidates: readonly Candidate[]): 
   if (craft !== undefined) return craft
   const place = pool.find((candidate) => candidate.kind === 'PLACE')
   if (place !== undefined) return place
+  const retrieve = pool.find((candidate) => candidate.kind === 'RETRIEVE')
+  if (retrieve !== undefined) return retrieve
   const step = pool.find((candidate) => candidate.kind === 'STEP')
   if (step !== undefined) return step
   const move = pool.find((candidate) => candidate.kind === 'MOVE')

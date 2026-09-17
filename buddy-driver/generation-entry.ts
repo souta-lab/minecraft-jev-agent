@@ -48,6 +48,7 @@ import type {
   ActuationLease,
   GenerationContext,
   GenerationStatus,
+  KnownResourceJson,
   MissionPreflightResult,
   ResidentGeneration,
   ResidentWorldMemory,
@@ -160,6 +161,42 @@ function mergeStations(target: Vec3Json[], found: Vec3Json[]): number {
     if (seen.has(key)) continue
     seen.add(key)
     target.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) })
+    added += 1
+  }
+  return added
+}
+
+const LOG_BLOCK_NAMES = [
+  'oak_log',
+  'birch_log',
+  'spruce_log',
+  'jungle_log',
+  'acacia_log',
+  'dark_oak_log',
+  'mangrove_log',
+  'cherry_log',
+  'pale_oak_log',
+  'crimson_stem',
+  'warped_stem',
+] as const
+
+const KNOWN_RESOURCE_CAP = 256
+
+function mergeKnownResources(target: KnownResourceJson[], found: KnownResourceJson[]): number {
+  const seen = new Set(target.map((resource) => `${resource.name}@${resource.x},${resource.y},${resource.z}`))
+  let added = 0
+  for (const resource of found) {
+    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+    if (seen.has(key)) continue
+    if (target.length >= KNOWN_RESOURCE_CAP) break
+    seen.add(key)
+    target.push({
+      name: resource.name,
+      kind: resource.kind,
+      x: Math.round(resource.x),
+      y: Math.round(resource.y),
+      z: Math.round(resource.z),
+    })
     added += 1
   }
   return added
@@ -322,6 +359,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     furnaces: ctx.worldMemory.furnaces.map((p) => ({ ...p })),
     mined: { ...ctx.worldMemory.mined },
     discoveredOres: [...ctx.worldMemory.discoveredOres],
+    knownResources: (ctx.worldMemory.knownResources ?? []).map((resource) => ({ ...resource })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
@@ -336,18 +374,27 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     64,
     64,
   )
+  const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64)
   const newTables = mergeStations(world.craftingTables, tables)
   const newFurnaces = mergeStations(world.furnaces, furnaces)
   const discoveredOres: string[] = []
+  const foundResources: KnownResourceJson[] = []
   for (const ore of ores) {
     const name = bot.blockAt(new Vec3(ore.x, ore.y, ore.z))?.name ?? 'unknown_ore'
     if (!world.discoveredOres.includes(name)) world.discoveredOres.push(name)
     if (!discoveredOres.includes(name)) discoveredOres.push(name)
+    foundResources.push({ name, kind: 'ore', x: ore.x, y: ore.y, z: ore.z })
   }
+  for (const log of logs) {
+    const name = bot.blockAt(new Vec3(log.x, log.y, log.z))?.name ?? 'unknown_log'
+    foundResources.push({ name, kind: 'log', x: log.x, y: log.y, z: log.z })
+  }
+  const newKnownResources = mergeKnownResources(world.knownResources, foundResources)
   const proposal: WorldMemoryDelta = {
     craftingTables: tables,
     furnaces,
     discoveredOres,
+    knownResources: foundResources,
     traversalFailures: world.traversalFailures,
   }
   // The generation proposes; the HOST is the only writer that commits.
@@ -359,6 +406,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     furnaces: world.furnaces.length,
     newFurnaces,
     discoveredOres: world.discoveredOres,
+    knownResources: world.knownResources.length,
+    newKnownResources,
   })
 
   const counts = inventoryCounts(ctx.bot)
@@ -448,6 +497,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     scanRadius: 48,
     verbose: true,
     eventSink: (event, detail) => ctx.log(event, detail),
+    knownResources: world.knownResources.map((resource) => ({
+      name: resource.name,
+      kind: resource.kind,
+      position: { x: resource.x, y: resource.y, z: resource.z },
+    })),
   }
 
   const controller = new JevController(bot, options)

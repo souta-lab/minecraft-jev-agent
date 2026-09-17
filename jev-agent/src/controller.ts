@@ -44,7 +44,7 @@ import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
-import type { AgentSignals, GoalState, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import { DigMemory } from './worldMemory.ts'
@@ -96,6 +96,12 @@ export interface JevAgentOptions {
   lowConfidenceThreshold: number
   stallMs: number
   wedgeRepeatLimit: number
+  /**
+   * Consecutive WAITs on the SAME goal before the goal is treated as a wedge and
+   * replaced (issue #43). Deliberately much smaller than `wedgeRepeatLimit`: a
+   * WAIT is a no-op, so it must never be chosen indefinitely.
+   */
+  waitLimit: number
   wedgeStallMs: number
   failureStreakLimit: number
   candidateFailureLimit: number
@@ -135,6 +141,8 @@ export interface JevAgentOptions {
    * `buddy.log`, so a generation can forward them without the host changing.
    */
   eventSink?: (event: string, detail: Record<string, unknown>) => void
+  /** durable known-resource coordinates injected by the resident host (issue #43) */
+  knownResources?: KnownResource[]
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -148,6 +156,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   lowConfidenceThreshold: 0.55,
   stallMs: 25000,
   wedgeRepeatLimit: 5,
+  waitLimit: 3,
   wedgeStallMs: 60000,
   failureStreakLimit: 3,
   candidateFailureLimit: 2,
@@ -251,6 +260,7 @@ function emptySignals(): AgentSignals {
     lastTunnel: null,
     descendNoProgress: 0,
     descendLimitReached: false,
+    knownResources: [],
   }
 }
 
@@ -264,6 +274,31 @@ const { goals } = pathfinderModule
 
 function normalizeOptions(options: JevAgentOptions): JevAgentOptions {
   return { ...options, reach: Math.min(options.reach, MAX_BLOCK_REACH) }
+}
+
+export interface WaitWedgeInput {
+  actionId: string
+  goalKey: string
+  previousGoalKey: string | null
+  streak: number
+  waitLimit: number
+  replans: number
+  replanLimit: number
+}
+
+export interface WaitWedgeDecision {
+  outcome: 'not-wait' | 'below-limit' | 'replan' | 'wedge'
+  streak: number
+  goalKey: string
+  n: number
+}
+
+export function evaluateWaitWedge(input: WaitWedgeInput): WaitWedgeDecision {
+  if (input.actionId !== 'WAIT') return { outcome: 'not-wait', streak: 0, goalKey: input.goalKey, n: 0 }
+  const streak = input.goalKey === input.previousGoalKey ? input.streak + 1 : 1
+  if (streak < input.waitLimit) return { outcome: 'below-limit', streak, goalKey: input.goalKey, n: streak }
+  if (input.replans < input.replanLimit) return { outcome: 'replan', streak: 0, goalKey: input.goalKey, n: streak }
+  return { outcome: 'wedge', streak: 0, goalKey: input.goalKey, n: streak }
 }
 
 interface PendingDecision {
@@ -283,6 +318,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'REUSE_TUNNEL',
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
+  'RETURN_TO_KNOWN_RESOURCE',
+  'EXPLORE',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -385,6 +422,11 @@ export class JevController {
   private chosenCountsAtProgress = -1
   private wedgeAborted = false
   private waitReplans = 0
+  private waitStreak = 0
+  private waitGoalKey: string | null = null
+  private noProductiveRepeats = 0
+  private noProductiveKey: string | null = null
+  private noProductiveThisTick = false
   private wedgeReason: string | null = null
 
   private pendingDecisions = new Map<number, PendingDecision>()
@@ -749,6 +791,7 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
+      this.signals.knownResources = this.options.knownResources ?? []
       this.updateStallSignal()
 
       if (this.bot.entity === undefined) return
@@ -825,8 +868,30 @@ export class JevController {
       const actionable = candidates.filter(
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
       ).length
-      if (actionable === 0 && !state.goal.complete) {
-        this.escalate('all_candidates_invalid', 'candidate generator produced no actionable candidate')
+      const noProductive = actionable === 0 && !state.goal.complete
+      this.noProductiveThisTick = noProductive
+      if (noProductive) {
+        const key = this.noProductiveSignature(state)
+        if (key === this.noProductiveKey) this.noProductiveRepeats += 1
+        else {
+          this.noProductiveKey = key
+          this.noProductiveRepeats = 1
+        }
+        this.logger.warn(
+          'agent',
+          `NO_PRODUCTIVE_CANDIDATE repeat=${this.noProductiveRepeats}/${this.options.waitLimit} goal="${this.currentGoalKey()}" candidates=${candidates.length}`,
+          { repeat: this.noProductiveRepeats, goal: this.currentGoalKey(), candidates: candidates.length },
+          this.tickCounter,
+        )
+        if (this.noProductiveRepeats >= this.options.waitLimit) {
+          this.escalate(
+            'all_candidates_invalid',
+            `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x with no state change on goal "${this.currentGoalKey()}"`,
+          )
+        }
+      } else {
+        this.noProductiveRepeats = 0
+        this.noProductiveKey = null
       }
       this.breakFailureDeadlock(candidates)
 
@@ -919,6 +984,7 @@ export class JevController {
       }
 
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
+      if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
 
       const claim = this.executor.claim(guarded.candidate)
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
@@ -1813,23 +1879,94 @@ export class JevController {
     if (this.lastProgress > this.chosenCountsAtProgress) {
       this.chosenCounts.clear()
       this.chosenCountsAtProgress = this.lastProgress
+      this.waitStreak = 0
+      this.waitGoalKey = null
+    }
+    const goalKey = this.currentGoalKey()
+    if (actionId === 'WAIT' && !this.options.singleShotPlanner) {
+      const wait = evaluateWaitWedge({
+        actionId,
+        goalKey,
+        previousGoalKey: this.waitGoalKey,
+        streak: this.waitStreak,
+        waitLimit: this.options.waitLimit,
+        replans: this.waitReplans,
+        replanLimit: WAIT_REPLAN_LIMIT,
+      })
+      this.waitStreak = wait.streak
+      this.waitGoalKey = wait.goalKey
+      if (wait.outcome === 'below-limit') return
+      if (wait.outcome === 'replan') {
+        const summon = this.summonLlm(
+          'no_progress',
+          `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; requesting a replan`,
+        )
+        this.waitReplans += 1
+        this.waitStreak = 0
+        this.chosenCounts.set(actionId, 0)
+        this.logger.warn(
+          'agent',
+          `WAIT_LIMIT n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}`,
+          {
+            actionId,
+            count: wait.n,
+            goal: goalKey,
+            waitReplans: this.waitReplans,
+            llmSummoned: summon?.triggered ?? false,
+          },
+          this.tickCounter,
+        )
+        return
+      }
+      if (wait.outcome === 'wedge') {
+        this.abortWedge(
+          `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress after ${this.waitReplans} replan(s)`,
+        )
+      }
+      return
     }
     const count = (this.chosenCounts.get(actionId) ?? 0) + 1
     this.chosenCounts.set(actionId, count)
     if (count <= this.options.wedgeRepeatLimit) return
-    if (actionId === 'WAIT' && !this.options.singleShotPlanner && this.waitReplans < WAIT_REPLAN_LIMIT) {
-      const summon = this.summonLlm('no_progress', `WAIT chosen ${count}x with no verified progress; requesting a replan`)
-      this.waitReplans += 1
-      this.chosenCounts.set(actionId, 0)
-      this.logger.warn(
+    this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
+  }
+
+  private currentGoalKey(): string {
+    const current = this.queue.state.current
+    if (current !== null) {
+      return `${current.kind}:${current.targetItem ?? current.description}:${current.requiredCount}`
+    }
+    return `objective:${this.goal.targetItem}:${this.goal.requiredCount}`
+  }
+
+  private noProductiveSignature(state: WorldState): string {
+    const inventory = Object.entries(state.inventory.counts)
+      .filter(([, count]) => count > 0)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, count]) => `${name}=${count}`)
+      .join(',')
+    const position = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
+    return `${this.currentGoalKey()}|${position}|${inventory}`
+  }
+
+  private logRetrievalAction(candidate: Candidate): void {
+    const resource = typeof candidate.meta.resource === 'string' ? candidate.meta.resource : 'unknown'
+    const at = candidate.target === null ? null : `${candidate.target.x},${candidate.target.y},${candidate.target.z}`
+    if (candidate.meta.retrieval === 'surface') {
+      this.logger.info(
         'agent',
-        `WAIT_LIMIT n=${count} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT})`,
-        { actionId, count, waitReplans: this.waitReplans, llmSummoned: summon?.triggered ?? false },
+        `EXPLORE kind=surface target=${resource} at=${at ?? 'unknown'}`,
+        { kind: 'surface', target: resource, at },
         this.tickCounter,
       )
       return
     }
-    this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
+    this.logger.info(
+      'agent',
+      `RETURN_TO_KNOWN_RESOURCE target=${resource} name=${candidate.targetName ?? 'unknown'} at=${at ?? 'unknown'}`,
+      { target: resource, name: candidate.targetName, at },
+      this.tickCounter,
+    )
   }
 
   private abortWedge(reason: string): void {

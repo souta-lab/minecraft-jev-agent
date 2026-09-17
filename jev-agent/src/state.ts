@@ -18,6 +18,20 @@ export type Vec3Json = {
   z: number
 }
 
+/**
+ * A resource whose COORDINATE is remembered durably (issue #43: known-resource
+ * retrieval). `name` is the block name at the remembered cell, `kind` the broad
+ * class used to decide whether a retrieval is a surface trip (log/tree) or an
+ * underground trip (ore). The coordinate is the block cell, not a stand spot;
+ * the executor paths within a small radius and the next sensor tick re-offers
+ * the normal MINE once the block is in range.
+ */
+export type KnownResource = {
+  name: string
+  kind: 'ore' | 'log' | 'station'
+  position: Vec3Json
+}
+
 export type HeldItemState = {
   name: string
   count: number
@@ -228,6 +242,8 @@ export type AgentSignals = {
   descendNoProgress?: number
   /** set once `descendNoProgress >= DESCEND_NO_PROGRESS_LIMIT` -> lateral search */
   descendLimitReached?: boolean
+  /** durable known-resource coordinates injected by the host (issue #43) */
+  knownResources?: KnownResource[]
 }
 
 export type WorldState = {

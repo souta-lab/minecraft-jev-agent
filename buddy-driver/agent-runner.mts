@@ -30,6 +30,7 @@ import type {
   GenerationContext,
   GenerationModule,
   GenerationStatus,
+  KnownResourceJson,
   ResidentGeneration,
   ResidentState,
   ResidentWorldMemory,
@@ -151,6 +152,7 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     furnaces: normal.furnaces.map((p) => ({ ...p })),
     mined: { ...normal.mined },
     discoveredOres: [...normal.discoveredOres],
+    knownResources: normal.knownResources.map((resource) => ({ ...resource })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     hazards: normal.hazards.map((h) => ({ ...h })),
   }
@@ -238,6 +240,7 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
       if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
     }
   }
+  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {
       memory.mined[key] = (memory.mined[key] ?? 0) + count
@@ -289,6 +292,26 @@ function mergeStationDtos(target: Vec3Json[], found: Vec3Json[]): number {
     if (seen.has(key)) continue
     seen.add(key)
     target.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) })
+    added += 1
+  }
+  return added
+}
+
+function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[]): number {
+  const seen = new Set(target.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
+  let added = 0
+  for (const resource of found) {
+    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+    if (seen.has(key)) continue
+    if (target.length >= 256) break
+    seen.add(key)
+    target.push({
+      name: resource.name,
+      kind: resource.kind,
+      x: Math.round(resource.x),
+      y: Math.round(resource.y),
+      z: Math.round(resource.z),
+    })
     added += 1
   }
   return added

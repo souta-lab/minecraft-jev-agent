@@ -19,6 +19,7 @@
     "audit-test": "tsx test-audit.mts",
     "option-spec-test": "tsx test-option-spec.mts",
     "m1-test": "tsx test-m1.mts",
+    "issue43-test": "tsx test-issue43.mts",
     "step-pipeline-test": "tsx data/step-pipeline-test.mts",
     "step-cut-test": "tsx data/step-cut-test.mts",
     "m1": "tsx m1.mts",

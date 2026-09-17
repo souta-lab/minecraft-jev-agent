@@ -114,6 +114,8 @@ export function guardCandidate(
       return guardDescend(candidate, state, context)
     case 'STEP':
       return guardStep(candidate, state, context)
+    case 'RETRIEVE':
+      return guardRetrieve(candidate, state, context)
     case 'ATTACK':
       return guardAttack(candidate, state)
     case 'EAT':
@@ -433,6 +435,36 @@ function guardSmelt(candidate: Candidate, state: WorldState, context: GuardConte
   return { ok: true, candidate }
 }
 
+function guardRetrieve(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
+  const target = candidate.target
+  if (target === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'RETRIEVE candidate carries no coordinates')
+  }
+  if (target.y < VOID_FLOOR) {
+    return deny(candidate.id, 'NO_SUPPORT', `(${target.x},${target.y},${target.z}) is below the world floor (void)`)
+  }
+  if (candidate.meta.surface === true) {
+    const standable = state.terrain.standable.some((spot) => samePosition(spot, target))
+    if (!standable) {
+      return deny(
+        candidate.id,
+        'NO_SUPPORT',
+        `(${target.x},${target.y},${target.z}) is not a known standable surface position`,
+      )
+    }
+    return guardPathComputable(candidate, context, target)
+  }
+  const known = (state.signals.knownResources ?? []).some((resource) => samePosition(resource.position, target))
+  if (!known) {
+    return deny(candidate.id, 'TARGET_GONE', `no remembered resource at (${target.x},${target.y},${target.z})`)
+  }
+  const hazard = nearestHazardTo(state, target)
+  if (hazard !== null) {
+    return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the remembered resource`)
+  }
+  return { ok: true, candidate }
+}
+
 function guardStep(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
   const target = candidate.target
   if (target === null) {
@@ -550,4 +582,5 @@ export const ACTING_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'EAT',
   'RETREAT',
   'STEP',
+  'RETRIEVE',
 ])

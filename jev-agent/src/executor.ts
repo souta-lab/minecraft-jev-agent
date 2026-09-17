@@ -502,6 +502,8 @@ export class Executor {
           return await this.runDescend(candidate, epoch, signal, startedAt)
         case 'STEP':
           return await this.runStep(candidate, epoch, signal, startedAt)
+        case 'RETRIEVE':
+          return await this.runRetrieve(candidate, epoch, signal, startedAt)
         case 'PLACE':
           return await this.runPlace(candidate, epoch, signal, startedAt)
         case 'EAT':
@@ -687,6 +689,33 @@ export class Executor {
     }
     return this.buildResult(candidate, epoch, startedAt, 'done', 'arrived', `moved from ${round2(before)}m to ${round2(after)}m`, null, {
       verified,
+      blockRemoved: false,
+      dropObserved: false,
+      itemsGained: 0,
+      goalItemCount: this.countGoalItem(),
+    })
+  }
+
+  private async runRetrieve(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('target_gone', 'RETRIEVE candidate has no coordinates')
+    const before = this.distanceToFeet(target)
+    this.setPhase(candidate, epoch, 'retrieving')
+    await this.pathToNear(target, 2, epoch, signal)
+    this.ensureOwned(epoch, signal)
+    const after = this.distanceToFeet(target)
+    this.logger.info(
+      'executor',
+      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m`,
+      { target, actionId: candidate.id },
+    )
+    return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
+      verified: false,
       blockRemoved: false,
       dropObserved: false,
       itemsGained: 0,
