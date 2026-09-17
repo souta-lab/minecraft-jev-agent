@@ -39,9 +39,36 @@ const FOOD_ITEMS = new Set([
   'sweet_berries',
 ])
 
-const FUEL_ITEMS = new Set(['coal', 'charcoal', 'oak_planks', 'birch_planks', 'spruce_planks', 'stick', 'lava_bucket'])
+const FUEL_ITEMS = new Set(['coal', 'charcoal', 'blaze_rod', 'oak_planks', 'birch_planks', 'spruce_planks', 'stick', 'lava_bucket'])
 
 const PICKAXE_SUFFIX = '_pickaxe'
+
+const PREFERRED_SINGLE_FUELS = ['charcoal', 'coal', 'blaze_rod'] as const
+
+export interface InventoryFuel {
+  item: string
+  count: number
+}
+
+/**
+ * Issue #43: the first valid furnace fuel held in the live inventory, or null.
+ * Valid fuel = any log, planks/wood, coal, charcoal or blaze rod (stick is
+ * excluded: it is furnace fuel but not a log substitute). Deterministic order.
+ */
+export function findInventoryFuel(counts: Readonly<Record<string, number>>): InventoryFuel | null {
+  for (const item of PREFERRED_SINGLE_FUELS) {
+    const count = counts[item] ?? 0
+    if (count > 0) return { item, count }
+  }
+  const woodIds = Object.keys(counts)
+    .filter((name) => {
+      const count = counts[name] ?? 0
+      return count > 0 && (name.endsWith(LOG_SUFFIX) || name.endsWith(PLANK_SUFFIX) || name.endsWith('_wood'))
+    })
+    .sort()
+  for (const item of woodIds) return { item, count: counts[item] ?? 0 }
+  return null
+}
 
 export function isResourceClass(value: string): value is ResourceClass {
   return (RESOURCE_CLASSES as readonly string[]).includes(value)

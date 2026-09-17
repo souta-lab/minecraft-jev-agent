@@ -281,6 +281,35 @@ function guardPathComputable(candidate: Candidate, context: GuardContext, target
   return { ok: true, candidate }
 }
 
+/** A target more than this many blocks above the bot cannot be walked to. */
+export const MOVE_VERTICAL_GAP_LIMIT = 4
+
+/** The exact log line emitted when a body-change target is dropped as unreachable. */
+export function formatMoveUnreachable(target: Vec3Json, dy: number): string {
+  return `MOVE_UNREACHABLE target=${target.x},${target.y},${target.z} dy=${dy}`
+}
+
+/**
+ * Issue #43: mechanical unreachability for a body-change candidate. The pinned
+ * `canDig=false` pathfinder has no climb primitive, so a target more than
+ * MOVE_VERTICAL_GAP_LIMIT above the bot only loops. `canComputePath` adds the
+ * explicit no-path case when the caller has the pathfinder probe; pure tests
+ * leave it null and still get the deterministic vertical check.
+ */
+export function unreachableMove(
+  candidate: Candidate,
+  state: WorldState,
+  canComputePath?: ((position: Vec3Json) => boolean) | null,
+): { target: Vec3Json; dy: number } | null {
+  if (candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE') return null
+  const target = candidate.target
+  if (target === null) return null
+  const dy = Math.round(target.y - state.self.position.y)
+  if (dy > MOVE_VERTICAL_GAP_LIMIT) return { target, dy }
+  if (canComputePath !== undefined && canComputePath !== null && !canComputePath(target)) return { target, dy }
+  return null
+}
+
 /**
  * A MOVE that names the block it is walking toward. It is grounded in the
  * sensor's own `adjacentStandable` field, so a vanished block or a changed

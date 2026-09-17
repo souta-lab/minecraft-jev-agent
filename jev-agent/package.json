@@ -21,6 +21,7 @@
     "observability-test": "tsx test-observability.mts",
     "m1-test": "tsx test-m1.mts",
     "issue43-test": "tsx test-issue43.mts",
+    "fuel-guard-test": "tsx test-fuel-guard.mts",
     "vertical-plan-test": "tsx test-vertical-plan.mts",
     "retrieval-stall-test": "tsx test-retrieval-stall.mts",
     "predicate-goal-test": "tsx test-predicate-goal.mts",
