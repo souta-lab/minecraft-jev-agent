@@ -28,6 +28,7 @@ import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance } from './state.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
+import { planVerticalApproach } from './verticalPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 
 export type CandidateKind =
@@ -1015,11 +1016,49 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
   if (known !== null) {
     const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
     if (failureCount(state.signals.failedCandidates, id) >= MOVE_FAILURE_LIMIT) return []
+    // Issue #45: a remembered resource below the current level needs a vertical
+    // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
+    // horizontal bearing and falls back to WAIT.
+    const vertical = planVerticalApproach({
+      selfFeetY: state.self.position.y,
+      selfPosition: state.self.position,
+      target: known.position,
+      tunnel: state.signals.lastTunnel,
+      descent: state.descent,
+    })
+    const verticalMeta: Record<string, string | number | boolean> = {
+      vertical: vertical?.kind ?? 'none',
+      verticalFromY: vertical?.fromY ?? Math.floor(state.self.position.y),
+      verticalToY: vertical?.toY ?? known.position.y,
+    }
+    if (vertical?.kind === 'reuse') {
+      verticalMeta.tunnelX = vertical.tunnel.x
+      verticalMeta.tunnelY = vertical.tunnel.y
+      verticalMeta.tunnelZ = vertical.tunnel.z
+    }
+    if (vertical?.kind === 'staircase') {
+      verticalMeta.stairDir = vertical.dir
+      verticalMeta.stairFromY = vertical.fromY
+      verticalMeta.stairToY = vertical.toY
+      verticalMeta.stairDigX = vertical.dig.x
+      verticalMeta.stairDigY = vertical.dig.y
+      verticalMeta.stairDigZ = vertical.dig.z
+      verticalMeta.stairStepX = vertical.step.x
+      verticalMeta.stairStepY = vertical.step.y
+      verticalMeta.stairStepZ = vertical.step.z
+      verticalMeta.stairBlockName = vertical.digName ?? 'unknown'
+    }
+    const verticalLabel =
+      vertical?.kind === 'reuse'
+        ? ` (reuse the tunnel at ${vertical.tunnel.x},${vertical.tunnel.y},${vertical.tunnel.z})`
+        : vertical?.kind === 'staircase'
+          ? ` (dig a staircase down from y=${vertical.fromY} toward y=${vertical.toY})`
+          : ''
     return [
       {
         id,
         kind: 'RETRIEVE',
-        label: `return to remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}, ${distance(known.position, state.self.position)}m away`,
+        label: `return to remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}, ${distance(known.position, state.self.position)}m away${verticalLabel}`,
         targetName: known.name,
         target: known.position,
         targetEntityId: null,
@@ -1037,6 +1076,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
           x: known.position.x,
           y: known.position.y,
           z: known.position.z,
+          ...verticalMeta,
         },
       },
     ]
