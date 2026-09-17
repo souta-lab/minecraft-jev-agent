@@ -1,0 +1,37 @@
+{
+  "name": "jev-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mineflayer plugin: Sensor -> WorldModel -> deterministic candidates -> Jev policy -> guard -> Executor -> Verify",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "index.ts",
+  "scripts": {
+    "postinstall": "node scripts/apply-movement-patch.mjs",
+    "movement-patch:check": "node scripts/apply-movement-patch.mjs --check",
+    "typecheck": "tsc --noEmit",
+    "demo": "tsx demo.mts",
+    "guard-test": "tsx test-guard.mts",
+    "gating-test": "tsx test-gating.mts",
+    "loop-test": "tsx test-loop.mts",
+    "audit-test": "tsx test-audit.mts",
+    "m1-test": "tsx test-m1.mts",
+    "step-pipeline-test": "tsx data/step-pipeline-test.mts",
+    "step-cut-test": "tsx data/step-cut-test.mts",
+    "m1": "tsx m1.mts",
+    "analyze": "tsx analyze-run.mts"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "ai": "^7.0.105",
+    "mineflayer": "^4.39.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

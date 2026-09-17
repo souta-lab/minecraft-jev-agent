@@ -1,0 +1,22 @@
+{
+  "name": "buddy-driver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI_Buddy resident driver: keeps one Mineflayer connection alive and hot-swaps the jev-agent intelligence as a hash-stamped esbuild bundle.",
+  "main": "agent-runner.mts",
+  "scripts": {
+    "build": "node build.mts",
+    "start": "node agent-runner.mts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "mineflayer": "^4.39.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  }
+}

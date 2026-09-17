@@ -1,0 +1,1094 @@
+// state.ts - the SENSOR.
+//
+// Reads the live Mineflayer bot and produces a *structured JSON* world state
+// (not prose). Jev consumes this object directly as its `state` argument.
+//
+// Shape: { self, inventory, entities, blocks, terrain, goal, recentEvents, signals }
+// Everything here is plain JSON-serialisable data so it can be:
+//   1. handed to the model verbatim,
+//   2. written to the JSONL calibration log,
+//   3. replayed in the pure guard unit test with no bot at all.
+import type { Bot } from 'mineflayer'
+import type { GoalQueueState } from './goalQueue.ts'
+import { resourceMatches } from './resourceClass.ts'
+
+export type Vec3Json = {
+  x: number
+  y: number
+  z: number
+}
+
+export type HeldItemState = {
+  name: string
+  count: number
+  slot: number
+}
+
+export type SelfState = {
+  username: string
+  position: Vec3Json
+  eyePosition: Vec3Json
+  yaw: number
+  pitch: number
+  onGround: boolean
+  health: number
+  food: number
+  gameMode: string
+  dimension: string
+  isDay: boolean
+  heldItem: HeldItemState | null
+}
+
+export type InventorySlotState = {
+  name: string
+  count: number
+  slot: number
+}
+
+export type InventoryState = {
+  slots: InventorySlotState[]
+  /** item name -> total count across slots */
+  counts: Record<string, number>
+  totalItems: number
+}
+
+export type EntityState = {
+  id: number
+  name: string
+  kind: string
+  username: string | null
+  position: Vec3Json
+  distance: number
+  hostile: boolean
+}
+
+export type BlockKind = 'log' | 'stone' | 'ore' | 'hazard'
+
+export type HarvestTool = 'pickaxe' | 'axe' | 'shovel'
+
+/** Rank of a pickaxe family: index 0 is the weakest that can harvest anything. */
+export const PICKAXE_RANKS: Readonly<Record<string, number>> = {
+  wooden_pickaxe: 0,
+  golden_pickaxe: 1,
+  copper_pickaxe: 1,
+  stone_pickaxe: 2,
+  iron_pickaxe: 3,
+  diamond_pickaxe: 4,
+  netherite_pickaxe: 5,
+}
+
+export type BlockState = {
+  kind: BlockKind
+  name: string
+  position: Vec3Json
+  distance: number
+  diggable: boolean
+  /** target is already within `reach` of the bot's eyes */
+  inReach: boolean
+  /**
+   * A solid, walkable spot exists next to this block. With
+   * `movements.canDig = false` this is what makes a block physically minable:
+   * the executor may only *walk* to it, never tunnel to it.
+   */
+  hasAdjacentStandable: boolean
+  adjacentStandable: Vec3Json | null
+  /** primary item this block drops when harvested (from minecraft-data) */
+  yield?: string | null
+  /** tool required for a useful drop; null means hand-harvestable */
+  harvestTool?: HarvestTool | null
+  /**
+   * Minimum pickaxe rank required for a useful drop (see PICKAXE_RANKS), when
+   * `harvestTool === 'pickaxe'`. Iron ore needs copper/stone+, diamond ore
+   * needs iron+. Enforced so a wooden pickaxe never mines diamond for nothing.
+   */
+  harvestTier?: number | null
+  /**
+   * A straight line from the eyes reaches the block (`bot.canSeeBlock`). A
+   * close but occluded block must not be offered as MINE: the server refuses to
+   * dig through a wall, so it becomes a tunnel target instead.
+   */
+  visible?: boolean
+}
+
+/** One pre-computed staircase/tunnel step in a cardinal direction. */
+export type DescentMode = 'down' | 'level'
+
+/**
+ * A single stair-cut that turns an unclimbable 2-block vertical face directly in
+ * front of the bot into a 1-block step. `cut` is the upper block of the face (the
+ * cell the bot will stand in afterwards), so `cut === step`.
+ */
+export type StepCut = {
+  dir: 'E' | 'W' | 'N' | 'S'
+  dx: number
+  dz: number
+  cut: Vec3Json
+  step: Vec3Json
+  name: string
+  safe: boolean
+  reason: string
+}
+
+/**
+ * A solid block directly above the bot's feet that blocks a jump (the
+ * "canopy pocket" trap: a 2-tall space under leaves where every step-up jump is
+ * vetoed by the ceiling). Mining it opens the headroom the jump needs. `safe` is
+ * false when the block must not be removed (unbreakable, or a fluid/hazard).
+ */
+export type HeadroomCut = {
+  /** the ceiling block itself (feet + 1 or feet + 2; never the feet/support) */
+  pos: Vec3Json
+  name: string
+  safe: boolean
+  reason: string
+}
+
+export type DescentOption = {
+  dir: 'E' | 'W' | 'N' | 'S'
+  mode: DescentMode
+  dx: number
+  dz: number
+  /** cell the bot ends in after the step (feet position) */
+  step: Vec3Json
+  /** front cell at the current feet level; dug when solid */
+  wall: Vec3Json
+  /** head cell above the front cell; dug when solid (level mode) */
+  head: Vec3Json
+  /** support block under the step cell; dug to open the drop (down mode) */
+  floor: Vec3Json
+  wallSolid: boolean
+  headSolid: boolean
+  floorSolid: boolean
+  /** true when every dig in this step is safe (no lava/water/void, solid landing) */
+  safe: boolean
+  reason: string
+}
+
+export type GoalState = {
+  id: string
+  description: string
+  targetItem: string
+  requiredCount: number
+  /** how many the bot had when the goal started (so drops can be attributed) */
+  startCount: number
+  haveCount: number
+  /** 0..1 */
+  progress: number
+  complete: boolean
+  startedAtMs: number
+}
+
+export type PathStatus = 'idle' | 'success' | 'noPath' | 'timeout' | 'stuck'
+
+/**
+ * Deterministic, mechanically-derived signals. These drive candidate
+ * generation, the guard and the escalation triggers, so `candidates.ts` and
+ * `policy.ts` stay pure functions of the state.
+ */
+export type AgentSignals = {
+  consecutiveFailures: number
+  lastFailureCode: string | null
+  lastPathStatus: PathStatus
+  /** ms since goal progress last moved */
+  stalledMs: number
+  /** choice confidence reported by the last policy call (null for fallback) */
+  lastPolicyConfidence: number | null
+  maxConcurrentActions: number
+  /** set by the controller when any escalation trigger has fired */
+  escalationRecommended: boolean
+  /**
+   * candidate id -> recent failure count. Fed back into the policy so it stops
+   * re-selecting a target that mechanically keeps failing (unreachable behind a
+   * wall, stale coords, and so on). This is the "learned policy head" memory.
+   */
+  failedCandidates: Record<string, number>
+}
+
+export type WorldState = {
+  schemaVersion: 1
+  tick: number
+  timestampMs: number
+  self: SelfState
+  inventory: InventoryState
+  entities: EntityState[]
+  blocks: BlockState[]
+  terrain: { standable: Vec3Json[] }
+  /** placed crafting_table stations in sensor range, nearest first */
+  craftingTables: Vec3Json[]
+  /** placed furnace stations in sensor range, nearest first (M2 smelting) */
+  furnaces?: Vec3Json[]
+  /** reachable air positions with solid support where a block could be placed */
+  placementSpots: Vec3Json[]
+  /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
+  descent?: DescentOption[]
+  /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
+  stepCuts?: StepCut[]
+  /** ceiling blocks above the bot that block a jump (canopy pocket) */
+  headroomCuts?: HeadroomCut[]
+  goal: GoalState
+  /** the long-horizon plan from System 2 (see goalQueue.ts), consumed by Jev */
+  goalQueue: GoalQueueState
+  recentEvents: string[]
+  signals: AgentSignals
+}
+
+export interface SensorOptions {
+  /** radius (blocks) searched for candidate blocks */
+  scanRadius: number
+  /** block interaction reach, measured from the eyes */
+  reach: number
+  maxLogs: number
+  maxEntities: number
+  maxTerrain: number
+  hazardRadius: number
+  entityRadius: number
+  maxStoneBlocks: number
+  maxPlacementSpots: number
+}
+
+export const defaultSensorOptions: SensorOptions = {
+  scanRadius: 48,
+  reach: 4.5,
+  maxLogs: 16,
+  maxEntities: 12,
+  maxTerrain: 8,
+  hazardRadius: 6,
+  entityRadius: 24,
+  maxStoneBlocks: 16,
+  maxPlacementSpots: 6,
+}
+
+export interface SensorInput {
+  tick: number
+  goal: GoalState
+  goalQueue: GoalQueueState
+  /** the item the current subgoal targets, used to focus the block scan */
+  focusItem?: string | null
+  recentEvents: string[]
+  signals: AgentSignals
+}
+
+const EYE_HEIGHT = 1.62
+const LOG_NAME = /_log$/
+const HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire', 'soul_campfire', 'sweet_berry_bush', 'cactus'])
+const STONE_LIKE = new Set([
+  'stone',
+  'cobblestone',
+  'deepslate',
+  'cobbled_deepslate',
+  'andesite',
+  'diorite',
+  'granite',
+  'tuff',
+])
+const CRAFT_STATIONS = new Set(['crafting_table'])
+const FURNACE_STATIONS = new Set(['furnace', 'blast_furnace', 'smoker'])
+export const STONE_YIELDS = new Set(['cobblestone', 'cobbled_deepslate'])
+
+/**
+ * Ore block name -> the item it drops. Drives goal-directed ore scanning:
+ * a `collect raw_iron` subgoal finds `iron_ore`/`deepslate_iron_ore`, and a
+ * `collect diamond` subgoal finds both diamond ore variants.
+ */
+export const ORE_SOURCES: Readonly<Record<string, readonly string[]>> = {
+  raw_iron: ['iron_ore', 'deepslate_iron_ore'],
+  raw_copper: ['copper_ore', 'deepslate_copper_ore'],
+  raw_gold: ['gold_ore', 'deepslate_gold_ore'],
+  diamond: ['diamond_ore', 'deepslate_diamond_ore'],
+  coal: ['coal_ore', 'deepslate_coal_ore'],
+  emerald: ['emerald_ore', 'deepslate_emerald_ore'],
+  lapis_lazuli: ['lapis_ore', 'deepslate_lapis_ore'],
+  redstone: ['redstone_ore', 'deepslate_redstone_ore'],
+}
+
+/** Every block name that can be an ore target, regardless of the focus item. */
+export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_SOURCES).flat())]
+
+interface RegistryShape {
+  blocksByName?: Record<string, { drops?: number[]; harvestTools?: Record<string, boolean> }>
+  items?: Record<number, { name?: string }>
+  itemsByName?: Record<string, { id?: number }>
+}
+
+function registryShape(bot: Bot): RegistryShape {
+  return (bot.registry ?? {}) as RegistryShape
+}
+
+/** Resolve a block's primary drop, required tool class and required pickaxe rank. */
+function blockHarvest(
+  bot: Bot,
+  blockName: string,
+): { yield: string | null; harvestTool: HarvestTool | null; harvestTier: number | null } {
+  const reg = registryShape(bot)
+  const info = reg.blocksByName?.[blockName]
+  if (info === undefined) return { yield: null, harvestTool: null, harvestTier: null }
+  const dropId = info.drops?.[0]
+  let yieldName: string | null = null
+  if (typeof dropId === 'number') {
+    yieldName = reg.items?.[dropId]?.name ?? null
+  }
+  let harvestTool: HarvestTool | null = null
+  let harvestTier: number | null = null
+  const tools = info.harvestTools
+  if (tools !== null && typeof tools === 'object') {
+    for (const toolId of Object.keys(tools)) {
+      const toolName = reg.items?.[Number(toolId)]?.name ?? ''
+      if (toolName.endsWith('_pickaxe')) {
+        harvestTool = 'pickaxe'
+        const rank = PICKAXE_RANKS[toolName]
+        if (rank !== undefined && (harvestTier === null || rank < harvestTier)) harvestTier = rank
+        continue
+      }
+      if (toolName.endsWith('_axe')) harvestTool = harvestTool ?? 'axe'
+      if (toolName.endsWith('_shovel')) harvestTool = harvestTool ?? 'shovel'
+    }
+  }
+  return { yield: yieldName ?? blockName, harvestTool, harvestTier }
+}
+
+function blockVisible(bot: Bot, block: { position: { x: number; y: number; z: number } }, inReach: boolean): boolean {
+  if (!inReach) return false
+  try {
+    return bot.canSeeBlock(block as never)
+  } catch {
+    return true
+  }
+}
+
+/** Vec3 factory that never imports `vec3` directly (keeps deps to the spec list). */
+export function toVec3(bot: Bot, p: Vec3Json) {
+  return bot.entity.position.clone().set(p.x, p.y, p.z)
+}
+
+function vecJson(v: { x: number; y: number; z: number }): Vec3Json {
+  return { x: round2(v.x), y: round2(v.y), z: round2(v.z) }
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+export function distance(a: Vec3Json, b: Vec3Json): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+function isPassable(block: { boundingBox: string } | null): boolean {
+  // lava/water have an "empty" bounding box, so passability alone is not
+  // enough for a standable spot - the support check below excludes liquids.
+  return block !== null && block.boundingBox === 'empty'
+}
+
+function isSolidSupport(block: { boundingBox: string } | null): boolean {
+  return block !== null && block.boundingBox === 'block'
+}
+
+const REPLACEABLE_AIR = new Set(['air', 'cave_air', 'void_air'])
+
+function isReplaceableAir(block: { name: string } | null): boolean {
+  return block !== null && REPLACEABLE_AIR.has(block.name)
+}
+
+/** True when `feet` is walkable: feet + head passable and the block below solid. */
+function isStandable(bot: Bot, feet: Vec3Json): boolean {
+  const feetBlock = bot.blockAt(toVec3(bot, feet))
+  const headBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z }))
+  const belowBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z }))
+  return isPassable(feetBlock) && isPassable(headBlock) && isSolidSupport(belowBlock)
+}
+
+/** The 8 neighbours the executor could stand on to reach a block, best first. */
+function findAdjacentStandable(bot: Bot, target: Vec3Json): Vec3Json | null {
+  const offsets: Array<[number, number, number]> = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+    [1, 0, 1],
+    [-1, 0, 1],
+    [1, 0, -1],
+    [-1, 0, -1],
+    [1, -1, 0],
+    [-1, -1, 0],
+    [0, -1, 1],
+    [0, -1, -1],
+  ]
+  const here = vecJson(bot.entity.position)
+  let best: Vec3Json | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const [dx, dy, dz] of offsets) {
+    const feet: Vec3Json = { x: target.x + dx, y: target.y + dy, z: target.z + dz }
+    if (!isStandable(bot, feet)) continue
+    const d = distance(feet, here)
+    if (d < bestDistance) {
+      bestDistance = d
+      best = feet
+    }
+  }
+  return best
+}
+
+function buildSelf(bot: Bot): SelfState {
+  const position = vecJson(bot.entity.position)
+  const eye = bot.entity.position.offset(0, EYE_HEIGHT, 0)
+  const held = bot.heldItem
+  return {
+    username: bot.username,
+    position,
+    eyePosition: vecJson(eye),
+    yaw: round2(bot.entity.yaw),
+    pitch: round2(bot.entity.pitch),
+    onGround: bot.entity.onGround === true,
+    health: bot.health,
+    food: bot.food,
+    gameMode: bot.game.gameMode,
+    dimension: bot.game.dimension,
+    isDay: bot.time.isDay,
+    heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
+  }
+}
+
+function buildInventory(bot: Bot): InventoryState {
+  const slots: InventorySlotState[] = []
+  const counts: Record<string, number> = {}
+  let totalItems = 0
+  for (const item of bot.inventory.items()) {
+    slots.push({ name: item.name, count: item.count, slot: item.slot })
+    counts[item.name] = (counts[item.name] ?? 0) + item.count
+    totalItems += item.count
+  }
+  return { slots, counts, totalItems }
+}
+
+function buildEntities(bot: Bot, options: SensorOptions, selfPosition: Vec3Json): EntityState[] {
+  const out: EntityState[] = []
+  const selfId = bot.entity.id
+  for (const entity of Object.values(bot.entities)) {
+    if (entity.id === selfId) continue
+    if (entity.isValid === false) continue
+    const distanceToBot = entity.position.distanceTo(bot.entity.position)
+    if (distanceToBot > options.entityRadius) continue
+    const name = entity.username ?? entity.name ?? entity.kind ?? 'unknown'
+    out.push({
+      id: entity.id,
+      name,
+      kind: entity.kind ?? 'unknown',
+      username: entity.username ?? null,
+      position: vecJson(entity.position),
+      distance: round2(distanceToBot),
+      hostile: isHostile(name, entity.kind),
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance)
+  return out.slice(0, options.maxEntities)
+}
+
+const HOSTILE_NAMES = new Set([
+  'zombie',
+  'skeleton',
+  'creeper',
+  'spider',
+  'cave_spider',
+  'enderman',
+  'witch',
+  'slime',
+  'magma_cube',
+  'pillager',
+  'vindicator',
+  'ravager',
+  'phantom',
+  'drowned',
+  'husk',
+  'stray',
+  'blaze',
+  'ghast',
+  'piglin_brute',
+  'warden',
+  'hoglin',
+  'zoglin',
+])
+
+function isHostile(name: string, kind: string | undefined): boolean {
+  if (HOSTILE_NAMES.has(name)) return true
+  if (kind !== undefined && HOSTILE_NAMES.has(kind)) return true
+  return name.endsWith('_zombie') || name.endsWith('_skeleton')
+}
+
+export function isHostileEntityName(name: string, kind: string | undefined): boolean {
+  return isHostile(name, kind)
+}
+
+function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
+  const out: BlockState[] = []
+  const positions = bot.findBlocks({
+    matching: (block) => LOG_NAME.test(block.name),
+    maxDistance: options.scanRadius,
+    count: 256,
+  })
+  for (const position of positions) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const pos = vecJson(position)
+    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const harvest = blockHarvest(bot, block.name)
+    out.push({
+      kind: 'log',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach: distance(pos, self.eyePosition) <= options.reach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: harvest.yield,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance || b.position.y - a.position.y)
+  return out.slice(0, options.maxLogs)
+}
+
+/**
+ * Surface stone scan, focused on the current subgoal item.
+ *
+ * Deep underground stone has no standable neighbour and is therefore not
+ * executable under `canDig=false`, so a plain nearest-N scan would only ever
+ * return unreachable blocks. Instead we walk columns from the surface down,
+ * keep the topmost stone-like block that is exposed to air, and let the caller
+ * drop any whose primary drop does not match the focus item.
+ */
+function buildStoneBlocks(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  focusItem: string | null,
+): BlockState[] {
+  const base = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const radius = Math.min(options.scanRadius, 32)
+  const top = base.y + 6
+  const bottom = base.y - 20
+  const scratch = bot.entity.position.clone()
+  const out: BlockState[] = []
+  const seen = new Set<string>()
+  const faces: Array<[number, number, number]> = [
+    [0, 1, 0],
+    [0, -1, 0],
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+  ]
+  const isExposed = (x: number, y: number, z: number): boolean => {
+    for (const [dx, dy, dz] of faces) {
+      const neighbour = bot.blockAt(scratch.set(x + dx, y + dy, z + dz))
+      if (neighbour !== null && neighbour.boundingBox === 'empty') return true
+    }
+    return false
+  }
+
+  for (let dx = -radius; dx <= radius; dx += 1) {
+    for (let dz = -radius; dz <= radius; dz += 1) {
+      if (dx * dx + dz * dz > radius * radius) continue
+      const x = base.x + dx
+      const z = base.z + dz
+      for (let y = top; y >= bottom; y -= 1) {
+        const block = bot.blockAt(scratch.set(x, y, z))
+        if (block === null || !STONE_LIKE.has(block.name)) continue
+        if (!isExposed(x, y, z)) break
+        const harvest = blockHarvest(bot, block.name)
+        if (focusItem !== null && !resourceMatches(harvest.yield, focusItem)) break
+        const key = `${x}_${y}_${z}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          const pos = { x, y, z }
+          const adjacentStandable = findAdjacentStandable(bot, pos)
+          out.push({
+            kind: 'stone',
+            name: block.name,
+            position: pos,
+            distance: round2(distance(pos, self.position)),
+            diggable: block.diggable,
+            inReach: distance(pos, self.eyePosition) <= options.reach,
+            hasAdjacentStandable: adjacentStandable !== null,
+            adjacentStandable,
+            yield: harvest.yield,
+            harvestTool: harvest.harvestTool,
+            harvestTier: harvest.harvestTier,
+          })
+        }
+        break
+      }
+    }
+  }
+  out.sort((a, b) => a.distance - b.distance || b.position.y - a.position.y)
+  return out.slice(0, options.maxStoneBlocks)
+}
+
+/**
+ * Buried stone-like blocks near the bot, used only as tunnel targets. Unlike
+ * `buildStoneBlocks` (which keeps the topmost *exposed* block per column), this
+ * records solid stone with no walk-up access so the agent knows where to dig
+ * toward when no exposed stone is reachable under `canDig=false`.
+ */
+function buildBuriedStoneBlocks(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  focusItem: string | null,
+): BlockState[] {
+  if (focusItem === null || !STONE_YIELDS.has(focusItem)) return []
+  const radius = Math.min(options.scanRadius, 24)
+  const positions = bot.findBlocks({
+    matching: (block) => STONE_LIKE.has(block.name),
+    maxDistance: radius,
+    count: 96,
+  })
+  const out: BlockState[] = []
+  for (const position of positions) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const pos = vecJson(position)
+    const harvest = blockHarvest(bot, block.name)
+    if (focusItem !== null && !resourceMatches(harvest.yield, focusItem)) continue
+    if (distance(pos, self.position) <= options.reach) continue
+    const adjacentStandable = findAdjacentStandable(bot, pos)
+    out.push({
+      kind: 'stone',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach: distance(pos, self.eyePosition) <= options.reach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: harvest.yield,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance)
+  return out.slice(0, options.maxStoneBlocks)
+}
+
+/**
+ * Ore scan for the current collect subgoal. Ores are found by name through
+ * `bot.findBlocks` (which sees loaded chunks in every direction) so buried and
+ * deepslate ores become tunnel targets, not just exposed surface veins.
+ */
+function buildOreBlocks(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  focusItem: string | null,
+): BlockState[] {
+  if (focusItem === null) return []
+  const sources = ORE_SOURCES[focusItem]
+  if (sources === undefined) return []
+  const wanted = new Set(sources)
+  const radius = Math.max(options.scanRadius, 64)
+  const positions = bot.findBlocks({
+    matching: (block) => wanted.has(block.name),
+    maxDistance: radius,
+    count: 96,
+  })
+  const out: BlockState[] = []
+  for (const position of positions) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const pos = vecJson(position)
+    const adjacentStandable = findAdjacentStandable(bot, pos)
+    const harvest = blockHarvest(bot, block.name)
+    out.push({
+      kind: 'ore',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach: distance(pos, self.eyePosition) <= options.reach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: harvest.yield,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance)
+  return out.slice(0, 48)
+}
+
+function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
+  const out: BlockState[] = []
+  const positions = bot.findBlocks({
+    matching: (block) => HAZARDS.has(block.name),
+    maxDistance: options.hazardRadius,
+    count: 32,
+  })
+  for (const position of positions) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const pos = vecJson(position)
+    out.push({
+      kind: 'hazard',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach: false,
+      hasAdjacentStandable: false,
+      adjacentStandable: null,
+      yield: null,
+      harvestTool: null,
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance)
+  return out
+}
+
+function buildBlocks(bot: Bot, options: SensorOptions, self: SelfState, focusItem: string | null): BlockState[] {
+  const logs = buildLogBlocks(bot, options, self)
+  const stones = focusItem !== null && STONE_YIELDS.has(focusItem) ? buildStoneBlocks(bot, options, self, focusItem) : []
+  const buried = buildBuriedStoneBlocks(bot, options, self, focusItem)
+  const ores = buildOreBlocks(bot, options, self, focusItem)
+  const hazards = buildHazardBlocks(bot, options, self)
+  return [...logs, ...stones, ...buried, ...ores, ...hazards]
+}
+
+function buildStations(bot: Bot, options: SensorOptions, self: SelfState, names: ReadonlySet<string>): Vec3Json[] {
+  const positions = bot.findBlocks({
+    matching: (block) => names.has(block.name),
+    maxDistance: Math.max(16, options.reach + 8),
+    count: 8,
+  })
+  return positions
+    .map((position) => vecJson(position))
+    .sort((a, b) => distance(a, self.position) - distance(b, self.position))
+}
+
+function buildFurnaces(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
+  return buildStations(bot, options, self, FURNACE_STATIONS)
+}
+
+export const PROBE_HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus'])
+export const PROBE_FLUIDS = new Set(['water', 'flowing_water', 'bubble_column'])
+export const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal', 'end_portal_frame', 'nether_portal', 'obsidian'])
+
+/**
+ * Pre-compute the four cardinal staircase/tunnel steps. This is the only place
+ * with live block access, so `candidates.ts` stays a pure function of the state
+ * and the guard can re-check a step mechanically. A step is `safe` only when
+ * every dig involved is breakable, no lava/water touches the column, and the
+ * landing cell has solid support so the bot never drops into a void.
+ */
+function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): DescentOption[] {
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const solid = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && block.boundingBox === 'block'
+  }
+  const diggableSolid = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && block.boundingBox !== 'empty' && block.diggable && !UNBREAKABLE.has(block.name)
+  }
+  const hazardous = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && (PROBE_HAZARDS.has(block.name) || PROBE_FLUIDS.has(block.name)) && block.boundingBox === 'empty'
+  }
+  const clear = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block === null || block.boundingBox === 'empty'
+  }
+
+  const dirs: Array<{ dir: DescentOption['dir']; dx: number; dz: number }> = [
+    { dir: 'E', dx: 1, dz: 0 },
+    { dir: 'W', dx: -1, dz: 0 },
+    { dir: 'N', dx: 0, dz: -1 },
+    { dir: 'S', dx: 0, dz: 1 },
+  ]
+
+  const out: DescentOption[] = []
+  for (const { dir, dx, dz } of dirs) {
+    for (const mode of ['down', 'level'] as const) {
+      const wall = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+      const head = { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz }
+      const stepY = mode === 'down' ? feet.y - 1 : feet.y
+      const step = { x: feet.x + dx, y: stepY, z: feet.z + dz }
+      const floor = { x: feet.x + dx, y: feet.y - 1, z: feet.z + dz }
+      const support = { x: feet.x + dx, y: stepY - 1, z: feet.z + dz }
+      const wallSolid = solid(wall.x, wall.y, wall.z)
+      const headSolid = solid(head.x, head.y, head.z)
+      const floorSolid = solid(floor.x, floor.y, floor.z)
+      const supportSolid = solid(support.x, support.y, support.z)
+      const wallOk = clear(wall.x, wall.y, wall.z) || diggableSolid(wall.x, wall.y, wall.z)
+      const headOk = clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
+      const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
+      let reason = 'safe'
+      if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
+      else if (!headOk) reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
+      else if (!floorOk) reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
+      else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
+      else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) reason = 'floor already open (uncontrolled fall)'
+      else if (hazardsAround(hazardous, wall, head, floor, step, support)) reason = 'lava/water in the step column'
+      out.push({
+        dir,
+        mode,
+        dx,
+        dz,
+        step,
+        wall,
+        head,
+        floor,
+        wallSolid,
+        headSolid,
+        floorSolid,
+        safe: reason === 'safe',
+        reason,
+      })
+    }
+  }
+  return out
+}
+
+function hazardsAround(
+  hazardous: (x: number, y: number, z: number) => boolean,
+  ...cells: Vec3Json[]
+): boolean {
+  const seen = new Set<string>()
+  for (const cell of cells) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dz = -1; dz <= 1; dz += 1) {
+          const key = `${cell.x + dx}_${cell.y + dy}_${cell.z + dz}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          if (hazardous(cell.x + dx, cell.y + dy, cell.z + dz)) return true
+        }
+      }
+    }
+  }
+  return false
+}
+
+function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepCut[] {
+  const feetX = Math.floor(self.position.x)
+  const feetY = Math.floor(self.position.y)
+  const feetZ = Math.floor(self.position.z)
+  const scratch = bot.entity.position.clone()
+  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const solid = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && block.boundingBox === 'block'
+  }
+  const clear = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block === null || block.boundingBox === 'empty'
+  }
+  const diggableSolid = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && block.boundingBox !== 'empty' && block.diggable && !UNBREAKABLE.has(block.name)
+  }
+  const hazardous = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && (PROBE_HAZARDS.has(block.name) || PROBE_FLUIDS.has(block.name)) && block.boundingBox === 'empty'
+  }
+
+  const dirs: Array<{ dir: StepCut['dir']; dx: number; dz: number }> = [
+    { dir: 'E', dx: 1, dz: 0 },
+    { dir: 'W', dx: -1, dz: 0 },
+    { dir: 'N', dx: 0, dz: -1 },
+    { dir: 'S', dx: 0, dz: 1 },
+  ]
+
+  const out: StepCut[] = []
+  for (const { dir, dx, dz } of dirs) {
+    for (const dist of [1, 2, 3]) {
+      const x = feetX + dx * dist
+      const z = feetZ + dz * dist
+      let top: number | null = null
+      for (let y = feetY + 2; y >= feetY - 1; y -= 1) {
+        if (solid(x, y, z)) {
+          top = y
+          break
+        }
+      }
+      if (top === null) continue
+      if (top - (feetY - 1) < 2) continue
+      const cut = { x, y: top, z }
+      const step = { x, y: top, z }
+      const name = at(x, top, z)?.name ?? 'unknown'
+      let reason = 'safe'
+      if (!diggableSolid(x, top, z)) reason = `${name} is not breakable`
+      else if (!solid(x, top - 1, z)) reason = 'no solid landing under the cut'
+      else if (!clear(x, top + 1, z) || !clear(x, top + 2, z)) reason = 'no headroom above the new step'
+      else if (hazardsAround(hazardous, cut, step, { x, y: top - 1, z })) reason = 'lava/water in the step column'
+      out.push({ dir, dx, dz, cut, step, name, safe: reason === 'safe', reason })
+      break
+    }
+  }
+  return out
+}
+
+function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): HeadroomCut[] {
+  const feetX = Math.floor(self.position.x)
+  const feetY = Math.floor(self.position.y)
+  const feetZ = Math.floor(self.position.z)
+  const scratch = bot.entity.position.clone()
+  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const clear = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block === null || block.boundingBox === 'empty'
+  }
+  if (clear(feetX, feetY + 1, feetZ) && clear(feetX, feetY + 2, feetZ)) return []
+
+  const out: HeadroomCut[] = []
+  const consider = (x: number, y: number, z: number): void => {
+    const block = at(x, y, z)
+    if (block === null || block.boundingBox !== 'block') return
+    const name = block.name
+    let safe = true
+    let reason = 'safe'
+    if (!block.diggable || UNBREAKABLE.has(name)) {
+      safe = false
+      reason = `${name} is not breakable`
+    } else if (PROBE_HAZARDS.has(name) || PROBE_FLUIDS.has(name)) {
+      safe = false
+      reason = `${name} would flood or burn the pocket`
+    }
+    out.push({ pos: { x, y, z }, name, safe, reason })
+  }
+  for (const dy of [1, 2]) consider(feetX, feetY + dy, feetZ)
+  // Adjacent columns are included so a clearance candidate survives the 1-block
+  // shuffle of the escape and the next decision can still execute the same dig.
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      if (dx === 0 && dz === 0) continue
+      for (const dy of [1, 2]) consider(feetX + dx, feetY + dy, feetZ + dz)
+    }
+  }
+  return out
+}
+
+function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
+  const base = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const feet = base
+  const scratch = bot.entity.position.clone()
+  const spots: Vec3Json[] = []
+  const botBody = { x: self.position.x, y: self.position.y, z: self.position.z }
+  for (let dx = -2; dx <= 2; dx += 1) {
+    for (let dz = -2; dz <= 2; dz += 1) {
+      for (let dy = 0; dy <= 1; dy += 1) {
+        const candidate = { x: feet.x + dx, y: feet.y + dy, z: feet.z + dz }
+        // A placement target must not be inside the bot's own body.
+        const nearBody = distance(
+          { x: candidate.x + 0.5, y: candidate.y, z: candidate.z + 0.5 },
+          botBody,
+        )
+        if (nearBody < 1.0) continue
+        const atFeet = bot.blockAt(scratch.set(candidate.x, candidate.y, candidate.z))
+        const above = bot.blockAt(scratch.set(candidate.x, candidate.y + 1, candidate.z))
+        const below = bot.blockAt(scratch.set(candidate.x, candidate.y - 1, candidate.z))
+        // Truly replaceable air only: `leaf_litter` and similar are passable but
+        // the server refuses to overwrite them, so placing there silently fails.
+        if (!isReplaceableAir(atFeet)) continue
+        if (above === null || above.boundingBox !== 'empty') continue
+        if (below === null || below.boundingBox !== 'block') continue
+        const pos = vecJson(candidate)
+        if (distance(pos, self.eyePosition) > options.reach + 0.5) continue
+        spots.push(pos)
+      }
+    }
+  }
+  spots.sort((a, b) => distance(a, self.position) - distance(b, self.position))
+  return spots.slice(0, options.maxPlacementSpots)
+}
+
+function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
+  const found: Vec3Json[] = []
+  const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
+  for (let dx = -2; dx <= 2; dx += 1) {
+    for (let dz = -2; dz <= 2; dz += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
+        if (!isStandable(bot, feet)) continue
+        found.push(feet)
+      }
+    }
+  }
+  found.sort((a, b) => distance(a, self.position) - distance(b, self.position))
+  return found.slice(0, options.maxTerrain)
+}
+
+/**
+ * The SENSOR entry point.
+ *
+ * Reads the bot once per policy tick and returns the JSON world state. Every
+ * block lookup is defensive: unloaded chunks yield `null` and are simply
+ * omitted rather than crashing the loop.
+ */
+export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
+  const self = buildSelf(bot)
+  return {
+    schemaVersion: 1,
+    tick: input.tick,
+    timestampMs: Date.now(),
+    self,
+    inventory: buildInventory(bot),
+    entities: buildEntities(bot, options, self.position),
+    blocks: buildBlocks(bot, options, self, input.focusItem ?? null),
+    terrain: { standable: buildTerrain(bot, options, self) },
+    craftingTables: buildStations(bot, options, self, CRAFT_STATIONS),
+    furnaces: buildFurnaces(bot, options, self),
+    placementSpots: buildPlacementSpots(bot, options, self),
+    descent: buildDescent(bot, options, self),
+    stepCuts: buildStepCuts(bot, options, self),
+    headroomCuts: buildHeadroomCuts(bot, options, self),
+    goal: input.goal,
+    goalQueue: input.goalQueue,
+    recentEvents: input.recentEvents.slice(-12),
+    signals: input.signals,
+  }
+}
+
+/** Convenience: reload the goal counters from the live inventory after a dig. */
+export function refreshGoalProgress(goal: GoalState, haveCount: number): GoalState {
+  const gained = Math.max(0, haveCount - goal.startCount)
+  const progress = goal.requiredCount === 0 ? 1 : Math.min(1, gained / goal.requiredCount)
+  return {
+    ...goal,
+    haveCount,
+    progress,
+    complete: gained >= goal.requiredCount,
+  }
+}
+
+/** True for any wood log item (`oak_log`, `birch_log`, ... , `stripped_*_log`). */
+export function isLogItem(name: string): boolean {
+  return name.endsWith('_log')
+}
+
+export function makeGoal(targetItem: string, requiredCount: number): GoalState {
+  return {
+    id: `chop:${targetItem}`,
+    description: `collect ${requiredCount} x ${targetItem}`,
+    targetItem,
+    requiredCount,
+    startCount: 0,
+    haveCount: 0,
+    progress: 0,
+    complete: false,
+    startedAtMs: Date.now(),
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "mc-companion-buddy",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Minimal companion bot that follows the human player in the local Minecraft server",
+  "main": "buddy.cjs"
+}

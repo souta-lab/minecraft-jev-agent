@@ -1,0 +1,265 @@
+// scheduler.ts - the EVENT-DRIVEN decision scheduler.
+//
+// Jev is NOT called on a fixed period. A decision is requested by world events,
+// with a maximum heartbeat as the fallback:
+//
+//     block_broken · path_completed (arrival at target) · mob_appeared ·
+//     damage_taken · hp_changed · inventory_changed · action_completed ·
+//     action_timeout · path_stuck · path_no_path
+//     ─────────────────────────────────────────────────────────────────────
+//     heartbeat (<= 3000 ms)  - only fires while the agent is idle
+//
+// While the bot walks three seconds to a tree, no event fires and the heartbeat
+// is suppressed because an action is in flight: the same question is asked
+// once, not six times. The controller owns the "action in flight" knowledge and
+// decides whether a trigger runs, defers, or is dropped; this class only turns
+// bot events into named triggers.
+import type { Bot } from 'mineflayer'
+import type { Block } from 'prismarine-block'
+import type { Entity } from 'prismarine-entity'
+import type { EventLogger } from './jev.ts'
+import { isHostileEntityName } from './state.ts'
+
+export const DECISION_TRIGGERS = [
+  'start',
+  'heartbeat',
+  'block_broken',
+  'path_completed',
+  'mob_appeared',
+  'damage_taken',
+  'hp_changed',
+  'inventory_changed',
+  'action_completed',
+  'action_timeout',
+  'path_stuck',
+  'path_no_path',
+  'llm_plan',
+] as const
+
+export type DecisionTrigger = (typeof DECISION_TRIGGERS)[number]
+
+/**
+ * Triggers that may preempt an in-flight action because they can change the
+ * safety calculus mid-action (mob appeared, taken damage, health changed). The
+ * rest - arrival, block broken, inventory change, action completion, path
+ * failure, a new LLM plan - coalesce and are deferred until the action finishes,
+ * which is what stops Jev being re-asked during a long walk.
+ */
+export const PREEMPTIVE_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
+  'mob_appeared',
+  'damage_taken',
+  'hp_changed',
+  'action_timeout',
+])
+
+/** Higher wins when a burst of triggers is coalesced; a critical trigger is never overwritten. */
+export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
+  damage_taken: 10,
+  hp_changed: 9,
+  mob_appeared: 8,
+  path_stuck: 7,
+  path_no_path: 7,
+  action_timeout: 7,
+  inventory_changed: 6,
+  block_broken: 5,
+  path_completed: 4,
+  action_completed: 3,
+  llm_plan: 3,
+  start: 2,
+  heartbeat: 1,
+}
+
+export interface TriggerEvent {
+  trigger: DecisionTrigger
+  detail: Record<string, unknown>
+  ts: number
+}
+
+export interface SchedulerOptions {
+  /** maximum time between decisions while idle (fallback only) */
+  heartbeatMs: number
+  /** which world events may request a decision */
+  enabledTriggers: readonly DecisionTrigger[]
+  /** coalescing window for bursty events (inventory slots etc.) */
+  coalesceMs: number
+}
+
+export const defaultSchedulerOptions: SchedulerOptions = {
+  heartbeatMs: 3000,
+  enabledTriggers: DECISION_TRIGGERS,
+  coalesceMs: 40,
+}
+
+export class DecisionScheduler {
+  private readonly bot: Bot
+  private readonly logger: EventLogger
+  private readonly options: SchedulerOptions
+  private readonly enabled: ReadonlySet<DecisionTrigger>
+
+  private handler: ((event: TriggerEvent) => void) | null = null
+  private heartbeatTimer: NodeJS.Timeout | null = null
+  private coalesceTimer: NodeJS.Timeout | null = null
+  private pendingTriggers = new Map<DecisionTrigger, TriggerEvent>()
+  private started = false
+  private lastHealth: number | null = null
+  private lastFood: number | null = null
+
+  constructor(bot: Bot, logger: EventLogger, options: Partial<SchedulerOptions> = {}) {
+    this.bot = bot
+    this.logger = logger
+    this.options = { ...defaultSchedulerOptions, ...options }
+    this.enabled = new Set(this.options.enabledTriggers)
+  }
+
+  get heartbeatMs(): number {
+    return this.options.heartbeatMs
+  }
+
+  get triggers(): readonly DecisionTrigger[] {
+    return [...this.enabled]
+  }
+
+  onDecision(handler: (event: TriggerEvent) => void): void {
+    this.handler = handler
+  }
+
+  /** Internal events (executor path phase / timeout / action result). */
+  notify(trigger: DecisionTrigger, detail: Record<string, unknown> = {}): void {
+    this.request(trigger, detail)
+  }
+
+  start(): void {
+    if (this.started) return
+    this.started = true
+    this.lastHealth = this.bot.health
+    this.lastFood = this.bot.food
+    if (this.enabled.has('block_broken')) this.bot.on('blockUpdate', this.onBlockUpdate)
+    if (this.enabled.has('path_completed')) this.bot.on('goal_reached', this.onGoalReached)
+    if (this.enabled.has('mob_appeared')) this.bot.on('entitySpawn', this.onEntitySpawn)
+    if (this.enabled.has('damage_taken')) this.bot.on('entityHurt', this.onEntityHurt)
+    if (this.enabled.has('hp_changed')) this.bot.on('health', this.onHealth)
+    if (this.enabled.has('inventory_changed')) {
+      this.bot.on('playerCollect', this.onPlayerCollect)
+      this.bot.inventory.on('updateSlot', this.onInventorySlot)
+    }
+    this.heartbeatTimer = setInterval(() => {
+      this.request('heartbeat', {})
+    }, this.options.heartbeatMs)
+    this.request('start', { heartbeatMs: this.options.heartbeatMs, triggers: this.triggers })
+  }
+
+  stop(): void {
+    if (!this.started) return
+    this.started = false
+    this.bot.removeListener('blockUpdate', this.onBlockUpdate)
+    this.bot.removeListener('goal_reached', this.onGoalReached)
+    this.bot.removeListener('entitySpawn', this.onEntitySpawn)
+    this.bot.removeListener('entityHurt', this.onEntityHurt)
+    this.bot.removeListener('health', this.onHealth)
+    this.bot.removeListener('playerCollect', this.onPlayerCollect)
+    this.bot.inventory.removeListener('updateSlot', this.onInventorySlot)
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
+    this.clearPending()
+    this.handler = null
+  }
+
+  private readonly onBlockUpdate = (oldBlock: Block | null, newBlock: Block): void => {
+    if (oldBlock === null || oldBlock.type === 0 || newBlock.type !== 0) return
+    this.request('block_broken', {
+      block: oldBlock.name,
+      position: { x: oldBlock.position.x, y: oldBlock.position.y, z: oldBlock.position.z },
+    })
+  }
+
+  private readonly onGoalReached = (): void => {
+    this.request('path_completed', { source: 'goal_reached' })
+  }
+
+  private readonly onEntitySpawn = (entity: Entity): void => {
+    const name = entity.username ?? entity.name ?? entity.kind ?? 'unknown'
+    if (!isHostileEntityName(name, entity.kind ?? undefined)) return
+    this.request('mob_appeared', {
+      entity: name,
+      id: entity.id,
+      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    })
+  }
+
+  private readonly onEntityHurt = (entity: Entity): void => {
+    if (this.bot.entity === undefined || entity.id !== this.bot.entity.id) return
+    this.request('damage_taken', { health: this.bot.health })
+  }
+
+  private readonly onHealth = (): void => {
+    const health = this.bot.health
+    const food = this.bot.food
+    const previousHealth = this.lastHealth
+    this.lastHealth = health
+    this.lastFood = food
+    if (previousHealth === null || health === previousHealth) return
+    this.request('hp_changed', { health, previousHealth, food, delta: health - previousHealth })
+  }
+
+  private readonly onPlayerCollect = (collector: Entity, collected: Entity): void => {
+    if (collector.id !== this.bot.entity?.id) return
+    this.request('inventory_changed', { collected: collected.name ?? 'unknown', source: 'playerCollect' })
+  }
+
+  private readonly onInventorySlot = (slot: number, oldItem: { name: string; count: number } | null, newItem: { name: string; count: number } | null): void => {
+    const before = oldItem === null ? null : `${oldItem.name}x${oldItem.count}`
+    const after = newItem === null ? null : `${newItem.name}x${newItem.count}`
+    if (before === after) return
+    this.request('inventory_changed', { slot, before, after, source: 'updateSlot' })
+  }
+
+  private request(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
+    if (!this.enabled.has(trigger)) return
+    if (this.handler === null) return
+    const event: TriggerEvent = { trigger, detail, ts: Date.now() }
+    if (trigger === 'heartbeat') {
+      if (this.pendingTriggers.size > 0) return
+      this.handler(event)
+      return
+    }
+    if (trigger === 'start' || PREEMPTIVE_TRIGGERS.has(trigger)) {
+      // Deliver immediately without duplicating into the coalesced set; any
+      // already-queued lower-priority triggers survive and flush afterwards.
+      this.handler(event)
+      return
+    }
+    this.pendingTriggers.set(trigger, event)
+    this.ensureCoalesceTimer()
+  }
+
+  private ensureCoalesceTimer(): void {
+    if (this.coalesceTimer !== null) return
+    this.coalesceTimer = setTimeout(() => {
+      this.coalesceTimer = null
+      this.flushPending()
+    }, this.options.coalesceMs)
+  }
+
+  /** Deliver every coalesced trigger highest-priority first; none are dropped. */
+  private flushPending(): void {
+    while (this.pendingTriggers.size > 0) {
+      let best: TriggerEvent | null = null
+      for (const event of this.pendingTriggers.values()) {
+        if (best === null || TRIGGER_PRIORITY[event.trigger] > TRIGGER_PRIORITY[best.trigger]) best = event
+      }
+      if (best === null) return
+      this.pendingTriggers.delete(best.trigger)
+      if (this.handler !== null) this.handler(best)
+    }
+  }
+
+  private clearPending(): void {
+    if (this.coalesceTimer !== null) {
+      clearTimeout(this.coalesceTimer)
+      this.coalesceTimer = null
+    }
+    this.pendingTriggers.clear()
+  }
+}

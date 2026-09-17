@@ -1,0 +1,1024 @@
+// jev.ts - the JEV POLICY layer.
+//
+// One interface, two implementations:
+//
+//   * TypeSafeJevPolicy - the real thing, wired to the *proven* path:
+//
+//       ai (v7) -> experimental_evaluate({ model: 'typesafe-ai/jev', state, questions })
+//
+//     Many questions are batched into ONE call (action / mine_target /
+//     combat_target / danger / route_danger / goal_progress / need_replan)
+//     and only the answers we need are adopted. The primary question is a
+//     *grounded macro-action choice* whose labels are the deterministic
+//     candidate ids that actually exist right now.
+//
+//   * FallbackJevPolicy - a clearly-marked deterministic local policy used when
+//     neither the gateway key file nor AI_GATEWAY_API_KEY is present, so the
+//     loop is runnable today. Same interface, so swapping is a no-op for the
+//     rest of the agent.
+//
+// Verified SDK facts this file encodes:
+//   * `experimental_evaluate` question types are `choice` | `score` | `boolean`.
+//     There is NO `noul` type on this path.
+//   * probabilities are rounded to `rounding.probabilityDecimals` (2 by default);
+//     `usage.inputTokens` / `usage.outputTokens` are available.
+//   * `providerMetadata.typesafe.confidence[questionId]` carries TypeSafe's
+//     *calibrated* per-question confidence. This is NOT distribution sharpness
+//     and NOT an accuracy claim - it must be validated against real outcomes,
+//     which is exactly what the decision log in `decisionlog.ts` records
+//     (predicted confidence vs observed action result) for a reliability diagram.
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { experimental_evaluate as evaluate } from 'ai'
+import type { Experimental_EvaluationQuestion } from 'ai'
+import type { Candidate } from './candidates.ts'
+import type { WorldState } from './state.ts'
+
+type EvaluateArgs = Parameters<typeof evaluate>[0]
+type EvaluationState = EvaluateArgs['state']
+type EvaluationQuestion = Experimental_EvaluationQuestion
+
+export type JevPolicyKind = 'typesafe' | 'fallback'
+
+/** Where the answer came from, for the decision log. */
+export type JevSource = 'jev' | 'fallback'
+
+export type JevQuestionType = 'choice' | 'score' | 'boolean'
+
+export interface JevAnswer {
+  name: string
+  type: JevQuestionType
+  /**
+   * choice: the selected option id.
+   * score: the fractional position in [0, levels-1].
+   * boolean: P(true), in [0, 1].
+   */
+  value: string | number
+  /** probability mass on `value`, when the primitive exposes a distribution */
+  probability: number | null
+  /**
+   * TypeSafe's *calibrated* per-question confidence
+   * (`providerMetadata.typesafe.confidence[name]`). null when the provider did
+   * not report one (e.g. boolean questions) or for the rule-based fallback.
+   * Never assume it is "distribution sharpness" - validate it against outcomes.
+   */
+  confidence: number | null
+  probabilities: Record<string, number> | null
+  /** score: the ordered level labels the fractional score indexes into */
+  legend: string[] | null
+  note: string | null
+}
+
+export interface JevUsage {
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
+}
+
+export interface JevResult {
+  callId: string
+  policy: JevPolicyKind
+  source: JevSource
+  model: string
+  latencyMs: number
+  usage: JevUsage | null
+  answers: Record<string, JevAnswer>
+}
+
+export interface JevRequest {
+  stage: string
+  state: WorldState
+  candidates: readonly Candidate[]
+  /** CORE + trigger-specific set to send; defaults to the full set. */
+  questionNames?: readonly QuestionName[]
+}
+
+export interface JevPolicy {
+  readonly kind: JevPolicyKind
+  readonly model: string
+  decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult>
+}
+
+export class JevPolicyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'JevPolicyError'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// logging
+// ---------------------------------------------------------------------------
+
+/** Append-only JSONL sink. One record per line, flushed per write. */
+export class JsonlWriter {
+  readonly path: string
+
+  constructor(path: string) {
+    this.path = path
+    mkdirSync(dirname(path), { recursive: true })
+  }
+
+  write(record: unknown): void {
+    appendFileSync(this.path, `${JSON.stringify(record)}\n`)
+  }
+}
+
+export interface JevCallRecord {
+  record: 'jev-call'
+  callId: string
+  ts: string
+  policy: JevPolicyKind
+  model: string
+  stage: string
+  latencyMs: number
+  /** rate-limit retries already consumed before this successful attempt */
+  rateLimitRetries: number
+  /** cumulative backoff slept before this attempt (excluded from latencyMs) */
+  rateLimitWaitMs: number
+  /** exact request payload sent (or that would have been sent) */
+  state: unknown
+  questions: unknown
+  response: { model: string; usage: unknown; answers: Record<string, JevAnswer> } | null
+  error: string | null
+}
+
+export interface JevRetryRecord {
+  record: 'jev-retry'
+  callId: string
+  ts: string
+  attempt: number
+  delayMs: number
+  totalWaitMs: number
+  error: string
+}
+
+export interface JevOutcomeRecord {
+  record: 'jev-outcome'
+  callId: string
+  ts: string
+  policy: JevPolicyKind
+  actionId: string | null
+  executed: boolean
+  verified: boolean
+  failureCode: string | null
+  goalProgress: number
+  note: string
+}
+
+export type AgentLevel = 'info' | 'warn' | 'error'
+
+export interface AgentEventRecord {
+  record: 'agent-event'
+  ts: string
+  tick: number | null
+  source: string
+  level: AgentLevel
+  message: string
+  detail: Record<string, unknown>
+}
+
+/**
+ * Human-readable console output + machine-readable JSONL in one call, so the
+ * recorded run and the log file always tell the same story.
+ */
+export class EventLogger {
+  private readonly writer: JsonlWriter | null
+  private readonly echo: boolean
+
+  constructor(writer: JsonlWriter | null, echo: boolean) {
+    this.writer = writer
+    this.echo = echo
+  }
+
+  log(
+    source: string,
+    level: AgentLevel,
+    message: string,
+    detail: Record<string, unknown> = {},
+    tick: number | null = null,
+  ): void {
+    if (this.echo) {
+      const suffix = Object.keys(detail).length > 0 ? ` ${JSON.stringify(detail)}` : ''
+      process.stdout.write(`[${source}] ${message}${suffix}\n`)
+    }
+    if (this.writer !== null) {
+      const record: AgentEventRecord = {
+        record: 'agent-event',
+        ts: new Date().toISOString(),
+        tick,
+        source,
+        level,
+        message,
+        detail,
+      }
+      this.writer.write(record)
+    }
+  }
+
+  info(source: string, message: string, detail: Record<string, unknown> = {}, tick: number | null = null): void {
+    this.log(source, 'info', message, detail, tick)
+  }
+
+  warn(source: string, message: string, detail: Record<string, unknown> = {}, tick: number | null = null): void {
+    this.log(source, 'warn', message, detail, tick)
+  }
+
+  error(source: string, message: string, detail: Record<string, unknown> = {}, tick: number | null = null): void {
+    this.log(source, 'error', message, detail, tick)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// the batched question set
+// ---------------------------------------------------------------------------
+
+export const PRIMARY_INSTRUCTIONS =
+  'You are the local policy head of a Minecraft bot. Choose exactly ONE id from the ' +
+  'action list: the single best macro-action for the bot to execute right now. Every id ' +
+  'refers to a concrete target that exists in the supplied world state. Answer with the id ' +
+  'verbatim; never invent an id. The id already embeds its target (e.g. MINE:b12_64_8, ' +
+  'MOVE:p3_64_8, CRAFT:oak_planks); do NOT answer a separate target. The state field ' +
+  'signals.failedCandidates maps candidate ids to how many times they recently failed, so ' +
+  'prefer an id with no recorded failures. The state field goalQueue is the long-horizon ' +
+  'plan from System 2: follow its current goal while plan_still_valid is high.'
+
+/**
+ * Boolean answers have NO calibrated per-outcome confidence: the primitive only
+ * exposes a probability. A boolean is therefore read as a probability band, never
+ * as `threshold + providerMetadata.confidence`.
+ *
+ *   p <= 0.30  -> strong false
+ *   p >= 0.70  -> strong true
+ *   in between -> uncertain (keep the current safe action on the first hit;
+ *                 escalate only when uncertainty repeats or stacks with a
+ *                 no-progress / deterministic anomaly)
+ */
+export const BOOLEAN_LOW = 0.3
+export const BOOLEAN_HIGH = 0.7
+
+export const GOAL_PROGRESS_LEVELS = [
+  'no progress toward the goal',
+  'barely started (<25%)',
+  'about a quarter done',
+  'about half done',
+  'nearly or fully complete',
+] as const
+
+/** Ordered danger levels. `score` is the fractional position in this list. */
+export const DANGER_LEVELS = ['safe', 'minor risk', 'dangerous', 'lethal'] as const
+
+/** Ordered plan-validity levels for the core `plan_still_valid` score. */
+export const PLAN_VALID_LEVELS = [
+  'plan is broken',
+  'plan is mostly broken',
+  'plan is questionable',
+  'plan is mostly valid',
+  'plan is valid',
+] as const
+
+/** Ordered situation-comprehension levels for the core `situation_understood` score. */
+export const SITUATION_LEVELS = [
+  'situation is not understood',
+  'mostly unfamiliar',
+  'partially understood',
+  'mostly understood',
+  'fully understood',
+] as const
+
+/**
+ * Question sets are CORE + trigger-specific (P1-7). The tool-to-LLM contract is:
+ *  - `action`             the ONLY authoritative control choice; it embeds its target.
+ *  - `goal_progress`      core score.
+ *  - `plan_still_valid`   core score; low -> semantic escalation.
+ *  - `situation_understood` core score; low -> semantic escalation.
+ *  - `danger` / `should_retreat`      threat-triggered only.
+ *  - `goal_blocked` / `strategy_change_needed` stall/failure-triggered only.
+ *
+ * `need_llm` / `need_replan` are deliberately NOT asked: "should the LLM run" is a
+ * deterministic controller decision, not a model meta-judgement.
+ */
+export const CORE_QUESTION_NAMES = ['action', 'goal_progress', 'plan_still_valid', 'situation_understood'] as const
+export const THREAT_QUESTION_NAMES = ['danger', 'should_retreat'] as const
+export const STALL_QUESTION_NAMES = ['goal_blocked', 'strategy_change_needed'] as const
+export const QUESTION_NAMES = [...CORE_QUESTION_NAMES, ...THREAT_QUESTION_NAMES, ...STALL_QUESTION_NAMES] as const
+
+export type QuestionName = (typeof QUESTION_NAMES)[number]
+export type QuestionSetKind = 'core' | 'threat' | 'stall' | 'all'
+
+/** Resolve a trigger class to the exact question set that is sent. */
+export function questionNamesFor(kind: QuestionSetKind): readonly QuestionName[] {
+  switch (kind) {
+    case 'core':
+      return CORE_QUESTION_NAMES
+    case 'threat':
+      return [...CORE_QUESTION_NAMES, ...THREAT_QUESTION_NAMES]
+    case 'stall':
+      return [...CORE_QUESTION_NAMES, ...STALL_QUESTION_NAMES]
+    case 'all':
+      return QUESTION_NAMES
+  }
+}
+
+/** Every question is optional: only the requested set is present in a call. */
+export type JevQuestions = Partial<Record<QuestionName, EvaluationQuestion>>
+
+/**
+ * Prompt strategy: ONE batched evaluation of the CORE + trigger-specific set.
+ * `action` is the primary, grounded macro-action choice (labels are real
+ * candidate ids that already embed their target). The scores/booleans are the
+ * semantic facts the deterministic controller integrates.
+ */
+export function buildQuestions(
+  candidates: readonly Candidate[],
+  names: readonly QuestionName[] = QUESTION_NAMES,
+): JevQuestions {
+  const actionCriteria: Record<string, string> = {}
+  for (const candidate of candidates) actionCriteria[candidate.id] = candidate.label
+
+  const all: Record<QuestionName, EvaluationQuestion> = {
+    action: {
+      type: 'choice',
+      instructions: PRIMARY_INSTRUCTIONS,
+      criteria: actionCriteria,
+    },
+    danger: {
+      type: 'score',
+      instructions:
+        'How dangerous is the current situation for the bot right now? Use the ordered ' +
+        'levels from safe to lethal. Judge only immediate physical danger (lava, fire, ' +
+        'hostile mob in melee range, very low health, deep drop).',
+      criteria: [...DANGER_LEVELS],
+    },
+    should_retreat: {
+      type: 'boolean',
+      instructions:
+        'Should the bot break off what it is doing and move away to safety right now? ' +
+        'Answer true only for immediate physical danger, not for a merely inconvenient target.',
+      criteria: {
+        true: 'retreat to safety now',
+        false: 'the current action is safe enough to continue',
+      },
+    },
+    goal_progress: {
+      type: 'score',
+      instructions: `How much progress has been made toward the goal queue's current goal? Use the ordered levels: ${GOAL_PROGRESS_LEVELS.join(' | ')}.`,
+      criteria: [...GOAL_PROGRESS_LEVELS],
+    },
+    plan_still_valid: {
+      type: 'score',
+      instructions: `Is the long-horizon plan from System 2 still meaningful for the current situation (right targets, right resources, not blocked)? Use the ordered levels: ${PLAN_VALID_LEVELS.join(' | ')}. Do not judge whether the LLM should be called; judge only whether the existing plan still makes sense.`,
+      criteria: [...PLAN_VALID_LEVELS],
+    },
+    situation_understood: {
+      type: 'score',
+      instructions: `Does the current world situation match something the bot understands well enough to keep acting? Use the ordered levels: ${SITUATION_LEVELS.join(' | ')}.`,
+      criteria: [...SITUATION_LEVELS],
+    },
+    goal_blocked: {
+      type: 'boolean',
+      instructions:
+        'Is the current subgoal blocked right now (target unreachable, required resource ' +
+        'missing, repeated failure)? Answer true only when a deterministic retry would fail again.',
+      criteria: {
+        true: 'the current subgoal cannot make progress',
+        false: 'the current subgoal can still make progress',
+      },
+    },
+    strategy_change_needed: {
+      type: 'boolean',
+      instructions:
+        'Does reaching the current goal require changing approach (different resource, route, ' +
+        'or order of subgoals)? Answer true when the plan must be patched or replaced.',
+      criteria: {
+        true: 'the remaining plan should change',
+        false: 'the remaining plan is still the right approach',
+      },
+    },
+  }
+
+  const out: JevQuestions = {}
+  for (const name of names) out[name] = all[name]
+  return out
+}
+
+/**
+ * The id the model selected for the primary question, or null if unusable.
+ * `action` is the ONLY authoritative choice: the target lives inside the
+ * grounded candidate id, so the executor never composes action + target answers.
+ */
+export function decisionIdFrom(result: JevResult): string | null {
+  const answer = result.answers.action
+  if (answer === undefined) return null
+  if (answer.type !== 'choice') return null
+  return typeof answer.value === 'string' ? answer.value : null
+}
+
+export function sourceOf(policy: JevPolicyKind): JevSource {
+  return policy === 'typesafe' ? 'jev' : 'fallback'
+}
+
+export type BooleanBand = 'strong_false' | 'uncertain' | 'strong_true'
+
+/** Map a boolean answer's P(true) to the 0.30/0.70 band. */
+export function booleanBand(probability: number | null | undefined): BooleanBand | null {
+  if (typeof probability !== 'number') return null
+  if (probability >= BOOLEAN_HIGH) return 'strong_true'
+  if (probability <= BOOLEAN_LOW) return 'strong_false'
+  return 'uncertain'
+}
+
+/** Adopt `should_retreat` only on a strong-true band; uncertainty keeps the current action. */
+export function shouldRetreatFrom(result: JevResult): boolean {
+  return booleanBand(result.answers.should_retreat?.probability) === 'strong_true'
+}
+
+// ---------------------------------------------------------------------------
+// defensive parsing of the raw evaluate() response
+// ---------------------------------------------------------------------------
+
+function mapChoiceAnswer(name: string, answer: unknown, confidence: number | null): JevAnswer {
+  const probabilities = readNumberRecord(answer, 'probabilities') ?? {}
+  const selected = readString(answer, 'choice')
+  if (selected === null) {
+    throw new JevPolicyError(`choice answer "${name}" was malformed: ${safeJson(answer)}`)
+  }
+  return {
+    name,
+    type: 'choice',
+    value: selected,
+    probability: probabilities[selected] ?? null,
+    confidence,
+    probabilities,
+    legend: null,
+    note: null,
+  }
+}
+
+function mapScoreAnswer(name: string, answer: unknown, legend: readonly string[], confidence: number | null): JevAnswer {
+  const value = readNumber(answer, 'score')
+  if (value === null) {
+    throw new JevPolicyError(`score answer "${name}" was malformed: ${safeJson(answer)}`)
+  }
+  return {
+    name,
+    type: 'score',
+    value,
+    probability: null,
+    confidence,
+    probabilities: readNumberRecord(answer, 'probabilities') ?? {},
+    legend: [...legend],
+    note:
+      confidence === null
+        ? 'provider reported no confidence for this score; a score without certainty is never acted on'
+        : null,
+  }
+}
+
+function mapBooleanAnswer(name: string, answer: unknown, confidence: number | null): JevAnswer {
+  const value = readNumber(answer, 'probability')
+  if (value === null) {
+    throw new JevPolicyError(`boolean answer "${name}" was malformed: ${safeJson(answer)}`)
+  }
+  return {
+    name,
+    type: 'boolean',
+    value,
+    probability: value,
+    confidence,
+    probabilities: { true: value, false: 1 - value },
+    legend: null,
+    note: 'boolean probability is P(true), not confidence in either outcome',
+  }
+}
+
+const SCORE_LEGENDS: Partial<Record<QuestionName, readonly string[]>> = {
+  danger: DANGER_LEVELS,
+  goal_progress: GOAL_PROGRESS_LEVELS,
+  plan_still_valid: PLAN_VALID_LEVELS,
+  situation_understood: SITUATION_LEVELS,
+}
+
+/** Map exactly one requested question's raw answer to the defensive JevAnswer shape. */
+function mapAnswer(name: QuestionName, raw: unknown, providerMetadata: unknown): JevAnswer {
+  const confidence = readCalibratedConfidence(providerMetadata, name)
+  const legend = SCORE_LEGENDS[name]
+  if (legend !== undefined) return mapScoreAnswer(name, raw, legend, confidence)
+  if (name === 'action') return mapChoiceAnswer(name, raw, confidence)
+  return mapBooleanAnswer(name, raw, confidence)
+}
+
+function member(source: unknown, key: string): unknown {
+  if (typeof source !== 'object' || source === null) return undefined
+  return (source as Record<string, unknown>)[key]
+}
+
+function readNumber(source: unknown, key: string): number | null {
+  const value = member(source, key)
+  return typeof value === 'number' ? value : null
+}
+
+function readString(source: unknown, key: string): string | null {
+  const value = member(source, key)
+  return typeof value === 'string' ? value : null
+}
+
+function readNumberRecord(source: unknown, key: string): Record<string, number> | null {
+  const value = member(source, key)
+  if (typeof value !== 'object' || value === null) return null
+  const out: Record<string, number> = {}
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (typeof entryValue === 'number') out[entryKey] = entryValue
+  }
+  return out
+}
+
+/**
+ * TypeSafe's calibrated per-question confidence lives in
+ * `providerMetadata.typesafe.confidence[questionId]`. Shape-checked, never trusted.
+ */
+function readCalibratedConfidence(providerMetadata: unknown, name: string): number | null {
+  const typesafe = member(providerMetadata, 'typesafe')
+  const confidence = member(typesafe, 'confidence')
+  const value = member(confidence, name)
+  return typeof value === 'number' ? value : null
+}
+
+function readUsage(usage: unknown): JevUsage | null {
+  if (typeof usage !== 'object' || usage === null) return null
+  return {
+    inputTokens: readNumber(usage, 'inputTokens'),
+    outputTokens: readNumber(usage, 'outputTokens'),
+    totalTokens: readNumber(usage, 'totalTokens'),
+  }
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`
+  return safeJson(error)
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '<unserialisable>'
+  }
+}
+
+// ---------------------------------------------------------------------------
+// real policy: ai v7 experimental_evaluate -> typesafe-ai/jev
+// ---------------------------------------------------------------------------
+
+/** The proven gateway key location. Read-only; the value is never logged. */
+export const JEV_KEY_FILE = '/home/s0u7a/.config/kimaki-secrets/vercel-ai-gateway.key'
+
+export const DEFAULT_JEV_MODEL = 'typesafe-ai/jev'
+
+export interface KeyResolution {
+  key: string
+  /** human-readable description of where the key came from (never the key) */
+  origin: string
+}
+
+/**
+ * Resolve the gateway key from the 0600 file first, then the environment.
+ * Returns null when neither is present, which selects the fallback policy.
+ */
+export function resolveJevApiKey(): KeyResolution | null {
+  try {
+    const key = readFileSync(JEV_KEY_FILE, 'utf8').trim()
+    if (key.length > 0) return { key, origin: `file:${JEV_KEY_FILE}` }
+  } catch {
+    // fall through to the environment
+  }
+  const fromEnv = (process.env.AI_GATEWAY_API_KEY ?? '').trim()
+  if (fromEnv.length > 0) return { key: fromEnv, origin: 'env:AI_GATEWAY_API_KEY' }
+  return null
+}
+
+export interface JevPolicyOptions {
+  writer: JsonlWriter
+  /** null -> DEFAULT_JEV_MODEL / AI_GATEWAY_MODEL env override */
+  model: string | null
+  timeoutMs: number
+  maxRetries: number
+  /** how many times a 429 gateway rate limit is retried before giving up */
+  rateLimitRetries: number
+  /** linear backoff base: attempt N sleeps base * N (excluded from latencyMs) */
+  rateLimitBaseDelayMs: number
+  /** force the local deterministic policy even when a key is present */
+  forceFallback?: boolean
+}
+
+/**
+ * The AI SDK may wrap a 429 in an `AI_RetryError` (whose `lastError`/`errors`
+ * hold the real cause), so the detection has to walk the chain.
+ */
+function isRateLimitError(error: unknown, depth = 0): boolean {
+  if (depth > 4 || typeof error !== 'object' || error === null) return false
+  const record = error as Record<string, unknown>
+  if (record.statusCode === 429) return true
+  const name = record.name
+  if (typeof name === 'string' && name.includes('RateLimit')) return true
+  if (isRateLimitError(record.lastError, depth + 1)) return true
+  if (isRateLimitError(record.cause, depth + 1)) return true
+  const errors = record.errors
+  return Array.isArray(errors) && errors.some((entry) => isRateLimitError(entry, depth + 1))
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+/**
+ * Project the world state down to exactly the fields the policy reasons about.
+ *
+ * The full `WorldState` carries the sensor's own bookkeeping (inventory slots,
+ * raw terrain samples, entity positions, the whole subgoal history, the clock),
+ * which costs input tokens on every call without changing a single answer. The
+ * candidate ids and their labels already carry the executable detail, so this
+ * keeps the goal, the goal queue's current entry, the inventory counts, the
+ * nearest entities/blocks and the failure memory, and drops the rest.
+ */
+function toEvaluationState(state: WorldState): EvaluationState {
+  const compact = {
+    tick: state.tick,
+    self: {
+      position: state.self.position,
+      health: state.self.health,
+      food: state.self.food,
+      heldItem: state.self.heldItem,
+    },
+    inventory: state.inventory.counts,
+    entities: state.entities.slice(0, 6).map((entity) => ({
+      id: entity.id,
+      name: entity.name,
+      distance: entity.distance,
+      hostile: entity.hostile,
+    })),
+    blocks: state.blocks.map((block) => ({
+      kind: block.kind,
+      name: block.name,
+      position: block.position,
+      distance: block.distance,
+      inReach: block.inReach,
+      walkUp: block.hasAdjacentStandable,
+    })),
+    goal: {
+      description: state.goal.description,
+      targetItem: state.goal.targetItem,
+      requiredCount: state.goal.requiredCount,
+      haveCount: state.goal.haveCount,
+      progress: state.goal.progress,
+      complete: state.goal.complete,
+    },
+    goalQueue: {
+      empty: state.goalQueue.empty,
+      depth: state.goalQueue.depth,
+      current: state.goalQueue.current === null
+        ? null
+        : {
+            description: state.goalQueue.current.description,
+            targetItem: state.goalQueue.current.targetItem,
+            haveCount: state.goalQueue.current.haveCount,
+            requiredCount: state.goalQueue.current.requiredCount,
+          },
+    },
+    signals: {
+      failedCandidates: state.signals.failedCandidates,
+      escalationRecommended: state.signals.escalationRecommended,
+      lastFailureCode: state.signals.lastFailureCode,
+    },
+  }
+  // The AI SDK expects a plain JSON value; the compact object has no index
+  // signature, so round-trip it through JSON (no `any`, no ts-ignore).
+  return JSON.parse(JSON.stringify(compact)) as EvaluationState
+}
+
+class TypeSafeJevPolicy implements JevPolicy {
+  readonly kind = 'typesafe' as const
+  readonly model: string
+  readonly keyOrigin: string
+  private readonly writer: JsonlWriter
+  private readonly timeoutMs: number
+  private readonly maxRetries: number
+  private readonly rateLimitRetries: number
+  private readonly rateLimitBaseDelayMs: number
+
+  constructor(options: JevPolicyOptions & { key: KeyResolution }) {
+    this.writer = options.writer
+    this.timeoutMs = options.timeoutMs
+    this.maxRetries = options.maxRetries
+    this.rateLimitRetries = options.rateLimitRetries
+    this.rateLimitBaseDelayMs = options.rateLimitBaseDelayMs
+    this.keyOrigin = options.key.origin
+    this.model = options.model ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    // The gateway provider reads AI_GATEWAY_API_KEY at request time.
+    process.env.AI_GATEWAY_API_KEY = options.key.key
+  }
+
+  async decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult> {
+    const callId = randomUUID()
+    const requested = request.questionNames ?? QUESTION_NAMES
+    const questions = buildQuestions(request.candidates, requested)
+    let attempt = 0
+    let rateLimitWaitMs = 0
+    for (;;) {
+      if (signal?.aborted === true) throw new JevPolicyError(`aborted before attempt ${attempt + 1}`)
+      const attemptStart = Date.now()
+      const timeoutSignal = AbortSignal.timeout(this.timeoutMs)
+      const abortSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
+      try {
+        const response = await evaluate({
+          model: this.model,
+          state: toEvaluationState(request.state),
+          questions,
+          abortSignal,
+          maxRetries: this.maxRetries,
+        })
+        const latencyMs = Date.now() - attemptStart
+        const answers: Record<string, JevAnswer> = {}
+        for (const name of requested) {
+          answers[name] = mapAnswer(name, response.answers[name], response.providerMetadata)
+        }
+        const usage = readUsage(response.usage)
+        const record: JevCallRecord = {
+          record: 'jev-call',
+          callId,
+          ts: new Date().toISOString(),
+          policy: this.kind,
+          model: this.model,
+          stage: request.stage,
+          latencyMs,
+          rateLimitRetries: attempt,
+          rateLimitWaitMs,
+          state: request.state,
+          questions,
+          response: { model: this.model, usage, answers },
+          error: null,
+        }
+        this.writer.write(record)
+        return { callId, policy: this.kind, source: 'jev', model: this.model, latencyMs, usage, answers }
+      } catch (error) {
+        const message = describeError(error)
+        if (attempt < this.rateLimitRetries && isRateLimitError(error)) {
+          attempt += 1
+          const delayMs = this.rateLimitBaseDelayMs * attempt
+          rateLimitWaitMs += delayMs
+          this.writer.write({
+            record: 'jev-retry',
+            callId,
+            ts: new Date().toISOString(),
+            attempt,
+            delayMs,
+            totalWaitMs: rateLimitWaitMs,
+            error: message,
+          } satisfies JevRetryRecord)
+          await sleep(delayMs)
+          continue
+        }
+        const record: JevCallRecord = {
+          record: 'jev-call',
+          callId,
+          ts: new Date().toISOString(),
+          policy: this.kind,
+          model: this.model,
+          stage: request.stage,
+          latencyMs: Date.now() - attemptStart,
+          rateLimitRetries: attempt,
+          rateLimitWaitMs,
+          state: request.state,
+          questions,
+          response: null,
+          error: message,
+        }
+        this.writer.write(record)
+        throw new JevPolicyError(message)
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// fallback policy: deterministic, clearly marked, no network
+// ---------------------------------------------------------------------------
+
+export const FALLBACK_MODEL = 'deterministic-local-fallback'
+
+/** A candidate that failed this many times recently is skipped by the fallback. */
+export const FALLBACK_FAILURE_LIMIT = 2
+
+function fallbackPriority(state: WorldState, candidates: readonly Candidate[]): Candidate | null {
+  const failed = state.signals.failedCandidates
+  const fresh = candidates.filter((candidate) => (failed[candidate.id] ?? 0) < FALLBACK_FAILURE_LIMIT)
+  const pool = fresh.length > 0 ? fresh : candidates
+  const mines = pool.filter((candidate) => candidate.kind === 'MINE' && candidate.meta.clearance !== true)
+  // prefer the goal item, then nearest (the generator already sorts by distance)
+  const preferred = mines.find((candidate) => candidate.targetName === state.goal.targetItem)
+  if (preferred !== undefined) return preferred
+  if (mines.length > 0) return mines[0] ?? null
+  const eat = pool.find((candidate) => candidate.kind === 'EAT')
+  if (eat !== undefined) return eat
+  const attack = pool.find((candidate) => candidate.kind === 'ATTACK')
+  if (attack !== undefined) return attack
+  const craft = pool.find((candidate) => candidate.kind === 'CRAFT')
+  if (craft !== undefined) return craft
+  const place = pool.find((candidate) => candidate.kind === 'PLACE')
+  if (place !== undefined) return place
+  const step = pool.find((candidate) => candidate.kind === 'STEP')
+  if (step !== undefined) return step
+  const move = pool.find((candidate) => candidate.kind === 'MOVE')
+  if (move !== undefined) return move
+  const clearance = pool.find((candidate) => candidate.kind === 'MINE' && candidate.meta.clearance === true)
+  if (clearance !== undefined) return clearance
+  const wait = pool.find((candidate) => candidate.kind === 'WAIT')
+  return wait ?? pool[0] ?? candidates[0] ?? null
+}
+
+function progressLevel(progress: number, complete: boolean): number {
+  if (complete) return 4
+  if (progress <= 0) return 0
+  if (progress < 0.25) return 1
+  if (progress < 0.5) return 2
+  if (progress < 1) return 3
+  return 4
+}
+
+function dangerLevel(health: number, nearestHazardDistance: number | null): number {
+  if (health <= 6 || (nearestHazardDistance !== null && nearestHazardDistance <= 2)) return 3
+  if (health <= 12) return 2
+  if (nearestHazardDistance !== null && nearestHazardDistance <= 3) return 1
+  return 0
+}
+
+class FallbackJevPolicy implements JevPolicy {
+  readonly kind = 'fallback' as const
+  readonly model = FALLBACK_MODEL
+  private readonly writer: JsonlWriter
+
+  constructor(options: JevPolicyOptions) {
+    this.writer = options.writer
+  }
+
+  async decide(request: JevRequest): Promise<JevResult> {
+    const callId = randomUUID()
+    const requestedAnswers = request.questionNames ?? QUESTION_NAMES
+    const questions = buildQuestions(request.candidates, requestedAnswers)
+    const startedAt = Date.now()
+
+    const chosen = fallbackPriority(request.state, request.candidates)
+    const nearestHazard = request.state.blocks.find((block) => block.kind === 'hazard')
+    const level = progressLevel(request.state.goal.progress, request.state.goal.complete)
+    const dangerScore = dangerLevel(request.state.self.health, nearestHazard?.distance ?? null)
+
+    // Deterministic answers: action confidence stays null (a rule-based pick is
+    // not a measurable distribution), while `danger` carries confidence 1 because
+    // the level is *computed* from mechanical state, not estimated. `note` tags
+    // the provenance so calibration can exclude the fallback from reliability
+    // diagrams (they join real Jev predictions to real outcomes only).
+    const note = 'deterministic-fallback'
+    const shouldRetreat = request.state.self.health <= 6 || (nearestHazard !== undefined && nearestHazard.distance <= 2)
+    const escalating = request.state.signals.escalationRecommended
+    const planValidLevel = escalating ? 1 : 4
+    const situationLevel = request.state.goalQueue.empty && !request.state.goal.complete ? 2 : 4
+
+    const allAnswers: Record<QuestionName, JevAnswer> = {
+      action: {
+        name: 'action',
+        type: 'choice',
+        value: chosen?.id ?? 'WAIT',
+        probability: 1,
+        confidence: null,
+        probabilities: chosen === null ? {} : { [chosen.id]: 1 },
+        legend: null,
+        note,
+      },
+      danger: {
+        name: 'danger',
+        type: 'score',
+        value: dangerScore,
+        probability: null,
+        confidence: 1,
+        probabilities: { [String(dangerScore)]: 1 },
+        legend: [...DANGER_LEVELS],
+        note: `${note}; level computed mechanically, certainty 1 by construction`,
+      },
+      should_retreat: {
+        name: 'should_retreat',
+        type: 'boolean',
+        value: shouldRetreat ? 1 : 0,
+        probability: shouldRetreat ? 1 : 0,
+        confidence: null,
+        probabilities: { true: shouldRetreat ? 1 : 0, false: shouldRetreat ? 0 : 1 },
+        legend: null,
+        note: `${note}; boolean P(true)`,
+      },
+      goal_progress: {
+        name: 'goal_progress',
+        type: 'score',
+        value: level,
+        probability: null,
+        confidence: 1,
+        probabilities: { [String(level)]: 1 },
+        legend: [...GOAL_PROGRESS_LEVELS],
+        note: `${note}; level computed mechanically, certainty 1 by construction`,
+      },
+      plan_still_valid: {
+        name: 'plan_still_valid',
+        type: 'score',
+        value: planValidLevel,
+        probability: null,
+        confidence: 1,
+        probabilities: { [String(planValidLevel)]: 1 },
+        legend: [...PLAN_VALID_LEVELS],
+        note: `${note}; level computed mechanically, certainty 1 by construction`,
+      },
+      situation_understood: {
+        name: 'situation_understood',
+        type: 'score',
+        value: situationLevel,
+        probability: null,
+        confidence: 1,
+        probabilities: { [String(situationLevel)]: 1 },
+        legend: [...SITUATION_LEVELS],
+        note: `${note}; level computed mechanically, certainty 1 by construction`,
+      },
+      goal_blocked: {
+        name: 'goal_blocked',
+        type: 'boolean',
+        value: escalating ? 1 : 0,
+        probability: escalating ? 1 : 0,
+        confidence: null,
+        probabilities: { true: escalating ? 1 : 0, false: escalating ? 0 : 1 },
+        legend: null,
+        note: `${note}; boolean P(true)`,
+      },
+      strategy_change_needed: {
+        name: 'strategy_change_needed',
+        type: 'boolean',
+        value: escalating ? 1 : 0,
+        probability: escalating ? 1 : 0,
+        confidence: null,
+        probabilities: { true: escalating ? 1 : 0, false: escalating ? 0 : 1 },
+        legend: null,
+        note: `${note}; boolean P(true)`,
+      },
+    }
+
+    const answers: Record<string, JevAnswer> = {}
+    for (const name of requestedAnswers) answers[name] = allAnswers[name]
+
+    const latencyMs = Date.now() - startedAt
+    const record: JevCallRecord = {
+      record: 'jev-call',
+      callId,
+      ts: new Date().toISOString(),
+      policy: this.kind,
+      model: this.model,
+      stage: request.stage,
+      latencyMs,
+      rateLimitRetries: 0,
+      rateLimitWaitMs: 0,
+      state: request.state,
+      questions,
+      response: { model: this.model, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, answers },
+      error: null,
+    }
+    this.writer.write(record)
+    return {
+      callId,
+      policy: this.kind,
+      source: 'fallback',
+      model: this.model,
+      latencyMs,
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      answers,
+    }
+  }
+}
+
+export interface CreateJevPolicyResult {
+  policy: JevPolicy
+  /** which implementation was selected, and why */
+  reason: string
+}
+
+/**
+ * THE swap point. A resolvable gateway key selects the real policy; otherwise
+ * the marked deterministic fallback keeps the loop testable today.
+ */
+export function createJevPolicy(options: JevPolicyOptions): JevPolicy {
+  const resolved = options.forceFallback === true ? null : resolveJevApiKey()
+  if (resolved !== null) {
+    return new TypeSafeJevPolicy({ ...options, key: resolved })
+  }
+  return new FallbackJevPolicy(options)
+}
+
+export function writeOutcome(writer: JsonlWriter, record: Omit<JevOutcomeRecord, 'record' | 'ts'>): void {
+  writer.write({ record: 'jev-outcome', ts: new Date().toISOString(), ...record } satisfies JevOutcomeRecord)
+}

@@ -1,0 +1,140 @@
+// index.ts - the Mineflayer PLUGIN entry point.
+//
+// Mineflayer is designed for `bot.loadPlugin()`; pathfinder and PVP are external
+// plugins and so is this. Nothing here forks, patches or vendors Mineflayer -
+// it is the published `bot.loadPlugin` extension API only.
+//
+//   mineflayer -> pathfinder/tool plugins -> jev-agent plugin -> brain/policy/executor
+//
+// Usage:
+//   bot.loadPlugin(pathfinder)
+//   bot.loadPlugin(jevAgent)
+//   bot.jev.setOptions({ goalCount: 3 })
+//   bot.jev.start()
+import type { Bot } from 'mineflayer'
+import { defaultJevAgentOptions, JevController } from './controller.ts'
+import type { EscalationReason, JevAgentOptions, RunSummary } from './controller.ts'
+import { buildWorldState, defaultSensorOptions, makeGoal, toVec3 } from './state.ts'
+import type { AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'
+import { defaultCandidateOptions, generateCandidates } from './candidates.ts'
+import type { Candidate, CandidateKind, CandidateOptions } from './candidates.ts'
+import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
+import type { CalibrationEntry, DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionResultLog, DecisionSubgoalLog } from './decisionlog.ts'
+import { createRecipeIndex } from './crafting.ts'
+import type { CraftOp, CraftPlanResult, RecipeIndex, RecipeIngredient, RecipeVariant } from './crafting.ts'
+import { emptyGoalQueueState, GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
+import type { GoalKind, GoalOrigin, GoalQueueState, GoalQueueStateLog, GoalStatus, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import { ACTING_KINDS, guardCandidate, guardDecision } from './policy.ts'
+import type { GuardCode, GuardContext, GuardPhase, GuardResult, InFlightAction } from './policy.ts'
+import { Executor, defaultExecutorOptions } from './executor.ts'
+import type { ActuationMode, ClaimResult, CurrentAction, ExecutionResult, ExecutorHooks, ExecutorOptions, FailureCode, PathCompletedEvent, PathFailedEvent } from './executor.ts'
+import { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, applyDangerGate, dangerRequiresSafeAction, gateDanger, gateScore, preserveCurrentSafeAction } from './gating.ts'
+import type { DangerGateDecision, DangerGateOutcome, GatedScore } from './gating.ts'
+import { createJevPolicy, CORE_QUESTION_NAMES, decisionIdFrom, EventLogger, JsonlWriter, questionNamesFor, QUESTION_NAMES, shouldRetreatFrom, STALL_QUESTION_NAMES, THREAT_QUESTION_NAMES, writeOutcome } from './jev.ts'
+import type { JevAnswer, JevCallRecord, JevOutcomeRecord, JevPolicy, JevQuestionType, JevRequest, JevResult, JevSource, JevUsage, QuestionName, QuestionSetKind } from './jev.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions } from './scheduler.ts'
+import type { DecisionTrigger, SchedulerOptions as JevSchedulerOptions, TriggerEvent } from './scheduler.ts'
+import { buildStubPlan, evaluateSummonConditions, FixedPlanSystem2, LLM_SUMMON_REASONS, M1_PLAN_JSON, planFromJson, SINGLE_SHOT_PLANNER_MODEL, STUB_HORIZON_TAIL, STUB_SYSTEM2_MODEL, StubSystem2 } from './system2.ts'
+import type { LlmSummonReason, PlanJson, PlanSubgoalJson, System2Brain, System2Objective, System2Outcome, System2Plan, System2PlanRecord, System2PlanRequest, SummonConditions } from './system2.ts'
+
+declare module 'mineflayer' {
+  interface Bot {
+    jev: JevController
+  }
+}
+
+const registered = new WeakSet<Bot>()
+
+/**
+ * Register the agent on a bot. Side-effect free: it only attaches the
+ * controller, so the caller decides when to `start()` (typically on 'spawn').
+ */
+export function jevAgent(bot: Bot): void {
+  if (registered.has(bot)) return
+  registered.add(bot)
+  bot.jev = new JevController(bot, defaultJevAgentOptions)
+}
+
+export default jevAgent
+
+export { JevController, defaultJevAgentOptions, Executor, defaultExecutorOptions }
+export { buildWorldState, makeGoal, toVec3, defaultSensorOptions }
+export { generateCandidates, defaultCandidateOptions, ACTING_KINDS }
+export { guardCandidate, guardDecision }
+export { createJevPolicy, EventLogger, JsonlWriter, writeOutcome, decisionIdFrom }
+export { QUESTION_NAMES, CORE_QUESTION_NAMES, THREAT_QUESTION_NAMES, STALL_QUESTION_NAMES, questionNamesFor, shouldRetreatFrom }
+export type { QuestionName, QuestionSetKind }
+export { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, defaultSchedulerOptions }
+export { DANGER_ACTIONABLE_SCORE, DANGER_CONFIDENCE_THRESHOLD, dangerRequiresSafeAction, gateDanger, gateScore }
+export { applyDangerGate, preserveCurrentSafeAction }
+export { attachResult, makeDecisionRecord, stableStateHash }
+export { GoalQueue, emptyGoalQueueState, toGoalQueueStateLog }
+export { StubSystem2, buildStubPlan, evaluateSummonConditions, LLM_SUMMON_REASONS, STUB_HORIZON_TAIL, STUB_SYSTEM2_MODEL }
+export { FixedPlanSystem2, SINGLE_SHOT_PLANNER_MODEL, M1_PLAN_JSON, planFromJson }
+export { createRecipeIndex }
+export type { CraftOp, CraftPlanResult, RecipeIndex, RecipeIngredient, RecipeVariant }
+export type { PlanJson, PlanSubgoalJson, DecisionLlmLog, DecisionSubgoalLog }
+export type {
+  JevAgentOptions,
+  RunSummary,
+  EscalationReason,
+  WorldState,
+  SelfState,
+  GoalState,
+  AgentSignals,
+  BlockState,
+  EntityState,
+  Vec3Json,
+  Candidate,
+  CandidateKind,
+  CandidateOptions,
+  GuardCode,
+  GuardContext,
+  GuardPhase,
+  GuardResult,
+  InFlightAction,
+  ExecutionResult,
+  ActuationMode,
+  ClaimResult,
+  CurrentAction,
+  ExecutorHooks,
+  ExecutorOptions,
+  FailureCode,
+  PathCompletedEvent,
+  PathFailedEvent,
+  JevPolicy,
+  JevRequest,
+  JevResult,
+  JevAnswer,
+  JevSource,
+  JevUsage,
+  JevCallRecord,
+  JevOutcomeRecord,
+  JevQuestionType,
+  DecisionRecord,
+  DecisionJevLog,
+  DecisionLlmResummonLog,
+  DecisionResultLog,
+  CalibrationEntry,
+  DecisionTrigger,
+  TriggerEvent,
+  JevSchedulerOptions,
+  GatedScore,
+  DangerGateDecision,
+  DangerGateOutcome,
+  GoalKind,
+  GoalOrigin,
+  GoalStatus,
+  GoalQueueState,
+  GoalQueueStateLog,
+  PlannedGoal,
+  QueuedGoal,
+  LlmSummonReason,
+  System2Brain,
+  System2Objective,
+  System2Outcome,
+  System2Plan,
+  System2PlanRecord,
+  System2PlanRequest,
+  SummonConditions,
+}

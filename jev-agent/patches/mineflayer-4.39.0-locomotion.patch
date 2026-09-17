@@ -1,0 +1,78 @@
+--- a/node_modules/mineflayer/lib/plugins/physics.js
++++ b/node_modules/mineflayer/lib/plugins/physics.js
+@@ -37,5 +37,8 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+   let lastSentYaw = null
+   let lastSentPitch = null
++  // [jev-agent patch] Ticks since the last position packet; vanilla sends one
++  // before this reaches 20 (LocalPlayer.sendPosition's positionReminder).
++  let positionReminder = 0
+   let doPhysicsTimer = null
+   let lastPhysicsFrameTime = null
+   let shouldUsePhysics = false
+@@ -138,7 +141,24 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     bot._client.write('position_look', lastSent)
+     bot.emit('move', oldPos)
+   }
+ 
++  // [jev-agent patch] Answer a clientbound teleport with `position_look` that
++  // carries onGround=false and no horizontal collision, WITHOUT mutating
++  // `lastSent`. Vanilla answers a forced move the same way; leaving `lastSent`
++  // on the pre-teleport value makes the next tick send the teleported position
++  // once, after which ordinary movement is accepted and the rubber-band loop
++  // stops. Ported from mineflayer PR #4063 (`sendTeleportReply`).
++  function sendTeleportReply (position, yaw, pitch) {
++    if (!Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) return
++    const oldPos = new Vec3(lastSent.x, lastSent.y, lastSent.z)
++    bot._client.write('position_look', {
++      x: position.x,
++      y: position.y,
++      z: position.z,
++      yaw,
++      pitch,
++      onGround: false,
++      flags: { onGround: false, hasHorizontalCollision: false } // 1.21.3+
++    })
++    bot.emit('move', oldPos)
++  }
++
+   function deltaYaw (yaw1, yaw2) {
+     let dYaw = (yaw1 - yaw2) % PI_2
+     if (dYaw < -PI) dYaw += PI_2
+@@ -179,14 +199,21 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+     // Only send a position update if necessary, select the appropriate packet
+-    const positionUpdated = lastSent.x !== position.x || lastSent.y !== position.y || lastSent.z !== position.z ||
+-      // Send a position update every second, even if no other update was made
+-      // This function rounds to the nearest 50ms (or PHYSICS_INTERVAL_MS) and checks if a second has passed.
+-      (Math.round((now - lastSent.time) / PHYSICS_INTERVAL_MS) * PHYSICS_INTERVAL_MS) >= 1000
++    // [jev-agent patch] Vanilla sends a position packet when the squared
++    // displacement exceeds 4e-8 (i.e. 2e-4 blocks) or after 20 ticks without
++    // one. Mineflayer's exact inequality re-sent a packet for sub-threshold
++    // physics jitter, which the server rejects while pressed against terrain.
++    positionReminder++
++    const dx = position.x - lastSent.x
++    const dy = position.y - lastSent.y
++    const dz = position.z - lastSent.z
++    const positionUpdated = dx * dx + dy * dy + dz * dz > 4e-8 || positionReminder >= 20
+     const lookUpdated = lastSent.yaw !== yaw || lastSent.pitch !== pitch
+@@ -198,7 +226,8 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+       bot._client.write('flying', {
+         onGround: bot.entity.onGround,
+         flags: { onGround: bot.entity.onGround, hasHorizontalCollision: undefined } // 1.21.3+
+       })
+     }
+ 
++    if (positionUpdated) positionReminder = 0 // [jev-agent patch]
+     lastSent.onGround = bot.entity.onGround // onGround is always set
+   }
+@@ -443,7 +472,10 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
+       return
+     }
+ 
+-    sendPacketPositionAndLook(pos, newYaw, newPitch, bot.entity.onGround)
++    // [jev-agent patch] Answer a teleport without recording the server's target
++    // in `lastSent`; otherwise the next tick compares against the wrong origin
++    // and re-sends a server-rejected position packet every tick.
++    sendTeleportReply(pos, newYaw, newPitch)
+ 
+     shouldUsePhysics = true
+     bot.jumpTicks = 0

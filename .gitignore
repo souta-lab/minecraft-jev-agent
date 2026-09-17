@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Runtime logs and traces
+logs/
+*.log
+*.jsonl
+runner.out
+
+# Resident runtime state / generated bundles
+buddy-state.json
+buddy-ledger.json
+buddy-driver/data/
+
+# `data/` dirs hold run artifacts; keep only the jev-agent *.mts probe sources
+data/
+!jev-agent/data/
+jev-agent/data/*
+!jev-agent/data/*.mts
+
+# Secrets and local-only server config (NEVER commit)
+server.properties
+*.key
+.env
+.env.*
+accounts.json
+.config/kimaki-secrets/
+
+# Minecraft server / world / launcher artifacts
+*.jar
+world/
+world*/
+bds/
+mc-world-backups/
+mc-server/
+launch/data/
+launch/data-*/
+launch/game-*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
