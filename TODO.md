@@ -58,8 +58,28 @@
 ・ゲート: tools/verify-issue12.mjs / verify-issue13.mjs / verify-mercury.mjs
 ```
 
-## 進捗ログ（一次証拠つき）
+## モデル運用（ユーザー指示 2026-09-18）
 ```
+現状: /home/s0u7a/.config/opencode/opencode.jsonc
+  "model":       "opencode-go/deepseek-v4.1-flash"
+  "small_model": "opencode-go/deepseek-v4.1-flash"
+  provider.commandcode → baseURL https://api.commandcode.ai/provider/v1
+  （プラグイン: @brainervirus/opencode-commandcode）
+
+指示: opencode-go の利用制限に達したら **Command Code の deepseek v4.1 flash に切り替える**
+切替手順（制限に達した時点で実行。実行中セッションが落ちる可能性があるので事前には書き換えない）:
+  1) opencode.jsonc の "model" と "small_model" を `commandcode/deepseek-v4.1-flash` に変更
+     （プロバイダIDが異なる場合は `opencode models | grep -i deepseek` 等で正確なIDを確認）
+  2) 認証が未設定なら Command Code のキーを設定（キーは絶対にログへ出さない）
+  3) 変更後は opencode を再起動し、`opencode models` で選択可能なことを確認
+  4) 切替えた事実と理由を本ファイルに追記（どちらのモデルで走ったかを後から追えるように）
+回避策（制限到達前にやれること）:
+  ・サブエージェントは category を分けて安いモデル（quick/unspecified-low）へ寄せる
+  ・大きい調査は librarian/explore に委譲し、メインの文脈消費を減らす
+  ・長時間の自走は「タスク起動 → 通知待ち」に徹し、ポーリングしない
+```
+
+## 進捗ログ（一次証拠つき）```
 2026-09-18 02:26 JST — ★節目: 掘削系マーカーが初めて非ゼロになった
   issue12 ゲート 4/6（3/6 から前進）: precond=363 ladderPrereq=216 maxTicks=202 gensLast5min=2 rawIron=0
   TOOL_CHOICE=4  DIG_PATH=4  JUMP_ATTEMPT=24  DESCEND_LIMIT=1  STAIRCASE=1
