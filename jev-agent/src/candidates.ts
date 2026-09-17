@@ -191,6 +191,7 @@ export function generateCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
+  const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
 
   switch (goalKind) {
     case 'craft':
@@ -203,7 +204,7 @@ export function generateCandidates(
       candidates.push(...placeCandidates(state, options, focusItem))
       break
     default:
-      candidates.push(...mineCandidates(state, options, focusItem))
+      candidates.push(...mineCandidates(state, options, focusItem, descendTargetY))
       break
   }
 
@@ -332,7 +333,12 @@ export function generateCandidates(
  *  - a block with no walk-up access is a tunnel target, and the generator emits
  *    a DESCEND staircase/tunnel step toward the nearest one.
  */
-function mineCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
+function mineCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+  descendTargetY: number | null = null,
+): Candidate[] {
   const mineable = state.blocks.filter(
     (block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore',
   )
@@ -447,7 +453,7 @@ function mineCandidates(state: WorldState, options: CandidateOptions, focusItem:
   if (moveActions.length > 0) candidates.push(...stepCutCandidates(state, options))
   candidates.push(...moveActions)
   if (candidates.length === 0) {
-    candidates.push(...descendCandidates(state, options, focusItem, tunnelTargets))
+    candidates.push(...descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY))
   }
   return candidates
 }
@@ -577,8 +583,9 @@ function descendCandidates(
   options: CandidateOptions,
   focusItem: string | null,
   tunnelTargets: readonly BlockState[],
+  descendTargetY: number | null = null,
 ): Candidate[] {
-  if (focusItem === null) return []
+  if (focusItem === null && descendTargetY === null) return []
   if (state.signals.descendLimitReached === true) return []
   const steps = (state.descent ?? []).filter((step) => step.safe)
   if (steps.length === 0) return []
@@ -590,16 +597,16 @@ function descendCandidates(
     z: Math.floor(state.self.position.z),
   }
   const knownStoneY = state.signals.knownStoneY ?? null
-  const goalIsUnderground = STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined
-  const stoneGoal = STONE_YIELDS.has(focusItem)
+  const goalIsUnderground =
+    focusItem !== null && (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined)
+  const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
   const targetBelow = target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
-  // Positive evidence for a downward step: a visible target below, a remembered
-  // stone/ore level below, or a stone-collection goal whose surface stone is
-  // absent (the explicit staircase case from #4). "No target" alone is not
-  // evidence (#9); ore goals keep the stricter rule so they cannot dig blindly.
-  const downEvidence = targetBelow || (target === null && (knownStoneBelow || stoneGoal))
-  const wantDown = targetBelow || (target === null && downEvidence)
+  // #41: an explicit descend predicate is positive evidence for a downward step
+  // even when no ore is visible, and (unlike a collect goal) it does not need one.
+  const descendToY = descendTargetY !== null && state.self.position.y > descendTargetY
+  const downEvidence = descendToY || targetBelow || (target === null && (knownStoneBelow || stoneGoal))
+  const wantDown = descendToY || targetBelow || (target === null && downEvidence)
   const hasTunnelTarget = tunnelTargets.length > 0
   const oscillate = state.signals.digOscillate === true
   const fixedDir = state.signals.digDir ?? null
@@ -618,7 +625,7 @@ function descendCandidates(
   let bestScore = Number.POSITIVE_INFINITY
   for (const step of pool) {
     if (failureCount(state.signals.failedCandidates, descendId(step)) >= DESCEND_FAILURE_LIMIT) continue
-    const modePenalty = step.mode === 'down' ? (wantDown ? 0 : 2) : wantDown && hasTunnelTarget ? 2 : 0
+    const modePenalty = step.mode === 'down' ? (wantDown ? 0 : 2) : wantDown && (hasTunnelTarget || descendTargetY !== null) ? 2 : 0
     let alignment = 0
     if (target !== null) {
       const tdx = target.position.x - feet.x
@@ -666,7 +673,9 @@ function descendCandidates(
         dir: best.dir,
         dx: best.dx,
         dz: best.dz,
-        focusItem,
+        focusItem: focusItem ?? 'unknown',
+        predicate: descendTargetY === null ? 'none' : `descend_to:Y=${descendTargetY}`,
+        descendTargetY: descendTargetY ?? 'none',
         digBlockName: best.digName ?? 'unknown',
         toolReason: choice.reason,
         staircase: oscillate || (best.mode === 'down' && fixedCount === 0),

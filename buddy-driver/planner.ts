@@ -35,6 +35,8 @@ import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import { matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
+import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
+import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
@@ -373,25 +375,48 @@ export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory):
 
 const ORE_RUNG_ITEM: Record<string, string> = { raw_iron: 'raw_iron', diamond: 'diamond' }
 
+const ORE_DIMENSION = 'minecraft:overworld'
+
 const ORE_HOME: Record<string, { item: string; ore: string; dimension: string }> = {
   raw_iron: { item: 'raw_iron', ore: 'iron_ore', dimension: 'minecraft:overworld' },
   diamond: { item: 'diamond', ore: 'diamond_ore', dimension: 'minecraft:overworld' },
 }
 
 /**
- * A bounded descent goal derived from the live inventory. Ore rungs need positive
- * evidence of a level below (`#9`); a stone-collection goal is that evidence
- * (`#4`), so digging resumes instead of the `collect raw_iron` WAIT wedge.
- * `requiredCount` is current+8 so the goal is never instantly complete.
+ * A predicate goal (#41): success is `position.y <= targetY` in `dimension`,
+ * evaluated by code. Descending is a spatial predicate, not an item collection,
+ * so the ore descent no longer charges the bot a cobblestone quota it stalls on.
  */
-export function stoneDescentGoal(counts: Counts): PlannedGoal {
-  const cobble = counts['cobblestone'] ?? 0
+export function descendGoal(targetY: number, item: string | null, dimension: string | null = ORE_DIMENSION): PlannedGoal {
   return {
-    kind: 'collect',
-    description: `collect ${cobble + 8} x cobblestone (descend toward ore levels)`,
-    targetItem: 'cobblestone',
-    requiredCount: cobble + 8,
+    kind: 'descend',
+    description: `descend_to:Y=${targetY}`,
+    targetItem: item,
+    requiredCount: 1,
+    targetY,
+    dimension,
   }
+}
+
+/** Known ore coordinates, derived from durable WorldMemory (#14). */
+export function knownOrePositions(world: ResidentWorldMemory): KnownOrePosition[] {
+  return (world.knownResources ?? [])
+    .filter((resource) => resource.kind === 'ore')
+    .map((resource) => ({
+      name: resource.name,
+      y: resource.y,
+      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+    }))
+}
+
+/**
+ * The ore-descent predicate goal: a couple of blocks below the deepest known
+ * coordinate of the target ore when WorldMemory has one (#14), else the canonical
+ * ore band. `requiredCount` is 1 because success is the predicate, not a count.
+ */
+export function oreDescentGoal(item: string, world: ResidentWorldMemory): PlannedGoal {
+  const targetY = oreDescentTargetY(item, knownOrePositions(world), ORE_DIMENSION)
+  return descendGoal(targetY, item)
 }
 
 function needsOreDescent(rungId: string, counts: Counts): boolean {
@@ -426,21 +451,25 @@ function withFurnacePrereq(goals: PlannedGoal[], counts: Counts, placedFurnacesN
   return prereq.length === 0 ? goals : [...prereq, ...goals]
 }
 
-/** A rung's goals, with the inventory-derived descent prerequisite prepended for
- * ore rungs whose ore is not held yet (#12). */
+/** A rung's goals, with the predicate descent prerequisite prepended for
+ * ore rungs whose ore is not held yet (#12, #41). */
 export function rungGoalsWithPrereq(rung: Rung, c: Counts, w: ResidentWorldMemory): PlannedGoal[] {
   const base = rung.goals(c, w)
   if (!needsOreDescent(rung.id, c)) return base
-  return [stoneDescentGoal(c), ...base]
+  const oreItem = ORE_RUNG_ITEM[rung.id]
+  if (oreItem === undefined) return base
+  return [oreDescentGoal(oreItem, w), ...base]
 }
 
-function withOreDescent(goals: PlannedGoal[], counts: Counts): PlannedGoal[] {
-  const first = goals[0]
-  const oreItem = first?.targetItem ?? null
-  if (oreItem === null || !Object.values(ORE_RUNG_ITEM).includes(oreItem)) return goals
+function withOreDescent(goals: PlannedGoal[], counts: Counts, world: ResidentWorldMemory): PlannedGoal[] {
+  const oreItem =
+    goals
+      .map((goal) => goal.targetItem)
+      .find((item): item is string => typeof item === 'string' && Object.values(ORE_RUNG_ITEM).includes(item)) ?? null
+  if (oreItem === null) return goals
   if (!needsOreDescent(oreItem, counts)) return goals
-  if (goals.some((goal) => goal.targetItem === 'cobblestone')) return goals
-  return [stoneDescentGoal(counts), ...goals]
+  if (goals.some((goal) => goal.kind === 'descend')) return goals
+  return [oreDescentGoal(oreItem, world), ...goals]
 }
 
 /**
@@ -682,7 +711,7 @@ export function buildBodyChangeOption(
   if (oreRung !== undefined) for (const goal of planGoals(oreRung)) pushUnique(goal)
   const front = unsat[0]
   if (front !== undefined && front.id !== oreRung?.id) for (const goal of planGoals(front)) pushUnique(goal)
-  if (goals.length === 0) pushUnique(stoneDescentGoal(counts))
+  if (goals.length === 0) pushUnique(oreDescentGoal('raw_iron', world))
   return { id: `body_change_${front?.id ?? 'upkeep'}`, title: `body-changing replan toward ${oreRung?.id ?? front?.id ?? 'ore'}`, goals }
 }
 
@@ -702,10 +731,10 @@ export function goalsForStrategy(
   const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x cobblestone`, targetItem: 'cobblestone', requiredCount: n })
   const iron = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x raw_iron`, targetItem: 'raw_iron', requiredCount: n })
   const chosen = (goals: PlannedGoal[]): PlannedGoal[] =>
-    withFurnacePrereq(withOreDescent(goals, counts), counts, opts?.placedFurnacesNear)
+    withFurnacePrereq(withOreDescent(goals, counts, world), counts, opts?.placedFurnacesNear)
   switch (strategy) {
     case 'descend_to_y16':
-      return rank < 1 ? ladderFront : chosen([stone(24)])
+      return rank < 1 ? ladderFront : chosen([descendGoal(16, 'raw_iron'), iron(3)])
     case 'explore_cave':
       return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(16)]) : chosen([stone(12), iron(3)])
     case 'branch_mine':

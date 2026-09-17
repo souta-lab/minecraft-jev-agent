@@ -18,7 +18,7 @@
 //
 // The queue is deliberately plain data so it can be: handed to Jev inside the
 // world state, written to the decision log, and unit-tested with no bot at all.
-export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'unknown'
+export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'unknown'
 
 /** Where a goal came from, for the decision log / debugging. */
 export type GoalOrigin = 'bootstrap' | 'llm' | 'mechanical'
@@ -34,6 +34,12 @@ export interface QueuedGoal {
   /** item this goal targets, when the kind is `collect` */
   targetItem: string | null
   requiredCount: number
+  /**
+   * Predicate goal (#41): success is `position.y <= targetY`, not an item count.
+   * Absent for item-counted goals and for ledgers written before #41.
+   */
+  targetY?: number | null
+  dimension?: string | null
   /** how many relevant items the bot held when the goal was created */
   startCount: number
   /** live progress toward `requiredCount` (collect goals) */
@@ -52,6 +58,9 @@ export interface PlannedGoal {
   description: string
   targetItem?: string | null
   requiredCount?: number
+  /** Predicate goal (#41): complete when `position.y <= targetY` in `dimension`. */
+  targetY?: number | null
+  dimension?: string | null
   detail?: string
 }
 
@@ -76,6 +85,7 @@ export interface GoalQueueCurrentLog {
   targetItem: string | null
   haveCount: number
   requiredCount: number
+  targetY: number | null
 }
 
 export interface GoalQueueStateLog {
@@ -101,6 +111,7 @@ export function toGoalQueueStateLog(state: GoalQueueState): GoalQueueStateLog {
             targetItem: state.current.targetItem,
             haveCount: state.current.haveCount,
             requiredCount: state.current.requiredCount,
+            targetY: state.current.targetY ?? null,
           },
     pending: state.goals.filter((goal) => goal.status === 'pending').map((goal) => goal.id),
   }
@@ -193,6 +204,8 @@ export class GoalQueue {
         description: plan.description,
         targetItem: plan.targetItem ?? null,
         requiredCount: Math.max(1, Math.floor(plan.requiredCount ?? 1)),
+        targetY: plan.targetY ?? null,
+        dimension: plan.dimension ?? null,
         startCount: 0,
         haveCount: 0,
         status: 'pending',
