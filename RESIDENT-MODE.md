@@ -190,3 +190,63 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
     4. ログで可視化: `CLIMB_ATTEMPT height=2` / `CLIMB_FAIL` / `DETOUR` / `STAIRCUT ok=true cuts=1`。無言で登り続けるのを禁止。
   根拠: 本プロジェクトで実測済みの物理定数（jump apex 1.2522）。過去に `STEP`/`stair-cut` ＋ 接触前ジャンプで 2.25m の段を攻略した実績があるため、**迂回か階段化のみ**が正解。
 
+---
+
+## 13-0. 優先順位（2026-09-18 外部レビュー改訂 — §13 を SUPERSEDE）
+
+> この節は §13（LLM誘導プランナを先に）を **supersede** する。LLM プランナ（Jev shadow → authority）は **P5**。それまでは決定論フォールバックを維持し、常駐の原子性を先に証明する。上位段の gate を満たすまで次に進まない。
+
+- **P0（gate）: ビルドを緑に戻す。** `typecheck` clean / `audit-test` 9/9 / `step-pipeline-test` 6/6 / `guard-test` 12/12 / `gating-test` 6/6 / `loop-test` 7/7 / `m1-test` 5/5 / `movement-patch:check` ok。緑でない限り、他の検証は意味を持たない。
+- **P1: 常駐 generation swap を原子的にする。**
+  - HOST→generation 契約は **DATA-ONLY**。`{x,y,z}` DTO だけを永続化し、Block / Entity / Vec3 / Window / Recipe / Bot インスタンスを一切保存しない。必要な箇所で `new Vec3(...)` により再水和する。
+  - **structural smoke と mission preflight を分離**。structural smoke（contract version / import / 必須メソッド / snapshot schema / sensor 可読 / listener 数）は **空 plan・完了ゴール 0 で PASS** しなければならない。hot reload は goal の有無に依存しない。
+  - **ACTUATION LEASE**: HOST が `activeGenerationId` を所有し、executor は副作用のある bot 呼び出しの直前に lease を assert する。swap 順は `build → import → structural smoke → prepare(new) → old quiesce → snapshot → new attach → new healthcheck → ACTION LEASE SWITCH（commit 点）→ old dispose`。commit 前に新世代は不可逆操作をできない。rollback は lease を旧世代へ戻して resume する。
+  - **state ownership**: 永続ファイルの唯一の writer は HOST。generation は mutation proposal / snapshot を返し、HOST が commit する。`{ schemaVersion, revision, worldEpoch, generationId }` を保持し、独立ファイルより単一の原子的スナップショットを優先する。
+  - **WorldMemory の名前空間**: mined / discovered ores / crafting tables / explored regions を **server identity + dimension + worldEpoch** で名前空間化する。同一 seed の世界リセットでも別世界であり、古い座標を漏らしてはならない。
+  - **SERVER TRUTH と DURABLE SEMANTIC STATE の分離**: position / health / inventory / entities / open window は SERVER TRUTH。reload / reconnect 後は sensor から再観測し、JSON から復元しない。durable 側は完了サブゴール / 既知 station 座標 / 枯渇地点 / 探索済み領域 / 既知鉱石 / 失敗記憶 / 高レベル plan。
+  - **検証証拠**: 最低 5 回の実リロード（`RELOAD ok=true` かつ hash 変化。`skipped=unchanged` は数えない）、reconnect 0、reload 間で listener 数が安定、さらに freeze → context dump → reload → resume を 1 サイクル。run ごとに machine-readable な acceptance record（runId, gitCommit/generationHash, dependency versions, worldEpoch, seed, bot username, start position, mode, goalComplete/wedge/reconnects/reloads/listenerLeak）を出す。
+- **P2: freeze → dump → reload → resume を 1 回通す。**（P1 の検証に含めてよい）
+- **P3: M1 を常駐の golden regression にする**（world reset なし・reconnect なし）。
+- **P4: 2-block movement fixture。** terrain graph や大きな movement subsystem を作らない。薄い `TraversalFailure` 記憶（obstacleSignature, from, toward, wallHeight, failureKind, attempts, lastSeenAt）と順序 `stock pathfinder detour → resource policy が許せば STEP/stair-cut → candidate を抑制して replan` のみ。同じ面で hop-hop-hop を繰り返さない。
+- **P5: Jev を shadow モードで入れてから authority。** 決定論フォールバックは常駐が証明されるまで維持。
+- **P6: M2 ラダーを再開。**
+
+やらないこと: terrain graph を作らない / Mineflayer movement patch を拡張しない（現行 2-change subset、upstream PR #4063 は open のまま）/ Jev を複雑化しない / `need_llm` を制御信号として復活させない / LLM planning を今は足さない / 大規模 refactor・`any`・`@ts-ignore`・commit・server restart をしない。
+
+### craft 根本原因の来歴（訂正）
+`mineflayer@4.39.0` の 3x3 クラフトが**エラーも item も出さずに無言で失敗する**現象について、来歴を分離する:
+- **upstream `PrismarineJS/mineflayer#3906`** は「同種/類似の silent 3x3 crafting failure」として参照する（上流の報告）。
+- **stale `stateId`** という機序は **本プロジェクトのローカル診断**であり、1.21.11 の packet trace（`jev-agent/logs/probe-craft-diag2.log`）から導いたもの。upstream の説明として帰属させない。
+
+---
+
+## 13. LLM誘導プランナ（M2→M4 の自走方針）
+
+### 方針（ユーザー認識）
+低レベル（採掘・クラフト・製錬・移動）は概ね回るようになった。残る律速は**上位の方向づけ**である。
+「作業台が作れるようになった後は、上位LLMが次の方向性を誘導するだけでよく、M2が通りLLMが正しく誘導できれば**無指示でM4まで素直に行ける**」というのがユーザーの読み。実装はこれを満たすように組む。
+
+### 現状の欠落
+常駐モードは `forceFallbackPolicy=true`（決定論のみ）で動いており、**戦略を決める主体が存在しない**。
+そのため「鉄鉱石をどう探すか」のような方針依存の局面で前進が止まる（例: `rung=raw_iron` で探索が停滞）。
+
+### 設計
+1. **プランナは buddy-driver 側に置く**（`planner.ts` → `generation-entry.ts` に配線）。jev-agent は読み取り専用のままimportする。
+2. **LLMに返させるのは有界な計画データのみ**（ゴール一覧・選択・スコア）。**行動権限は System One のまま**（不変条件を維持）。
+3. **質問は有界**にする（自由会話にしない）。既存の Jev 経路 `experimental_evaluate({model,state,questions})` を再利用し、state は在庫・位置・次元・達成済みマイルストーン・既知の作業台/資源・直近の失敗に限定した圧縮サマリにする。
+4. **決定論ラダーはフォールバック**として常備。LLM失敗・レート制限時は即座に切替え、`PLAN source=fallback` を記録（エージェントを止めない）。
+5. **キャッシュ**: 状態ハッシュでプランをキャッシュし、同一状態の重複呼び出しを排除（レート制限対策）。コスト目標 <$0.001/plan（既存実測 ~$0.00018/call）。
+6. **再計画の契機**: キューが空／ゴールが不可能と判定／スタック検出（頻度は上限つき）。
+7. **ゴールテンプレートをM4まで用意**: 鉄装備→ダイヤ→ダイヤツルハシ→ネザーポータル＋火打石→ネザー移動→ブレイズロッド→エンダーパール→エンダーアイ→要塞→ジ・エンド→ドラゴン討伐。現行 executor で実行可能なものから段階的に対応し、未対応は future として明示。
+8. **ログ**: `PLAN source=llm|fallback goals=[...] cost=<usd> ms=<n> reason=<queue_empty|impossible|stuck|start>` と `MILESTONE name=... done=...`。
+9. **決定論モードの保証**: LLM無効時は `llm.called==false` を維持（既存の不変条件）。
+
+### 検証（これが出たら達成）
+```
+1) PLAN source=llm がゴール一覧つきで出て、その後の ACTION/MILESTONE がその計画に一致して進む
+2) LLM無効時は PLAN source=fallback で走行が継続（llm.called==false）
+3) ソース変更 → RELOAD ok=true ms=<2s>、再接続なしで新プランナが有効
+4) プラン単価が実測で記録され妥当（目標 <$0.001）
+5) ハートビートが継続し、在庫が増え続ける（前進している）
+```
+

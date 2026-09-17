@@ -6,6 +6,7 @@
 - 本ドキュメントは 2026-09-18 00:03 JST 時点のスナップショット。この時点で **リポジトリは赤い**（typecheck が通らない、2 つのテストがロード不能）。同時に **常駐ホストが生きたプロセスとして走っている**（`node agent-runner.mts`, PID 150528）。つまり「実装中」の状態を写している。
 - 検証できなかった主張は `UNVERIFIED: ...` と明記した。プロンプト側の主張でも、実ファイルと食い違うものは実測を優先し、差分を本文に書いた。
 - ファイルパスは `/home/s0u7a/mc-ai/` 起点。ログは `jev-agent/logs/` 起点。
+- **優先順位は `RESIDENT-MODE.md` §13-0（P0 green build → P1 atomic swap → P2 freeze/resume → P3 M1 golden → P4 2-block fixture → P5 Jev shadow→authority → P6 M2 ladder）が正典であり、本文書 §7 の順序に優先する。**
 
 ---
 
@@ -178,48 +179,51 @@ WORLD リセットの履歴（枯渇対策）:
 
 CORE + trigger 別 question 集合、boolean 0.30/0.70 帯、action-only authority（`target` question 廃止）、trigger Map + priority drain、`policyEpoch`/`candidateSetHash`、単調サブゴール台帳、`resourceClass.ts`、`PlanOp continue|patch|replace|abort`。
 
-### 5.6 craft-at-station: 修復が agent レベルで確認できた（ただしビルドは赤）
+### 5.6 craft-at-station: FIXED・agent レベルで実証済み（ビルド緑）
 
-- `logs/probe-craft-diag2.log`（2026-09-17 23:49）: `[probe] AGENT-PATH result= {"status":"done","detail":"crafted 1x wooden_pickaxe","gained":1}`。
-- `logs/m1-diag2-console.log`（23:57）: `CRAFTDBG item=wooden_pickaxe ... table=crafting_table@17,68,4 ... requiresTable=true` の後 `[queue] subgoal COMPLETE [craft 1 x wooden_pickaxe] -> [collect 16 x cobblestone]`。つまり station craft は通った。
-- ただしこれは新しい `src/craftWindow.ts` を使う実装で、その最新コードは今コンパイルできない（§6.1）。
+- `logs/probe-direct3.log`（2026-09-18 00:24）: `[probe] DIRECT craftAtTable ok` と
+  `[probe] AGENT-PATH result= {"status":"done","detail":"crafted 1x wooden_pickaxe","gained":1}`。
+  同一 bot で `src/craftWindow.ts` を直接呼んだ場合と、`Executor.runCraft` 経由の両方が成功。
+- `logs/m1-craftfix-console.log`（00:19, AI_M2Z, live）:
+  `[executor] craft recipe wooden_pickaxe result=... requiresTable=true table=crafting_table@-10,67,11`
+  の後 `[queue] subgoal COMPLETE [craft 1 x wooden_pickaxe] ... have=1 inventory={...wooden_pickaxe:1}`。
+  つまり live pipeline でも station craft が inventory に着地した。
+- 追加で見つけた後処理バグ: prismarine-recipe は pickaxe の `outShape` に `null` を返すため、
+  `updateOutShape` の `=== undefined` 判定をすり抜けて `null.length` で throw していた
+  （`probe-direct.log` の stack が証拠）。`== null` に修正し `probe-direct3.log` で解消を確認。
 
-### 5.7 テスト現況（重要: 緑ではない）
+### 5.7 テスト現況（2026-09-18 00:28 時点、全緑）
 
-2026-09-18 00:03 時点の実測:
 | テスト | 結果 |
 |---|---|
-| `npm run typecheck` | **FAIL**（`src/craftWindow.ts` と `data/probe-craft.mts` にエラー） |
+| `npm run typecheck` | PASS（clean、exit 0） |
 | `npm run guard-test` | PASS 12/12 |
 | `npm run gating-test` | PASS 6/6 |
 | `npm run loop-test` | PASS 7/7 |
 | `npm run m1-test` | PASS 5/5 |
-| `npm run audit-test` | **ロード失敗**（`prismarine-windows does not provide an export named 'Window'`） |
-| `npm run step-pipeline-test` | **ロード失敗**（同上） |
+| `npm run audit-test` | PASS 9/9 |
+| `npm run step-pipeline-test` | PASS 6/6 |
 | `npm run movement-patch:check` | PASS（`0 hunk(s), 5 already present; verified 4/4 checks`） |
 
-`audit-test` は history 上 9/9、`step-pipeline-test` は 6/6 まで到達している（`M2-PROGRESS.md`）。今ロードできないのは `src/executor.ts` が新規 `src/craftWindow.ts` を import しており、その module の ESM export が壊れているため。typecheck エラーの実文:
-```
-src/craftWindow.ts(59,16): error TS2349: This expression is not callable.
-  Type 'typeof import(".../prismarine-item/index")' has no call signatures.
-data/probe-craft.mts(...): error TS2345 / TS2532 ...
-```
-以前の typecheck では `src/executor.ts(1170,44): error TS2304: Cannot find name 'CraftRecipeLike'` 等も出ていた（import 行が入る前の過渡状態）。
+`craftWindow.ts` の ESM 問題は `import type { Window }`（型のみ）と
+`createRequire(import.meta.url)('prismarine-item')`（CJS default の call signature）で解消した。
+診断用 `data/probe-craft.mts` は役目を終えたため削除済み。
 
 ---
 
 ## 6. 現在の故障・ブロッカー（正直に、証拠付き）
 
-### 6.1 BLOCKER（最優先）: ビルドが赤く、ladder を再実証できない
+### 6.1 RESOLVED（2026-09-18 00:28）: ビルド緑・ladder 再走可能
 
-2026-09-18 00:01〜00:03 の live edit で `src/craftWindow.ts` が導入され、`executor.ts` がそれを import した。現時点で:
-- `prismarine-windows` に named export `Window` が無い（runtime ESM error）。
-- `prismarine-item` の default import に call signature が無い（typecheck TS2349）。
-- この結果 `audit-test` と `step-pipeline-test` がロード不能、typecheck 不通過。
+`src/craftWindow.ts` の ESM import 2 件を修正（`Window` は type-only、`prismarine-item` は
+`createRequire`）。`npm run typecheck` clean、全 7 スイートが緑（§5.7）。M1/M2 の再走を
+塞いでいた赤は解消した。
 
-これは「craft を直すための新実装が着地途中」の状態であり、**M1/M2 の regression 再走も、常駐の smoke test も、この赤が消えるまで意味ある検証にならない**。
+残る実ブロッカーはコードではなく **world 枯渇と移動**である（§6.2 以降）。`data/seed-scan.mts`
+の再走で surface stone `exposed+standable=0`、`collect 3 x log` も canopy/pickup の既知問題で
+0/3 になる。fresh-world phase を要求するが、server の再起動/再設定は本タスクの禁止事項。
 
-### 6.2 craft at a placed station: 以前は「gained 0 → wedge」だった（history）、今は赤のため未再実証
+### 6.2 craft at a placed station: FIXED（live 実証済み）
 
 以前の full run 実測（`logs/m2-phase1e-console.log`, AI_M2P5, 170 s, 2026-09-17 23:28）:
 - `[m2] stopped=wedge success=false durationMs=125072 ticks=22`
@@ -229,7 +233,12 @@ data/probe-craft.mts(...): error TS2345 / TS2532 ...
 
 診断された根本原因（プロンプトの推測「window を開く/同じ table 参照を渡す」より深い）: `mineflayer@4.39.0` の `bot.craft(recipe, count, table)` は module global の `stateId` closure に依存して `window_click` を送る。crafting window を開いている間も server は player inventory（window 0）を同期し続け、mineflayer がその packet stateId を global に取り込むため、craft click が **エラーも無く item も出さずに無視される**（upstream `PrismarineJS/mineflayer#3906`）。executor は `gained 0` を見て wedge する。
 
-現在の修復方針（`src/craftWindow.ts`, 実装中）: ウィンドウを明示所有する。`bot.openBlock(table)` で開き、click の直前に `bot._syncWindow(win)`（stateId=-1 の no-op click で server に full window state を再送させる）を強制し、mineflayer `craft.js` と同じ recipe 配置アルゴリズムを自前で実行、最後に `closeWindow`。agent レベルの diag では成功済み（§5.6）。ただし §6.1 の通り今は import できない。
+修復（`src/craftWindow.ts`, 着地済み）: ウィンドウを明示所有する。`bot.openBlock(table)` で開き、
+click の直前に `bot._syncWindow(win)`（stateId=-1 の no-op click で server に full window state を
+再送させる）を強制し、mineflayer `craft.js` と同じ recipe 配置アルゴリズムを自前で実行、最後に
+`closeWindow`。`Executor.runCraft` は table 経由の craft だけこの経路を使い、2x2 inventory craft は
+stock の `bot.craft` のまま（実証済み）。失敗時は recipe/delta/inventory/window を添えて
+`verify_failed` で clean に落ち、wed げない。
 
 教訓: 「open container + 正しい table 参照」だけでは足りない。**stateId の stale 化**まで見ないと再発する。
 
@@ -348,7 +357,7 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 
 | パス | 内容 |
 |---|---|
-| `/home/s0u7a/mc-ai/ARCHITECTURE.md` | 本ドキュメント（2026-09-18 00:03 JST 版） |
+| `/home/s0u7a/mc-ai/ARCHITECTURE.md` | 本ドキュメント（2026-09-18 00:30 JST 版） |
 | `/home/s0u7a/mc-ai/RESIDENT-MODE.md` | 常駐化の正典要件（所有権、bundling 訂正、generation 契約、state store、制御チャネル、freeze/resume、検証、運用ノート） |
 | `/home/s0u7a/mc-ai/MILESTONES.md` | M0〜M4 のマイルストーン台帳（559 行） |
 | `/home/s0u7a/mc-ai/M2-PROGRESS.md` | M2 の全試行履歴（649 行） |
@@ -356,6 +365,10 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 | `/home/s0u7a/mc-ai/jev-agent/logs/m1-fresh2-console.log` | M1 PASS 4/4（fresh world, `llm.called==false 0/40`, verifiedDigs=22, wedge 0） |
 | `/home/s0u7a/mc-ai/jev-agent/logs/m2-phase1e-console.log` | craft-at-station が gained 0 で wedge した full run（2/14, wedge 64546ms） |
 | `/home/s0u7a/mc-ai/jev-agent/logs/m1-diag2-console.log` | craft 成功（subgoal COMPLETE）と、2-block 面 hop ループ wedge 67715ms の最新実測 |
+| `/home/s0u7a/mc-ai/jev-agent/src/craftWindow.ts` | table craft を明示所有（`openBlock` + `_syncWindow` + recipe 配置 + `closeWindow`）。`#3906` の stateId stale 化対策 |
+| `/home/s0u7a/mc-ai/jev-agent/logs/probe-direct3.log` | `DIRECT craftAtTable ok` と `AGENT-PATH result ... crafted 1x wooden_pickaxe gained=1`（修復の直接証拠） |
+| `/home/s0u7a/mc-ai/jev-agent/logs/m1-craftfix-console.log` | live M1: `craft recipe wooden_pickaxe ... table=crafting_table@-10,67,11` → `subgoal COMPLETE ... have=1` |
+| `/home/s0u7a/mc-ai/jev-agent/logs/probe-direct.log` | `outShape:null` の `null.length` stack（後処理バグの証拠） |
 | `/home/s0u7a/mc-ai/jev-agent/logs/probe-craft-diag2.log` | `AGENT-PATH result ... crafted 1x wooden_pickaxe gained=1` と window stateId の packet trace |
 | `/home/s0u7a/mc-ai/jev-agent/logs/m2-phase1b-console.log` | `phase ledger restored` の実測 |
 | `/home/s0u7a/mc-ai/jev-agent/data/seed-scan.mts`, `logs/seed-scan-2024.log` | seed 2024 の資源スキャン（oak 207+ standable、surface stone 枯渇） |
@@ -380,7 +393,22 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 
 ## 10. 更新メタ
 
-- timestamp: 2026-09-18 00:03 JST（`date` 実測は 2026-09-18 00:02:07 JST、その後 typecheck 再測定）
+- timestamp: 2026-09-18 00:30 JST
+- author: Sisyphus-Junior（craft-at-station ブロッカーを着地。`src/craftWindow.ts` 新規、
+  `src/executor.ts` の `runCraft` を table 経路のみ明示所有へ）
+- 変更ファイル: `src/craftWindow.ts`（新規）、`src/executor.ts`（import + `runCraft`）、
+  `ARCHITECTURE.md`、`MILESTONES.md`、`M2-PROGRESS.md`。診断用 `data/probe-craft.mts` は削除。
+- 検証区分:
+  - **VERIFIED（実測で確認）**: typecheck clean、guard 12/12、gating 6/6、loop 7/7、
+    m1-test 5/5、audit-test 9/9、step-pipeline-test 6/6、movement-patch:check ok(4/4)。
+    `craftAtTable` 直接 + Executor 経由の pickaxe craft 成功（`probe-direct3.log`）。
+    live M1 の `craft wooden_pickaxe` subgoal が `have=1` で完了（`m1-craftfix-console.log`）。
+  - **UNVERIFIED / NOT REACHED**: M1 4/4 の完全再走は world 枯渇（surface stone
+    `exposed+standable=0`）と canopy/pickup の移動問題により未達。M2 の charcoal / iron_ingot /
+    iron_pickaxe は前段（log 収集と cobblestone 採掘）が同じ理由で未到達。server 再起動/
+    再設定は禁止のため fresh-world phase を起こせていない。
+
+- timestamp（履歴）: 2026-09-18 00:03 JST（`date` 実測は 2026-09-18 00:02:07 JST、その後 typecheck 再測定）
 - author: Sisyphus-Junior（M2 セッションからの handoff。コードは変更していない。読み取りと検証のみ）
 - 検証区分:
   - **VERIFIED（実測で確認）**: §3 の環境（jar sha256、Java 21.0.12.1、server.properties）、§5.1 M1 PASS の各数値、§5.6 craft diag 成功、§5.7 テスト現況、§6.1 のコンパイル/ロードエラー、§6.3 の hop ループと 2-block fail-fast、§6.5 の RELOAD ログ・`reloads:0`・`craftingTables=9`、§6.4 の join/PLACE 集計、movement patch check 4/4。

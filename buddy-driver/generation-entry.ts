@@ -6,213 +6,131 @@
 // can never be wired to stale sibling modules.
 //
 // The generation wraps the battle-tested `JevController` (System One remains the
-// sole action authority). The long-horizon planner is a deterministic, inventory-
-// aware "resident ladder" supplied once via the canonical single-shot contract,
-// so the goal-queue ledger restore path is preserved across reloads/reconnects.
+// sole action authority). The long-horizon brain is `PlannerBrain` (planner.ts):
+// it answers the controller's replan summons with a BOUNDED goal list, choosing
+// between the deterministic capability ladder and a batched Jev evaluation. The
+// controller consumes the goal queue exactly as before, so the ledger and the
+// reload path are untouched.
 import type { Bot } from 'mineflayer'
 import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
-import { FixedPlanSystem2 } from '../jev-agent/src/system2.ts'
-import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import { matchesResourceClass } from '../jev-agent/src/resourceClass.ts'
-import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
+import {
+  PlannerBrain,
+  bestPickaxeRank,
+  buildLadder,
+  buildPlanOptions,
+  computeFrontier,
+  debugFrontier,
+  has,
+  inventoryCounts,
+  resolvePlannerMode,
+} from './planner.ts'
 import type {
+  ActuationLease,
   GenerationContext,
   GenerationStatus,
+  MissionPreflightResult,
   ResidentGeneration,
   ResidentWorldMemory,
+  ServerTruth,
+  StructuralSmokeResult,
   Vec3Json,
+  WorldMemoryDelta,
 } from './resident-types.ts'
 
-export const CONTRACT_VERSION = 1
+export const CONTRACT_VERSION = 2
 
-type Counts = Record<string, number>
+// jev-agent/ is imported read-only, so the lease is asserted at the generation
+// boundary: the bot handed to the controller is a Proxy that refuses every
+// side-effecting method while this generation is not the active lease owner.
+// Before the host's commit point the new generation cannot cause irreversible
+// actions; after it the old generation cannot.
+const MUTATING_BOT_METHODS = new Set<string>([
+  'dig',
+  'placeBlock',
+  'equip',
+  'unequip',
+  'activateItem',
+  'deactivateItem',
+  'activateBlock',
+  'clickWindow',
+  'putSelectedItemRange',
+  'craft',
+  'openBlock',
+  'openContainer',
+  'closeWindow',
+  'setControlState',
+  'clearControlStates',
+  'look',
+  'lookAt',
+  'toss',
+  'tossStack',
+  'chat',
+  'setQuickBarSlot',
+  'consume',
+  'updateSign',
+  'useOn',
+  'swingArm',
+])
 
-function inventoryCounts(bot: Bot): Counts {
-  const counts: Counts = {}
-  for (const item of bot.inventory.items()) counts[item.name] = (counts[item.name] ?? 0) + item.count
-  return counts
+function withActuationLease(bot: Bot, lease: ActuationLease, id: string): Bot {
+  const assert = (what: string): void => lease.assertActive(id, what)
+  let pathfinderProxy: object | null = null
+  return new Proxy(bot, {
+    get(target, prop, receiver): unknown {
+      const value = Reflect.get(target, prop, receiver) as unknown
+      if (typeof prop === 'string' && typeof value === 'function' && MUTATING_BOT_METHODS.has(prop)) {
+        return (...args: unknown[]): unknown => {
+          assert(`bot.${prop}`)
+          return (value as (...a: unknown[]) => unknown).apply(target, args)
+        }
+      }
+      if (prop === 'pathfinder' && value !== null && typeof value === 'object') {
+        if (pathfinderProxy === null) {
+          pathfinderProxy = new Proxy(value, {
+            get(pfTarget, pfProp, pfRecv): unknown {
+              const pfValue = Reflect.get(pfTarget, pfProp, pfRecv) as unknown
+              if (
+                (pfProp === 'setGoal' || pfProp === 'setMovements' || pfProp === 'stop' || pfProp === 'goto') &&
+                typeof pfValue === 'function'
+              ) {
+                return (...args: unknown[]): unknown => {
+                  assert(`pathfinder.${String(pfProp)}`)
+                  return (pfValue as (...a: unknown[]) => unknown).apply(pfTarget, args)
+                }
+              }
+              return pfValue
+            },
+          })
+        }
+        return pathfinderProxy
+      }
+      return value
+    },
+  }) as Bot
 }
 
-function countClass(counts: Counts, cls: ResourceClass): number {
-  let total = 0
-  for (const [name, n] of Object.entries(counts)) {
-    if (matchesResourceClass(name, cls)) total += n
+// Loud-fail craft capability check: a future Mineflayer bump that removes the
+// private `_syncWindow` API must fail loudly here instead of silently degrading
+// to the stock `bot.craft` silent-3x3-failure path (#3906).
+const TESTED_MINEFLAYER = '4.39.0'
+function assertCraftCapability(bot: Bot, log: (event: string, detail?: Record<string, unknown>) => void): void {
+  const syncable = bot as unknown as { _syncWindow?: unknown }
+  if (typeof syncable._syncWindow !== 'function') {
+    const version = (bot as unknown as { version?: string }).version ?? 'unknown'
+    log('CRAFT_COMPAT', { ok: false, mineflayerTested: TESTED_MINEFLAYER, serverVersion: version, api: '_syncWindow' })
+    throw new Error(
+      `craftWindow unsupported: bot._syncWindow is not a function (tested with mineflayer ${TESTED_MINEFLAYER}, connected to ${version}). ` +
+        'Refusing to run: stock bot.craft silently ignores 3x3 crafting clicks (PrismarineJS/mineflayer#3906).',
+    )
   }
-  return total
+  log('CRAFT_COMPAT', { ok: true, mineflayerTested: TESTED_MINEFLAYER, api: '_syncWindow' })
 }
 
-function has(counts: Counts, name: string): boolean {
-  return (counts[name] ?? 0) > 0
-}
-
-function bestPickaxeRank(counts: Counts): number {
-  // 0 none, 1 wooden, 2 stone, 3 iron, 4 diamond+
-  const order = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe']
-  let rank = 0
-  for (let i = 0; i < order.length; i += 1) {
-    if (has(counts, order[i]!)) rank = Math.max(rank, i + 1)
-  }
-  return rank
-}
-
-function woodUnits(counts: Counts): number {
-  return countClass(counts, 'log') + Math.floor(countClass(counts, 'planks') / 4)
-}
-
-interface Rung {
-  id: string
-  satisfied: (c: Counts, w: ResidentWorldMemory) => boolean
-  goals: (c: Counts, w: ResidentWorldMemory) => PlannedGoal[]
-}
-
-function climb(rungId: string, c: Counts, ingots: number, have: number, crafts: Array<[string, number]>): PlannedGoal[] {
-  const out: PlannedGoal[] = []
-  const missing = Math.max(0, ingots - have)
-  if (missing > 0) {
-    out.push({ kind: 'collect', description: `collect ${missing} x raw_iron`, targetItem: 'raw_iron', requiredCount: missing })
-    out.push({ kind: 'smelt', description: `smelt ${missing} x iron_ingot`, targetItem: 'iron_ingot', requiredCount: missing })
-  }
-  for (const [item, n] of crafts) {
-    if ((c[item] ?? 0) < n) out.push({ kind: 'craft', description: `craft ${n} x ${item}`, targetItem: item, requiredCount: n })
-  }
-  if (out.length === 0) {
-    out.push({ kind: 'craft', description: `${rungId}: craft iron_chestplate`, targetItem: 'iron_chestplate', requiredCount: 1 })
-  }
-  return out
-}
-
-/** The ordered capability ladder. Each rung states its own completion in inventory/world terms. */
-const RUNGS: readonly Rung[] = [
-  {
-    id: 'wood',
-    // A pickaxe already implies the wood stage is done; the charcoal rung asks
-    // for its own 2 logs, so do not re-collect 3 logs just to satisfy this rung.
-    satisfied: (c) => woodUnits(c) >= 3 || bestPickaxeRank(c) >= 1,
-    goals: () => [{ kind: 'collect', description: 'collect 3 x log', targetItem: 'log', requiredCount: 3 }],
-  },
-  {
-    id: 'crafting_table',
-    satisfied: (c, w) => has(c, 'crafting_table') || w.craftingTables.length > 0,
-    goals: () => [{ kind: 'craft', description: 'craft 1 x crafting_table', targetItem: 'crafting_table', requiredCount: 1 }],
-  },
-  {
-    id: 'wooden_pickaxe',
-    satisfied: (c) => bestPickaxeRank(c) >= 1,
-    goals: () => [{ kind: 'craft', description: 'craft 1 x wooden_pickaxe', targetItem: 'wooden_pickaxe', requiredCount: 1 }],
-  },
-  {
-    id: 'cobblestone',
-    // Stone is legitimately spent on the furnace and stone_pickaxe; a stone
-    // pickaxe proves enough cobblestone was mined even when the count is low.
-    satisfied: (c) => countClass(c, 'stone') >= 12 || bestPickaxeRank(c) >= 2,
-    goals: () => [{ kind: 'collect', description: 'collect 12 x stone', targetItem: 'stone', requiredCount: 12 }],
-  },
-  {
-    id: 'furnace',
-    satisfied: (c, w) => has(c, 'furnace') || w.furnaces.length > 0,
-    goals: () => [
-      { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1 },
-      { kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 },
-    ],
-  },
-  {
-    id: 'stone_pickaxe',
-    satisfied: (c) => bestPickaxeRank(c) >= 2,
-    goals: () => [{ kind: 'craft', description: 'craft 1 x stone_pickaxe', targetItem: 'stone_pickaxe', requiredCount: 1 }],
-  },
-  {
-    id: 'charcoal',
-    satisfied: (c) => has(c, 'charcoal') || has(c, 'coal'),
-    goals: () => [
-      { kind: 'collect', description: 'collect 2 x log (fuel)', targetItem: 'log', requiredCount: 2 },
-      { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 },
-    ],
-  },
-  {
-    id: 'raw_iron',
-    satisfied: (c) => (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 3,
-    goals: (c) => [
-      { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: Math.max(1, 3 - ((c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0))) },
-    ],
-  },
-  {
-    id: 'iron_ingot',
-    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3,
-    goals: (c) => [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: Math.max(1, 3 - (c['iron_ingot'] ?? 0)) }],
-  },
-  {
-    id: 'iron_pickaxe',
-    satisfied: (c) => bestPickaxeRank(c) >= 3,
-    goals: () => [{ kind: 'craft', description: 'craft 1 x iron_pickaxe', targetItem: 'iron_pickaxe', requiredCount: 1 }],
-  },
-  {
-    id: 'diamond',
-    satisfied: (c) => has(c, 'diamond'),
-    goals: () => [{ kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 }],
-  },
-  {
-    id: 'diamond_pickaxe',
-    satisfied: (c) => has(c, 'diamond_pickaxe'),
-    goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
-  },
-  {
-    id: 'iron_gear',
-    satisfied: (c) =>
-      has(c, 'iron_chestplate') && has(c, 'iron_leggings') && has(c, 'iron_helmet') && has(c, 'iron_boots') && has(c, 'iron_sword'),
-    goals: (c) =>
-      climb(
-        'iron_gear',
-        c,
-        26,
-        (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0),
-        [
-          ['iron_chestplate', 1],
-          ['iron_leggings', 1],
-          ['iron_helmet', 1],
-          ['iron_boots', 1],
-          ['iron_sword', 1],
-        ],
-      ),
-  },
-]
-
-interface Ladder {
-  goals: PlannedGoal[]
-  rungIndex: number
-  rungId: string
-}
-
-function buildLadder(counts: Counts, world: ResidentWorldMemory): Ladder {
-  const goals: PlannedGoal[] = []
-  let rungIndex = RUNGS.length
-  let rungId = 'complete'
-  for (let i = 0; i < RUNGS.length; i += 1) {
-    const rung = RUNGS[i]!
-    if (rung.satisfied(counts, world)) continue
-    if (rungIndex === RUNGS.length) {
-      rungIndex = i
-      rungId = rung.id
-    }
-    for (const goal of rung.goals(counts, world)) goals.push(goal)
-  }
-  if (goals.length === 0) {
-    // Everything on the ladder is satisfied: keep the resident meaningfully busy
-    // with a repeatable resource goal instead of idling.
-    goals.push({ kind: 'collect', description: 'collect 16 x raw_iron (resident upkeep)', targetItem: 'raw_iron', requiredCount: 16 })
-  }
-  return { goals, rungIndex, rungId }
-}
-
-function computeFrontier(counts: Counts, world: ResidentWorldMemory): { rungIndex: number; rungId: string } {
-  for (let i = 0; i < RUNGS.length; i += 1) {
-    const rung = RUNGS[i]!
-    if (!rung.satisfied(counts, world)) return { rungIndex: i, rungId: rung.id }
-  }
-  return { rungIndex: RUNGS.length, rungId: 'complete' }
-}
+export { debugFrontier }
 
 function roundPos(p: Vec3Json): string {
   return `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`
@@ -274,7 +192,7 @@ const PICKAXE_RANK: Record<string, number> = {
  * live world or inventory (consumables like ingots/logs are excluded - those are
  * legitimately spent and their rungs express the current front, not history).
  */
-function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Counts, world: ResidentWorldMemory): boolean {
+function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Record<string, number>, world: ResidentWorldMemory): boolean {
   const done = new Set<string>()
   for (const goal of ledger.goals ?? []) {
     if (goal.status === 'done' && typeof goal.targetItem === 'string') done.add(goal.targetItem)
@@ -287,7 +205,7 @@ function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Counts, world: Resid
   return true
 }
 
-function resolveLedgerPath(ctx: GenerationContext, counts: Counts, world: ResidentWorldMemory): string | null {
+function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number>, world: ResidentWorldMemory): string | null {
   const path = ctx.ledgerPath
   if (!existsSync(path)) return path
   try {
@@ -303,16 +221,19 @@ function resolveLedgerPath(ctx: GenerationContext, counts: Counts, world: Reside
   }
 }
 
-export function debugFrontier(counts: Record<string, number>, world: ResidentWorldMemory): { rungIndex: number; rungId: string } {
-  return computeFrontier(counts, world)
-}
-
 export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const startedAt = Date.now()
-  const { bot } = ctx
-  const world = ctx.state.worldMemory
+  assertCraftCapability(ctx.bot, ctx.log)
+  const world: ResidentWorldMemory = {
+    craftingTables: ctx.worldMemory.craftingTables.map((p) => ({ ...p })),
+    furnaces: ctx.worldMemory.furnaces.map((p) => ({ ...p })),
+    mined: { ...ctx.worldMemory.mined },
+    discoveredOres: [...ctx.worldMemory.discoveredOres],
+    traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+  }
+  const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const bot = withActuationLease(ctx.bot, ctx.lease, id)
 
-  // --- WorldMemory: register existing stations/ores instead of re-deriving them.
   const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64)
   const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32)
   const ores = scanBlockPositions(
@@ -323,11 +244,22 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   )
   const newTables = mergeStations(world.craftingTables, tables)
   const newFurnaces = mergeStations(world.furnaces, furnaces)
+  const discoveredOres: string[] = []
   for (const ore of ores) {
     const name = bot.blockAt(new Vec3(ore.x, ore.y, ore.z))?.name ?? 'unknown_ore'
     if (!world.discoveredOres.includes(name)) world.discoveredOres.push(name)
+    if (!discoveredOres.includes(name)) discoveredOres.push(name)
   }
+  const proposal: WorldMemoryDelta = {
+    craftingTables: tables,
+    furnaces,
+    discoveredOres,
+    traversalFailures: world.traversalFailures,
+  }
+  // The generation proposes; the HOST is the only writer that commits.
+  ctx.proposeWorldMemory(proposal)
   ctx.log('WORLDMEMORY', {
+    worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
     craftingTables: world.craftingTables.length,
     newCraftingTables: newTables,
     furnaces: world.furnaces.length,
@@ -335,10 +267,17 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: world.discoveredOres,
   })
 
-  const counts = inventoryCounts(bot)
+  const counts = inventoryCounts(ctx.bot)
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
   const ladder = buildLadder(counts, world)
-  const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+
+  // The planner IS the env switch: deterministic keeps the original single-shot
+  // contract, so every decision record truthfully reports `llm.called == false`.
+  // `llm` turns the controller's exception paths into bounded replans.
+  const plannerMode = resolvePlannerMode()
+
+  // Durable plan cache (survives hot reloads; keyed by world-state hash).
+  const cachePath = fileURLToPath(new URL('./planner-cache.json', import.meta.url))
 
   const options: Partial<JevAgentOptions> = {
     goalItem: ctx.goalItem,
@@ -352,13 +291,22 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     failureStreakLimit: 6,
     candidateFailureLimit: 3,
     finishOnObjectiveComplete: false,
-    singleShotPlanner: true,
+    // Dynamic planner: the controller wakes System 2 on queue_empty /
+    // action_impossible / no_progress / need_llm and consumes whatever bounded
+    // goal list it returns. System One (forceFallbackPolicy) stays the sole
+    // action authority, so `llm.called === false` for the Jev action policy.
+    // deterministic keeps the single-shot contract (bootstrap once) so the
+    // `llm.called == false` gate stays provable.
+    singleShotPlanner: plannerMode === 'deterministic',
+    // Bounded replan frequency: the planner also throttles LLM calls itself, but
+    // keep the controller from re-summoning every tick while a goal is blocked.
+    llmCooldownMs: 15000,
     ledgerPath,
     stopAfterSubgoals: 0,
     logDir: ctx.logDir,
     // Deterministic local policy: no LLM on the hot path, `llm.called === false`
-    // by construction. This is the resident default (the user wants gameplay, not
-    // gateway rate-limit stalls).
+    // by construction. The LLM is used ONLY by the high-level planner and only
+    // returns bounded planning data, never actions.
     forceFallbackPolicy: true,
     actuation: 'pathfinder',
     reach: 5,
@@ -367,7 +315,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   const controller = new JevController(bot, options)
-  controller.setSystem2(new FixedPlanSystem2(null, ladder.goals, `resident ladder: ${ladder.rungId} (${ladder.goals.length} goal(s))`))
+  const brain = new PlannerBrain({
+    bot,
+    world,
+    log: (event, detail) => ctx.log(event, detail),
+    cachePath,
+    mode: plannerMode,
+  })
+  controller.setSystem2(brain)
 
   ctx.log('GENERATION_READY', {
     id,
@@ -376,12 +331,17 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     goals: ladder.goals.map((goal) => goal.description),
     policy: controller.policyKind,
     model: controller.policyModel,
+    planner: brain.mode,
+    plannerModel: brain.model,
+    plannerCache: cachePath,
+    futureRungs: ladder.futureRungIds,
     craftingTables: world.craftingTables.length,
     furnaces: world.furnaces.length,
   })
 
   let stopped: string | null = null
   let runPromise: Promise<void> | null = null
+  let ready = false
 
   function attach(): void {
     // The controller registers its own bot listeners in start(); nothing to do.
@@ -389,7 +349,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   function start(): void {
     if (runPromise !== null) return
+    ctx.lease.assertActive(id, 'generation.start')
     controller.start()
+    ready = true
     runPromise = controller
       .wait()
       .then((result: RunSummary) => {
@@ -423,11 +385,23 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     await Promise.race([runPromise ?? Promise.resolve(), delay(3000)])
   }
 
-  function status(): GenerationStatus {
-    const liveCounts = inventoryCounts(bot)
-    const frontier = computeFrontier(liveCounts, world)
-    const current = controller.agent.current
+  function readTruth(): ServerTruth {
     const entity = bot.entity
+    const raw = entity === undefined ? null : entity.position
+    return {
+      position: raw === null || raw === undefined ? null : { x: raw.x, y: raw.y, z: raw.z },
+      health: entity === undefined ? null : bot.health,
+      food: entity === undefined ? null : bot.food,
+      dimension: bot.game?.dimension ?? null,
+      onGround: entity === undefined ? null : (entity.onGround ?? null),
+      inventory: inventoryCounts(bot),
+    }
+  }
+
+  function status(): GenerationStatus {
+    const truth = readTruth()
+    const frontier = computeFrontier(truth.inventory, world)
+    const current = controller.agent.current
     return {
       running: controller.isRunning,
       policyKind: controller.policyKind,
@@ -436,13 +410,64 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       queue: controller.goalQueueState,
       currentAction:
         current === null ? null : { id: current.id, kind: current.kind, phase: current.phase, startedAt: current.startedAt },
-      position: entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-      health: entity === undefined ? null : bot.health,
-      inventory: liveCounts,
+      truth,
       plannedGoals: ladder.goals.length,
       rungIndex: frontier.rungIndex,
       rungId: frontier.rungId,
+      ready,
+      contractVersion: CONTRACT_VERSION,
     }
+  }
+
+  function structuralSmoke(): StructuralSmokeResult {
+    const checks: string[] = []
+    const failures: string[] = []
+    const check = (name: string, fn: () => boolean): void => {
+      try {
+        if (fn()) checks.push(name)
+        else failures.push(name)
+      } catch (error) {
+        failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    check('id', () => typeof id === 'string' && id.length > 0)
+    check('startedAt', () => Number.isFinite(startedAt))
+    check('rungId', () => typeof ladder.rungId === 'string' && ladder.rungId.length > 0)
+    check('contract-version', () => CONTRACT_VERSION === 2)
+    check('status-readable', () => {
+      const s = status()
+      return typeof s.running === 'boolean' && typeof s.policyKind === 'string' && s.policyKind.length > 0
+    })
+    check('snapshot-schema', () => {
+      const s = status()
+      return (
+        typeof s.queue === 'object' &&
+        s.queue !== null &&
+        typeof s.queue.done === 'number' &&
+        typeof s.queue.depth === 'number' &&
+        typeof s.plannedGoals === 'number' &&
+        typeof s.rungIndex === 'number'
+      )
+    })
+    check('sensor-truth-dto', () => {
+      const t = status().truth
+      if (t.position === null) return t.health === null || typeof t.health === 'number'
+      return (
+        Number.isFinite(t.position.x) &&
+        Number.isFinite(t.position.y) &&
+        Number.isFinite(t.position.z) &&
+        Object.getPrototypeOf(t.position) === Object.prototype
+      )
+    })
+    check('pure-buildLadder', () => buildLadder({}, world).goals.length > 0)
+    check('pure-buildPlanOptions', () => Array.isArray(buildPlanOptions({}, world)))
+    check('pure-computeFrontier', () => typeof computeFrontier({}, world).rungIndex === 'number')
+    return { ok: failures.length === 0, checks, failures }
+  }
+
+  function missionPreflight(): MissionPreflightResult {
+    const goalCount = ladder.goals.length
+    return { ok: goalCount >= 1, reason: goalCount >= 1 ? null : 'planner produced an empty plan', goalCount }
   }
 
   return {
@@ -461,9 +486,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       }
     },
     status,
+    structuralSmoke,
+    missionPreflight,
     stopReason: () => stopped,
     hasStopped: () => stopped !== null,
   }
 }
 
 export default createGeneration
+
+// reload-probe: 0

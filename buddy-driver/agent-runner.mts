@@ -11,6 +11,7 @@
 //     </dev/null > runner.out 2>&1 &
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import type { Socket } from 'node:net'
 import { createHash } from 'node:crypto'
@@ -21,9 +22,37 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'
 import { buildGeneration } from './build.mts'
-import type { GenerationModule, GenerationStatus, ResidentGeneration, ResidentState, Vec3Json } from './resident-types.ts'
+import type {
+  AcceptanceRecord,
+  ActuationLease,
+  GenerationContext,
+  GenerationModule,
+  GenerationStatus,
+  ResidentGeneration,
+  ResidentState,
+  ResidentWorldMemory,
+  StructuralSmokeResult,
+  Vec3Json,
+  WorldKey,
+  WorldMemoryDelta,
+} from './resident-types.ts'
+import { emptyWorldMemory, worldKeyString } from './resident-types.ts'
 
-const CONTRACT_VERSION = 1
+const CONTRACT_VERSION = 2
+const STATE_SCHEMA_VERSION = 2
+const LISTENER_EVENTS = [
+  'physicsTick',
+  'goal_reached',
+  'goal_updated',
+  'path_update',
+  'blockUpdate',
+  'entitySpawn',
+  'health',
+  'playerCollect',
+  'death',
+  'end',
+  'kicked',
+] as const
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DATA = join(HERE, 'data', 'resident')
@@ -92,16 +121,53 @@ function delay(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 // durable state mirror (in-memory is the truth; tmp -> rename is the mirror)
 // ---------------------------------------------------------------------------
+const SERVER_ID = `${HOST}:${PORT}`
+
+function normalizeDimension(dimension: string | undefined): string {
+  if (dimension === undefined || dimension.length === 0) return 'minecraft:overworld'
+  if (dimension.includes(':')) return dimension
+  return `minecraft:${dimension}`
+}
+
+function currentWorldKey(): WorldKey {
+  return { serverId: state.serverId, dimension: state.dimension, worldEpoch: state.worldEpoch }
+}
+
+function keyedMemory(): ResidentWorldMemory {
+  const key = worldKeyString(currentWorldKey())
+  const existing = state.worldMemoryByKey[key]
+  if (existing !== undefined) return existing
+  const created = emptyWorldMemory()
+  state.worldMemoryByKey[key] = created
+  return created
+}
+
+function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
+  return {
+    craftingTables: memory.craftingTables.map((p) => ({ ...p })),
+    furnaces: memory.furnaces.map((p) => ({ ...p })),
+    mined: { ...memory.mined },
+    discoveredOres: [...memory.discoveredOres],
+    traversalFailures: memory.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+  }
+}
+
 function defaultState(): ResidentState {
   return {
-    version: 1,
+    schemaVersion: STATE_SCHEMA_VERSION,
+    revision: 0,
+    worldEpoch: 1,
+    generationId: null,
     bot: USERNAME,
+    serverId: SERVER_ID,
+    dimension: 'minecraft:overworld',
+    levelName: null,
     firstSeenAt: Date.now(),
     updatedAt: Date.now(),
     milestoneIndex: -1,
     milestone: null,
     ledger: null,
-    worldMemory: { craftingTables: [], furnaces: [], mined: {}, discoveredOres: [] },
+    worldMemoryByKey: {},
     generations: 0,
     reloads: 0,
     recoveries: 0,
@@ -111,30 +177,91 @@ function defaultState(): ResidentState {
 }
 
 function loadState(): ResidentState {
+  const base = defaultState()
   try {
-    const parsed = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as Partial<ResidentState>
-    const base = defaultState()
-    return {
+    const parsed = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as Partial<ResidentState> & { worldMemory?: ResidentWorldMemory }
+    const merged: ResidentState = {
       ...base,
       ...parsed,
-      worldMemory: { ...base.worldMemory, ...(parsed.worldMemory ?? {}) },
+      schemaVersion: STATE_SCHEMA_VERSION,
+      worldMemoryByKey: { ...(parsed.worldMemoryByKey ?? {}) },
     }
+    delete (merged as unknown as Record<string, unknown>).worldMemory
+    if (parsed.worldMemory !== undefined && Object.keys(merged.worldMemoryByKey).length === 0) {
+      merged.worldMemoryByKey[worldKeyString({ serverId: merged.serverId, dimension: merged.dimension, worldEpoch: merged.worldEpoch })] = {
+        ...emptyWorldMemory(),
+        ...parsed.worldMemory,
+        traversalFailures: parsed.worldMemory.traversalFailures ?? [],
+      }
+    }
+    for (const memory of Object.values(merged.worldMemoryByKey)) {
+      memory.craftingTables = memory.craftingTables ?? []
+      memory.furnaces = memory.furnaces ?? []
+      memory.mined = memory.mined ?? {}
+      memory.discoveredOres = memory.discoveredOres ?? []
+      memory.traversalFailures = memory.traversalFailures ?? []
+    }
+    merged.dimension = normalizeDimension(merged.dimension)
+    const remapped: Record<string, ResidentWorldMemory> = {}
+    for (const [key, memory] of Object.entries(merged.worldMemoryByKey)) {
+      const parts = key.split('|')
+      const canonical = parts.length === 3 ? `${parts[0]}|${normalizeDimension(parts[1])}|${parts[2]}` : key
+      const existing = remapped[canonical]
+      const score = (m: ResidentWorldMemory): number => m.craftingTables.length + m.furnaces.length + m.discoveredOres.length
+      if (existing === undefined || score(memory) > score(existing)) remapped[canonical] = memory
+    }
+    merged.worldMemoryByKey = remapped
+    return merged
   } catch {
-    return defaultState()
+    return base
   }
 }
 
 let state = loadState()
 
-function saveState(): void {
+function saveState(event = 'save'): void {
   state.updatedAt = Date.now()
+  state.revision += 1
   try {
     const tmp = `${STATE_PATH}.${process.pid}.tmp`
     writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
     renameSync(tmp, STATE_PATH)
   } catch (error) {
-    log('ERROR', { where: 'saveState', message: error instanceof Error ? error.message : String(error) })
+    log('ERROR', { where: 'saveState', event, message: error instanceof Error ? error.message : String(error) })
   }
+}
+
+function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
+  const memory = keyedMemory()
+  if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables)
+  if (delta.furnaces !== undefined) mergeStationDtos(memory.furnaces, delta.furnaces)
+  if (delta.discoveredOres !== undefined) {
+    for (const ore of delta.discoveredOres) {
+      if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
+    }
+  }
+  if (delta.mined !== undefined) {
+    for (const [key, count] of Object.entries(delta.mined)) {
+      memory.mined[key] = (memory.mined[key] ?? 0) + count
+    }
+  }
+  if (delta.traversalFailures !== undefined) {
+    memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
+  }
+  saveState('world-memory')
+}
+
+function mergeStationDtos(target: Vec3Json[], found: Vec3Json[]): number {
+  const seen = new Set(target.map((p) => `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`))
+  let added = 0
+  for (const pos of found) {
+    const key = `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    target.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) })
+    added += 1
+  }
+  return added
 }
 
 function archiveLedger(reason: string): void {
@@ -164,6 +291,52 @@ let lastSrcSignature = ''
 let lastInventoryHash = ''
 let lastActionId: string | null = null
 let lastHeartbeatAt = 0
+let activeGenerationId: string | null = null
+let generationHash: string | null = null
+let listenerBaseline: Record<string, number> = {}
+let baselineCaptured = false
+let startPosition: Vec3Json | null = null
+let lastStatus: GenerationStatus | null = null
+let hasConnected = false
+
+const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
+const stats = {
+  reconnects: 0,
+  reloadsChangedHash: 0,
+  reloadsSkippedUnchanged: 0,
+  reloadsFailed: 0,
+  freezeCycles: 0,
+  wedge: false,
+  goalComplete: false,
+}
+
+// The HOST owns the lease. A generation may only act while its id is active;
+// the reload commit point is exactly this switch. Rollback switches it back.
+const lease: ActuationLease = {
+  get activeId(): string {
+    return activeGenerationId ?? ''
+  },
+  isActive: (id: string): boolean => activeGenerationId === id,
+  assertActive: (id: string, what: string): void => {
+    if (activeGenerationId !== id) {
+      throw new Error(
+        `ACTUATION_LEASE_DENIED what=${what} owner=${activeGenerationId ?? 'none'} caller=${id} - refusing a side-effecting call`,
+      )
+    }
+  },
+}
+
+function listenerCounts(): Record<string, number> {
+  const counts: Record<string, number> = {}
+  if (bot === null) return counts
+  const countable = bot as unknown as { listenerCount(event: string): number }
+  for (const event of LISTENER_EVENTS) counts[event] = countable.listenerCount(event)
+  return counts
+}
+
+function listenerLeak(): boolean {
+  return Object.keys(listenerBaseline).some((event) => (listenerCounts()[event] ?? 0) > (listenerBaseline[event] ?? 0))
+}
 
 async function loadGenerationModule(force: boolean): Promise<GenerationModule | null> {
   if (!force && generationModule !== null) return generationModule
@@ -187,24 +360,48 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
   return null
 }
 
-function smokeTest(gen: ResidentGeneration): void {
-  const status = gen.status()
-  if (typeof status.policyKind !== 'string' || status.policyKind.length === 0) {
-    throw new Error('smoke test failed: no policy kind')
+/**
+ * STRUCTURAL smoke: contract version, import surface, required methods, snapshot
+ * schema, sensor readability, listener sanity. It must PASS with an EMPTY plan
+ * and NO completed goals - hot reload never depends on a goal existing.
+ */
+function runStructuralSmoke(gen: ResidentGeneration): StructuralSmokeResult {
+  let result: StructuralSmokeResult
+  try {
+    result = gen.structuralSmoke()
+  } catch (error) {
+    throw new Error(`structural smoke threw: ${error instanceof Error ? error.message : String(error)}`)
   }
-  if (typeof status.queue.done !== 'number') {
-    throw new Error('smoke test failed: no goal queue projection')
+  const surface = ['attach', 'start', 'quiesce', 'dispose', 'status', 'stopReason', 'hasStopped', 'structuralSmoke', 'missionPreflight'] as const
+  for (const name of surface) {
+    if (typeof (gen as unknown as Record<string, unknown>)[name] !== 'function') result.failures.push(`missing method ${name}`)
   }
-  if (status.plannedGoals < 1) {
-    throw new Error('smoke test failed: planner produced an empty plan')
+  if (typeof gen.id !== 'string' || gen.id.length === 0) result.failures.push('missing generation id')
+  if (typeof gen.rungId !== 'string') result.failures.push('missing rung id')
+  if (result.failures.length > 0) {
+    result.ok = false
+    throw new Error(`structural smoke failed: ${result.failures.join('; ')}`)
+  }
+  return result
+}
+
+/** MISSION preflight: goal exists / candidates generatable. Never gates reload. */
+function runMissionPreflight(gen: ResidentGeneration): { ok: boolean; reason: string | null; goalCount: number } {
+  try {
+    return gen.missionPreflight()
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error), goalCount: 0 }
   }
 }
 
-function makeGenerationContext(b: Bot) {
+function makeGenerationContext(b: Bot): GenerationContext {
   return {
     bot: b,
     log,
-    state,
+    lease,
+    worldMemory: cloneMemory(keyedMemory()),
+    worldKey: currentWorldKey(),
+    proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
     ledgerPath: LEDGER,
     logDir: JEV_LOGS,
     goalItem: GOAL_ITEM,
@@ -222,11 +419,14 @@ function watchGenerationStop(gen: ResidentGeneration): void {
     clearInterval(guard)
     const stopped = gen.stopReason()
     generation = null
+    if (activeGenerationId === gen.id) activeGenerationId = null
+    if (stopped === 'wedge') stats.wedge = true
+    if (stopped === 'goal-complete') stats.goalComplete = true
     if (shuttingDown || frozen) return
     log('RECOVERY', { reason: 'generation-stopped', stopped })
     state.recoveries += 1
     if (stopped === 'goal-complete') archiveLedger('goal-complete')
-    saveState()
+    saveState('generation-stop')
     scheduleGenerationRestart('generation-stopped')
   }, 2000)
 }
@@ -243,12 +443,27 @@ async function startGeneration(trigger: string): Promise<boolean> {
   }
   const gen = mod.createGeneration(makeGenerationContext(bot))
   gen.attach()
-  gen.start()
+  runStructuralSmoke(gen)
+  const preflight = runMissionPreflight(gen)
+  log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
+  activeGenerationId = gen.id
+  try {
+    gen.start()
+  } catch (error) {
+    activeGenerationId = null
+    throw error
+  }
   generation = gen
   lastActionId = null
+  if (!baselineCaptured) {
+    baselineCaptured = true
+    listenerBaseline = listenerCounts()
+    log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id })
+  }
   state.generations += 1
   state.lastGenerationId = gen.id
-  saveState()
+  state.generationId = gen.id
+  saveState('generation-start')
   log('GENERATION_START', { id: gen.id, trigger, rung: gen.rungId, rungIndex: gen.rungIndex, generations: state.generations })
   watchGenerationStop(gen)
   return true
@@ -282,13 +497,29 @@ function connect(): void {
 
   created.once('spawn', () => {
     reconnecting = false
+    hasConnected = true
     const entity = created.entity
+    const game = created.game as unknown as { dimension?: string; levelName?: string } | undefined
+    if (entity !== undefined) {
+      startPosition = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+    }
+    const observedDimension = normalizeDimension(game?.dimension)
+    if (observedDimension !== state.dimension) {
+      log('WORLD_KEY_CHANGED', { from: state.dimension, to: observedDimension, worldEpoch: state.worldEpoch })
+      state.dimension = observedDimension
+    }
+    if (game?.levelName !== undefined) state.levelName = game.levelName
+    baselineCaptured = false
     log('SPAWN', {
       pos: entity === undefined ? '?' : fmtPos({ x: entity.position.x, y: entity.position.y, z: entity.position.z }),
       version: created.version,
       health: created.health,
       username: created.username,
+      dimension: state.dimension,
+      worldEpoch: state.worldEpoch,
+      listeners: listenerBaseline,
     })
+    saveState('spawn')
     lastHeartbeatAt = Date.now()
     void startGeneration('spawn')
   })
@@ -312,7 +543,8 @@ function connect(): void {
 function scheduleReconnect(): void {
   if (shuttingDown || reconnecting) return
   reconnecting = true
-  log('RECONNECT', { inMs: RECONNECT_MS })
+  if (hasConnected) stats.reconnects += 1
+  log('RECONNECT', { inMs: RECONNECT_MS, reconnects: stats.reconnects })
   setTimeout(() => {
     if (shuttingDown) return
     reconnecting = false
@@ -334,6 +566,8 @@ setInterval(() => {
     return
   }
 
+  lastStatus = status
+  const truth = status.truth
   const action = status.currentAction
   if (action !== null && action.id !== lastActionId) {
     lastActionId = action.id
@@ -343,45 +577,45 @@ setInterval(() => {
       id: action.id,
       kind: action.kind,
       phase: action.phase,
-      pos: fmtPos(status.position),
+      pos: fmtPos(truth.position),
       rung: status.rungId,
     })
   } else if (action === null) {
     lastActionId = null
   }
 
-  const stableInv = Object.keys(status.inventory)
+  const stableInv = Object.keys(truth.inventory)
     .sort()
-    .map((name) => `${name}:${status.inventory[name] ?? 0}`)
+    .map((name) => `${name}:${truth.inventory[name] ?? 0}`)
     .join(',')
   const invHash = createHash('sha1').update(stableInv).digest('hex').slice(0, 12)
   if (invHash !== lastInventoryHash) {
     lastInventoryHash = invHash
-    log('INVENTORY', { items: shortInv(status.inventory), pos: fmtPos(status.position) })
+    log('INVENTORY', { items: shortInv(truth.inventory), pos: fmtPos(truth.position) })
   }
 
   if (status.rungIndex > state.milestoneIndex) {
     state.milestoneIndex = status.rungIndex
     state.milestone = status.rungId
-    log('MILESTONE', { rung: status.rungId, index: status.rungIndex, inventory: shortInv(status.inventory) })
-    saveState()
+    log('MILESTONE', { name: status.rungId, done: true, index: status.rungIndex, queueDone: status.queue.done, inventory: shortInv(truth.inventory) })
+    saveState('milestone')
   }
 
   if (Date.now() - lastHeartbeatAt >= HEARTBEAT_MS) {
     lastHeartbeatAt = Date.now()
     log('HEARTBEAT', {
-      pos: fmtPos(status.position),
-      health: status.health,
+      pos: fmtPos(truth.position),
+      health: truth.health,
       running: status.running,
       rung: status.rungId,
       queue: status.queue.current?.description ?? 'none',
       depth: status.queue.depth,
       done: status.queue.done,
       action: status.currentAction?.kind ?? 'idle',
-      inv: shortInv(status.inventory),
+      inv: shortInv(truth.inventory),
     })
     state.ledger = status.queue
-    saveState()
+    saveState('heartbeat')
   }
 }, OBSERVE_MS)
 
@@ -445,15 +679,96 @@ function scheduleReload(trigger: string): void {
   }, RELOAD_DEBOUNCE_MS)
 }
 
+function depVersion(pkg: string): string {
+  try {
+    const raw = readFileSync(join(MC_AI, 'jev-agent', 'node_modules', pkg, 'package.json'), 'utf8')
+    return (JSON.parse(raw) as { version?: string }).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+function serverSeed(): string | null {
+  try {
+    const match = /^level-seed=(.*)$/m.exec(readFileSync('/home/s0u7a/mc-server/server.properties', 'utf8'))
+    return match?.[1]?.trim() ?? null
+  } catch {
+    return null
+  }
+}
+
+function gitCommit(): string | null {
+  try {
+    return execSync('git rev-parse HEAD', { cwd: MC_AI, encoding: 'utf8' }).trim()
+  } catch {
+    return null
+  }
+}
+
+function writeAcceptance(): string {
+  const counts = listenerCounts()
+  const record: AcceptanceRecord = {
+    record: 'acceptance',
+    runId,
+    ts: new Date().toISOString(),
+    gitCommit: gitCommit(),
+    generationHash,
+    generationId: activeGenerationId,
+    contractVersion: CONTRACT_VERSION,
+    stateSchemaVersion: state.schemaVersion,
+    stateRevision: state.revision,
+    dependencies: {
+      mineflayer: depVersion('mineflayer'),
+      'minecraft-protocol': depVersion('minecraft-protocol'),
+      'minecraft-data': depVersion('minecraft-data'),
+      'mineflayer-pathfinder': depVersion('mineflayer-pathfinder'),
+      vec3: depVersion('vec3'),
+    },
+    serverId: state.serverId,
+    dimension: state.dimension,
+    levelName: state.levelName,
+    worldEpoch: state.worldEpoch,
+    seed: serverSeed(),
+    botUsername: USERNAME,
+    startPosition,
+    mode: lastStatus?.policyKind === 'typesafe' ? 'llm' : 'deterministic',
+    goalComplete: stats.goalComplete,
+    wedge: stats.wedge,
+    reconnects: stats.reconnects,
+    reloads: state.reloads,
+    reloadsChangedHash: stats.reloadsChangedHash,
+    reloadsSkippedUnchanged: stats.reloadsSkippedUnchanged,
+    reloadsFailed: stats.reloadsFailed,
+    freezeCycles: stats.freezeCycles,
+    listenerBaseline,
+    listenerCurrent: counts,
+    listenerLeak: listenerLeak(),
+    worldMemoryKeys: Object.keys(state.worldMemoryByKey),
+  }
+  const path = join(DATA, `acceptance-${runId}.json`)
+  const tmp = `${path}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
+  renameSync(tmp, path)
+  return path
+}
+
+/**
+ * Swap order (atomic): build -> import -> structural smoke -> prepare(new) ->
+ * old quiesce -> snapshot -> new healthcheck -> ACTION LEASE SWITCH (commit) ->
+ * new start -> old dispose. Before the commit the new generation cannot act;
+ * rollback switches the lease back to the old module and resumes it.
+ */
 async function performReload(trigger: string): Promise<void> {
   const started = Date.now()
   if (bot === null || bot.entity === undefined) {
+    stats.reloadsFailed += 1
     log('RELOAD', { ok: false, trigger, reason: 'no live bot' })
     return
   }
   try {
     const built = await buildGeneration()
     if (built.outfile === currentBundle && generationModule !== null) {
+      stats.reloadsSkippedUnchanged += 1
       log('RELOAD', { ok: true, trigger, skipped: 'unchanged', ms: Date.now() - started })
       return
     }
@@ -461,27 +776,59 @@ async function performReload(trigger: string): Promise<void> {
     if (mod.CONTRACT_VERSION !== CONTRACT_VERSION) {
       throw new Error(`CONTRACT_VERSION mismatch: generation=${mod.CONTRACT_VERSION} host=${CONTRACT_VERSION}`)
     }
-    const next = mod.createGeneration(makeGenerationContext(bot))
-    smokeTest(next)
     const previous = generation
-    if (previous !== null) {
-      await previous.quiesce()
-      previous.dispose()
-      generation = null
-    }
-    generationModule = mod
-    currentBundle = built.outfile
+    const previousModule = generationModule
+    const next = mod.createGeneration(makeGenerationContext(bot))
     next.attach()
-    next.start()
-    generation = next
-    lastActionId = null
+    const smoke = runStructuralSmoke(next)
+    log('SMOKE', { id: next.id, ok: smoke.ok, checks: smoke.checks.length, failures: smoke.failures })
+    if (previous !== null) await previous.quiesce()
     state.reloads += 1
     state.generations += 1
     state.lastGenerationId = next.id
-    saveState()
-    log('RELOAD', { ok: true, trigger, ms: Date.now() - started, hash: built.hash, id: next.id, generations: state.generations })
+    saveState('reload-snapshot')
+    const preflight = runMissionPreflight(next)
+    log('MISSION_PREFLIGHT', { id: next.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason, trigger })
+    activeGenerationId = next.id
+    generation = next
+    try {
+      next.start()
+    } catch (startError) {
+      generation = null
+      activeGenerationId = null
+      if (previous !== null && previousModule !== null) {
+        const resumed = previousModule.createGeneration(makeGenerationContext(bot))
+        resumed.attach()
+        activeGenerationId = resumed.id
+        generation = resumed
+        resumed.start()
+        log('RELOAD_ROLLBACK', { from: next.id, resumed: resumed.id })
+      }
+      throw startError
+    }
+    generationModule = mod
+    currentBundle = built.outfile
+    generationHash = built.hash
+    state.generationId = next.id
+    lastActionId = null
+    if (previous !== null) previous.dispose()
+    stats.reloadsChangedHash += 1
+    saveState('reload-commit')
+    const counts = listenerCounts()
+    log('RELOAD', {
+      ok: true,
+      trigger,
+      ms: Date.now() - started,
+      hash: built.hash,
+      id: next.id,
+      generations: state.generations,
+      listeners: counts,
+      listenerLeak: listenerLeak(),
+    })
+    log('ACCEPTANCE', { path: writeAcceptance(), runId })
     watchGenerationStop(next)
   } catch (error) {
+    stats.reloadsFailed += 1
     const message = error instanceof Error ? error.message : String(error)
     log('ERROR', { where: 'performReload', trigger, message })
     log('RELOAD', { ok: false, trigger, ms: Date.now() - started, message })
@@ -509,8 +856,15 @@ function freezeReport(reason: string, status: unknown): string {
     ts: new Date().toISOString(),
     reason,
     bot: USERNAME,
+    runId,
+    generationId: activeGenerationId,
+    worldKey: currentWorldKey(),
+    reconcileKey: worldKeyString(currentWorldKey()),
     state,
     status,
+    recentDecisions: state.ledger,
+    listeners: listenerCounts(),
+    heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576),
   }
   const tmp = `${path}.tmp`
   writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`)
@@ -522,18 +876,30 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
   const cmd = request.cmd ?? ''
   if (cmd === 'report' || cmd === 'status') {
     const status = generation === null ? null : generation.status()
+    const memory = keyedMemory()
     controlReply(socket, request, true, {
+      runId,
       frozen,
       connected: bot !== null && bot.entity !== undefined,
       generations: state.generations,
       reloads: state.reloads,
       recoveries: state.recoveries,
       milestone: state.milestone,
+      worldKey: currentWorldKey(),
+      generationId: activeGenerationId,
+      generationHash,
+      contractVersion: CONTRACT_VERSION,
+      stats,
       worldMemory: {
-        craftingTables: state.worldMemory.craftingTables.length,
-        furnaces: state.worldMemory.furnaces.length,
-        discoveredOres: state.worldMemory.discoveredOres,
+        craftingTables: memory.craftingTables.length,
+        furnaces: memory.furnaces.length,
+        discoveredOres: memory.discoveredOres,
+        traversalFailures: memory.traversalFailures.length,
       },
+      listeners: listenerCounts(),
+      listenerBaseline,
+      listenerLeak: listenerLeak(),
+      acceptancePath: join(DATA, `acceptance-${runId}.json`),
       status,
     })
     return
@@ -545,31 +911,43 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
   }
   if (cmd === 'freeze') {
     frozen = true
+    stats.freezeCycles += 1
     let path: string | null = null
     if (generation !== null) {
       const status = generation.status()
       path = freezeReport('control', status)
       await generation.quiesce()
+      activeGenerationId = null
     }
-    log('FREEZE', { reason: 'control', report: path })
-    controlReply(socket, request, true, { frozen: true, report: path })
+    log('FREEZE', { reason: 'control', report: path, freezeCycles: stats.freezeCycles })
+    writeAcceptance()
+    controlReply(socket, request, true, { frozen: true, report: path, runId })
     return
   }
   if (cmd === 'resume') {
     frozen = false
     const ok = await startGeneration('control:resume')
-    log('RESUME', { ok })
+    log('RESUME', { ok, reconnect: false })
+    writeAcceptance()
     controlReply(socket, request, true, { frozen: false, started: ok })
     return
   }
+  if (cmd === 'worldreset') {
+    state.worldEpoch += 1
+    state.generationId = null
+    keyedMemory()
+    saveState('worldreset')
+    log('WORLD_EPOCH', { worldEpoch: state.worldEpoch, worldKey: currentWorldKey() })
+    controlReply(socket, request, true, { worldEpoch: state.worldEpoch, worldKey: currentWorldKey() })
+    return
+  }
+  if (cmd === 'acceptance') {
+    const path = writeAcceptance()
+    controlReply(socket, request, true, { path })
+    return
+  }
   if (cmd === 'leakcheck') {
-    const counts: Record<string, number> = {}
-    if (bot !== null) {
-      for (const event of ['physicsTick', 'goal_reached', 'goal_updated', 'path_update', 'blockUpdate', 'entitySpawn', 'health', 'playerCollect', 'death', 'end', 'kicked']) {
-        counts[event] = bot.listenerCount(event)
-      }
-    }
-    controlReply(socket, request, true, { listeners: counts, heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576) })
+    controlReply(socket, request, true, { listeners: listenerCounts(), listenerBaseline, listenerLeak: listenerLeak(), heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576) })
     return
   }
   if (cmd === 'gc') {
@@ -645,7 +1023,14 @@ function shutdown(reason: string): void {
   if (shuttingDown) return
   shuttingDown = true
   log('SHUTDOWN', { reason })
-  saveState()
+  let acceptance: string | null = null
+  try {
+    acceptance = writeAcceptance()
+  } catch {
+    // ignore
+  }
+  log('ACCEPTANCE', { path: acceptance, runId })
+  saveState('shutdown')
   try {
     generation?.dispose()
   } catch {
@@ -673,15 +1058,21 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 // boot
 // ---------------------------------------------------------------------------
 state.firstSeenAt = state.firstSeenAt || Date.now()
-saveState()
+saveState('boot')
 log('BOOT', {
   pid: process.pid,
+  runId,
   runtime: process.release.name,
   node: process.version,
   bundle: currentBundle ?? 'none',
   milestone: state.milestone,
   generations: state.generations,
   reloads: state.reloads,
+  contractVersion: CONTRACT_VERSION,
+  schemaVersion: state.schemaVersion,
+  revision: state.revision,
+  worldEpoch: state.worldEpoch,
+  worldKey: currentWorldKey(),
 })
 startControlServer()
 void loadGenerationModule(false).then(() => {

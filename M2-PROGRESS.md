@@ -647,3 +647,52 @@ step-pipeline-test 6/6, `movement-patch:check` ok (`0 hunk(s), 5 already present
 ### Suite after this round
 `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
+
+## CRAFT-AT-STATION BLOCKER FIXED (2026-09-18 00:29 JST)
+
+### Diagnosis (measured)
+- Direct mineflayer check against Leaf 1.21.11: `bot.craft(pickaxe, 1, table)` **works** in a clean
+  probe (`logs/probe-craft-diag.log`), so the failure is caller/context-specific.
+- The real pipeline repeatedly failed with `craft wooden_pickaxe gained 0 (after=0)` while the
+  crafting-table recipe/delta resolved correctly (`logs/m1-craftfix-console.log` shows
+  `result={"id":913,...} delta=[planks -3, stick -2] requiresTable=true`).
+- Root cause: `mineflayer@4.39.0` `bot.craft` sends `window_click` with a module-global `stateId`.
+  While a crafting window is open the server keeps syncing window 0 (player inventory) and mineflayer
+  adopts those stateIds globally, so the craft clicks are silently ignored — `bot.craft` resolves
+  with no items and no error (upstream `PrismarineJS/mineflayer#3906`). The executor then sees
+  `gained 0` and wedges.
+- A second bug surfaced in the fix: prismarine-recipe returns `outShape: null` for the pickaxe; the
+  `=== undefined` guard let null through and `updateOutShape` threw `null.length` **after** the
+  pickaxe had already been delivered (`logs/probe-direct.log` stack).
+
+### Fix (`src/craftWindow.ts` + `src/executor.ts`)
+- New `craftAtTable(bot, table, recipe)`: `bot.openBlock(table)` -> validate
+  `minecraft:crafting` -> `bot._syncWindow(win)` before every click -> place the recipe with the
+  same algorithm as `craft.js` -> grab the result -> `updateOutShape` -> `closeWindow`.
+- `runCraft` uses `craftAtTable` only when a table is required; the proven 2x2 inventory path keeps
+  stock `bot.craft`. Failures log recipe/delta/inventory/window state and throw `verify_failed`
+  (clean, no wedge). Recipe selection is logged before crafting:
+  `craft recipe wooden_pickaxe result=... delta=... requiresTable=true table=crafting_table@...`.
+
+### Evidence
+- Direct + Executor: `logs/probe-direct3.log`
+  `[probe] DIRECT craftAtTable ok` and
+  `[probe] AGENT-PATH result= {"status":"done","detail":"crafted 1x wooden_pickaxe","gained":1}`.
+- Live M1 (`logs/m1-craftfix-console.log`, AI_M2Z, `--no-clean`, seeded logs+planks+sticks):
+  `craft recipe wooden_pickaxe ... table=crafting_table@-10,67,11` ->
+  `[queue] subgoal COMPLETE [craft 1 x wooden_pickaxe] -> [collect 16 x cobblestone] have=1
+  inventory={"stick":2,"crafting_table":1,"oak_log":4,"wooden_pickaxe":1,"oak_planks":3}`.
+
+### M1 / M2 ladder status (honest)
+- `craft 1 x wooden_pickaxe` is **FIXED**. M1/M2 can no longer wedge on this step.
+- M1 4/4 full re-run is NOT reachable on the current world: `data/seed-scan.mts` re-verified
+  `stone-like exposed+standable=0` within 64 m (surface stone mined out), and `collect 3 x log`
+  wedges on the known canopy-pocket / geometry-sensitive pickup limits. A fresh-world phase needs a
+  server restart/reconfig, which is forbidden here.
+- M2 `furnace` / `charcoal` / `iron_ingot` / `iron_pickaxe`: not reached for the same upstream
+  reasons (log collection + cobblestone). No new blocker in the smelt/craft layer has been observed.
+- All runs keep `llm.called==false` on every decision.
+
+### Suite
+`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).

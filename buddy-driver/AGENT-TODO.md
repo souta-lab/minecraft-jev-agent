@@ -58,3 +58,40 @@
 4) DESCEND_LIMIT が出て、depth が無制限に増えない
 5) RELOAD ok=true が継続（ms < 2s）し、リロード前後で listener数・タイマー数が増えない
 ```
+
+---
+
+## ★最優先の新規ブロッカー（00:33 実測・ホスト再起動後に発生）
+
+再起動した新ホストは起動直後に落ちており、**世代が開始されていない**（Buddyは生存しているが待機中）:
+```
+BOOT pid=165685 runtime=node node=v25.9.0 bundle=none milestone=raw_iron generations=39 reloads=14
+BUILD hash=4babbfa827e4 bytes=1125877 ms=35
+CONNECT → SPAWN pos=16.5,65.0,25.5 version=1.21.11
+CRAFT_COMPAT ok=true mineflayerTested=4.39.0 api=_syncWindow
+ERROR where=unhandledRejection message=Cannot read properties of undefined (reading 'craftingTables')
+（以降 GENERATION_READY が出ない = 世代未起動）
+```
+
+原因箇所（読み取り調査）:
+```
+buddy-driver/generation-entry.ts:228  craftingTables: ctx.worldMemory.craftingTables.map(...)   ← ctx.worldMemory が undefined
+buddy-driver/generation-entry.ts:203  ... || world.craftingTables ...
+buddy-driver/generation-entry.ts:245/254/263/338  world.craftingTables
+buddy-driver/planner.ts:136 / :669     w.craftingTables / this.world.craftingTables
+```
+推定原因: WorldMemory を worldEpoch で namespace 化した際、**その世代のエントリを初期化する前に参照**している（`worldMemory[worldEpoch] ??= {...}` の初期化漏れ）。
+
+修正要件:
+1. 復元時に必ず初期化: `worldMemory[worldEpoch] ??= { craftingTables: [], furnaces: [], mined: {}, ores: {}, explored: [] }`
+2. 世代構築時も `const world = ctx.worldMemory ?? { craftingTables: [], furnaces: [], mined: {}, ores: {}, explored: [] }`
+3. snapshot/report 系（228 / 263 / 338 / 669）は `.length` 参照前に空配列へ正規化
+4. 受け入れ: 起動ログに `GENERATION_READY` が出て、以降 `ACTION` / `HEARTBEAT` が継続すること
+
+## 併せて: 再起動で状態がリセットされる問題（P1の核心）
+再起動前 `done=9, depth=12` → 再起動後 `done=0, depth=2`。**台帳からの復元が効いていない**。
+要件: 起動時に durable state から `done` を復元し、前後で維持されることを実測（例: 再起動前 done=9 → 再起動後 done>=9）。
+
+## 順序の注意（Sol レビュー準拠）
+`planner.ts` は既に存在するが、**LLMプランナの配線は P5**（Phase B shadow → C authority）。
+P1では「動くが決定論フォールバックで走る」状態に留め、プランナは後段に回すこと。

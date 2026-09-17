@@ -40,7 +40,7 @@ export interface CraftRecipeLike {
   result: { id: number; count: number; metadata?: number | null }
   inShape?: CraftCell[][]
   ingredients?: CraftCell[]
-  outShape?: Array<Array<{ id: number; count?: number; metadata?: number | null }>>
+  outShape?: Array<Array<{ id: number; count?: number; metadata?: number | null } | null>> | null
 }
 
 type SyncableBot = Bot & { _syncWindow?: (window: Window) => Promise<void> }
@@ -124,7 +124,7 @@ async function craftInWindow(bot: SyncableBot, win: Window, recipe: CraftRecipeL
       (win.findItemRange(start, end, item.type, item.metadata, true, item.nbt) !== null ||
         win.firstEmptySlotRange(start, end) !== null)
     if (room && !resultSlot) {
-      await bot.clickWindow(slot, 0, 1)
+      await click(slot, 0, 1)
     } else {
       await click(slot, 0, 0)
       await bot.putSelectedItemRange(start, end, win, null)
@@ -139,7 +139,7 @@ async function craftInWindow(bot: SyncableBot, win: Window, recipe: CraftRecipeL
   }
 
   const updateOutShape = async (): Promise<void> => {
-    if (recipe.outShape === undefined) {
+    if (recipe.outShape == null) {
       for (let i = 1; i <= w * h; i += 1) win.updateSlot(i, null as unknown as Item)
       return
     }

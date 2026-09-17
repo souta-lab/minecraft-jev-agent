@@ -557,3 +557,29 @@ additionally depend on DESCEND. `charcoal`/`iron_ingot`/`iron_pickaxe` were neve
 ### Tests
 `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
+
+## CRAFT-AT-STATION BLOCKER FIXED (2026-09-18 00:29 JST) — `src/craftWindow.ts`
+
+- Root cause (deeper than the prompt's guess of "open the container"): `mineflayer@4.39.0`
+  `bot.craft(recipe, count, table)` sends `window_click` with the module-global `stateId` closure.
+  While the crafting window is open the server keeps syncing window 0 (player inventory), and
+  mineflayer adopts those packet stateIds globally, so a craft click is silently ignored
+  (upstream `PrismarineJS/mineflayer#3906`). `bot.craft` resolves with no item and no error ->
+  `gained 0` -> `ABORT: wedge`.
+- Fix: new `src/craftWindow.ts` owns the window — `bot.openBlock(table)`, a forced
+  `bot._syncWindow(win)` (a `stateId=-1` no-op click that makes the server resend the full window
+  state) immediately before each click, the `craft.js` recipe-placement algorithm re-run locally,
+  then `closeWindow`. `Executor.runCraft` uses it only for the table path; the proven 2x2 inventory
+  path keeps stock `bot.craft`. On failure it logs recipe/delta/inventory/window and throws a clean
+  `verify_failed` (no wedge).
+- Secondary bug fixed: prismarine-recipe returns `outShape: null` for the pickaxe; the
+  `=== undefined` guard let null through and `updateOutShape` threw `null.length` **after** the item
+  was delivered. Now `== null`.
+- Evidence: `logs/probe-direct3.log` (`DIRECT craftAtTable ok`, `AGENT-PATH result ... crafted 1x
+  wooden_pickaxe gained=1`); `logs/m1-craftfix-console.log` live `craft recipe wooden_pickaxe ...
+  table=crafting_table@-10,67,11` -> `subgoal COMPLETE [craft 1 x wooden_pickaxe] have=1`.
+- Tests: `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+  step-pipeline-test 6/6; `movement-patch:check` ok (4/4).
+- NOT REACHED: M1 4/4 full re-run and the M2 charcoal/iron ladder. The seed-2024 surface stone is
+  mined out (`data/seed-scan.mts`: `exposed+standable=0`) and log collection still hits the known
+  canopy/pickup limit; a fresh-world phase needs a server restart/reconfig, which this task forbids.
