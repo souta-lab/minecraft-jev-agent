@@ -293,6 +293,17 @@ function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number
 }
 
 /**
+ * A snapshot/plan is only usable when it is an object carrying a `goals` array.
+ * The inventory-aware resume path reads `snapshot.goals`; a missing or malformed
+ * snapshot (e.g. a legacy `buddy-state.json` whose `ledger` is a GoalQueueState
+ * with `depth`/`current` instead of `counter`/`goals`) must degrade to an empty
+ * goal list, never throw `Cannot read properties of undefined (reading 'goals')`.
+ */
+export function snapshotGoals(snapshot: GoalQueueSnapshot | null | undefined): GoalQueueSnapshot['goals'] {
+  return Array.isArray(snapshot?.goals) ? snapshot.goals : []
+}
+
+/**
  * Restore the durable ledger into the controller. Class A says the HOST snapshot
  * is the authority (#40): the generation reads `ctx.ledgerSnapshot` first and only
  * falls back to the derived `buddy-ledger.json` compatibility mirror. A ledger
@@ -326,9 +337,10 @@ function restoreLedgerIntoController(
   try {
     const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
     holder.queue.restore(chosen.snapshot)
-    const done = chosen.snapshot.goals.filter((goal) => goal.status === 'done').length
-    const current = chosen.snapshot.goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
-    log('LEDGER_RESTORED', { source: chosen.source, done, total: chosen.snapshot.goals.length, current: current?.description ?? null })
+    const goals = snapshotGoals(chosen.snapshot)
+    const done = goals.filter((goal) => goal.status === 'done').length
+    const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
+    log('LEDGER_RESTORED', { source: chosen.source, done, total: goals.length, current: current?.description ?? null })
   } catch (error) {
     log('ERROR', { where: 'restoreLedgerIntoController', message: error instanceof Error ? error.message : String(error) })
   }
@@ -486,10 +498,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   // A reset resumes from the LIVE inventory; `invEmpty` is computed, not assumed.
   if (ctx.resetReason !== null || resume.rungIndex > 0) {
+    const resumeReason = ctx.resetReason ?? 'inventory-resume'
+    const resumeGoals = snapshotGoals(ctx.ledgerSnapshot)
+    if (ctx.ledgerSnapshot === null || !Array.isArray(ctx.ledgerSnapshot.goals)) {
+      ctx.log('LADDER_RESUME_NO_SNAPSHOT', { reason: resumeReason, goals: resumeGoals.length })
+    }
     ctx.log('LADDER_RESUME', {
       rung: resume.rungId,
       rungIndex: resume.rungIndex,
-      reason: ctx.resetReason ?? 'inventory-resume',
+      reason: resumeReason,
       invEmpty: resume.invEmpty,
       ...(resume.fallbackFrom === null ? {} : { fallbackFrom: resume.fallbackFrom, fallbackNeed: resume.fallbackNeed }),
       inventory: counts,
