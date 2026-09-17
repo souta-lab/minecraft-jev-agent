@@ -57,3 +57,26 @@
 ・ブランチ作業は git worktree（共有ツリーで checkout しない）。ブランチ修正は main マージ後に初めて稼働中エージェントへ反映
 ・ゲート: tools/verify-issue12.mjs / verify-issue13.mjs / verify-mercury.mjs
 ```
+
+## 進捗ログ（一次証拠つき）
+```
+2026-09-18 02:26 JST — ★節目: 掘削系マーカーが初めて非ゼロになった
+  issue12 ゲート 4/6（3/6 から前進）: precond=363 ladderPrereq=216 maxTicks=202 gensLast5min=2 rawIron=0
+  TOOL_CHOICE=4  DIG_PATH=4  JUMP_ATTEMPT=24  DESCEND_LIMIT=1  STAIRCASE=1
+  → これまで全マーカー0で検証不能だった #7（道具選択）/ #8（hop順序・failure memory）/
+    #9（DESCEND暴走）/ ジグザグ→階段 の修正が、身体の行動として観測できた
+  → 連鎖: Mercury有効化（キャッシュループ解消、cached=false の新規計画）→ 前提チェーン差し替え（LADDER_PREREQ）
+    → 実際に掘る、が成立
+  残: rawIron=0（鉄鉱石未入手）。直近は WAIT（pos=29.5,60.0,34.3 rung=charcoal）
+      → 次の詰め: 探索候補の不足。discoveredOres=[coal_ore,copper_ore,iron_ore] を活かす RETURN_TO_KNOWN_ORE が未実装（#14/#29）
+
+2026-09-18 02:24 JST — Mercury有効化でキャッシュループ解消（暫定回避策）
+  system2.config.json {"mercury": false} → {"mercury": true}（ホットリロード ms=155）
+  ADVISOR source=mercury reason=wait_limit  strategy=mercury_patch_collect_coal   cost=0.000281 ms=6655 cached=false
+  ADVISOR source=mercury reason=no_progress strategy=mercury_replace_collect_coal cost=0.000289 ms=4468 cached=false
+  恒久修正は #15（cache hit は plan を再生／同一WAIT再発で無効化／実行不能戦略を grounding で拒否）
+
+2026-09-18 02:05 JST — #12 着地（部分的）
+  LADDER_PREREQ 出現（0 → 200超）／churn 9回/5分 → 2回/5分／maxTicks 121 → 202
+  listenerLeak は false に（#13相当は改善）。ただし 1tick停止は残存。
+```
