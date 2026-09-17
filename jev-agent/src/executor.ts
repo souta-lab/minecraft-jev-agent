@@ -15,10 +15,13 @@ import type { PartiallyComputedPath } from 'mineflayer-pathfinder'
 import type { Bot } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
+import type { Item } from 'prismarine-item'
 import type { Candidate, CandidateKind } from './candidates.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { distance, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, UNBREAKABLE } from './state.ts'
+import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, UNBREAKABLE } from './state.ts'
+import { selectDigTool, toolLabel } from './toolChoice.ts'
+import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 
@@ -764,6 +767,7 @@ export class Executor {
     let maxY = start.y
     let jumps = 0
     let recoveries = 0
+    let hopAttempts = 0
     let backUntil = 0
     const savedPhysics = this.bot.physicsEnabled
     // The sensor reads `onGround` from Mineflayer, but on this server the flag
@@ -953,18 +957,49 @@ export class Executor {
             return false
           }
           recoveries += 1
+          const beforeHop = this.bot.entity.position.clone()
           this.logger.info(
             'executor',
             `control locomotion hop recoveries=${recoveries} (pinned=${pinned} still=${standingStill}) at y=${round2(position.y)} climb=${climb === null ? 'none' : `${climb.source}@${climb.x},${climb.top},${climb.z}`} headroom=[cur=${currentHeadroom} land=${landingHeadroom}]`,
             { target, anchor },
           )
-          this.bot.setControlState('forward', false)
-          this.bot.setControlState('jump', true)
-          await delay(180, signal)
-          this.bot.setControlState('jump', false)
           this.bot.setControlState('forward', true)
-          await delay(260, signal)
+          this.bot.setControlState('jump', true)
+          await delay(500, signal)
+          this.bot.setControlState('jump', false)
+          await delay(120, signal)
           this.bot.setControlState('forward', false)
+          const afterHop = this.bot.entity.position
+          const dy = afterHop.y - beforeHop.y
+          const occupiedTarget =
+            Math.hypot(afterHop.x - (node.x + 0.5), afterHop.z - (node.z + 0.5)) <= 1.1 &&
+            Math.abs(afterHop.y - node.y) <= 1
+          const hopOk = dy >= 0.75 || occupiedTarget
+          this.logger.info(
+            'executor',
+            `JUMP_ATTEMPT dy=1 ok=${hopOk} attempts=${recoveries} from=(${round2(beforeHop.x)},${round2(beforeHop.y)},${round2(beforeHop.z)}) to=(${round2(afterHop.x)},${round2(afterHop.y)},${round2(afterHop.z)}) rise=${round2(dy)} target=(${node.x},${node.y},${node.z}) occupiedTarget=${occupiedTarget}`,
+            { target, anchor },
+          )
+          if (hopOk) {
+            hopAttempts = 0
+            lastPosition = afterHop.clone()
+            lastProgressAt = Date.now()
+            continue
+          }
+          hopAttempts += 1
+          if (hopAttempts >= 2) {
+            this.logger.warn(
+              'executor',
+              `JUMP_FAIL attempts=${hopAttempts} -> strategy=detour`,
+              { target, anchor, obstacle: climb === null ? null : `${climb.source}@${climb.x},${climb.top},${climb.z}` },
+            )
+            this.logger.info(
+              'executor',
+              `DETOUR via=alternate_route reason=hop_failed attempts=${hopAttempts}`,
+              { target, anchor },
+            )
+            return false
+          }
           if (this.isPinned()) {
             // Back off to create room for the next pre-contact jump; a depression
             // gets a longer back-off so the bot clears the pit wall first.
@@ -986,6 +1021,7 @@ export class Executor {
           lastProgressAt = Date.now()
           backUntil = 0
           jumpStreak = 0
+          hopAttempts = 0
         } else if (Date.now() - lastProgressAt > 2500) {
           nextReplanAt = 0
         }
@@ -1314,7 +1350,21 @@ export class Executor {
       throw new ExecutorError('target_gone', `block at (${target.x},${target.y},${target.z}) is gone before the dig`)
     }
     this.setPhase(candidate, epoch, 'digging')
-    await this.equipTool(candidate, epoch, signal)
+    const live = this.resolveLiveDigTool(block)
+    if (!live.ok) {
+      throw new ExecutorError('dig_error', `cannot dig ${block.name} at (${target.x},${target.y},${target.z}): ${live.reason}`)
+    }
+    await this.equipTool(
+      {
+        ...candidate,
+        toolName: live.tool,
+        toolTier: live.tier,
+        requiresTool: live.tool !== null,
+        meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
+      },
+      epoch,
+      signal,
+    )
     await this.digBlock(block, epoch, signal)
     this.ensureOwned(epoch, signal)
 
@@ -2255,14 +2305,53 @@ export class Executor {
 
   private async equipTool(candidate: Candidate, epoch: number, signal: AbortSignal): Promise<void> {
     const toolName = candidate.toolName
-    if (toolName === null) return
-    const tool = this.bot.inventory.items().find((entry) => entry.name.endsWith(`_${toolName}`))
-    if (tool === undefined) {
-      if (candidate.requiresTool) throw new ExecutorError('dig_error', `no ${toolName} in the inventory`)
-      return
+    const blockName = readMetaString(candidate, 'digBlockName') ?? candidate.targetName ?? 'unknown'
+    const reason =
+      readMetaString(candidate, 'toolReason') ??
+      (toolName === null ? 'hand_harvestable' : `${toolName}_required`)
+    if (toolName !== null) {
+      const tool = this.findTool(toolName, candidate.toolTier ?? null)
+      if (tool === undefined) {
+        this.logger.warn(
+          'executor',
+          `TOOL_CHOICE block=${blockName} tool=none reason=${reason}`,
+          { actionId: candidate.id },
+        )
+        if (candidate.requiresTool) {
+          throw new ExecutorError('dig_error', `no ${toolName} in the inventory`)
+        }
+      } else {
+        await this.bot.equip(tool, 'hand')
+        this.ensureOwned(epoch, signal)
+      }
     }
-    await this.bot.equip(tool, 'hand')
-    this.ensureOwned(epoch, signal)
+    this.logger.info(
+      'executor',
+      `TOOL_CHOICE block=${blockName} tool=${toolLabel(toolName)} reason=${reason}`,
+      { actionId: candidate.id, toolName, tier: candidate.toolTier ?? null },
+    )
+  }
+
+  private findTool(toolName: 'pickaxe' | 'axe' | 'shovel', tier: number | null): Item | undefined {
+    const tools = this.bot.inventory.items().filter((entry) => entry.name.endsWith(`_${toolName}`))
+    if (toolName !== 'pickaxe' || tier === null || tier <= 0) return tools[0]
+    return tools.find((entry) => (PICKAXE_RANKS[entry.name] ?? -1) >= tier)
+  }
+
+  /**
+   * Re-resolve the dig tool from the live block (#7, option B). Candidate state
+   * can be stale; the actual block in front of the bot is authoritative, so a
+   * dirt cell can never inherit a pickaxe from an old resource-scan lookup.
+   */
+  private resolveLiveDigTool(block: { name: string; diggable: boolean }): ToolChoice {
+    const harvest = resolveBlockHarvest(this.bot, block.name)
+    const info: DigBlockInfo = {
+      name: block.name,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+      diggable: block.diggable,
+    }
+    return selectDigTool(info, (tool, tier) => this.findTool(tool, tier) !== undefined)
   }
 
   private findPlaceReference(target: Vec3Json): { block: Block; face: ReturnType<Bot['entity']['position']['clone']> } | null {

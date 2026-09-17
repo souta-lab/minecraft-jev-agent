@@ -45,6 +45,8 @@ import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
+import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
+import { DigMemory } from './worldMemory.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -233,6 +235,14 @@ function emptySignals(): AgentSignals {
     maxConcurrentActions: 0,
     escalationRecommended: false,
     failedCandidates: {},
+    digDir: null,
+    digDirCount: 0,
+    digDepth: 0,
+    digOscillate: false,
+    knownStoneY: null,
+    lastTunnel: null,
+    descendNoProgress: 0,
+    descendLimitReached: false,
   }
 }
 
@@ -285,6 +295,9 @@ export class JevController {
   private harvestedGoalCount = 0
   private failureStreak = 0
   private candidateFailures = new Map<string, number>()
+  private candidateFailureAt = new Map<string, number>()
+  private readonly digMemory = new DigMemory()
+  private descendHaveBaseline = 0
   private lastEscalationAt = new Map<EscalationReason, number>()
   private lastEscalationMs = 0
 
@@ -731,6 +744,7 @@ export class JevController {
         },
         sensorOptions(this.options),
       )
+      this.syncTerrainSignals(state)
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -846,6 +860,8 @@ export class JevController {
         return
       }
 
+      if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
+
       const claim = this.executor.claim(guarded.candidate)
       if (claim.kept) {
         this.logger.info(
@@ -860,7 +876,7 @@ export class JevController {
       this.pendingDecisions.set(claim.epoch, { record, healthAtDecision: this.bot.health })
       void claim.completion
         .then((result) => {
-          this.onActionComplete(result, decision)
+          this.onActionComplete(result, decision, guarded.candidate)
         })
         .catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error)
@@ -1085,7 +1101,7 @@ export class JevController {
     this.recordFailure(guarded.code, guarded.reason)
   }
 
-  private onActionComplete(result: ExecutionResult, decision: JevResult): void {
+  private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
     this.recentOutcomes.push({
       actionId: result.actionId,
       status: result.status,
@@ -1167,6 +1183,7 @@ export class JevController {
           return
         }
       }
+      if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
       this.failureStreak = 0
       this.signals.consecutiveFailures = 0
     } else {
@@ -1186,6 +1203,98 @@ export class JevController {
         ? deferred.detail
         : { actionId: result.actionId, status: result.status, failure: result.failure }
     this.requestDecision(trigger, detail)
+  }
+
+  private syncTerrainSignals(state: WorldState): void {
+    const feetY = Math.floor(state.self.position.y)
+    let deepest: number | null = null
+    for (const block of state.blocks) {
+      if (block.kind !== 'stone' && block.kind !== 'ore') continue
+      if (block.position.y >= feetY) continue
+      if (deepest === null || block.position.y < deepest) deepest = block.position.y
+    }
+    if (deepest !== null) this.digMemory.observeStoneY(deepest)
+    const memory = this.digMemory.snapshot()
+    this.signals.digDir = memory.digDir
+    this.signals.digDirCount = memory.digDirCount
+    this.signals.digDepth = memory.digDepth
+    this.signals.digOscillate = memory.digOscillate
+    this.signals.knownStoneY = memory.knownStoneY
+    this.signals.lastTunnel = memory.lastTunnel
+    this.signals.descendNoProgress = memory.descendNoProgress
+    this.signals.descendLimitReached = memory.descendLimitReached
+  }
+
+  private logDescendPlan(candidate: Candidate): void {
+    const dir = typeof candidate.meta.dir === 'string' ? candidate.meta.dir : 'unknown'
+    const mode = candidate.meta.mode === 'down' ? 'down' : 'level'
+    const focus = typeof candidate.meta.focusItem === 'string' ? candidate.meta.focusItem : 'unknown'
+    const depth = this.digMemory.dirCount + 1
+    this.logger.info(
+      'agent',
+      `DIG_PATH dir=${dir} depth=${depth} target=${focus}`,
+      { actionId: candidate.id, mode, dir, depth },
+      this.tickCounter,
+    )
+    const tunnel = this.digMemory.lastTunnel
+    if (this.digMemory.dirCount > 0 && tunnel !== null) {
+      this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id }, this.tickCounter)
+    }
+    if (mode === 'down' && this.digMemory.dirCount === 0) {
+      const from = Math.floor(this.bot.entity.position.y)
+      const to = this.digMemory.knownStoneY ?? from - 8
+      this.logger.info('agent', `STAIRCASE from_y=${from} to_y=${to}`, { actionId: candidate.id }, this.tickCounter)
+    }
+  }
+
+  private onDescendComplete(result: ExecutionResult, candidate: Candidate): void {
+    const target = candidate.target
+    const dir = candidate.meta.dir
+    if (target !== null && (dir === 'E' || dir === 'W' || dir === 'N' || dir === 'S')) {
+      this.digMemory.record({
+        x: target.x,
+        y: target.y,
+        z: target.z,
+        dir,
+        mode: candidate.meta.mode === 'down' ? 'down' : 'level',
+        target: typeof candidate.meta.focusItem === 'string' ? candidate.meta.focusItem : null,
+        atMs: Date.now(),
+      })
+    }
+    const have = this.effectiveHave()
+    const delta = have - this.descendHaveBaseline
+    if (delta > 0) {
+      this.descendHaveBaseline = have
+      this.digMemory.markResourceProgress()
+    } else {
+      const budget = this.digMemory.markDescend(false)
+      this.logger.info(
+        'agent',
+        `DESCEND_PROGRESS actionSuccess=true resourceDelta=${delta} streak=${budget.noProgress}`,
+        { actionId: result.actionId, noProgress: budget.noProgress },
+        this.tickCounter,
+      )
+      if (budget.limitReached) {
+        this.logger.warn(
+          'agent',
+          `DESCEND_LIMIT depth=${this.digMemory.depth} noProgress=${budget.noProgress} -> strategy=lateral`,
+          { actionId: result.actionId },
+          this.tickCounter,
+        )
+        this.signals.descendLimitReached = true
+        this.digMemory.resetPath()
+      }
+    }
+    if (this.digMemory.isOscillating()) {
+      const net = Math.round(this.digMemory.netDisplacement() * 100) / 100
+      this.logger.warn(
+        'agent',
+        `DIG_OSCILLATE net=${net} -> strategy=staircase`,
+        { actionId: result.actionId, dir: this.digMemory.dir },
+        this.tickCounter,
+      )
+      this.digMemory.markStaircase()
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1229,6 +1338,8 @@ export class JevController {
         this.harvestedGoalCount = 0
         this.lastProgressAt = Date.now()
         this.lastProgress = 0
+        this.descendHaveBaseline = have
+        this.digMemory.markResourceProgress()
         this.logger.warn(
           'queue',
           `subgoal COMPLETE [${beforeDescription}] -> [${after?.description ?? 'plan complete'}] trigger=${trigger} have=${have} inventory=${JSON.stringify(this.pendingTransition.inventory)}`,
@@ -1506,18 +1617,40 @@ export class JevController {
   }
 
   private failureSnapshot(): Record<string, number> {
+    const now = Date.now()
     const snapshot: Record<string, number> = {}
-    for (const [id, count] of this.candidateFailures) snapshot[id] = count
+    for (const [id, count] of this.candidateFailures) {
+      const age = now - (this.candidateFailureAt.get(id) ?? now)
+      const decayed = decayedFailureCount(count, age)
+      if (decayed > 0) snapshot[id] = decayed
+    }
     return snapshot
   }
 
+  private candidateFailureCount(candidateId: string): number {
+    return failureCount(this.failureSnapshot(), candidateId)
+  }
+
   private noteCandidateFailure(candidateId: string): void {
+    const now = Date.now()
     this.candidateFailures.set(candidateId, (this.candidateFailures.get(candidateId) ?? 0) + 1)
+    this.candidateFailureAt.set(candidateId, now)
+    const spatial = spatialFailureKey(candidateId)
+    if (spatial !== null) {
+      this.candidateFailures.set(spatial, (this.candidateFailures.get(spatial) ?? 0) + 1)
+      this.candidateFailureAt.set(spatial, now)
+    }
     this.signals.failedCandidates = this.failureSnapshot()
   }
 
   private noteCandidateSuccess(candidateId: string): void {
     this.candidateFailures.delete(candidateId)
+    this.candidateFailureAt.delete(candidateId)
+    const spatial = spatialFailureKey(candidateId)
+    if (spatial !== null) {
+      this.candidateFailures.delete(spatial)
+      this.candidateFailureAt.delete(spatial)
+    }
     this.signals.failedCandidates = this.failureSnapshot()
   }
 
@@ -1532,7 +1665,7 @@ export class JevController {
     )
     if (actionable.length === 0) return
     const allExhausted = actionable.every(
-      (candidate) => (this.candidateFailures.get(candidate.id) ?? 0) >= this.options.candidateFailureLimit,
+      (candidate) => this.candidateFailureCount(candidate.id) >= this.options.candidateFailureLimit,
     )
     if (!allExhausted) return
     this.escalate(

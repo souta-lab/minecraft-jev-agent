@@ -162,6 +162,14 @@ export type DescentOption = {
   /** true when every dig in this step is safe (no lava/water/void, solid landing) */
   safe: boolean
   reason: string
+  /** concrete name of the primary cell this step digs (down=floor else wall/head) */
+  digName?: string | null
+  /** harvest family of the primary cell, resolved from the live block */
+  digHarvestTool?: HarvestTool | null
+  /** minimum pickaxe rank for the primary cell */
+  digHarvestTier?: number | null
+  /** primary cell is diggable right now */
+  diggable?: boolean
 }
 
 export type GoalState = {
@@ -200,8 +208,26 @@ export type AgentSignals = {
    * candidate id -> recent failure count. Fed back into the policy so it stops
    * re-selecting a target that mechanically keeps failing (unreachable behind a
    * wall, stale coords, and so on). This is the "learned policy head" memory.
+   * The controller also writes coarser spatial keys for movement candidates so a
+   * nearby coordinate cannot evade the memory (#8a).
    */
   failedCandidates: Record<string, number>
+  /** fixed dig direction once chosen; do not flip until the cap/resource (#4) */
+  digDir?: 'E' | 'W' | 'N' | 'S' | null
+  /** consecutive digs already executed in `digDir` (cap `DIG_PATH_CAP`) */
+  digDirCount?: number
+  /** staircase depth (down steps) for the current dig path */
+  digDepth?: number
+  /** true when the last 6 digs showed near-zero net displacement -> staircase */
+  digOscillate?: boolean
+  /** deepest stone/ore level observed (positive evidence for a staircase) */
+  knownStoneY?: number | null
+  /** last tunnel cell recorded by WorldMemory, for `REUSE_TUNNEL` */
+  lastTunnel?: Vec3Json | null
+  /** successful DESCEND actions in a row that produced zero resource progress */
+  descendNoProgress?: number
+  /** set once `descendNoProgress >= DESCEND_NO_PROGRESS_LIMIT` -> lateral search */
+  descendLimitReached?: boolean
 }
 
 export type WorldState = {
@@ -315,7 +341,7 @@ function registryShape(bot: Bot): RegistryShape {
 }
 
 /** Resolve a block's primary drop, required tool class and required pickaxe rank. */
-function blockHarvest(
+export function resolveBlockHarvest(
   bot: Bot,
   blockName: string,
 ): { yield: string | null; harvestTool: HarvestTool | null; harvestTier: number | null } {
@@ -529,7 +555,7 @@ function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): Bloc
     if (block === null) continue
     const pos = vecJson(position)
     const adjacentStandable = findAdjacentStandable(bot, pos)
-    const harvest = blockHarvest(bot, block.name)
+    const harvest = resolveBlockHarvest(bot, block.name)
     out.push({
       kind: 'log',
       name: block.name,
@@ -599,7 +625,7 @@ function buildStoneBlocks(
         const block = bot.blockAt(scratch.set(x, y, z))
         if (block === null || !STONE_LIKE.has(block.name)) continue
         if (!isExposed(x, y, z)) break
-        const harvest = blockHarvest(bot, block.name)
+        const harvest = resolveBlockHarvest(bot, block.name)
         if (focusItem !== null && !resourceMatches(harvest.yield, focusItem)) break
         const key = `${x}_${y}_${z}`
         if (!seen.has(key)) {
@@ -652,7 +678,7 @@ function buildBuriedStoneBlocks(
     const block = bot.blockAt(position)
     if (block === null) continue
     const pos = vecJson(position)
-    const harvest = blockHarvest(bot, block.name)
+    const harvest = resolveBlockHarvest(bot, block.name)
     if (focusItem !== null && !resourceMatches(harvest.yield, focusItem)) continue
     if (distance(pos, self.position) <= options.reach) continue
     const adjacentStandable = findAdjacentStandable(bot, pos)
@@ -701,7 +727,7 @@ function buildOreBlocks(
     if (block === null) continue
     const pos = vecJson(position)
     const adjacentStandable = findAdjacentStandable(bot, pos)
-    const harvest = blockHarvest(bot, block.name)
+    const harvest = resolveBlockHarvest(bot, block.name)
     out.push({
       kind: 'ore',
       name: block.name,
@@ -838,6 +864,12 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
       else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) reason = 'floor already open (uncontrolled fall)'
       else if (hazardsAround(hazardous, wall, head, floor, step, support)) reason = 'lava/water in the step column'
+      const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
+      const primaryBlock = at(primary.x, primary.y, primary.z)
+      const primaryHarvest =
+        primaryBlock === null
+          ? { yield: null, harvestTool: null, harvestTier: null }
+          : resolveBlockHarvest(bot, primaryBlock.name)
       out.push({
         dir,
         mode,
@@ -852,6 +884,10 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
         floorSolid,
         safe: reason === 'safe',
         reason,
+        digName: primaryBlock?.name ?? null,
+        digHarvestTool: primaryHarvest.harvestTool,
+        digHarvestTier: primaryHarvest.harvestTier,
+        diggable: primaryBlock?.diggable ?? false,
       })
     }
   }
