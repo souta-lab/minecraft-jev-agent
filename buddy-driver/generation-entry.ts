@@ -292,25 +292,42 @@ function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number
 }
 
 /**
- * In llm-planner mode the controller's own ledger restore is gated behind the
- * single-shot planner, so the durable `done` count is restored here instead.
- * jev-agent is imported read-only, so the queue is reached through a narrow cast;
- * the HOST has already validated/archived the ledger against the live inventory.
+ * Restore the durable ledger into the controller. Class A says the HOST snapshot
+ * is the authority (#40): the generation reads `ctx.ledgerSnapshot` first and only
+ * falls back to the derived `buddy-ledger.json` compatibility mirror. A ledger
+ * whose recorded tools/stations are gone from the live bot is refused.
  */
 function restoreLedgerIntoController(
   controller: JevController,
+  hostSnapshot: GoalQueueSnapshot | null,
   ledgerPath: string | null,
+  counts: Record<string, number>,
+  world: ResidentWorldMemory,
   log: (event: string, detail?: Record<string, unknown>) => void,
 ): void {
-  if (ledgerPath === null || !existsSync(ledgerPath)) return
+  const candidates: Array<{ source: string; snapshot: GoalQueueSnapshot }> = []
+  if (hostSnapshot !== null && Array.isArray(hostSnapshot.goals) && typeof hostSnapshot.counter === 'number') {
+    candidates.push({ source: 'host-snapshot', snapshot: hostSnapshot })
+  }
+  if (ledgerPath !== null && existsSync(ledgerPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf8')) as GoalQueueSnapshot
+      if (Array.isArray(parsed.goals) && typeof parsed.counter === 'number') candidates.push({ source: 'derived-file', snapshot: parsed })
+    } catch (error) {
+      log('ERROR', { where: 'restoreLedgerIntoController.read', message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const chosen = candidates.find((candidate) => ledgerIsConsistent(candidate.snapshot, counts, world))
+  if (chosen === undefined) {
+    if (candidates.length > 0) log('LEDGER_STALE', { reason: 'live inventory regressed below recorded goals', source: candidates[0]?.source ?? 'none' })
+    return
+  }
   try {
-    const snapshot = JSON.parse(readFileSync(ledgerPath, 'utf8')) as GoalQueueSnapshot
-    if (!Array.isArray(snapshot.goals) || typeof snapshot.counter !== 'number') return
     const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
-    holder.queue.restore(snapshot)
-    const done = snapshot.goals.filter((goal) => goal.status === 'done').length
-    const current = snapshot.goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
-    log('LEDGER_RESTORED', { done, total: snapshot.goals.length, current: current?.description ?? null })
+    holder.queue.restore(chosen.snapshot)
+    const done = chosen.snapshot.goals.filter((goal) => goal.status === 'done').length
+    const current = chosen.snapshot.goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
+    log('LEDGER_RESTORED', { source: chosen.source, done, total: chosen.snapshot.goals.length, current: current?.description ?? null })
   } catch (error) {
     log('ERROR', { where: 'restoreLedgerIntoController', message: error instanceof Error ? error.message : String(error) })
   }
@@ -566,7 +583,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
   installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
-  restoreLedgerIntoController(controller, ledgerPath, ctx.log)
+  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, ctx.log)
   const brain = new PlannerBrain({
     bot,
     world,
@@ -639,6 +656,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           subgoalCount: result.subgoalCount,
           jevCalls: result.jevCalls,
         })
+        proposeLedger()
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
@@ -654,8 +672,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'quiesce.stop', message })
     }
+    proposeLedger()
     // Bounded settle: the executor cancels the in-flight action on stop.
     await Promise.race([runPromise ?? Promise.resolve(), delay(3000)])
+  }
+
+  function proposeLedger(): void {
+    try {
+      const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
+      ctx.proposeLedger(holder.queue.snapshot())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.log('ERROR', { id, where: 'proposeLedger', message })
+    }
   }
 
   function readTruth(): ServerTruth {
