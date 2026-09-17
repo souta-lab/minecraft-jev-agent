@@ -295,6 +295,33 @@ addCase('a visible matching ore suppresses retrieval so MINE keeps priority', ()
   return { pass: retrieve === undefined && mine !== undefined, detail: candidates.map((candidate) => candidate.id).join(',') }
 })
 
+addCase('a remembered surface log beyond reach grounds a RETRIEVE for the charcoal goal (#44)', () => {
+  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 6, y: 68, z: 0 } }
+  const state = worldState({
+    position: { x: 0, y: 60, z: 0 },
+    goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' })),
+    goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
+    knownResources: [known],
+  })
+  const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
+  return {
+    pass: retrieve !== undefined && retrieve.meta.retrieval === 'known' && retrieve.target?.x === 6 && retrieve.target?.y === 68,
+    detail: retrieve === undefined ? 'no RETRIEVE' : `${retrieve.id} ${JSON.stringify(retrieve.meta)}`,
+  }
+})
+
+addCase('a remembered log within proof distance but absent from the scan stays depleted', () => {
+  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 3, y: 60, z: 0 } }
+  const state = worldState({
+    position: { x: 0, y: 60, z: 0 },
+    goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' })),
+    goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
+    knownResources: [known],
+  })
+  const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
+  return { pass: retrieve === undefined, detail: retrieve === undefined ? 'suppressed (depleted)' : `${retrieve.id}` }
+})
+
 let failures = 0
 process.stdout.write('inventory-first planning + known-resource retrieval (#43/#14/#29)\n')
 process.stdout.write('-'.repeat(72) + '\n')

@@ -48,6 +48,8 @@ import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
+import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import type { ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import { DigMemory } from './worldMemory.ts'
 import { StubSystem2 } from './system2.ts'
@@ -151,6 +153,13 @@ export interface JevAgentOptions {
   eventSink?: (event: string, detail: Record<string, unknown>) => void
   /** durable known-resource coordinates injected by the resident host (issue #43) */
   knownResources?: KnownResource[]
+  /**
+   * #44: minimum spacing between replans for the same summon reason. A second
+   * replan inside the window (with unchanged inputs) reuses the current plan.
+   */
+  replanThrottleMs: number
+  /** #44: position delta in blocks that counts as new information. */
+  replanPositionDelta: number
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -190,6 +199,8 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   pathTimeoutMs: 15000,
   digTimeoutMs: 15000,
   actuation: 'pathfinder',
+  replanThrottleMs: resolveReplanThrottleMs(),
+  replanPositionDelta: resolveReplanPositionDelta(),
 }
 
 export interface RunSummary {
@@ -331,6 +342,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'MOVE_OSCILLATE',
   'RETURN_TO_KNOWN_RESOURCE',
   'EXPLORE',
+  'REPLAN_THROTTLED',
+  'REPLAN_REJECTED',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -439,6 +452,7 @@ export class JevController {
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
   private wedgeReason: string | null = null
+  private readonly replanThrottle: ReplanThrottle
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -456,6 +470,7 @@ export class JevController {
   constructor(bot: Bot, options: Partial<JevAgentOptions> = {}) {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
+    this.replanThrottle = new ReplanThrottle(this.options.replanThrottleMs, this.options.replanPositionDelta)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.recipeIndex = createRecipeIndex(bot.registry)
@@ -1726,7 +1741,19 @@ export class JevController {
       return { triggered: false, reason, detail: 'a plan call is already in flight' }
     }
     const last = this.lastLlmSummonAt.get(reason) ?? 0
-    if (now - last < this.options.llmCooldownMs) {
+    if (reason !== 'queue_empty') {
+      const throttle = this.replanThrottle.tryReplan(reason, this.replanInputs(), now)
+      if (!throttle.allow) {
+        const message = formatReplanThrottled(reason, throttle)
+        this.logger.warn(
+          'agent',
+          message,
+          { reason, ageMs: throttle.ageMs, stateHash: throttle.stateHash, because: throttle.kind },
+          this.tickCounter,
+        )
+        return { triggered: false, reason, detail: message }
+      }
+    } else if (now - last < this.options.llmCooldownMs) {
       this.logger.info(
         'system2',
         `LLM summon suppressed reason=${reason} (${now - last}ms < ${this.options.llmCooldownMs}ms cooldown)`,
@@ -1773,6 +1800,7 @@ export class JevController {
       .plan(request)
       .then((plan) => {
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+        this.waitReplans = 0
         if (added.length > 0) {
           this.chosenCounts.clear()
           this.chosenCountsAtProgress = this.lastProgress
@@ -1960,18 +1988,20 @@ export class JevController {
           'no_progress',
           `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; requesting a replan`,
         )
-        this.waitReplans += 1
+        const counted = summon?.triggered === true
+        if (counted) this.waitReplans += 1
         this.waitStreak = 0
         this.chosenCounts.set(actionId, 0)
         this.logger.warn(
           'agent',
-          `WAIT_LIMIT n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}`,
+          `WAIT_LIMIT n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}${counted ? '' : ' THROTTLED'}`,
           {
             actionId,
             count: wait.n,
             goal: goalKey,
             waitReplans: this.waitReplans,
-            llmSummoned: summon?.triggered ?? false,
+            llmSummoned: counted,
+            throttled: !counted,
           },
           this.tickCounter,
         )
@@ -2006,6 +2036,30 @@ export class JevController {
       .join(',')
     const position = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
     return `${this.currentGoalKey()}|${position}|${inventory}`
+  }
+
+  private replanInputs(): ReplanInputs {
+    const inventory: Record<string, number> = {}
+    try {
+      for (const item of this.bot.inventory.items()) inventory[item.name] = (inventory[item.name] ?? 0) + item.count
+    } catch {
+      // inventory unreadable at a death/quit boundary; an empty snapshot is safe
+    }
+    const entity = this.bot.entity
+    const position =
+      entity === undefined
+        ? null
+        : { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) }
+    const failureSignature = this.recentOutcomes
+      .slice(-4)
+      .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`)
+      .join(',')
+    return {
+      inventory,
+      position,
+      knownResources: (this.signals.knownResources ?? []).length,
+      failureSignature,
+    }
   }
 
   private logRetrievalAction(candidate: Candidate): void {

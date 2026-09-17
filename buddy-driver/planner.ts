@@ -34,6 +34,7 @@ import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } fr
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import { matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
+import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
@@ -653,6 +654,10 @@ const UPKEEP_GOAL: PlannedGoal = {
 
 const FRONT_FALLBACK: PlanOption = { id: 'front_fallback', title: 'deterministic ladder front', goals: [UPKEEP_GOAL] }
 
+function rejectionPlan(note: string): System2Plan {
+  return { goals: [], note: `REPLAN_REJECTED no_body_delta (${note})`, op: 'continue' as PlanOp }
+}
+
 /**
  * A replan that MUST change the body (#43 follow-up): its first goal is the
  * nearest unsatisfied ore rung's descent+ore chain, or a stone-collection
@@ -907,6 +912,7 @@ export class PlannerBrain implements System2Brain {
   private lastAdvisorSignature: string | null = null
   private lastBodySignature: string | null = null
   private lastBodyGoals: PlannedGoal[] = []
+  private currentCounts: Counts = {}
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -927,6 +933,7 @@ export class PlannerBrain implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const started = Date.now()
     const counts = inventoryCounts(this.bot)
+    this.currentCounts = counts
     const options = buildPlanOptions(counts, this.world, { placedFurnacesNear: this.placedFurnacesNear(), log: this.log })
     const reason = mapReason(request, this.firstCall)
     this.firstCall = false
@@ -1032,7 +1039,9 @@ export class PlannerBrain implements System2Brain {
     if (alreadyActive && !force) {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
-    return { goals: option.goals, note, op: 'replace' }
+    const adjusted = this.applyBodyDeltaRequirement(option, request, note)
+    if (adjusted === null) return rejectionPlan(note)
+    return { goals: adjusted.goals, note, op: 'replace' }
   }
 
   private finishPlanOp(option: PlanOption, request: System2PlanRequest, op: PlanOp, note: string): System2Plan {
@@ -1050,7 +1059,43 @@ export class PlannerBrain implements System2Brain {
     if (alreadyActive && op !== 'continue') {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
-    return { goals: option.goals, note, op }
+    const adjusted = this.applyBodyDeltaRequirement(option, request, note)
+    if (adjusted === null) return rejectionPlan(note)
+    return { goals: adjusted.goals, note, op }
+  }
+
+  /**
+   * Issue #44 requirement 3: a replacement must change the body. When the
+   * chosen option is stationary relative to the blocked goal, substitute the
+   * deterministic body-change option (descent/ore/retrieval). If even that
+   * cannot change the body, reject the replan and keep the current plan.
+   */
+  private applyBodyDeltaRequirement(option: PlanOption, request: System2PlanRequest, note: string): PlanOption | null {
+    const current = request.goalQueueState.current
+    if (hasBodyDelta(option.goals, current)) return option
+    const substitute = this.bodyChangeOption()
+    if (hasBodyDelta(substitute.goals, current)) {
+      this.log('REPLAN_BODY_CHANGE', {
+        requested: option.id,
+        replacement: substitute.id,
+        reason: request.reason,
+      })
+      return substitute
+    }
+    this.log('REPLAN_REJECTED', {
+      reason: 'no_body_delta',
+      requested: option.id,
+      current: current === null ? null : `${current.kind}:${current.targetItem ?? current.description}`,
+      note,
+    })
+    return null
+  }
+
+  private bodyChangeOption(): PlanOption {
+    return buildBodyChangeOption(this.currentCounts, this.world, {
+      placedFurnacesNear: this.placedFurnacesNear(),
+      log: this.log,
+    })
   }
 
   /**

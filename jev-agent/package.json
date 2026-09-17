@@ -21,6 +21,7 @@
     "observability-test": "tsx test-observability.mts",
     "m1-test": "tsx test-m1.mts",
     "issue43-test": "tsx test-issue43.mts",
+    "replan-throttle-test": "tsx test-replan-throttle.mts",
     "step-pipeline-test": "tsx data/step-pipeline-test.mts",
     "step-cut-test": "tsx data/step-cut-test.mts",
     "m1": "tsx m1.mts",

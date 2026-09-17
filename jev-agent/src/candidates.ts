@@ -950,8 +950,10 @@ function knownResourceFor(state: WorldState, want: RetrievalWant): KnownResource
   return best
 }
 
+const DEPLETION_PROOF_DISTANCE = 8
+
 function resourceDepleted(state: WorldState, resource: KnownResource): boolean {
-  if (distance(resource.position, state.self.position) > 24) return false
+  if (distance(resource.position, state.self.position) > DEPLETION_PROOF_DISTANCE) return false
   return !state.blocks.some(
     (block) =>
       block.kind !== 'hazard' &&
