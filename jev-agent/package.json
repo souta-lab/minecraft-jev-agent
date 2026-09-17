@@ -17,6 +17,7 @@
     "gating-test": "tsx test-gating.mts",
     "loop-test": "tsx test-loop.mts",
     "audit-test": "tsx test-audit.mts",
+    "option-spec-test": "tsx test-option-spec.mts",
     "m1-test": "tsx test-m1.mts",
     "step-pipeline-test": "tsx data/step-pipeline-test.mts",
     "step-cut-test": "tsx data/step-cut-test.mts",
