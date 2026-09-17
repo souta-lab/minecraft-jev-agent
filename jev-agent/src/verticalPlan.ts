@@ -20,6 +20,17 @@ import { distance } from './state.ts'
 /** A vertical gap larger than this (blocks) needs an explicit vertical plan. */
 export const VERTICAL_GAP = 1
 
+/** Default progress-assertion window (ticks) before a RETRIEVE is called stalled. */
+export const RETRIEVAL_STALL_TICKS_DEFAULT = 40
+
+/** `BUDDY_RETRIEVAL_STALL_TICKS` overrides the window; invalid values fall back. */
+export function resolveRetrievalStallTicks(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_RETRIEVAL_STALL_TICKS ?? RETRIEVAL_STALL_TICKS_DEFAULT)
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : RETRIEVAL_STALL_TICKS_DEFAULT
+}
+
 export type VerticalDir = 'E' | 'W' | 'N' | 'S'
 
 export type VerticalPlan =
@@ -150,4 +161,57 @@ export function evaluateRetrievalProgress(input: {
   const ticks = previous.ticks + 1
   if (ticks >= stallTicks) return { best: previous.best, ticks: 0, outcome: 'stalled' }
   return { best: previous.best, ticks, outcome: 'tracking' }
+}
+
+// --- stall escalation (issue #45 requirement 3) --------------------------------
+//
+// A stalled retrieval target has consumed its bounded effort. The controller must
+// stop re-issuing it and pick a different body change: another remembered resource
+// of the same kind (nearest first), or a branch-mine at the failed target's Y.
+// Pure and deterministic so the escalation policy is unit-testable.
+
+export interface KnownResourceLike {
+  name: string
+  position: Vec3Json
+}
+
+export type RetrievalEscalation =
+  | { kind: 'switch-resource'; name: string; position: Vec3Json }
+  | { kind: 'branch-mine'; y: number }
+
+/**
+ * Choose the replacement strategy after a RETRIEVE stall. The failed cell is
+ * excluded; another remembered resource of the same block name wins when one
+ * exists, otherwise the caller branch-mines at the failed target's Y.
+ */
+export function planRetrievalEscalation(input: {
+  failedName: string
+  failedTarget: Vec3Json
+  known: readonly KnownResourceLike[]
+  self: Vec3Json
+}): RetrievalEscalation {
+  let best: KnownResourceLike | null = null
+  for (const resource of input.known) {
+    if (resource.name !== input.failedName) continue
+    const sameCell =
+      resource.position.x === input.failedTarget.x &&
+      resource.position.y === input.failedTarget.y &&
+      resource.position.z === input.failedTarget.z
+    if (sameCell) continue
+    if (best === null || distance(resource.position, input.self) < distance(best.position, input.self)) {
+      best = resource
+    }
+  }
+  if (best !== null) return { kind: 'switch-resource', name: best.name, position: best.position }
+  return { kind: 'branch-mine', y: input.failedTarget.y }
+}
+
+/** The exact log line emitted while a RETRIEVE makes no distance progress. */
+export function formatRetrieveStalled(target: Vec3Json, dist: number, ticks: number): string {
+  return `RETRIEVE_STALLED target=${target.x},${target.y},${target.z} dist=${dist} ticks=${ticks}`
+}
+
+/** The exact log line emitted when a remembered resource is dropped as unreachable. */
+export function formatKnownResourceUnreachable(item: string, name: string, at: Vec3Json): string {
+  return `KNOWN_RESOURCE_UNREACHABLE item=${item} name=${name} at=${at.x},${at.y},${at.z}`
 }
