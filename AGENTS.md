@@ -67,3 +67,33 @@ M3: ダイヤ入手 → ダイヤ装備 → ネザー到達 → ブレイズロ�
 M4: エンダーアイ生成 → 要塞発見 → ジ・エンド到達 → ドラゴン討伐
 ```
 各段で「一次ログ＋在庫」を証拠として残し、`ARCHITECTURE.md` と issue を更新する。
+
+## 6. Issue キュー（Sol監査 #13〜#36・推奨順に固定）
+外部共同監査が24本のissueをコード根拠付きで起票済み。**次の順で潰す**（この順序はユーザー推奨に基づく）:
+```
+1. #12 PRECONDITION_MISSING → 1tick stop → recovery ループ（critical path。これが直らないと他が観測不能）
+2. #13 listener leak（physicsTick 3 vs baseline 2）
+3. #15 Mercury cache hit で cached plan を捨てて continue [] にしている ／
+   #30 patch/replace の tail を PlannerBrain が丸ごと捨て得る
+4. #14 WorldMemory が iron_ore を覚えているのに座標を捨てている（RETURN_TO_KNOWN_ORE が実質不能だった理由）／
+   #29 advisor の explore_cave / branch_mine / return_to_known_ore が身体行動では全部 collect raw_iron x3 に潰れて区別不能
+5. #20 grounded skill candidates → #21 OptionSpec → #22 β shadow → #23 replay A/B harness → #24 β termination controller
+   （= #11 Grounded Options を実装可能な単位に分解したもの）
+```
+その他の既知issue（優先度は上記の後、または関連作業時に同時に）:
+```
+#25 worldEpoch切替の世代不整合 / #27 reconnect storm / #28 disconnect時lease revoke
+#16 cacheのworld scope不足 / #18 retry accounting / #19 PLACE furnaceがschema上表現不能
+#31 station memory が add-only（消えた炉を永遠に覚え得る）
+#26 simdeath を同じ安全地点で2回やると real hazard count に加算され永久危険地帯化し得る
+#34 simdeath の lostInventory ログ取得タイミング
+#32 Jev Boolean probability を 0.5 で即bool化せず生値保持 / #35 semantic planner 三重化の整理 /
+#36 System2 → Option → Jev → ACTION → VERIFY の end-to-end causal IDs
+#5 （再監査で生存確認済み）createGeneration 中の WorldMemory proposal が HOST で即 save される／
+    generation 側の ledger renameSync が commit 前に起こり得る
+#37 M3/M4 ロードマップ（テンプレート＋必要プリミティブ）
+```
+**#37 補足（M4の設定ブロッカー）**: `difficulty=peaceful` では敵対mobが湧かず、blaze_rod と ender_pearl が入手不能
+＝ eye_of_ender が作れず M4 は原理的に不可能。M3d 段に入る前に difficulty を normal へ切り替える（または
+AI_Buddy を op にして自律的に `/difficulty` を実行できるようにする）。それまでは M2 durability 検証を優先し、
+mob死とdurabilityバグを混同しないこと。
