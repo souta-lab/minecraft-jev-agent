@@ -240,7 +240,10 @@ addCase('mercury cache hit replays the cached plan instead of continue + empty g
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: 2,
+      version: 3,
+      worldKey: 'local|unknown|0',
+      worldEpoch: 0,
+      schemaVersion: 3,
       entries: {
         [hashMercuryState(summary)]: {
           op: seededPlan.op,
@@ -287,7 +290,10 @@ addCase('mercury cache bypasses after MAX_CACHE_REPLAYS identical hits', async (
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: 2,
+      version: 3,
+      worldKey: 'local|unknown|0',
+      worldEpoch: 0,
+      schemaVersion: 3,
       entries: {
         [hashMercuryState(summary)]: {
           op: 'patch',

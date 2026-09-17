@@ -572,6 +572,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,
+        worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
         postDeathRecovery,
       })
     : undefined
@@ -630,6 +631,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     world,
     log: (event, detail) => ctx.log(event, detail),
     cachePath,
+    worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
     mode: plannerMode,
     advisor,
     mercury,
