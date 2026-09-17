@@ -263,3 +263,38 @@ PY
 ```
 要件: ①`model` が実モデル（`typesafe-ai/jev`）の行だけ抽出できること ②`state` は圧縮サマリ ③`response` に answers/probabilities が入る
 ④cost と rateLimit 情報が残る ⑤失敗時は `error` が入る。Mercury を使う場合も**同じスキーマで記録**する（`model='inception/mercury-2.5'`）。
+
+---
+
+## ★自律運転モード（ユーザー指示: フィードバック無し・指示待ち禁止）
+
+ユーザーはPCを閉じ、以後サーバー参加もフィードバックも無い。**このファイルと各issueを正として自律的に判断し、前進し続けること。** 確認待ち・許可待ちはしない。
+
+### 自律時の優先順（外部共同監査の結論）
+```
+1. P1 durability/atomicity を最新mainで確定
+   ledger復元(done維持・rung後退防止) / lease前のdurable書き込み禁止(HOSTだけがwriter) /
+   craftingTables例外の完全解消 / リロード<2s・listener/タイマー非増加 / 単一インスタンス強制
+2. movement の root cause 修正
+   #7 resourceTier の unknown→0（土にツルハシ）
+   #8 hop recovery の順序（forward=false→jump→解除→forward のその場ジャンプ）＋近傍座標でのfailure memory回避
+   #9 DESCEND暴走（target===null→wantDown=true、土掘りが成功扱いでfailure limit回避）
+   ＋ ジグザグ掘りの方向固定・階段掘り・既存穴再利用（DIG_PATH/STAIRCASE/DIG_OSCILLATE/REUSE_TUNNEL）
+3. System2: Mercury 2.5 を System2Brain として例外駆動で稼働
+   アボート誤設定の修正 / mercury-calls.jsonl に error=null の実応答(plan, latency, usage, cost) /
+   失敗時は決定論ラダーへ即fallback / 決定論モードは llm.called==false
+4. Issue #11 Grounded Options へ段階移行（Jev = π action + β abandon_option、事前条件・成功述語はコード）
+5. M2完走（furnace→charcoal→iron_ore→iron_ingot×3→iron_pickaxe を在庫で証明）→ M3/M4
+```
+
+### 自律時の行動規則
+```
+・判断に迷ったら「P1 durability を壊さない」を優先する
+・各作業単位で commit & push（秘密スキャン: server.properties/*.key/.env/accounts.json が0件であること）
+・証拠は一次ログ/在庫/コミットで残す。テストは typecheck / audit 9/9 / step-pipeline 6/6 / guard 12/12 /
+  gating 6/6 / loop 7/7 / m1 5/5 を維持
+・サーバー再起動は最終手段（今は ops.json に s0u7a level4 を設定済み。RCONはLeafでは実際には開かない）
+・Javaは 21.0.13-ea のため `-DPaper.IgnoreJavaVersion=true` を付けて起動する（付けないと起動失敗）
+・常駐ホストは単一インスタンスのみ（pidでkill、`pkill -f` 自爆禁止）
+・人間が居ないので、危険な変更（サーバー停止・world削除・履歴改変・force push）はしない
+```

@@ -250,3 +250,59 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 5) ハートビートが継続し、在庫が増え続ける（前進している）
 ```
 
+---
+
+## 14. ★本命設計: Grounded Options（Jev = π + β）— Issue #11（#10を置換）
+
+ユーザー判断: **これを将来の正式設計とする**（#10の5値controlヘッドは破棄）。
+
+### 役割分担
+```
+LLM / Mercury = Option（意図）の生成・修復。数十秒〜数分のスパン
+Jev           = ① π(a|s,o): 接地済み候補ID上の action Choice
+                ② β(s,o)  : その Option を abandon すべきかの Boolean 確率
+Code          = 安全性・物理的真実・成功/完了述語（モデルに権威を持たせない）
+Mineflayer    = メカニクスの実行と、検証済みの世界遷移の生成
+```
+
+### Jevコアは2つだけ
+```
+1. action        : Choice（接地済み候補IDの集合から1つ）
+2. abandon_option: Boolean（確率）
+＋ トリガ特化の補助診断（danger / should_retreat 等）は必要な時だけ追加
+```
+
+### なぜ5値controlより良いか
+```
+・recover は「Option内の行動戦略」であり計画状態ではない
+・subgoal_done / goal_done は決定論的述語であるべき（モデル権威にしない）
+・replan は自然には「終了/放棄」の決定である
+・カテゴリ選択は、Booleanが既に与える連続確率を捨ててしまう
+→ ACTION = このOption内で何をするか / TERMINATION = このOptionを止めてSystem2に新しいOptionを求めるか
+```
+
+### Options階層への対応
+```
+Option o: 事前条件 I(o) / intra-option policy π(a|s,o) / termination β(s,o) / 成功述語 success(s,o)
+Mercury or 決定論プランナ → Option（意図） → 事前条件＋成功述語（コード）
+   → Jev Choice(action)=π ／ Jev Boolean(abandon)=β → Guard → Executor → VERIFY
+※RL訓練は不要（アーキテクチャ分解として導入する）
+```
+
+### 例
+```
+Option: collect 3 x raw_iron
+状態: 石ツルハシ有り / 鉄は見えていない / 近くに既知の洞窟 / branch-mine候補が存在
+→ Jev: action=BRANCH_MINE:N, abandon_option=0.08  ⇒ 同じOptionを継続
+後刻: action=RETURN_TO_KNOWN_ORE:o17, abandon_option=0.17
+```
+
+### 実装上の含意（将来）
+```
+・事前条件 I(o) と成功述語 success(s,o) はコードで判定し、満たさなければOptionを開始しない/完了とする
+・abandon_option が閾値を超えたら System2（Mercury or 決定論）へ再計画を要求（=βの発火）
+・action は従来どおり接地済み候補IDのみ（自由文の行動生成は禁止）、Guardで実行直前に再検証
+・補助診断（danger等）はトリガ条件付きでのみ質問に含める（トークン/コスト削減）
+・決定論モードでは π を決定論ポリシー、β を決定論述語にフォールバック（llm.called==false を維持）
+```
+
