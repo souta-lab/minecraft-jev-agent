@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // verify-issue13: listener-leak acceptance check.
 // Samples the resident control socket several times and asserts that no event's
-// listener count ever exceeds the recorded baseline (i.e. reloads do not accumulate handlers).
+// listener count exceeds the ownership-aware expected count. Generation-owned
+// temporary listeners (for example physicsTick during a control walk) are
+// expected while active; an untracked listener still exceeds this count.
 // Usage: node tools/verify-issue13.mjs [--json] [--samples 3] [--gap 8000]
 import net from 'node:net'
 import { existsSync } from 'node:fs'
@@ -42,22 +44,23 @@ for (let i = 0; i < SAMPLES; i++) {
     listenerLeak: r.data.listenerLeak,
     listeners: r.data.listeners,
     baseline: r.data.listenerBaseline,
+    expected: r.data.listenerExpected || r.data.listenerBaseline,
   })
   if (i < SAMPLES - 1) await new Promise((res) => setTimeout(res, GAP))
 }
 
-const events = new Set(samples.flatMap((s) => Object.keys(s.listeners || {})))
-const over = {}
-for (const e of events) {
-  const maxSeen = Math.max(...samples.map((s) => s.listeners?.[e] ?? 0))
-  const base = samples[samples.length - 1].baseline?.[e] ?? 0
-  if (maxSeen > base) over[e] = { maxSeen, base }
+const violations = []
+for (const [index, sample] of samples.entries()) {
+  for (const [event, count] of Object.entries(sample.listeners || {})) {
+    const expected = sample.expected?.[event] ?? sample.baseline?.[event] ?? 0
+    if (count > expected) violations.push({ sample: index, event, count, expected })
+  }
 }
 const leakFlags = samples.map((s) => s.listenerLeak)
 const genGrowth = samples.length > 1 ? samples[samples.length - 1].generations - samples[0].generations : 0
 
 const checks = [
-  { id: 'no_event_over_baseline', pass: Object.keys(over).length === 0, detail: JSON.stringify(over) },
+  { id: 'no_event_over_expected', pass: violations.length === 0, detail: JSON.stringify(violations) },
   { id: 'leak_flag_false_in_all_samples', pass: leakFlags.every((f) => f === false), detail: JSON.stringify(leakFlags) },
 ]
 const passCount = checks.filter((c) => c.pass).length

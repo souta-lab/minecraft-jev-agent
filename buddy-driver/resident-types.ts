@@ -408,6 +408,7 @@ export interface AcceptanceRecord {
   reloadsFailed: number
   freezeCycles: number
   listenerBaseline: Record<string, number>
+  listenerExpected: Record<string, number>
   listenerCurrent: Record<string, number>
   listenerLeak: boolean
   worldMemoryKeys: string[]
