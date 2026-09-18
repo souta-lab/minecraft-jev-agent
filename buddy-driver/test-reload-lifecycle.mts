@@ -378,14 +378,16 @@ addCase('#13 generation-owned listeners are removable and untracked by the lease
   ;(bot as unknown as { on(event: string, fn: () => void): void }).on('physicsTick', handler)
   ;(bot as unknown as { on(event: string, fn: () => void): void }).on('physicsTick', handler)
   const before = registry.counts()
+  const owned = registry.ownedListenerCounts()
   const removed = registry.dispose()
   const pass =
     emitter.listenerCount('physicsTick') === 0 &&
     before.listeners === 2 &&
+    owned.physicsTick === 2 &&
     removed.listeners === 0 &&
     removed.timers === 0 &&
     registry.isDisposed()
-  return { pass, detail: `before=${JSON.stringify(before)} after=${JSON.stringify(removed)} emitterListeners=${emitter.listenerCount('physicsTick')}` }
+  return { pass, detail: `before=${JSON.stringify(before)} owned=${JSON.stringify(owned)} after=${JSON.stringify(removed)} emitterListeners=${emitter.listenerCount('physicsTick')}` }
 })
 
 let failures = 0
