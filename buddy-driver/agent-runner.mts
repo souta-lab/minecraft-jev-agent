@@ -1311,6 +1311,8 @@ interface ControlRequest {
   id?: string
   cmd?: string
   args?: Record<string, unknown>
+  /** `simdeath` destructive opt-in: {cmd:'simdeath', hard:true} or 'simdeath --hard'. */
+  hard?: boolean
 }
 
 function controlReply(socket: Socket, request: ControlRequest, ok: boolean, data: unknown): void {
@@ -1407,13 +1409,16 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     controlReply(socket, request, true, { frozen: false, started: ok })
     return
   }
-  if (cmd === 'simdeath') {
+  if (cmd === 'simdeath' || cmd === 'simdeath --hard') {
     if (bot === null || bot.entity === undefined) {
       controlReply(socket, request, false, { error: 'no live bot' })
       return
     }
     const liveBot = bot
-    const mode = parseRehearsalMode(request.args)
+    const mode: RehearsalMode =
+      cmd === 'simdeath --hard'
+        ? 'hard'
+        : parseRehearsalMode({ ...(request.args ?? {}), ...(request.hard === true ? { hard: true } : {}) })
     // #34: capture BEFORE any toss/clear so lostInventory is the real pre-loss set.
     const telemetry = capturePreLossInventory(() => inventorySummary(liveBot))
     // #26: the default (soft) rehearsal snapshots durable progress and restores it

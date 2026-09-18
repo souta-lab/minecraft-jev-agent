@@ -6,7 +6,8 @@ import { defaultCandidateOptions, generateCandidates } from '../jev-agent/src/ca
 import type { Candidate } from '../jev-agent/src/candidates.ts'
 import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
-import { enforceSmeltPriority, furnacePrereqGoals } from './planner.ts'
+import { enforceSmeltPriority, furnacePrereqGoals, orderPlanGoalsByReadiness } from './planner.ts'
+import { emptyWorldMemory } from './resident-types.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 
@@ -228,6 +229,27 @@ addCase('insufficient raw_iron is not reordered', () => {
 addCase('no fuel is not reordered', () => {
   const ordered = enforceSmeltPriority([descend], { raw_iron: 8, iron_ingot: 0 })
   return { pass: ordered[0]?.kind === 'descend', detail: `first=${ordered[0]?.kind ?? 'none'}` }
+})
+
+addCase('readiness ordering moves a ready smelt ahead of an unmet collect and logs the reason (#46)', () => {
+  const logged: Array<{ event: string; detail: Record<string, unknown> }> = []
+  const collect: PlannedGoal = { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 }
+  const smelt: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
+  const ordered = orderPlanGoalsByReadiness(
+    [collect, smelt],
+    { raw_iron: 3, coal: 1 },
+    { ...emptyWorldMemory(), furnaces: [{ x: 1, y: 64, z: 1 }] },
+    (event, detail) => logged.push({ event, detail: detail ?? {} }),
+  )
+  const order = logged.find((entry) => entry.event === 'PLAN_ORDER')
+  const pass =
+    ordered[0]?.kind === 'smelt' &&
+    ordered[0]?.targetItem === 'iron_ingot' &&
+    ordered[1]?.targetItem === 'diamond' &&
+    order?.detail.preferred === 'smelt_iron_ingot' &&
+    order?.detail.over === 'collect 1 x diamond' &&
+    order?.detail.reason === 'preconditions_satisfied'
+  return { pass, detail: `order=[${ordered.map((goal) => goal.targetItem).join(',')}] planOrder=${JSON.stringify(order?.detail ?? null)}` }
 })
 
 addCase('furnacePrereqGoals crafts from 8 cobblestone when nothing is known', () => {
