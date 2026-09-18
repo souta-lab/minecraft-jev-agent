@@ -757,10 +757,64 @@ function preconditionCauseName(predicate: Predicate): string {
       return `dimension:${predicate.dimension}`
     case 'levelAtMost':
       return `y<=${predicate.y}`
+    case 'levelAtLeast':
+      return `y>=${predicate.y}`
     case 'healthAtLeast':
       return 'health'
     case 'custom':
       return `custom:${predicate.id}`
+  }
+}
+
+export interface SurfaceRecoveryEvaluation {
+  /** The code-owned vertical predicate; Y alone is never sufficient. */
+  vertical: PredicateEvaluation
+  /** Inventory count for the explicit recovery resource, e.g. the log class. */
+  have: number
+  required: number
+  resourceSatisfied: boolean
+  satisfied: boolean
+}
+
+/**
+ * Evaluate the existing return-recovery contract as plain data.
+ *
+ * The planner describes this route as "reach the upper access hint and collect
+ * a log". Keep those two facts together at the controller boundary so a high
+ * remembered ore/station coordinate cannot be mistaken for verified surface
+ * truth. The function is pure and intentionally uses the same level predicate
+ * that the Option compiler emits.
+ */
+export function evaluateSurfaceRecovery(
+  goal: Pick<QueuedGoal, 'kind' | 'targetY' | 'dimension' | 'targetItem' | 'requiredCount'>,
+  snapshot: {
+    position: Vec3Json | null
+    dimension: string | null
+    inventory: Readonly<Record<string, number>>
+  },
+): SurfaceRecoveryEvaluation | null {
+  if (goal.kind !== 'surface') return null
+  const predicate = predicateForGoal(goal)
+  if (predicate === null || predicate.kind !== 'levelAtLeast') return null
+  const vertical = evaluateSpatialPredicate(predicate, {
+    position: snapshot.position,
+    dimension: snapshot.dimension,
+  })
+  const required = Math.max(1, goal.requiredCount)
+  const target = goal.targetItem
+  let have = 0
+  if (target !== null) {
+    for (const [name, count] of Object.entries(snapshot.inventory)) {
+      if (isResourceClass(target) ? matchesResourceClass(name, target) : name === target) have += count
+    }
+  }
+  const resourceSatisfied = target === null || have >= required
+  return {
+    vertical,
+    have,
+    required,
+    resourceSatisfied,
+    satisfied: vertical.satisfied && resourceSatisfied,
   }
 }
 
@@ -2975,8 +3029,11 @@ export class JevController {
           this.tickCounter,
         )
       }
-      const surfaceEntity = this.bot.entity
-      if (surfaceEntity === undefined || surfaceEntity.position.y < current.targetY) return
+      const evaluation = evaluateSurfaceRecovery(current, {
+        ...this.predicateSnapshot(),
+        inventory: this.inventorySnapshot(),
+      })
+      if (evaluation === null || !evaluation.satisfied) return
       const beforeId = current.id
       const beforeDescription = current.description
       this.queue.markDone()
@@ -2997,8 +3054,16 @@ export class JevController {
       this.digMemory.markResourceProgress()
       this.logger.warn(
         'agent',
-        `RETURN_TO_SURFACE goal=${beforeId} reached=true y=${Math.round(surfaceEntity.position.y)} target_y=${current.targetY}`,
-        { from: beforeId, to: after?.id ?? null, trigger, y: surfaceEntity.position.y, targetY: current.targetY },
+        `RETURN_TO_SURFACE goal=${beforeId} reached=true predicate=levelAtLeast+inventory y=${Math.round(evaluation.vertical.y ?? 0)} target_y=${current.targetY} log=${evaluation.have}/${evaluation.required}`,
+        {
+          from: beforeId,
+          to: after?.id ?? null,
+          trigger,
+          y: evaluation.vertical.y,
+          targetY: current.targetY,
+          resourceHave: evaluation.have,
+          resourceRequired: evaluation.required,
+        },
         this.tickCounter,
       )
       if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}`)
@@ -3075,6 +3140,25 @@ export class JevController {
         haveCount: satisfied ? 1 : 0,
         progress: satisfied ? 1 : 0,
         complete: satisfied,
+        startedAtMs: current.createdAt,
+      }
+      return
+    }
+    if (current.kind === 'surface') {
+      const evaluation = evaluateSurfaceRecovery(current, {
+        ...this.predicateSnapshot(),
+        inventory: this.inventorySnapshot(),
+      })
+      const have = evaluation?.have ?? 0
+      this.goal = {
+        id: current.id,
+        description: current.description,
+        targetItem: current.targetItem ?? '',
+        requiredCount: current.requiredCount,
+        startCount: 0,
+        haveCount: have,
+        progress: evaluation?.satisfied === true ? 1 : Math.min(1, have / Math.max(1, current.requiredCount)),
+        complete: evaluation?.satisfied === true,
         startedAtMs: current.createdAt,
       }
       return

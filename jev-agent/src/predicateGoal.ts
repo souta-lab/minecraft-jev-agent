@@ -1,15 +1,17 @@
 // predicateGoal.ts - Issue #41: predicate-based goal success.
 //
-// Some objectives are not item counts: descending to an ore level, entering a
-// dimension, locating a structure. This module owns the deterministic, code-only
-// evaluation of those predicates plus the plan helper that builds a descend goal
-// from known ore coordinates. No bot, no model, no clock.
+// Some objectives are not item counts: descending to an ore level, recovering
+// vertical access, entering a dimension, or locating a structure. This module
+// owns the deterministic, code-only evaluation of those predicates plus the plan
+// helper that builds a descend goal from known ore coordinates. No bot, no model,
+// no clock.
 import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
 
 /** Spatial predicate whose truth is read from a plain snapshot, never a model. */
 export type SpatialPredicate =
   | { readonly kind: 'levelAtMost'; readonly y: number; readonly dimension: string | null }
+  | { readonly kind: 'levelAtLeast'; readonly y: number; readonly dimension: string | null }
 
 export interface PredicateSnapshot {
   position: Vec3Json | null
@@ -44,20 +46,25 @@ export function levelAtMost(y: number, dimension: string | null = null): Spatial
   return { kind: 'levelAtMost', y, dimension }
 }
 
-/** The predicate a goal carries, or null when the goal is item-counted. */
+export function levelAtLeast(y: number, dimension: string | null = null): SpatialPredicate {
+  return { kind: 'levelAtLeast', y, dimension }
+}
+
+/** The vertical predicate a goal carries, or null when the goal is item-counted. */
 export function predicateForGoal(goal: {
   kind?: string
   targetY?: number | null
   dimension?: string | null
 }): SpatialPredicate | null {
-  if (goal.kind !== 'descend') return null
   const y = goal.targetY
   if (typeof y !== 'number' || !Number.isFinite(y)) return null
-  return levelAtMost(y, goal.dimension ?? null)
+  if (goal.kind === 'descend') return levelAtMost(y, goal.dimension ?? null)
+  if (goal.kind === 'surface') return levelAtLeast(y, goal.dimension ?? null)
+  return null
 }
 
 export function describeSpatialPredicate(predicate: SpatialPredicate): string {
-  return `descend_to:Y=${predicate.y}`
+  return predicate.kind === 'levelAtMost' ? `descend_to:Y=${predicate.y}` : `reach_at_least:Y=${predicate.y}`
 }
 
 export function evaluateSpatialPredicate(predicate: SpatialPredicate, snapshot: PredicateSnapshot): PredicateEvaluation {
@@ -65,7 +72,8 @@ export function evaluateSpatialPredicate(predicate: SpatialPredicate, snapshot: 
     predicate.dimension === null ||
     (snapshot.dimension !== null && normalizeDimension(snapshot.dimension) === normalizeDimension(predicate.dimension))
   const y = snapshot.position === null ? null : snapshot.position.y
-  const levelOk = y !== null && y <= predicate.y
+  const levelOk = y !== null &&
+    (predicate.kind === 'levelAtMost' ? y <= predicate.y : y >= predicate.y)
   const satisfied = dimensionOk && levelOk
   return {
     satisfied,

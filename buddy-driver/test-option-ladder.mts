@@ -1,7 +1,7 @@
 // test-option-ladder.mts - Issue #21 dry-run demonstration: the compiled Options
 // reproduce the current deterministic ladder for the M2 rungs, and the compiler
 // is a no-op while BUDDY_OPTION_COMPILER is off. Pure: no bot, no server.
-import { applyCompiledPlan, compilePlannedGoals, optionSpecsToPlannedGoals, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, compilePlannedGoals, evaluatePredicates, optionSpecsToPlannedGoals, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { bestPickaxeRank, buildPlanOptions, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { M2_PLAN_JSON, planFromJson } from '../jev-agent/src/system2.ts'
 import { emptyWorldMemory } from './resident-types.ts'
@@ -144,6 +144,45 @@ addCase('an unmet smelt precondition is expanded in front of the ladder goal', (
   const ids = expansion.specs.map((entry) => entry.id)
   const ok = spec.length === 1 && ids.join(',') === 'collect:raw_iron,smelt:iron_ingot'
   return { pass: ok, detail: `ids=[${ids.join(',')}] goals=[${expansion.goals.map((g) => g.targetItem).join(',')}]` }
+})
+
+addCase('#136 recovery Option requires both upper access and the explicit log predicate', () => {
+  const spec = compilePlannedGoals([
+    {
+      kind: 'surface',
+      strategy: 'return_to_surface',
+      description: 'recover vertical access to y>=68 and collect 1 x log',
+      targetItem: 'log',
+      requiredCount: 1,
+      targetY: 68,
+    },
+  ])[0]
+  if (spec === undefined) return { pass: false, detail: 'recovery Option was not compiled' }
+  const noLog = evaluatePredicates(
+    spec.success,
+    makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 80, z: 0 }, dimension: 'minecraft:overworld' }),
+  )
+  const underground = evaluatePredicates(
+    spec.success,
+    makeOptionSnapshot({ inventory: { oak_log: 1 }, position: { x: 0, y: 60, z: 0 }, dimension: 'minecraft:overworld' }),
+  )
+  const complete = evaluatePredicates(
+    spec.success,
+    makeOptionSnapshot({ inventory: { oak_log: 1 }, position: { x: 0, y: 68, z: 0 }, dimension: 'minecraft:overworld' }),
+  )
+  const roundTrip = optionSpecsToPlannedGoals([spec])[0]
+  const predicates = spec.success.map((predicate) => predicate.kind).join(',')
+  return {
+    pass:
+      spec.kind === 'surface' &&
+      roundTrip?.kind === 'surface' &&
+      roundTrip.targetY === 68 &&
+      !noLog.ok &&
+      !underground.ok &&
+      complete.ok &&
+      predicates === 'levelAtLeast,inventoryAtLeast',
+    detail: `kind=${spec.kind}->${roundTrip?.kind ?? 'none'} predicates=${predicates} noLog=${noLog.ok} underground=${underground.ok} complete=${complete.ok}`,
+  }
 })
 
 addCase('the host wrapper emits the blocked-Option log and never silently drops the block (#50)', () => {

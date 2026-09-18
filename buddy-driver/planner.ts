@@ -1225,24 +1225,24 @@ export function buildBodyChangeOption(
   return { id: `body_change_${front?.id ?? 'upkeep'}`, title: `body-changing replan toward ${oreRung?.id ?? front?.id ?? 'ore'}`, goals }
 }
 
-/** Localized policy for the deterministic surface-return horizon. */
-export interface SurfaceReturnPolicy {
-  /** minimum rise above the live y before the horizon is offered */
+/** Localized policy for the deterministic upper-access recovery horizon. */
+export interface UpperAccessRecoveryPolicy {
+  /** minimum rise above the live y before the recovery horizon is offered */
   minRiseBlocks: number
-  /** bounded rise used when no remembered surface feature exists above the bot */
+  /** bounded rise used when no remembered upper-region feature exists above the bot */
   boundedRiseBlocks: number
-  /** blocks above the highest remembered surface feature to target */
+  /** blocks above the highest remembered upper-region feature to target */
   marginBlocks: number
 }
 
-export const DEFAULT_SURFACE_RETURN_POLICY: SurfaceReturnPolicy = {
+export const DEFAULT_UPPER_ACCESS_RECOVERY_POLICY: UpperAccessRecoveryPolicy = {
   minRiseBlocks: 8,
   boundedRiseBlocks: 64,
   marginBlocks: 1,
 }
 
-/** Highest remembered y that can stand for the surface (resource or station). */
-export function highestRememberedSurfaceY(world: ResidentWorldMemory): number | null {
+/** Highest remembered y used only as an upper-region navigation hint, never as surface proof. */
+export function highestRememberedUpperRegionY(world: ResidentWorldMemory): number | null {
   let best: number | null = null
   for (const resource of world.knownResources) {
     if (best === null || resource.y > best) best = resource.y
@@ -1253,54 +1253,58 @@ export function highestRememberedSurfaceY(world: ResidentWorldMemory): number | 
   return best
 }
 
-/** Deterministic surface target: remembered surface + margin, else a bounded rise. */
-export function deriveSurfaceTargetY(
+/** Deterministic upper-region navigation hint: remembered y + margin, else a bounded rise. */
+export function deriveUpperAccessTargetY(
   world: ResidentWorldMemory,
   botY: number,
-  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+  policy: UpperAccessRecoveryPolicy = DEFAULT_UPPER_ACCESS_RECOVERY_POLICY,
 ): number {
-  const remembered = highestRememberedSurfaceY(world)
+  const remembered = highestRememberedUpperRegionY(world)
   if (remembered !== null && remembered > botY + policy.minRiseBlocks) return Math.floor(remembered) + policy.marginBlocks
   return Math.floor(botY) + policy.boundedRiseBlocks
 }
 
-/** A real queue goal: climb to the surface y and recover a log to re-tool with. */
-export function surfaceReturnGoal(
+/**
+ * A queue goal for vertical recovery. The target Y is only a navigation hint;
+ * completion also requires the explicit log resource predicate in the
+ * controller/Option compiler. It is deliberately not a surface assertion.
+ */
+export function upperAccessRecoveryGoal(
   world: ResidentWorldMemory,
   botY: number,
-  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+  policy: UpperAccessRecoveryPolicy = DEFAULT_UPPER_ACCESS_RECOVERY_POLICY,
 ): PlannedGoal {
-  const targetY = deriveSurfaceTargetY(world, botY, policy)
+  const targetY = deriveUpperAccessTargetY(world, botY, policy)
   return {
     kind: 'surface',
     strategy: 'return_to_surface',
-    description: `return to the surface at y>=${targetY} and collect 1 x log`,
+    description: `recover vertical access to y>=${targetY} and collect 1 x log`,
     targetItem: 'log',
     requiredCount: 1,
     targetY,
   }
 }
 
-export function buildSurfaceReturnOption(
+export function buildUpperAccessRecoveryOption(
   world: ResidentWorldMemory,
   botY: number,
-  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+  policy: UpperAccessRecoveryPolicy = DEFAULT_UPPER_ACCESS_RECOVERY_POLICY,
 ): PlanOption {
   return {
-    id: 'return_to_surface',
-    title: `return to the surface (capability recovery, y>=${deriveSurfaceTargetY(world, botY, policy)})`,
-    goals: [surfaceReturnGoal(world, botY, policy)],
+    id: 'recover_vertical_access',
+    title: `recover vertical access and collect a log (y>=${deriveUpperAccessTargetY(world, botY, policy)})`,
+    goals: [upperAccessRecoveryGoal(world, botY, policy)],
     strategy: 'return_to_surface',
   }
 }
 
-/** True when a surface return is a meaningful alternative at this altitude. */
-export function surfaceReturnApplies(
+/** True when upper-access recovery is a meaningful alternative at this altitude. */
+export function upperAccessRecoveryApplies(
   world: ResidentWorldMemory,
   botY: number,
-  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+  policy: UpperAccessRecoveryPolicy = DEFAULT_UPPER_ACCESS_RECOVERY_POLICY,
 ): boolean {
-  return deriveSurfaceTargetY(world, botY, policy) > botY + policy.minRiseBlocks
+  return deriveUpperAccessTargetY(world, botY, policy) > botY + policy.minRiseBlocks
 }
 
 /**
@@ -1703,14 +1707,14 @@ export class PlannerBrain implements System2Brain {
     const capabilityGap = parseCapabilityGap(request.recentEvents)
     const entity = this.bot.entity
     const botY = entity === undefined ? null : entity.position.y
-    const surfaceOption = botY === null ? null : buildSurfaceReturnOption(this.world, botY)
+    const surfaceOption = botY === null ? null : buildUpperAccessRecoveryOption(this.world, botY)
     const forcedSurface = capabilityGap !== null && surfaceOption !== null ? surfaceOption : null
-    const surfaceApplies = botY !== null && surfaceReturnApplies(this.world, botY)
+    const surfaceApplies = botY !== null && upperAccessRecoveryApplies(this.world, botY)
     const horizonOptions =
       surfaceOption !== null && (capabilityGap !== null || surfaceApplies) ? [...options, surfaceOption] : options
 
     if (forcedSurface !== null) {
-      this.logSurfaceReturnPolicy(forcedSurface, options)
+      this.logUpperAccessRecoveryPolicy(forcedSurface, options)
       this.logPlan('fallback', forcedSurface, reason, started, 0, 'capability gap -> return_to_surface')
       return this.finishPlan(forcedSurface, request, 'capability gap -> return_to_surface', true, true)
     }
@@ -2102,11 +2106,11 @@ export class PlannerBrain implements System2Brain {
     })
   }
 
-  private logSurfaceReturnPolicy(option: PlanOption, alternatives: readonly PlanOption[]): void {
+  private logUpperAccessRecoveryPolicy(option: PlanOption, alternatives: readonly PlanOption[]): void {
     const targetY = option.goals[0]?.targetY ?? null
     const entity = this.bot.entity
     const botY = entity === undefined ? null : entity.position.y
-    this.log('SURFACE_RETURN_POLICY', {
+    this.log('UPPER_ACCESS_RECOVERY_POLICY', {
       chosen: option.id,
       targetY,
       score: targetY !== null && botY !== null ? Math.round(targetY - botY) : null,

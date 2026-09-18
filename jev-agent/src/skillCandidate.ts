@@ -550,6 +550,11 @@ export function dependencySkillForPredicate(predicate: Predicate, source: SkillS
       return collectBlockSkill(predicate.item, 1, source)
     case 'levelAtMost':
       return { id: `descend_to:Y=${predicate.y}`, kind: 'descend_to', target: { targetY: predicate.y }, preconditions: [], params: { targetY: predicate.y }, source }
+    case 'levelAtLeast':
+      // Vertical recovery is a success predicate of the return-recovery
+      // Option, not an independently startable skill. The body remains
+      // grounded by the recovery goal's log retrieval candidate.
+      return null
     case 'custom':
       if (predicate.id.startsWith(KNOWN_RESOURCE_PREDICATE)) {
         const item = predicate.id.slice(KNOWN_RESOURCE_PREDICATE.length)
@@ -636,6 +641,8 @@ function describePredicateSafe(predicate: Predicate): string {
       return `dimension == ${predicate.dimension}`
     case 'levelAtMost':
       return `y <= ${predicate.y}`
+    case 'levelAtLeast':
+      return `y >= ${predicate.y}`
     case 'healthAtLeast':
       return `health >= ${predicate.health}`
     case 'custom':
