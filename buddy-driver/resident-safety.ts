@@ -14,7 +14,7 @@
 
 import type { Bot } from 'mineflayer'
 import type { ActuationPose, ActuationPort } from '../jev-agent/src/actuationPort.ts'
-import type { ActuationLease } from './resident-types.ts'
+import type { ActuationLease, GenerationResourceCounts, GenerationResourceTarget, GenerationResources } from './resident-types.ts'
 
 // ---------------------------------------------------------------------------
 // #27 reconnect backoff
@@ -239,6 +239,104 @@ export class ActuationLeaseManager implements ActuationLease {
   }
 }
 
+const liveGenerationRegistries = new Set<GenerationResourceRegistry>()
+const collectedRegistryIds: string[] = []
+let registrySeq = 0
+const registryFinalizer: FinalizationRegistry<string> | null =
+  typeof FinalizationRegistry === 'function'
+    ? new FinalizationRegistry<string>((id) => {
+        collectedRegistryIds.push(id)
+      })
+    : null
+
+/**
+ * Tracks exactly the listeners and timers ONE generation owns so the host can
+ * remove all of them on teardown instead of trusting that `controller.stop()`
+ * covered every path (#13). A FinalizationRegistry note lets a leak test observe
+ * a registry collected without an explicit dispose.
+ */
+export class GenerationResourceRegistry implements GenerationResources {
+  readonly registryId: string
+  private listeners: Array<{ target: GenerationResourceTarget; event: string; fn: (...args: unknown[]) => void }> = []
+  private readonly timers = new Set<unknown>()
+  private disposed = false
+
+  constructor() {
+    registrySeq += 1
+    this.registryId = `res-${registrySeq.toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+    liveGenerationRegistries.add(this)
+    registryFinalizer?.register(this, this.registryId, this)
+  }
+
+  trackListener(target: GenerationResourceTarget, event: string, fn: (...args: unknown[]) => void): void {
+    if (this.disposed) return
+    this.listeners.push({ target, event, fn })
+  }
+
+  untrackListener(target: GenerationResourceTarget, event: string, fn: (...args: unknown[]) => void): void {
+    this.listeners = this.listeners.filter((entry) => !(entry.target === target && entry.event === event && entry.fn === fn))
+  }
+
+  untrackAll(target: GenerationResourceTarget, event?: string): void {
+    this.listeners = this.listeners.filter((entry) => !(entry.target === target && (event === undefined || entry.event === event)))
+  }
+
+  trackTimer(handle: unknown): void {
+    if (!this.disposed) this.timers.add(handle)
+  }
+
+  untrackTimer(handle: unknown): void {
+    this.timers.delete(handle)
+  }
+
+  counts(): GenerationResourceCounts {
+    return { listeners: this.listeners.length, timers: this.timers.size }
+  }
+
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
+  /** Removes every tracked resource. Anything that throws stays tracked and is reported. */
+  dispose(): GenerationResourceCounts {
+    const remaining: typeof this.listeners = []
+    for (const entry of this.listeners) {
+      try {
+        entry.target.removeListener?.(entry.event, entry.fn)
+      } catch {
+        remaining.push(entry)
+      }
+    }
+    for (const handle of this.timers) clearTrackedTimer(handle)
+    this.timers.clear()
+    this.listeners = remaining
+    this.disposed = true
+    liveGenerationRegistries.delete(this)
+    registryFinalizer?.unregister(this)
+    return this.counts()
+  }
+}
+
+function clearTrackedTimer(handle: unknown): void {
+  const withClear = handle as { clear?: unknown }
+  if (typeof withClear === 'object' && withClear !== null && typeof withClear.clear === 'function') {
+    ;(withClear.clear as () => void).call(handle)
+    return
+  }
+  clearTimeout(handle as NodeJS.Timeout)
+  clearInterval(handle as NodeJS.Timeout)
+}
+
+/** Leak-test hook: registries created but not yet disposed. */
+export function liveGenerationRegistryCount(): number {
+  return liveGenerationRegistries.size
+}
+
+/** Leak-test hook: registry ids observed by the FinalizationRegistry after GC. */
+export function collectedGenerationRegistryIds(): string[] {
+  return [...collectedRegistryIds]
+}
+
 /**
  * Every bot method that can change server-side state. Mineflayer's read-only
  * surface is untouched; these are wrapped by the lease proxy below.
@@ -270,6 +368,41 @@ export const MUTATING_BOT_METHODS: ReadonlySet<string> = new Set<string>([
   'useOn',
   'swingArm',
 ])
+
+const TRACKED_EMITTER_METHODS = new Set<string>(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'])
+const UNTRACKED_EMITTER_METHODS = new Set<string>(['removeListener', 'off', 'removeAllListeners'])
+
+function wrapEmitterResources(target: object, resources: GenerationResources): object {
+  return new Proxy(target, {
+    get(inner, prop, receiver): unknown {
+      const value = Reflect.get(inner, prop, receiver) as unknown
+      if (typeof prop !== 'string' || typeof value !== 'function') return value
+      if (TRACKED_EMITTER_METHODS.has(prop)) {
+        return (event: unknown, fn: unknown): unknown => {
+          if (typeof event === 'string' && typeof fn === 'function') {
+            resources.trackListener(inner as GenerationResourceTarget, event, fn as (...args: unknown[]) => void)
+          }
+          return (value as (...args: unknown[]) => unknown).apply(inner, [event, fn])
+        }
+      }
+      if (prop === 'removeListener' || prop === 'off') {
+        return (event: unknown, fn: unknown): unknown => {
+          if (typeof event === 'string' && typeof fn === 'function') {
+            resources.untrackListener(inner as GenerationResourceTarget, event, fn as (...args: unknown[]) => void)
+          }
+          return (value as (...args: unknown[]) => unknown).apply(inner, [event, fn])
+        }
+      }
+      if (prop === 'removeAllListeners') {
+        return (event?: unknown): unknown => {
+          resources.untrackAll(inner as GenerationResourceTarget, typeof event === 'string' ? event : undefined)
+          return (value as (...args: unknown[]) => unknown).apply(inner, [event])
+        }
+      }
+      return value
+    },
+  })
+}
 
 /**
  * #38: nested capabilities that can actuate WITHOUT passing through the
@@ -332,6 +465,10 @@ function makeLeaseAssert(lease: ActuationLease, id: string, log?: LeaseLog): (wh
 
 /**
  * Wrap a bot so every side-effecting call asserts this generation's lease first.
+ * When `resources` is supplied, the same proxy records every listener the
+ * generation registers (and unregisters) on the bot and its inventory, so the
+ * host can remove them all on disposal (#49).
+ *
  * Used by `generation-entry.ts`; exported here so the lease denial can be tested
  * against the real actuator without a live connection.
  *
@@ -340,13 +477,21 @@ function makeLeaseAssert(lease: ActuationLease, id: string, log?: LeaseLog): (wh
  * `bot._client.write`, `bot.collectBlock.collect` and `bot.entity.position.set`
  * without a lease assertion.
  */
-export function withActuationLease(bot: Bot, lease: ActuationLease, id: string, log?: LeaseLog): Bot {
+export function withActuationLease(
+  bot: Bot,
+  lease: ActuationLease,
+  id: string,
+  resources?: GenerationResources,
+  log?: LeaseLog,
+): Bot {
   const assert = makeLeaseAssert(lease, id, log)
   let pathfinderProxy: object | null = null
+  let inventoryProxy: object | null = null
   let clientProxy: object | null = null
   let collectBlockProxy: object | null = null
   let entityProxy: object | null = null
   let positionProxy: object | null = null
+  const trackedBot = resources === undefined ? null : wrapEmitterResources(bot, resources)
 
   const guardPosition = (position: object): object => {
     if (positionProxy !== null) return positionProxy
@@ -386,6 +531,13 @@ export function withActuationLease(bot: Bot, lease: ActuationLease, id: string, 
   const guarded = new Proxy(bot, {
     get(target, prop, receiver): unknown {
       const value = Reflect.get(target, prop, receiver) as unknown
+      if (trackedBot !== null && typeof prop === 'string' && (TRACKED_EMITTER_METHODS.has(prop) || UNTRACKED_EMITTER_METHODS.has(prop))) {
+        return Reflect.get(trackedBot, prop, receiver) as unknown
+      }
+      if (resources !== undefined && prop === 'inventory' && value !== null && typeof value === 'object') {
+        if (inventoryProxy === null) inventoryProxy = wrapEmitterResources(value, resources)
+        return inventoryProxy
+      }
       if (typeof prop === 'string' && typeof value === 'function' && MUTATING_BOT_METHODS.has(prop)) {
         return (...args: unknown[]): unknown => {
           assert(`bot.${prop}`)
