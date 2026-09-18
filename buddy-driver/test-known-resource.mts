@@ -246,6 +246,35 @@ addCase('cobblestone descent proxy with queued raw_iron still emits a raw_iron R
   return { pass, detail: candidates.map((candidate) => candidate.id).join(',') }
 })
 
+addCase('an active smelt does not retrieve a future ore before its own prerequisites (#73)', () => {
+  const current = queuedGoal({
+    id: 'g-charcoal',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const state = worldState({
+    position: { x: 30, y: 46, z: 37 },
+    goal: goal({ id: 'smelt:charcoal', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }),
+    goalQueue: queueWith(
+      current,
+      queuedGoal({ id: 'g-iron', targetItem: 'raw_iron', description: 'collect 3 x raw_iron' }),
+      queuedGoal({ id: 'g-diamond', targetItem: 'diamond', description: 'collect 1 x diamond' }),
+    ),
+    knownResources: [
+      { name: 'iron_ore', kind: 'ore', position: { x: 36, y: 56, z: 41 } },
+      { name: 'deepslate_diamond_ore', kind: 'ore', position: { x: 42, y: -2, z: 25 } },
+    ],
+    inventory: inventory({ cobblestone: 60, stone_pickaxe: 1 }),
+  })
+
+  const retrievals = generateCandidates(state, defaultCandidateOptions).filter((candidate) => candidate.kind === 'RETRIEVE')
+  const future = retrievals.find((candidate) => candidate.meta.resource === 'raw_iron' || candidate.meta.resource === 'diamond')
+  const pass = future === undefined
+  return { pass, detail: `retrievals=[${retrievals.map((candidate) => String(candidate.meta.resource)).join(',')}]` }
+})
+
 addCase('retrieval is offered alongside a dig candidate but a visible matching ore suppresses it', () => {
   const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 } }
   const proxy = worldState({

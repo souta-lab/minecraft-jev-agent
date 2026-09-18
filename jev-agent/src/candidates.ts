@@ -1508,7 +1508,9 @@ function hasLogInInventory(state: WorldState): boolean {
  * current subgoal first, then the queued goals. A `collect cobblestone (descend
  * toward ore levels)` proxy must not hide the real need (raw_iron) when a
  * remembered ore coordinate exists, so callers consult the queue, not only
- * `focusItem`. Pure.
+ * `focusItem`. An active smelt is a prerequisite barrier, however: future
+ * queue retrievals must not steal the body while its furnace/input path is
+ * unresolved (#73). Pure.
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
@@ -1518,8 +1520,10 @@ function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalW
     needs.push({ item, fuel })
   }
   push(focusItem, goalWantsFuel(current))
-  push(state.goal.targetItem, goalWantsFuel(current))
-  for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued))
+  if (current?.kind !== 'smelt') {
+    push(state.goal.targetItem, goalWantsFuel(current))
+    for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued))
+  }
   const wants: RetrievalWant[] = []
   for (const need of needs) {
     if (need.fuel && fuelNeedSatisfiedByInventory(state, need.item)) continue
