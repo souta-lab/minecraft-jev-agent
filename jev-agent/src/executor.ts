@@ -20,7 +20,7 @@ import type { Candidate, CandidateKind } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, UNBREAKABLE } from './state.ts'
+import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, isBreakableSolidBlock } from './state.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
@@ -34,9 +34,16 @@ import {
   formatPillarRefused,
   formatPillarRelocate,
   resolvePillarStep,
-  selectPillarFallbackColumn,
 } from './verticalPlan.ts'
-import type { HeadroomClearOutcome, HeadroomObstacle, PillarColumnProbe } from './verticalPlan.ts'
+import type { HeadroomClearOutcome, HeadroomObstacle } from './verticalPlan.ts'
+import {
+  decidePillarPlaceBlock,
+  decidePillarRelocation,
+  decidePillarStepBudget,
+  DEFAULT_PILLAR_SEARCH_POLICY,
+  formatPillarSearch,
+} from './pillarSearch.ts'
+import type { PillarColumnProbe } from './pillarSearch.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
@@ -45,6 +52,7 @@ import {
   PILLAR_TAKEOFF_POLL_MS,
 } from './pillarJump.ts'
 import type { SolidAt } from './pillarJump.ts'
+import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -97,6 +105,12 @@ export interface ExecutionResult {
   dropObserved: boolean
   itemsGained: number
   goalItemCount: number
+  /**
+   * Deterministic evidence that the action durably changed the body even
+   * though no block was removed and no item was gained (a bounded PILLAR_UP
+   * chunk that gained altitude). Never a substitute for `verified`.
+   */
+  progressed: boolean
   /** item the action actually produced (MINE drop or crafted item), when known */
   yieldItem?: string | null
   /**
@@ -231,12 +245,11 @@ const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
 /**
- * PILLAR_UP: bounded same-action relocations away from columns whose ceiling
- * cannot be cleared. Two keeps the action bounded while allowing one retry if
- * the first open neighbour was mis-read; the refused-column set stops any
- * ping-pong between two cells.
+ * PILLAR_UP relocation budget: `PillarSearchPolicy.maxRelocations`. Two keeps
+ * the action bounded while allowing one retry if the first open neighbour was
+ * mis-read; the refused-column set stops any ping-pong between two cells.
  */
-const MAX_PILLAR_RELOCATIONS = 2
+const PILLAR_SEARCH_POLICY = DEFAULT_PILLAR_SEARCH_POLICY
 
 /** Stable key for the refused-column set (never fed back into world state). */
 function pillarColumnKey(cell: Vec3Json): string {
@@ -265,14 +278,6 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
   return above1Empty && above2Empty
 }
 
-/**
- * Pit-escape recipe timings from the movement harness
- * (`mcbot/movement-test/vertical.mjs#navigateTo`): a held pure jump rises the
- * full 1.2522 blocks, then forward is pushed for the airborne window so the body
- * carries onto the lip.
- */
-const VERTICAL_HOP_RISE_MS = 180
-const VERTICAL_HOP_PUSH_MS = 260
 /** How far ahead the terrain-contact probe reads the facing column (blocks). */
 const FACE_PROBE_DIST = 0.8
 
@@ -306,17 +311,13 @@ export function planClimbManeuver(input: ClimbManeuverInput): ClimbManeuver {
 }
 
 /**
- * The vertical-hop body rule. A free body (`pinned=false`) holds `forward`
- * through the jump so the packet carries the horizontal component and the body
- * carries onto the lip (live A/B: rise 1.12/1.17/1.18/1.20 when forward was held
- * with `pinned=false still=true`). A pinned body releases forward for the pure
- * jump — the server rejects a blocked forward push combined with a jump — and
- * only pushes forward once airborne. Live release data: `rise=0` on 296/296
- * attempts, so a released-forward free hop can never satisfy `hopOk`.
+ * The vertical-hop body rule, owned by `hopPolicy.planVerticalHop`: a free body
+ * holds `forward` through the jump so the packet carries the horizontal
+ * component; a pinned body releases forward for the pure jump because the
+ * server rejects a blocked forward push combined with a jump. Re-exported for
+ * the existing pit-escape regression.
  */
-export function hopHoldsForward(pinned: boolean): boolean {
-  return !pinned
-}
+export { hopHoldsForward } from './hopPolicy.ts'
 
 export interface HopOutcome {
   dy: number
@@ -1035,6 +1036,7 @@ export class Executor {
     this.ensureOwned(epoch, signal)
     const startFloorY = Math.floor(startY)
     const climbedTo = Math.floor(this.bot.entity.position.y)
+    const dugVertical = vertical === 'staircase' || vertical === 'staircase-up'
     if (verticalStep && climbedTo > startFloorY) {
       this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
         actionId: candidate.id,
@@ -1059,10 +1061,11 @@ export class Executor {
         null,
         {
           verified: true,
-          blockRemoved: true,
+          blockRemoved: dugVertical && verticalStep,
           dropObserved: false,
           itemsGained: 0,
           goalItemCount: this.countGoalItem(),
+          progressed: true,
         },
       )
     }
@@ -1089,10 +1092,11 @@ export class Executor {
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
       verified: closed || verticalProgress || verticalStep,
-      blockRemoved: verticalStep,
+      blockRemoved: dugVertical && verticalStep,
       dropObserved: false,
       itemsGained: 0,
       goalItemCount: this.countGoalItem(),
+      progressed: !dugVertical && verticalStep,
     })
   }
 
@@ -1195,6 +1199,11 @@ export class Executor {
       this.logger.warn('executor', 'PILLAR_UP refused: liquid or hazard in the bot column', { actionId: candidate.id })
       return false
     }
+    this.logger.info('agent', formatPillarSearch(decidePillarPlaceBlock(this.inventoryCounts(), PILLAR_SEARCH_POLICY)), {
+      actionId: candidate.id,
+    })
+    const budget = decidePillarStepBudget(toY - Math.floor(this.bot.entity.position.y), PILLAR_SEARCH_POLICY)
+    this.logger.info('agent', formatPillarSearch(budget), { actionId: candidate.id })
     this.setPhase(candidate, epoch, 'equipping')
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
@@ -1252,9 +1261,16 @@ export class Executor {
               { actionId: candidate.id, ...feet, obstacle: blocked?.obstacle?.name ?? null },
             )
           }
-          if (step.reason === 'no_headroom' && relocations < MAX_PILLAR_RELOCATIONS) {
+          if (step.reason === 'no_headroom') {
             refusedColumns.add(pillarColumnKey(feet))
-            const fallback = this.findPillarFallbackColumn(feet, refusedColumns)
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations })
+            const fallback = relocation.target
             if (fallback !== null) {
               this.logger.info('agent', formatPillarRelocate(feet, fallback, blocked?.obstacle ?? null), {
                 actionId: candidate.id,
@@ -1361,7 +1377,7 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<HeadroomClearOutcome> {
     let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < PILLAR_SEARCH_POLICY.headroomAttempts; attempt += 1) {
       const position = this.bot.entity.position
       if (this.headroomAt(column.x, position.y, column.z)) return { cleared: true }
       const feetY = Math.floor(position.y + 1e-4)
@@ -1423,12 +1439,12 @@ export class Executor {
   }
 
   /**
-   * Grounded pillar fallback: probe the eight same-level neighbours in a fixed
-   * order and let `selectPillarFallbackColumn` pick the nearest one with solid
-   * support and 2-block headroom. Columns already refused this action are
-   * excluded so the climb cannot ping-pong between two blocked cells.
+   * Grounded pillar fallback probes: the eight same-level neighbours in a fixed
+   * order. Columns already refused this action are excluded so the climb cannot
+   * ping-pong between two blocked cells; the ranking/refusal decision belongs to
+   * `decidePillarRelocation` (pillarSearch.ts).
    */
-  private findPillarFallbackColumn(feet: Vec3Json, refused: ReadonlySet<string>): Vec3Json | null {
+  private probePillarColumns(feet: Vec3Json, refused: ReadonlySet<string>): PillarColumnProbe[] {
     const dirs: readonly { dx: number; dz: number }[] = [
       { dx: 1, dz: 0 },
       { dx: -1, dz: 0 },
@@ -1452,7 +1468,7 @@ export class Executor {
         unsafe: this.columnUnsafeAt(cell.x, cell.y, cell.z),
       })
     }
-    return selectPillarFallbackColumn(probes, feet)
+    return probes
   }
 
   /** True when no fluid/hazard block touches the cell (a dig there cannot flood it). */
@@ -1796,12 +1812,14 @@ export class Executor {
           // horizontal component, then forward keeps pushing while airborne; a
           // pinned body releases forward for the pure jump because the server
           // rejects a blocked forward push combined with a jump.
-          this.bot.setControlState('forward', hopHoldsForward(pinned))
+          const hopPlan = planVerticalHop(pinned)
+          this.logger.info('agent', formatHopPlan(hopPlan), { target, anchor, pinned, recoveries })
+          this.bot.setControlState('forward', hopPlan.holdForward)
           this.bot.setControlState('jump', true)
-          await delay(VERTICAL_HOP_RISE_MS, signal)
+          await delay(hopPlan.riseMs, signal)
           this.bot.setControlState('jump', false)
           this.bot.setControlState('forward', true)
-          await delay(VERTICAL_HOP_PUSH_MS, signal)
+          await delay(hopPlan.pushMs, signal)
           this.bot.setControlState('forward', false)
           const afterHop = this.bot.entity.position
           const hop = evaluateHop(beforeHop, afterHop, node)
@@ -2612,7 +2630,7 @@ export class Executor {
         if (top === null) continue
         if (top - (feetY - 1) < 2) break
         const upper = this.currentBlockAt({ x, y: top, z })
-        if (upper === null || upper.boundingBox === 'empty' || !upper.diggable || UNBREAKABLE.has(upper.name)) break
+        if (upper === null || !isBreakableSolidBlock(upper)) break
         if (!this.solidSupportAt(x, top - 1, z)) break
         if (!this.passableAt(x, top + 1, z) || !this.passableAt(x, top + 2, z)) break
         if (
@@ -3113,7 +3131,9 @@ export class Executor {
     phase: string,
     detail: string,
     failure: FailureCode | null,
-    extra: Pick<ExecutionResult, 'verified' | 'blockRemoved' | 'dropObserved' | 'itemsGained' | 'goalItemCount'>,
+    extra: Pick<ExecutionResult, 'verified' | 'blockRemoved' | 'dropObserved' | 'itemsGained' | 'goalItemCount'> & {
+      progressed?: boolean
+    },
   ): ExecutionResult {
     return {
       actionId: candidate.id,
@@ -3126,6 +3146,7 @@ export class Executor {
       failure,
       ms: Date.now() - startedAt,
       ...extra,
+      progressed: extra.progressed ?? false,
     }
   }
 

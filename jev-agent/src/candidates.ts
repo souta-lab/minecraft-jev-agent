@@ -94,14 +94,21 @@ export interface CandidateOptions {
    * prerequisite planner stops choosing an unreachable remembered station.
    */
   unreachableStations?: ReadonlySet<string>
+  /** failures at one MOVE/RETRIEVE target before the generator stops offering it (default 4) */
+  moveFailureLimit?: number
+  /** failures at one DESCEND step before the generator stops offering it (default 3) */
+  descendFailureLimit?: number
+  /** failures at one placement spot before a fallback spot is used (default 2) */
+  placeSpotRetryLimit?: number
 }
 
 const DEFAULT_MOVE_MIN_DISTANCE = 0
 const DEFAULT_MOVE_MAX_DISTANCE = 48
 const DEFAULT_TUNNEL_MAX_DISTANCE = 24
 const DEFAULT_MAX_MOVE_CANDIDATES = 6
-const MOVE_FAILURE_LIMIT = 4
-const DESCEND_FAILURE_LIMIT = 3
+const DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT = 4
+const DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT = 3
+const DEFAULT_PLACE_SPOT_RETRY_LIMIT = 2
 /** Block within this horizontal distance of the bot counts as pickup-adjacent. */
 const PICKUP_MINE_HORIZONTAL = 2.75
 /** Vertical band (relative to the feet) in which a drop still lands in reach. */
@@ -116,6 +123,9 @@ export const defaultCandidateOptions: CandidateOptions = {
   moveMaxDistance: DEFAULT_MOVE_MAX_DISTANCE,
   tunnelMaxDistance: DEFAULT_TUNNEL_MAX_DISTANCE,
   maxMoveCandidates: DEFAULT_MAX_MOVE_CANDIDATES,
+  moveFailureLimit: DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+  descendFailureLimit: DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT,
+  placeSpotRetryLimit: DEFAULT_PLACE_SPOT_RETRY_LIMIT,
   recipes: null,
 }
 
@@ -214,7 +224,7 @@ export function generateCandidates(
   }
 
   if (strategy === 'explore_cave') {
-    const explore = pickExplore(state, state.terrain.standable, focusItem)
+    const explore = pickExplore(state, state.terrain.standable, focusItem, options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
     if (explore !== null) {
       candidates.unshift({
         id: `EXPLORE_CAVE:${blockId('p', explore)}`,
@@ -304,8 +314,9 @@ export function generateCandidates(
   // remembered, going there is strictly better than re-issuing the front goal.
   candidates.push(...retrievalCandidates(state, options, focusItem))
   if (candidates.length === 0) {
-    const explore = pickExplore(state, state.terrain.standable, focusItem)
-    if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < MOVE_FAILURE_LIMIT) {
+    const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+    const explore = pickExplore(state, state.terrain.standable, focusItem, moveFailureLimit)
+    if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < moveFailureLimit) {
       candidates.push({
         id: `MOVE:${blockId('p', explore)}`,
         kind: 'MOVE',
@@ -446,7 +457,7 @@ function mineCandidates(
         continue
       }
       if (moveCount >= maxMoves) continue
-      if (failureCount(state.signals.failedCandidates, `MOVE:${blockId('b', block.position)}`) >= MOVE_FAILURE_LIMIT) continue
+      if (failureCount(state.signals.failedCandidates, `MOVE:${blockId('b', block.position)}`) >= (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)) continue
       if (spot === null || atSpot) continue
       moveCount += 1
       moveActions.push({
@@ -669,7 +680,9 @@ function descendCandidates(
     feet,
   }
   const notFailed = pool.filter(
-    (step) => failureCount(state.signals.failedCandidates, descendId(step)) < DESCEND_FAILURE_LIMIT,
+    (step) =>
+      failureCount(state.signals.failedCandidates, descendId(step)) <
+      (options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT),
   )
   let best = pickBestDescendStep(notFailed, scoreInput)
   if (best === null && descendTargetY !== null) {
@@ -810,7 +823,9 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
     if (op.requiresTable && !tableInReach && holdsTable && craftFailed && state.placementSpots.length > 0) {
       const spot =
         state.placementSpots.find(
-          (candidate) => (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) < 2,
+          (candidate) =>
+            (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+            (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
         ) ?? state.placementSpots[0]
       if (spot === undefined) return []
       return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
@@ -842,7 +857,11 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
 
   const failed = state.signals.failedCandidates
   const spot =
-    state.placementSpots.find((candidate) => (failed[`PLACE:${op.item}:${blockId('p', candidate)}`] ?? 0) < 2) ??
+    state.placementSpots.find(
+      (candidate) =>
+        (failed[`PLACE:${op.item}:${blockId('p', candidate)}`] ?? 0) <
+        (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
+    ) ??
     state.placementSpots[0] ??
     null
   if (spot === null) return []
@@ -984,6 +1003,7 @@ function knownStations(state: WorldState, station: string): KnownStationLike[] {
 function craftingTableSource(
   state: WorldState,
   unreachableStations: ReadonlySet<string>,
+  placeSpotRetryLimit: number,
 ): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
   const sensed = state.craftingTables[0]
   if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
@@ -994,7 +1014,9 @@ function craftingTableSource(
   if ((state.inventory.counts.crafting_table ?? 0) <= 0) return null
   const spot =
     state.placementSpots.find(
-      (candidate) => (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) < 2,
+      (candidate) =>
+        (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+        placeSpotRetryLimit,
     ) ?? state.placementSpots[0]
   return spot === undefined ? null : { kind: 'held-place', spot }
 }
@@ -1032,7 +1054,9 @@ function tableAcquisitionCandidates(
   if ((state.inventory.counts.crafting_table ?? 0) > 0 && state.placementSpots.length > 0) {
     const spot =
       state.placementSpots.find(
-        (candidate) => (failed[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) < 2,
+        (candidate) =>
+          (failed[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+          (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
       ) ?? state.placementSpots[0]
     if (spot !== undefined) {
       return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
@@ -1067,7 +1091,12 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     heldCount: counts.furnace ?? 0,
     placedCount: state.furnaces?.length ?? 0,
     stoneCount,
-    tableAvailable: craftingTableSource(state, unreachableStations) !== null,
+    tableAvailable:
+      craftingTableSource(
+        state,
+        unreachableStations,
+        options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT,
+      ) !== null,
     placementSpot: state.placementSpots.length > 0 ? leastFailedPlacementSpot(state, 'furnace') : null,
     knownStation: reachableFurnace ?? furnaces[0] ?? null,
     unreachableStations,
@@ -1096,7 +1125,11 @@ function candidatesForPrereqPath(
 
 /** CRAFT/PLACE step toward a furnace: use a table in reach, walk to a remembered one, or place a held one. */
 function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
-  const source = craftingTableSource(state, options.unreachableStations ?? EMPTY_STATIONS)
+  const source = craftingTableSource(
+    state,
+    options.unreachableStations ?? EMPTY_STATIONS,
+    options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT,
+  )
   if (source === null) return []
   if (source.kind === 'held-place') {
     return [placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)]
@@ -1441,7 +1474,11 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
   const known = knownResourceFor(state, want)
   if (known !== null) {
     const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
-    if (failureCount(state.signals.failedCandidates, id) >= MOVE_FAILURE_LIMIT) return []
+    if (
+      failureCount(state.signals.failedCandidates, id) >=
+      (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
+    )
+      return []
     // Issue #45: a remembered resource below the current level needs a vertical
     // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
     // horizontal bearing and falls back to WAIT.
@@ -1485,7 +1522,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     ]
   }
   if (want.kind !== 'log') return []
-  const spot = surfaceSpot(state, want.item)
+  const spot = surfaceSpot(state, want.item, options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
   if (spot === null) return []
   return [
     {
@@ -1527,12 +1564,12 @@ function retrievalCandidates(state: WorldState, options: CandidateOptions, focus
   return []
 }
 
-function surfaceSpot(state: WorldState, item: string): Vec3Json | null {
+function surfaceSpot(state: WorldState, item: string, moveFailureLimit: number): Vec3Json | null {
   let best: Vec3Json | null = null
   for (const spot of state.terrain.standable) {
     if (spot.y <= state.self.position.y + 2) continue
     const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
-    if (failureCount(state.signals.failedCandidates, id) >= MOVE_FAILURE_LIMIT) continue
+    if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
     if (best === null || spot.y > best.y) best = spot
   }
   return best
@@ -1593,11 +1630,16 @@ function pickRetreat(
  *     distance to that resource is preferred, so exploring walks toward the
  *     resource beyond the move band instead of wandering away from it.
  */
-function pickExplore(state: WorldState, standable: Vec3Json[], focusItem: string | null): Vec3Json | null {
+function pickExplore(
+  state: WorldState,
+  standable: Vec3Json[],
+  focusItem: string | null,
+  moveFailureLimit: number,
+): Vec3Json | null {
   const options = standable.filter(
     (spot) =>
       distance(spot, state.self.position) > 1.5 &&
-      failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < MOVE_FAILURE_LIMIT,
+      failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < moveFailureLimit,
   )
   if (options.length === 0) return null
 

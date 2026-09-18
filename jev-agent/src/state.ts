@@ -796,7 +796,26 @@ function buildFurnaces(bot: Bot, options: SensorOptions, self: SelfState): Vec3J
 
 export const PROBE_HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus'])
 export const PROBE_FLUIDS = new Set(['water', 'flowing_water', 'bubble_column'])
-export const UNBREAKABLE = new Set(['bedrock', 'barrier', 'end_portal', 'end_portal_frame', 'nether_portal', 'obsidian'])
+
+/**
+ * The block slice the breakability rule needs.
+ */
+export interface BreakabilityProbe {
+  diggable: boolean
+  boundingBox: string
+}
+
+/**
+ * Minecraft truth for "can this block ever be broken": mineflayer's `diggable`
+ * flag is derived from the block hardness (false for bedrock, barrier and the
+ * portal blocks), and an empty cell is nothing to break. Tool adequacy is NOT
+ * part of this predicate - `hasTool`/`selectDigTool` decide that from
+ * `gameData.resolveHarvest`, so obsidian is breakable here (it needs a diamond
+ * pickaxe) and must not be excluded by a hardcoded unbreakable list.
+ */
+export function isBreakableSolidBlock(block: BreakabilityProbe): boolean {
+  return block.boundingBox !== 'empty' && block.diggable
+}
 
 /**
  * Pre-compute the four cardinal staircase/tunnel steps. This is the only place
@@ -819,7 +838,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
   }
   const diggableSolid = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
-    return block !== null && block.boundingBox !== 'empty' && block.diggable && !UNBREAKABLE.has(block.name)
+    return block !== null && isBreakableSolidBlock(block)
   }
   const hazardous = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
@@ -934,7 +953,7 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
   }
   const diggableSolid = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
-    return block !== null && block.boundingBox !== 'empty' && block.diggable && !UNBREAKABLE.has(block.name)
+    return block !== null && isBreakableSolidBlock(block)
   }
   const hazardous = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
@@ -996,7 +1015,7 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
     const name = block.name
     let safe = true
     let reason = 'safe'
-    if (!block.diggable || UNBREAKABLE.has(name)) {
+    if (!isBreakableSolidBlock(block)) {
       safe = false
       reason = `${name} is not breakable`
     } else if (PROBE_HAZARDS.has(name) || PROBE_FLUIDS.has(name)) {
