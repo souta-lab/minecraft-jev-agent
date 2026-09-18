@@ -380,7 +380,6 @@ export const RUNGS: readonly Rung[] = [
   // --- M3: nether route (templates only; the current executor cannot run these) ---
   {
     id: 'nether_portal',
-    future: true,
     satisfied: (c) => has(c, 'flint_and_steel') && countClass(c, 'stone') >= 0 && has(c, 'flint'),
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
