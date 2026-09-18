@@ -24,7 +24,7 @@
 import type { RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, KnownResource, Vec3Json, WorldState } from './state.ts'
-import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance } from './state.ts'
+import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
 import { findInventoryFuel, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
@@ -846,7 +846,7 @@ function placeStationCandidate(
 function craftCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   const recipes = options.recipes ?? null
   if (recipes === null || focusItem === null) return []
-  const tableAvailable = state.craftingTables.length > 0
+  const tableAvailable = state.craftingTables.some(isSensedStation)
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
   const op = plan.op
 
@@ -862,7 +862,7 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (op === null) return []
 
   if (op.type === 'craft') {
-    const nearestTable = state.craftingTables[0] ?? null
+    const nearestTable = state.craftingTables.find(isSensedStation) ?? null
     const table = op.requiresTable ? nearestTable : null
     // A station the bot must WALK to can be unreachable (a natural village table
     // behind a canopy / 2-block face). When the recipe needs a station, the bot
@@ -972,7 +972,7 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
  */
 function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
-  const furnace = state.furnaces?.[0] ?? null
+  const furnace = (state.furnaces ?? []).find(isSensedStation) ?? null
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
   if (inputItem === null) return []
@@ -1058,7 +1058,7 @@ function craftingTableSource(
   unreachableStations: ReadonlySet<string>,
   placeSpotRetryLimit: number,
 ): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
-  const sensed = state.craftingTables[0]
+  const sensed = state.craftingTables.find(isSensedStation)
   if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
   const remembered = knownStations(state, 'crafting_table').find(
     (station) => !unreachableStations.has(knownStationKey(station)),
@@ -1142,7 +1142,7 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
   return {
     goal: state.goalQueue?.current ?? null,
     heldCount: counts.furnace ?? 0,
-    placedCount: state.furnaces?.length ?? 0,
+    placedCount: (state.furnaces ?? []).filter(isSensedStation).length,
     stoneCount,
     tableAvailable:
       craftingTableSource(
