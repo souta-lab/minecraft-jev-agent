@@ -1,0 +1,62 @@
+name: repo-invariants
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  convergence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Frontier fixtures
+        run: npm run frontier-test
+      - name: Issue-state fixtures
+        run: npm run issue-state-test
+      - name: Issue graph fixtures
+        run: npm run issue-graph-test
+      - name: Current-status fixtures
+        run: npm run current-status-test
+      - name: Lane-guard fixtures
+        run: npm run lane-guard-test
+      - name: Live issue-routing invariant
+        run: npm run frontier:check
+      - name: Live issue-evidence invariant
+        run: npm run issue-state:check
+
+  core-deterministic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: jev-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: jev-agent/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Mechanics truth
+        run: npm run game-data-test && npm run minecraft-truth-test
+      - name: Option and verification semantics
+        run: npm run option-spec-test && npm run action-verify-test && npm run protected-goals-test
+      - name: Recovery policy regressions
+        run: npm run candidate-policy-test && npm run move-failmem-test && npm run pit-escape-test && npm run pillar-search-test && npm run hop-policy-test
