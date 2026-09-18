@@ -2555,7 +2555,13 @@ function exploreMoveCandidate(
  * has a body change instead of a stationary non-yield MINE.
  */
 function logExploreCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const currentFocus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  // A prerequisite log can sit behind a craft goal in the queue. Focus the
+  // exploration heuristic on the resource class that the fallback can
+  // actually find, rather than asking it to match blocks against
+  // `wooden_pickaxe`/`charcoal`/`planks`.
+  const logNeed = retrievalNeeds(state, currentFocus).find((want) => want.kind === 'log')
+  const focusItem = logNeed === undefined ? currentFocus : 'log'
   const spot = pickExplore(
     state,
     state.terrain.standable,
@@ -2669,8 +2675,16 @@ export function applyReachabilityGate(
   // MINE as its only productive action (live wedge on 7acd849: `MINE:b30_35_35`
   // stone ceiling, 30x dig_timeout, chosen 25x). When every log MINE/MOVE/
   // RETRIEVE this tick was withheld, offer the exploration MOVE so the policy
-  // still has a body change that can lead to a log.
-  if (logCollectGoal(state) && !presented.some(carriesLogRoute)) {
+  // still has a body change that can lead to a log. The same condition also
+  // applies when a prerequisite log route is withheld while the CURRENT goal
+  // is a craft (for example `craft wooden_pickaxe`): the craft goal itself is
+  // not a `collect log`, but WAIT cannot acquire the missing ingredient.
+  const withheldLogRoute = withheld.some(
+    (entry) =>
+      entry.candidate.meta.resourceKind === 'log' ||
+      (entry.candidate.kind === 'MINE' && isLogMine(entry.candidate)),
+  )
+  if ((logCollectGoal(state) || withheldLogRoute) && !presented.some(carriesLogRoute)) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
     run(logExploreCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
   }
