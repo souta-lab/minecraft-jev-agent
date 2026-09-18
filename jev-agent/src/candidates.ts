@@ -2103,6 +2103,10 @@ function capabilityAcquisitionCandidates(
 ): Candidate[] {
   const out: Candidate[] = []
   const seen = new Set<string>(existingIds)
+  // A candidate already withheld this cycle must never be re-emitted: the
+  // acquisition pass would re-evaluate the same id and double-record its
+  // refusal (duplicate withheld work).
+  for (const entry of withheld) seen.add(entry.candidate.id)
   for (const entry of withheld) {
     for (const capability of entry.result.missingCapabilities) {
       let source: Candidate[] = []
