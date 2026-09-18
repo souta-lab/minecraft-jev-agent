@@ -68,12 +68,11 @@ export type Counts = Record<string, number>
 
 export type PlannerMode = 'llm' | 'deterministic'
 
-/** `BUDDY_PLANNER=llm|deterministic|auto` (auto = llm when a gateway key exists). */
+/** Explicit opt-in only: `BUDDY_PLANNER=llm|jev|on`; all other values fail closed. */
 export function resolvePlannerMode(): PlannerMode {
-  const raw = (process.env.BUDDY_PLANNER ?? 'auto').trim().toLowerCase()
-  if (raw === 'deterministic' || raw === 'off' || raw === 'fallback' || raw === 'none') return 'deterministic'
-  if (raw === 'llm' || raw === 'on') return 'llm'
-  return resolveJevApiKey() !== null ? 'llm' : 'deterministic'
+  const raw = (process.env.BUDDY_PLANNER ?? 'deterministic').trim().toLowerCase()
+  if (raw === 'llm' || raw === 'jev' || raw === 'on') return 'llm'
+  return 'deterministic'
 }
 
 // ---------------------------------------------------------------------------
