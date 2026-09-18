@@ -60,8 +60,8 @@ import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
-import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
-import type { ReplanInputs } from './replanThrottle.ts'
+import { evaluateCapabilityGap, formatCapabilityGap, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
   detectOscillation,
@@ -507,6 +507,9 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
+  'CAPABILITY_GAP',
+  'CAPABILITY_GAP_CLEARED',
+  'RETURN_TO_SURFACE',
   'PRECONDITION_PROTECTED',
   'PLACE_RETRY',
   'ABANDON_REASON',
@@ -644,6 +647,12 @@ export class JevController {
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
+  /** M2 ascent trap: bounded-window tracker owned by evaluateCapabilityGap. */
+  private capabilityGapState: CapabilityGapState | null = null
+  private capabilityGapActive = false
+  private capabilityGapSignature: string | null = null
+  private ascendRefusedSinceObservation = false
+  private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
@@ -1047,6 +1056,7 @@ export class JevController {
       )
       this.updateStallSignal()
       this.observeRetrievalStall()
+      this.observeCapabilityGap()
 
       if (this.bot.entity === undefined) return
 
@@ -1609,6 +1619,7 @@ export class JevController {
    * replan is suppressed (and logged) until the bounded placement retries run out.
    */
   private protectedReplanSuppressed(reason: LlmSummonReason): boolean {
+    if (this.capabilityGapActive) return false
     if (reason !== 'no_progress' && reason !== 'action_impossible' && reason !== 'unknown_situation') return false
     const guard = shouldAdoptAbandon({
       actionId: this.lastDecisionId,
@@ -1824,6 +1835,7 @@ export class JevController {
       detail: result.detail,
     })
     if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
+    this.noteAscendOutcome(result, candidate)
 
     writeOutcome(this.jevWriter, {
       callId: decision.callId,
@@ -2414,6 +2426,53 @@ export class JevController {
       }
       return
     }
+    if (current.kind === 'surface') {
+      if (typeof current.targetY !== 'number' || !Number.isFinite(current.targetY)) {
+        const badPredicate = this.queue.markImpossible(`surface goal '${current.id}' has no targetY predicate`)
+        if (badPredicate !== null) {
+          this.recentEvents.push(`goal impossible: ${badPredicate.description}`)
+          this.summonLlm('action_impossible', `current goal is not executable: ${badPredicate.description}`)
+        }
+        return
+      }
+      if (this.lastSurfaceGoalId !== current.id) {
+        this.lastSurfaceGoalId = current.id
+        this.logger.warn(
+          'agent',
+          `RETURN_TO_SURFACE goal=${current.id} target_y=${current.targetY} reason=capability_gap`,
+          { id: current.id, targetY: current.targetY },
+          this.tickCounter,
+        )
+      }
+      const surfaceEntity = this.bot.entity
+      if (surfaceEntity === undefined || surfaceEntity.position.y < current.targetY) return
+      const beforeId = current.id
+      const beforeDescription = current.description
+      this.queue.markDone()
+      const after = this.queue.current
+      this.pendingTransition = {
+        fromId: beforeId,
+        fromDescription: beforeDescription,
+        toId: after?.id ?? null,
+        toDescription: after?.description ?? null,
+        trigger,
+        inventory: this.inventorySnapshot(),
+      }
+      this.harvestedGoalCount = 0
+      this.lastProgressAt = Date.now()
+      this.lastProgress = 0
+      this.capabilityGapActive = false
+      this.capabilityGapSignature = null
+      this.digMemory.markResourceProgress()
+      this.logger.warn(
+        'agent',
+        `RETURN_TO_SURFACE goal=${beforeId} reached=true y=${Math.round(surfaceEntity.position.y)} target_y=${current.targetY}`,
+        { from: beforeId, to: after?.id ?? null, trigger, y: surfaceEntity.position.y, targetY: current.targetY },
+        this.tickCounter,
+      )
+      if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}`)
+      return
+    }
     const impossible = this.queue.markImpossible(
       `goal kind '${current.kind}' is not executable by this PoC`,
     )
@@ -2795,6 +2854,85 @@ export class JevController {
   }
 
   /**
+   * The remembered target the ascent trap is measured against: the active
+   * retrieval when one exists, else the highest remembered resource still above
+   * the bot. Pure lookup; the trap predicate itself is `evaluateCapabilityGap`.
+   */
+  private capabilityTarget(): { y: number; key: string } | null {
+    const active = this.activeRetrieval
+    if (active !== null) return { y: active.target.y, key: this.retrievalKey(active) }
+    const entity = this.bot.entity
+    if (entity === undefined) return null
+    let best: KnownResource | null = null
+    for (const resource of this.signals.knownResources ?? []) {
+      if (resource.position.y <= entity.position.y) continue
+      if (best === null || resource.position.y > best.position.y) best = resource
+    }
+    if (best === null) return null
+    return { y: best.position.y, key: `known:${best.name}@${best.position.x},${best.position.y},${best.position.z}` }
+  }
+
+  /**
+   * M2 capability trap observable. The deterministic predicate decides; this
+   * method only feeds it the live y / target / refusal flag and reacts with the
+   * `CAPABILITY_GAP` marker plus a strategic replan. It is not a movement
+   * heuristic and it never claims success.
+   */
+  private observeCapabilityGap(): void {
+    const entity = this.bot.entity
+    if (entity === undefined) return
+    const target = this.capabilityTarget()
+    const decision = evaluateCapabilityGap(this.capabilityGapState, {
+      y: entity.position.y,
+      targetY: target === null ? null : target.y,
+      targetKey: target === null ? null : target.key,
+      ascendRefused: this.ascendRefusedSinceObservation,
+    })
+    this.capabilityGapState = decision.state
+    this.ascendRefusedSinceObservation = false
+    if (!decision.gap) {
+      if (this.capabilityGapActive) {
+        this.capabilityGapActive = false
+        this.capabilityGapSignature = null
+        this.logger.info(
+          'agent',
+          `CAPABILITY_GAP_CLEARED target_y=${Math.round(decision.targetY ?? 0)}`,
+          { targetY: decision.targetY },
+          this.tickCounter,
+        )
+      }
+      return
+    }
+    const marker = formatCapabilityGap(decision)
+    if (!this.capabilityGapActive) {
+      this.capabilityGapActive = true
+      this.capabilityGapSignature = `ascend_blocked:${Math.round(decision.targetY ?? 0)}`
+      this.logger.warn(
+        'agent',
+        marker,
+        { attempts: decision.attempts, targetY: decision.targetY, reason: decision.reason },
+        this.tickCounter,
+      )
+    }
+    this.ensureCapabilityGapSignal(marker)
+    this.summonLlm('no_progress', `capability gap: ${marker} -> strategic replan`)
+  }
+
+  /** Keep the gap marker the newest recent event so the planner sees it. */
+  private ensureCapabilityGapSignal(marker: string): void {
+    const last = this.recentEvents[this.recentEvents.length - 1]
+    if (last === marker) return
+    this.recentEvents.push(marker)
+  }
+
+  /** A pillar ascent attempt that did not verify is a refused ascend. */
+  private noteAscendOutcome(result: ExecutionResult, candidate: Candidate): void {
+    if (candidate.meta.vertical !== 'pillar') return
+    if (result.status === 'done' && result.verified) return
+    this.ascendRefusedSinceObservation = true
+  }
+
+  /**
    * Issue #45 progress assertion: while a retrieval is active its distance to the
    * remembered target must keep decreasing. When it does not for
    * RETRIEVAL_STALL_TICKS the target is dropped as unreachable, RETRIEVE_STALLED
@@ -3124,6 +3262,7 @@ export class JevController {
       position,
       knownResources: (this.signals.knownResources ?? []).length,
       failureSignature,
+      capabilityGap: this.capabilityGapActive ? this.capabilityGapSignature : null,
     }
   }
 

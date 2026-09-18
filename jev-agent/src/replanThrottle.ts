@@ -50,6 +50,12 @@ export interface ReplanInputs {
   position: ReplanPosition | null
   knownResources: number
   failureSignature: string
+  /**
+   * M2 capability trap: a signature while the pure `evaluateCapabilityGap`
+   * predicate proves the agent cannot ascend to its remembered target, else
+   * null. A capability gap is information the throttle must not swallow.
+   */
+  capabilityGap: string | null
 }
 
 /** Canonical, order-independent inventory signature (counts > 0 only). */
@@ -71,6 +77,7 @@ export function hashReplanInputs(inputs: ReplanInputs): string {
         : `${Math.round(inputs.position.x)},${Math.round(inputs.position.y)},${Math.round(inputs.position.z)}`,
     knownResources: inputs.knownResources,
     failures: inputs.failureSignature,
+    capabilityGap: inputs.capabilityGap,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -89,6 +96,8 @@ export function replanInputsChanged(
   current: ReplanInputs,
   positionDelta = REPLAN_POSITION_DELTA_DEFAULT,
 ): boolean {
+  if (current.capabilityGap !== null) return true
+  if (previous.capabilityGap !== current.capabilityGap) return true
   if (inventorySignature(previous.inventory) !== inventorySignature(current.inventory)) return true
   if (previous.knownResources !== current.knownResources) return true
   if (previous.failureSignature !== current.failureSignature) return true
@@ -116,6 +125,7 @@ function cloneInputs(inputs: ReplanInputs): ReplanInputs {
     position: inputs.position === null ? null : { ...inputs.position },
     knownResources: inputs.knownResources,
     failureSignature: inputs.failureSignature,
+    capabilityGap: inputs.capabilityGap,
   }
 }
 
@@ -190,9 +200,117 @@ export function hasBodyDelta(planned: readonly GoalLike[], current: GoalLike | n
     if (goal.kind === 'explore') return true
     if (goal.kind === 'descend') return true
     if (goal.kind === 'place') return true
+    if (goal.kind === 'surface') return true
     if (goal.kind !== 'collect') return false
     const item = goal.targetItem ?? null
     if (item === null) return false
     return item !== currentItem
   })
+}
+
+/**
+ * M2 capability trap: the pure, deterministic rule that says "this is not a
+ * movement problem any more". It is the truth owner for the trap; the retry /
+ * score fields are a localized policy (heuristic-authority rule).
+ */
+export interface CapabilityGapPolicy {
+  /** how far above the live feet a remembered target must be to count as an ascent */
+  minClimbBlocks: number
+  /** bounded observation window, in decision ticks */
+  windowTicks: number
+  /** altitude gain at or below this does not count as progress */
+  altitudeEpsilon: number
+  /** refused ascend attempts within the window that make the gap fire */
+  minAscendRefusals: number
+}
+
+export const DEFAULT_CAPABILITY_GAP_POLICY: CapabilityGapPolicy = {
+  minClimbBlocks: 8,
+  windowTicks: 40,
+  altitudeEpsilon: 0.9,
+  minAscendRefusals: 3,
+}
+
+export interface CapabilityGapState {
+  /** remembered target the window is tracking; a new target restarts the window */
+  targetKey: string
+  /** feet y when the window opened */
+  startY: number
+  /** highest feet y seen inside the window */
+  bestY: number
+  /** decision ticks observed inside the window */
+  ticks: number
+  /** refused ascend attempts observed inside the window */
+  ascendRefusals: number
+}
+
+export interface CapabilityGapObservation {
+  y: number
+  targetY: number | null
+  targetKey: string | null
+  /** an ascend attempt was refused since the previous observation */
+  ascendRefused: boolean
+}
+
+export interface CapabilityGapDecision {
+  gap: boolean
+  attempts: number
+  targetY: number | null
+  reason: 'ascend_blocked' | null
+  state: CapabilityGapState | null
+}
+
+/** Exact marker the controller emits when the pure predicate fires. */
+export function formatCapabilityGap(decision: CapabilityGapDecision): string {
+  return `CAPABILITY_GAP reason=ascend_blocked attempts=${decision.attempts} target_y=${Math.round(decision.targetY ?? 0)}`
+}
+
+export const CAPABILITY_GAP_MARKER = 'CAPABILITY_GAP'
+
+export interface CapabilityGapSignal {
+  attempts: number
+  targetY: number | null
+}
+
+/** Read the newest capability-gap marker out of a recent-events window, or null. */
+export function parseCapabilityGap(events: readonly string[]): CapabilityGapSignal | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const line = events[index]
+    if (line === undefined || !line.startsWith(`${CAPABILITY_GAP_MARKER} `)) continue
+    const attempts = /attempts=(\d+)/.exec(line)
+    const targetY = /target_y=(-?\d+)/.exec(line)
+    return {
+      attempts: attempts === null ? 0 : Number(attempts[1]),
+      targetY: targetY === null ? null : Number(targetY[1]),
+    }
+  }
+  return null
+}
+
+/**
+ * Bounded-window trap detector. Fires only when a remembered target sits
+ * `minClimbBlocks` above the agent, the window never gained altitude, AND at
+ * least `minAscendRefusals` ascend attempts were refused. Any real altitude gain
+ * or reaching the target restarts the window, so normal movement never fires it.
+ */
+export function evaluateCapabilityGap(
+  previous: CapabilityGapState | null,
+  observation: CapabilityGapObservation,
+  policy: CapabilityGapPolicy = DEFAULT_CAPABILITY_GAP_POLICY,
+): CapabilityGapDecision {
+  const { y, targetY, targetKey } = observation
+  if (targetY === null || targetKey === null || targetY - y < policy.minClimbBlocks) {
+    return { gap: false, attempts: 0, targetY, reason: null, state: null }
+  }
+  const restart = previous === null || previous.targetKey !== targetKey
+  const startY = restart ? y : previous.startY
+  const bestY = restart ? y : Math.max(previous.bestY, y)
+  const ticks = (restart ? 0 : previous.ticks) + 1
+  const ascendRefusals = (restart ? 0 : previous.ascendRefusals) + (observation.ascendRefused ? 1 : 0)
+  if (bestY - startY > policy.altitudeEpsilon || y >= targetY) {
+    return { gap: false, attempts: 0, targetY, reason: null, state: { targetKey, startY: y, bestY: y, ticks: 0, ascendRefusals: 0 } }
+  }
+  const state: CapabilityGapState = { targetKey, startY, bestY, ticks, ascendRefusals }
+  const gap = ticks >= policy.windowTicks && ascendRefusals >= policy.minAscendRefusals
+  return { gap, attempts: ascendRefusals, targetY, reason: gap ? 'ascend_blocked' : null, state }
 }

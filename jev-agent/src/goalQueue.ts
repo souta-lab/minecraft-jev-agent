@@ -28,7 +28,7 @@ import {
 } from './protectedGoals.ts'
 import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
 
-export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'unknown'
+export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
 
 /** Where a goal came from, for the decision log / debugging. */
 export type GoalOrigin = 'bootstrap' | 'llm' | 'mechanical'
@@ -42,6 +42,7 @@ export type GoalStrategy =
   | 'explore_cave'
   | 'branch_mine'
   | 'return_to_known_ore'
+  | 'return_to_surface'
   | 'smelt_and_craft'
 
 export interface ApplyPlanOptions {

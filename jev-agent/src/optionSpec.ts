@@ -530,6 +530,8 @@ export function optionKindForGoal(kind: GoalKind): OptionKind {
       return 'explore'
     case 'descend':
       return 'descend'
+    case 'surface':
+      return 'explore'
     case 'recover':
       return 'combat'
     case 'unknown':
@@ -577,6 +579,7 @@ const SKILLS_BY_STRATEGY: Readonly<Record<GoalStrategy, readonly string[]>> = {
   explore_cave: ['EXPLORE_CAVE_FRONTIER'],
   branch_mine: ['BRANCH_MINE'],
   return_to_known_ore: ['RETURN_TO_KNOWN_ORE'],
+  return_to_surface: ['RETURN_TO_SURFACE'],
   smelt_and_craft: ['SMELT_AND_CRAFT'],
 }
 

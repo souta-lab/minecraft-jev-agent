@@ -2,16 +2,20 @@
 // new-information gate and body-delta requirement. No bot, no network, injected
 // clock: the whole policy is exercised as pure functions.
 import {
+  DEFAULT_CAPABILITY_GAP_POLICY,
+  evaluateCapabilityGap,
+  formatCapabilityGap,
   formatReplanThrottled,
   hasBodyDelta,
   hashReplanInputs,
+  parseCapabilityGap,
   ReplanThrottle,
   REPLAN_THROTTLE_WINDOW_MS_DEFAULT,
   replanInputsChanged,
   resolveReplanPositionDelta,
   resolveReplanThrottleMs,
 } from './src/replanThrottle.ts'
-import type { ReplanInputs } from './src/replanThrottle.ts'
+import type { CapabilityGapState, ReplanInputs } from './src/replanThrottle.ts'
 
 interface Case {
   name: string
@@ -28,6 +32,7 @@ const inputs = (over: Partial<ReplanInputs> = {}): ReplanInputs => ({
   position: { x: 29, y: 60, z: 34 },
   knownResources: 128,
   failureSignature: 'WAIT:no_progress',
+  capabilityGap: null,
   ...over,
 })
 
@@ -192,6 +197,77 @@ addCase('the live charcoal spin is refused: front plan stationary, body-change a
     pass: !refused.allow && !hasBodyDelta(front, current) && hasBodyDelta(bodyChange, current),
     detail: `refused=${refused.kind} front=${hasBodyDelta(front, current)} bodyChange=${hasBodyDelta(bodyChange, current)}`,
   }
+})
+
+addCase('the capability-gap predicate fires on the live ascend-blocked shape', () => {
+  const targetKey = 'raw_iron@37,67,33'
+  const first = evaluateCapabilityGap(null, { y: 10.75, targetY: 67, targetKey, ascendRefused: true })
+  let decision = first
+  for (let tick = 1; tick < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: 10.75, targetY: 67, targetKey, ascendRefused: true })
+  }
+  const line = formatCapabilityGap(decision)
+  return {
+    pass:
+      first.gap === false &&
+      decision.gap &&
+      decision.reason === 'ascend_blocked' &&
+      decision.attempts === DEFAULT_CAPABILITY_GAP_POLICY.windowTicks &&
+      decision.targetY === 67 &&
+      line === 'CAPABILITY_GAP reason=ascend_blocked attempts=40 target_y=67',
+    detail: `beforeWindow=${first.gap} line=${line}`,
+  }
+})
+
+addCase('normal movement and real altitude gain never fire the capability gap', () => {
+  const targetKey = 'raw_iron@37,67,33'
+  const tooClose = evaluateCapabilityGap(null, { y: 64, targetY: 66, targetKey, ascendRefused: true })
+  let decision = evaluateCapabilityGap(null, { y: 10, targetY: 67, targetKey, ascendRefused: true })
+  for (let step = 0; step < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; step += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: 10 + step, targetY: 67, targetKey, ascendRefused: true })
+  }
+  return {
+    pass: tooClose.gap === false && tooClose.state === null && decision.gap === false,
+    detail: `tooClose=${tooClose.gap} climbing=${decision.gap}`,
+  }
+})
+
+addCase('an active capability gap defeats no_new_info and stays window-bounded', () => {
+  const throttle = new ReplanThrottle(10_000, 2)
+  throttle.record('no_progress', inputs(), 1_000)
+  const gapInputs = inputs({ capabilityGap: 'ascend_blocked:67' })
+  const insideWindow = throttle.check('no_progress', gapInputs, 4_000)
+  const afterWindow = throttle.check('no_progress', gapInputs, 12_000)
+  return {
+    pass: insideWindow.allow === false && insideWindow.kind === 'window' && afterWindow.allow && afterWindow.kind === 'new_info',
+    detail: `${JSON.stringify(insideWindow)} ${JSON.stringify(afterWindow)}`,
+  }
+})
+
+addCase('clearing a capability gap is new information too', () => {
+  const throttle = new ReplanThrottle(10_000, 2)
+  throttle.record('no_progress', inputs({ capabilityGap: 'ascend_blocked:67' }), 1_000)
+  const decision = throttle.check('no_progress', inputs(), 12_000)
+  return { pass: decision.allow && decision.kind === 'new_info', detail: JSON.stringify(decision) }
+})
+
+addCase('parseCapabilityGap reads the newest marker and ignores noise', () => {
+  const parsed = parseCapabilityGap(['dug x', 'CAPABILITY_GAP reason=ascend_blocked attempts=3 target_y=67', 'dug y'])
+  const latest = parseCapabilityGap([
+    'CAPABILITY_GAP reason=ascend_blocked attempts=3 target_y=67',
+    'CAPABILITY_GAP reason=ascend_blocked attempts=41 target_y=67',
+  ])
+  const missing = parseCapabilityGap(['REPLAN_THROTTLED reason=no_progress ageMs=1 -> reuse plan'])
+  return {
+    pass: parsed?.attempts === 3 && parsed.targetY === 67 && latest?.attempts === 41 && missing === null,
+    detail: `${JSON.stringify(parsed)} ${JSON.stringify(latest)} missing=${missing === null}`,
+  }
+})
+
+addCase('hasBodyDelta accepts the surface-return goal as a body change', () => {
+  const current = { kind: 'collect', targetItem: 'raw_iron' }
+  const surface = [{ kind: 'surface', targetItem: 'log', requiredCount: 1 }]
+  return { pass: hasBodyDelta(surface, current), detail: `surface=${hasBodyDelta(surface, current)}` }
 })
 
 let failures = 0
