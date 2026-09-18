@@ -25,6 +25,7 @@
     "skill-candidate-test": "tsx test-skill-candidate.mts",
     "observability-test": "tsx test-observability.mts",
     "action-verify-test": "tsx test-action-verify.mts",
+    "minecraft-truth-test": "tsx test-minecraft-truth.mts",
     "beta-authority-test": "tsx test-beta-authority.mts",
     "beta-hysteresis-test": "tsx test-beta-hysteresis.mts",
     "abandon-enforce-test": "tsx test-abandon-enforce.mts",

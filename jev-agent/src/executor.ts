@@ -20,7 +20,7 @@ import type { Candidate, CandidateKind } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, UNBREAKABLE } from './state.ts'
+import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, isBreakableSolidBlock } from './state.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
@@ -2612,7 +2612,7 @@ export class Executor {
         if (top === null) continue
         if (top - (feetY - 1) < 2) break
         const upper = this.currentBlockAt({ x, y: top, z })
-        if (upper === null || upper.boundingBox === 'empty' || !upper.diggable || UNBREAKABLE.has(upper.name)) break
+        if (upper === null || !isBreakableSolidBlock(upper)) break
         if (!this.solidSupportAt(x, top - 1, z)) break
         if (!this.passableAt(x, top + 1, z) || !this.passableAt(x, top + 2, z)) break
         if (

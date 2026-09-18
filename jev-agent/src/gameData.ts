@@ -66,6 +66,8 @@ export const PICKAXE_TIER0: Readonly<Record<string, number>> = {
 
 export interface GameDataBlock {
   name?: string
+  /** registry hardness flag: false for bedrock/barrier/portals; obsidian is true */
+  diggable?: boolean
   drops?: number[]
   harvestTools?: Record<string, boolean>
 }
