@@ -45,7 +45,9 @@ function footingAt(solidAtY: number | null): SolidAt {
  * before every other simulate - so the physicsTick correction must actively
  * re-ground the body between ticks for the jump to ever fire.
  */
-function createFakeBot(input: { y: number }) {
+function createFakeBot(input: { y: number; gate?: boolean; floorTop?: number }) {
+  const gateOpen = input.gate !== false
+  const floorTop = input.floorTop ?? Number.NEGATIVE_INFINITY
   const entity = {
     position: { x: FEET_X + 0.5, y: input.y, z: FEET_Z + 0.5 },
     velocity: { y: 0 },
@@ -80,7 +82,7 @@ function createFakeBot(input: { y: number }) {
       // Clientbound position packet (mineflayer physics.js): onGround=false.
       if (stats.ticks % 2 === 1) entity.onGround = false
       const jumpHeld = controls.length > 0 && controls[controls.length - 1] === true
-      if (jumpHeld && entity.onGround) {
+      if (gateOpen && jumpHeld && entity.onGround) {
         // prismarine-physics jump gate (index.js:721-725): velocity.y = 0.42.
         entity.velocity.y = 0.42
         entity.onGround = false
@@ -89,6 +91,10 @@ function createFakeBot(input: { y: number }) {
         entity.velocity.y -= 0.08
       }
       entity.position.y += entity.velocity.y
+      if (entity.position.y < floorTop && entity.velocity.y <= 0) {
+        entity.position.y = floorTop
+        entity.velocity.y = 0
+      }
       entity.onGround = false
       for (const listener of listeners) listener()
     },
@@ -157,6 +163,25 @@ addCase('the pillar jump path installs the correction and a simulated onGround=f
   return {
     pass,
     detail: `airborne=${outcome.airborne} rise=${outcome.peakRise} samples=${outcome.samples} jumpApplied=${bot.stats.jumpApplied} listeners(max=${bot.stats.maxListeners},after=${bot.listenerCount()}) physicsDuring=${bot.stats.physicsEnabledDuringJump}->after=${bot.physicsEnabled} controls=[${transitions.join(',')}]`,
+  }
+})
+
+addCase('the takeoff impulse launches a body whose jump gate never fires (the live flag race)', async () => {
+  // The real race: physicsTick fires after physics already read onGround, and a
+  // clientbound position packet can reset it in between. `gate: false` models a
+  // gate that loses every tick; only the verified impulse can launch the body.
+  const bot = createFakeBot({ y: 10.5, gate: false, floorTop: 10 })
+  const outcome = await jumpWithGroundCorrection(bot, jumpDeps(bot, footingAt(9)))
+  const pass =
+    outcome.airborne &&
+    outcome.impulses >= 1 &&
+    outcome.ticks >= 1 &&
+    outcome.peakRise > TAKEOFF_RISE &&
+    outcome.failure === null &&
+    bot.stats.jumpApplied === 0
+  return {
+    pass,
+    detail: `airborne=${outcome.airborne} rise=${outcome.peakRise} impulses=${outcome.impulses} ticks=${outcome.ticks} samples=${outcome.samples} gateFires=${bot.stats.jumpApplied} failure=${outcome.failure}`,
   }
 })
 

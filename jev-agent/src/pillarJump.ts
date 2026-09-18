@@ -1,5 +1,5 @@
-// pillarJump.ts - the ground correction and verified takeoff shared by the
-// control walk (`walkByControls`) and PILLAR_UP.
+// pillarJump.ts - the ground correction and the verified takeoff shared by the
+// control walk (`walkByControls`) and the PILLAR_UP step (`pillarApex.ts`).
 //
 // This Leaf 26.1 server ships no collision shapes for the running client
 // version, so prismarine-physics reports `entity.onGround = false` while a
@@ -11,7 +11,28 @@
 // so a clientbound `position` packet - which resets `onGround = false` in
 // mineflayer/lib/plugins/physics.js - cannot win the race and turn the jump
 // back into a no-op.
+//
+// M2 apex control (main d8a7a72, live `PILLAR_UP jump never left the ground at
+// y=10.75 rise=0 samples=40` 41x): the flag correction alone did not launch the
+// live body, for two structural reasons. (1) mineflayer emits `physicsTick`
+// AFTER `simulatePlayer().apply()` (physics.js `tickPhysics`), so the
+// correction patches the flag for the NEXT tick while a clientbound position
+// packet zeroes velocity and resets `onGround` in between. (2) when
+// `shouldUsePhysics` is false the physics loop early-returns before the emit,
+// so no corrective tick ever arrives. The takeoff is therefore now verified by
+// a POSITION rise (never by a velocity this code itself may have written) and,
+// once the flag race has lost for `PILLAR_TAKEOFF_IMPULSE_MS`, backed by the
+// exact vanilla impulse (`vel.y = Math.fround(0.42)`, prismarine-physics
+// index.js:726). The same live run also proved the placement needs a verified
+// apex window rather than a `velocity.y <= 0.01` predicate; that state machine
+// lives in `pillarApex.ts`.
 import { resolvePillarStep } from './verticalPlan.ts'
+
+export interface Vec3Like {
+  x: number
+  y: number
+  z: number
+}
 
 /** The entity slice a jump needs. */
 export interface JumpEntityLike {
@@ -46,6 +67,19 @@ export const PILLAR_TAKEOFF_BUDGET_MS = 600
 export const PILLAR_TAKEOFF_POLL_MS = 15
 
 /**
+ * The exact vanilla jump impulse: prismarine-physics sets
+ * `vel.y = Math.fround(0.42)` for a grounded jump (index.js:726). Applied only
+ * after the flag race has demonstrably lost, so a healthy physics loop never
+ * sees it.
+ */
+export const PILLAR_TAKEOFF_IMPULSE_MS = 100
+
+/** Minimum spacing between explicit impulses: one per 20 Hz physics tick. */
+export const PILLAR_TAKEOFF_IMPULSE_INTERVAL_MS = 50
+
+export const JUMP_IMPULSE_VY = Math.fround(0.42)
+
+/**
  * Patch mineflayer's stale `onGround` flag from the block grid. The feet cell
  * (a partial mount such as a slab or snow layer lives in it) or the cell below
  * must be a full solid block - the same contiguous scan `resolvePillarStep`
@@ -62,10 +96,20 @@ export function correctStandingOnGround(bot: { entity: JumpEntityLike }, isSolid
   return true
 }
 
-/** Install the correction on every physicsTick; the returned function removes it. */
-export function installGroundCorrection(bot: JumpBotLike, isSolid: SolidAt): () => void {
+/**
+ * Install the correction on every physicsTick; the returned function removes
+ * it. `onTick` observes the physics loop itself (`grounded` is the correction
+ * verdict), so a caller can tell "the loop never ran" from "the loop ran but
+ * the body never left the ground".
+ */
+export function installGroundCorrection(
+  bot: JumpBotLike,
+  isSolid: SolidAt,
+  onTick?: (grounded: boolean) => void,
+): () => void {
   const onPhysicsTick = (): void => {
-    correctStandingOnGround(bot, isSolid)
+    const grounded = correctStandingOnGround(bot, isSolid)
+    onTick?.(grounded)
   }
   bot.on('physicsTick', onPhysicsTick)
   return () => bot.removeListener('physicsTick', onPhysicsTick)
@@ -81,55 +125,98 @@ export interface PillarJumpDeps {
   now: () => number
 }
 
+/** Why the takeoff could not be verified. */
+export type TakeoffFailure = 'no_physics_tick' | 'no_support' | 'no_rise'
+
 export interface PillarJumpOutcome {
-  /** true only when velocity/position prove the body left the ground */
+  /** true only when a POSITION rise proves the body left the ground */
   airborne: boolean
   /** highest rise (blocks) observed during the attempt */
   peakRise: number
   /** poll iterations spent before takeoff or the deadline */
   samples: number
+  /** physicsTick events observed during the attempt (0 => the loop is idle) */
+  ticks: number
+  /** explicit vanilla impulses applied after the flag race lost */
+  impulses: number
+  /** why takeoff failed; null once airborne */
+  failure: TakeoffFailure | null
 }
 
 /**
  * The control-walk jump mechanism, bounded and VERIFIED: force physics on,
  * install the ground correction for the duration, hold `jump`, and return only
- * once `velocity.y > 0` or the body has risen off the launch point. A silent
- * no-op can no longer be mistaken for a jump - the caller gets
- * `airborne: false` and raises a typed error.
+ * once the body has risen off the launch point. A silent no-op can no longer be
+ * mistaken for a jump - the caller gets `airborne: false` plus a typed failure
+ * (`no_physics_tick` / `no_support` / `no_rise`).
+ *
+ * `velocity.y > 0` is deliberately NOT accepted as proof of takeoff: this
+ * function itself writes the impulse below, and a dead physics loop would then
+ * look airborne forever. Only a position change over `TAKEOFF_RISE` counts.
  */
 export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJumpDeps): Promise<PillarJumpOutcome> {
   const savedPhysics = bot.physicsEnabled
   const startY = bot.entity.position.y
+  const startedAt = deps.now()
   let peakRise = 0
   let samples = 0
   let airborne = false
+  let groundedOnce = false
+  let groundedNow = false
+  let ticks = 0
+  let impulses = 0
+  let lastImpulseAt = Number.NEGATIVE_INFINITY
   // Same correction as the control walk, kept for the whole attempt so a
   // clientbound position packet cannot reset onGround between two ticks.
-  const uninstall = installGroundCorrection(bot, deps.isSolid)
+  const uninstall = installGroundCorrection(bot, deps.isSolid, (grounded) => {
+    ticks += 1
+    groundedOnce = groundedOnce || grounded
+  })
   bot.physicsEnabled = true
   try {
     // Ground the body before the jump control is set: the next physics tick
     // reads `entity.onGround` and applies `velocity.y = 0.42`.
-    correctStandingOnGround(bot, deps.isSolid)
+    groundedNow = correctStandingOnGround(bot, deps.isSolid)
+    groundedOnce = groundedOnce || groundedNow
     bot.setControlState('jump', true)
-    const deadline = deps.now() + deps.budgetMs
+    const deadline = startedAt + deps.budgetMs
     while (deps.now() < deadline) {
-      correctStandingOnGround(bot, deps.isSolid)
+      groundedNow = correctStandingOnGround(bot, deps.isSolid)
+      groundedOnce = groundedOnce || groundedNow
       samples += 1
       const rise = bot.entity.position.y - startY
       if (rise > peakRise) peakRise = rise
-      if (bot.entity.velocity.y > 0 || rise > TAKEOFF_RISE) {
+      if (rise > TAKEOFF_RISE) {
         airborne = true
         break
       }
+      // The flag race lost (physicsTick fires after the gate read, or the loop
+      // is idle): assert the exact vanilla impulse while the body is grounded.
+      const now = deps.now()
+      if (
+        groundedNow &&
+        now - startedAt >= PILLAR_TAKEOFF_IMPULSE_MS &&
+        now - lastImpulseAt >= PILLAR_TAKEOFF_IMPULSE_INTERVAL_MS
+      ) {
+        bot.entity.velocity.y = JUMP_IMPULSE_VY
+        impulses += 1
+        lastImpulseAt = now
+      }
       await deps.sleep(deps.pollMs)
     }
-    return { airborne, peakRise, samples }
   } finally {
     bot.setControlState('jump', false)
     uninstall()
     bot.physicsEnabled = savedPhysics
   }
+  const failure: TakeoffFailure | null = airborne
+    ? null
+    : ticks === 0
+      ? 'no_physics_tick'
+      : !groundedOnce
+        ? 'no_support'
+        : 'no_rise'
+  return { airborne, peakRise, samples, ticks, impulses, failure }
 }
 
 /** One line per real PILLAR_UP step: the live proof the climb started. */
