@@ -10,13 +10,13 @@
   },
   "issues": {
     "4": {
-      "acceptanceClass": "resident-reproducibility",
+      "acceptanceClass": "offline-reproducibility",
       "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "fail",
-      "note": "Current planner code still defaults to auto and enables Jev when a key exists; static POLICY vs IMPLEMENTED mismatch is enough for FAIL."
+      "implementation": "landed",
+      "verification": "offline",
+      "observation": "pass",
+      "compliance": "pass",
+      "note": "PR #139 merged as 6a5248d. The resolver defaults to deterministic and requires explicit BUDDY_PLANNER=llm|jev|on; the branch fixture covered the 13-case mode matrix. No live planner authority claim is made."
     },
     "56": {
       "acceptanceClass": "architecture-dataflow",
@@ -25,7 +25,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Option compiler/identity exists, but exact CurrentOptionContext still does not reach the Jev hot decision boundary."
+      "note": "CurrentOptionContext now persists and reaches WorldState/Jev payloads on main; candidate/Skill lists still do not consume or constrain by allowedSkills, and live/replay evidence remains unverified."
     },
     "79": {
       "acceptanceClass": "closed-loop-live",
