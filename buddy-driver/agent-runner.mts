@@ -553,6 +553,7 @@ let disconnectReasonSeen: DisconnectReason | null = null
 let disconnectDetail: string | null = null
 let generationHash: string | null = null
 let listenerBaseline: Record<string, number> = {}
+let listenerHostBaseline: Record<string, number> = {}
 let baselineCaptured = false
 let listenerBaselineTimer: NodeJS.Timeout | null = null
 let listenerBaselineGeneration: ResidentGeneration | null = null
@@ -688,8 +689,23 @@ function listenerCounts(): Record<string, number> {
   return counts
 }
 
+function expectedListenerCounts(): Record<string, number> {
+  const expected = { ...listenerBaseline }
+  if (generation === null || Object.keys(listenerBaseline).length === 0) return expected
+  const registry = generationRegistries.get(generation.id)
+  if (registry === undefined || Object.keys(listenerHostBaseline).length === 0) return expected
+  const owned = registry.ownedListenerCounts()
+  for (const event of LISTENER_EVENTS) {
+    const hostCount = listenerHostBaseline[event]
+    if (hostCount !== undefined) expected[event] = hostCount + (owned[event] ?? 0)
+  }
+  return expected
+}
+
 function listenerLeak(): boolean {
-  return Object.keys(listenerBaseline).some((event) => (listenerCounts()[event] ?? 0) > (listenerBaseline[event] ?? 0))
+  const current = listenerCounts()
+  const expected = expectedListenerCounts()
+  return Object.keys(listenerBaseline).some((event) => (current[event] ?? 0) > (expected[event] ?? 0))
 }
 
 function clearListenerBaselineTimer(): void {
@@ -883,6 +899,14 @@ function disposeGeneration(gen: ResidentGeneration): GenerationResourceCounts {
     generationStopWatch.delete(gen.id)
   }
   const hostListeners = listenerCounts()
+  log('LISTENERS', {
+    phase: 'after_dispose',
+    generationId: gen.id,
+    listeners: hostListeners,
+    baseline: listenerBaseline,
+    hostBaseline: listenerHostBaseline,
+    tracked,
+  })
   log('GENERATION_DISPOSED', { id: gen.id, listeners: tracked.listeners, timers: tracked.timers, hostListeners: hostListeners.physicsTick ?? 0 })
   if (listenerLeak()) {
     log('WARN', { where: 'generation-dispose', id: gen.id, reason: 'listener-count-did-not-return-to-baseline', listeners: hostListeners, baseline: listenerBaseline, tracked })
@@ -905,6 +929,7 @@ function ownershipPorts(): OwnershipPorts {
 function makeSwapPorts(previousModule: GenerationModule | null): SwapPorts {
   return {
     ...ownershipPorts(),
+    afterQuiesce: (target) => log('LISTENERS', { phase: 'after_quiesce', generationId: target.id, listeners: listenerCounts() }),
     buildResume: () => {
       if (previousModule === null || bot === null) return null
       const pending = newPendingProposals()
@@ -969,6 +994,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     } catch {
       // best effort
     }
+    log('LISTENERS', { phase: 'after_quiesce', generationId: old.id, listeners: listenerCounts() })
     disposeGeneration(old)
   }
   const mod = await loadGenerationModule(false)
@@ -994,6 +1020,8 @@ async function startGeneration(trigger: string): Promise<boolean> {
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
   commitOwner(ownershipPorts(), gen)
   const listenersBeforeStart = listenerCounts()
+  listenerHostBaseline = { ...listenersBeforeStart }
+  log('LISTENERS', { phase: 'before_start', generationId: gen.id, listeners: listenersBeforeStart })
   try {
     gen.start()
   } catch (error) {
@@ -1005,6 +1033,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     discardStagedProposals(gen.id, 'start-failed')
     throw error
   }
+  log('LISTENERS', { phase: 'after_start', generationId: gen.id, listeners: listenerCounts() })
   lastActionId = null
   if (!baselineCaptured) {
     scheduleListenerBaseline(gen, listenersBeforeStart)
@@ -1264,6 +1293,8 @@ function connect(): void {
     if (game?.levelName !== undefined) state.levelName = game.levelName
     clearListenerBaselineTimer()
     baselineCaptured = false
+    listenerBaseline = {}
+    listenerHostBaseline = {}
     log('SPAWN', {
       pos: entity === undefined ? '?' : fmtPos({ x: entity.position.x, y: entity.position.y, z: entity.position.z }),
       version: created.version,
@@ -1513,6 +1544,7 @@ function gitCommit(): string | null {
 
 function writeAcceptance(): string {
   const counts = listenerCounts()
+  const expected = expectedListenerCounts()
   const record: AcceptanceRecord = {
     record: 'acceptance',
     runId,
@@ -1547,6 +1579,7 @@ function writeAcceptance(): string {
     reloadsFailed: stats.reloadsFailed,
     freezeCycles: stats.freezeCycles,
     listenerBaseline,
+    listenerExpected: expected,
     listenerCurrent: counts,
     listenerLeak: listenerLeak(),
     worldMemoryKeys: Object.keys(state.worldMemoryByKey),
@@ -1625,8 +1658,17 @@ async function performReload(trigger: string): Promise<void> {
     // generationId (and of rollback/disposal); `state.lastGenerationId` is set by
     // `commitOwner` to the superseded id, which test-reload-lifecycle pins.
     nextSeed.revision = state.revision
+    log('LISTENERS', { phase: 'before_start', generationId: candidate.id, listeners: listenerCounts() })
     const outcome = await swapGeneration(makeSwapPorts(previousModule), candidate)
     candidate = null
+    const outcomeGenerationId = 'generationId' in outcome ? outcome.generationId : null
+    log('LISTENERS', {
+      phase: 'after_start',
+      generationId: outcomeGenerationId,
+      listeners: listenerCounts(),
+      expected: expectedListenerCounts(),
+      outcome: outcome.status,
+    })
     if (outcome.status !== 'committed') {
       if (outcome.status === 'rolled-back') {
         discardStagedProposals(outcome.from, 'reload-rolled-back-candidate')
@@ -1764,6 +1806,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       },
       listeners: listenerCounts(),
       listenerBaseline,
+      listenerExpected: expectedListenerCounts(),
       listenerLeak: listenerLeak(),
       acceptancePath: join(DATA, `acceptance-${runId}.json`),
       status,
@@ -1914,7 +1957,13 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'leakcheck') {
-    controlReply(socket, request, true, { listeners: listenerCounts(), listenerBaseline, listenerLeak: listenerLeak(), heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576) })
+    controlReply(socket, request, true, {
+      listeners: listenerCounts(),
+      listenerBaseline,
+      listenerExpected: expectedListenerCounts(),
+      listenerLeak: listenerLeak(),
+      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    })
     return
   }
   if (cmd === 'gc') {
