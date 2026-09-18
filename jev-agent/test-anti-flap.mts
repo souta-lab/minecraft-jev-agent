@@ -17,9 +17,11 @@
 //       RETRIEVE:known:station:crafting_table:b40_29_35 ...
 //
 // Pure: no bot, no network, no model. Run: npx tsx test-anti-flap.mts
+import { readFileSync } from 'node:fs'
 import {
   AbandonmentLedger,
   formatProtectionAbandonConflict,
+  PROTECTION_ABANDON_CONFLICT,
   reconcileProtection,
 } from './src/protectionConflict.ts'
 import {
@@ -32,6 +34,7 @@ import {
 } from './src/candidateCommitment.ts'
 import type { CandidateFlapState, FlapCandidate } from './src/candidateCommitment.ts'
 import { prerequisiteProtection } from './src/placementGuard.ts'
+import { MIRRORED_MARKERS } from './src/controller.ts'
 
 interface Case {
   name: string
@@ -42,6 +45,8 @@ const cases: Case[] = []
 const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
+
+const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
 
 const OPTION = 'CRAFT:furnace'
 const SMELT = [{ kind: 'smelt', targetItem: 'iron_ingot' }] as const
@@ -293,6 +298,21 @@ addCase('the flap window resolves from env with a safe default', () => {
   const invalid = resolveCandidateFlapTicks({ BUDDY_CANDIDATE_FLAP_TICKS: 'nope' }) === CANDIDATE_FLAP_TICKS_DEFAULT
   const zero = resolveCandidateFlapTicks({ BUDDY_CANDIDATE_FLAP_TICKS: '0' }) === CANDIDATE_FLAP_TICKS_DEFAULT
   return { pass: defaults && override && invalid && zero, detail: `defaults=${defaults} override=${override} invalid=${invalid} zero=${zero}` }
+})
+
+addCase('wiring: the controller reconciles protection with the abandonment ledger', () => {
+  const text = source('./src/controller.ts')
+  const missing = [
+    'new AbandonmentLedger()',
+    'reconcileProtection({',
+    'markOptionAbandoned(',
+  ].filter((needle) => !text.includes(needle))
+  const mirrored = MIRRORED_MARKERS.has(PROTECTION_ABANDON_CONFLICT)
+  const pass = missing.length === 0 && mirrored
+  return {
+    pass,
+    detail: missing.length === 0 ? `mirrored=${mirrored}` : `missing ${missing.join(', ')}`,
+  }
 })
 
 let failures = 0
