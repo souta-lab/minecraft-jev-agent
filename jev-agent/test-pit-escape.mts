@@ -11,6 +11,8 @@ import type { Candidate } from './src/candidates.ts'
 import { classifyMoveOutcome } from './src/controller.ts'
 import { formatMoveTargetSkipped, filterBlacklistedMoves, MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
 import { evaluateHop, hopHoldsForward, planClimbManeuver } from './src/executor.ts'
+import { classifyHeadroomBlocker, formatPillarRefused, selectPillarFallbackColumn } from './src/verticalPlan.ts'
+import type { PillarColumnProbe } from './src/verticalPlan.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 
@@ -298,6 +300,40 @@ addCase('a pit with no standable rim spot yields no escape MOVE (nothing to clim
   const candidates = generateCandidates(blocked, defaultCandidateOptions)
   const pass = pitEscapeCandidate(candidates) === null
   return { pass, detail: `escape=none moves=[${movementCandidates(candidates).map((c) => c.id).join(',')}] candidates=[${candidates.map((c) => c.id).join(',')}]` }
+})
+
+addCase('a ceiling-capped pocket column refuses with the marker and offers the adjacent open pillar column', () => {
+  // Live pocket: feet (40,8,31), cobblestone ceiling at (40,9,31), no pickaxe;
+  // (40,8,32) is the open neighbour the pillar must relocate to.
+  const feet = { x: 40, y: 8, z: 31 }
+  const decision = classifyHeadroomBlocker({
+    cell: { x: 40, y: 9, z: 31 },
+    name: 'cobblestone',
+    diggable: true,
+    fluidOrHazard: false,
+    floodRisk: false,
+    toolOk: false,
+  })
+  const marker =
+    decision.kind === 'refuse'
+      ? formatPillarRefused({ reason: 'no_headroom', cell: feet, obstacle: decision.obstacle, cause: decision.reason })
+      : 'not-refused'
+  const probes: PillarColumnProbe[] = [
+    { cell: { x: 40, y: 8, z: 32 }, supported: true, feetClear: true, headClear: true, aboveHeadClear: true, unsafe: false },
+    { cell: { x: 39, y: 9, z: 32 }, supported: true, feetClear: true, headClear: true, aboveHeadClear: true, unsafe: false },
+  ]
+  const fallback = selectPillarFallbackColumn(probes, feet)
+  const pass =
+    decision.kind === 'refuse' &&
+    decision.reason === 'needs_tool' &&
+    marker.startsWith('PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31') &&
+    fallback?.x === 40 &&
+    fallback?.y === 8 &&
+    fallback?.z === 32
+  return {
+    pass,
+    detail: `decision=${decision.kind}${decision.kind === 'refuse' ? `/${decision.reason}` : ''} fallback=${fallback === null ? 'none' : `${fallback.x},${fallback.y},${fallback.z}`} marker=${marker}`,
+  }
 })
 
 let failures = 0
