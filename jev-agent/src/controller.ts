@@ -492,6 +492,7 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'PILLAR_SEARCH',
+  'HOP_PLAN',
   'DESCEND_STALLED',
   'DESCEND_PROGRESS',
   'DIG_OSCILLATE',

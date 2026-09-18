@@ -27,6 +27,7 @@
     "action-verify-test": "tsx test-action-verify.mts",
     "minecraft-truth-test": "tsx test-minecraft-truth.mts",
     "pillar-search-test": "tsx test-pillar-search.mts",
+    "hop-policy-test": "tsx test-hop-policy.mts",
     "beta-authority-test": "tsx test-beta-authority.mts",
     "beta-hysteresis-test": "tsx test-beta-hysteresis.mts",
     "abandon-enforce-test": "tsx test-abandon-enforce.mts",

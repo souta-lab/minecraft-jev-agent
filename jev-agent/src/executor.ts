@@ -52,6 +52,7 @@ import {
   PILLAR_TAKEOFF_POLL_MS,
 } from './pillarJump.ts'
 import type { SolidAt } from './pillarJump.ts'
+import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -277,14 +278,6 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
   return above1Empty && above2Empty
 }
 
-/**
- * Pit-escape recipe timings from the movement harness
- * (`mcbot/movement-test/vertical.mjs#navigateTo`): a held pure jump rises the
- * full 1.2522 blocks, then forward is pushed for the airborne window so the body
- * carries onto the lip.
- */
-const VERTICAL_HOP_RISE_MS = 180
-const VERTICAL_HOP_PUSH_MS = 260
 /** How far ahead the terrain-contact probe reads the facing column (blocks). */
 const FACE_PROBE_DIST = 0.8
 
@@ -318,17 +311,13 @@ export function planClimbManeuver(input: ClimbManeuverInput): ClimbManeuver {
 }
 
 /**
- * The vertical-hop body rule. A free body (`pinned=false`) holds `forward`
- * through the jump so the packet carries the horizontal component and the body
- * carries onto the lip (live A/B: rise 1.12/1.17/1.18/1.20 when forward was held
- * with `pinned=false still=true`). A pinned body releases forward for the pure
- * jump — the server rejects a blocked forward push combined with a jump — and
- * only pushes forward once airborne. Live release data: `rise=0` on 296/296
- * attempts, so a released-forward free hop can never satisfy `hopOk`.
+ * The vertical-hop body rule, owned by `hopPolicy.planVerticalHop`: a free body
+ * holds `forward` through the jump so the packet carries the horizontal
+ * component; a pinned body releases forward for the pure jump because the
+ * server rejects a blocked forward push combined with a jump. Re-exported for
+ * the existing pit-escape regression.
  */
-export function hopHoldsForward(pinned: boolean): boolean {
-  return !pinned
-}
+export { hopHoldsForward } from './hopPolicy.ts'
 
 export interface HopOutcome {
   dy: number
@@ -1823,12 +1812,14 @@ export class Executor {
           // horizontal component, then forward keeps pushing while airborne; a
           // pinned body releases forward for the pure jump because the server
           // rejects a blocked forward push combined with a jump.
-          this.bot.setControlState('forward', hopHoldsForward(pinned))
+          const hopPlan = planVerticalHop(pinned)
+          this.logger.info('agent', formatHopPlan(hopPlan), { target, anchor, pinned, recoveries })
+          this.bot.setControlState('forward', hopPlan.holdForward)
           this.bot.setControlState('jump', true)
-          await delay(VERTICAL_HOP_RISE_MS, signal)
+          await delay(hopPlan.riseMs, signal)
           this.bot.setControlState('jump', false)
           this.bot.setControlState('forward', true)
-          await delay(VERTICAL_HOP_PUSH_MS, signal)
+          await delay(hopPlan.pushMs, signal)
           this.bot.setControlState('forward', false)
           const afterHop = this.bot.entity.position
           const hop = evaluateHop(beforeHop, afterHop, node)
