@@ -599,7 +599,10 @@ export interface MercuryCallRecord {
   model: string
   stage: MercuryTriggerReason
   latencyMs: number
+  attempts: number
+  failures: number
   retries: number
+  outcome: 'success' | 'plan_rejected' | 'fallback'
   state: unknown
   prompt: { system: string; user: string }
   response: unknown
@@ -722,6 +725,49 @@ export function isTimeoutError(error: unknown, depth = 0): boolean {
   if (isTimeoutError(record.lastError, depth + 1)) return true
   const errors = record.errors
   return Array.isArray(errors) && errors.some((entry) => isTimeoutError(entry, depth + 1))
+}
+
+export type MercuryAttemptRun<T> =
+  | { readonly ok: true; readonly result: T; readonly attempts: number; readonly failures: number }
+  | { readonly ok: false; readonly error: unknown; readonly attempts: number; readonly failures: number }
+
+export interface MercuryAttemptOptions<T> {
+  readonly maxAttempts: number
+  readonly reserveAttempt: (attempt: number) => void
+  readonly call: () => Promise<T>
+  readonly isRetryable: (error: unknown) => boolean
+  readonly onRetry: (detail: { attempt: number; nextAttempt: number; error: unknown }) => void
+}
+
+/** Run attempts with accounting at the boundary immediately before each provider call. */
+export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): Promise<MercuryAttemptRun<T>> {
+  let attempts = 0
+  let failures = 0
+  let previousError: unknown
+  let hasPreviousError = false
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+    try {
+      options.reserveAttempt(attempt)
+    } catch (error) {
+      return { ok: false, error, attempts, failures }
+    }
+    attempts += 1
+    if (hasPreviousError) {
+      options.onRetry({ attempt: attempt - 1, nextAttempt: attempt, error: previousError })
+    }
+    try {
+      const result = await options.call()
+      return { ok: true, result, attempts, failures }
+    } catch (error) {
+      failures += 1
+      if (attempt >= options.maxAttempts || !options.isRetryable(error)) {
+        return { ok: false, error, attempts, failures }
+      }
+      previousError = error
+      hasPreviousError = true
+    }
+  }
+  return { ok: false, error: new Error('mercury: retry loop produced no result'), attempts, failures }
 }
 
 function isRateLimitError(error: unknown, depth = 0): boolean {
@@ -894,12 +940,6 @@ export class MercurySystem2 implements System2Brain {
       this.saveCache()
     }
 
-    const now = Date.now()
-    this.cache.callTimes = this.cache.callTimes.filter((time) => now - time < HOUR_MS)
-    if (this.cache.callTimes.length >= this.maxPerHour) {
-      return this.fallback(trigger, started, state, `hourly budget exhausted (${this.maxPerHour}/h)`)
-    }
-
     const key = resolveJevApiKey()
     if (key === null) return this.fallback(trigger, started, state, 'no gateway key resolved')
     // The gateway provider reads this at request time; the value is never logged.
@@ -907,9 +947,6 @@ export class MercurySystem2 implements System2Brain {
 
     const userPrompt = JSON.stringify(state)
     const callId = `mercury-${++this.callCounter}-${started.toString(36)}`
-    // Budget counts ATTEMPTS, so a failing model cannot be retried for free.
-    this.cache.callTimes.push(now)
-    this.saveCache()
 
     // A generation swap / lease event does NOT own this promise and must not abort
     // it: the only abort signal is the per-attempt timeout below. On a timeout the
@@ -931,33 +968,69 @@ export class MercurySystem2 implements System2Brain {
         abortSignal: AbortSignal.timeout(this.timeoutMs),
       })
 
-    const callModel = async (): Promise<{ result: Awaited<ReturnType<typeof callOnce>>; attempts: number }> => {
-      let lastError: unknown = null
-      for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-        try {
-          const result = await callOnce()
-          return { result, attempts: attempt }
-        } catch (attemptError) {
-          lastError = attemptError
-          if (attempt < this.maxAttempts && isTimeoutError(attemptError)) {
-            this.log('MERCURY_RETRY', {
-              attempt,
-              maxAttempts: this.maxAttempts,
-              trigger,
-              error: describeError(attemptError),
-            })
-            continue
-          }
-          throw attemptError
-        }
-      }
-      throw lastError ?? new Error('mercury: retry loop produced no result')
-    }
-
+    let attempts = 0
+    let failures = 0
     let retriesUsed = 0
     try {
-      const { result, attempts } = await callModel()
+      const attemptRun = await runMercuryAttempts({
+        maxAttempts: this.maxAttempts,
+        reserveAttempt: (attempt) => {
+          const now = Date.now()
+          this.cache.callTimes = this.cache.callTimes.filter((time) => now - time < HOUR_MS)
+          if (this.cache.callTimes.length >= this.maxPerHour) {
+            throw new Error(`hourly budget exhausted (${this.maxPerHour}/h)`)
+          }
+          this.cache.callTimes.push(now)
+          this.saveCache()
+          this.log('MERCURY_ATTEMPT', {
+            callId,
+            attempt,
+            maxAttempts: this.maxAttempts,
+            trigger,
+            budgetUsed: this.cache.callTimes.length,
+            budgetMax: this.maxPerHour,
+          })
+        },
+        call: callOnce,
+        isRetryable: isTimeoutError,
+        onRetry: ({ attempt, nextAttempt, error }) => {
+          this.log('MERCURY_RETRY', {
+            callId,
+            attempt,
+            nextAttempt,
+            maxAttempts: this.maxAttempts,
+            trigger,
+            error: describeError(error),
+          })
+        },
+      })
+      attempts = attemptRun.attempts
+      failures = attemptRun.failures
       retriesUsed = attempts - 1
+      if (!attemptRun.ok) {
+        const message = `llm_error: ${describeError(attemptRun.error)}`
+        this.writeCall({
+          record: 'mercury-call',
+          callId,
+          ts: new Date().toISOString(),
+          model: this.model,
+          stage: trigger,
+          latencyMs: Date.now() - started,
+          attempts,
+          failures,
+          retries: retriesUsed,
+          outcome: 'fallback',
+          state,
+          prompt: { system: SYSTEM_PROMPT, user: userPrompt },
+          response: null,
+          usage: null,
+          cost: 0,
+          error: message,
+          errorDetail: describeErrorFull(attemptRun.error),
+        })
+        return this.fallback(trigger, started, state, message, 0, Date.now() - started)
+      }
+      const result = attemptRun.result
       this.calls += 1
       const latencyMs = Date.now() - started
       const toolCall = result.toolCalls[0]
@@ -981,7 +1054,10 @@ export class MercurySystem2 implements System2Brain {
           model: this.model,
           stage: trigger,
           latencyMs,
+          attempts,
+          failures,
           retries: retriesUsed,
+          outcome: 'plan_rejected',
           state,
           prompt: { system: SYSTEM_PROMPT, user: userPrompt },
           response: raw ?? null,
@@ -1026,7 +1102,10 @@ export class MercurySystem2 implements System2Brain {
         model: this.model,
         stage: trigger,
         latencyMs,
-        retries: 0,
+        attempts,
+        failures,
+        retries: retriesUsed,
+        outcome: 'success',
         state,
         prompt: { system: SYSTEM_PROMPT, user: userPrompt },
         response: plan,
@@ -1065,7 +1144,10 @@ export class MercurySystem2 implements System2Brain {
         model: this.model,
         stage: trigger,
         latencyMs,
+        attempts,
+        failures,
         retries: retriesUsed,
+        outcome: 'fallback',
         state,
         prompt: { system: SYSTEM_PROMPT, user: userPrompt },
         response: null,
