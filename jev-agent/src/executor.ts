@@ -256,6 +256,8 @@ const PLACE_VERIFY_SETTLE_MS = 500
 const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
+/** PILLAR_UP: bounded same-cell nudge away from an adjacent AABB blocker. */
+const PILLAR_RECENTER_BUDGET_MS = 1500
 /**
  * PILLAR_UP relocation budget: `PillarSearchPolicy.maxRelocations`. Two keeps
  * the action bounded while allowing one retry if the first open neighbour was
@@ -1728,12 +1730,26 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<HeadroomClearOutcome> {
     let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
+    let recenterAttempted = false
     for (let attempt = 0; attempt < PILLAR_SEARCH_POLICY.headroomAttempts; attempt += 1) {
       const position = this.bot.entity.position
       const headroom = this.headroomAt(column.x, position.y, column.z, position)
       if (headroom.clear) return { cleared: true }
       const blockingCell = headroom.blocker
       if (blockingCell === null) continue
+      // A fractional body can touch an adjacent cell even when the canonical
+      // centre of this same column has clear headroom. Re-centre once before
+      // declaring the column blocked; this is a bounded horizontal nudge and
+      // never digs or changes the selected pillar column.
+      const centeredHeadroom = this.headroomAt(column.x, position.y, column.z)
+      const adjacentBlocker = blockingCell.x !== column.x || blockingCell.z !== column.z
+      if (!recenterAttempted && adjacentBlocker && centeredHeadroom.clear) {
+        recenterAttempted = true
+        if (await this.recenterPillarColumn(candidate, column, epoch, signal)) {
+          this.ensureOwned(epoch, signal)
+          continue
+        }
+      }
       const block = this.currentBlockAt(blockingCell)
       if (block === null || block.boundingBox === 'empty') continue
       const live = this.resolveLiveDigTool(block)
@@ -1778,6 +1794,60 @@ export class Executor {
     const headroom = this.headroomAt(column.x, this.bot.entity.position.y, column.z, this.bot.entity.position)
     if (headroom.clear) return { cleared: true }
     return last
+  }
+
+  /**
+   * Move to the centre of the current grounded cell when only a fractional
+   * AABB overlap blocks headroom. The custom arrival predicate is intentionally
+   * tighter than normal path arrival so a same-cell no-op cannot be reported
+   * as a successful recenter.
+   */
+  private async recenterPillarColumn(
+    candidate: Candidate,
+    column: { x: number; z: number },
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const origin = this.bot.entity.position.clone()
+    const center = { x: column.x + 0.5, z: column.z + 0.5 }
+    const atCenter = (): boolean => {
+      const position = this.bot.entity.position
+      return (
+        Math.floor(position.y + 1e-4) === Math.floor(origin.y + 1e-4) &&
+        Math.hypot(position.x - center.x, position.z - center.z) <= 0.08
+      )
+    }
+    if (atCenter()) return true
+    this.setPhase(candidate, epoch, 'recentering-pillar-column')
+    try {
+      await this.walkByControls(
+        { x: column.x, y: Math.floor(origin.y + 1e-4), z: column.z },
+        epoch,
+        signal,
+        {
+          directBearing: true,
+          budgetMs: PILLAR_RECENTER_BUDGET_MS,
+          tolerance: 0.08,
+          arrivedAt: atCenter,
+        },
+      )
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.info('agent', `PILLAR_RECENTER failed reason=${error instanceof Error ? error.message : String(error)}`, {
+        actionId: candidate.id,
+        from: { x: origin.x, y: origin.y, z: origin.z },
+        to: { x: center.x, y: origin.y, z: center.z },
+      })
+      return false
+    }
+    const position = this.bot.entity.position
+    const ok = atCenter()
+    this.logger.info('agent', `PILLAR_RECENTER from=${origin.x},${origin.y},${origin.z} to=${position.x},${position.y},${position.z} ok=${ok}`, {
+      actionId: candidate.id,
+      column,
+      center,
+    })
+    return ok
   }
 
   /**
