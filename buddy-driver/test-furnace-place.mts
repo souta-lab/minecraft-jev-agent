@@ -11,15 +11,24 @@
 import { createRequire } from 'node:module'
 import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
-import { candidateStarvationLine, candidateStarvationMissing, goalStarvationBlockedBy } from '../jev-agent/src/controller.ts'
+import {
+  candidateStarvationLine,
+  candidateStarvationMissing,
+  formatStationRegisteredPlaced,
+  goalStarvationBlockedBy,
+  MIRRORED_MARKERS,
+  PLACED_STATION_ITEMS,
+  registerPlacedStation,
+} from '../jev-agent/src/controller.ts'
 import { createRecipeIndex } from '../jev-agent/src/crafting.ts'
 import type { QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'
+import { executeFurnaceSmelt, formatSmeltLog, placedStationReadyLine } from '../jev-agent/src/executor.ts'
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
 import { formatPrereqRankShadow, knownStationKey, planPrereqOptions, selectPrereqPath } from '../jev-agent/src/prereqOption.ts'
 import type { PrereqPath } from '../jev-agent/src/prereqOption.ts'
 import { MoveFailMemory } from '../jev-agent/src/moveFailMemory.ts'
 import type { KnownResource } from '../jev-agent/src/state.ts'
+import { stationRegisteredPlacedDetail } from './generation-entry.ts'
 import {
   classifyAbandonReason,
   evaluatePlaceRetry,
@@ -665,6 +674,91 @@ addCase('a 2x2 craft goal never acquires a table', () => {
   const craft = candidates.find((candidate) => candidate.id === 'CRAFT:oak_planks')
   const pass = retrieve === undefined && craft !== undefined
   return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+// --- (M2 placed-station) a verified placement is itself station proof --------
+
+addCase('(placed-station) a verified furnace placement registers the registered cell once', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const stations: KnownResource[] = []
+  const first = registerPlacedStation(stations, 'furnace', at)
+  const again = registerPlacedStation(stations, 'furnace', at)
+  const line = formatStationRegisteredPlaced('furnace', at)
+  const pass =
+    PLACED_STATION_ITEMS.has('furnace') &&
+    first.added === true &&
+    again.added === false &&
+    stations.length === 1 &&
+    stations[0]?.name === 'furnace' &&
+    stations[0]?.kind === 'station' &&
+    stations[0]?.position.x === 31 &&
+    stations[0]?.position.y === 61 &&
+    stations[0]?.position.z === 35 &&
+    line === 'STATION_REGISTERED kind=furnace source=placed at=31,61,35' &&
+    MIRRORED_MARKERS.has('STATION_REGISTERED')
+  return { pass, detail: `added=${first.added}/${again.added} stations=${stations.length} line="${line}" mirrored=${MIRRORED_MARKERS.has('STATION_REGISTERED')}` }
+})
+
+addCase('(placed-station) the host registration detail renders STATION_REGISTERED kind=furnace source=placed at=31,61,35', () => {
+  const detail = stationRegisteredPlacedDetail('furnace', { x: 31, y: 61, z: 35 })
+  const line = `STATION_REGISTERED ${Object.entries(detail).map(([key, value]) => `${key}=${String(value)}`).join(' ')}`
+  const pass = line === 'STATION_REGISTERED kind=furnace source=placed at=31,61,35'
+  return { pass, detail: line }
+})
+
+addCase('(placed-station) an unverified/failed placement emits no FURNACE_READY and registers nothing', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const air = placedStationReadyLine('furnace', null, at)
+  const wrongBlock = placedStationReadyLine('furnace', 'cobblestone', at)
+  const table = placedStationReadyLine('crafting_table', 'crafting_table', at)
+  const verified = placedStationReadyLine('furnace', 'furnace', at)
+  const pass =
+    air === null &&
+    wrongBlock === null &&
+    table === null &&
+    verified === 'FURNACE_READY source=placed at=31,61,35'
+  return { pass, detail: `air=${air ?? 'null'} wrong=${wrongBlock ?? 'null'} table=${table ?? 'null'} verified="${verified ?? 'null'}"` }
+})
+
+addCase('(placed-station) FURNACE_READY is deterministic per verified placement and the registration fires once per cell', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const stations: KnownResource[] = []
+  const readyLines: string[] = []
+  let registrations = 0
+  for (let observation = 0; observation < 2; observation += 1) {
+    const line = placedStationReadyLine('furnace', 'furnace', at)
+    if (line !== null) readyLines.push(line)
+    if (registerPlacedStation(stations, 'furnace', at).added) registrations += 1
+  }
+  const pass =
+    readyLines.length === 2 &&
+    readyLines[0] === readyLines[1] &&
+    readyLines[0] === 'FURNACE_READY source=placed at=31,61,35' &&
+    registrations === 1 &&
+    stations.length === 1
+  return { pass, detail: `ready="${readyLines[0] ?? 'null'}" emissions=${readyLines.length} registrations=${registrations} stations=${stations.length}` }
+})
+
+addCase('(placed-station) a registered-but-not-sensed furnace yields the walk-to-then-smelt RETRIEVE, never WAIT-only', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const registered: StationEntry = { ...at, source: 'remembered' }
+  const inputs = inventory({ raw_iron: 8, coal: 7 })
+  const state = worldState({ inventory: inputs, furnaces: [registered] })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const retrieve = productive.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:furnace'))
+  const unregistered = generateCandidates(worldState({ inventory: inputs }), defaultCandidateOptions)
+  const starved = unregistered.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')
+  const pass =
+    retrieve !== undefined &&
+    retrieve.meta.furnaceSource === 'known' &&
+    retrieve.label.includes('to smelt') &&
+    productive.length > 0 &&
+    starved
+  return {
+    pass,
+    detail: `registered=[${candidates.map((candidate) => candidate.id).join(',')}] unregistered=[${unregistered.map((candidate) => candidate.id).join(',')}]`,
+  }
 })
 
 // --- (b) bounded placement retry --------------------------------------------
