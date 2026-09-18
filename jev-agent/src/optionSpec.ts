@@ -613,6 +613,14 @@ function successForGoal(goal: PlannedGoal): Predicate[] {
       return typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)
         ? [{ kind: 'levelAtMost', y: goal.targetY }]
         : [{ kind: 'custom', id: `descend:${item ?? 'unknown'}` }]
+    case 'explore':
+      // #57: an explore goal qualified by a dimension is the typed `dimensionIs`
+      // predicate, never a prose completion. This keeps the deterministic target
+      // semantics when a `dimensionIs` dependency is compiled back from its
+      // PlannedGoal (dependency expansion -> GoalQueue -> compile).
+      return typeof goal.dimension === 'string' && goal.dimension.length > 0
+        ? [{ kind: 'dimensionIs', dimension: goal.dimension }]
+        : [{ kind: 'custom', id: `done:explore:${item ?? 'unknown'}` }]
     default:
       return [{ kind: 'custom', id: `done:${goal.kind}:${item ?? 'unknown'}` }]
   }
@@ -644,7 +652,7 @@ export function compilePlannedGoals(goals: readonly PlannedGoal[]): OptionSpec[]
 }
 
 export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
-  return {
+  const planned: PlannedGoal = {
     kind: goal.kind,
     description: goal.description,
     targetItem: goal.targetItem,
@@ -652,6 +660,9 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
   }
+  if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) planned.targetY = goal.targetY
+  if (typeof goal.dimension === 'string' && goal.dimension.length > 0) planned.dimension = goal.dimension
+  return planned
 }
 
 /** Compile the current goal plus every pending goal, in queue order. */
@@ -813,9 +824,21 @@ export function dependencyGoalForPredicate(
     case 'oreKnown':
       return dependencyGoalForItem(predicate.item, owner.target.count ?? 1)
     case 'levelAtMost':
-      return { kind: 'explore', description: `descend to y <= ${predicate.y}`, targetItem: null, requiredCount: 1 }
+      return {
+        kind: 'descend',
+        description: `descend to y <= ${predicate.y}`,
+        targetItem: null,
+        requiredCount: 1,
+        targetY: predicate.y,
+      }
     case 'dimensionIs':
-      return { kind: 'explore', description: `travel to ${predicate.dimension}`, targetItem: null, requiredCount: 1 }
+      return {
+        kind: 'explore',
+        description: `travel to ${predicate.dimension}`,
+        targetItem: null,
+        requiredCount: 1,
+        dimension: predicate.dimension,
+      }
     case 'healthAtLeast':
       return null
     case 'custom':

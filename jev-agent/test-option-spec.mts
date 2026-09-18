@@ -18,9 +18,11 @@ import {
   isOptionComplete,
   isOptionStartable,
   makeOptionSnapshot,
+  optionSpecToPlannedGoal,
   optionSpecsToPlannedGoals,
   optionStartabilityTruth,
   orderGoalsByReadiness,
+  queuedToPlanned,
   resolveOptionCompilerEnabled,
   setPredicateUnknownSink,
   snapshotFromResident,
@@ -423,6 +425,111 @@ addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
     result.ready.length === 0 &&
     result.blocked.length === 2
   return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
+})
+
+addCase('expanding levelAtMost(46) yields a descend dependency carrying targetY=46 (#57)', () => {
+  const owner: OptionSpec = {
+    id: 'fixture:level',
+    intent: 'fixture requiring a level',
+    kind: 'custom',
+    target: { count: 1 },
+    preconditions: [{ kind: 'levelAtMost', y: 46 }],
+    success: [],
+    skills: [],
+    abortThreshold: 0.5,
+  }
+  const snapshot = makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 100, z: 0 } })
+  const expansion = expandOptionDependencies(owner, snapshot)
+  const dependency = expansion.specs[0]
+  const successPredicate = dependency?.success[0]
+  const successY = successPredicate?.kind === 'levelAtMost' ? successPredicate.y : null
+  const planned = dependency === undefined ? undefined : optionSpecToPlannedGoal(dependency)
+  const pass =
+    dependency !== undefined &&
+    dependency.kind === 'descend' &&
+    dependency.target.targetY === 46 &&
+    successY === 46 &&
+    planned?.targetY === 46
+  return {
+    pass,
+    detail: `kind=${dependency?.kind} targetY=${dependency?.target.targetY} success=${successPredicate?.kind}${successY !== null ? `:y=${successY}` : ''} plannedTargetY=${planned?.targetY}`,
+  }
+})
+
+addCase('expanding dimensionIs(minecraft:overworld) yields a typed dimension dependency (#57)', () => {
+  const owner: OptionSpec = {
+    id: 'fixture:dimension',
+    intent: 'fixture requiring a dimension',
+    kind: 'custom',
+    target: { count: 1 },
+    preconditions: [{ kind: 'dimensionIs', dimension: 'minecraft:overworld' }],
+    success: [],
+    skills: [],
+    abortThreshold: 0.5,
+  }
+  const snapshot = makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:the_nether' })
+  const expansion = expandOptionDependencies(owner, snapshot)
+  const dependency = expansion.specs[0]
+  const successPredicate = dependency?.success[0]
+  const successDimension = successPredicate?.kind === 'dimensionIs' ? successPredicate.dimension : null
+  const planned = dependency === undefined ? undefined : optionSpecToPlannedGoal(dependency)
+  const pass =
+    dependency !== undefined &&
+    dependency.target.dimension === 'minecraft:overworld' &&
+    successDimension === 'minecraft:overworld' &&
+    planned?.dimension === 'minecraft:overworld'
+  return {
+    pass,
+    detail: `kind=${dependency?.kind} targetDimension=${dependency?.target.dimension} success=${successPredicate?.kind}${successDimension !== null ? `:${successDimension}` : ''} plannedDimension=${planned?.dimension}`,
+  }
+})
+
+addCase('queuedToPlanned(plannedToQueue(x)) preserves targetY/dimension round-trip (#57)', () => {
+  const plannedDescend: PlannedGoal = {
+    kind: 'descend',
+    description: 'descend to y <= 46',
+    targetItem: null,
+    requiredCount: 1,
+    targetY: 46,
+    dimension: 'minecraft:overworld',
+  }
+  const plannedTravel: PlannedGoal = {
+    kind: 'explore',
+    description: 'travel to minecraft:the_nether',
+    targetItem: null,
+    requiredCount: 1,
+    dimension: 'minecraft:the_nether',
+  }
+  const queue = new GoalQueue()
+  const enqueued = queue.applyPlan([plannedDescend, plannedTravel], 'llm')
+  const restored = new GoalQueue()
+  restored.restore(queue.snapshot())
+
+  const queuedDescend = enqueued[0]
+  const queuedTravel = enqueued[1]
+  const restoredCurrent = restored.state.current
+  const backDescend = queuedDescend === undefined ? undefined : queuedToPlanned(queuedDescend)
+  const backTravel = queuedTravel === undefined ? undefined : queuedToPlanned(queuedTravel)
+  const restoredBack = restoredCurrent === null ? undefined : queuedToPlanned(restoredCurrent)
+  const descendSuccess = backDescend === undefined ? undefined : compilePlannedGoal(backDescend).success[0]
+  const travelSuccess = backTravel === undefined ? undefined : compilePlannedGoal(backTravel).success[0]
+  const descendY = descendSuccess?.kind === 'levelAtMost' ? descendSuccess.y : null
+  const travelDimension = travelSuccess?.kind === 'dimensionIs' ? travelSuccess.dimension : null
+
+  const pass =
+    queuedDescend?.targetY === 46 &&
+    queuedDescend?.dimension === 'minecraft:overworld' &&
+    backDescend?.targetY === 46 &&
+    backDescend?.dimension === 'minecraft:overworld' &&
+    descendY === 46 &&
+    backTravel?.dimension === 'minecraft:the_nether' &&
+    travelDimension === 'minecraft:the_nether' &&
+    restoredBack?.targetY === 46 &&
+    restoredBack?.dimension === 'minecraft:overworld'
+  return {
+    pass,
+    detail: `queued[${queuedDescend?.targetY},${queuedDescend?.dimension}] back[${backDescend?.targetY},${backDescend?.dimension}] descendSuccessY=${descendY} travelSuccess=${travelSuccess?.kind}${travelDimension !== null ? `:${travelDimension}` : ''} restored[${restoredBack?.targetY},${restoredBack?.dimension}]`,
+  }
 })
 
 let failures = 0
