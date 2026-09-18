@@ -1562,11 +1562,51 @@ export class Executor {
           isSolid: (y) => this.solidSupportAt(feet.x, y, feet.z),
         })
         if (placeStack === undefined || pose === null) {
-          this.logger.warn(
-            'executor',
-            formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
-            { actionId: candidate.id, ...feet },
-          )
+          if (pose === null && placeStack !== undefined) {
+            this.logger.warn(
+              'executor',
+              formatPillarRefused({ reason: 'no_footing', cell: feet, obstacle: null }),
+              { actionId: candidate.id, ...feet },
+            )
+            refusedColumns.add(pillarColumnKey(feet))
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations })
+            const fallback = relocation.target
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation from no-footing column to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
+          }
+          if (!(pose === null && placeStack !== undefined)) {
+            this.logger.warn(
+              'executor',
+              formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
+              { actionId: candidate.id, ...feet },
+            )
+          }
           break
         }
         const columnSafe = !this.pillarColumnUnsafe()
