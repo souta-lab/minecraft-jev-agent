@@ -111,6 +111,8 @@ function worldState(overrides: {
   descent?: WorldState['descent']
   stepCuts?: WorldState['stepCuts']
   blocks?: BlockState[]
+  furnaces?: WorldState['furnaces']
+  craftingTables?: WorldState['craftingTables']
   goal?: GoalState
   goalQueue?: GoalQueueState
 }): WorldState {
@@ -123,8 +125,8 @@ function worldState(overrides: {
     entities: [],
     blocks: overrides.blocks ?? [],
     terrain: { standable: overrides.standable ?? [overrides.position] },
-    craftingTables: [],
-    furnaces: [],
+    craftingTables: overrides.craftingTables ?? [],
+    furnaces: overrides.furnaces ?? [],
     placementSpots: [],
     descent: overrides.descent ?? [],
     stepCuts: overrides.stepCuts ?? [],
@@ -134,6 +136,51 @@ function worldState(overrides: {
     recentEvents: [],
     signals: overrides.signals ?? signals(),
   }
+}
+
+// (13) a smelt goal with a sensed furnace must pursue a missing visible input.
+// The live failure shape had a furnace in range and no log in inventory, while
+// an oak log was visible above. Before this bridge, smeltCandidates returned
+// [] and retrievalCandidates intentionally skipped visible logs, so the final
+// fallback selected unrelated underground MOVE targets.
+{
+  const log: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 33, y: 68, z: 27 },
+    distance: 38.49,
+    diggable: true,
+    inReach: false,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 32, y: 67, z: 27 },
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const smelt = queuedGoal({
+    id: 'g-charcoal-input',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const state = worldState({
+    position: { x: 34.49, y: 31, z: 37.5 },
+    inventory: inventory({ birch_planks: 2, cobblestone: 158, stick: 2, dirt: 37, stone_pickaxe: 1 }),
+    blocks: [log],
+    furnaces: [{ x: 37, y: 30, z: 37, source: 'sensed' }],
+    goal: goal({ id: 'smelt:charcoal', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }),
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(state, optionsWith(null))
+  const inputMove = grounded.candidates.find((candidate) => candidate.id === 'MOVE:b33_68_27')
+  const unrelated = grounded.candidates.find((candidate) => candidate.id.startsWith('MOVE:p'))
+  const productive = grounded.candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  check(
+    '(13) sensed furnace + missing visible log yields the log MINE/MOVE route',
+    inputMove !== undefined && inputMove.meta.targetBlockName === 'oak_log' && unrelated === undefined && productive.length > 0,
+    `productive=[${productive.map((candidate) => candidate.id).join(',')}] input=${inputMove?.id ?? 'none'}`,
+  )
 }
 
 const BOT: Vec3Json = { x: 0, y: 60, z: 0 }

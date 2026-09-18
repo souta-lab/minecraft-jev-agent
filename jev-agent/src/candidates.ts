@@ -1305,7 +1305,16 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   const furnace = (state.furnaces ?? []).find(isSensedStation) ?? null
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
-  if (inputItem === null) return []
+  if (inputItem === null) {
+    // A sensed furnace is usable, but the smelt input may still be absent from
+    // the inventory. Keep the current smelt option grounded by pursuing the
+    // input resource itself. In particular, a visible log must become the
+    // normal MINE/MOVE route; otherwise `retrievalCandidates` treats the
+    // visible block as already handled and the generator falls through to an
+    // unrelated local exploration MOVE (the live charcoal starvation shape).
+    const input = smeltInputName(focusItem)
+    return input === null ? [] : mineCandidates(state, options, input)
+  }
   const fuelItem = smeltFuelFor(state)
   if (fuelItem === null) return []
 
