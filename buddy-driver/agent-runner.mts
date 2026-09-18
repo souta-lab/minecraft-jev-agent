@@ -47,13 +47,22 @@ import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './reside
 import { normalizeStation, stationKey } from './station-memory.ts'
 import {
   capturePreLossInventory,
-  parseRehearsalMode,
   partitionHazardsBySource,
+  parseRehearsalMode,
   recordRehearsalHazard,
   shouldRegisterHazard,
   type DeathTelemetry,
   type RehearsalMode,
 } from './simdeath.ts'
+import {
+  commitPendingProposals,
+  newPendingProposals,
+  stageLedgerProposal,
+  stageLedgerReconciliation,
+  stageWorldMemory,
+  writeSnapshotAtomic,
+} from './proposal-staging.ts'
+import type { PendingProposals } from './proposal-staging.ts'
 import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
@@ -235,12 +244,30 @@ function saveState(event = 'save'): void {
   }
   const revision = bumpRevision(state)
   try {
-    const tmp = `${STATE_PATH}.${process.pid}.tmp`
-    writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
-    renameSync(tmp, STATE_PATH)
+    writeSnapshotAtomic(STATE_PATH, state, `.${process.pid}.tmp`)
   } catch (error) {
     log('ERROR', { where: 'saveState', event, revision, message: error instanceof Error ? error.message : String(error) })
   }
+}
+
+const pendingByGeneration = new Map<string, PendingProposals>()
+
+/** Host-only rewrite of the derived ledger mirror (class C) from the committed
+ * class-A snapshot. The generation never writes this file (#5). */
+function writeLedgerMirror(): void {
+  if (state.ledger === null) return
+  try {
+    const tmp = `${LEDGER}.${process.pid}.tmp`
+    writeFileSync(tmp, `${JSON.stringify(state.ledger, null, 2)}\n`)
+    renameSync(tmp, LEDGER)
+  } catch (error) {
+    log('ERROR', { where: 'writeLedgerMirror', message: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+/** Host-only archive of an inconsistent derived ledger (#5 reconcile proposal). */
+function archiveReconciledLedger(reason: string): void {
+  archiveLedger(`reconcile:${reason}`)
 }
 
 /**
@@ -278,6 +305,7 @@ function onGenerationLedgerProposal(proposal: unknown, source: string): void {
  */
 function commitHostLedger(ledger: GoalQueueSnapshot, source: string): void {
   state.ledger = ledger
+  writeLedgerMirror()
   saveState(`ledger-host:${source}`)
 }
 
@@ -319,12 +347,51 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta, sourceWorldKey: WorldKey
   saveState('world-memory')
 }
 
-function hazardKey(h: { x: number; y: number; z: number }): string {
-  return `${Math.round(h.x)},${Math.round(h.y)},${Math.round(h.z)}`
+/** Issue #5 commit point: apply staged proposals only after ownership is committed. */
+function commitStagedProposals(generationId: string, event: string): void {
+  const pending = pendingByGeneration.get(generationId)
+  if (pending === undefined) {
+    saveState(event)
+    return
+  }
+  const result = commitPendingProposals(
+    {
+      pending,
+      memory: keyedMemory(),
+      state,
+      guard: {
+        revision: state.revision,
+        committedGenerationId: state.generationId,
+        activeGenerationId: leaseManager.activeId,
+        ledgerRevision,
+      },
+      log,
+      save: (evt) => saveState(evt),
+      reconcileLedger: archiveReconciledLedger,
+      writeLedgerMirror,
+      worldKey: currentWorldKey(),
+    },
+    event,
+  )
+  if (result.ledgerApplied) ledgerRevision = state.revision
+  log('PROPOSALS_COMMITTED', {
+    generationId,
+    event,
+    worldMemoryDeltas: result.worldMemoryDeltasApplied,
+    ledgerApplied: result.ledgerApplied,
+    ledgerRejected: result.ledgerRejected,
+    reconciliationRequested: result.reconciliationRequested,
+    writes: result.writes,
+  })
+  pendingByGeneration.delete(generationId)
 }
 
 /** Merge a death coordinate. The HOST is the only writer; two deaths at the same
  * rounded coordinate make the hazard permanent (`count >= 2`). */
+function hazardKey(h: { x: number; y: number; z: number }): string {
+  return `${Math.round(h.x)},${Math.round(h.y)},${Math.round(h.z)}`
+}
+
 function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHazard {
   if (found.source === 'simulation') {
     // Defense in depth for #26: even if a caller bypasses the source gate, a
@@ -420,6 +487,20 @@ function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourc
     removed += 1
   }
   return removed
+}
+
+/** Drop a rejected/superseded generation's staged proposals without writing. */
+function discardStagedProposals(generationId: string, reason: string): void {
+  const pending = pendingByGeneration.get(generationId)
+  pendingByGeneration.delete(generationId)
+  if (pending === undefined) return
+  log('PROPOSALS_DISCARDED', {
+    generationId,
+    reason,
+    worldMemoryDeltas: pending.worldMemory.length,
+    ledger: pending.ledger !== null,
+    reconciliation: pending.ledgerReconcile !== null,
+  })
 }
 
 function archiveLedger(reason: string): void {
@@ -661,8 +742,13 @@ interface GenerationSeed {
   revision: number
 }
 
-function makeGenerationContext(b: Bot, seed: GenerationSeed = { revision: state.revision }): GenerationContext {
+function makeGenerationContext(
+  b: Bot,
+  pending: PendingProposals,
+  seed: GenerationSeed = { revision: state.revision },
+): GenerationContext {
   const generationWorldKey = currentWorldKey()
+  pending.worldKey = generationWorldKey
   return {
     bot: b,
     log,
@@ -670,10 +756,30 @@ function makeGenerationContext(b: Bot, seed: GenerationSeed = { revision: state.
     resources: new GenerationResourceRegistry(),
     worldMemory: cloneMemory(keyedMemory()),
     worldKey: generationWorldKey,
-    proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta, generationWorldKey),
-    proposeLedger: (proposal) => onGenerationLedgerProposal(proposal, 'generation'),
+    proposeWorldMemory: (delta) => {
+      if (pending.speculative) {
+        stageWorldMemory(pending, delta)
+        return
+      }
+      applyWorldMemoryDelta(delta, generationWorldKey)
+    },
+    proposeLedger: (proposal) => {
+      if (pending.speculative) {
+        stageLedgerProposal(pending, proposal)
+        return
+      }
+      onGenerationLedgerProposal(proposal, 'generation')
+    },
     get snapshotRevision(): number {
       return seed.revision
+    },
+    proposeLedgerReconciliation: (proposal) => {
+      if (pending.speculative) {
+        stageLedgerReconciliation(pending, proposal)
+        return
+      }
+      archiveReconciledLedger(proposal.reason)
+      saveState('ledger-reconcile')
     },
     ledgerSnapshot: state.ledger,
     ledgerPath: LEDGER,
@@ -734,8 +840,11 @@ function makeSwapPorts(previousModule: GenerationModule | null): SwapPorts {
     ...ownershipPorts(),
     buildResume: () => {
       if (previousModule === null || bot === null) return null
-      const ctx = makeGenerationContext(bot)
+      const pending = newPendingProposals()
+      const ctx = makeGenerationContext(bot, pending)
       const resumed = previousModule.createGeneration(ctx)
+      pending.generationId = resumed.id
+      pendingByGeneration.set(resumed.id, pending)
       registerGenerationResources(resumed, ctx)
       return resumed
     },
@@ -800,12 +909,20 @@ async function startGeneration(trigger: string): Promise<boolean> {
     scheduleGenerationRestart('module-unavailable')
     return false
   }
-  const ctx = makeGenerationContext(bot)
+  const pending = newPendingProposals()
+  const ctx = makeGenerationContext(bot, pending)
   const gen = mod.createGeneration(ctx)
+  pending.generationId = gen.id
+  pendingByGeneration.set(gen.id, pending)
   registerGenerationResources(gen, ctx)
   pendingResetReason = null
   gen.attach()
-  runStructuralSmoke(gen)
+  try {
+    runStructuralSmoke(gen)
+  } catch (error) {
+    discardStagedProposals(gen.id, 'structural-smoke-failed')
+    throw error
+  }
   const preflight = runMissionPreflight(gen)
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
   commitOwner(ownershipPorts(), gen)
@@ -817,6 +934,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     state.generationId = null
     if (leaseManager.isActive(gen.id)) revokeLease('start-failed')
     disposeGeneration(gen)
+    discardStagedProposals(gen.id, 'start-failed')
     throw error
   }
   lastActionId = null
@@ -826,7 +944,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id })
   }
   state.generations += 1
-  saveState('generation-start')
+  commitStagedProposals(gen.id, 'generation-start')
   log('GENERATION_START', { id: gen.id, trigger, rung: gen.rungId, rungIndex: gen.rungIndex, generations: state.generations })
   watchGenerationStop(gen)
   return true
@@ -1390,17 +1508,26 @@ async function performReload(trigger: string): Promise<void> {
     }
     const previousModule = generationModule
     const nextSeed: GenerationSeed = { revision: state.revision }
-    const ctx = makeGenerationContext(bot, nextSeed)
+    const nextPending = newPendingProposals()
+    const ctx = makeGenerationContext(bot, nextPending, nextSeed)
     candidate = mod.createGeneration(ctx)
+    nextPending.generationId = candidate.id
+    pendingByGeneration.set(candidate.id, nextPending)
     registerGenerationResources(candidate, ctx)
     candidate.attach()
-    const smoke = runStructuralSmoke(candidate)
+    let smoke: StructuralSmokeResult
+    try {
+      smoke = runStructuralSmoke(candidate)
+    } catch (smokeError) {
+      discardStagedProposals(candidate.id, 'structural-smoke-failed')
+      throw smokeError
+    }
     log('SMOKE', { id: candidate.id, ok: smoke.ok, checks: smoke.checks.length, failures: smoke.failures })
     if (frozen) {
       // Frozen: validate and remember the new module, but do NOT swap/start it.
       // `resume` commits and starts exactly this module.
-      generationRegistries.get(candidate.id)?.dispose()
-      generationRegistries.delete(candidate.id)
+      discardStagedProposals(candidate.id, 'frozen-deferred')
+      disposeGeneration(candidate)
       candidate = null
       generationModule = mod
       currentBundle = built.outfile
@@ -1423,6 +1550,13 @@ async function performReload(trigger: string): Promise<void> {
     const outcome = await swapGeneration(makeSwapPorts(previousModule), candidate)
     candidate = null
     if (outcome.status !== 'committed') {
+      if (outcome.status === 'rolled-back') {
+        discardStagedProposals(outcome.from, 'reload-rolled-back-candidate')
+        commitStagedProposals(outcome.generationId, 'reload-rollback')
+      } else {
+        discardStagedProposals(outcome.from, 'reload-failed-closed')
+        for (const id of pendingByGeneration.keys()) discardStagedProposals(id, 'reload-failed-closed')
+      }
       stats.reloadsFailed += 1
       const resumed = outcome.status === 'rolled-back' ? outcome.generationId : null
       log('RELOAD_REJECTED', {
@@ -1443,7 +1577,7 @@ async function performReload(trigger: string): Promise<void> {
     generationHash = built.hash
     lastActionId = null
     stats.reloadsChangedHash += 1
-    saveState('reload-commit')
+    commitStagedProposals(outcome.generationId, 'reload-commit')
     const counts = listenerCounts()
     log('RELOAD', {
       ok: true,
@@ -1470,6 +1604,7 @@ async function performReload(trigger: string): Promise<void> {
       } catch {
         // best effort
       }
+      discardStagedProposals(candidate.id, 'reload-failed')
     }
     stats.reloadsFailed += 1
     const message = error instanceof Error ? error.message : String(error)
