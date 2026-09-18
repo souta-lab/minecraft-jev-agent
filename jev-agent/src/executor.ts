@@ -27,7 +27,16 @@ import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { evaluatePillarStep, resolvePillarStep, formatAscentProgress } from './verticalPlan.ts'
+import {
+  classifyHeadroomBlocker,
+  evaluatePillarStep,
+  formatAscentProgress,
+  formatPillarRefused,
+  formatPillarRelocate,
+  resolvePillarStep,
+  selectPillarFallbackColumn,
+} from './verticalPlan.ts'
+import type { HeadroomClearOutcome, HeadroomObstacle, PillarColumnProbe } from './verticalPlan.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
@@ -221,6 +230,18 @@ const PLACE_VERIFY_SETTLE_MS = 500
 const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
+/**
+ * PILLAR_UP: bounded same-action relocations away from columns whose ceiling
+ * cannot be cleared. Two keeps the action bounded while allowing one retry if
+ * the first open neighbour was mis-read; the refused-column set stops any
+ * ping-pong between two cells.
+ */
+const MAX_PILLAR_RELOCATIONS = 2
+
+/** Stable key for the refused-column set (never fed back into world state). */
+function pillarColumnKey(cell: Vec3Json): string {
+  return `${cell.x},${cell.y},${cell.z}`
+}
 
 /** The cell itself plus its six face neighbours: the flood check for a dig. */
 const DIG_SAFETY_OFFSETS: readonly Vec3Json[] = [
@@ -1185,6 +1206,8 @@ export class Executor {
     this.bot.physicsEnabled = true
     try {
       let climbed = 0
+      let relocations = 0
+      const refusedColumns = new Set<string>()
       while (climbed < maxSteps) {
         this.ensureOwned(epoch, signal)
         const feet = {
@@ -1201,27 +1224,59 @@ export class Executor {
         if (placeStack === undefined || pose === null) {
           this.logger.warn(
             'executor',
-            `PILLAR_UP step refused at (${feet.x},${feet.y},${feet.z}): ${placeStack === undefined ? 'no_placeable' : 'no_footing'} place=${placeName}`,
+            formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
             { actionId: candidate.id, ...feet },
           )
           break
         }
         const columnSafe = !this.pillarColumnUnsafe()
-        const headroomClear = columnSafe && (await this.clearPillarHeadroom(candidate, feet, epoch, signal))
+        const headroom = columnSafe ? await this.clearPillarHeadroom(candidate, feet, epoch, signal) : null
         const step = evaluatePillarStep({
           placeableCount: placeStack.count,
           columnSafe,
           remaining: maxSteps - climbed,
           footingSolid: true,
-          headroomClear,
+          headroomClear: headroom !== null && headroom.cleared,
         })
         if (!step.ok) {
+          const blocked = headroom !== null && !headroom.cleared ? headroom : null
           if (step.reason !== 'reached') {
             this.logger.warn(
               'executor',
-              `PILLAR_UP step refused at (${feet.x},${feet.y},${feet.z}): ${step.reason} place=${placeName}`,
-              { actionId: candidate.id, ...feet },
+              formatPillarRefused({
+                reason: step.reason,
+                cell: feet,
+                obstacle: blocked?.obstacle ?? null,
+                cause: blocked?.reason ?? null,
+              }),
+              { actionId: candidate.id, ...feet, obstacle: blocked?.obstacle?.name ?? null },
             )
+          }
+          if (step.reason === 'no_headroom' && relocations < MAX_PILLAR_RELOCATIONS) {
+            refusedColumns.add(pillarColumnKey(feet))
+            const fallback = this.findPillarFallbackColumn(feet, refusedColumns)
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, blocked?.obstacle ?? null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
           }
           break
         }
@@ -1304,19 +1359,29 @@ export class Executor {
     column: { x: number; z: number },
     epoch: number,
     signal: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<HeadroomClearOutcome> {
+    let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const position = this.bot.entity.position
-      if (this.headroomAt(column.x, position.y, column.z)) return true
+      if (this.headroomAt(column.x, position.y, column.z)) return { cleared: true }
       const feetY = Math.floor(position.y + 1e-4)
-      const blockY = this.passableAt(column.x, feetY + 1, column.z) ? feetY + 2 : feetY + 1
-      const block = this.currentBlockAt({ x: column.x, y: blockY, z: column.z })
+      const blockingCell = this.blockingHeadroomCell(column.x, feetY, column.z)
+      if (blockingCell === null) continue
+      const block = this.currentBlockAt(blockingCell)
       if (block === null || block.boundingBox === 'empty') continue
-      if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return false
-      if (!this.cellClearOfFluids({ x: column.x, y: blockY + 1, z: column.z })) return false
       const live = this.resolveLiveDigTool(block)
-      if (!live.ok) return false
-      this.logger.info('agent', `PILLAR_UP clearing headroom ${block.name} at (${column.x},${blockY},${column.z})`, {
+      const decision = classifyHeadroomBlocker({
+        cell: blockingCell,
+        name: block.name,
+        diggable: block.diggable === true,
+        fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
+        floodRisk: !this.cellClearOfFluids({ x: blockingCell.x, y: blockingCell.y + 1, z: blockingCell.z }),
+        toolOk: live.ok,
+      })
+      if (decision.kind === 'refuse') return { cleared: false, obstacle: decision.obstacle, reason: decision.reason }
+      const obstacle: HeadroomObstacle = decision.obstacle
+      last = { cleared: false, obstacle, reason: 'dig_failed' }
+      this.logger.info('agent', `PILLAR_UP clearing headroom ${obstacle.name} at (${obstacle.cell.x},${obstacle.cell.y},${obstacle.cell.z})`, {
         actionId: candidate.id,
       })
       await this.equipTool(
@@ -1339,11 +1404,55 @@ export class Executor {
           `PILLAR_UP headroom dig failed: ${error instanceof Error ? error.message : String(error)}`,
           { actionId: candidate.id },
         )
-        return false
+        return last
       }
       this.ensureOwned(epoch, signal)
     }
-    return this.headroomAt(column.x, this.bot.entity.position.y, column.z)
+    if (this.headroomAt(column.x, this.bot.entity.position.y, column.z)) return { cleared: true }
+    return last
+  }
+
+  /** Lowest non-passable cell above the feet: the obstacle the jump headroom hits. */
+  private blockingHeadroomCell(x: number, feetY: number, z: number): Vec3Json | null {
+    for (const y of [feetY + 1, feetY + 2]) {
+      const block = this.currentBlockAt({ x, y, z })
+      if (block === null || block.boundingBox === 'empty') continue
+      return { x, y, z }
+    }
+    return null
+  }
+
+  /**
+   * Grounded pillar fallback: probe the eight same-level neighbours in a fixed
+   * order and let `selectPillarFallbackColumn` pick the nearest one with solid
+   * support and 2-block headroom. Columns already refused this action are
+   * excluded so the climb cannot ping-pong between two blocked cells.
+   */
+  private findPillarFallbackColumn(feet: Vec3Json, refused: ReadonlySet<string>): Vec3Json | null {
+    const dirs: readonly { dx: number; dz: number }[] = [
+      { dx: 1, dz: 0 },
+      { dx: -1, dz: 0 },
+      { dx: 0, dz: -1 },
+      { dx: 0, dz: 1 },
+      { dx: 1, dz: 1 },
+      { dx: 1, dz: -1 },
+      { dx: -1, dz: 1 },
+      { dx: -1, dz: -1 },
+    ]
+    const probes: PillarColumnProbe[] = []
+    for (const { dx, dz } of dirs) {
+      const cell = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+      if (refused.has(pillarColumnKey(cell))) continue
+      probes.push({
+        cell,
+        supported: this.solidSupportAt(cell.x, cell.y - 1, cell.z),
+        feetClear: this.passableAt(cell.x, cell.y, cell.z),
+        headClear: this.passableAt(cell.x, cell.y + 1, cell.z),
+        aboveHeadClear: this.passableAt(cell.x, cell.y + 2, cell.z),
+        unsafe: this.columnUnsafeAt(cell.x, cell.y, cell.z),
+      })
+    }
+    return selectPillarFallbackColumn(probes, feet)
   }
 
   /** True when no fluid/hazard block touches the cell (a dig there cannot flood it). */
@@ -1356,18 +1465,22 @@ export class Executor {
     return true
   }
 
+  private columnUnsafeAt(x: number, feetY: number, z: number): boolean {
+    for (const dy of [-1, 0, 1, 2]) {
+      const block = this.currentBlockAt({ x, y: feetY + dy, z })
+      if (block === null) continue
+      if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return true
+    }
+    return false
+  }
+
   private pillarColumnUnsafe(): boolean {
     const feet = {
       x: Math.floor(this.bot.entity.position.x),
       y: Math.floor(this.bot.entity.position.y),
       z: Math.floor(this.bot.entity.position.z),
     }
-    for (const dy of [-1, 0, 1, 2]) {
-      const block = this.currentBlockAt({ x: feet.x, y: feet.y + dy, z: feet.z })
-      if (block === null) continue
-      if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return true
-    }
-    return false
+    return this.columnUnsafeAt(feet.x, feet.y, feet.z)
   }
 
   /**
