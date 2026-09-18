@@ -81,7 +81,14 @@ const summary = {
   connected: d?.connected ?? null,
   frozen: d?.frozen ?? null,
   generations: d?.generations ?? null,
+  // Backwards-compatible alias: historically `reloads` meant hash-changed
+  // reloads in this tool, not the resident's total state.reloads counter.
+  // Keep it for existing consumers, but expose every semantic counter by name.
   reloads: d?.stats?.reloadsChangedHash ?? null,
+  reloadsFieldMeaning: 'legacy alias for reloadsChangedHash; use reloadsTotal for total hot reloads',
+  reloadsTotal: d?.reloads ?? null,
+  reloadsChangedHash: d?.stats?.reloadsChangedHash ?? null,
+  reloadsSkippedUnchanged: d?.stats?.reloadsSkippedUnchanged ?? null,
   reloadsFailed: d?.stats?.reloadsFailed ?? null,
   recoveries: d?.recoveries ?? null,
   reconnects: d?.stats?.reconnects ?? null,
@@ -110,7 +117,7 @@ if (JSON_OUT) {
   row('hosts', `${ps.length}${ps.length === 1 ? ' (ok)' : ' (!! expected 1)'}  ${ps.join(',')}`)
   row('connected', d ? `${d.connected}  frozen=${d.frozen}` : 'NO CONTROL SOCKET')
   row('milestone', `${d?.milestone}  policy=${d?.status?.policyKind}`)
-  row('generations', `${d?.generations}  reloads(hash)=${d?.stats?.reloadsChangedHash} failed=${d?.stats?.reloadsFailed}`)
+  row('generations', `${d?.generations}  reloadsTotal=${d?.reloads} changedHash=${d?.stats?.reloadsChangedHash} skipped=${d?.stats?.reloadsSkippedUnchanged} failed=${d?.stats?.reloadsFailed}`)
   row('recoveries', `${d?.recoveries}  reconnects=${d?.stats?.reconnects} lastHour=${d?.stats?.reconnectsLastHour} wedge=${d?.stats?.wedge}`)
   row('lease', `${d?.lease?.activeId || '(none)'}  lock=${d?.hostLock?.present ? `held pid=${d?.hostLock?.filePid}` : 'MISSING'}`)
   row('listenerLeak', `${d?.listenerLeak}${d?.listenerLeak ? '  (!! fix pending)' : ''}`)
