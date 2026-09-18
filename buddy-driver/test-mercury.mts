@@ -11,12 +11,13 @@ import {
   mercuryStrategyLabel,
   plannedGoalsFromMercury,
   resolveMercuryEnablement,
+  runMercuryAttempts,
   validateMercuryPlan,
 } from './mercury-system2.ts'
 
 interface Case {
   name: string
-  run: () => { pass: boolean; detail: string }
+  run: () => { pass: boolean; detail: string } | Promise<{ pass: boolean; detail: string }>
 }
 
 const cases: Case[] = []
@@ -179,11 +180,78 @@ addCase('captures the full provider error (status + body + cause chain)', () => 
   }
 })
 
+addCase('counts a timeout retry at the provider boundary and on the final record', async () => {
+  let providerCalls = 0
+  const reservedAttempts: number[] = []
+  const retryLogs: number[] = []
+  const timeout = Object.assign(new Error('aborted due to timeout'), { name: 'TimeoutError' })
+  const result = await runMercuryAttempts({
+    maxAttempts: 2,
+    reserveAttempt: (attempt) => reservedAttempts.push(attempt),
+    call: async () => {
+      providerCalls += 1
+      if (providerCalls === 1) throw timeout
+      return 'plan'
+    },
+    isRetryable: isTimeoutError,
+    onRetry: ({ attempt }) => retryLogs.push(attempt),
+  })
+  return {
+    pass:
+      result.ok &&
+      result.result === 'plan' &&
+      result.attempts === 2 &&
+      result.failures === 1 &&
+      result.attempts - 1 === 1 &&
+      providerCalls === 2 &&
+      JSON.stringify(reservedAttempts) === '[1,2]' &&
+      JSON.stringify(retryLogs) === '[1]',
+    detail: JSON.stringify({ result, providerCalls, reservedAttempts, retryLogs }),
+  }
+})
+
+addCase('stops before a retry when the attempt budget is exhausted', async () => {
+  let providerCalls = 0
+  let budgetUsed = 0
+  const timeout = Object.assign(new Error('aborted due to timeout'), { name: 'TimeoutError' })
+  const result = await runMercuryAttempts({
+    maxAttempts: 2,
+    reserveAttempt: () => {
+      if (budgetUsed >= 1) throw new Error('hourly budget exhausted (1/h)')
+      budgetUsed += 1
+    },
+    call: async () => {
+      providerCalls += 1
+      throw timeout
+    },
+    isRetryable: isTimeoutError,
+    onRetry: () => undefined,
+  })
+  return {
+    pass: !result.ok && result.attempts === 1 && result.failures === 1 && providerCalls === 1 && budgetUsed === 1,
+    detail: JSON.stringify({ result, providerCalls, budgetUsed }),
+  }
+})
+
+addCase('counts a first-attempt success without a retry', async () => {
+  const result = await runMercuryAttempts({
+    maxAttempts: 2,
+    reserveAttempt: () => undefined,
+    call: async () => 'plan',
+    isRetryable: isTimeoutError,
+    onRetry: () => undefined,
+  })
+  return {
+    pass: result.ok && result.result === 'plan' && result.attempts === 1 && result.failures === 0 && result.attempts - 1 === 0,
+    detail: JSON.stringify(result),
+  }
+})
+
 let failures = 0
 process.stdout.write('Mercury System 2 - bounded structured planner tests\n')
 process.stdout.write(`${'-'.repeat(72)}\n`)
 for (const testCase of cases) {
-  const observed = testCase.run()
+  const observed = await testCase.run()
   if (!observed.pass) failures += 1
   process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
   process.stdout.write(`      ${observed.detail}\n`)
