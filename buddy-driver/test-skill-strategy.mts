@@ -1,7 +1,7 @@
 // test-skill-strategy.mts - Issue #20 integration: the planner's strategy ->
 // skill adapter. Proves the exact function the resident planner calls compiles
 // strategies to different grounded skills and expands unmet preconditions.
-import { skillsForStrategy, plannedGoalToSkillGoal, goalsForStrategy, goalSignature } from './planner.ts'
+import { compileStrategyOption, skillsForStrategy, plannedGoalToSkillGoal, goalsForStrategy, goalSignature } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { formatSkillSelected, formatStrategyBodyDelta, skillSignature } from '../jev-agent/src/skillCandidate.ts'
@@ -61,6 +61,22 @@ addCase('the compiled goal plan also differs between the collect strategies (#29
     goalSignature(goalsForStrategy(strategy as (typeof STRATEGIES)[number], COUNTS, WORLD, { placedFurnacesNear: 0 })),
   )
   return { pass: new Set(signatures).size === 3, detail: `distinct=${new Set(signatures).size}/3 sigs=${JSON.stringify(signatures)}` }
+})
+
+addCase('typed strategy options preserve distinct intent, objective, and candidates (#29)', () => {
+  const options = STRATEGIES.slice(0, 3).map((strategy) =>
+    compileStrategyOption(strategy, COUNTS, WORLD, {
+      placedFurnacesNear: 0,
+      skill: OPTS,
+    }),
+  )
+  const identities = options.map((option) => `${option.strategy}|${option.objective.targetItem}|${option.objective.requiredCount}`)
+  const bodies = options.map((option) => `${goalSignature(option.goals)}#${skillSignature(option.skills)}`)
+  const pass =
+    options.every((option) => option.objective.targetItem === 'raw_iron' && option.objective.requiredCount === 3) &&
+    new Set(identities).size === 3 &&
+    new Set(bodies).size === 3
+  return { pass, detail: `identities=${JSON.stringify(identities)} bodies=${JSON.stringify(bodies)}` }
 })
 
 let failures = 0
