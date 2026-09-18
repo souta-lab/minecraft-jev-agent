@@ -1,9 +1,11 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
-import { buildLadder, deriveResumeRung, goalsForStrategy, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { buildLadder, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { snapshotGoals } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
+import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
+import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 
 interface Case {
   name: string
@@ -202,6 +204,36 @@ addCase('the resume path logs LADDER_RESUME_NO_SNAPSHOT and still resumes from l
       resumed.detail?.rungIndex === 8,
     detail: `noSnapshot=${JSON.stringify(noSnapshot?.detail)} resumed=${JSON.stringify(resumed?.detail)}`,
   }
+})
+
+addCase('#prereq-order: a blocked ore plan gets the craftable pickaxe as the queue head, ore retained', () => {
+  const counts = { cobblestone: 42, stick: 2, birch_planks: 7 }
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+  const ordered = orderPlanGoalsByReadiness([rawIron], counts, world(), (event, detail) => log.push({ event, detail }))
+  const queue = new GoalQueue()
+  queue.applyPlan(ordered, 'llm', 'replace')
+  const head = queue.current
+  const retained = queue.state.goals.some((goal) => goal.targetItem === 'raw_iron' && goal.status === 'pending')
+  const planOrder = log.find((entry) => entry.event === 'PLAN_ORDER' && entry.detail?.reason === 'prerequisite_required')
+  const pass =
+    head?.kind === 'craft' &&
+    head.targetItem === 'stone_pickaxe' &&
+    retained &&
+    ordered.some((goal) => goal.targetItem === 'raw_iron') &&
+    planOrder?.detail?.preferred === 'craft_stone_pickaxe' &&
+    planOrder.detail?.over === 'collect 3 x raw_iron'
+  return { pass, detail: `head=${head?.kind}:${head?.targetItem} retained=${retained} order=${JSON.stringify(planOrder?.detail ?? null)}` }
+})
+
+addCase('#prereq-order: with a stone pickaxe the blocked goal is the head and nothing is inserted', () => {
+  const counts = { cobblestone: 42, stick: 2, birch_planks: 7, stone_pickaxe: 1 }
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const ordered = orderPlanGoalsByReadiness([rawIron], counts, world())
+  const queue = new GoalQueue()
+  queue.applyPlan(ordered, 'llm', 'replace')
+  const pass = ordered.length === 1 && queue.current?.targetItem === 'raw_iron'
+  return { pass, detail: `goals=${ordered.length} head=${String(queue.current?.targetItem)}` }
 })
 
 let failures = 0

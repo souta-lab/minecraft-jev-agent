@@ -49,7 +49,10 @@ import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
-import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
+import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
+import { PICKAXE_TIER_ORDER } from './gameData.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
@@ -581,6 +584,44 @@ export function candidateStarvationBlockedBy(
   const reasons = [...new Set(withheld.map((entry) => entry.result.reason))]
   if (reasons.length > 0) return reasons[0] ?? 'unknown_reason'
   return lastFailureCode ?? 'no_productive_candidate'
+}
+
+/** Capability name for one unmet predicate, used in the `precondition:<cause>` blockedBy. */
+function preconditionCauseName(predicate: Predicate): string {
+  switch (predicate.kind) {
+    case 'pickaxeRankAtLeast':
+      return 'pickaxe'
+    case 'inventoryAtLeast':
+      return predicate.item
+    case 'inventoryClassAtLeast':
+      return `class:${predicate.cls}`
+    case 'stationKnown':
+      return `station:${predicate.station}`
+    case 'oreKnown':
+      return `ore:${predicate.item}`
+    case 'dimensionIs':
+      return `dimension:${predicate.dimension}`
+    case 'levelAtMost':
+      return `y<=${predicate.y}`
+    case 'healthAtLeast':
+      return 'health'
+    case 'custom':
+      return `custom:${predicate.id}`
+  }
+}
+
+/**
+ * The code-owned precondition that stops `goal` from starting, rendered as a
+ * `blockedBy` cause (`precondition:pickaxe`), or null when it is startable. A
+ * deterministic block must be surfaced instead of a generic `verify_failed`
+ * spin, so the starvation line names what actually has to be produced.
+ */
+export function goalPreconditionCause(goal: PlannedGoal | null, snapshot: OptionWorldSnapshot): string | null {
+  if (goal === null) return null
+  const { ok, unmet } = evaluatePredicates(compilePlannedGoal(goal).preconditions, snapshot)
+  if (ok) return null
+  const first = unmet[0]
+  return first === undefined ? null : `precondition:${preconditionCauseName(first)}`
 }
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -1240,7 +1281,8 @@ export class JevController {
           this.noProductiveKey = key
           this.noProductiveRepeats = 1
         }
-        const blockedBy = candidateStarvationBlockedBy(grounded.withheld, this.signals.lastFailureCode)
+        const preconditionCause = this.currentGoalPreconditionCause(state)
+        const blockedBy = preconditionCause ?? candidateStarvationBlockedBy(grounded.withheld, this.signals.lastFailureCode)
         const missing = candidateStarvationMissing(grounded.withheld)
         const starvation = candidateStarvationLine(
           candidates,
@@ -2685,6 +2727,42 @@ export class JevController {
       counts[item.name] = (counts[item.name] ?? 0) + item.count
     }
     return counts
+  }
+
+  private currentGoalPreconditionCause(state: WorldState): string | null {
+    const current = this.queue.state.current
+    if (current === null) return null
+    return goalPreconditionCause(queuedToPlanned(current), this.optionSnapshot(state))
+  }
+
+  private optionSnapshot(state: WorldState): OptionWorldSnapshot {
+    const counts = this.inventorySnapshot()
+    let toolRank = 0
+    for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
+      const name = PICKAXE_TIER_ORDER[i]
+      if (name !== undefined && (counts[name] ?? 0) > 0) toolRank = i + 1
+    }
+    const knownStations = new Set<'crafting_table' | 'furnace'>()
+    if ((counts['crafting_table'] ?? 0) > 0) knownStations.add('crafting_table')
+    if ((counts['furnace'] ?? 0) > 0) knownStations.add('furnace')
+    if (state.craftingTables.length > 0) knownStations.add('crafting_table')
+    if ((state.furnaces?.length ?? 0) > 0) knownStations.add('furnace')
+    const knownOres: string[] = []
+    for (const resource of this.options.knownResources ?? []) {
+      if (resource.name === 'furnace') knownStations.add('furnace')
+      if (resource.name === 'crafting_table') knownStations.add('crafting_table')
+      if (resource.kind === 'ore') knownOres.push(resource.name)
+    }
+    const position = this.bot.entity?.position
+    return makeOptionSnapshot({
+      inventory: counts,
+      dimension: this.bot.game?.dimension ?? null,
+      position: position === undefined ? null : { x: position.x, y: position.y, z: position.z },
+      health: this.bot.health ?? null,
+      toolRank,
+      knownStations: [...knownStations],
+      knownOres,
+    })
   }
 
   private logSubgoalStart(goal: QueuedGoal, inventory: Record<string, number>, cause: string): void {

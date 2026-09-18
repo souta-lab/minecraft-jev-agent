@@ -556,6 +556,41 @@ addCase('readiness ordering marks a startable goal ready and leaves blocked goal
   }
 })
 
+addCase('prereq-order: a blocked ore goal with a craftable pickaxe is headed by the craft (#prereq-order)', () => {
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const snapshot = makeOptionSnapshot({ inventory: { cobblestone: 42, stick: 2, birch_planks: 7 }, dimension: 'minecraft:overworld', toolRank: 0 })
+  const result = orderGoalsByReadiness([rawIron], snapshot)
+  const head = result.goals[0]
+  const retained = result.goals.some((goal) => goal.targetItem === 'raw_iron')
+  const insertion = result.inserted[0]
+  const pass =
+    head?.kind === 'craft' &&
+    head.targetItem === 'stone_pickaxe' &&
+    head.ready === true &&
+    retained &&
+    result.blocked.length === 1 &&
+    insertion?.prerequisite.targetItem === 'stone_pickaxe' &&
+    insertion.consumer.targetItem === 'raw_iron'
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.description).join(' | ')}] inserted=${result.inserted.length}` }
+})
+
+addCase('prereq-order: once the pickaxe exists the blocked goal is the head again (#prereq-order)', () => {
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const snapshot = makeOptionSnapshot({ inventory: { cobblestone: 42, stick: 2, birch_planks: 7, stone_pickaxe: 1 }, dimension: 'minecraft:overworld', toolRank: 2 })
+  const result = orderGoalsByReadiness([rawIron], snapshot)
+  const pass = result.goals.length === 1 && result.goals[0]?.targetItem === 'raw_iron' && result.inserted.length === 0 && result.blocked.length === 0
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length}` }
+})
+
+addCase('prereq-order: an already-satisfied precondition does not reorder or insert (#prereq-order)', () => {
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const charcoal: PlannedGoal = { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }
+  const snapshot = makeOptionSnapshot({ inventory: { stone_pickaxe: 1, log: 2 }, knownStations: ['furnace'], toolRank: 2 })
+  const result = orderGoalsByReadiness([rawIron, charcoal], snapshot)
+  const unchanged = result.goals.length === 2 && result.goals[0]?.targetItem === 'raw_iron' && result.goals[1]?.targetItem === 'charcoal'
+  return { pass: unchanged && result.inserted.length === 0 && result.moves.length === 0, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} moves=${result.moves.length}` }
+})
+
 addCase('expanding levelAtMost(46) yields a descend dependency carrying targetY=46 (#57)', () => {
   const owner: OptionSpec = {
     id: 'fixture:level',
