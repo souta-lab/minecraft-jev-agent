@@ -413,6 +413,47 @@ addCase('(live) craft 1 x furnace + blacklisted remembered table emits no doomed
   return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
+addCase('(live) a sensed table that failed pathing is re-planned as unavailable', () => {
+  const sensedTable: StationEntry = { x: 31, y: 63, z: 37, source: 'sensed' }
+  const state = worldState({
+    position: { x: 29, y: 51, z: 37 },
+    inventory: inventory({ stick: 2, birch_planks: 7, dirt: 8, leaf_litter: 4, cobblestone: 42 }),
+    craftingTables: [sensedTable],
+    signals: signals({
+      lastFailureCode: 'path_stuck',
+      failedCandidates: { 'CRAFT:wooden_pickaxe': 1 },
+    }),
+    current: craftCurrent('wooden_pickaxe'),
+  })
+
+  const candidates = generateCandidates(state, craftOptions)
+  const retry = candidates.find((candidate) => candidate.id === 'CRAFT:wooden_pickaxe')
+  const acquire = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const pass = retry === undefined && acquire !== undefined && acquire.meta.requiresTable === false
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(live) an explicitly unreachable sensed table is not treated as available', () => {
+  const sensedTable: StationEntry = { x: 31, y: 63, z: 37, source: 'sensed' }
+  const state = worldState({
+    position: { x: 29, y: 51, z: 37 },
+    inventory: inventory({ stick: 2, birch_planks: 7 }),
+    craftingTables: [sensedTable],
+    signals: signals(),
+    current: craftCurrent('wooden_pickaxe'),
+  })
+  const options: CandidateOptions = {
+    ...craftOptions,
+    unreachableStations: new Set([knownStationKey({ name: 'crafting_table', position: sensedTable })]),
+  }
+
+  const candidates = generateCandidates(state, options)
+  const retry = candidates.find((candidate) => candidate.id === 'CRAFT:wooden_pickaxe')
+  const acquire = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const pass = retry === undefined && acquire !== undefined
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 addCase('(live) craft 1 x furnace + no table held or remembered still crafts one from logs', () => {
   const state = worldState({
     position: { x: 39, y: 10, z: 34 },
