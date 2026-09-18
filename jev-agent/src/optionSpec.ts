@@ -51,7 +51,7 @@ import {
   requiredPickaxeRankForItem1,
   smeltInputFor,
 } from './gameData.ts'
-import type { RecipeView } from './gameData.ts'
+import type { RecipeIngredient, RecipeView } from './gameData.ts'
 
 export type OptionKind =
   | 'collect'
@@ -641,17 +641,161 @@ function pickaxeRankForCollectItem(item: string): number | null {
   return asBlock ?? requiredPickaxeRankForItem1(reg, item)
 }
 
+type IngredientPredicate = Extract<Predicate, { kind: 'inventoryAtLeast' | 'inventoryClassAtLeast' }>
+
 /**
- * Craft preconditions derived from the item's minecraft-data recipe variants.
- * An ingredient is only required when EVERY variant needs it (a necessary
- * condition), so a bamboo-or-stick variant never forces one specific substitute
- * and a false-positive initiation predicate is impossible. Stone-class stacks
- * collapse to a class predicate (`8 x stone` for furnace). This is what fixed
- * `diamond_pickaxe` requiring 1 diamond instead of 3 (#54).
+ * One class-folded ingredient requirement of a recipe variant. `cls` is non-null
+ * only for the stone class: any stone item (`cobblestone`, `blackstone`, ...)
+ * satisfies it, so `furnace` collapses to `8 x stone` instead of demanding one
+ * specific rock. `item` stays the concrete recipe anchor for logging.
  */
-function craftPreconditions(item: string): Predicate[] {
+export interface CraftIngredientNeed {
+  item: string
+  count: number
+  cls: ResourceClass | null
+}
+
+/**
+ * Fold a recipe's raw ingredient list into class-aware requirements, summing
+ * duplicates. Data-driven: the list comes from the recipe, never a hand table.
+ * `stick` is NOT skipped: a pickaxe genuinely needs 2 sticks, and the
+ * prerequisite chain must be able to order their producer (#craft-ingredient-prereq).
+ */
+export function craftIngredientNeeds(ingredients: readonly RecipeIngredient[]): CraftIngredientNeed[] {
+  const needs = new Map<string, CraftIngredientNeed>()
+  const stoneCount = ingredients
+    .filter((ingredient) => matchesResourceClass(ingredient.item, 'stone'))
+    .reduce((total, ingredient) => total + ingredient.count, 0)
+  if (stoneCount > 0) needs.set('class:stone', { item: 'cobblestone', count: stoneCount, cls: 'stone' })
+  for (const ingredient of ingredients) {
+    if (matchesResourceClass(ingredient.item, 'stone')) continue
+    const key = `item:${ingredient.item}`
+    const existing = needs.get(key)
+    if (existing === undefined) needs.set(key, { item: ingredient.item, count: ingredient.count, cls: null })
+    else existing.count += ingredient.count
+  }
+  return [...needs.values()]
+}
+
+function variantRequirements(recipe: RecipeView): Map<string, IngredientPredicate> {
+  const needed = new Map<string, IngredientPredicate>()
+  for (const need of craftIngredientNeeds(recipe.ingredients)) {
+    const key = need.cls === null ? `item:${need.item}` : `class:${need.cls}`
+    needed.set(
+      key,
+      need.cls === null
+        ? { kind: 'inventoryAtLeast', item: need.item, count: need.count }
+        : { kind: 'inventoryClassAtLeast', cls: need.cls, count: need.count },
+    )
+  }
+  return needed
+}
+
+function needCount(need: CraftIngredientNeed, inventory: Readonly<Record<string, number>>): number {
+  return need.cls === null ? (inventory[need.item] ?? 0) : inventoryClassCount(inventory, need.cls)
+}
+
+/**
+ * True when every ingredient can be produced from the live inventory, following
+ * recipes recursively (log -> planks -> sticks -> pickaxe). A craft whose chain
+ * is fully producible is STARTABLE: the candidate layer plans the intermediate
+ * craft steps itself, so the Option layer must not order a prerequisite for it.
+ * Deliberately mirrors `crafting.ts#planNextCraftStep`'s recursion so the two
+ * layers agree on what "craftable now" means.
+ */
+function craftVariantProducible(recipe: RecipeView, inventory: Readonly<Record<string, number>>): boolean {
+  const needProducible = (need: CraftIngredientNeed, depth: number, stack: ReadonlySet<string>): boolean => {
+    if (needCount(need, inventory) >= need.count) return true
+    if (depth >= MAX_DEPENDENCY_DEPTH) return false
+    if (need.cls !== null) return false
+    if (stack.has(need.item)) return false
+    const variants = recipesFor(need.item)
+    if (variants.length === 0) return false
+    const next = new Set(stack)
+    next.add(need.item)
+    return variants.some((variant) =>
+      craftIngredientNeeds(variant.ingredients).every((ingredient) => needProducible(ingredient, depth + 1, next)),
+    )
+  }
+  return craftIngredientNeeds(recipe.ingredients).every((need) => needProducible(need, 0, new Set<string>()))
+}
+
+/**
+ * Deterministic variant choice for a craft goal (#craft-ingredient-prereq).
+ * `recipesFor` returns every substitute recipe (12 plank types for a wooden
+ * pickaxe), so no single intersection predicate can name the missing material.
+ * Ordered by: satisfied requirements, partial credit, missing units, yield,
+ * fewest ingredients, signature. Live shape: 2 birch planks + 2 sticks selects
+ * the birch variant and reports the single missing `birch_planks`.
+ */
+export function selectCraftIngredients<T extends { ingredients: readonly RecipeIngredient[]; signature: string; resultCount: number }>(
+  variants: readonly T[],
+  inventory: Readonly<Record<string, number>>,
+): { variant: T; needs: CraftIngredientNeed[]; missing: CraftIngredientNeed[] } | null {
+  interface Scored {
+    variant: T
+    needs: CraftIngredientNeed[]
+    missing: CraftIngredientNeed[]
+    satisfied: number
+    units: number
+    missingUnits: number
+  }
+  const scored: Scored[] = []
+  for (const variant of variants) {
+    const needs = craftIngredientNeeds(variant.ingredients)
+    let satisfied = 0
+    let units = 0
+    let missingUnits = 0
+    const missing: CraftIngredientNeed[] = []
+    for (const need of needs) {
+      const have = needCount(need, inventory)
+      if (have >= need.count) satisfied += 1
+      else missing.push(need)
+      units += Math.min(have, need.count)
+      missingUnits += Math.max(0, need.count - have)
+    }
+    scored.push({ variant, needs, missing, satisfied, units, missingUnits })
+  }
+  scored.sort((a, b) => {
+    if (a.satisfied !== b.satisfied) return b.satisfied - a.satisfied
+    if (a.units !== b.units) return b.units - a.units
+    if (a.missingUnits !== b.missingUnits) return a.missingUnits - b.missingUnits
+    if (a.variant.resultCount !== b.variant.resultCount) return b.variant.resultCount - a.variant.resultCount
+    if (a.needs.length !== b.needs.length) return a.needs.length - b.needs.length
+    return a.variant.signature.localeCompare(b.variant.signature)
+  })
+  const best = scored[0]
+  return best === undefined ? null : { variant: best.variant, needs: best.needs, missing: best.missing }
+}
+
+function needPredicate(need: CraftIngredientNeed): Predicate {
+  return need.cls === null
+    ? { kind: 'inventoryAtLeast', item: need.item, count: need.count }
+    : { kind: 'inventoryClassAtLeast', cls: need.cls, count: need.count }
+}
+
+/**
+ * Craft initiation predicates derived from the item's minecraft-data recipe
+ * variants (#54 + #craft-ingredient-prereq).
+ *
+ * With a snapshot: a craft whose ingredient chain is recursively producible from
+ * the live inventory is startable ([]) - the candidate layer owns the multi-step
+ * plan. Otherwise the deterministic best variant's requirements become
+ * preconditions, so `completeStartablePrerequisites` orders a producer for the
+ * MISSING material (`wooden_pickaxe` with 2 planks -> collect log) instead of
+ * the goal starving to WAIT with an empty precondition set.
+ *
+ * Without a snapshot (persistence / legacy compile): the necessary-condition
+ * intersection over all variants, exactly as before.
+ */
+function craftPreconditions(item: string, inventory?: Readonly<Record<string, number>>): Predicate[] {
   const variants = recipesFor(item)
   if (variants.length === 0) return []
+  if (inventory !== undefined) {
+    if (variants.some((variant) => craftVariantProducible(variant, inventory))) return []
+    const selection = selectCraftIngredients(variants, inventory)
+    if (selection !== null) return selection.needs.map(needPredicate)
+  }
   const required = new Map<string, IngredientPredicate>()
   let seeded = false
   for (const variant of variants) {
@@ -668,48 +812,6 @@ function craftPreconditions(item: string): Predicate[] {
     }
   }
   return [...required.values()]
-}
-
-type IngredientPredicate = Extract<Predicate, { kind: 'inventoryAtLeast' | 'inventoryClassAtLeast' }>
-
-/**
- * Craft intermediates that are deliberately NOT initiation predicates. Sticks
- * are trivially produced from any plank/log and are resolved by the craft skill
- * and the executor's recipe lookup; making them an Option precondition made the
- * compiled chain disagree with the deterministic ladder (#54 scope note).
- */
-const CRAFT_INTERMEDIATE_ITEMS = new Set(['stick'])
-
-function variantRequirements(recipe: RecipeView): Map<string, IngredientPredicate> {
-  const needed = new Map<string, IngredientPredicate>()
-  const stoneCount = recipe.ingredients
-    .filter((ingredient) => matchesResourceClass(ingredient.item, 'stone'))
-    .reduce((total, ingredient) => total + ingredient.count, 0)
-  if (stoneCount > 0) needed.set('class:stone', { kind: 'inventoryClassAtLeast', cls: 'stone', count: stoneCount })
-  for (const ingredient of recipe.ingredients) {
-    if (matchesResourceClass(ingredient.item, 'stone')) continue
-    if (CRAFT_INTERMEDIATE_ITEMS.has(ingredient.item)) continue
-    needed.set(`item:${ingredient.item}`, { kind: 'inventoryAtLeast', item: ingredient.item, count: ingredient.count })
-  }
-  return needed
-}
-
-/**
- * True when at least one recipe variant for `item` has every ingredient held
- * (class-aware). `isOptionStartable` alone is not enough for a craft
- * prerequisite: `craftPreconditions` intersects all variants, so a multi-variant
- * recipe (wooden_pickaxe over every plank type) yields no predicate and would
- * look startable with an empty inventory.
- */
-function anyRecipeVariantCraftable(item: string, snapshot: OptionWorldSnapshot): boolean {
-  const variants = recipesFor(item)
-  if (variants.length === 0) return false
-  return variants.some((variant) => {
-    for (const predicate of variantRequirements(variant).values()) {
-      if (!evaluatePredicate(predicate, snapshot)) return false
-    }
-    return true
-  })
 }
 
 /**
@@ -748,7 +850,7 @@ function smeltPreconditions(item: string, count: number): Predicate[] {
  * ingredient counts from `recipes`. Strategic rules minecraft-data cannot
  * express (e.g. "stone_pickaxe needs some pickaxe") stay explicit.
  */
-function preconditionsForGoal(goal: PlannedGoal): Predicate[] {
+function preconditionsForGoal(goal: PlannedGoal, snapshot?: OptionWorldSnapshot): Predicate[] {
   const item = goal.targetItem ?? null
   if (item === null) return []
   const count = goalCount(goal)
@@ -758,7 +860,7 @@ function preconditionsForGoal(goal: PlannedGoal): Predicate[] {
       return rank === null ? [] : [{ kind: 'pickaxeRankAtLeast', rank }]
     }
     case 'craft': {
-      const preconditions = craftPreconditions(item)
+      const preconditions = craftPreconditions(item, snapshot?.inventory)
       // A stone pickaxe is craftable from 3 stone + 2 sticks. The "some pickaxe"
       // strategic rule is only needed to MINE that stone, and it is already
       // implied by the `collect cobblestone` dependency (that collect goal's own
@@ -822,8 +924,13 @@ function successForGoal(goal: PlannedGoal): Predicate[] {
   }
 }
 
-/** Compile one planned goal into an OptionSpec. Pure and total. */
-export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
+/**
+ * Compile one planned goal into an OptionSpec. Pure and total. When `snapshot`
+ * is given, craft ingredient preconditions are derived against the live
+ * inventory (#craft-ingredient-prereq); without it the compile stays
+ * snapshot-free (persistence, identity, legacy rows).
+ */
+export function compilePlannedGoal(goal: PlannedGoal, snapshot?: OptionWorldSnapshot): OptionSpec {
   const kind = optionKindForGoal(goal.kind)
   const target: OptionTarget = { count: goalCount(goal) }
   if (typeof goal.targetItem === 'string' && goal.targetItem.length > 0) target.item = goal.targetItem
@@ -836,7 +943,7 @@ export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
     kind,
     ...(goal.strategy === undefined ? {} : { strategy: goal.strategy }),
     target,
-    preconditions: preconditionsForGoal(goal),
+    preconditions: preconditionsForGoal(goal, snapshot),
     success: successForGoal(goal),
     skills: goal.strategy === undefined ? [...SKILLS_BY_KIND[kind]] : [...SKILLS_BY_STRATEGY[goal.strategy]],
     abortThreshold: DEFAULT_ABORT_THRESHOLD,
@@ -845,8 +952,8 @@ export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
   }
 }
 
-export function compilePlannedGoals(goals: readonly PlannedGoal[]): OptionSpec[] {
-  return goals.map(compilePlannedGoal)
+export function compilePlannedGoals(goals: readonly PlannedGoal[], snapshot?: OptionWorldSnapshot): OptionSpec[] {
+  return goals.map((goal) => compilePlannedGoal(goal, snapshot))
 }
 
 export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
@@ -936,6 +1043,8 @@ export interface ReadinessOrderResult {
   inserted: InsertedPrerequisite[]
   /** ready goals that were moved ahead of a blocked goal (for PLAN_ORDER) */
   moves: Array<{ preferred: string; over: string }>
+  /** prerequisite chains that hit the depth bound instead of resolving */
+  unresolved: string[]
 }
 
 /** One prerequisite goal inserted immediately before the blocked goal it unblocks. */
@@ -948,17 +1057,20 @@ export interface PrerequisiteCompletion {
   /** input goals in order, each preceded by the startable prerequisites unblocking it */
   goals: PlannedGoal[]
   inserted: InsertedPrerequisite[]
+  /** prerequisite chains that hit the depth bound instead of resolving */
+  unresolved: string[]
 }
 
 /**
  * Deterministic dependency ordering (#prereq-order): for every goal with an unmet
- * precondition, insert the DIRECT prerequisite Option produced by
- * `dependencyGoalForPredicate` immediately before it, but only when that
- * prerequisite is itself startable in the snapshot. A prerequisite that is not
- * executable right now cannot be ordered into a head that would still be blocked,
- * so the stable order is preserved rather than inventing an unexecutable step.
- * Pure and order-preserving; identity is the #52 instance id, so a prerequisite
- * already queued ahead of its consumer is never duplicated.
+ * precondition, insert the first STARTABLE prerequisite in its producer chain
+ * immediately before it. The chain is walked recursively: when the direct
+ * producer is itself blocked (`craft planks` without a log), its own producer is
+ * resolved first, bounded by MAX_DEPENDENCY_DEPTH. #craft-ingredient-prereq: this
+ * is what turns a craft goal's missing ingredient into an ordered collect step
+ * (`craft:wooden_pickaxe` with 2 planks -> `collect 1 x log`) instead of an
+ * unstartable craft. Pure and order-preserving; identity is the #52 instance id,
+ * so a prerequisite already queued ahead of its consumer is never duplicated.
  */
 export function completeStartablePrerequisites(
   goals: readonly PlannedGoal[],
@@ -967,30 +1079,65 @@ export function completeStartablePrerequisites(
 ): PrerequisiteCompletion {
   const out: PlannedGoal[] = []
   const inserted: InsertedPrerequisite[] = []
+  const unresolved: string[] = []
   const present = new Set<string>()
+  const visiting = new Set<string>()
+  // A producer already planned (even behind its consumer) is never duplicated:
+  // the readiness partition moves the startable instance ahead instead.
+  for (const goal of goals) present.add(stableOptionInstanceId(compilePlannedGoal(goal, snapshot)))
+
+  const producerForPredicate = (
+    predicate: Predicate,
+    spec: OptionSpec,
+    depth: number,
+  ): PlannedGoal | null => {
+    const dependency = dependencyGoalForPredicate(predicate, spec, snapshot)
+    if (dependency === null) return null
+    const dependencySpec = compilePlannedGoal(dependency, snapshot)
+    if (dependencySpec.id === spec.id) return null
+    if (isOptionStartable(dependencySpec, snapshot, custom)) return dependency
+    if (depth >= MAX_DEPENDENCY_DEPTH) {
+      unresolved.push(`${dependencySpec.id}: max dependency depth ${MAX_DEPENDENCY_DEPTH} exceeded`)
+      return null
+    }
+    const instanceId = stableOptionInstanceId(dependencySpec)
+    if (visiting.has(instanceId)) return null
+    visiting.add(instanceId)
+    try {
+      return producerForGoal(dependency, dependencySpec, depth + 1)
+    } finally {
+      visiting.delete(instanceId)
+    }
+  }
+
+  const producerForGoal = (goal: PlannedGoal, spec: OptionSpec, depth: number): PlannedGoal | null => {
+    const { unmet } = evaluatePredicates(spec.preconditions, snapshot, custom)
+    for (const predicate of unmet) {
+      const producer = producerForPredicate(predicate, spec, depth)
+      if (producer !== null) return producer
+    }
+    return null
+  }
+
   for (const goal of goals) {
-    const spec = compilePlannedGoal(goal)
+    const spec = compilePlannedGoal(goal, snapshot)
     if (!isOptionStartable(spec, snapshot, custom)) {
-      const { unmet } = evaluatePredicates(spec.preconditions, snapshot, custom)
-      for (const predicate of unmet) {
-        const dependency = dependencyGoalForPredicate(predicate, spec, snapshot)
-        if (dependency === null) continue
-        const dependencySpec = compilePlannedGoal(dependency)
-        if (dependencySpec.id === spec.id) continue
-        if (!isOptionStartable(dependencySpec, snapshot, custom)) continue
-        if (dependency.kind === 'craft' && typeof dependency.targetItem === 'string' && !anyRecipeVariantCraftable(dependency.targetItem, snapshot)) continue
-        const instanceId = stableOptionInstanceId(dependencySpec)
-        if (present.has(instanceId)) continue
-        const prerequisite: PlannedGoal = dependency.ready === true ? dependency : { ...dependency, ready: true }
-        out.push(prerequisite)
-        inserted.push({ prerequisite, consumer: goal })
-        present.add(instanceId)
+      const producer = producerForGoal(goal, spec, 0)
+      if (producer !== null) {
+        const producerSpec = compilePlannedGoal(producer, snapshot)
+        const instanceId = stableOptionInstanceId(producerSpec)
+        if (!present.has(instanceId)) {
+          const prerequisite: PlannedGoal = producer.ready === true ? producer : { ...producer, ready: true }
+          out.push(prerequisite)
+          inserted.push({ prerequisite, consumer: goal })
+          present.add(instanceId)
+        }
       }
     }
     out.push(goal)
     present.add(stableOptionInstanceId(spec))
   }
-  return { goals: out, inserted }
+  return { goals: out, inserted, unresolved }
 }
 
 /**
@@ -1015,7 +1162,7 @@ export function orderGoalsByReadiness(
   const blocked: PlannedGoal[] = []
   const isReady: boolean[] = []
   for (const goal of completed.goals) {
-    const startable = isOptionStartable(compilePlannedGoal(goal), snapshot, custom)
+    const startable = isOptionStartable(compilePlannedGoal(goal, snapshot), snapshot, custom)
     isReady.push(startable)
     if (startable) ready.push(goal.ready === true ? goal : { ...goal, ready: true })
     else blocked.push(goal)
@@ -1031,7 +1178,7 @@ export function orderGoalsByReadiness(
       moves.push({ preferred: goalReadinessLabel(candidate), over: overGoal.description })
     }
   }
-  return { goals: [...ready, ...blocked], ready, blocked, inserted: completed.inserted, moves }
+  return { goals: [...ready, ...blocked], ready, blocked, inserted: completed.inserted, moves, unresolved: completed.unresolved }
 }
 
 /** OptionSpec -> PlannedGoal, so compiled Options seed the existing GoalQueue. */
@@ -1076,22 +1223,6 @@ export function optionSpecsToPlannedGoals(specs: readonly OptionSpec[]): Planned
 export const MAX_DEPENDENCY_DEPTH = 16
 
 const SMELT_ITEMS = new Set(['charcoal', 'iron_ingot', 'gold_ingot', 'copper_ingot', 'glass'])
-const CRAFT_ITEMS = new Set([
-  'crafting_table',
-  'furnace',
-  'wooden_pickaxe',
-  'stone_pickaxe',
-  'iron_pickaxe',
-  'diamond_pickaxe',
-  'stick',
-  'torch',
-  'chest',
-  'iron_chestplate',
-  'iron_leggings',
-  'iron_helmet',
-  'iron_boots',
-  'iron_sword',
-])
 
 const CLASS_DEPENDENCY_ITEM: Readonly<Record<ResourceClass, string | null>> = {
   log: 'log',
@@ -1102,11 +1233,42 @@ const CLASS_DEPENDENCY_ITEM: Readonly<Record<ResourceClass, string | null>> = {
   pickaxe: 'wooden_pickaxe',
 }
 
-/** Which goal produces an item: smelt > craft > collect (the safe default). */
+/** Concrete collect anchor for a semantic class (`stone` -> `cobblestone`). */
+export function collectItemForClass(cls: ResourceClass): string | null {
+  return CLASS_DEPENDENCY_ITEM[cls]
+}
+
+/**
+ * A decomposition recipe turns a denser block back into the item
+ * (`raw_iron_block` -> `raw_iron`). It does not make the item craftable, so
+ * `raw_iron`/`diamond`/`coal` stay collect goals instead of demanding a block
+ * the bot can only hold after collecting 9 of the item.
+ */
+function isDecompositionRecipe(variant: RecipeView, item: string): boolean {
+  return variant.ingredients.some((ingredient) =>
+    recipesFor(ingredient.item).some((upstream) =>
+      upstream.ingredients.some((source) => source.item === item),
+    ),
+  )
+}
+
+function hasCraftingProducer(item: string): boolean {
+  return recipesFor(item).some((variant) => !isDecompositionRecipe(variant, item))
+}
+
+/**
+ * Which goal produces an item: smelt > craft > collect (the safe default).
+ * The craft decision is RECIPE-DRIVEN (#craft-ingredient-prereq): any item with
+ * a real crafting recipe is a craft goal, so planks and every other ingredient
+ * gets its producer without a hand-maintained list. Raw world resources keep the
+ * collect default, and a `*_log` normalizes to the `log` class so one collect
+ * goal is satisfied by any obtainable log.
+ */
 export function dependencyGoalForItem(item: string, count: number): PlannedGoal {
   const n = Math.max(1, count)
   if (SMELT_ITEMS.has(item)) return { kind: 'smelt', description: `smelt ${n} x ${item}`, targetItem: item, requiredCount: n }
-  if (CRAFT_ITEMS.has(item)) return { kind: 'craft', description: `craft ${n} x ${item}`, targetItem: item, requiredCount: n }
+  if (hasCraftingProducer(item)) return { kind: 'craft', description: `craft ${n} x ${item}`, targetItem: item, requiredCount: n }
+  if (matchesResourceClass(item, 'log')) return { kind: 'collect', description: `collect ${n} x log`, targetItem: 'log', requiredCount: n }
   return { kind: 'collect', description: `collect ${n} x ${item}`, targetItem: item, requiredCount: n }
 }
 
@@ -1265,7 +1427,7 @@ export function expandOptionDependencies(
         blockedReasons.push(describePredicate(predicate))
         continue
       }
-      const dependencySpec = compilePlannedGoal(dependency)
+      const dependencySpec = compilePlannedGoal(dependency, snapshot)
       if (dependencySpec.id === current.id) continue
       dependencies.push(dependencySpec)
     }
@@ -1368,7 +1530,7 @@ export function applyCompiledPlan(
   const deduped: OptionDedupeRecord[] = []
 
   for (const goal of planned) {
-    const spec = compilePlannedGoal(goal)
+    const spec = compilePlannedGoal(goal, snapshot)
     const errors = validateOptionSpec(spec)
     if (errors.length > 0) {
       rejected.push({ description: goal.description, reason: errors.join('; ') })

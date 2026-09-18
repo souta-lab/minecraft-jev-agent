@@ -23,6 +23,9 @@ const M2_LIVE: Record<string, number> = {
   crafting_table: 1,
   cobblestone: 22,
   oak_log: 2,
+  // The craft ingredient contract now orders a producer for a missing stick, so
+  // the fixture holds the sticks the ladder's pickaxe craft consumes.
+  stick: 2,
   stone_pickaxe: 1,
   furnace: 1,
   charcoal: 1,
