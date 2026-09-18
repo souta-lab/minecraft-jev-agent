@@ -55,6 +55,13 @@ function makeBot(): Bot {
   } as unknown as Bot
 }
 
+function botHolding(entries: Array<{ name: string; count: number }>): Bot {
+  return {
+    ...(makeBot() as object),
+    inventory: { items: () => entries.map((entry, slot) => ({ ...entry, slot })) },
+  } as unknown as Bot
+}
+
 function activeGoal(): PlannedGoal {
   return { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
 }
@@ -192,7 +199,7 @@ addCase('#30: a 4-goal Mercury patch keeps the 3 new tail goals', async () => {
     { kind: 'craft', description: 'craft 1 x iron_pickaxe', targetItem: 'iron_pickaxe', requiredCount: 1 },
   ]
   const brain = new PlannerBrain({
-    bot: makeBot(),
+    bot: botHolding([{ name: 'coal', count: 2 }]),
     world: emptyWorldMemory(),
     log: hostLog(logs),
     cachePath: join(dir, 'planner-cache.json'),
