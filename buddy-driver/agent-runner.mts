@@ -108,8 +108,16 @@ const HEARTBEAT_MS = 15000
 const OBSERVE_MS = 1500
 const RELOAD_DEBOUNCE_MS = 1200
 const GEN_RESTART_MS = 3000
+const LISTENER_BASELINE_POLL_MS = 25
+const LISTENER_BASELINE_MAX_POLLS = 200
 const GOAL_ITEM = 'iron_ingot'
 const GOAL_COUNT = 3
+
+// The generation scheduler owns these bot listeners in the default resident
+// configuration.  The HOST must not capture its leak baseline until this set
+// is attached; otherwise deterministic bootstrap (which awaits its plan
+// before scheduler.start()) makes a healthy generation look like a leak.
+const GENERATION_SCHEDULER_EVENTS = ['goal_reached', 'blockUpdate', 'entitySpawn', 'health', 'playerCollect'] as const
 
 for (const dir of [DATA, LOGS, JEV_LOGS, FREEZE_DIR]) mkdirSync(dir, { recursive: true })
 
@@ -546,6 +554,8 @@ let disconnectDetail: string | null = null
 let generationHash: string | null = null
 let listenerBaseline: Record<string, number> = {}
 let baselineCaptured = false
+let listenerBaselineTimer: NodeJS.Timeout | null = null
+let listenerBaselineGeneration: ResidentGeneration | null = null
 let startPosition: Vec3Json | null = null
 let lastStatus: GenerationStatus | null = null
 let deathResetPending = false
@@ -682,6 +692,56 @@ function listenerLeak(): boolean {
   return Object.keys(listenerBaseline).some((event) => (listenerCounts()[event] ?? 0) > (listenerBaseline[event] ?? 0))
 }
 
+function clearListenerBaselineTimer(): void {
+  if (listenerBaselineTimer !== null) {
+    clearTimeout(listenerBaselineTimer)
+    listenerBaselineTimer = null
+  }
+  listenerBaselineGeneration = null
+}
+
+function listenerBaselineReady(beforeStart: Record<string, number>, current: Record<string, number>): boolean {
+  return GENERATION_SCHEDULER_EVENTS.every((event) => (current[event] ?? 0) > (beforeStart[event] ?? 0))
+}
+
+function scheduleListenerBaseline(gen: ResidentGeneration, beforeStart: Record<string, number>): void {
+  if (baselineCaptured || listenerBaselineTimer !== null || listenerBaselineGeneration !== null) return
+  listenerBaselineGeneration = gen
+  let polls = 0
+
+  const poll = (): void => {
+    listenerBaselineTimer = null
+    if (listenerBaselineGeneration !== gen) return
+    if (baselineCaptured || generation !== gen || gen.hasStopped() || shuttingDown) {
+      listenerBaselineGeneration = null
+      return
+    }
+    const listeners = listenerCounts()
+    if (listenerBaselineReady(beforeStart, listeners)) {
+      baselineCaptured = true
+      listenerBaseline = listeners
+      listenerBaselineGeneration = null
+      log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id, polls })
+      return
+    }
+    polls += 1
+    if (polls >= LISTENER_BASELINE_MAX_POLLS) {
+      listenerBaselineGeneration = null
+      log('LISTENER_BASELINE_UNKNOWN', {
+        generationId: gen.id,
+        polls,
+        beforeStart,
+        listeners,
+        requiredEvents: GENERATION_SCHEDULER_EVENTS,
+      })
+      return
+    }
+    listenerBaselineTimer = setTimeout(poll, LISTENER_BASELINE_POLL_MS)
+  }
+
+  listenerBaselineTimer = setTimeout(poll, 0)
+}
+
 async function loadGenerationModule(force: boolean): Promise<GenerationModule | null> {
   if (!force && generationModule !== null) return generationModule
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -808,6 +868,7 @@ function registerGenerationResources(gen: ResidentGeneration, ctx: GenerationCon
  * logged instead of silently accepting it (#13).
  */
 function disposeGeneration(gen: ResidentGeneration): GenerationResourceCounts {
+  if (listenerBaselineGeneration === gen) clearListenerBaselineTimer()
   try {
     gen.dispose()
   } catch (error) {
@@ -932,6 +993,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
   const preflight = runMissionPreflight(gen)
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
   commitOwner(ownershipPorts(), gen)
+  const listenersBeforeStart = listenerCounts()
   try {
     gen.start()
   } catch (error) {
@@ -945,9 +1007,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
   }
   lastActionId = null
   if (!baselineCaptured) {
-    baselineCaptured = true
-    listenerBaseline = listenerCounts()
-    log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id })
+    scheduleListenerBaseline(gen, listenersBeforeStart)
   }
   state.generations += 1
   commitStagedProposals(gen.id, 'generation-start')
@@ -1202,6 +1262,7 @@ function connect(): void {
       state.dimension = observedDimension
     }
     if (game?.levelName !== undefined) state.levelName = game.levelName
+    clearListenerBaselineTimer()
     baselineCaptured = false
     log('SPAWN', {
       pos: entity === undefined ? '?' : fmtPos({ x: entity.position.x, y: entity.position.y, z: entity.position.z }),
@@ -1928,6 +1989,7 @@ function startControlServer(): void {
 function shutdown(reason: string): void {
   if (shuttingDown) return
   shuttingDown = true
+  clearListenerBaselineTimer()
   reloadArbiter?.stop()
   log('SHUTDOWN', { reason })
   let acceptance: string | null = null
