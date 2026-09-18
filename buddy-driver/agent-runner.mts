@@ -1397,6 +1397,7 @@ setInterval(() => {
       id: action.id,
       kind: action.kind,
       phase: action.phase,
+      generationId: generation.id,
       pos: fmtPos(truth.position),
       rung: status.rungId,
     })
