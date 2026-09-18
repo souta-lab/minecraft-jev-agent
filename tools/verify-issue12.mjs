@@ -15,6 +15,10 @@ const lines = txt.trim() ? txt.trim().split('\n') : []
 
 const count = (s) => txt.split(s).length - 1
 
+// A log can hold hundreds of thousands of lines; spreading a large array into
+// Math.max(...) overflows the call stack. Reduce instead.
+const maxOf = (arr, fallback = 0) => (arr.length ? arr.reduce((a, b) => (a > b ? a : b)) : fallback)
+
 // 1. precondition vs replacement
 const precond = count('PRECONDITION_MISSING')
 const ladderPrereq = count('LADDER_PREREQ')
@@ -28,7 +32,7 @@ const tsOf = (line) => {
   return m ? Date.parse(m[1] + 'Z') : null
 }
 const allTs = lines.map(tsOf).filter(Boolean)
-const newestTs = allTs.length ? Math.max(...allTs) : 0
+const newestTs = maxOf(allTs)
 const cutoff = newestTs - WINDOW_MIN * 60 * 1000
 const recentLines = newestTs ? lines.filter((l) => { const t = tsOf(l); return t === null || t >= cutoff }) : lines
 const recentTxt = recentLines.join('\n')
@@ -37,7 +41,7 @@ const tickValues = [...recentTxt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)]
 const ticksAllTime = [...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].length
 const ticks1 = tickValues.filter((t) => t <= 1).length
 const ticksGe100 = tickValues.filter((t) => t >= 100).length
-const maxTicks = tickValues.length ? Math.max(...tickValues) : 0
+const maxTicks = maxOf(tickValues)
 
 // 3. digging markers (proof the body resumed working)
 const digMarkers = {
@@ -52,7 +56,7 @@ const digging = Object.values(digMarkers).some((v) => v > 0)
 
 // 4. target resource actually obtained
 const rawIronLines = [...txt.matchAll(/"raw_iron"\s*:\s*(\d+)/g)].map((m) => Number(m[1]))
-const rawIron = rawIronLines.length ? Math.max(...rawIronLines) : 0
+const rawIron = maxOf(rawIronLines)
 
 // 5. churn rate: generations/recoveries in the last 5 minutes of the log
 function ts(line) {
@@ -64,7 +68,7 @@ const genStarts = lines.filter((l) => l.includes('GENERATION_START')).map((l) =>
 const recents = lastTs ? genStarts.filter((g) => lastTs - g.t <= 5 * 60 * 1000) : []
 const gensLast5min = recents.length
 
-const allTimeMaxTicks = Math.max(0, ...[...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].map((m) => Number(m[1])))
+const allTimeMaxTicks = maxOf([...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+)/g)].map((m) => Number(m[1])))
 
 const checks = [
   { id: 'ladder_prereq_present', pass: ladderPrereq > 0, detail: `LADDER_PREREQ=${ladderPrereq}` },

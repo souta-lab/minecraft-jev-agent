@@ -16,6 +16,7 @@ import {
   isOptionStartable,
   makeOptionSnapshot,
   optionSpecsToPlannedGoals,
+  orderGoalsByReadiness,
   resolveOptionCompilerEnabled,
   snapshotFromResident,
   validateOptionSpec,
@@ -257,6 +258,54 @@ addCase('dependencyGoalForPredicate is total for the supported predicate kinds',
   const healthDep = dependencyGoalForPredicate({ kind: 'healthAtLeast', health: 5 }, spec, empty)
   const pass = rankDep?.targetItem === 'iron_pickaxe' && stationDep?.kind === 'place' && healthDep === null
   return { pass, detail: `rank=${rankDep?.targetItem} station=${stationDep?.targetItem} health=${healthDep === null ? 'null' : 'unexpected'}` }
+})
+
+addCase('readiness ordering moves a ready smelt ahead of an unmet collect (#46)', () => {
+  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3 }, knownStations: ['furnace'], toolRank: 1 })
+  const goals: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
+    { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
+  ]
+  const result = orderGoalsByReadiness(goals, snapshot)
+  const move = result.moves[0]
+  const pass =
+    result.goals[0]?.kind === 'smelt' &&
+    result.goals[0]?.targetItem === 'iron_ingot' &&
+    result.goals[1]?.targetItem === 'diamond' &&
+    result.ready.length === 1 &&
+    result.blocked.length === 1 &&
+    move?.preferred === 'smelt_iron_ingot' &&
+    move?.over === 'collect 1 x diamond'
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] moves=${JSON.stringify(result.moves)}` }
+})
+
+addCase('readiness ordering is stable when every goal is ready (#46)', () => {
+  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, diamond: 1 }, knownStations: ['furnace'], toolRank: 2 })
+  const goals: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
+    { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
+  ]
+  const result = orderGoalsByReadiness(goals, snapshot)
+  const pass =
+    result.goals[0]?.targetItem === 'diamond' &&
+    result.goals[1]?.targetItem === 'iron_ingot' &&
+    result.moves.length === 0
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] moves=${result.moves.length}` }
+})
+
+addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
+  const snapshot = makeOptionSnapshot({ inventory: {}, toolRank: 0 })
+  const goals: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
+    { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
+  ]
+  const result = orderGoalsByReadiness(goals, snapshot)
+  const pass =
+    result.goals[0]?.targetItem === 'diamond' &&
+    result.goals[1]?.targetItem === 'iron_ingot' &&
+    result.ready.length === 0 &&
+    result.blocked.length === 2
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
 })
 
 let failures = 0
