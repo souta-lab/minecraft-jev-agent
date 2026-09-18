@@ -1,108 +1,195 @@
-# 🚫 DON'T WAIT — 絶対に待機するな（最上位ルール）
+# ⚡ CONTINUOUS EXECUTION — 継続実行がデフォルト（最上位ルール）
 
+オーケストレーター（Sisyphus）は、明確な完了条件または具体的な HARD STOP に到達するまで自律的に前進する。
+「ユーザーの次の発言」は通常の依存条件ではない。
+
+```text
+通常状態 = CONTINUE
+
+候補:
+a) open issue から highest-priority work を選ぶ
+b) 走行中laneの成果物を検証する
+c) ready-to-integrate branchを安全に統合する
+d) acceptance / observability / reproducibilityを改善する
+e) 発見したfailure modeをtest / invariant / issueへ固定する
 ```
-オーケストレーター（Sisyphus）は「待つ」という選択肢を持たない。
-・応答内容が「〜を待ちます」「変化なし」だけなら、それは失格。
-・待機しそうになったら必ず次を実行する:
-   a) open issue を1本選び worktree + PR でレーン起動（#5 #38 #48 #49 #50 #52 #54 #55 #56 #57 #59 …）
-   b) 走行中レーンの成果物を検証（grep実証 / テスト件数 / 実ログ / push実証）
-   c) 直近の PR / ブランチを安全にマージし、main の緑とクリーンを確認
-   d) 観測・検証ツールを改善（品質を下げない範囲で）
-   e) 失敗モードの再発防止を文書/テストで固定
-・ポーリング（同一内容の再確認）禁止。確認するなら証拠を取り、その結果で次の行動を決める。
-・issue は常に大量にある。ネタ切れはあり得ない。
-・品質最優先: トークンを節約しても、証拠取得・テスト・マージ検証は省略しない。
-```
+
+同じ状態を再確認するだけのpollingは進捗として数えない。確認は新しい証拠を取り、その証拠から次の行動を決めるために行う。
+品質・証拠・integrationを省略して速度だけを上げない。
 
 ## 🧠 Luna / fast-model proactive execution contract
 
-Luna等の高速・字面追従型モデルでは、ユーザーの一文を「完了条件の全リスト」と解釈してはいけない。**ユーザーの指示は目的であり、必要な安全な中間作業まで列挙したチェックリストではない。**
+Luna等の高速・字面追従型モデルでは、ユーザーの一文を「作業手順の完全列挙」と解釈しない。
+**ユーザーの指示は objective であり、そのobjectiveを安全に満たすための調査・依存修正・test・integration・evidence取得まで自分で補完する。**
 
 ### 必須ループ
 
-各作業は必ず次のループで進め、明確な停止条件を満たすまで繰り返す。
+```text
+ORIENT   : root/scoped AGENTS, TODO, issue, latest main, live evidence を読む
+PLAN     : objectiveを前進させる次の1〜3手を決める
+ACT      : highest-priorityの実行可能な1手を行う
+VERIFY   : test / diff / log / inventory / commit / PR 等の一次証拠を取る
+UPDATE   : issue / TODO / docs / run artifactへ事実を反映する
+REASSESS : 元objectiveとacceptanceへ戻って残るblocker/evidence gapを探す
+CONTINUE : 実行可能な次作業がある限り、そのまま次ループへ進む
+```
+
+### PROCEED-BY-DEFAULT
+
+以下は**停止理由ではない**。その状況に合う代替行動へ移って継続する。
 
 ```text
-ORIENT   : root AGENTS / scoped AGENTS / TODO / issue / latest main / live evidence を読む
-PLAN     : 目的を前進させる次の1〜3手を自分で決める
-ACT      : 最優先の安全な1手を実行する
-VERIFY   : test / log / diff / inventory / commit / PR 等の一次証拠で確認する
-UPDATE   : issue / TODO / docs / run artifact に事実を反映する
-REASSESS : 元の目的とacceptanceへ戻り、次に残る blocker / evidence gap を探す
-CONTINUE : 安全で有用な次作業がある限り、ユーザーの追加発言を待たず続ける
+・ユーザーが中間作業を明示していない
+・変更が複数ファイル/複数issueにまたがる
+・「scope外かもしれない」という抽象的な懸念
+・1つの操作に権限が無い
+・1つのtool/APIが利用できない
+・別laneが特定ファイルを所有している
+・完全な確証がまだ無い
+・既存testがknown-redである
+・repo/issue/docsを読めば解消できる曖昧さ
+・「alignment/safety的に何となく不安」という、具体的規則に結び付かない懸念
 ```
 
-### 「言われたことだけやって停止」を禁止
-
-```
-禁止:
-・依頼された1ファイルだけ直して、明らかに必要なテスト/統合/証拠取得をせず終了する
-・issue本文の最初の箇条書きだけ満たして、acceptance criteriaを読まず終了する
-・「修正しました。次はどうしますか？」と、安全な未完了作業が残っているのにユーザーへ返す
-・PR/branchを作っただけで「完了」とする（landedが必要な仕事ならmerge後の検証まで含む）
-・失敗を見つけても、ユーザーが明示していないという理由だけで放置する
-・TODO/issueに次の明確なblockerがあるのに「指示待ち」に入る
-・曖昧さを理由に即質問する。まずrepo・issue・tests・logsから解消を試みる
-```
-
-### NEXT-WORK CHECK（終了前に必ず実行）
-
-応答を終える・laneを完了扱いにする前に、最低限これを確認する。
+対応例:
 
 ```text
-1. 元の目的は本当に満たされたか？
-2. acceptance criteriaに未達はないか？
-3. 実装はあるがtest/live evidenceが無い、というgapはないか？
-4. 今の変更が依存する前提issue / integration / migrationが残っていないか？
-5. latest mainにlandしているか？（landが要求される作業の場合）
-6. 直近の観測から新しいP0/P1 correctness defectが見えていないか？
-7. WIP上限内で、次に進められるhighest-priority workはないか？
+merge権限なし
+→ branch / commit / push / PR / tests / review evidenceまで進める
+
+対象fileが別lane所有
+→ 競合しないissue、test、tooling、docs、reviewを進める
+
+tool/API unavailable
+→ read-only調査、代替tool、fixture、static review、issue化を進める
+
+仕様が少し曖昧
+→ repoの既存invariantに最も整合する可逆案を採用し、testで検証する
 ```
 
-**1つでも安全に実行できる次作業があるなら、原則としてその場で続ける。**
+### STOP DECISION MODEL
 
-### 質問して止まってよい条件
+停止判定は抽象語ではなく、以下の分類で行う。
 
-ユーザー確認が必要なのは、主に以下だけ。
+#### HARD STOP — その**具体的操作だけ**保留
+
+次の操作には明示的な現在のユーザー承認または必要な外部権限が必要。
 
 ```text
-・破壊的/不可逆な操作
-・外部公開、課金、秘密情報、credential、法的/契約的判断
-・複数の製品仕様があり、repo/issue/既存方針から選べない本当のproduct decision
-・安全な仮説検証をしてもなお解消できない情報不足
+H1 irreversible/destructive
+   world削除/reset、履歴rewrite、force-push、不可逆なuser data削除など
+
+H2 external commitment
+   公開投稿、外部への送信、課金/購入、契約・法的意思決定など
+
+H3 secret/credential boundary
+   秘密情報の表示・送信、credential利用の新規許可、権限昇格など
+
+H4 disruptive infrastructure control
+   server停止/再起動、resident hostの意図的shutdownなど、継続稼働を壊す操作
+
+H5 genuine product decision
+   repo/issue/既存方針から決められず、複数案でユーザー体験・仕様が本質的に変わる判断
+
+H6 governing-policy conflict
+   system/platform/toolの実在する上位制約に、その具体的操作が抵触する場合
 ```
 
-それ以外の曖昧さは、**最も低リスクで可逆な仮説を選び、実装/検証して証拠で修正する。**
+**HARD STOPはmission全体の停止ではない。**
+その操作を保留し、同時に可能な調査・実装・test・branch・issue・review・evidence取得を続ける。
+ユーザー確認が必要なら「何がblockedか」を1点に絞り、それ以外を先に進める。
 
-### 能動性とscope creepを区別する
-
-能動的に動くことは、無関係な機能を勝手に増やすことではない。自発的に行ってよいのは、次のどれかに直接効く作業:
+#### SOFT CONSTRAINT — 方針を調整して継続
 
 ```text
-・現在のobjective / release blockerを前進させる
+S1 scope concern
+S2 file/lane ownership conflict
+S3 partial permission/tool limitation
+S4 missing evidence
+S5 known-red baseline
+S6 uncertain implementation detail
+S7 runtimeが一時的に検証不能
+```
+
+SOFT CONSTRAINTでは止まらず、reversible / isolated / read-only / branch-basedな手段へ切り替える。
+
+### scope の定義
+
+「ユーザーが名指ししたファイル/issue」だけがscopeではない。
+次のいずれかに**直接の因果関係**がある作業はscope内として扱う。
+
+```text
+・現在objective / release blockerを前進させる
 ・P0/P1 correctness / safetyを守る
-・現在の変更に必要な依存・migration・integrationを完了する
-・acceptance evidenceを取得/改善する
-・再発する失敗をtest / invariant / toolingで固定する
-・次の作業者が同じ調査を繰り返さないよう正典を更新する
+・変更に必要なdependency / migration / integrationを完了する
+・acceptance evidenceを取得・信頼可能にする
+・再発failureをtest / invariant / toolingへ固定する
+・同じ調査の再実行を防ぐため正典を更新する
 ```
+
+直接関係のないenhancementはbacklog候補として記録し、現在objectiveをブロックしない。
+
+### 権限不足の定義
+
+「特定操作ができない」と「作業全体ができない」を分ける。
+
+```text
+write不可 → read/review/patch案/test設計/issue化を進める
+merge不可 → branch/PR/evidenceまで進める
+server操作不可 → offline/static/fixture検証を進める
+外部API不可 → local validation / mock / schema reviewを進める
+```
+
+権限不足で終了してよいのは、代替経路を調べてもobjectiveへ意味のある進捗を一切作れない場合だけ。
+
+### alignment / safety の定義
+
+安全性判断では、**実在する規則と具体的な操作**を対応付ける。
+
+```text
+優先する実在ルール:
+- system/platform/toolの上位制約
+- ユーザーの明示指示
+- root/scoped AGENTS
+- repository permissions / branch rules
+- issue acceptance / P0-P1 invariants
+```
+
+抽象的な「alignment」「safety」「best practice」を新しい停止規則として発明しない。
+実在する上位制約が特定操作をblockする場合、その制約を回避しようとせず、許可された代替作業へ移る。
+通常のrepo読取、code review、branch作成、test、docs、issue作成、内部的な設計改善は、具体的な上位制約が無い限り継続可能な作業として扱う。
+
+### NEXT-WORK CHECK
+
+laneや応答を終了扱いにする前に確認する。
+
+```text
+1. objective / acceptanceは満たされたか
+2. implementationだけ存在し、test/live evidenceが欠けていないか
+3. dependency / migration / integrationが残っていないか
+4. landが必要な作業はlatest mainへ到達したか
+5. post-merge / reload / acceptance gateは確認したか
+6. 新しいP0/P1 defectが見えていないか
+7. WIP上限内で進められるhigher-priority workが無いか
+8. HARD STOPがある場合、その操作以外の安全な作業を完了したか
+```
+
+実行可能な次作業がある場合は次ループへ進む。
 
 ### 完了の定義
 
-`code written` は完了ではない。仕事に応じて必要な範囲で、次まで揃って初めて完了候補:
+`code written`だけでは完了判定にならない。作業の性質に応じて必要な範囲で次を揃える。
 
 ```text
 implemented
-+ tests/no-new-regression
-+ required live/isolated evidence
++ tests / no-new-regression
++ required live or isolated evidence
 + issue acceptance checked
 + branch pushed
 + landed to main when required
 + post-merge/reload gate checked
 + remaining gap explicitly recorded
 ```
-
-「完了した」と言う前に、元のobjectiveを再読する。
 
 # AGENTS.md — mc-ai グローバル指示（全エージェント必読）
 
@@ -111,70 +198,61 @@ implemented
 
 ## 0. 標準指令（ユーザー指示・恒久）
 1. **最終目標は M4（Ender Dragon 討伐）**。M2（鉄器時代）は通過点。
-2. **ユーザーの発言を待たない。指示待ちをしない。** やることが無ければ**自分で仕事を考えて着手する**。
-3. 判断に迷ったら最初に「**方法論 / evidence integrity が壊れていないか**」を確認する。acceptanceの意味が壊れている、証拠が汚染されている、正典が矛盾している場合は **P0 (#63)** として先に直す。次に「**P1 durability / actuation safety を壊さない**」、次に「将来の二重実装を避ける」、次に「M4への距離を縮める」を基準にする。
-4. 進捗は必ず一次証拠（ログ行・在庫・コミット）で残す。主観や推測で「できた」と言わない。ただし**ログ名やall-time counterだけを意味論の証拠として扱わない**。
-5. 作業単位ごとに小さくコミット＆push（秘密スキャン必須）。ただし commit 頻度そのものを productivity KPI にしない。
-6. 人間は基本不在。危険操作（サーバー停止・world削除・履歴改変・force push）はしない。
-7. 正典の優先順位は明示的に次とする。下位文書は上位を暗黙に supersede してはならない。
+2. ユーザーの追加発言を通常の待機条件にしない。やることが無いように見える時は、objective / open issues / evidence gapsから次作業を発見する。
+3. 判断順は **P0 methodology/evidence integrity (#63) → P1 durability/actuation safety → 二重実装回避 → M4への距離**。
+4. 進捗は一次証拠（ログ行・在庫・コミット等）で残す。ログ名やall-time counterだけから意味論を推定しない。
+5. 作業単位ごとに小さくcommit & pushし、秘密scanを行う。commit頻度自体はproductivity KPIにしない。
+6. H1-H6のHARD STOP操作は具体的操作単位で保留し、残りの安全な作業を継続する。
+7. 正典の優先順位:
 
-```
+```text
 ユーザーの明示指示
 > root AGENTS.md
 > nearest scoped AGENTS.md
 > TODO.md / 現在のoperational queue
-> PLANNERS.md / RESIDENT-MODE.md / ARCHITECTURE.md などの設計・証拠文書
+> PLANNERS.md / RESIDENT-MODE.md / ARCHITECTURE.md など設計・証拠文書
 > historical / superseded sections
 ```
 
 ### 0.1 P0 methodology / evidence integrity（Issue #63）
 
-**これは機能開発の前提条件。** evidence system が壊れている状態で `fixed` / `accepted` / `authority-ready` / `SOTA-ready` 等を宣言しない。
+**これは機能開発の前提条件。** evidence systemが曖昧な状態では、強いclaimのCOMPLIANCEをPASSにしない。
 
-重要な判定は必ず分離して扱う:
+重要な判定を分離する:
 
-```
+```text
 POLICY       = 本来どうあるべきか（AGENTS / issue acceptance）
 IMPLEMENTED  = 現在のコードが実際に何をするか
-OBSERVED     = runtime / log / test で何が観測されたか
-COMPLIANCE   = POLICY に対して PASS / FAIL / UNKNOWN のどれか
+OBSERVED     = runtime / log / testで何が観測されたか
+COMPLIANCE   = POLICYに対して PASS / FAIL / UNKNOWN
 ```
 
-禁止:
+Evidence解釈ルール:
 
-```
-・marker 名が BETA_SHADOW だから shadow-only だった、と推論する
-・all-time buddy.log counter を単一runのacceptanceとして扱う
-・GitHub issueがopenなのに「closed」と書く
-・unit test greenだけでlive acceptance済みと扱う
-・offline replayだけでcounterfactual closed-loop性能を証明したと扱う
-・既知redを無言で無視して「full green」と書く
+```text
+marker名だけではsemantic complianceを確定しない
+all-time shared log counterはdiagnostic evidenceとして扱う
+GitHub state / implementation / test / live acceptance / closure decisionを別々に記録する
+unit greenはlive acceptanceの代替ではない
+offline replayはcounterfactual closed-loop proofではない
+known-redはpinned baselineと比較し、no-new-regressionを証明する
 ```
 
-Evidence class は少なくとも区別する:
+Evidence class:
 
-```
+```text
 LIVE      = embodied/runtime failure or observation
 STATIC    = code/invariant inspection
 ARCH      = architecture/ownership/scalability inconsistency
 RESEARCH  = hypothesis to test
 ```
 
-Test / issue state も分離する:
+`tools/replay.mjs` (#23) は calibration / disagreement / safety screening 用。
+#24 authority昇格には isolated/live A/B 等のclosed-loop evidenceを加える。
 
-```
-GitHub state
-implementation state
-unit/integration test state
-live acceptance state
-closure decision
-```
+Acceptance evidenceは可能な限りrun-scopedにする。run artifactには可能な範囲で以下を残す:
 
-`tools/replay.mjs` (#23) は **calibration / disagreement / safety screening 用**。recorded trajectory は現在policyが作った未来なので、別policyのclosed-loop counterfactual superiorityを単独では証明しない。#24 authority昇格には isolated/live A/B 等のclosed-loop evidenceが必要。
-
-Acceptance evidence は可能な限り run-scoped にする。shared `buddy.log` は診断用であり、commit/config/world/runが混ざったall-time countだけでacceptanceを出さない。run artifactには可能な範囲で以下を残す:
-
-```
+```text
 runId / gitCommit / dirtyTree / generationHash
 worldKey / worldEpoch / seed(if known)
 server version / difficulty
@@ -185,240 +263,248 @@ start/end timestamps
 acceptance result
 ```
 
-Known-red test が存在する場合は、pinned baseline と比較して **no new regression** を証明する。既知失敗を黙って許容しない。
-
 ## 1. システム概要
-```
+
+```text
 Mineflayer   = メカニクス実行（連続モーター）
 Jev          = 接地された強い局所判断器・唯一のAction選択権限
 Mercury      = 例外駆動の上位意図/Option/plan repair
 Option/Skill = 上位意図を実行可能な時間的抽象へコンパイルする層
 Code         = 安全性・物理的真実・事前条件・成功述語・capability dependency
-常駐ホスト   = 接続保持＋世代ホットリロード＋制御ソケット＋authoritative resident state＋actuation lease
+常駐ホスト   = 接続保持＋世代hot reload＋control socket＋authoritative resident state＋actuation lease
 ```
 
 **設計の本命: Issue #11 Grounded Options**
-```
+
+```text
 Jev π = grounded action/skill Choice
 Jev β = abandon_option probability
 Option initiation/success = deterministic code
 Mercury = sparse Option/plan repair
 ```
 
-重要な移行原則:
+移行原則:
 
 > **early schema/control-surface migration, late authority migration**
 
-#11を後回しにしてM3/M4機能を旧Goal表現へ大量追加しない。先にOption/Skillの契約を作り、既存のGoalQueue/Guard/Executorをその下で再利用する。
+M3/M4の新規能力はOption/Skill境界の上へ積み、既存GoalQueue/Guard/Executorを再利用する。
 
-## 2. 優先順（この順で前へ進める）
-```
-0. P0 methodology / evidence integrity (#63) はグローバルgate
-   acceptance semanticsの誤り、shared-log汚染、正典矛盾、issue state誤記、
-   replayの過大解釈等が見つかった場合、強いclaimやauthority昇格より先に直す。
+## 2. 優先順
 
-1. P1 safety/durability は常時ブロッカー
+```text
+0. P0 methodology / evidence integrity (#63)
+   acceptance semantics、run isolation、正典、issue state、replay semanticsを信頼可能にする
+
+1. P1 safety/durability
    #5 atomic state / #13 listener leak / #28 disconnect lease / #38 nested actuation bypass /
-   #40 authoritative snapshot / #48 stale proposal / #49 rollback ownership など。
-   壊れている場合はfeature workより先に直す。
+   #40 authoritative snapshot / #48 stale proposal / #49 rollback ownership
 
-2. #11 Grounded Options の骨格を前倒し
-   #21 OptionSpec + PlannedGoal->Option compiler
-   #20 SkillCandidate contract
-   #14 known-resource coordinates + #29 strategy grounding
-   ※ GoalQueue / Guard / Executor / resident は捨てない。
+2. #11 Grounded Options skeleton
+   #21 OptionSpec / compiler
+   #20 SkillCandidate
+   #14 known-resource coordinates
+   #29 executable strategy grounding
+   #50 #52 #54 #55 #56 #57 #59 correctness
 
-3. #11 shadow/評価基盤
-   #22 abandon_option β shadow
-   #32 raw Boolean probability保持
-   #36 causal/provenance IDs
-   #23 replay A/B harness（promotion screen。closed-loop proofではない）
+3. shadow/evaluation
+   #22 β shadow / #32 raw probability / #36 provenance IDs / #23 replay screen
 
-4. 現行Mercury correctnessを並行で最小修正
-   #15 cache replay / #30 patch tail / #18 retry accounting / #16 world scope / #19 explicit operation
-   旧plannerを大規模拡張しない。
+4. Mercury correctness
+   #15 #30 #18 #16/#17/#33 #19
 
 5. #24 β termination controller
-   replay/calibrationだけではauthorityを与えない。closed-loop evidence + hysteresis/corroboration/cooldown必須。
+   closed-loop evidence + hysteresis/corroboration/cooldown後にauthority
 
-6. M2を新しいOption境界の上で完走
+6. M2完走
    furnace -> charcoal -> raw_iron -> iron_ingot×3 -> iron_pickaxe
 
-7. #35 semantic planner重複を整理
-   #11が実測で勝った後だけ Advisor/PlannerBrain/Jev/Mercury の重複責務を削る。
-
+7. #35 semantic planner consolidation
 8. #41 predicate-based capability graph
-   M3/M4の非item objectiveを追加する前に依存関係/成功述語の表現を一般化。
-
 9. M3/M4
-   ダイヤ -> ネザー -> ブレイズ/パール -> エンダーアイ -> 要塞 -> End -> Dragon
 ```
 
-### #11前倒しで「やらない」こと
-```
-・いきなりβにreplan authorityを与えない
-・今までのM1/M2 mechanicsを全面書き直さない
-・GoalQueueを削除しない（execution ledgerとして残す）
-・Guard / VERIFYをモデル権限へ移さない
-・現在の多質問Jev diagnosticsをすぐ削除しない（shadow比較に使う）
-・M3/M4の新機能をfake targetItemや自然言語strategyだけで増やさない
+### #11移行で維持するinvariants
+
+```text
+β authorityは#24のpromotion条件を満たすまでshadowとして扱う
+既存M1/M2 mechanicsは新境界から再利用する
+GoalQueueはexecution ledger/historyとして維持する
+Guard / VERIFY / hard world truthはdeterministic codeが所有する
+現行Jev diagnosticsはshadow比較に利用する
+M3/M4 goalはtyped Option/capability semanticsで表現する
 ```
 
 ## 3. 現在の重要状態（2026-09-18）
-```
-#63 methodology/evidence integrity をP0へ昇格。DEVELOPMENT-METHOD.md監査で正典順・evidence semantics・replay評価・shared log等の問題を確認。
-#22 β shadow はGitHub上でreopen。marker名ではなく実authority semanticsで判定する。
-#12 LADDER_PREREQ 修正は main に landed（3866d3d）。live acceptanceは継続確認する。
-movement root cause #7/#8/#9 の修正も landed。live挙動はresident安定後に再検証する。
-Mercury System2 は live。現行 correctness issue #15/#30/#18 等は残る。
-#13 listener leak はopen。listenerLeak=falseの観測があってもclosure acceptanceとは分ける。
-actuation lease はあるが nested capability bypass が残る (#38)。
-#48 stale ledger proposal / #49 rollback ownership はP1 substrate correctness。
+
+```text
+#63 methodology/evidence integrity = P0
+#22 β shadow = reopen。marker名ではなくauthority semanticsで判定
+#12 LADDER_PREREQ fix landed。live acceptance継続
+movement #7/#8/#9 fix landed。resident安定後にlive再検証
+Mercury System2 live。#15/#30/#18等correctness issueあり
+#13 listener leak open。healthy observationとclosure acceptanceを分離
+#38 nested actuation bypassあり
+#48 stale ledger proposal / #49 rollback ownership = P1
 ```
 
-## 4. 運用手順（必ず守る）
-### 4.0-A 並行レーンの分担規則（衝突を構造的に防ぐ）
-```
-・実装レーン全体のWIP上限は原則 **3本**。
-・ホスト層（buddy-driver/agent-runner.mts, resident-types.ts, package.json）を触るレーンは
-  **同時に1本まで**。同系統の変更が並行すると必ず衝突する（実例: #26/#34 と #27/#28 が
-  agent-runner.mts と package.json で衝突し、merge を abort する事態になった）
-・ready-to-integrate branch が2本以上溜まっている時は、原則として新しい実装laneを増やさず先に統合する。
-・それ以外の領域（jev-agent/src/*, tools/, docs）は上限内で並行可
-・複数レーンが同領域に触れた場合は、**worktree 内でマージして衝突を解消**し、
-  解消済みブランチを報告してから 1本ずつ main へ取り込む（mainツリーでは絶対に merge/cherry-pick しない）
-・main ツリーは常に「ビルド可能・クリーン」を保つ。壊れた状態をホストに読ませない
-・「最後のcommitから何分」を成功指標にしない。meaningful verified progress / blocked time / WIP age / rework を優先する
+## 4. 運用手順
+
+### 4.0-A 並行lane
+
+```text
+implementation WIP上限 = 原則3
+host layer lane = 同時1
+ready-to-integrate >= 2 → integrationを先に処理
+その他jev-agent/src, tools, docs = WIP上限内で並行可
+同領域の競合 = worktree内で統合・解消後、1本ずつmainへland
+main tree = buildable + cleanを維持
+productivity = meaningful verified progress / blocked time / WIP age / reworkで見る
 ```
 
-### 4.0 ブランチ運用（競合防止・必須）
-```
-・サブエージェント／並行タスクは **必ず専用ブランチを切って作業する**（例: `task/issue-12-precondition-chain`）
-・★共有ツリーで `git checkout` しない。**`git worktree add` で別ディレクトリを切る**:
-    cd /home/s0u7a/mc-ai
-    git fetch origin
-    git worktree add /tmp/opencode/wt-<task> -b task/<name> origin/main
-    # 作業後: git -C /tmp/opencode/wt-<task> add -A && git -C ... commit -m "..." && git -C ... push -u origin task/<name>
-    # 終了時: git worktree remove /tmp/opencode/wt-<task>
-  理由: 常駐ホストは**作業ツリーからバンドルを生成**してホットリロードするため、
-        共有ツリーを checkout で切り替えると稼働中のエージェントが別ブランチのコードで動き出し、他のタスクの編集も壊れる
-  （実例: #21 は /tmp/opencode/wt21 を使用。これが正しい）
-・main へ直接コミットするのは「単一の作業者しか触っていない」ことが明確な場合のみ（例: tools/, docs のみ）
-・★**ブランチ上の修正は main にマージされるまで稼働中エージェントに反映されない**
-  （常駐ホストは main ツリーからバンドルを生成するため）。したがって修正の「着地」＝ マージまでを含む。
-  マージは一度に1本ずつ、他タスクが未コミットのファイルを持つ間は行わない。
-  マージ手順: `git worktree` 側で push → main ツリーで `git fetch && git merge --no-ff origin/task/<name> && git push`
-  → 直後に `RELOAD ok=true` と該当ゲート（tools/verify-*.mjs）を確認する
-・作業完了時に main へ取り込む（`git checkout main && git pull --rebase && git merge --no-ff <branch> && git push`）。
-  force push・履歴改変は禁止
-・**作業ツリーに他タスクの未コミット変更（WIP）があるときは rebase/pull しない**
-  （ホットリロードは作業ツリーからバンドルを作るため、stash や rebase は稼働中のエージェントを壊す）
-  その場合は自分のコミットを退避ブランチへ push しておき、WIP がコミットされた後に main へ取り込む
-  （実例: `git push origin HEAD:refs/heads/tools/verify-mercury`）
-・同じファイルを2つのタスクが編集しないよう、着手前に担当ファイルを宣言する
-  （直近の分担: #12/#11=jev-agent/src/{jev,controller,policy,scheduler,system2}.ts + buddy-driver/{generation-entry,planner}.ts
-   ／ movement=executor,candidates,state ／ Mercury/CI=PRブランチ `sol/system2-ci-mercury` ／ tools・docs=誰でも）
-```
-```
-・健全性の一括確認:      node tools/buddy-status.mjs        （--json で機械可読）
-・常駐ホストは単一:      pgrep は bash ラッパーに誤マッチするので tools の判定を使う。kill は pid 指定
-・デタッチ起動:          cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &
-・サーバー:              127.0.0.1:25565 (Leaf 1.21.11, offline, peaceful)。停止時は
-                         -DPaper.IgnoreJavaVersion=true を付けて起動（Java は 21.0.13-ea のため必須）
-・制御ソケット:          data/resident/control.sock（0600, JSON Lines）
-   照会のみ: report / status / goal / milestone / acceptance
-   実行可:   freeze / resume / reload / gc / leakcheck / simdeath / quit
-   注意:     goal/milestone は注入不可（照会だけ）。worldreset は実装にあるが破壊的なので使わない
-   契約:     HOST↔generation の契約バージョンは RESIDENT-MODE.md §4-A が正典（数値を再掲しない）。
-            doc/code の不一致は buddy-driver の `npm run contract-docs-check` が FAIL で検出する。
-            不一致は hot reload では解消せず、ホスト再起動が必要（`RELOAD_REJECTED ... mismatch` が観測される）。
-・Bot名:                 AI_Buddy は常駐が占有。検証は AI_M1* / AI_M2* 等を使う。s0u7a は人間用
-・秘密:                  /home/s0u7a/.config/kimaki-secrets/ 配下は絶対に出力しない
+host layer:
+
+```text
+buddy-driver/agent-runner.mts
+buddy-driver/resident-types.ts
+buddy-driver/package.json
 ```
 
-## 5. 完了の定義（M4までの到達点）
-```
-M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone（検証済み・維持）
-M2: furnace -> charcoal -> iron_ore -> iron_ingot×3 -> iron_pickaxe（在庫で証明）
-M3: ダイヤ入手 -> ダイヤ装備 -> ネザー到達 -> ブレイズロッド・エンダーパール確保
-M4: エンダーアイ生成 -> 要塞発見 -> ジ・エンド到達 -> ドラゴン討伐
-```
-各段で「一次ログ＋在庫/述語」を証拠として残し、`ARCHITECTURE.md` と issue を更新する。ただし一次ログ自体の意味論が未検証ならCOMPLIANCEはUNKNOWNとする。
+### 4.0 ブランチ運用
 
-## 6. Issueキュー（アーキ前倒し版）
+```bash
+cd /home/s0u7a/mc-ai
+git fetch origin
+git worktree add /tmp/opencode/wt-<task> -b task/<name> origin/main
 
-### 0. methodology / evidence integrity — グローバルP0
+# lane finish
+git -C /tmp/opencode/wt-<task> add -A
+git -C /tmp/opencode/wt-<task> commit -m "..."
+git -C /tmp/opencode/wt-<task> push -u origin task/<name>
+
+# integration
+git fetch
+git merge --no-ff origin/task/<name>
+git push
+
+# cleanup
+git worktree remove /tmp/opencode/wt-<task>
 ```
+
+運用invariants:
+
+```text
+shared main treeのbranchを切替えて作業せず、worktreeを使う
+branch fixのlanded判定 = mainへmerge + push + post-merge gate
+他taskのWIPがmain treeにある時は、そのtreeをrebase/pullで動かさない
+同じfileを複数laneが触る場合はownershipを調整する
+HARD STOPに該当するintegration操作だけを保留し、review/test等は続ける
+```
+
+健全性/host:
+
+```text
+status: node tools/buddy-status.mjs  (--json available)
+resident host: single instance
+start: cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &
+server: 127.0.0.1:25565 (Leaf 1.21.11, offline, peaceful)
+Java: 21.0.13-ea; server startには -DPaper.IgnoreJavaVersion=true
+control socket: data/resident/control.sock (0600, JSON Lines)
+query: report / status / goal / milestone / acceptance
+reversible resident controls: freeze / resume / reload / gc / leakcheck / soft simdeath
+bot names: AI_Buddy=resident, AI_M1*/AI_M2*=verification, s0u7a=human
+secret boundary: /home/s0u7a/.config/kimaki-secrets/
+```
+
+`worldreset`, server stop/restart, intentional resident shutdown等はH1/H4として扱う。
+HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
+`npm run contract-docs-check` がdoc/code mismatchを検出する。
+
+## 5. 完了の定義（M4）
+
+```text
+M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone
+M2: furnace -> charcoal -> iron_ore -> iron_ingot×3 -> iron_pickaxe
+M3: diamond -> diamond gear -> Nether -> blaze rods / ender pearls
+M4: eyes -> stronghold -> End -> dragon
+```
+
+各段で一次ログ＋inventory/predicateをrun-scoped evidenceとして残し、ARCHITECTURE.mdとissueを更新する。
+意味論が未検証の証拠はCOMPLIANCE=UNKNOWNとして扱う。
+
+## 6. Issue queue
+
+### 0. P0 methodology / evidence integrity
+```text
 #63 authority hierarchy / evidence taxonomy / run isolation / replay semantics / release scope
 ```
 
-### A. substrate correctness — P1
-```
-#5  speculative generation durable mutation
+### A. P1 substrate correctness
+```text
+#5 speculative generation durable mutation
 #13 listener leak
 #28 disconnect lease revoke
 #38 nested actuation capability bypass
-#40 authoritative AgentSnapshot / state classes（landed/closedでも派生P1は別issueで追う）
+#40 authoritative AgentSnapshot/state classes
 #48 stale ledger proposal revision bypass
 #49 reload rollback ownership mismatch
 ```
 
-### B. #11 architecture skeleton — 新機能より先
-```
-#21 OptionSpec / deterministic predicates / PlannedGoal compiler
-#20 grounded SkillCandidate contract
-#14 known resource coordinates
-#29 strategy -> executable skill grounding
+### B. #11 architecture skeleton/correctness
+```text
+#21 OptionSpec/compiler
+#20 SkillCandidate
+#14 known resources
+#29 grounding
 #50 blocked Option execution
-#52 Option template/instance identity
-#54 mechanics/recipe truth source
-#55 protected prerequisite/core goals
-#56 OptionSpec -> Jev integration
-#57 typed predicate round-trip
-#59 unknown health fail-open
+#52 Option instance identity
+#54 mechanics/recipe truth
+#55 prerequisite/core-goal preservation
+#56 OptionSpec -> Jev
+#57 predicate round-trip
+#59 unknown-health semantics
 ```
 
 ### C. shadow + evaluation
-```
+```text
 #22 β shadow
-#32 raw Jev Boolean probability
-#36 end-to-end decision provenance IDs
-#23 replay A/B harness（screen。closed-loop causal proofではない）
+#32 raw Boolean probability
+#36 decision provenance IDs
+#23 replay screen
 ```
 
-### D. current Mercury correctness — 並行・最小修正
-```
-#15 cache hit plan replay
-#30 patch/replace tail preservation
+### D. Mercury correctness
+```text
+#15 cache replay
+#30 patch/replace tail
 #18 retry accounting
-#16/#17/#33 cache world/schema namespacing
-#19 explicit operation/capability id
+#16/#17/#33 cache namespaces
+#19 typed operation/capability
 ```
 
-### E. authority / consolidation
-```
-#24 β meta-controller（#63 evidence contract + closed-loop evidenceを満たしてから）
-#35 semantic planner consolidation（#11が勝った後）
-#41 predicate-based capability graph
+### E. authority/consolidation
+```text
+#24 β meta-controller
+#35 semantic planner consolidation
+#41 capability graph
 ```
 
-### F. その他resident/world correctness
-```
-#25 worldEpoch switch lifecycle
+### F. resident/world correctness
+```text
+#25 worldEpoch lifecycle
 #27 reconnect storm
 #31 stale station memory
 #26/#34 simdeath semantics/telemetry
 #39 explicit JevController integration API
 ```
 
-## 7. M4設定ブロッカー
-`difficulty=peaceful` では blaze / enderman farming が成立せず、eye_of_ender 経路が止まる。
-M3dへ入る前に明示的にdifficulty変更方針を決め、証拠を残す。それまではresident/Option architectureの検証とM2を優先し、mob由来の失敗とdurabilityバグを混同しない。
+## 7. M4設定blocker
+
+現在difficulty=peaceful。blaze / enderman由来resourceが必要になるM3d前にdifficulty変更をproduct decisionとして明示し、変更runを証拠化する。
+それまではresident/Option/M2の検証を進める。
 
 ## 8. 設計判定ルール
-新しい機能を追加する前に「どの層の責務か」を決める。
 
-```
+```text
 Mission predicate / dependency -> capability graph
 時間的にまとまった行動        -> Option / Skill
 瞬間的な候補選択              -> Jev π
@@ -428,4 +514,4 @@ Option継続可否のsemantic判断  -> Jev β + deterministic meta-controller
 接続 / durable authority      -> HOST
 ```
 
-**2つ以上のsemantic layerが同じ問いに答え始めたら設計臭。**
+同じsemantic questionを複数layerが所有し始めた場合は、責務重複として整理対象にする。
