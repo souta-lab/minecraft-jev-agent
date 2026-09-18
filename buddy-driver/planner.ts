@@ -936,7 +936,6 @@ export function ladderFloorGoals(
   return { rungId: resume.rungId, rungIndex: resume.rungIndex, goals: ladder.goals, supplied }
 }
 
-
 // ---------------------------------------------------------------------------
 // candidate horizon plans (the bounded options the LLM chooses between)
 // ---------------------------------------------------------------------------
