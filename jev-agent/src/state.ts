@@ -21,6 +21,34 @@ export type Vec3Json = {
 }
 
 /**
+ * Where a perceived station entry came from:
+ *
+ *  - `sensed`     the live block scan saw the station this tick inside the
+ *                 near-field scan radius. Authoritative: a sensed entry also
+ *                 replaces any remembered record for the same cell.
+ *  - `remembered` a durable, host-validated station record (WorldMemory ->
+ *                 `generation-entry.ts` injection -> controller options) merged
+ *                 into perception. Station validation uses
+ *                 `STATION_VALIDATION_RADIUS = 48` there, so a validated
+ *                 station can be remembered from much farther than the bot can
+ *                 see. It is real, but NOT proof the bot can see or reach it
+ *                 right now.
+ */
+export type StationSource = 'sensed' | 'remembered'
+
+/** A perceived station: coordinates plus provenance (see `StationSource`). */
+export type StationEntry = Vec3Json & { source: StationSource }
+
+/**
+ * True when the bot's own block scan saw this station this tick. In-place
+ * preconditions (craft at a table, load a furnace) must use the sensed list
+ * only: a remembered coordinate must never satisfy an in-reach requirement.
+ */
+export function isSensedStation(station: StationEntry): boolean {
+  return station.source === 'sensed'
+}
+
+/**
  * A resource whose COORDINATE is remembered durably (issue #43: known-resource
  * retrieval). `name` is the block name at the remembered cell, `kind` the broad
  * class used to decide whether a retrieval is a surface trip (log/tree) or an
@@ -269,10 +297,10 @@ export type WorldState = {
   entities: EntityState[]
   blocks: BlockState[]
   terrain: { standable: Vec3Json[] }
-  /** placed crafting_table stations in sensor range, nearest first */
-  craftingTables: Vec3Json[]
-  /** placed furnace stations in sensor range, nearest first (M2 smelting) */
-  furnaces?: Vec3Json[]
+  /** placed crafting_table stations: sensed near-field first, then remembered */
+  craftingTables: StationEntry[]
+  /** placed furnace stations: sensed near-field first, then remembered (M2 smelting) */
+  furnaces?: StationEntry[]
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
@@ -322,6 +350,16 @@ export interface SensorInput {
   focusItem?: string | null
   recentEvents: string[]
   signals: AgentSignals
+  /**
+   * Durable, host-validated station records (WorldMemory -> generation-entry
+   * injection -> controller options). Merged into `craftingTables`/`furnaces`
+   * as `source: 'remembered'` entries, independent of the transient
+   * unreachable-resource filter the controller applies to
+   * `signals.knownResources`: "I remember it" is perception truth even while
+   * walking there is blocked. Falls back to `signals.knownResources` when
+   * omitted.
+   */
+  rememberedStations?: readonly KnownResource[]
 }
 
 const EYE_HEIGHT = 1.62
@@ -779,19 +817,75 @@ function buildBlocks(bot: Bot, options: SensorOptions, self: SelfState, focusIte
   return [...logs, ...stones, ...buried, ...ores, ...hazards]
 }
 
-function buildStations(bot: Bot, options: SensorOptions, self: SelfState, names: ReadonlySet<string>): Vec3Json[] {
-  const positions = bot.findBlocks({
-    matching: (block) => names.has(block.name),
-    maxDistance: Math.max(16, options.reach + 8),
-    count: 8,
-  })
-  return positions
-    .map((position) => vecJson(position))
-    .sort((a, b) => distance(a, self.position) - distance(b, self.position))
+/**
+ * Max SENSED stations per kind kept from the near-field block scan.
+ */
+export const SENSED_STATION_CAP = 8
+
+/**
+ * Max REMEMBERED stations per kind merged from the host's durable memory. This
+ * is a safety bound against an unbounded host list, not a filter: the host
+ * keeps only validated, selectable stations (measured live: 14 tables + 3
+ * furnaces), far below this bound, so a validated station is never silently
+ * dropped. Raise it if the durable station count can approach it.
+ */
+export const REMEMBERED_STATION_CAP = 256
+
+function stationCellKey(position: Vec3Json): string {
+  return `${position.x},${position.y},${position.z}`
 }
 
-function buildFurnaces(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
-  return buildStations(bot, options, self, FURNACE_STATIONS)
+function rememberedStationPositions(
+  remembered: readonly KnownResource[],
+  names: ReadonlySet<string>,
+): Vec3Json[] {
+  const out: Vec3Json[] = []
+  for (const resource of remembered) {
+    if (resource.kind !== 'station') continue
+    if (!names.has(resource.name)) continue
+    out.push(resource.position)
+  }
+  return out
+}
+
+/**
+ * Perceived stations of one kind. The live scan stays near-field (16 blocks):
+ * it answers "can I see it now", and `isSensedStation` is what in-place
+ * preconditions consume. Durable, host-validated records (validation radius 48
+ * in `generation-entry.ts`) are merged in as `remembered` so a known station is
+ * never invisible just because it is beyond the scan radius. Sensed entries are
+ * authoritative: a remembered duplicate of a sensed cell is dropped.
+ */
+function buildStations(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  names: ReadonlySet<string>,
+  remembered: readonly KnownResource[],
+): StationEntry[] {
+  const sensed: StationEntry[] = bot
+    .findBlocks({
+      matching: (block) => names.has(block.name),
+      maxDistance: Math.max(16, options.reach + 8),
+      count: SENSED_STATION_CAP,
+    })
+    .map((position) => ({ ...vecJson(position), source: 'sensed' as const }))
+    .sort((a, b) => distance(a, self.position) - distance(b, self.position))
+  const sensedCells = new Set(sensed.map((station) => stationCellKey(station)))
+  const rememberedEntries: StationEntry[] = rememberedStationPositions(remembered, names)
+    .filter((position) => !sensedCells.has(stationCellKey(position)))
+    .map((position) => ({ ...position, source: 'remembered' as const }))
+    .sort((a, b) => distance(a, self.position) - distance(b, self.position))
+  return [...sensed, ...rememberedEntries.slice(0, REMEMBERED_STATION_CAP)]
+}
+
+function buildFurnaces(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  remembered: readonly KnownResource[],
+): StationEntry[] {
+  return buildStations(bot, options, self, FURNACE_STATIONS, remembered)
 }
 
 export const PROBE_HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus'])
@@ -1099,6 +1193,7 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
  */
 export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
   const self = buildSelf(bot)
+  const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   return {
     schemaVersion: 1,
     tick: input.tick,
@@ -1108,8 +1203,8 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     entities: buildEntities(bot, options, self.position),
     blocks: buildBlocks(bot, options, self, input.focusItem ?? null),
     terrain: { standable: buildTerrain(bot, options, self) },
-    craftingTables: buildStations(bot, options, self, CRAFT_STATIONS),
-    furnaces: buildFurnaces(bot, options, self),
+    craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
+    furnaces: buildFurnaces(bot, options, self, rememberedStations),
     placementSpots: buildPlacementSpots(bot, options, self),
     descent: buildDescent(bot, options, self),
     stepCuts: buildStepCuts(bot, options, self),

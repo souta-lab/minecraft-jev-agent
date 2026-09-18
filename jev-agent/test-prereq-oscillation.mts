@@ -23,7 +23,7 @@ import {
 } from './src/prereqOption.ts'
 import { evaluateOscillation, positionKey } from './src/oscillation.ts'
 import type { OscillationState } from './src/oscillation.ts'
-import type { AgentSignals, KnownResource, WorldState } from './src/state.ts'
+import type { AgentSignals, KnownResource, StationEntry, WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -39,7 +39,7 @@ const STATION = 'b29_61_35'
 
 function world(overrides: {
   inventory: Record<string, number>
-  furnaces?: { x: number; y: number; z: number }[]
+  furnaces?: StationEntry[]
   signals?: Partial<AgentSignals>
 }): WorldState {
   return {
@@ -146,7 +146,7 @@ addCase('(a) held furnace selects place_held and logs the inventory-first detail
 addCase('(a) the next decision cycle after the placement emits FURNACE_READY source=held', () => {
   const placed = world({
     inventory: { raw_iron: 8, coal: 7, cobblestone: 112 },
-    furnaces: [{ x: 40, y: 10, z: 34 }],
+    furnaces: [{ x: 40, y: 10, z: 34, source: 'sensed' }],
     signals: { heldFurnacePlacedAt: 'b40_10_34' },
   })
   const smelt = generateCandidates(placed, defaultCandidateOptions).find((candidate) => candidate.kind === 'SMELT')
@@ -198,7 +198,7 @@ addCase('(b) abandoning the world path makes the next option run', () => {
     inventory: { cobblestone: 119, raw_iron: 8, coal: 7 },
     signals: { knownResources: [{ name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } }] },
   })
-  state.craftingTables = [{ x: 39, y: 10, z: 34 }]
+  state.craftingTables = [{ x: 39, y: 10, z: 34, source: 'sensed' }]
   const input = furnacePrereqInputFromState(state, defaultCandidateOptions)
   const decision = planPrereqOptions(input)
   const next = selectPrereqPath(decision, new Set(['use_known_station']))

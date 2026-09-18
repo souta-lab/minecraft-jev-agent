@@ -9,7 +9,7 @@ import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
 import { enforceSmeltPriority, furnacePrereqGoals, orderPlanGoalsByReadiness } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
+import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StationEntry, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 
 interface Case {
   name: string
@@ -78,7 +78,7 @@ function worldState(overrides: {
   inventory?: InventoryState
   signals?: AgentSignals
   goal?: GoalState
-  furnaces?: Vec3Json[]
+  furnaces?: StationEntry[]
   placementSpots?: Vec3Json[]
 }): WorldState {
   return {
@@ -170,7 +170,7 @@ addCase('sensed furnace + raw_iron + coal yields SMELT with input/fuel counts', 
   const state = worldState({
     position: { x: 39, y: 65, z: 34 },
     inventory: inventory({ raw_iron: 8, coal: 7 }),
-    furnaces: [{ x: 40, y: 65, z: 34 }],
+    furnaces: [{ x: 40, y: 65, z: 34, source: 'sensed' }],
   })
   const candidate = smeltCandidate(generateCandidates(state, defaultCandidateOptions))
   const pass =
@@ -186,7 +186,7 @@ addCase('any held fuel is accepted: logs/planks satisfy the fuel need', () => {
   const state = worldState({
     position: { x: 39, y: 65, z: 34 },
     inventory: inventory({ raw_iron: 3, oak_planks: 2, oak_log: 1 }),
-    furnaces: [{ x: 40, y: 65, z: 34 }],
+    furnaces: [{ x: 40, y: 65, z: 34, source: 'sensed' }],
   })
   const candidate = smeltCandidate(generateCandidates(state, defaultCandidateOptions))
   const pass = candidate !== undefined && (candidate.meta.fuelItem === 'oak_planks' || candidate.meta.fuelItem === 'oak_log')

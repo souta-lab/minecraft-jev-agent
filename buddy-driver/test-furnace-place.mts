@@ -26,7 +26,7 @@ import {
   prerequisiteProtection,
   shouldAdoptAbandon,
 } from '../jev-agent/src/placementGuard.ts'
-import type { AgentSignals, BlockState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
+import type { AgentSignals, BlockState, GoalState, InventoryState, SelfState, StationEntry, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 
 interface Case {
   name: string
@@ -91,10 +91,10 @@ function smeltGoal(): GoalState {
 function worldState(overrides: {
   inventory?: InventoryState
   signals?: AgentSignals
-  furnaces?: Vec3Json[]
+  furnaces?: StationEntry[]
   placementSpots?: Vec3Json[]
   position?: Vec3Json
-  craftingTables?: Vec3Json[]
+  craftingTables?: StationEntry[]
   /**
    * M2 craft-table regression: override the active subgoal so the same fixture
    * drives a `craft` goal instead of the default smelt.
@@ -510,7 +510,7 @@ addCase('fixture: protected PLACE leads to a SMELT candidate and SMELT_DONE', as
     return { pass: false, detail: `place=${place?.id ?? 'none'} adopt=${guard.adopt}` }
   }
 
-  const afterPlace = worldState({ inventory: inventory({ raw_iron: 3, coal: 1 }), furnaces: [spot], placementSpots: [spot] })
+  const afterPlace = worldState({ inventory: inventory({ raw_iron: 3, coal: 1 }), furnaces: [{ ...spot, source: 'sensed' }], placementSpots: [spot] })
   const smelt = generateCandidates(afterPlace, defaultCandidateOptions).find((entry) => entry.kind === 'SMELT')
   if (smelt === undefined) return { pass: false, detail: 'no SMELT candidate after the placement' }
 
