@@ -1,0 +1,15 @@
+{
+  "name": "mc-ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minecraft Jev agent: resident orchestrator, tools, and evidence gates",
+  "scripts": {
+    "lane-guard": "node tools/lane-guard.mjs",
+    "issue-graph": "node tools/issue-graph.mjs",
+    "current-status": "node tools/current-status.mjs",
+    "current-status:write": "node tools/current-status.mjs --write",
+    "lane-guard-test": "node tools/test-lane-guard.mjs",
+    "issue-graph-test": "node tools/test-issue-graph.mjs",
+    "current-status-test": "node tools/test-current-status.mjs"
+  }
+}
