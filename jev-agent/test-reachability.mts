@@ -18,6 +18,7 @@ import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { capabilityKey, evaluateReachability, formatCandidateWithheld, formatReachability, reachabilityFingerprint } from './src/reachability.ts'
 import type { ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './src/reachability.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'
+import { knownStationKey } from './src/prereqOption.ts'
 import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
 
 let failures = 0
@@ -707,6 +708,89 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
         productive.some((candidate) => candidate.id === 'CRAFT:crafting_table') &&
         line === null,
       `before=[${afterControllerFilters.map((candidate) => candidate.id).join(',')}] after=[${restored.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`,
+    )
+  }
+
+  // (f) live M2: a sensed table 11 blocks below is ACQUIRED, never blind-CRAFTed.
+  //
+  // Measured live: `CRAFT:furnace` targeted a sensed crafting_table at (40,29,35)
+  // from y=40; the executor's `pathing-to-table` GoalNear failed (`noPath`) and
+  // the hop loop never descended, so the candidate was abandoned as unreachable
+  // and the smelt goal starved - while the reachability gate reported the SAME
+  // table coordinate reachable (`RETRIEVE:known:station:crafting_table:b40_29_35
+  // reachable=true`). The furnace craft's table sub-step must therefore be the
+  // acquisition candidate (placespot ladder), not a blind CRAFT walk.
+  {
+    const feet: Vec3Json = { x: 32, y: 40, z: 37 }
+    const table: Vec3Json = { x: 40, y: 29, z: 35 }
+    const smeltCharcoal = queuedGoal({
+      id: 'g-charcoal',
+      kind: 'smelt',
+      description: 'smelt 1 x charcoal',
+      targetItem: 'charcoal',
+      requiredCount: 1,
+    })
+    const downStep: DescentOption = {
+      dir: 'E',
+      mode: 'down',
+      dx: 1,
+      dz: 0,
+      step: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+      wall: { x: feet.x + 1, y: feet.y, z: feet.z },
+      head: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+      floor: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+      wallSolid: false,
+      headSolid: false,
+      floorSolid: true,
+      safe: true,
+      reason: 'safe',
+      digName: 'dirt',
+      digHarvestTool: 'pickaxe',
+      digHarvestTier: 0,
+      diggable: true,
+    }
+    const liveInventory = inventory({
+      cobblestone: 67,
+      stick: 2,
+      birch_planks: 2,
+      wooden_pickaxe: 1,
+      stone_pickaxe: 1,
+    })
+    const withSensedTable = worldState({
+      position: feet,
+      inventory: liveInventory,
+      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: table }] }),
+      descent: [downStep],
+      goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 }),
+      goalQueue: queueWith(smeltCharcoal),
+    })
+    withSensedTable.craftingTables = [{ ...table, source: 'sensed' }]
+    const grounded = generateGroundedCandidates(withSensedTable, craftOptions)
+    const acquire = grounded.candidates.find(
+      (candidate) => candidate.id === 'RETRIEVE:known:station:crafting_table:b40_29_35',
+    )
+    const blindCraft = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
+    const blockedBy = goalStarvationBlockedBy(null, smeltCharcoal, grounded.withheld)
+    const missing = candidateStarvationMissing(grounded.withheld)
+    const line = candidateStarvationLine(grounded.candidates, 'smelt:charcoal:1', false, blockedBy, missing)
+    check(
+      '(f) a sensed table out of reach is routed through its acquisition candidate, not CRAFT:furnace',
+      acquire !== undefined &&
+        acquire.meta.prereqPath === 'craft_and_place' &&
+        acquire.affordance?.feasible === true &&
+        blindCraft === undefined &&
+        line === null,
+      `acquire=${acquire?.id ?? 'none'} affordance=${JSON.stringify(acquire?.affordance ?? null)} blindCraft=${blindCraft?.id ?? 'none'} starvation=${line ?? 'none'}`,
+    )
+
+    const blacklisted = new Set([knownStationKey({ name: 'crafting_table', position: table })])
+    const blockedOptions: CandidateOptions = { ...craftOptions, unreachableStations: blacklisted }
+    const blockedGrounded = generateGroundedCandidates(withSensedTable, blockedOptions)
+    const doomedCraft = blockedGrounded.candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
+    check(
+      '(f) a blacklisted table cell is not re-offered as a fresh sensed CRAFT',
+      doomedCraft === undefined,
+      blockedGrounded.candidates.map((candidate) => candidate.id).join(',') || 'none',
     )
   }
 

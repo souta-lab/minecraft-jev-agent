@@ -32,7 +32,7 @@ import { selectDigTool } from './toolChoice.ts'
 import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks } from './verticalPlan.ts'
 import type { VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
-import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.ts'
+import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
@@ -113,6 +113,12 @@ export interface CandidateOptions {
   placeSpotRetryLimit?: number
   /** affordance gate facts: pathfinder probe + state-fingerprint suppression memory */
   reachability?: ReachabilityGateOptions | null
+  /**
+   * #11 v2: ordering policy for the furnace prerequisite ladder (`cost` default,
+   * `rank` for A/B). Shared by the generator and the controller so both agree on
+   * which path the candidate set represents.
+   */
+  prereqRankPolicy?: PrereqRankPolicy
 }
 
 export interface ReachabilityGateOptions {
@@ -1340,35 +1346,67 @@ function knownStations(state: WorldState, station: string): KnownStationLike[] {
 }
 
 /**
- * Where the furnace craft step gets its 3x3 station. A sensed table is used in
- * place; a remembered reachable table is walked to; a held table is placed
- * first. Blacklisted stations are skipped, so the M2 blocker cannot re-select a
- * station the move-failure memory already proved unreachable.
+ * A sensed station is not automatically a grounded route (mirror of
+ * `sensedCraftingTableAvailable` for craft goals): once the exact `CRAFT:furnace`
+ * step failed with a path failure, re-plan as if that table were absent so the
+ * ladder falls through to a remembered/held table. The controller's explicit
+ * blacklist applies to the sensed cell exactly like its remembered copy - they
+ * are the SAME coordinate, and the live M2 loop blacklisted the remembered
+ * `crafting_table@40,29,35` while a `CRAFT:furnace` at the sensed copy of that
+ * cell was still offered, producing `ABANDON_REASON ... reason=unreachable`.
+ */
+function sensedTableUsable(
+  state: WorldState,
+  unreachableStations: ReadonlySet<string>,
+  sensed: Vec3Json,
+): boolean {
+  if (unreachableStations.has(knownStationKey({ name: 'crafting_table', position: sensed }))) return false
+  const craftFailures = state.signals.failedCandidates['CRAFT:furnace'] ?? 0
+  const lastFailure = state.signals.lastFailureCode
+  const pathFailure = lastFailure === 'path_no_path' || lastFailure === 'path_stuck'
+  return !(craftFailures > 0 && pathFailure)
+}
+
+/**
+ * Where the furnace craft step gets its 3x3 station, as a ladder of GROUNDED
+ * routes. A sensed table only serves the in-place CRAFT when it is inside
+ * interaction reach; otherwise the sub-step is an acquisition (retrieve a
+ * remembered table / place a held one), and only as a last resort is the CRAFT
+ * step issued against a distant sensed table the executor must walk to. A
+ * proven-unreachable coordinate (blacklist) or a table that already failed a
+ * pathing CRAFT is never re-selected as if it were fresh.
  */
 function craftingTableSource(
   state: WorldState,
-  unreachableStations: ReadonlySet<string>,
-  placeSpotRetryLimit: number,
+  options: CandidateOptions,
 ): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
-  // Sensed stations use the same explicit reachability blacklist as remembered
-  // stations. A stale sensor result must not bypass MOVE_FAILMEM and re-enter
-  // the same CRAFT:furnace -> JUMP_FAIL loop on every prerequisite decision.
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const placeSpotRetryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
+  // Sensed stations use the same explicit reachability blacklist and path-failure
+  // memory as remembered stations: a stale sensor result must not bypass
+  // MOVE_FAILMEM and re-enter the same CRAFT:furnace -> JUMP_FAIL loop. The first
+  // USABLE sensed table wins; blacklisted/failed cells are skipped, not fatal.
   const sensed = state.craftingTables.find(
-    (position) => isSensedStation(position) && !unreachableStations.has(knownStationKey({ name: 'crafting_table', position })),
+    (position) =>
+      isSensedStation(position) && sensedTableUsable(state, unreachableStations, position),
   )
-  if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
+  const sensedInReach = sensed !== undefined && distance(sensed, state.self.eyePosition) <= options.reach
+  if (sensed !== undefined && sensedInReach) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
   const remembered = knownStations(state, 'crafting_table').find(
     (station) => !unreachableStations.has(knownStationKey(station)),
   )
   if (remembered !== undefined) return { kind: 'remembered', station: remembered }
-  if ((state.inventory.counts.crafting_table ?? 0) <= 0) return null
-  const spot =
-    state.placementSpots.find(
-      (candidate) =>
-        (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
-        placeSpotRetryLimit,
-    ) ?? state.placementSpots[0]
-  return spot === undefined ? null : { kind: 'held-place', spot }
+  if ((state.inventory.counts.crafting_table ?? 0) > 0) {
+    const spot =
+      state.placementSpots.find(
+        (candidate) =>
+          (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+          placeSpotRetryLimit,
+      ) ?? state.placementSpots[0]
+    if (spot !== undefined) return { kind: 'held-place', spot }
+  }
+  if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
+  return null
 }
 
 /**
@@ -1452,15 +1490,12 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     placedCount: (state.furnaces ?? []).filter(isSensedStation).length,
     stoneCount,
     tableAvailable:
-      craftingTableSource(
-        state,
-        unreachableStations,
-        options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT,
-      ) !== null,
+      craftingTableSource(state, options) !== null,
     placementSpot: state.placementSpots.length > 0 ? leastFailedPlacementSpot(state, 'furnace') : null,
     knownStation: reachableFurnace ?? furnaces[0] ?? null,
     unreachableStations,
     self: state.self.position,
+    rankPolicy: options.prereqRankPolicy,
   }
 }
 
@@ -1485,11 +1520,7 @@ function candidatesForPrereqPath(
 
 /** CRAFT/PLACE step toward a furnace: use a table in reach, walk to a remembered one, or place a held one. */
 function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
-  const source = craftingTableSource(
-    state,
-    options.unreachableStations ?? EMPTY_STATIONS,
-    options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT,
-  )
+  const source = craftingTableSource(state, options)
   if (source === null) return []
   if (source.kind === 'held-place') {
     return [placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)]
