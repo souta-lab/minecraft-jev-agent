@@ -21,10 +21,12 @@ import { createRequire } from 'node:module'
 import {
   candidateStarvationBlockedBy,
   candidateStarvationLine,
+  candidateStarvationMissing,
   formatCandidateStarvation,
   MIRRORED_MARKERS,
 } from './src/controller.ts'
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
+import type { CandidateReachability } from './src/candidates.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { QueuedGoal } from './src/goalQueue.ts'
@@ -281,38 +283,43 @@ addCase('(3) a productive candidate set emits no starvation marker', () => {
   return { pass, detail: `productive=${productive} line=${line ?? 'none'}` }
 })
 
-addCase('(3) blockedBy names the withheld capabilities when targets were refused', () => {
-  const blockedBy = candidateStarvationBlockedBy(
-    [
-      {
-        candidate: {
-          id: 'RETRIEVE:known:station:furnace:b29_61_35',
-          kind: 'RETRIEVE',
-          label: 'x',
-          targetName: 'furnace',
-          target: { x: 29, y: 61, z: 35 },
-          targetEntityId: null,
-          itemName: null,
-          requiresTool: false,
-          toolName: null,
-          inReach: false,
-          hasStandableAdjacent: true,
-          meta: {},
-        },
-        result: {
-          reachable: false,
-          reason: 'needs_ascend',
-          missingCapabilities: [{ kind: 'ascend_plan' }, { kind: 'placeable_block' }],
-        },
-        fingerprint: 'fp',
-        withheld: true,
-        suppressed: false,
+addCase('(3) blockedBy is the primary withheld capability; missing=[all] stays ordered', () => {
+  const withheld: CandidateReachability[] = [
+    {
+      candidate: {
+        id: 'RETRIEVE:known:station:furnace:b29_61_35',
+        kind: 'RETRIEVE',
+        label: 'x',
+        targetName: 'furnace',
+        target: { x: 29, y: 61, z: 35 },
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: false,
+        hasStandableAdjacent: true,
+        meta: {},
       },
-    ],
-    null,
-  )
-  const pass = blockedBy === 'ascend_plan|placeable_block' || blockedBy === 'placeable_block|ascend_plan'
-  return { pass, detail: `blockedBy=${blockedBy}` }
+      result: {
+        reachable: false,
+        reason: 'needs_ascend',
+        missingCapabilities: [{ kind: 'ascend_plan' }, { kind: 'placeable_block' }],
+      },
+      fingerprint: 'fp',
+      withheld: true,
+      suppressed: false,
+    },
+  ]
+  const blockedBy = candidateStarvationBlockedBy(withheld, null)
+  const missing = candidateStarvationMissing(withheld)
+
+  const line = formatCandidateStarvation(2, 'craft:furnace:1', blockedBy, missing)
+  const pass =
+    blockedBy === 'ascend_plan' &&
+    missing.join(',') === 'ascend_plan,placeable_block' &&
+    line ===
+      'CANDIDATE_STARVATION presented=2 productive=0 goal="craft:furnace:1" blockedBy=ascend_plan missing=[ascend_plan,placeable_block]'
+  return { pass, detail: `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line}"` }
 })
 
 // --- (4) the persisted perception snapshot is bounded --------------------------
