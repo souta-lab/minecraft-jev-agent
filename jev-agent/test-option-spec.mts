@@ -852,7 +852,8 @@ addCase('(#56) the Jev payload carries a bounded optionContext and null when abs
   const dependencies = arrayOf(context['dependencies'])
   const parents = arrayOf(context['parents'])
   const skills = arrayOf(context['skills'])
-  const absent = recordOf(toEvaluationState(state))['optionContext'] === null
+  const withoutContext = recordOf(toEvaluationState(state))
+  const absent = withoutContext['optionContext'] === undefined && !('optionContext' in withoutContext)
   const goalsIntact = recordOf(payload['goalQueue'])['empty'] === true
   const pass =
     context['instanceId'] === stableOptionInstanceId(spec) &&

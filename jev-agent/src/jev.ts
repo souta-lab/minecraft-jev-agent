@@ -869,16 +869,19 @@ export function toEvaluationState(state: WorldState, optionContext?: CurrentOpti
             requiredCount: state.goalQueue.current.requiredCount,
           },
     },
-    optionContext: optionContextRecord(optionContext),
     signals: {
       failedCandidates: state.signals.failedCandidates,
       escalationRecommended: state.signals.escalationRecommended,
       lastFailureCode: state.signals.lastFailureCode,
     },
   }
+  const contextPayload = optionContextRecord(optionContext)
+  const withContext = contextPayload === null ? compact : { ...compact, optionContext: contextPayload }
   // The AI SDK expects a plain JSON value; the compact object has no index
-  // signature, so round-trip it through JSON (no `any`, no ts-ignore).
-  return JSON.parse(JSON.stringify(compact)) as EvaluationState
+  // signature, so round-trip it through JSON (no `any`, no ts-ignore). The
+  // optionContext key is omitted entirely when absent, so a disabled Option
+  // compiler leaves the payload byte-identical to the pre-#56 shape.
+  return JSON.parse(JSON.stringify(withContext)) as EvaluationState
 }
 
 class TypeSafeJevPolicy implements JevPolicy {
