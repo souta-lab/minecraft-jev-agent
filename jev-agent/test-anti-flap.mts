@@ -332,6 +332,18 @@ addCase('wiring: the controller commits to one candidate when the choice flaps',
   }
 })
 
+addCase('wiring: tunnel entry refusal and local clearance are mirrored markers', () => {
+  const executor = source('./src/executor.ts')
+  const markers = ['tunnel_entry_refused', 'formatTunnelEntryRefused', 'formatLocalClear', 'planReuseLeg']
+  const missing = markers.filter((needle) => !executor.includes(needle))
+  const mirrored = MIRRORED_MARKERS.has('TUNNEL_ENTRY_REFUSED') && MIRRORED_MARKERS.has('LOCAL_CLEAR')
+  const pass = missing.length === 0 && mirrored
+  return {
+    pass,
+    detail: missing.length === 0 ? `mirrored=${mirrored}` : `missing ${missing.join(', ')}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('#11 v2 - state-conditioned validity + anti-thrash commitment\n')
 process.stdout.write('-'.repeat(78) + '\n')

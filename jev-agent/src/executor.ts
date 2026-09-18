@@ -30,12 +30,22 @@ import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcon
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
+  evaluateTunnelEntry,
   formatAscentProgress,
+  formatLocalClear,
   formatPillarRefused,
   formatPillarRelocate,
+  formatTunnelEntryRefused,
+  planReuseLeg,
   resolvePillarStep,
 } from './verticalPlan.ts'
-import type { HeadroomClearOutcome, HeadroomObstacle } from './verticalPlan.ts'
+import type {
+  ApproachBlockage,
+  HeadroomClearOutcome,
+  HeadroomObstacle,
+  TunnelEntryBlockerProbe,
+  TunnelEntryProbe,
+} from './verticalPlan.ts'
 import {
   decidePillarPlaceBlock,
   decidePillarRelocation,
@@ -78,6 +88,7 @@ export type FailureCode =
   | 'path_no_path'
   | 'path_timeout'
   | 'path_stuck'
+  | 'tunnel_entry_refused'
   | 'out_of_reach'
   | 'dig_error'
   | 'dig_timeout'
@@ -990,58 +1001,39 @@ export class Executor {
     // Issue #45: close the vertical gap first (reuse a recorded tunnel, else dig
     // one guarded staircase step), then approach horizontally. Without this the
     // canDig=false walk stops at the resource's horizontal bearing and stalls.
+    // M2 FURNACE_READY: reuse is validated live; an unusable entry either clears
+    // the one blocking cell or falls back to a different vertical plan.
     const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    let activeVertical = vertical
     let verticalStep = false
     if (vertical === 'reuse') {
-      const tunnel = readMetaPoint(candidate, 'tunnelX', 'tunnelY', 'tunnelZ')
-      if (tunnel !== null) {
-        this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id, target })
-        this.setPhase(candidate, epoch, 'reuse-tunnel')
-        await this.pathToNear(tunnel, 1, epoch, signal)
-        this.ensureOwned(epoch, signal)
+      const reuse = await this.runReuseVerticalLeg(candidate, epoch, signal, target)
+      verticalStep = reuse.step
+      if (reuse.refused) {
+        const fallback = readMetaString(candidate, 'fallbackVertical')
+        if (fallback === null || fallback === 'none') {
+          throw new ExecutorError(
+            'tunnel_entry_refused',
+            `${candidate.id} reuse tunnel entry not usable and no fallback vertical plan`,
+          )
+        }
+        activeVertical = fallback
+        this.logger.info('agent', `TUNNEL_ENTRY_FALLBACK vertical=${fallback}`, { actionId: candidate.id, target })
+        verticalStep = await this.runVerticalLeg(candidate, fallback, true, epoch, signal, target, startY)
       }
-    } else if (vertical === 'staircase') {
-      const dig = readMetaPoint(candidate, 'stairDigX', 'stairDigY', 'stairDigZ')
-      const step = readMetaPoint(candidate, 'stairStepX', 'stairStepY', 'stairStepZ')
-      if (dig !== null && step !== null) {
-        const fromY = Math.floor(startY)
-        const toY = readMetaNumber(candidate, 'stairToY', target.y)
-        this.logger.info('agent', `STAIRCASE from_y=${fromY} to_y=${toY}`, { actionId: candidate.id, dig, step })
-        verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
-      }
-    } else if (vertical === 'staircase-up') {
-      const dig = readMetaPoint(candidate, 'upDigX', 'upDigY', 'upDigZ')
-      const step = readMetaPoint(candidate, 'upStepX', 'upStepY', 'upStepZ')
-      if (dig !== null && step !== null) {
-        const fromY = Math.floor(startY)
-        const toY = readMetaNumber(candidate, 'upToY', target.y)
-        const dir = readMetaString(candidate, 'upDir') ?? 'unknown'
-        this.logger.info('agent', `ASCEND_STEP from_y=${fromY} to_y=${toY} dir=${dir}`, { actionId: candidate.id, dig, step })
-        verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal, 'GoalGetToBlock')
-      }
-    } else if (vertical === 'pillar') {
-      const placeName = readMetaString(candidate, 'pillarPlaceName')
-      const steps = Math.floor(readMetaNumber(candidate, 'pillarSteps', 0))
-      if (placeName !== null && steps >= 1) {
-        const fromY = Math.floor(startY)
-        const toY = Math.floor(readMetaNumber(candidate, 'pillarToY', target.y))
-        this.logger.info('agent', `PILLAR_UP from_y=${fromY} to_y=${toY} place=${placeName} steps=${steps}`, {
-          actionId: candidate.id,
-          target,
-        })
-        verticalStep = await this.pillarUp(candidate, { placeName, toY, steps }, epoch, signal)
-      }
+    } else {
+      verticalStep = await this.runVerticalLeg(candidate, vertical, false, epoch, signal, target, startY)
     }
 
     this.ensureOwned(epoch, signal)
     const startFloorY = Math.floor(startY)
     const climbedTo = Math.floor(this.bot.entity.position.y)
-    const dugVertical = vertical === 'staircase' || vertical === 'staircase-up'
+    const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
     if (verticalStep && climbedTo > startFloorY) {
       this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
         actionId: candidate.id,
         target,
-        vertical,
+        vertical: activeVertical,
       })
     }
     // M2 ascent persistence: a bounded climb chunk that has not yet closed the
@@ -1087,7 +1079,7 @@ export class Executor {
     const verticalProgress = Math.abs(endY - target.y) < Math.abs(startY - target.y) - 0.01
     this.logger.info(
       'executor',
-      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${vertical}`,
+      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${activeVertical}`,
       { target, actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
@@ -1160,6 +1152,245 @@ export class Executor {
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
     }
+    return true
+  }
+
+  private async runVerticalLeg(
+    candidate: Candidate,
+    vertical: string,
+    fallback: boolean,
+    epoch: number,
+    signal: AbortSignal,
+    target: Vec3Json,
+    startY: number,
+  ): Promise<boolean> {
+    const keyBase = this.verticalKeyBase(vertical, fallback)
+    if (keyBase === null) return false
+    if (vertical === 'staircase') {
+      const dig = readMetaPoint(candidate, `${keyBase}DigX`, `${keyBase}DigY`, `${keyBase}DigZ`)
+      const step = readMetaPoint(candidate, `${keyBase}StepX`, `${keyBase}StepY`, `${keyBase}StepZ`)
+      if (dig === null || step === null) return false
+      const fromY = Math.floor(startY)
+      const toY = readMetaNumber(candidate, `${keyBase}ToY`, target.y)
+      this.logger.info('agent', `STAIRCASE from_y=${fromY} to_y=${toY}`, { actionId: candidate.id, dig, step })
+      return this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
+    }
+    if (vertical === 'staircase-up') {
+      const dig = readMetaPoint(candidate, `${keyBase}DigX`, `${keyBase}DigY`, `${keyBase}DigZ`)
+      const step = readMetaPoint(candidate, `${keyBase}StepX`, `${keyBase}StepY`, `${keyBase}StepZ`)
+      if (dig === null || step === null) return false
+      const fromY = Math.floor(startY)
+      const toY = readMetaNumber(candidate, `${keyBase}ToY`, target.y)
+      const dir = readMetaString(candidate, `${keyBase}Dir`) ?? 'unknown'
+      this.logger.info('agent', `ASCEND_STEP from_y=${fromY} to_y=${toY} dir=${dir}`, {
+        actionId: candidate.id,
+        dig,
+        step,
+      })
+      return this.digRetrievalStaircase(candidate, dig, step, epoch, signal, 'GoalGetToBlock')
+    }
+    const placeName = readMetaString(candidate, `${keyBase}PlaceName`)
+    const steps = Math.floor(readMetaNumber(candidate, `${keyBase}Steps`, 0))
+    if (placeName === null || steps < 1) return false
+    const fromY = Math.floor(startY)
+    const toY = Math.floor(readMetaNumber(candidate, `${keyBase}ToY`, target.y))
+    this.logger.info('agent', `PILLAR_UP from_y=${fromY} to_y=${toY} place=${placeName} steps=${steps}`, {
+      actionId: candidate.id,
+      target,
+    })
+    return this.pillarUp(candidate, { placeName, toY, steps }, epoch, signal)
+  }
+
+  private verticalKeyBase(vertical: string, fallback: boolean): string | null {
+    if (vertical === 'staircase') return fallback ? 'fallbackStair' : 'stair'
+    if (vertical === 'staircase-up') return fallback ? 'fallbackUp' : 'up'
+    if (vertical === 'pillar') return fallback ? 'fallbackPillar' : 'pillar'
+    return null
+  }
+
+  /**
+   * The reuse leg. Validates the remembered tunnel entry against the live world,
+   * clears the one blocking cell when it is diggable, walks, and on a near
+   * `path_stuck` attempts a local clearance for the single identified approach
+   * cell before giving up. An entry that is fundamentally unusable (no clearance
+   * openable, or no support) returns `refused` so the caller selects a different
+   * vertical plan instead of escalating a 1.5 m gap to `pathfinder_stuck`.
+   */
+  private async runReuseVerticalLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    target: Vec3Json,
+  ): Promise<{ step: boolean; refused: boolean }> {
+    const tunnel = readMetaPoint(candidate, 'tunnelX', 'tunnelY', 'tunnelZ')
+    if (tunnel === null) return { step: false, refused: false }
+
+    const planClear = readMetaPoint(candidate, 'tunnelClearX', 'tunnelClearY', 'tunnelClearZ')
+    if (planClear !== null) {
+      await this.localClearCell(candidate, planClear, readMetaString(candidate, 'tunnelClearName'), epoch, signal)
+    }
+
+    const entry = evaluateTunnelEntry(this.probeTunnelEntry(tunnel))
+    if (entry.kind === 'clear') {
+      await this.localClearCell(candidate, entry.blocker.cell, entry.blocker.name, epoch, signal)
+    } else if (entry.kind === 'refuse') {
+      this.logger.info('agent', formatTunnelEntryRefused({ reason: entry.reason, cell: entry.cell }), {
+        actionId: candidate.id,
+        target,
+      })
+      return { step: false, refused: true }
+    }
+
+    this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id, target })
+    this.setPhase(candidate, epoch, 'reuse-tunnel')
+    let pathFailed = false
+    try {
+      await this.pathToNear(tunnel, 1, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      if (!(error instanceof ExecutorError)) throw error
+      if (error.code !== 'path_stuck' && error.code !== 'path_no_path') throw error
+      pathFailed = true
+    }
+    if (!pathFailed) {
+      this.ensureOwned(epoch, signal)
+      return { step: false, refused: false }
+    }
+
+    const leg = planReuseLeg({
+      entry,
+      pathFailed: true,
+      distanceToTunnel: this.distanceToFeet(tunnel),
+      approachBlockages: this.probeApproachBlockages(tunnel),
+    })
+    if (leg.action === 'clear-approach') {
+      const blockName = this.currentBlockAt(leg.cell)?.name ?? null
+      const cleared = await this.localClearCell(candidate, leg.cell, blockName, epoch, signal)
+      if (cleared) {
+        try {
+          await this.pathToNear(tunnel, 1, epoch, signal)
+          this.ensureOwned(epoch, signal)
+          return { step: false, refused: false }
+        } catch (retry) {
+          if (retry instanceof ActionCancelled) throw retry
+        }
+      }
+    }
+    if (leg.action === 'refuse') {
+      this.logger.info('agent', formatTunnelEntryRefused({ reason: leg.reason, cell: leg.cell }), {
+        actionId: candidate.id,
+        target,
+      })
+      return { step: false, refused: true }
+    }
+    throw new ExecutorError('path_stuck', `packet locomotion blocked before (${tunnel.x},${tunnel.y},${tunnel.z})`)
+  }
+
+  private probeTunnelEntry(cell: Vec3Json): TunnelEntryProbe {
+    const bodyClear = this.passableAt(cell.x, cell.y, cell.z)
+    const headClear = this.passableAt(cell.x, cell.y + 1, cell.z)
+    const supportSolid = this.solidSupportAt(cell.x, cell.y - 1, cell.z)
+    let blocker: TunnelEntryBlockerProbe | null = null
+    if (!bodyClear || !headClear) {
+      const blockerCell = !bodyClear ? cell : { x: cell.x, y: cell.y + 1, z: cell.z }
+      const block = this.currentBlockAt(blockerCell)
+      if (block !== null && block.boundingBox !== 'empty') {
+        const live = this.resolveLiveDigTool(block)
+        blocker = {
+          cell: blockerCell,
+          name: block.name,
+          diggable: block.diggable === true,
+          fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
+          floodRisk: !this.cellClearOfFluids(blockerCell),
+          toolOk: live.ok,
+        }
+      }
+    }
+    return { cell, bodyClear, headClear, supportSolid, blocker }
+  }
+
+  private probeApproachBlockages(tunnel: Vec3Json): ApproachBlockage[] {
+    const position = this.bot.entity.position
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+    const sx = Math.sign(tunnel.x - feet.x)
+    const sz = Math.sign(tunnel.z - feet.z)
+    const cells: Vec3Json[] = []
+    const addColumn = (x: number, y: number, z: number): void => {
+      cells.push({ x, y, z })
+      cells.push({ x, y: y + 1, z })
+    }
+    if (sx !== 0) addColumn(feet.x + sx, feet.y, feet.z)
+    if (sz !== 0) addColumn(feet.x, feet.y, feet.z + sz)
+    if (sx !== 0 && sz !== 0) addColumn(feet.x + sx, feet.y, feet.z + sz)
+
+    const out: ApproachBlockage[] = []
+    const seen = new Set<string>()
+    for (const cell of cells) {
+      const key = `${cell.x},${cell.y},${cell.z}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (this.passableAt(cell.x, cell.y, cell.z)) {
+        out.push({ cell, passable: true })
+        continue
+      }
+      const block = this.currentBlockAt(cell)
+      const live = block !== null ? this.resolveLiveDigTool(block) : null
+      out.push({
+        cell,
+        passable: false,
+        name: block?.name,
+        diggable: block?.diggable === true,
+        fluidOrHazard: block !== null && (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)),
+        floodRisk: !this.cellClearOfFluids(cell),
+        toolOk: live?.ok === true,
+      })
+    }
+    return out
+  }
+
+  private async localClearCell(
+    candidate: Candidate,
+    cell: Vec3Json,
+    nameHint: string | null,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const block = this.currentBlockAt(cell)
+    if (block === null || block.boundingBox === 'empty') return false
+    const live = this.resolveLiveDigTool(block)
+    this.logger.info('agent', formatLocalClear(cell, block.name, live.tool, live.tier), {
+      actionId: candidate.id,
+      hint: nameHint,
+    })
+    if (!live.ok) {
+      this.logger.warn(
+        'executor',
+        `LOCAL_CLEAR cannot dig ${block.name} at (${cell.x},${cell.y},${cell.z}): ${live.reason}`,
+        { actionId: candidate.id },
+      )
+      return false
+    }
+    try {
+      await this.equipTool(
+        {
+          ...candidate,
+          toolName: live.tool,
+          toolTier: live.tier,
+          requiresTool: live.tool !== null,
+          meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
+        },
+        epoch,
+        signal,
+      )
+      await this.digBlock(block, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.warn('executor', `LOCAL_CLEAR dig failed: ${error instanceof Error ? error.message : String(error)}`, {
+        actionId: candidate.id,
+      })
+      return false
+    }
+    this.ensureOwned(epoch, signal)
     return true
   }
 
