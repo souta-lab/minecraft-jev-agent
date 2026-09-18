@@ -9,7 +9,7 @@
 //
 // Run: npx tsx test-reachability.mts  (wired as `npm run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
@@ -17,7 +17,7 @@ import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { capabilityKey, evaluateReachability, formatCandidateWithheld, formatReachability, reachabilityFingerprint } from './src/reachability.ts'
 import type { ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './src/reachability.ts'
-import { StateFingerprintMemory } from './src/moveFailMemory.ts'
+import { moveFailureKey, StateFingerprintMemory } from './src/moveFailMemory.ts'
 import { knownStationKey } from './src/prereqOption.ts'
 import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
@@ -1103,6 +1103,26 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       `down=${downRetrieve?.affordance?.reason ?? 'none'} level=${levelRetrieve?.affordance?.reason ?? 'none'}`,
     )
   }
+}
+
+// A coordinate blacklist restored from a previous generation must participate
+// in target selection, not only in the controller's post-generation filter.
+// Otherwise the nearest exploration target is regenerated, filtered out, and
+// the policy is left with WAIT even though another standable target exists.
+{
+  const blocked: Vec3Json = { x: 2, y: 60, z: 0 }
+  const alternate: Vec3Json = { x: 3, y: 60, z: 0 }
+  const state = worldState({ position: BOT, standable: [BOT, blocked, alternate] })
+  const grounded = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    blacklistedMoveTargets: new Set([moveFailureKey('overworld', blocked)]),
+  })
+  const ids = grounded.candidates.map((candidate) => candidate.id)
+  check(
+    'a restored movement blacklist is applied before exploration target selection',
+    !ids.includes(`MOVE:${blockId('p', blocked)}`) && ids.includes(`MOVE:${blockId('p', alternate)}`),
+    `candidates=${ids.join(',')}`,
+  )
 }
 
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)

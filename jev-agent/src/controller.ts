@@ -1369,11 +1369,13 @@ export class JevController {
       }
 
       const unreachableStations = this.unreachableStationKeys(state)
+      const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
       const groundingOptions = candidateOptions(
         this.options,
         this.recipeIndex,
         unreachableStations,
         this.reachabilityGateOptions(),
+        blacklistedMoveTargets,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -1527,7 +1529,13 @@ export class JevController {
       const freshCandidates = this.filterMoveCandidates(
         generateGroundedCandidates(
           freshState,
-          candidateOptions(this.options, this.recipeIndex, this.unreachableStationKeys(freshState), this.reachabilityGateOptions()),
+          candidateOptions(
+            this.options,
+            this.recipeIndex,
+            this.unreachableStationKeys(freshState),
+            this.reachabilityGateOptions(),
+            this.blacklistedMoveTargets(freshState),
+          ),
         ).candidates,
         freshState,
         false,
@@ -3860,6 +3868,22 @@ export class JevController {
     return keys
   }
 
+  /**
+   * Feed the active coordinate blacklist into candidate selection. The
+   * post-generation filter remains the final guard, but selection must see
+   * restored entries too; otherwise pickExplore/retrievalCandidates chooses a
+   * target that filterMoveCandidates immediately removes, leaving only WAIT.
+   */
+  private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
+    const dimension = state.self.dimension
+    const keys = new Set<string>()
+    for (const entry of this.moveFailMemory.snapshot()) {
+      if (entry.dimension !== dimension) continue
+      if (this.moveFailMemory.isBlacklisted(dimension, entry)) keys.add(entry.key)
+    }
+    return keys
+  }
+
   private applyFurnacePrereq(
     state: WorldState,
     candidates: readonly Candidate[],
@@ -3875,7 +3899,13 @@ export class JevController {
     }
     const input = furnacePrereqInputFromState(
       state,
-      candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+      candidateOptions(
+        this.options,
+        this.recipeIndex,
+        unreachableStations,
+        this.reachabilityGateOptions(),
+        this.blacklistedMoveTargets(state),
+      ),
     )
     const decision = planPrereqOptions(input)
     const goalKey = this.currentGoalKey()
@@ -4495,12 +4525,14 @@ function candidateOptions(
   recipes: RecipeIndex,
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
+  blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
     reach: options.reach,
     recipes,
     unreachableStations,
+    blacklistedMoveTargets,
     reachability,
     prereqRankPolicy: options.prereqRankPolicy,
   }
