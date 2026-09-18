@@ -18,12 +18,19 @@ export class ReloadArbiter {
   private inFlight: Promise<void> | null = null
   private queuedTrigger: string | null = null
   private stopped = false
+  private readonly run: ReloadRunner
+  private readonly canContinue: () => boolean
+  private readonly log?: ReloadArbiterLog
 
   constructor(
-    private readonly run: ReloadRunner,
-    private readonly canContinue: () => boolean = () => true,
-    private readonly log?: ReloadArbiterLog,
-  ) {}
+    run: ReloadRunner,
+    canContinue: () => boolean = () => true,
+    log?: ReloadArbiterLog,
+  ) {
+    this.run = run
+    this.canContinue = canContinue
+    this.log = log
+  }
 
   /** Start a reload, or queue one bounded follow-up while another is running. */
   request(trigger: string): ReloadRequestResult {
