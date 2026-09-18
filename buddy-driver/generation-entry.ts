@@ -48,6 +48,7 @@ import {
 } from './planner.ts'
 import type {
   GenerationContext,
+  GenerationResources,
   GenerationStatus,
   KnownResourceJson,
   MissionPreflightResult,
@@ -235,8 +236,14 @@ function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function delay(ms: number, resources?: GenerationResources): Promise<void> {
+  return new Promise((resolve) => {
+    const handle = setTimeout(() => {
+      resources?.untrackTimer(handle)
+      resolve()
+    }, ms)
+    resources?.trackTimer(handle)
+  })
 }
 
 interface LedgerGoal {
@@ -411,7 +418,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const bot = withActuationLease(ctx.bot, ctx.lease, id)
+  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources)
 
   const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64)
   const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32)
@@ -702,7 +709,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     }
     proposeLedger()
     // Bounded settle: the executor cancels the in-flight action on stop.
-    await Promise.race([runPromise ?? Promise.resolve(), delay(3000)])
+    await Promise.race([runPromise ?? Promise.resolve(), delay(3000, ctx.resources)])
   }
 
   function proposeLedger(): void {

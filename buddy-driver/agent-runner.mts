@@ -30,6 +30,7 @@ import type {
   DeathHazard,
   GenerationContext,
   GenerationModule,
+  GenerationResourceCounts,
   GenerationStatus,
   HazardSource,
   KnownResourceJson,
@@ -50,9 +51,10 @@ import {
   type DeathTelemetry,
   type RehearsalMode,
 } from './simdeath.ts'
-import { ActuationLeaseManager, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
+import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
+import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 
 const CONTRACT_VERSION = 2
 const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
@@ -401,6 +403,12 @@ let lastDeathAt = 0
 let lastHealth: number | null = null
 let lastSeenDeathPosition: Vec3Json | null = null
 
+// #13/#49: one host-owned resource ledger per generation. The generation records
+// every listener/timer it owns; disposal removes exactly those and reports the
+// counts, so an old generation cannot leave listeners behind silently.
+const generationRegistries = new Map<string, GenerationResourceRegistry>()
+const generationStopWatch = new Map<string, NodeJS.Timeout>()
+
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
 const stats = {
   reconnects: 0,
@@ -423,10 +431,6 @@ const lease: ActuationLease = {
   },
   isActive: (id: string): boolean => leaseManager.isActive(id),
   assertActive: (id: string, what: string): void => leaseManager.assertActive(id, what),
-}
-
-function acquireLease(id: string): void {
-  leaseManager.acquire(id, log)
 }
 
 function revokeLease(reason: string): void {
@@ -588,6 +592,7 @@ function makeGenerationContext(b: Bot): GenerationContext {
     bot: b,
     log,
     lease,
+    resources: new GenerationResourceRegistry(),
     worldMemory: cloneMemory(keyedMemory()),
     worldKey: currentWorldKey(),
     proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
@@ -601,17 +606,86 @@ function makeGenerationContext(b: Bot): GenerationContext {
   }
 }
 
+function registerGenerationResources(gen: ResidentGeneration, ctx: GenerationContext): void {
+  if (ctx.resources instanceof GenerationResourceRegistry) generationRegistries.set(gen.id, ctx.resources)
+}
+
+/**
+ * Remove a superseded generation and everything it owned, then assert the host
+ * listener counts returned to baseline. controller.stop() clears the controller's
+ * own listeners/timers; the registry removes any generation-registered resource
+ * stop() may miss. If the reclaim leaves a leak the counts are kept and a WARN is
+ * logged instead of silently accepting it (#13).
+ */
+function disposeGeneration(gen: ResidentGeneration): GenerationResourceCounts {
+  try {
+    gen.dispose()
+  } catch (error) {
+    log('ERROR', { where: 'generation.dispose', id: gen.id, message: error instanceof Error ? error.message : String(error) })
+  }
+  const registry = generationRegistries.get(gen.id)
+  const tracked = registry === undefined ? { listeners: 0, timers: 0 } : registry.dispose()
+  generationRegistries.delete(gen.id)
+  const watch = generationStopWatch.get(gen.id)
+  if (watch !== undefined) {
+    clearInterval(watch)
+    generationStopWatch.delete(gen.id)
+  }
+  const hostListeners = listenerCounts()
+  log('GENERATION_DISPOSED', { id: gen.id, listeners: tracked.listeners, timers: tracked.timers, hostListeners: hostListeners.physicsTick ?? 0 })
+  if (listenerLeak()) {
+    log('WARN', { where: 'generation-dispose', id: gen.id, reason: 'listener-count-did-not-return-to-baseline', listeners: hostListeners, baseline: listenerBaseline, tracked })
+  }
+  return tracked
+}
+
+function ownershipPorts(): OwnershipPorts {
+  return {
+    log,
+    lease: leaseManager,
+    ownership: state,
+    getLive: () => generation,
+    setLive: (next) => {
+      generation = next as ResidentGeneration | null
+    },
+  }
+}
+
+function makeSwapPorts(previousModule: GenerationModule | null): SwapPorts {
+  return {
+    ...ownershipPorts(),
+    buildResume: () => {
+      if (previousModule === null || bot === null) return null
+      const ctx = makeGenerationContext(bot)
+      const resumed = previousModule.createGeneration(ctx)
+      registerGenerationResources(resumed, ctx)
+      return resumed
+    },
+    dispose: (target: SwapGeneration) => disposeGeneration(target as ResidentGeneration),
+    smoke: (target: SwapGeneration) => {
+      runStructuralSmoke(target as ResidentGeneration)
+    },
+    persist: (event: string) => saveState(event),
+    revision: () => state.revision,
+  }
+}
+
 function watchGenerationStop(gen: ResidentGeneration): void {
   const guard = setInterval(() => {
     if (generation !== gen) {
       clearInterval(guard)
+      generationStopWatch.delete(gen.id)
       return
     }
     if (!gen.hasStopped()) return
     clearInterval(guard)
+    generationStopWatch.delete(gen.id)
     const stopped = gen.stopReason()
     generation = null
+    state.lastGenerationId = gen.id
+    state.generationId = null
     if (leaseManager.isActive(gen.id)) revokeLease('generation-stopped')
+    disposeGeneration(gen)
     if (stopped === 'wedge') stats.wedge = true
     if (stopped === 'goal-complete') stats.goalComplete = true
     if (shuttingDown || frozen || deathResetPending) return
@@ -621,6 +695,7 @@ function watchGenerationStop(gen: ResidentGeneration): void {
     saveState('generation-stop')
     scheduleGenerationRestart('generation-stopped')
   }, 2000)
+  generationStopWatch.set(gen.id, guard)
 }
 
 async function startGeneration(trigger: string): Promise<boolean> {
@@ -640,27 +715,32 @@ async function startGeneration(trigger: string): Promise<boolean> {
     } catch {
       // best effort
     }
-    old.dispose()
+    disposeGeneration(old)
   }
   const mod = await loadGenerationModule(false)
   if (mod === null) {
     scheduleGenerationRestart('module-unavailable')
     return false
   }
-  const gen = mod.createGeneration(makeGenerationContext(bot))
+  const ctx = makeGenerationContext(bot)
+  const gen = mod.createGeneration(ctx)
+  registerGenerationResources(gen, ctx)
   pendingResetReason = null
   gen.attach()
   runStructuralSmoke(gen)
   const preflight = runMissionPreflight(gen)
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
-  acquireLease(gen.id)
+  commitOwner(ownershipPorts(), gen)
   try {
     gen.start()
   } catch (error) {
-    revokeLease('start-failed')
+    generation = null
+    state.lastGenerationId = gen.id
+    state.generationId = null
+    if (leaseManager.isActive(gen.id)) revokeLease('start-failed')
+    disposeGeneration(gen)
     throw error
   }
-  generation = gen
   lastActionId = null
   if (!baselineCaptured) {
     baselineCaptured = true
@@ -668,8 +748,6 @@ async function startGeneration(trigger: string): Promise<boolean> {
     log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id })
   }
   state.generations += 1
-  state.lastGenerationId = gen.id
-  state.generationId = gen.id
   saveState('generation-start')
   log('GENERATION_START', { id: gen.id, trigger, rung: gen.rungId, rungIndex: gen.rungIndex, generations: state.generations })
   watchGenerationStop(gen)
@@ -978,13 +1056,9 @@ function connect(): void {
     revokeLease(classified)
     const old = generation
     generation = null
-    if (old !== null) {
-      try {
-        old.dispose()
-      } catch {
-        // best effort
-      }
-    }
+    if (old !== null) state.lastGenerationId = old.id
+    state.generationId = null
+    if (old !== null) disposeGeneration(old)
     connectedSince = 0
     scheduleReconnect(classified, uptimeMs)
   })
@@ -1211,10 +1285,11 @@ function writeAcceptance(): string {
 }
 
 /**
- * Swap order (atomic): build -> import -> structural smoke -> prepare(new) ->
- * old quiesce -> snapshot -> new healthcheck -> ACTION LEASE SWITCH (commit) ->
- * new start -> old dispose. Before the commit the new generation cannot act;
- * rollback switches the lease back to the old module and resumes it.
+ * Swap order (atomic): build -> import -> attach -> structural smoke -> preflight
+ * -> quiesce old -> ACTION LEASE SWITCH + snapshot generationId (one commit) ->
+ * new start -> dispose old. Before the commit the candidate cannot act; a failed
+ * start rolls back to a fresh generation from the previous module and disposes
+ * every superseded instance (generation-swap.ts).
  */
 async function performReload(trigger: string): Promise<void> {
   const started = Date.now()
@@ -1223,6 +1298,7 @@ async function performReload(trigger: string): Promise<void> {
     log('RELOAD', { ok: false, trigger, reason: 'no live bot' })
     return
   }
+  let candidate: ResidentGeneration | null = null
   try {
     const built = await buildGeneration()
     if (built.outfile === currentBundle && generationModule !== null) {
@@ -1234,15 +1310,19 @@ async function performReload(trigger: string): Promise<void> {
     if (mod.CONTRACT_VERSION !== CONTRACT_VERSION) {
       throw new Error(`CONTRACT_VERSION mismatch: generation=${mod.CONTRACT_VERSION} host=${CONTRACT_VERSION}`)
     }
-    const previous = generation
     const previousModule = generationModule
-    const next = mod.createGeneration(makeGenerationContext(bot))
-    next.attach()
-    const smoke = runStructuralSmoke(next)
-    log('SMOKE', { id: next.id, ok: smoke.ok, checks: smoke.checks.length, failures: smoke.failures })
+    const ctx = makeGenerationContext(bot)
+    candidate = mod.createGeneration(ctx)
+    registerGenerationResources(candidate, ctx)
+    candidate.attach()
+    const smoke = runStructuralSmoke(candidate)
+    log('SMOKE', { id: candidate.id, ok: smoke.ok, checks: smoke.checks.length, failures: smoke.failures })
     if (frozen) {
       // Frozen: validate and remember the new module, but do NOT swap/start it.
       // `resume` commits and starts exactly this module.
+      generationRegistries.get(candidate.id)?.dispose()
+      generationRegistries.delete(candidate.id)
+      candidate = null
       generationModule = mod
       currentBundle = built.outfile
       generationHash = built.hash
@@ -1250,36 +1330,33 @@ async function performReload(trigger: string): Promise<void> {
       log('RELOAD', { ok: true, trigger, deferred: 'frozen', ms: Date.now() - started, hash: built.hash, contractVersion: mod.CONTRACT_VERSION })
       return
     }
-    if (previous !== null) await previous.quiesce()
     state.reloads += 1
     state.generations += 1
-    state.lastGenerationId = next.id
-    saveState('reload-snapshot')
-    const preflight = runMissionPreflight(next)
-    log('MISSION_PREFLIGHT', { id: next.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason, trigger })
-    acquireLease(next.id)
-    generation = next
-    try {
-      next.start()
-    } catch (startError) {
-      generation = null
-      revokeLease('reload-start-failed')
-      if (previous !== null && previousModule !== null) {
-        const resumed = previousModule.createGeneration(makeGenerationContext(bot))
-        resumed.attach()
-        acquireLease(resumed.id)
-        generation = resumed
-        resumed.start()
-        log('RELOAD_ROLLBACK', { from: next.id, resumed: resumed.id })
-      }
-      throw startError
+    saveState('reload-attempt')
+    const preflight = runMissionPreflight(candidate)
+    log('MISSION_PREFLIGHT', { id: candidate.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason, trigger })
+    const outcome = await swapGeneration(makeSwapPorts(previousModule), candidate)
+    candidate = null
+    if (outcome.status !== 'committed') {
+      stats.reloadsFailed += 1
+      const resumed = outcome.status === 'rolled-back' ? outcome.generationId : null
+      log('RELOAD_REJECTED', {
+        trigger,
+        action: 'keep-previous-generation',
+        rollback: outcome.status,
+        resumed,
+        generationId: resumed,
+        leaseOwner: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+        snapshotGenerationId: state.generationId,
+        reason: outcome.reason,
+      })
+      log('RELOAD', { ok: false, trigger, ms: Date.now() - started, message: outcome.reason })
+      return
     }
     generationModule = mod
     currentBundle = built.outfile
     generationHash = built.hash
-    state.generationId = next.id
     lastActionId = null
-    if (previous !== null) previous.dispose()
     stats.reloadsChangedHash += 1
     saveState('reload-commit')
     const counts = listenerCounts()
@@ -1288,19 +1365,33 @@ async function performReload(trigger: string): Promise<void> {
       trigger,
       ms: Date.now() - started,
       hash: built.hash,
-      id: next.id,
+      id: outcome.generationId,
       generations: state.generations,
       listeners: counts,
       listenerLeak: listenerLeak(),
     })
     log('ACCEPTANCE', { path: writeAcceptance(), runId })
-    watchGenerationStop(next)
+    const live = generation
+    if (live !== null) watchGenerationStop(live)
   } catch (error) {
+    if (candidate !== null) {
+      if (generation === candidate) {
+        generation = null
+        state.lastGenerationId = candidate.id
+        state.generationId = null
+      }
+      try {
+        disposeGeneration(candidate)
+      } catch {
+        // best effort
+      }
+    }
     stats.reloadsFailed += 1
     const message = error instanceof Error ? error.message : String(error)
     log('ERROR', { where: 'performReload', trigger, message })
     log('RELOAD_REJECTED', { trigger, message, action: 'keep-previous-generation' })
     log('RELOAD', { ok: false, trigger, ms: Date.now() - started, message })
+    if (generation === null && !shuttingDown && !frozen && !deathResetPending) scheduleGenerationRestart('reload-failed')
   }
 }
 
@@ -1591,12 +1682,10 @@ function shutdown(reason: string): void {
   }
   log('ACCEPTANCE', { path: acceptance, runId })
   saveState('shutdown')
-  try {
-    generation?.dispose()
-  } catch {
-    // ignore
+  if (generation !== null) {
+    disposeGeneration(generation)
+    generation = null
   }
-  generation = null
   try {
     bot?.quit(reason)
   } catch {
