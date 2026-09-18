@@ -950,7 +950,9 @@ export interface PlanOption {
 
 /** Stable signature of a compiled goal list, for STRATEGY_BODY_DELTA (#29). */
 export function goalSignature(goals: readonly PlannedGoal[]): string {
-  return goals.map((goal) => `${goal.kind}:${goal.targetItem ?? goal.description}:${goal.requiredCount ?? 1}`).join('|')
+  return goals
+    .map((goal) => `${goal.kind}:${goal.targetItem ?? goal.description}:${goal.requiredCount ?? 1}:${goal.strategy ?? 'untyped'}`)
+    .join('|')
 }
 
 /** Adapter options for skill generation from the resident world/bot projection. */
@@ -1203,16 +1205,20 @@ export function goalsForStrategy(
   const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x cobblestone`, targetItem: 'cobblestone', requiredCount: n })
   const iron = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x raw_iron`, targetItem: 'raw_iron', requiredCount: n })
   const chosen = (goals: PlannedGoal[]): PlannedGoal[] =>
-    withFurnacePrereq(withOreDescent(goals, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces)
+    withFurnacePrereq(withOreDescent(goals, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces).map((goal) => ({
+      ...goal,
+      strategy,
+    }))
+  const ladder = (goals: PlannedGoal[]): PlannedGoal[] => goals.map((goal) => ({ ...goal, strategy }))
   switch (strategy) {
     case 'descend_to_y16':
-      return rank < 1 ? ladderFront : chosen([descendGoal(16, 'raw_iron'), iron(3)])
+      return rank < 1 ? ladder(ladderFront) : chosen([descendGoal(16, 'raw_iron'), iron(3)])
     case 'explore_cave':
-      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(16)]) : chosen([stone(12), iron(3)])
+      return rank < 1 ? ladder(ladderFront) : rank < 2 ? chosen([stone(16)]) : chosen([stone(12), iron(3)])
     case 'branch_mine':
-      return rank < 1 ? ladderFront : rank < 2 ? chosen([stone(32)]) : chosen([stone(24), iron(3)])
+      return rank < 1 ? ladder(ladderFront) : rank < 2 ? chosen([stone(32)]) : chosen([stone(24), iron(3)])
     case 'return_to_known_ore':
-      return rank < 2 ? (rank < 1 ? ladderFront : chosen([stone(16)])) : chosen([iron(3)])
+      return rank < 2 ? (rank < 1 ? ladder(ladderFront) : chosen([stone(16)])) : chosen([iron(3)])
     case 'smelt_and_craft':
       return chosen(ladderFront)
   }
