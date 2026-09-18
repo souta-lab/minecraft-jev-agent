@@ -12,15 +12,22 @@ import {
   describePredicate,
   emitBlockedOptionLogs,
   evaluatePredicate,
+  evaluatePredicateTruth,
   evaluatePredicates,
+  evaluatePredicatesTruth,
   expandOptionDependencies,
   formatBlockedOptionLog,
+  formatPredicateUnknown,
   isOptionComplete,
   isOptionStartable,
   makeOptionSnapshot,
+  optionSpecToPlannedGoal,
   optionSpecsToPlannedGoals,
+  optionStartabilityTruth,
   orderGoalsByReadiness,
+  queuedToPlanned,
   resolveOptionCompilerEnabled,
+  setPredicateUnknownSink,
   snapshotFromResident,
   validateOptionSpec,
   validatePredicate,
@@ -58,6 +65,29 @@ function sameGoal(a: PlannedGoal, b: PlannedGoal): boolean {
     (a.targetItem ?? null) === (b.targetItem ?? null) &&
     (a.requiredCount ?? 1) === (b.requiredCount ?? 1)
   )
+}
+
+function withPredicateUnknownCapture<T>(run: (lines: string[]) => T): T {
+  const lines: string[] = []
+  setPredicateUnknownSink((line) => {
+    lines.push(line)
+  })
+  try {
+    return run(lines)
+  } finally {
+    setPredicateUnknownSink(null)
+  }
+}
+
+const HEALTH_SPEC: OptionSpec = {
+  id: 'custom:survive',
+  intent: 'stay alive',
+  kind: 'custom',
+  target: { count: 1 },
+  preconditions: [{ kind: 'healthAtLeast', health: 10 }],
+  success: [],
+  skills: [],
+  abortThreshold: 0.5,
 }
 
 addCase('OptionSpec validation accepts a well-formed compiled spec', () => {
@@ -122,6 +152,95 @@ addCase('predicate: pickaxe rank, health and unknown custom ids fail closed', ()
   const custom = evaluatePredicate({ kind: 'custom', id: 'not-registered' }, snapshot)
   const customRegistered = evaluatePredicate({ kind: 'custom', id: 'yes' }, snapshot, { yes: () => true })
   return { pass: rank2 && !rank3 && healthy && !custom && customRegistered, detail: `rank2=${rank2} rank3=${rank3} healthy=${healthy} unknown=${custom} registered=${customRegistered}` }
+})
+
+addCase('healthAtLeast: unknown health fails closed and logs PREDICATE_UNKNOWN (#59)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const unknownSnapshot = makeOptionSnapshot({ inventory: {}, health: null })
+    const value = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, unknownSnapshot)
+    const truth = evaluatePredicateTruth({ kind: 'healthAtLeast', health: 10 }, unknownSnapshot)
+    const startable = isOptionStartable(HEALTH_SPEC, unknownSnapshot)
+    const expected = formatPredicateUnknown({ kind: 'healthAtLeast', health: 10 }, ['health'])
+    const logged = lines.includes(expected) && lines.every((line) => line.startsWith('PREDICATE_UNKNOWN'))
+    return {
+      pass: value === false && truth.truth === 'unknown' && !startable && logged && lines.length >= 2,
+      detail: `value=${value} truth=${truth.truth} startable=${startable} lines=${JSON.stringify(lines)}`,
+    }
+  })
+})
+
+addCase('healthAtLeast: known-good true, known-bad false, no unknown log', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const below = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, makeOptionSnapshot({ inventory: {}, health: 9 }))
+    const at = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, makeOptionSnapshot({ inventory: {}, health: 10 }))
+    const above = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, makeOptionSnapshot({ inventory: {}, health: 20 }))
+    return { pass: !below && at && above && lines.length === 0, detail: `health9=${below} health10=${at} health20=${above} logs=${lines.length}` }
+  })
+})
+
+addCase('dimensionIs/levelAtMost: unknown input fails closed and logs (#59 audit)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const noDimension = makeOptionSnapshot({ inventory: {}, dimension: null, position: { x: 0, y: 12, z: 0 } })
+    const noPosition = makeOptionSnapshot({ inventory: {}, dimension: 'overworld', position: null })
+    const dimensionUnknown = evaluatePredicate({ kind: 'dimensionIs', dimension: 'overworld' }, noDimension)
+    const levelUnknown = evaluatePredicate({ kind: 'levelAtMost', y: 16 }, noPosition)
+    const dimensionKnown = evaluatePredicate({ kind: 'dimensionIs', dimension: 'overworld' }, makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:overworld' }))
+    const levelGood = evaluatePredicate({ kind: 'levelAtMost', y: 16 }, makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 12, z: 0 } }))
+    const levelBad = evaluatePredicate({ kind: 'levelAtMost', y: 16 }, makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 20, z: 0 } }))
+    const logged =
+      lines.some((line) => line === 'PREDICATE_UNKNOWN name=dimensionIs input=dimension=null -> false') &&
+      lines.some((line) => line === 'PREDICATE_UNKNOWN name=levelAtMost input=position=null -> false')
+    return {
+      pass: !dimensionUnknown && !levelUnknown && dimensionKnown && levelGood && !levelBad && logged,
+      detail: `dimUnknown=${dimensionUnknown} levelUnknown=${levelUnknown} dimKnown=${dimensionKnown} levelGood=${levelGood} levelBad=${levelBad} lines=${JSON.stringify(lines)}`,
+    }
+  })
+})
+
+addCase('tri-state: unknown is not true and fresh health re-enables startability (#59)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const unknownSnapshot = makeOptionSnapshot({ inventory: {}, health: null })
+    const freshSnapshot = makeOptionSnapshot({ inventory: {}, health: 20 })
+    const cold = optionStartabilityTruth(HEALTH_SPEC, unknownSnapshot)
+    const warm = optionStartabilityTruth(HEALTH_SPEC, freshSnapshot)
+    const aggregate = evaluatePredicatesTruth([{ kind: 'healthAtLeast', health: 10 }], unknownSnapshot)
+    return {
+      pass:
+        cold === 'unknown' &&
+        warm === 'true' &&
+        aggregate.truth === 'unknown' &&
+        aggregate.unknown.length === 1 &&
+        isOptionStartable(HEALTH_SPEC, freshSnapshot) &&
+        !isOptionStartable(HEALTH_SPEC, unknownSnapshot),
+      detail: `cold=${cold} warm=${warm} aggregate=${aggregate.truth} unknown=${aggregate.unknown.length} logs=${lines.length}`,
+    }
+  })
+})
+
+addCase('custom: unregistered id is a proven false, not an unknown (#59 audit)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const snapshot = makeOptionSnapshot({ inventory: {} })
+    const value = evaluatePredicate({ kind: 'custom', id: 'not-registered' }, snapshot)
+    const truth = evaluatePredicateTruth({ kind: 'custom', id: 'not-registered' }, snapshot)
+    return { pass: value === false && truth.truth === 'false' && lines.length === 0, detail: `value=${value} truth=${truth.truth} logs=${lines.length}` }
+  })
+})
+
+addCase('tri-state aggregate prefers a proven false over an unknown (#59)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const snapshot = makeOptionSnapshot({ inventory: {}, health: null })
+    const result = evaluatePredicatesTruth(
+      [
+        { kind: 'healthAtLeast', health: 10 },
+        { kind: 'inventoryAtLeast', item: 'diamond', count: 1 },
+      ],
+      snapshot,
+    )
+    return {
+      pass: result.truth === 'false' && result.unknown.length === 1 && result.unmet.length === 2 && lines.length === 1,
+      detail: `truth=${result.truth} unknown=${result.unknown.length} unmet=${result.unmet.length} logs=${lines.length}`,
+    }
+  })
 })
 
 addCase('I(o): smelt iron_ingot is not startable without furnace + raw_iron', () => {
@@ -388,6 +507,111 @@ addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
     result.ready.length === 0 &&
     result.blocked.length === 2
   return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
+})
+
+addCase('expanding levelAtMost(46) yields a descend dependency carrying targetY=46 (#57)', () => {
+  const owner: OptionSpec = {
+    id: 'fixture:level',
+    intent: 'fixture requiring a level',
+    kind: 'custom',
+    target: { count: 1 },
+    preconditions: [{ kind: 'levelAtMost', y: 46 }],
+    success: [],
+    skills: [],
+    abortThreshold: 0.5,
+  }
+  const snapshot = makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 100, z: 0 } })
+  const expansion = expandOptionDependencies(owner, snapshot)
+  const dependency = expansion.specs[0]
+  const successPredicate = dependency?.success[0]
+  const successY = successPredicate?.kind === 'levelAtMost' ? successPredicate.y : null
+  const planned = dependency === undefined ? undefined : optionSpecToPlannedGoal(dependency)
+  const pass =
+    dependency !== undefined &&
+    dependency.kind === 'descend' &&
+    dependency.target.targetY === 46 &&
+    successY === 46 &&
+    planned?.targetY === 46
+  return {
+    pass,
+    detail: `kind=${dependency?.kind} targetY=${dependency?.target.targetY} success=${successPredicate?.kind}${successY !== null ? `:y=${successY}` : ''} plannedTargetY=${planned?.targetY}`,
+  }
+})
+
+addCase('expanding dimensionIs(minecraft:overworld) yields a typed dimension dependency (#57)', () => {
+  const owner: OptionSpec = {
+    id: 'fixture:dimension',
+    intent: 'fixture requiring a dimension',
+    kind: 'custom',
+    target: { count: 1 },
+    preconditions: [{ kind: 'dimensionIs', dimension: 'minecraft:overworld' }],
+    success: [],
+    skills: [],
+    abortThreshold: 0.5,
+  }
+  const snapshot = makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:the_nether' })
+  const expansion = expandOptionDependencies(owner, snapshot)
+  const dependency = expansion.specs[0]
+  const successPredicate = dependency?.success[0]
+  const successDimension = successPredicate?.kind === 'dimensionIs' ? successPredicate.dimension : null
+  const planned = dependency === undefined ? undefined : optionSpecToPlannedGoal(dependency)
+  const pass =
+    dependency !== undefined &&
+    dependency.target.dimension === 'minecraft:overworld' &&
+    successDimension === 'minecraft:overworld' &&
+    planned?.dimension === 'minecraft:overworld'
+  return {
+    pass,
+    detail: `kind=${dependency?.kind} targetDimension=${dependency?.target.dimension} success=${successPredicate?.kind}${successDimension !== null ? `:${successDimension}` : ''} plannedDimension=${planned?.dimension}`,
+  }
+})
+
+addCase('queuedToPlanned(plannedToQueue(x)) preserves targetY/dimension round-trip (#57)', () => {
+  const plannedDescend: PlannedGoal = {
+    kind: 'descend',
+    description: 'descend to y <= 46',
+    targetItem: null,
+    requiredCount: 1,
+    targetY: 46,
+    dimension: 'minecraft:overworld',
+  }
+  const plannedTravel: PlannedGoal = {
+    kind: 'explore',
+    description: 'travel to minecraft:the_nether',
+    targetItem: null,
+    requiredCount: 1,
+    dimension: 'minecraft:the_nether',
+  }
+  const queue = new GoalQueue()
+  const enqueued = queue.applyPlan([plannedDescend, plannedTravel], 'llm')
+  const restored = new GoalQueue()
+  restored.restore(queue.snapshot())
+
+  const queuedDescend = enqueued[0]
+  const queuedTravel = enqueued[1]
+  const restoredCurrent = restored.state.current
+  const backDescend = queuedDescend === undefined ? undefined : queuedToPlanned(queuedDescend)
+  const backTravel = queuedTravel === undefined ? undefined : queuedToPlanned(queuedTravel)
+  const restoredBack = restoredCurrent === null ? undefined : queuedToPlanned(restoredCurrent)
+  const descendSuccess = backDescend === undefined ? undefined : compilePlannedGoal(backDescend).success[0]
+  const travelSuccess = backTravel === undefined ? undefined : compilePlannedGoal(backTravel).success[0]
+  const descendY = descendSuccess?.kind === 'levelAtMost' ? descendSuccess.y : null
+  const travelDimension = travelSuccess?.kind === 'dimensionIs' ? travelSuccess.dimension : null
+
+  const pass =
+    queuedDescend?.targetY === 46 &&
+    queuedDescend?.dimension === 'minecraft:overworld' &&
+    backDescend?.targetY === 46 &&
+    backDescend?.dimension === 'minecraft:overworld' &&
+    descendY === 46 &&
+    backTravel?.dimension === 'minecraft:the_nether' &&
+    travelDimension === 'minecraft:the_nether' &&
+    restoredBack?.targetY === 46 &&
+    restoredBack?.dimension === 'minecraft:overworld'
+  return {
+    pass,
+    detail: `queued[${queuedDescend?.targetY},${queuedDescend?.dimension}] back[${backDescend?.targetY},${backDescend?.dimension}] descendSuccessY=${descendY} travelSuccess=${travelSuccess?.kind}${travelDimension !== null ? `:${travelDimension}` : ''} restored[${restoredBack?.targetY},${restoredBack?.dimension}]`,
+  }
 })
 
 let failures = 0

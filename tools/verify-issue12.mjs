@@ -3,15 +3,23 @@
 // (PRECONDITION_MISSING must not stop the generation; the ladder must be replaced with
 //  the prerequisite chain, and the agent must actually start digging again).
 //
-// Usage: node tools/verify-issue12.mjs [--json]
+// Usage: node tools/verify-issue12.mjs [--json] [--run <runId>]
 // Read-only. No secrets printed.
-import { readFileSync, existsSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+//
+// Evidence source (issue #63 §4): this gate prefers run-scoped evidence
+// (`runs/<runId>/evidence.log`, or a runId slice of the shared log) and only
+// falls back to the all-time shared `buddy.log` when no runId can be resolved.
+// A fallback is labelled FALLBACK in the output; it mixes commits/worlds/lanes.
+import { resolveRunEvidence, MARKER_FALLBACK } from './run-artifacts.mjs'
 
-const LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
 const JSON_OUT = process.argv.includes('--json')
-const txt = existsSync(LOG) ? readFileSync(LOG, 'utf8') : ''
-const lines = txt.trim() ? txt.trim().split('\n') : []
+const RUN_ARG = (() => {
+  const i = process.argv.indexOf('--run')
+  return i >= 0 ? process.argv[i + 1] : null
+})()
+const ev = await resolveRunEvidence({ runId: RUN_ARG })
+const txt = ev.text
+const lines = ev.lines
 
 const count = (s) => txt.split(s).length - 1
 
@@ -72,8 +80,8 @@ const allTimeMaxTicks = maxOf([...txt.matchAll(/GENERATION_STOP[^\n]*?ticks=(\d+
 
 const checks = [
   { id: 'ladder_prereq_present', pass: ladderPrereq > 0, detail: `LADDER_PREREQ=${ladderPrereq}` },
-  { id: 'no_1tick_rotation', pass: tickValues.length === 0 || ticks1 === 0, detail: tickValues.length === 0 ? `no generation stops in the last ${WINDOW_MIN}min (healthy: long-lived generation)` : `recent ${WINDOW_MIN}min: ticks<=1 count=${ticks1} of ${tickValues.length} stops (max=${maxTicks}, all-time stops=${ticksAllTime})` },
-  { id: 'generation_survives_100_ticks', pass: ticksGe100 > 0 || allTimeMaxTicks >= 100, detail: `recent ticks>=100 count=${ticksGe100}, all-time maxTicks=${allTimeMaxTicks}` },
+  { id: 'no_1tick_rotation', pass: tickValues.length === 0 || ticks1 === 0, detail: tickValues.length === 0 ? `no generation stops in the last ${WINDOW_MIN}min (healthy: long-lived generation)` : `recent ${WINDOW_MIN}min: ticks<=1 count=${ticks1} of ${tickValues.length} stops (max=${maxTicks}, evidence stops=${ticksAllTime})` },
+  { id: 'generation_survives_100_ticks', pass: ticksGe100 > 0 || allTimeMaxTicks >= 100, detail: `recent ticks>=100 count=${ticksGe100}, evidence maxTicks=${allTimeMaxTicks}` },
   { id: 'digging_resumed', pass: digging, detail: JSON.stringify(digMarkers) },
   { id: 'raw_iron_obtained', pass: rawIron >= 1, detail: `max raw_iron seen in inventory logs = ${rawIron}` },
   { id: 'churn_reduced', pass: gensLast5min <= 3, detail: `GENERATION_START in last 5min = ${gensLast5min} (<=3 required; 0 means no churn)` },
@@ -85,6 +93,14 @@ const result = {
   verdict: passCount === checks.length ? 'PASS' : 'FAIL',
   passCount,
   total: checks.length,
+  evidence: {
+    source: ev.source,
+    runId: ev.runId,
+    fallback: ev.fallback,
+    reason: ev.reason,
+    logLines: lines.length,
+    fallbackLabel: ev.source === MARKER_FALLBACK ? 'FALLBACK: all-time shared buddy.log (mixes commits/worlds/lanes)' : null,
+  },
   counters: { precond, ladderPrereq, ladderReset, genStops: tickValues.length, maxTicks, gensLast5min, rawIron },
   checks,
 }
@@ -93,6 +109,9 @@ if (JSON_OUT) {
   console.log(JSON.stringify(result, null, 2))
 } else {
   console.log(`== issue #12 acceptance: ${result.verdict} (${passCount}/${checks.length}) ==`)
+  console.log(`  evidence: ${ev.source}${ev.runId ? ` (runId=${ev.runId})` : ''} lines=${lines.length}`)
+  if (ev.fallback) console.log(`  !! FALLBACK: ${ev.reason}`)
+  if (!ev.fallback) console.log(`  reason: ${ev.reason}`)
   for (const c of checks) console.log(`  [${c.pass ? 'PASS' : 'FAIL'}] ${c.id.padEnd(32)} ${c.detail}`)
   console.log(`  counters: ${JSON.stringify(result.counters)}`)
   if (result.verdict === 'FAIL') {

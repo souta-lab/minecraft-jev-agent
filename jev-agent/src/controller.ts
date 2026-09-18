@@ -34,6 +34,7 @@ import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
 import { ActionCancelled, defaultExecutorOptions, Executor } from './executor.ts'
 import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
+import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
@@ -175,6 +176,14 @@ export interface JevAgentOptions {
   pathTimeoutMs: number
   digTimeoutMs: number
   actuation: ActuationMode
+  /**
+   * #38: the resident's allowlist actuation capability. When provided, the
+   * executor routes raw movement packets, entity-pose writes and stock
+   * collectblock through it (each asserts the actuation lease) instead of
+   * touching `bot._client`/`bot.collectBlock`/`bot.entity` directly. Absent in
+   * standalone runs and unit tests, where the stock actuator is used.
+   */
+  actuationPort?: ActuationPort
   /**
    * Mirror of the movement markers (DIG_PATH/STAIRCASE/DESCEND_LIMIT/...) into an
    * external sink (the resident log). The controller's own logger writes to the
@@ -736,7 +745,10 @@ export class JevController {
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
-    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+      reason: plan.note,
+      onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
+    })
     this.subgoalCount = added.length
     this.planSupplied = true
     const restored = this.loadLedger()
@@ -2185,7 +2197,10 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
-        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+          reason: plan.note,
+          onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+        })
         this.waitReplans = 0
         if (added.length > 0) {
           this.chosenCounts.clear()
@@ -3074,6 +3089,7 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
     digTimeoutMs: options.digTimeoutMs,
     goalItem: options.goalItem,
     actuation: options.actuation,
+    actuationPort: options.actuationPort,
     hooks: {
       onPathCompleted: (event) => {
         scheduler.notify('path_completed', {

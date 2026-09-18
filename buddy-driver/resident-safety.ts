@@ -13,6 +13,7 @@
 // type-only, so Node strips them and nothing extra reaches the bundle.
 
 import type { Bot } from 'mineflayer'
+import type { ActuationPose, ActuationPort } from '../jev-agent/src/actuationPort.ts'
 import type { ActuationLease } from './resident-types.ts'
 
 // ---------------------------------------------------------------------------
@@ -271,14 +272,118 @@ export const MUTATING_BOT_METHODS: ReadonlySet<string> = new Set<string>([
 ])
 
 /**
+ * #38: nested capabilities that can actuate WITHOUT passing through the
+ * top-level mutator set. Each is wrapped by `withActuationLease` so a stale
+ * generation is denied at the capability boundary, not only at `bot.*`.
+ */
+export const NESTED_ACTUATION_CAPABILITIES: ReadonlySet<string> = new Set<string>([
+  '_client', // raw protocol write: bot._client.write('position_look', ...)
+  'collectBlock', // mineflayer-collectblock: collect() drives pathfinder/body
+  'entity', // direct shared-state mutation: entity.position.set / entity.yaw =
+])
+
+/**
+ * Vec3 methods that MUTATE the receiver. Read-only projections (`clone`,
+ * `offset`, `distanceTo`, `floored`, ...) are deliberately NOT guarded: a stale
+ * generation may still compute, it just may not mutate shared authoritative
+ * state. Derived from `vec3@0.1.x` (`index.d.ts` `this`-returning methods).
+ */
+export const MUTATING_VEC3_METHODS: ReadonlySet<string> = new Set<string>([
+  'set',
+  'update',
+  'round',
+  'floor',
+  'translate',
+  'add',
+  'subtract',
+  'multiply',
+  'divide',
+  'scale',
+])
+
+/** Entity fields whose direct assignment mutates shared live state. */
+export const MUTATING_ENTITY_FIELDS: ReadonlySet<string> = new Set<string>(['yaw', 'pitch', 'onGround'])
+
+/** Env flag for the dev-only strict surface check (`BUDDY_STRICT_ACTUATION=1`). */
+export const STRICT_ACTUATION_ENV = 'BUDDY_STRICT_ACTUATION'
+
+/**
+ * Proxies produced by the lease wrapper. `assertActuationSurfaceCovered` uses
+ * this to prove the actuator layer is holding guarded objects, not the raw bot.
+ */
+const GUARDED_OBJECTS = new WeakSet<object>()
+
+/**
+ * Build a lease assertion that LOGS the denial (`LEASE_DENIED`) before
+ * rethrowing the `ACTUATION_LEASE_DENIED` error, so a denied bypass is always
+ * visible in the acceptance log.
+ */
+function makeLeaseAssert(lease: ActuationLease, id: string, log?: LeaseLog): (what: string) => void {
+  return (what: string): void => {
+    try {
+      lease.assertActive(id, what)
+    } catch (error) {
+      const owner = lease.activeId.length === 0 ? 'none' : lease.activeId
+      log?.('LEASE_DENIED', { what, caller: id, owner })
+      throw error
+    }
+  }
+}
+
+/**
  * Wrap a bot so every side-effecting call asserts this generation's lease first.
  * Used by `generation-entry.ts`; exported here so the lease denial can be tested
  * against the real actuator without a live connection.
+ *
+ * #38: nested capabilities (`_client`, `collectBlock`, `entity`) are wrapped too,
+ * because a denylist over the top-level surface let a stale generation reach
+ * `bot._client.write`, `bot.collectBlock.collect` and `bot.entity.position.set`
+ * without a lease assertion.
  */
-export function withActuationLease(bot: Bot, lease: ActuationLease, id: string): Bot {
-  const assert = (what: string): void => lease.assertActive(id, what)
+export function withActuationLease(bot: Bot, lease: ActuationLease, id: string, log?: LeaseLog): Bot {
+  const assert = makeLeaseAssert(lease, id, log)
   let pathfinderProxy: object | null = null
-  return new Proxy(bot, {
+  let clientProxy: object | null = null
+  let collectBlockProxy: object | null = null
+  let entityProxy: object | null = null
+  let positionProxy: object | null = null
+
+  const guardPosition = (position: object): object => {
+    if (positionProxy !== null) return positionProxy
+    positionProxy = new Proxy(position, {
+      get(vTarget, vProp, vRecv): unknown {
+        const vValue = Reflect.get(vTarget, vProp, vRecv) as unknown
+        if (typeof vProp === 'string' && typeof vValue === 'function' && MUTATING_VEC3_METHODS.has(vProp)) {
+          return (...args: unknown[]): unknown => {
+            assert(`bot.entity.position.${vProp}`)
+            return (vValue as (...a: unknown[]) => unknown).apply(vTarget, args)
+          }
+        }
+        return vValue
+      },
+    })
+    GUARDED_OBJECTS.add(positionProxy)
+    return positionProxy
+  }
+
+  const guardEntity = (entity: object): object => {
+    if (entityProxy !== null) return entityProxy
+    entityProxy = new Proxy(entity, {
+      get(eTarget, eProp, eRecv): unknown {
+        const eValue = Reflect.get(eTarget, eProp, eRecv) as unknown
+        if (eProp === 'position' && eValue !== null && typeof eValue === 'object') return guardPosition(eValue)
+        return eValue
+      },
+      set(eTarget, eProp, eValue, eRecv): boolean {
+        if (typeof eProp === 'string' && MUTATING_ENTITY_FIELDS.has(eProp)) assert(`bot.entity.${eProp}`)
+        return Reflect.set(eTarget, eProp, eValue, eRecv)
+      },
+    })
+    GUARDED_OBJECTS.add(entityProxy)
+    return entityProxy
+  }
+
+  const guarded = new Proxy(bot, {
     get(target, prop, receiver): unknown {
       const value = Reflect.get(target, prop, receiver) as unknown
       if (typeof prop === 'string' && typeof value === 'function' && MUTATING_BOT_METHODS.has(prop)) {
@@ -304,10 +409,215 @@ export function withActuationLease(bot: Bot, lease: ActuationLease, id: string):
               return pfValue
             },
           })
+          GUARDED_OBJECTS.add(pathfinderProxy)
         }
         return pathfinderProxy
       }
+      // #38 raw protocol writes (packet stepper).
+      if (prop === '_client' && value !== null && typeof value === 'object') {
+        if (clientProxy === null) {
+          clientProxy = new Proxy(value, {
+            get(cTarget, cProp, cRecv): unknown {
+              const cValue = Reflect.get(cTarget, cProp, cRecv) as unknown
+              if (cProp === 'write' && typeof cValue === 'function') {
+                return (...args: unknown[]): unknown => {
+                  assert('bot._client.write')
+                  return (cValue as (...a: unknown[]) => unknown).apply(cTarget, args)
+                }
+              }
+              return cValue
+            },
+          })
+          GUARDED_OBJECTS.add(clientProxy)
+        }
+        return clientProxy
+      }
+      // #38 plugin capability (mineflayer-collectblock).
+      if (prop === 'collectBlock' && value !== null && typeof value === 'object') {
+        if (collectBlockProxy === null) {
+          collectBlockProxy = new Proxy(value, {
+            get(cbTarget, cbProp, cbRecv): unknown {
+              const cbValue = Reflect.get(cbTarget, cbProp, cbRecv) as unknown
+              if (cbProp === 'collect' && typeof cbValue === 'function') {
+                return (...args: unknown[]): unknown => {
+                  assert('bot.collectBlock.collect')
+                  return (cbValue as (...a: unknown[]) => unknown).apply(cbTarget, args)
+                }
+              }
+              return cbValue
+            },
+          })
+          GUARDED_OBJECTS.add(collectBlockProxy)
+        }
+        return collectBlockProxy
+      }
+      // #38 direct shared-state mutation (entity.position.set / entity.yaw =).
+      if (prop === 'entity' && value !== null && typeof value === 'object') return guardEntity(value)
       return value
     },
   }) as Bot
+  GUARDED_OBJECTS.add(guarded)
+  return guarded
+}
+
+// ---------------------------------------------------------------------------
+// #38 allowlist ActuationPort
+// ---------------------------------------------------------------------------
+
+/** The raw (or guarded) bot surface the port delegates to. Structural, not `any`. */
+interface ActuationDelegate {
+  entity?: { position: { set(x: number, y: number, z: number): unknown }; yaw: number; pitch: number; onGround: boolean }
+  pathfinder?: { setGoal(goal: unknown): void; stop(): void }
+  collectBlock?: { collect(entity: unknown, options?: unknown): Promise<unknown> }
+  _client?: { write(name: string, payload: Record<string, unknown>): boolean }
+  setControlState?: (control: string, state: boolean) => void
+  clearControlStates?: () => void
+  lookAt?: (point: unknown, force?: boolean) => Promise<void>
+  dig?: (block: unknown, forceLook?: 'ignore') => Promise<void>
+  placeBlock?: (refBlock: unknown, face: unknown) => Promise<void>
+  activateItem?: (offhand?: boolean) => Promise<void>
+  activateBlock?: (block: unknown, face?: unknown) => Promise<void>
+  equip?: (item: unknown, destination?: unknown) => Promise<void>
+  craft?: (recipe: unknown, count?: number, craftingTable?: unknown) => Promise<void>
+  openBlock?: (block: unknown) => Promise<unknown>
+}
+
+/** Fail closed when an allowlisted actuator primitive is missing on the bot. */
+function requiredMethod<T>(value: T | undefined, what: string): T {
+  if (typeof value !== 'function') throw new Error(`ACTUATION_PORT_MISSING method=${what}`)
+  return value
+}
+
+/**
+ * Build the allowlist capability the generation actuates through. Every method
+ * asserts the lease BEFORE the side effect, then delegates to the (leased) bot.
+ *
+ * There is deliberately no method that returns the raw bot / `_client` /
+ * `collectBlock` / `entity`: the bypasses closed in #38 are only reachable via
+ * the guarded primitives below (`writeMovementPacket`, `setPose`, `collect`).
+ */
+export function createActuationPort(bot: Bot, lease: ActuationLease, id: string, log?: LeaseLog): ActuationPort {
+  const assert = makeLeaseAssert(lease, id, log)
+  const delegate = bot as unknown as ActuationDelegate
+  return {
+    generationId: id,
+    assertLease: (what: string): void => assert(what),
+    pathTo: (goal: unknown): void => {
+      assert('port.pathTo')
+      requiredMethod(delegate.pathfinder?.setGoal, 'pathfinder.setGoal').call(delegate.pathfinder, goal)
+    },
+    stopPath: (): void => {
+      assert('port.stopPath')
+      requiredMethod(delegate.pathfinder?.stop, 'pathfinder.stop').call(delegate.pathfinder)
+    },
+    setControls: (controls: Record<string, boolean>): void => {
+      assert('port.setControls')
+      const setControlState = requiredMethod(delegate.setControlState, 'setControlState')
+      for (const [control, state] of Object.entries(controls)) setControlState.call(delegate, control, state)
+    },
+    clearControls: (): void => {
+      assert('port.clearControls')
+      requiredMethod(delegate.clearControlStates, 'clearControlStates').call(delegate)
+    },
+    lookAt: (point, force): Promise<void> => {
+      assert('port.lookAt')
+      return requiredMethod(delegate.lookAt, 'lookAt').call(delegate, point, force)
+    },
+    dig: (block, forceLook): Promise<void> => {
+      assert('port.dig')
+      return requiredMethod(delegate.dig, 'dig').call(delegate, block, forceLook)
+    },
+    placeBlock: (refBlock, face): Promise<void> => {
+      assert('port.placeBlock')
+      return requiredMethod(delegate.placeBlock, 'placeBlock').call(delegate, refBlock, face)
+    },
+    activateItem: (offhand): Promise<void> => {
+      assert('port.activateItem')
+      return requiredMethod(delegate.activateItem, 'activateItem').call(delegate, offhand)
+    },
+    activateBlock: (block, face): Promise<void> => {
+      assert('port.activateBlock')
+      return requiredMethod(delegate.activateBlock, 'activateBlock').call(delegate, block, face)
+    },
+    equip: (item, destination): Promise<void> => {
+      assert('port.equip')
+      return requiredMethod(delegate.equip, 'equip').call(delegate, item, destination)
+    },
+    collect: (entity, options): Promise<unknown> => {
+      assert('port.collect')
+      const collect = requiredMethod(delegate.collectBlock?.collect, 'collectBlock.collect')
+      return collect.call(delegate.collectBlock, entity, options)
+    },
+    craft: (recipe, count, craftingTable): Promise<void> => {
+      assert('port.craft')
+      return requiredMethod(delegate.craft, 'craft').call(delegate, recipe, count, craftingTable)
+    },
+    openContainer: (block): Promise<unknown> => {
+      assert('port.openContainer')
+      return requiredMethod(delegate.openBlock, 'openBlock').call(delegate, block)
+    },
+    writeMovementPacket: (name: string, payload: Record<string, unknown>): void => {
+      assert('port.writeMovementPacket')
+      const write = requiredMethod(delegate._client?.write, '_client.write')
+      write.call(delegate._client, name, payload)
+    },
+    setPose: (pose: ActuationPose): void => {
+      assert('port.setPose')
+      const entity = delegate.entity
+      if (entity === undefined) throw new Error('ACTUATION_PORT_MISSING method=entity')
+      if (pose.yaw !== undefined) entity.yaw = pose.yaw
+      if (pose.pitch !== undefined) entity.pitch = pose.pitch
+      if (pose.onGround !== undefined) entity.onGround = pose.onGround
+      entity.position.set(pose.x, pose.y, pose.z)
+    },
+  }
+}
+
+/** True when `candidate` is a bot returned by `withActuationLease`. */
+export function isLeasedBot(candidate: object): boolean {
+  return GUARDED_OBJECTS.has(candidate)
+}
+
+export interface ActuationSurfaceReport {
+  ok: boolean
+  /** uncovered surfaces, e.g. `bot(not-leased-proxy)` or `bot._client` */
+  uncovered: string[]
+}
+
+/**
+ * Dev-only check (#38): prove the actuator layer holds a LEASED bot whose known
+ * nested actuation capabilities are all guarded. Flags:
+ *   - passing the raw bot instead of the `withActuationLease` proxy
+ *   - a nested capability that was returned unguarded (a future denylist hole)
+ *
+ * Non-strict mode logs `ACTUATION_SURFACE_CHECK`. Strict mode
+ * (`BUDDY_STRICT_ACTUATION=1`) throws `ACTUATION_SURFACE_UNCOVERED`, so CI/dev
+ * can turn the flag into a hard gate without touching production behaviour.
+ */
+export function assertActuationSurfaceCovered(candidate: unknown, log?: LeaseLog): ActuationSurfaceReport {
+  const uncovered: string[] = []
+  if (candidate === null || typeof candidate !== 'object') {
+    uncovered.push('bot(not-an-object)')
+  } else if (!GUARDED_OBJECTS.has(candidate)) {
+    uncovered.push('bot(not-leased-proxy)')
+  } else {
+    const holder = candidate as unknown as Record<string, unknown>
+    for (const name of NESTED_ACTUATION_CAPABILITIES) {
+      const value = holder[name]
+      if (value === null || value === undefined) continue
+      if ((typeof value === 'object' || typeof value === 'function') && !GUARDED_OBJECTS.has(value)) {
+        uncovered.push(`bot.${name}`)
+      }
+    }
+  }
+  const report: ActuationSurfaceReport = { ok: uncovered.length === 0, uncovered }
+  if (!report.ok) {
+    if (process.env[STRICT_ACTUATION_ENV] === '1') {
+      throw new Error(
+        `ACTUATION_SURFACE_UNCOVERED uncovered=${uncovered.join(',')} - refusing to run with an unguarded nested actuation capability`,
+      )
+    }
+    log?.('ACTUATION_SURFACE_CHECK', { ok: false, uncovered })
+  }
+  return report
 }

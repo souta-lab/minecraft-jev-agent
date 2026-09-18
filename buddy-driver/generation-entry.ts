@@ -32,7 +32,8 @@ import {
 } from './mercury-system2.ts'
 import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system2.ts'
 import { installDescendAwarePolicy } from './system-one-policy.ts'
-import { withActuationLease } from './resident-safety.ts'
+import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
+import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import {
   PlannerBrain,
   bestPickaxeRank,
@@ -59,7 +60,7 @@ import type {
   WorldMemoryDelta,
 } from './resident-types.ts'
 
-export const CONTRACT_VERSION = 2
+export const CONTRACT_VERSION = 3
 
 // Loud-fail craft capability check: a future Mineflayer bump that removes the
 // private `_syncWindow` API must fail loudly here instead of silently degrading
@@ -411,7 +412,18 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const bot = withActuationLease(ctx.bot, ctx.lease, id)
+  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.log)
+  // #38: the generation actuates through this allowlist capability. Every method
+  // asserts the lease; the raw Bot is not the actuation contract. The dev-only
+  // surface check proves the nested capabilities are guarded, not raw.
+  const actuationPort = createActuationPort(bot, ctx.lease, id, ctx.log)
+  const surface = assertActuationSurfaceCovered(bot, ctx.log)
+  ctx.log('ACTUATION_PORT_READY', {
+    id,
+    operations: ACTUATION_PORT_OPERATIONS,
+    surfaceOk: surface.ok,
+    surfaceUncovered: surface.uncovered,
+  })
 
   const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64)
   const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32)
@@ -586,6 +598,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // returns bounded planning data, never actions.
     forceFallbackPolicy: true,
     actuation: 'pathfinder',
+    actuationPort,
     reach: 5,
     scanRadius: 48,
     verbose: true,
@@ -708,7 +721,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function proposeLedger(): void {
     try {
       const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
-      ctx.proposeLedger(holder.queue.snapshot())
+      ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: holder.queue.snapshot() })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'proposeLedger', message })
@@ -763,7 +776,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     check('id', () => typeof id === 'string' && id.length > 0)
     check('startedAt', () => Number.isFinite(startedAt))
     check('rungId', () => typeof ladder.rungId === 'string' && ladder.rungId.length > 0)
-    check('contract-version', () => CONTRACT_VERSION === 2)
+    check('contract-version', () => CONTRACT_VERSION === 3)
     check('status-readable', () => {
       const s = status()
       return typeof s.running === 'boolean' && typeof s.policyKind === 'string' && s.policyKind.length > 0
