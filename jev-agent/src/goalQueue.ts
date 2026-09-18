@@ -55,6 +55,12 @@ export interface ApplyPlanOptions {
 export interface QueuedGoal {
   id: string
   /**
+   * Issue #56: the compiled Option instance this row executes, when the plan
+   * was built by the Option compiler (`optionInstanceId` of the `OptionSpec`).
+   * The row references the identity; the controller holds the full spec.
+   */
+  optionInstanceId?: string
+  /**
    * Issue #55: deterministic prerequisite marking. When true, a `patch`/
    * `replace` may not drop this goal without an explicit `abort`; the queue
    * re-inserts it and logs `PROTECTED_GOAL_REINSERTED`.
@@ -101,6 +107,12 @@ export interface PlannedGoal {
   protected?: boolean
   /** Issue #55: core/rung goal; a patch/replace may not drop it. */
   core?: boolean
+  /**
+   * Issue #56: compiled Option instance identity, so the controller can join
+   * this row to the exact `OptionSpec` it came from. Absent when the row was not
+   * produced by the Option compiler.
+   */
+  optionInstanceId?: string
   /**
    * Set by the readiness compiler (`orderGoalsByReadiness`) when every
    * precondition of this goal held in the snapshot it ordered against. Absent
@@ -332,6 +344,7 @@ export class GoalQueue {
       detail: plan.detail ?? null,
       protected: plan.protected === true,
       core: plan.core === true,
+      ...(plan.optionInstanceId === undefined ? {} : { optionInstanceId: plan.optionInstanceId }),
     }
     this.goals.push(goal)
     return goal

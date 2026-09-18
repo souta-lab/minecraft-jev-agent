@@ -761,6 +761,11 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.strategy === undefined ? {} : { strategy: goal.strategy }),
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
+    // #56: keep the Option instance reference alive across queue round-trips so
+    // the controller can join the head row back to its compiled OptionSpec.
+    ...(goal.optionInstanceId === undefined || goal.optionInstanceId === null
+      ? {}
+      : { optionInstanceId: goal.optionInstanceId }),
   }
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) planned.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) planned.dimension = goal.dimension
@@ -847,6 +852,7 @@ export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
     ...(spec.strategy === undefined ? {} : { strategy: spec.strategy }),
     description: spec.intent,
     requiredCount: spec.target.count ?? 1,
+    optionInstanceId: stableOptionInstanceId(spec),
   }
   if (typeof spec.target.item === 'string' && spec.target.item.length > 0) goal.targetItem = spec.target.item
   if (typeof spec.target.targetY === 'number' && Number.isFinite(spec.target.targetY)) goal.targetY = spec.target.targetY
@@ -1257,4 +1263,255 @@ export function snapshotFromResident(input: {
     knownStations,
     knownOres: input.discoveredOres,
   })
+}
+
+/** Best held pickaxe rank (0 when none) from plain inventory counts. */
+export function bestPickaxeRankFromCounts(counts: Readonly<Record<string, number>>): number {
+  let rank = 0
+  for (let index = 0; index < PICKAXE_TIER_ORDER.length; index += 1) {
+    const name = PICKAXE_TIER_ORDER[index]
+    if (name !== undefined && (counts[name] ?? 0) > 0) rank = Math.max(rank, index + 1)
+  }
+  return rank
+}
+
+// ---------------------------------------------------------------------------
+// current Option context (#56)
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional capability of a System2 brain: expose the compiled OptionSpecs of
+ * its most recent plan so the controller can hold the current head's Option
+ * context (#56). A plain brain without this capability stays valid.
+ */
+export interface OptionSpecSource {
+  /** compiled Options of the last plan, dependency-first (empty when compiler off) */
+  compiledOptionSpecs(): readonly OptionSpec[]
+}
+
+/** Structural guard: true when a brain can expose its compiled Options (#56). */
+export function isOptionSpecSource(value: unknown): value is OptionSpecSource {
+  if (typeof value !== 'object' || value === null) return false
+  return typeof (value as { compiledOptionSpecs?: unknown }).compiledOptionSpecs === 'function'
+}
+
+/** One settled executor outcome for one Option instance. */
+export interface OptionOutcomeSummary {
+  actionId: string | null
+  /** executor settle status: done | failed | cancelled | ... */
+  status: string
+  /** VERIFY result - code-owned, never a model claim */
+  verified: boolean
+  /** item-count delta attributed to the action */
+  progressDelta: number
+  failureCode: string | null
+  atMs: number
+}
+
+/** Per-instance runtime facts the controller already owns (#52/#79). */
+export interface OptionRuntimeSummary {
+  /** consecutive unproductive settled outcomes (resets on verified progress) */
+  attempts: number
+  /** every settled outcome recorded for this instance */
+  totalAttempts: number
+  lastVerified: boolean
+  lastProgressDelta: number
+  /** true while the instance is retired inside the abandon cooldown */
+  abandoned: boolean
+  /** queue row creation time (epoch ms), null when unknown */
+  startedAtMs: number | null
+}
+
+/**
+ * The typed projection of the current GoalQueue head's Option (issue #56):
+ * compiled identity, evaluated I(o)/success(s,o), allowed skills, dependency
+ * edges and the bounded runtime/outcome memory. Plain data only.
+ */
+export interface CurrentOptionContext {
+  /** precise instance identity (#52), e.g. `smelt:iron_ingot#c3` */
+  instanceId: string
+  /** semantic capability id (#52), e.g. `smelt:iron_ingot` */
+  templateId: string
+  kind: OptionKind
+  target: OptionTarget
+  intent: string
+  /** evaluated initiation predicate I(o) */
+  initiation: { truth: PredicateTruth; unmet: Predicate[] }
+  /** evaluated success predicate success(s,o) */
+  success: { truth: PredicateTruth; unmet: Predicate[] }
+  allowedSkills: string[]
+  /** instance ids of the prerequisite Options this instance depends on */
+  dependencyRefs: string[]
+  /** instance ids of the compiled Options that depend on this instance */
+  parentRefs: string[]
+  /** beta threshold for this Option (shadow; authority stays deterministic) */
+  abortThreshold: number
+  runtime: OptionRuntimeSummary
+  /** bounded recent settled outcomes for THIS instance, oldest first */
+  recentOutcomes: OptionOutcomeSummary[]
+}
+
+/** Caps so the Jev payload stays small no matter how long a run gets. */
+export const OPTION_CONTEXT_MAX_OUTCOMES = 3
+export const OPTION_CONTEXT_MAX_REFS = 8
+export const OPTION_CONTEXT_MAX_UNMET = 4
+
+/** The deterministic prerequisite instance ids of one Option in a snapshot. Pure. */
+function dependencyInstanceIds(
+  spec: OptionSpec,
+  snapshot: OptionWorldSnapshot,
+  planIds: ReadonlySet<string> | null,
+  custom?: CustomPredicateRegistry,
+): string[] {
+  const { unmet } = evaluatePredicatesTruth(spec.preconditions, snapshot, custom)
+  const selfId = stableOptionInstanceId(spec)
+  const ids: string[] = []
+  for (const predicate of unmet) {
+    const dependency = dependencyGoalForPredicate(predicate, spec, snapshot)
+    if (dependency === null) continue
+    const id = stableOptionInstanceId(compilePlannedGoal(dependency))
+    if (id === selfId) continue
+    if (planIds !== null && !planIds.has(id)) continue
+    if (!ids.includes(id)) ids.push(id)
+  }
+  return ids.slice(0, OPTION_CONTEXT_MAX_REFS)
+}
+
+export interface CurrentOptionContextInput {
+  /** every compiled Option instance of the active plan, for dependency/parent edges */
+  plan?: readonly OptionSpec[]
+  runtime?: Partial<OptionRuntimeSummary>
+  recentOutcomes?: readonly OptionOutcomeSummary[]
+  custom?: CustomPredicateRegistry
+}
+
+/**
+ * Build the bounded current-Option projection for a compiled OptionSpec (#56).
+ * Pure: code-only predicate evaluation, no model, no logging, no bot.
+ */
+export function buildCurrentOptionContext(
+  spec: OptionSpec,
+  snapshot: OptionWorldSnapshot,
+  input: CurrentOptionContextInput = {},
+): CurrentOptionContext {
+  const custom = input.custom
+  const instanceId = stableOptionInstanceId(spec)
+  const planIds = input.plan === undefined ? null : new Set(input.plan.map((entry) => stableOptionInstanceId(entry)))
+  const initiation = evaluatePredicatesTruth(spec.preconditions, snapshot, custom)
+  const success = evaluatePredicatesTruth(spec.success, snapshot, custom)
+  const dependencyRefs = dependencyInstanceIds(spec, snapshot, planIds, custom)
+  const parentRefs: string[] = []
+  if (input.plan !== undefined) {
+    for (const candidate of input.plan) {
+      const candidateId = stableOptionInstanceId(candidate)
+      if (candidateId === instanceId) continue
+      if (!dependencyInstanceIds(candidate, snapshot, planIds, custom).includes(instanceId)) continue
+      parentRefs.push(candidateId)
+      if (parentRefs.length >= OPTION_CONTEXT_MAX_REFS) break
+    }
+  }
+  const outcomes = input.recentOutcomes ?? []
+  return {
+    instanceId,
+    templateId: spec.id,
+    kind: spec.kind,
+    target: spec.target,
+    intent: spec.intent,
+    initiation: { truth: initiation.truth, unmet: initiation.unmet.slice(0, OPTION_CONTEXT_MAX_UNMET) },
+    success: { truth: success.truth, unmet: success.unmet.slice(0, OPTION_CONTEXT_MAX_UNMET) },
+    allowedSkills: [...spec.skills],
+    dependencyRefs,
+    parentRefs,
+    abortThreshold: spec.abortThreshold,
+    runtime: {
+      attempts: input.runtime?.attempts ?? 0,
+      totalAttempts: input.runtime?.totalAttempts ?? 0,
+      lastVerified: input.runtime?.lastVerified ?? false,
+      lastProgressDelta: input.runtime?.lastProgressDelta ?? 0,
+      abandoned: input.runtime?.abandoned ?? false,
+      startedAtMs: input.runtime?.startedAtMs ?? null,
+    },
+    recentOutcomes: outcomes.slice(-OPTION_CONTEXT_MAX_OUTCOMES).map((outcome) => ({ ...outcome })),
+  }
+}
+
+/** The bounded, model-facing projection of `CurrentOptionContext`. */
+export interface OptionContextPayload {
+  instanceId: string
+  templateId: string
+  kind: OptionKind
+  target: OptionTarget
+  intent: string
+  init: PredicateTruth
+  initUnmet: string[]
+  success: PredicateTruth
+  successUnmet: string[]
+  skills: string[]
+  dependencies: string[]
+  parents: string[]
+  abortThreshold: number
+  runtime: {
+    attempts: number
+    totalAttempts: number
+    lastVerified: boolean
+    lastProgressDelta: number
+    abandoned: boolean
+  }
+  outcomes: Array<{
+    actionId: string | null
+    status: string
+    verified: boolean
+    progressDelta: number
+    failureCode: string | null
+  }>
+}
+
+/** Project a context into the bounded JSON the Jev payload carries. Pure. */
+export function toOptionContextPayload(context: CurrentOptionContext): OptionContextPayload {
+  return {
+    instanceId: context.instanceId,
+    templateId: context.templateId,
+    kind: context.kind,
+    target: context.target,
+    intent: context.intent,
+    init: context.initiation.truth,
+    initUnmet: context.initiation.unmet.slice(0, OPTION_CONTEXT_MAX_UNMET).map(describePredicate),
+    success: context.success.truth,
+    successUnmet: context.success.unmet.slice(0, OPTION_CONTEXT_MAX_UNMET).map(describePredicate),
+    skills: context.allowedSkills.slice(0, OPTION_CONTEXT_MAX_REFS),
+    dependencies: context.dependencyRefs.slice(0, OPTION_CONTEXT_MAX_REFS),
+    parents: context.parentRefs.slice(0, OPTION_CONTEXT_MAX_REFS),
+    abortThreshold: context.abortThreshold,
+    runtime: {
+      attempts: context.runtime.attempts,
+      totalAttempts: context.runtime.totalAttempts,
+      lastVerified: context.runtime.lastVerified,
+      lastProgressDelta: context.runtime.lastProgressDelta,
+      abandoned: context.runtime.abandoned,
+    },
+    outcomes: context.recentOutcomes.slice(-OPTION_CONTEXT_MAX_OUTCOMES).map((outcome) => ({
+      actionId: outcome.actionId,
+      status: outcome.status,
+      verified: outcome.verified,
+      progressDelta: outcome.progressDelta,
+      failureCode: outcome.failureCode,
+    })),
+  }
+}
+
+/** The shadow log marker for the current Option context (#56). Mirrored. */
+export const OPTION_CONTEXT_MARKER = 'OPTION_CONTEXT'
+
+/**
+ * `OPTION_CONTEXT optionId=<id> template=<t> init=<true|false> success=<true|false> skills=[...] outcomes=<n>`
+ *
+ * The booleans are the fail-closed rendering of the tri-state truths (`unknown`
+ * renders false), matching how startability/completion are treated in code.
+ */
+export function formatOptionContextLog(context: CurrentOptionContext): string {
+  return (
+    `${OPTION_CONTEXT_MARKER} optionId=${context.instanceId} template=${context.templateId} ` +
+    `init=${context.initiation.truth === 'true'} success=${context.success.truth === 'true'} ` +
+    `skills=[${context.allowedSkills.join(',')}] outcomes=${context.recentOutcomes.length}`
+  )
 }
