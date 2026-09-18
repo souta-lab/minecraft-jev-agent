@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { combineEvidence, runGate, WATCH, ACCEPTANCE } from './m2-live-gate.mjs'
+import { combineEvidence, hasRunScope, runGate, WATCH, ACCEPTANCE } from './m2-live-gate.mjs'
 
 let checks = 0
 function ok(label) {
@@ -50,6 +50,32 @@ function ok(label) {
 }
 
 {
+  assert.equal(hasRunScope(['--since', '2026-09-18T14:00:00Z'], {}), true)
+  assert.equal(hasRunScope([], { M2_SINCE: '2026-09-18T14:00:00Z' }), true)
+  assert.equal(hasRunScope([], {}), false)
+  assert.equal(hasRunScope(['--log', '/tmp/run.log'], {}), false)
+  ok('run scope must come from --since or M2_SINCE')
+}
+
+{
+  let called = false
+  const lines = []
+  const code = await runGate({
+    argv: ['--log', '/tmp/run.log'],
+    env: {},
+    runner: async () => {
+      called = true
+      throw new Error('runner must not execute without a run scope')
+    },
+    write: (line) => lines.push(line),
+  })
+  assert.equal(code, 2)
+  assert.equal(called, false)
+  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=UNKNOWN reason=run_scope_required watch=2 acceptance=2/)
+  ok('gate refuses all-time evidence before reading either child')
+}
+
+{
   const calls = []
   const lines = []
   const runner = async (script, args) => {
@@ -64,6 +90,7 @@ function ok(label) {
   }
   const code = await runGate({
     argv: ['--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log', '--ignored', 'x'],
+    env: {},
     runner,
     write: (line) => lines.push(line),
   })
@@ -77,4 +104,19 @@ function ok(label) {
   ok('CLI forwards only run-scope watch args and combines both child results')
 }
 
-console.log(`m2-live-gate: ${checks}/7 checks passed`)
+{
+  const calls = []
+  const runner = async (script, args, options) => {
+    calls.push({ script, args, env: options?.env })
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const env = { M2_SINCE: '2026-09-18T14:00:00Z' }
+  const code = await runGate({ argv: [], env, runner, write: () => undefined })
+  assert.equal(code, 0)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls[0].env, env)
+  assert.deepEqual(calls[1].env, env)
+  ok('M2_SINCE scope is inherited by both child processes')
+}
+
+console.log(`m2-live-gate: ${checks}/10 checks passed`)
