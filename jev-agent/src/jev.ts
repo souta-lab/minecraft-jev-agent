@@ -806,6 +806,7 @@ function toEvaluationState(state: WorldState): EvaluationState {
             requiredCount: state.goalQueue.current.requiredCount,
           },
     },
+    currentOption: state.currentOption ?? null,
     signals: {
       failedCandidates: state.signals.failedCandidates,
       escalationRecommended: state.signals.escalationRecommended,
@@ -895,6 +896,7 @@ export function boundedStateSnapshot(
     headroomCuts: (state.headroomCuts ?? []).slice(0, limits.cuts),
     goal: state.goal,
     goalQueue: { ...state.goalQueue, goals: state.goalQueue.goals.slice(0, limits.goalQueueGoals) },
+    currentOption: state.currentOption ?? null,
     recentEvents: state.recentEvents.slice(-limits.recentEvents),
     signals: {
       ...state.signals,
@@ -912,6 +914,7 @@ export function boundedStateSnapshot(
     self: state.self,
     inventory: { counts: state.inventory.counts, totalItems: state.inventory.totalItems },
     goal,
+    currentOption: state.currentOption ?? null,
     signals: {
       consecutiveFailures: state.signals.consecutiveFailures,
       lastFailureCode: state.signals.lastFailureCode,
