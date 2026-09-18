@@ -25,6 +25,7 @@ import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
+import { formatFurnaceReady } from './placementGuard.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -1513,7 +1514,7 @@ export class Executor {
     const inputCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'inputCount', 1)))
     const fuelCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'fuelCount', 1)))
     const furnaceSource = readMetaString(candidate, 'furnaceSource') ?? 'known'
-    this.logger.info('agent', `FURNACE_READY source=${furnaceSource} at=${target.x},${target.y},${target.z}`, {
+    this.logger.info('agent', formatFurnaceReady(furnaceSource, target), {
       actionId: candidate.id,
       target,
       furnaceSource,

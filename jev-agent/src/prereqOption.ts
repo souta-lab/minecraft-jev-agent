@@ -38,8 +38,8 @@ export function resolvePrereqStallTicks(
 /**
  * Cost model. Deliberately small integers so the ordering is easy to read in a
  * log line and stable in tests. `place_held` carries a base cost so an item
- * already in hand beats crafting; a remembered station must be closer than the
- * craft cost to win (the "craft instead of walk" principle).
+ * already in hand beats everything; rank (`prereqRank`) decides between source
+ * classes, cost only breaks ties inside a class (#78).
  */
 export const PREREQ_COSTS = {
   /** cost of the single PLACE interaction */
@@ -145,6 +145,138 @@ export function formatPrereqOptionFor(decision: PrereqDecision, chosen: PrereqPa
   return formatPrereqOption(chosen, over, `${chosen} cost=${round1(option.cost)}`)
 }
 
+/**
+ * Issue #78: an item already in the inventory (or craftable from the held
+ * materials) must outrank walking to a remembered world station, regardless of
+ * raw walk cost. The measured loop chose `use_known_station` while the required
+ * item was in hand and oscillated vertically with no progress. Lower rank =
+ * higher priority; cost only breaks ties inside the same rank.
+ */
+export type PrereqSource = 'inventory' | 'world'
+
+export function prereqSource(path: PrereqPath): PrereqSource {
+  return path === 'use_known_station' ? 'world' : 'inventory'
+}
+
+export function prereqRank(path: PrereqPath): number {
+  switch (path) {
+    case 'place_held':
+      return 0
+    case 'craft_and_place':
+      return 1
+    case 'use_known_station':
+      return 2
+  }
+}
+
+export function isInventorySourced(path: PrereqPath): boolean {
+  return prereqSource(path) === 'inventory'
+}
+
+/**
+ * The exact instrumentation required by issue #78:
+ * `PREREQ_OPTION resource=<r> option=<path> reason=<why> qty=<n>`.
+ */
+export function formatPrereqOptionDetail(
+  resource: string,
+  option: PrereqPath,
+  reason: string,
+  qty: number,
+): string {
+  return `PREREQ_OPTION resource=${resource} option=${option} reason=${reason} qty=${qty}`
+}
+
+/** Why the inventory-first selector picked this path, for the detail line. */
+export function prereqOptionReason(path: PrereqPath): string {
+  switch (path) {
+    case 'place_held':
+      return 'held_in_inventory'
+    case 'craft_and_place':
+      return 'craftable_from_inventory'
+    case 'use_known_station':
+      return 'world_station'
+  }
+}
+
+/**
+ * Pick the path the controller will actually follow. Inventory-sourced paths
+ * (`place_held`, then `craft_and_place`) always win over world retrieval; a path
+ * already abandoned for this planning cycle is never re-selected. Returns null
+ * when every feasible path is abandoned.
+ */
+export function selectPrereqPath(
+  decision: PrereqDecision,
+  abandoned: ReadonlySet<PrereqPath> = new Set<PrereqPath>(),
+): PrereqPath | null {
+  const feasible = decision.options.filter((option) => option.feasible && !abandoned.has(option.path))
+  if (feasible.length === 0) return null
+  const held = feasible.find((option) => option.path === 'place_held')
+  if (held !== undefined) return 'place_held'
+  const craft = feasible.find((option) => option.path === 'craft_and_place')
+  if (craft !== undefined) return 'craft_and_place'
+  return feasible[0]?.path ?? null
+}
+
+/**
+ * A stalled path may be forced to the next-best one, but a forced world path
+ * must never outrank an available inventory-sourced path (#78). `forced` wins
+ * only when its rank is at least as good as the inventory-first baseline.
+ */
+export function preferPrereqPath(
+  base: PrereqPath | null,
+  forced: PrereqPath | null,
+  decision: PrereqDecision,
+): PrereqPath | null {
+  if (forced === null) return base
+  if (!decision.options.some((option) => option.feasible && option.path === forced)) return base
+  if (base === null) return forced
+  return prereqRank(forced) <= prereqRank(base) ? forced : base
+}
+
+/** Issue #78: repeated unverified zero-progress retrieves are abandoned. */
+export const RETRIEVE_UNVERIFIED_LIMIT = 3
+
+export interface RetrieveUnverifiedState {
+  /** the abandoned candidate id the count is keyed on */
+  key: string
+  /** consecutive `verified=false progressDelta=0` outcomes */
+  unverified: number
+}
+
+/**
+ * Bounded abandonment for a known-station retrieve that keeps finishing with
+ * `verified=false` and no progress. A positive progress delta re-arms the
+ * counter. The executor can report `verified=true` for a sub-metre nudge that
+ * gains nothing (see the RETRIEVE branch in controller.ts), so a verified
+ * no-progress outcome is a no-op rather than a reset; only real progress
+ * re-arms. When the count exceeds `limit` the option is abandoned with the
+ * required one-line reason so a different option can run.
+ */
+export function evaluateRetrieveAbandon(input: {
+  actionId: string
+  verified: boolean
+  progressDelta: number
+  previous: RetrieveUnverifiedState | null
+  limit?: number
+}): { state: RetrieveUnverifiedState; abandon: boolean; line: string | null } {
+  const limit = input.limit ?? RETRIEVE_UNVERIFIED_LIMIT
+  if (input.progressDelta > 0) {
+    return { state: { key: input.actionId, unverified: 0 }, abandon: false, line: null }
+  }
+  const prior =
+    input.previous !== null && input.previous.key === input.actionId ? input.previous.unverified : 0
+  if (input.verified) {
+    return { state: { key: input.actionId, unverified: prior }, abandon: false, line: null }
+  }
+  const unverified = prior + 1
+  const abandon = unverified > limit
+  return {
+    state: { key: input.actionId, unverified },
+    abandon,
+    line: abandon ? `ABANDON_REASON=retrieve_unverified progress=0 option=${input.actionId}` : null,
+  }
+}
+
 function placeHeldOption(input: PrereqInput): PrereqOption {
   const has = input.heldCount > 0
   if (!has) return { path: 'place_held', feasible: false, cost: Number.POSITIVE_INFINITY, reason: 'no_furnace_held' }
@@ -198,7 +330,9 @@ function craftAndPlaceOption(input: PrereqInput): PrereqOption {
  */
 export function planPrereqOptions(input: PrereqInput): PrereqDecision {
   const options: PrereqOption[] = [placeHeldOption(input), knownStationOption(input), craftAndPlaceOption(input)]
-  const feasible = options.filter((option) => option.feasible).sort((a, b) => a.cost - b.cost)
+  const feasible = options
+    .filter((option) => option.feasible)
+    .sort((a, b) => prereqRank(a.path) - prereqRank(b.path) || a.cost - b.cost)
   const infeasible = options.filter((option) => !option.feasible)
   const ordered = [...feasible, ...infeasible]
   const chosen = feasible[0] ?? null

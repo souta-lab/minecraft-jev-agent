@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -68,19 +68,27 @@ import {
   PLACE_RETRY_LIMIT,
   prerequisiteOptionName,
   shouldAdoptAbandon,
-  smeltPrerequisiteTarget,
 } from './placementGuard.ts'
 import type { AbandonReason } from './placementGuard.ts'
 import {
   evaluatePrereqStall,
+  evaluateRetrieveAbandon,
+  formatPrereqOptionDetail,
   formatPrereqOptionFor,
   formatPrereqSwitch,
+  isInventorySourced,
   nextPrereqPath,
   planPrereqOptions,
+  preferPrereqPath,
+  prereqOptionReason,
   prereqProgressSignature,
+  prereqSubjectForGoal,
   resolvePrereqStallTicks,
+  selectPrereqPath,
 } from './prereqOption.ts'
-import type { PrereqDecision, PrereqPath, PrereqProgress } from './prereqOption.ts'
+import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
+import { evaluateOscillation, positionKey } from './oscillation.ts'
+import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
 import { StubSystem2 } from './system2.ts'
@@ -404,6 +412,12 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PRECONDITION_PROTECTED',
   'PLACE_RETRY',
   'ABANDON_REASON',
+  'ABANDON_REASON=retrieve_unverified',
+  'PREREQ_OPTION',
+  'PREREQ_SWITCH',
+  'FURNACE_READY',
+  'SMELT_DONE',
+  'OSCILLATION_DETECTED',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -537,6 +551,12 @@ export class JevController {
   private prereqLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
+  /** #78: options excluded for the current goal after repeated unverified failure. */
+  private readonly abandonedPrereqPaths = new Set<PrereqPath>()
+  /** #78: consecutive `verified=false progressDelta=0` retrieve outcomes. */
+  private retrieveUnverified: RetrieveUnverifiedState | null = null
+  /** #78: last quantized position / swap pair / state signature. */
+  private oscillationState: OscillationState | null = null
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -1619,6 +1639,9 @@ export class JevController {
     if (result.status === 'done') {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.delete(candidate.itemName)
+        if (candidate.meta.furnaceSource === 'held' && candidate.target !== null) {
+          this.signals.heldFurnacePlacedAt = blockId('b', candidate.target)
+        }
       }
       if (result.kind === 'MINE' && result.verified) {
         this.noteCandidateSuccess(result.actionId)
@@ -1663,6 +1686,18 @@ export class JevController {
           this.activeRetrieval = null
           this.retrievalTrack = null
           this.noteCandidateSuccess(result.actionId)
+        }
+        if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
+          const outcome = evaluateRetrieveAbandon({
+            actionId: result.actionId,
+            verified: result.verified,
+            progressDelta: result.itemsGained,
+            previous: this.retrieveUnverified,
+          })
+          this.retrieveUnverified = outcome.state
+          if (outcome.abandon && outcome.line !== null) {
+            this.abandonRetrieveOption(outcome.line, candidate, outcome.state.unverified)
+          }
         }
       }
       if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
@@ -1731,6 +1766,7 @@ export class JevController {
   private sampleMovement(position: Vec3Json): void {
     this.positionWindow.push({ x: position.x, y: position.y, z: position.z })
     while (this.positionWindow.length > 40) this.positionWindow.shift()
+    this.detectOscillation(position)
     if (this.positionWindow.length < 40) return
     const first = this.positionWindow[0]
     const last = this.positionWindow[this.positionWindow.length - 1]
@@ -1750,6 +1786,50 @@ export class JevController {
       { traveled, net, efficiency, windowStart: first, windowEnd: last },
       this.tickCounter,
     )
+  }
+
+  private oscillationSignature(): string {
+    return `${this.currentGoalKey()}|${JSON.stringify(this.inventorySnapshot())}`
+  }
+
+  /**
+   * #78: detect the same position pair repeating with no inventory/goal change
+   * and take the escape action (drop the retrieval, abandon the world station,
+   * escalate) instead of walking between two cells forever.
+   */
+  private detectOscillation(position: Vec3Json): void {
+    const decision = evaluateOscillation({
+      position: positionKey(position),
+      signature: this.oscillationSignature(),
+      previous: this.oscillationState,
+    })
+    this.oscillationState = decision.state
+    if (!decision.detected || decision.line === null) return
+    this.logger.warn(
+      'agent',
+      decision.line,
+      { cycles: decision.state.cycles, pair: decision.state.pair, goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+    this.escapeOscillation(decision.state)
+  }
+
+  private escapeOscillation(state: OscillationState): void {
+    this.oscillationState = null
+    this.abandonedPrereqPaths.add('use_known_station')
+    if (this.activeRetrieval !== null) {
+      this.unreachableResources.add(this.retrievalKey(this.activeRetrieval))
+      this.noteCandidateFailure(this.activeRetrieval.id)
+    }
+    if (this.lastDecisionId !== null) this.noteCandidateFailure(this.lastDecisionId)
+    this.activeRetrieval = null
+    this.retrievalTrack = null
+    this.retrieveUnverified = null
+    this.prereqForcedPath = null
+    this.prereqProgress = null
+    this.prereqLoggedKey = null
+    this.retrievalEscalationPending = true
+    this.escalate('progress_stall', `position oscillation ${state.pair ?? 'pair'} cycles=${state.cycles}; escaping the loop`)
   }
 
   private logDescendPlan(candidate: Candidate): void {
@@ -2716,7 +2796,10 @@ export class JevController {
    */
   private applyFurnacePrereq(state: WorldState, candidates: readonly Candidate[]): Candidate[] {
     const goal = state.goalQueue?.current ?? null
-    if (smeltPrerequisiteTarget(goal === null ? [] : [goal], state.furnaces?.length ?? 0) === null) {
+    // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
+    // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
+    // stricter targetItem check here would let a retrieval candidate through unfiltered (#78).
+    if (prereqSubjectForGoal(goal) === null || (state.furnaces?.length ?? 0) > 0) {
       this.resetFurnacePrereq()
       return [...candidates]
     }
@@ -2728,16 +2811,13 @@ export class JevController {
       this.prereqForcedPath = null
       this.prereqProgress = null
       this.prereqLoggedKey = null
+      this.abandonedPrereqPaths.clear()
+      this.retrieveUnverified = null
     }
-    let chosen: PrereqPath | null = decision.chosen
-    if (
-      this.prereqForcedPath !== null &&
-      decision.options.some((option) => option.feasible && option.path === this.prereqForcedPath)
-    ) {
-      chosen = this.prereqForcedPath
-    } else {
-      this.prereqForcedPath = null
-    }
+    const base = selectPrereqPath(decision, this.abandonedPrereqPaths)
+    const forced = this.prereqForcedPath !== null && !this.abandonedPrereqPaths.has(this.prereqForcedPath) ? this.prereqForcedPath : null
+    const chosen = preferPrereqPath(base, forced, decision)
+    if (this.prereqForcedPath !== null && this.prereqForcedPath !== chosen) this.prereqForcedPath = null
     this.prereqPlan = decision
     const logKey = `${goalKey}|${chosen ?? 'none'}`
     if (this.prereqLoggedKey !== logKey) {
@@ -2751,6 +2831,14 @@ export class JevController {
         },
         this.tickCounter,
       )
+      if (chosen !== null && isInventorySourced(chosen)) {
+        this.logger.info(
+          'agent',
+          formatPrereqOptionDetail('furnace', chosen, prereqOptionReason(chosen), input.heldCount),
+          { chosen, heldCount: input.heldCount, abandoned: [...this.abandonedPrereqPaths] },
+          this.tickCounter,
+        )
+      }
     }
     const keep = (candidate: Candidate): boolean => {
       const path = candidate.meta.prereqPath
@@ -2770,7 +2858,7 @@ export class JevController {
     this.prereqProgress = evaluated.progress
     if (!evaluated.stalled) return kept
 
-    const next = nextPrereqPath(decision, chosen)
+    const next = this.nextUsablePrereqPath(decision, chosen)
     if (next === null) return kept
     this.prereqForcedPath = next
     this.prereqProgress = null
@@ -2787,12 +2875,57 @@ export class JevController {
     })
   }
 
+  /** The next feasible prereq path that has not been abandoned for this goal. */
+  private nextUsablePrereqPath(decision: PrereqDecision, current: PrereqPath): PrereqPath | null {
+    const seen = new Set<PrereqPath>([current])
+    for (;;) {
+      const next = nextPrereqPath(decision, current)
+      if (next === null || seen.has(next)) break
+      if (!this.abandonedPrereqPaths.has(next)) return next
+      seen.add(next)
+      current = next
+    }
+    return null
+  }
+
   private resetFurnacePrereq(): void {
     this.prereqPlan = null
     this.prereqForcedPath = null
     this.prereqGoalKey = null
     this.prereqLoggedKey = null
     this.prereqProgress = null
+    this.abandonedPrereqPaths.clear()
+    this.retrieveUnverified = null
+  }
+
+  /**
+   * #78: the same known-station retrieve finished unverified with zero progress
+   * past the bound, so abandon that option for the current goal and let the next
+   * scored path run. The abandoned path is never re-selected while the goal key
+   * is unchanged.
+   */
+  private abandonRetrieveOption(line: string, candidate: Candidate, unverified: number): void {
+    this.logger.warn(
+      'agent',
+      line,
+      { option: candidate.id, unverified, goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+    this.abandonedPrereqPaths.add('use_known_station')
+    if (candidate.target !== null) {
+      const knownName =
+        typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'station'
+      this.unreachableResources.add(this.retrievalKey({ knownName, target: candidate.target }))
+    }
+    this.noteCandidateFailure(candidate.id)
+    this.activeRetrieval = null
+    this.retrievalTrack = null
+    this.retrieveUnverified = null
+    this.prereqForcedPath = null
+    this.prereqProgress = null
+    this.prereqLoggedKey = null
+    this.retrievalEscalationPending = true
+    this.escalate('pathfinder_stuck', `${candidate.id} unverified progress=0 x${unverified}; abandoned option`)
   }
 
   private logStaleKnownResources(state: WorldState): void {

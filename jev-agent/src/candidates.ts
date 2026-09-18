@@ -139,7 +139,7 @@ const SMELT_FUELS = ['charcoal', 'coal', 'oak_planks', 'oak_log'] as const
 
 const HAZARD_DANGER_RADIUS = 3
 
-function blockId(prefix: 'b' | 'p', position: Vec3Json): string {
+export function blockId(prefix: 'b' | 'p', position: Vec3Json): string {
   return `${prefix}${position.x}_${position.y}_${position.z}`
 }
 
@@ -900,6 +900,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
         fuelCount,
         outputItem: focusItem,
         count,
+        ...(state.signals.heldFurnacePlacedAt === blockId('b', furnace) ? { furnaceSource: 'held' } : {}),
       },
     },
   ]
