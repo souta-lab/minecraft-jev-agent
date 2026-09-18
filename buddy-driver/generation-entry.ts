@@ -834,7 +834,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     scanRadius: 48,
     verbose: true,
     eventSink: (event, detail) => {
-      ctx.log(event, detail)
+      ctx.log(event, { ...detail, generationId: id })
       handleStationEvent(event, detail)
     },
     moveFailureEntries: world.moveFailures,
