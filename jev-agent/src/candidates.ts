@@ -577,6 +577,20 @@ function mineCandidates(
         continue
       }
       moveCount += 1
+      // A visible resource can be many blocks above the current floor.  Keep
+      // the same deterministic vertical contract as RETRIEVE candidates on
+      // the MOVE that takes the body to its standable spot; otherwise the
+      // executor sees only a horizontal path and repeatedly stalls below the
+      // resource even though the sensor proved a safe pillar/staircase leg.
+      const vertical = planVerticalApproach(verticalInputFor(state, block.position))
+      const tunnelFallback =
+        vertical?.kind === 'reuse'
+          ? planVerticalApproach({ ...verticalInputFor(state, block.position), tunnel: null })
+          : null
+      const verticalMeta = {
+        ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), block.position.y),
+        ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+      }
       moveActions.push({
         id: `MOVE:${blockId('b', block.position)}`,
         kind: 'MOVE',
@@ -600,6 +614,7 @@ function mineCandidates(
           targetBlockZ: block.position.z,
           targetBlockName: block.name,
           distance: block.distance,
+          ...verticalMeta,
         },
       })
       continue

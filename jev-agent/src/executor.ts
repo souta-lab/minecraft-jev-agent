@@ -948,7 +948,71 @@ export class Executor {
     this.setPhase(candidate, epoch, 'pathing')
     const before = this.distanceToFeet(target)
     const startPosition = this.bot.entity.position.clone()
+    const startY = startPosition.y
     const anchorBefore = anchor === null ? null : this.distanceToEyes(anchor)
+
+    // A visible resource may be above the current floor.  MINE/MOVE candidates
+    // carry the same vertical contract as RETRIEVE candidates so navigation
+    // does not throw away the deterministic ascent plan and then retry a
+    // horizontal path that cannot reach the resource's Y level.
+    const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    let activeVertical = vertical
+    let verticalStep = false
+    if (vertical !== 'none') {
+      this.setPhase(candidate, epoch, 'vertical')
+      if (vertical === 'reuse') {
+        const reuse = await this.runReuseVerticalLeg(candidate, epoch, signal, target)
+        verticalStep = reuse.step
+        if (reuse.refused) {
+          const fallback = readMetaString(candidate, 'fallbackVertical')
+          if (fallback === null || fallback === 'none') {
+            throw new ExecutorError(
+              'tunnel_entry_refused',
+              `${candidate.id} reuse tunnel entry not usable and no fallback vertical plan`,
+            )
+          }
+          activeVertical = fallback
+          this.logger.info('agent', `TUNNEL_ENTRY_FALLBACK vertical=${fallback}`, { actionId: candidate.id, target })
+          verticalStep = await this.runVerticalLeg(candidate, fallback, true, epoch, signal, target, startY)
+        }
+      } else {
+        verticalStep = await this.runVerticalLeg(candidate, vertical, false, epoch, signal, target, startY)
+      }
+
+      this.ensureOwned(epoch, signal)
+      const startFloorY = Math.floor(startY)
+      const climbedTo = Math.floor(this.bot.entity.position.y)
+      const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
+      if (verticalStep && climbedTo > startFloorY) {
+        this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
+          actionId: candidate.id,
+          target,
+          vertical: activeVertical,
+        })
+      }
+      // Preserve bounded ascent as durable MOVE progress.  The next sensor
+      // tick re-plans from the new Y instead of sending a canDig=false
+      // horizontal path back down to the original standable spot.
+      if (verticalStep && climbedTo > startFloorY && target.y - climbedTo > 1) {
+        return this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'done',
+          'arrived',
+          `climbed from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
+          null,
+          {
+            verified: true,
+            blockRemoved: dugVertical && verticalStep,
+            dropObserved: false,
+            itemsGained: 0,
+            goalItemCount: this.countGoalItem(),
+            progressed: true,
+          },
+        )
+      }
+    }
     let pathError: unknown = null
     try {
       // STOCK-FIRST: `pathTo` drives the stock pathfinder (`setGoal`) as the
