@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildChecks, newestRunIdFromLog } from './run-artifacts.mjs'
+import { buildChecks, buildManifest, newestRunIdFromLog } from './run-artifacts.mjs'
 
 const dir = mkdtempSync(join(tmpdir(), 'run-artifacts-'))
 let checks = 0
@@ -46,6 +46,24 @@ try {
   const metadata = buildChecks(currentRecord).find((check) => check.id === 'run_metadata_completeness')
   assert.equal(metadata?.compliance, 'UNKNOWN')
   assert.match(metadata?.observed ?? '', /serverVersion/)
+  checks++
+
+  const partialRecord = {
+    ...currentRecord,
+    serverVersion: 'Leaf 1.21.11',
+    difficulty: 'peaceful',
+    jevModel: 'typesafe-ai/jev',
+  }
+  const partialMetadata = buildChecks(partialRecord).find((check) => check.id === 'run_metadata_completeness')
+  assert.equal(partialMetadata?.compliance, 'UNKNOWN')
+  assert.match(partialMetadata?.observed ?? '', /mercuryModel/)
+  assert.equal(buildManifest({ record: partialRecord, window: null, logLineCount: 0 }).models.mercury, null)
+  checks++
+
+  const mercuryModel = 'inception/mercury-2.5'
+  const completeMetadata = buildChecks(partialRecord, mercuryModel).find((check) => check.id === 'run_metadata_completeness')
+  assert.equal(completeMetadata?.compliance, 'PASS')
+  assert.equal(buildManifest({ record: partialRecord, window: null, logLineCount: 0, mercuryModel }).models.mercury, mercuryModel)
   checks++
 
   console.log(`run-artifacts: ${checks}/${checks} checks passed`)

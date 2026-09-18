@@ -394,7 +394,7 @@ export async function resolveMercuryRecords({ runId = null, log = BUDDY_LOG, fil
 // acceptance checks: POLICY / IMPLEMENTED / OBSERVED / COMPLIANCE
 // ---------------------------------------------------------------------------
 
-export function buildChecks(record) {
+export function buildChecks(record, mercuryModel = null) {
   const checks = []
   const push = (id, policy, implemented, observed, compliance, command) =>
     checks.push({ id, policy, implemented, observed, compliance, command })
@@ -412,16 +412,22 @@ export function buildChecks(record) {
   }
 
   const jevModel = record.jevModel ?? record.policyModel ?? null
+  // System2/Mercury can be emitted by the resident record or recovered from
+  // the run-scoped Mercury call slice. A Jev-only manifest is not complete:
+  // the policy and planner model identities answer different provenance
+  // questions and must not silently collapse into one field.
+  const resolvedMercuryModel = record.mercuryModel ?? record.system2Model ?? mercuryModel ?? null
   const missingMetadata = [
     ['serverVersion', record.serverVersion],
     ['difficulty', record.difficulty],
     ['jevModel', jevModel],
+    ['mercuryModel', resolvedMercuryModel],
   ]
     .filter(([, value]) => value === null || value === undefined || value === '')
     .map(([name]) => name)
   push(
     'run_metadata_completeness',
-    'Issue #63 §4: a run manifest should identify the server version, difficulty, and Jev model; missing metadata cannot support a strong acceptance claim.',
+    'Issue #63 §4 / #110: a run manifest should identify server version, difficulty, Jev, and System2/Mercury models; missing metadata cannot support a strong acceptance claim.',
     'tools/run-artifacts.mjs forwards these fields from AcceptanceRecord when present; the current host record schema does not expose them yet.',
     `missing=[${missingMetadata.join(',')}]`,
     missingMetadata.length === 0 ? 'PASS' : 'UNKNOWN',
@@ -471,6 +477,7 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
   const commit = record?.gitCommit ?? sh('git', ['rev-parse', 'HEAD'])
   const status = sh('git', ['status', '--porcelain'])
   const jevModel = record?.jevModel ?? record?.policyModel ?? null
+  const resolvedMercuryModel = record?.mercuryModel ?? record?.system2Model ?? mercuryModel ?? null
   return {
     schemaVersion: SCHEMA_VERSION,
     runId: record?.runId ?? null,
@@ -496,7 +503,7 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
     botUsername: record?.botUsername ?? null,
     startPosition: record?.startPosition ?? null,
     config: configFromEnv(),
-    models: { jev: jevModel, mercury: mercuryModel },
+    models: { jev: jevModel, mercury: resolvedMercuryModel },
     window: window ?? null,
     logLineCount: logLineCount ?? null,
     sources: {
@@ -556,7 +563,7 @@ export async function captureRun(runId, { log = BUDDY_LOG, force = false, withMe
       'root AGENTS.md §2',
     ],
     window,
-    checks: buildChecks(record),
+    checks: buildChecks(record, mercuryModel),
     record,
   }
   await writeJsonAtomic(path.join(dir, 'manifest.json'), manifest)
