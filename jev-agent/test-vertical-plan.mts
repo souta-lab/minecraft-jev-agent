@@ -6,7 +6,7 @@ import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts
 import type { Candidate } from './src/candidates.ts'
 import { guardCandidate } from './src/policy.ts'
 import type { GuardContext } from './src/policy.ts'
-import { evaluateRetrievalProgress, planVerticalApproach } from './src/verticalPlan.ts'
+import { evaluateRetrievalProgress, PILLAR_UP_STEP_CAP, planVerticalApproach } from './src/verticalPlan.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type {
@@ -16,6 +16,7 @@ import type {
   InventoryState,
   KnownResource,
   SelfState,
+  StepCut,
   Vec3Json,
   WorldState,
 } from './src/state.ts'
@@ -110,6 +111,7 @@ function worldState(overrides: {
   goal?: GoalState
   signals?: AgentSignals
   descent?: DescentOption[]
+  stepCuts?: StepCut[]
   inventory?: InventoryState
 }): WorldState {
   return {
@@ -128,6 +130,7 @@ function worldState(overrides: {
     goalQueue: overrides.goalQueue,
     recentEvents: [],
     descent: overrides.descent,
+    stepCuts: overrides.stepCuts,
     signals: overrides.signals ?? signals(),
   }
 }
@@ -158,6 +161,14 @@ function downStep(dir: DescentOption['dir'], dx: number, dz: number, feet: Vec3J
 function retrieveOf(candidates: readonly Candidate[]): Candidate | null {
   return candidates.find((candidate) => candidate.kind === 'RETRIEVE') ?? null
 }
+
+/** The mirror of `downStep`: the upper block of a 2-block face opens a step up. */
+function upCut(dir: StepCut['dir'], dx: number, dz: number, feet: Vec3Json): StepCut {
+  const cut = { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz }
+  return { dir, dx, dz, cut, step: cut, name: 'cobblestone', safe: true, reason: 'safe' }
+}
+
+const COBBLESTONE_HELD = { name: 'cobblestone', count: 119 }
 
 function guardContext(candidateIds: string[]): GuardContext {
   return {
@@ -241,6 +252,131 @@ addCase('a level target produces no vertical plan', () => {
   return { pass: plan === null, detail: JSON.stringify(plan) }
 })
 
+// --- upward-plan generation (M2 blocker: the bot is under everything) -----------
+
+addCase('a target one block above with a held cobblestone yields a pillar plan', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 39, y: 32, z: 33 },
+    tunnel: null,
+    descent: [],
+    placeable: COBBLESTONE_HELD,
+  })
+  const pass =
+    plan?.kind === 'pillar' && plan.steps === 1 && plan.fromY === 31 && plan.toY === 32 && plan.placeName === 'cobblestone'
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('a target five blocks above with a held cobblestone yields a bounded pillar plan', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    placeable: COBBLESTONE_HELD,
+  })
+  const pass = plan?.kind === 'pillar' && plan.steps === 5 && plan.toY === 36 && plan.placeCount === 119
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('a target beyond the pillar cap is a bounded decision, never an unbounded climb', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 66, z: 33 },
+    tunnel: null,
+    descent: [],
+    placeable: COBBLESTONE_HELD,
+  })
+  const pass =
+    plan?.kind === 'pillar' &&
+    plan.steps === PILLAR_UP_STEP_CAP &&
+    plan.steps < 35 &&
+    plan.toY === feet.y + PILLAR_UP_STEP_CAP
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('pillar-up refuses when no placeable block is held', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    placeable: null,
+  })
+  return { pass: plan === null, detail: JSON.stringify(plan) }
+})
+
+addCase('a safe step-cut turns an upward target into a staircase-up plan', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const cut = upCut('E', 1, 0, feet)
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [cut],
+  })
+  const pass =
+    plan?.kind === 'staircase-up' &&
+    plan.dir === 'E' &&
+    plan.dig.x === cut.cut.x &&
+    plan.dig.y === 32 &&
+    plan.step.x === cut.step.x &&
+    plan.digName === 'cobblestone'
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('a tunnel between the bot and an upper target is reused before climbing', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 39, y: 40, z: 33 },
+    tunnel: { x: 39, y: 36, z: 33 },
+    descent: [],
+    placeable: COBBLESTONE_HELD,
+  })
+  const pass = plan?.kind === 'reuse' && plan.tunnel.y === 36
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('a safe step-cut is preferred over pillar-up when both are grounded', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [upCut('E', 1, 0, feet)],
+    placeable: COBBLESTONE_HELD,
+  })
+  return { pass: plan?.kind === 'staircase-up', detail: JSON.stringify(plan) }
+})
+
+addCase('an unsafe step-cut does not ground an upward staircase', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const cut = { ...upCut('E', 1, 0, feet), safe: false, reason: 'lava/water in the step column' }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [cut],
+  })
+  return { pass: plan === null, detail: JSON.stringify(plan) }
+})
+
 // --- candidate wiring -----------------------------------------------------------
 
 addCase('a below-level remembered ore emits a staircase retrieval candidate', () => {
@@ -277,6 +413,62 @@ addCase('a remembered tunnel turns the retrieval candidate into a reuse plan', (
     retrieve.meta.vertical === 'reuse' &&
     retrieve.meta.tunnelX === 27 &&
     retrieve.meta.tunnelY === 53
+  return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('an above-level remembered ore with cobblestone held emits a pillar retrieval candidate', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 53, y: 36, z: 33 } }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({})),
+    signals: signals({ knownResources: [known] }),
+    inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
+  })
+  const retrieve = retrieveOf(generateCandidates(state, defaultCandidateOptions))
+  const pass =
+    retrieve !== null &&
+    retrieve.meta.vertical === 'pillar' &&
+    retrieve.meta.pillarPlaceName === 'cobblestone' &&
+    retrieve.meta.pillarSteps === 5 &&
+    retrieve.meta.verticalToY === 36
+  return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('an above-level remembered ore with a safe step-cut emits a staircase-up candidate', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 43, y: 40, z: 33 } }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({})),
+    signals: signals({ knownResources: [known] }),
+    inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
+    stepCuts: [upCut('E', 1, 0, feet)],
+  })
+  const retrieve = retrieveOf(generateCandidates(state, defaultCandidateOptions))
+  const pass =
+    retrieve !== null &&
+    retrieve.meta.vertical === 'staircase-up' &&
+    retrieve.meta.upDir === 'E' &&
+    retrieve.meta.upDigY === 32 &&
+    retrieve.meta.upStepX === feet.x + 1
+  return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('an above-level remembered ore without a placeable keeps an explicit vertical=none', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 53, y: 36, z: 33 } }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({})),
+    signals: signals({ knownResources: [known] }),
+    inventory: inventory({ stone_pickaxe: 1 }),
+  })
+  const retrieve = retrieveOf(generateCandidates(state, defaultCandidateOptions))
+  const pass =
+    retrieve !== null &&
+    retrieve.meta.vertical === 'none' &&
+    retrieve.meta.verticalToY === 36
   return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
 })
 
