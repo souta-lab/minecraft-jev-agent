@@ -26,6 +26,7 @@ import {
 } from './src/protectionConflict.ts'
 import {
   CANDIDATE_COMMIT_RELEASED,
+  CANDIDATE_FLAP,
   CANDIDATE_FLAP_TICKS_DEFAULT,
   evaluateCandidateFlap,
   formatCandidateFlap,
@@ -308,6 +309,22 @@ addCase('wiring: the controller reconciles protection with the abandonment ledge
     'markOptionAbandoned(',
   ].filter((needle) => !text.includes(needle))
   const mirrored = MIRRORED_MARKERS.has(PROTECTION_ABANDON_CONFLICT)
+  const pass = missing.length === 0 && mirrored
+  return {
+    pass,
+    detail: missing.length === 0 ? `mirrored=${mirrored}` : `missing ${missing.join(', ')}`,
+  }
+})
+
+addCase('wiring: the controller commits to one candidate when the choice flaps', () => {
+  const text = source('./src/controller.ts')
+  const missing = [
+    'evaluateCandidateFlap({',
+    'applyCandidateCommitment(',
+    'deterministicInvalid(',
+  ].filter((needle) => !text.includes(needle))
+  const mirrored =
+    MIRRORED_MARKERS.has(CANDIDATE_FLAP) && MIRRORED_MARKERS.has(CANDIDATE_COMMIT_RELEASED)
   const pass = missing.length === 0 && mirrored
   return {
     pass,

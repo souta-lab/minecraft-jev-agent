@@ -45,6 +45,12 @@ import {
   PROTECTION_ABANDON_CONFLICT,
   reconcileProtection,
 } from './protectionConflict.ts'
+import {
+  CANDIDATE_COMMIT_RELEASED,
+  CANDIDATE_FLAP,
+  evaluateCandidateFlap,
+} from './candidateCommitment.ts'
+import type { CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -63,7 +69,7 @@ import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, 
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
-import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
+import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
@@ -560,6 +566,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
   PROTECTION_ABANDON_CONFLICT,
+  CANDIDATE_FLAP,
+  CANDIDATE_COMMIT_RELEASED,
 ])
 
 /**
@@ -898,6 +906,11 @@ export class JevController {
    * deterministically abandoned while the state is unchanged.
    */
   private readonly abandonedOptions = new AbandonmentLedger()
+  /** #11 v2 §7: anti-thrash commitment - one candidate until a fact changes. */
+  private commitmentState: CandidateFlapState | null = null
+  /** verified-outcome counter; a change clears the flap window and the commitment. */
+  private progressEpoch = 0
+  private commitmentProgressEpoch = 0
   /** Semantic per-tick fingerprint (inventory/world/topology), never the clock. */
   private lastStateFingerprint = ''
   /** The fingerprint that produced each abandoned prerequisite-path fact. */
@@ -1467,8 +1480,9 @@ export class JevController {
       this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
+      const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(rawChosenId, dangerGate, candidates)
+      const gated = this.applyDangerGate(committedId, dangerGate, candidates)
       const chosenId = gated.chosenId
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
@@ -2022,6 +2036,68 @@ export class JevController {
   }
 
   /**
+   * #11 v2 §7: one candidate until a fact changes. While a flap window is
+   * active the policy's raw choice is replaced by the cheap-feasible commitment;
+   * a deterministic rejection releases it to the next cheapest feasible.
+   */
+  private applyCandidateCommitment(
+    chosenId: string,
+    candidates: readonly Candidate[],
+    state: WorldState,
+  ): string {
+    const progressed = this.progressEpoch !== this.commitmentProgressEpoch
+    this.commitmentProgressEpoch = this.progressEpoch
+    const offered: readonly FlapCandidate[] = candidates.map((candidate, index) => ({
+      id: candidate.id,
+      cost: this.candidateCommitCost(candidate, index),
+    }))
+    const decision = evaluateCandidateFlap({
+      previous: this.commitmentState,
+      chosenId,
+      fingerprint: this.lastStateFingerprint,
+      progressed,
+      candidates: offered,
+      invalid: this.deterministicInvalid(candidates, state),
+    })
+    this.commitmentState = decision.state
+    if (decision.line !== null) {
+      this.logger.warn(
+        'policy',
+        decision.line,
+        { chosenId, committedId: decision.state.committedId, fingerprint: this.lastStateFingerprint },
+        this.tickCounter,
+      )
+    }
+    if (decision.releaseLine !== null) {
+      this.logger.warn(
+        'policy',
+        decision.releaseLine,
+        { chosenId, committedId: decision.state.committedId },
+        this.tickCounter,
+      )
+    }
+    return decision.chosenId
+  }
+
+  /** The caller's existing cost policy: a declared cost, else the generator order. */
+  private candidateCommitCost(candidate: Candidate, index: number): number {
+    const cost = candidate.meta.cost
+    if (typeof cost === 'number') return cost
+    const prereqCost = candidate.meta.prereqCost
+    if (typeof prereqCost === 'number') return prereqCost
+    return index
+  }
+
+  /** Candidate ids deterministic feasibility has already rejected. */
+  private deterministicInvalid(candidates: readonly Candidate[], state: WorldState): ReadonlySet<string> {
+    const invalid = new Set<string>(this.withheldCandidateIds)
+    for (const candidate of candidates) {
+      if (unreachableMove(candidate, state) !== null) invalid.add(candidate.id)
+    }
+    return invalid
+  }
+
+  /**
    * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
    * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
    * and only give up after PLACE_RETRY_LIMIT attempts.
@@ -2196,6 +2272,7 @@ export class JevController {
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+    if (result.itemsGained > 0 || result.blockRemoved) this.progressEpoch += 1
     this.recentOutcomes.push({
       actionId: result.actionId,
       status: result.status,
