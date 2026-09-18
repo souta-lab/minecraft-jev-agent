@@ -468,6 +468,20 @@ secret boundary: /home/s0u7a/.config/kimaki-secrets/
 HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
 `npm run contract-docs-check` がdoc/code mismatchを検出する。
 
+### 4.0-B レーン重複防止 / supersession / CURRENT-STATUS（派生）
+
+```text
+・lane開始前（実装に触る前）: node tools/lane-guard.mjs を実行する（読み取り専用）。
+  DUPLICATE_LANE（exit 1）= 同一issueを主張するopen PR/worktreeが既にある。
+  → 新laneを足さず、既存laneと調整・統合する（重複実装は後でマージ衝突の山になる）。
+・stale branch/worktreeのsupersession: headが origin/main の祖先であり、追跡された変更が
+  無いことを証明できたものだけをprune候補にする。未マージ・dirtyなworktreeは削除しない。
+  判断材料は lane-guard の branches/worktrees/prs と UNKNOWN 表示（読めないソースを推測で埋めない）。
+・現在状態はDERIVED（手書きしない）: node tools/current-status.mjs が「今何が真か」の正典。
+  再生成は npm run current-status:write。TODO/docsは古いruntime状態を現在として再掲しない
+  （historical evidenceとしてのみ残す）。依存とfrontierは node tools/issue-graph.mjs。
+```
+
 ## 5. 完了の定義（M4）
 
 ```text
