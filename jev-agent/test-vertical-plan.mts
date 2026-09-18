@@ -18,6 +18,7 @@ import {
   formatPillarRefused,
   formatPillarRelocate,
   formatTunnelEntryRefused,
+  headroomAcrossFootprint,
   LOCAL_CLEAR_RADIUS,
   PILLAR_UP_STEP_CAP,
   pillarColumnUnsafeFromBlocks,
@@ -534,6 +535,35 @@ addCase('a pillar step refuses without a placeable, on a hazard column, without 
   return {
     pass,
     detail: `noPlaceable=${noPlaceable.ok ? 'ok' : noPlaceable.reason} unsafe=${unsafe.ok ? 'ok' : unsafe.reason} noFooting=${noFooting.ok ? 'ok' : noFooting.reason} noHeadroom=${noHeadroom.ok ? 'ok' : noHeadroom.reason} reached=${reached.ok ? 'ok' : reached.reason} ok=${ok.ok}`,
+  }
+})
+
+addCase('jump headroom includes adjacent cells touched by the player footprint', () => {
+  const blocked = new Set(['38,24,33'])
+  const isPassable = (x: number, y: number, z: number): boolean => !blocked.has(`${x},${y},${z}`)
+  const nearBoundary = headroomAcrossFootprint({
+    center: { x: 39.28, z: 33.48 },
+    feetY: 23.5,
+    halfWidth: 0.3,
+    isPassable,
+  })
+  const centered = headroomAcrossFootprint({
+    center: { x: 39.5, z: 33.5 },
+    feetY: 23.5,
+    halfWidth: 0.3,
+    isPassable,
+  })
+  const pass =
+    !nearBoundary.clear &&
+    nearBoundary.blocker !== null &&
+    nearBoundary.blocker.x === 38 &&
+    nearBoundary.blocker.y === 24 &&
+    nearBoundary.blocker.z === 33 &&
+    centered.clear &&
+    centered.blocker === null
+  return {
+    pass,
+    detail: `nearBoundary=${nearBoundary.clear ? 'clear' : `blocked@${nearBoundary.blocker?.x},${nearBoundary.blocker?.y},${nearBoundary.blocker?.z}`} centered=${centered.clear ? 'clear' : 'blocked'}`,
   }
 })
 
