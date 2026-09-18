@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, staleKnownResources } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ReachabilityGateOptions } from './candidates.ts'
+import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, formatPlaceRefusal, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, staleKnownResources } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -487,6 +487,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CAUSAL',
   'SHADOW_METRICS',
   'TOOL_CHOICE',
+  'QUEUE_DEPTH',
+  'PLACE_REFUSED',
   'DIG_PATH',
   'JUMP_ATTEMPT',
   'JUMP_FAIL',
@@ -839,6 +841,8 @@ export class JevController {
   private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
   /** last logged REACHABILITY signature per candidate, so markers change with facts. */
   private readonly reachabilityLogSignatures = new Map<string, string>()
+  /** last logged PLACE_REFUSED signature, so one geometry dead end is one line. */
+  private lastPlacementRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
@@ -1311,6 +1315,7 @@ export class JevController {
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
+      this.logPlacementRefusal(grounded.placeRefusal)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
@@ -3897,6 +3902,26 @@ export class JevController {
         this.tickCounter,
       )
     }
+  }
+
+  /**
+   * Surface the generator's typed placement refusal (`PLACE_REFUSED
+   * reason=no_support|no_clearance|out_of_reach cell=x,y,z item=...`) once per
+   * distinct refusal, so a geometry dead end is an explicit fact instead of the
+   * silence that let a held station stall the craft goal.
+   */
+  private logPlacementRefusal(refusal: PlaceRefusal | null): void {
+    const key =
+      refusal === null ? null : `${refusal.reason}|${blockId('p', refusal.cell)}|${refusal.item}`
+    if (key === this.lastPlacementRefusalKey) return
+    this.lastPlacementRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn(
+      'agent',
+      formatPlaceRefusal(refusal),
+      { reason: refusal.reason, cell: refusal.cell, item: refusal.item },
+      this.tickCounter,
+    )
   }
 
   /** Gate facts, shared by both candidate generations in one tick. */
