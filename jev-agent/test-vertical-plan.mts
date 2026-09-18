@@ -8,15 +8,20 @@ import { guardCandidate } from './src/policy.ts'
 import type { GuardContext } from './src/policy.ts'
 import {
   ASCENT_PROGRESS_EPSILON,
+  classifyHeadroomBlocker,
   evaluatePillarStep,
   evaluateRetrievalProgress,
   formatAscentProgress,
+  formatPillarRefused,
+  formatPillarRelocate,
   PILLAR_UP_STEP_CAP,
   pillarColumnUnsafeFromBlocks,
   planVerticalApproach,
   resolvePillarStep,
+  selectPillarFallbackColumn,
 } from './src/verticalPlan.ts'
-import type { RetrievalProgressState } from './src/verticalPlan.ts'
+import type { PillarColumnProbe, RetrievalProgressState } from './src/verticalPlan.ts'
+import { formatPillarUpStep } from './src/pillarJump.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type {
@@ -601,6 +606,179 @@ addCase('the ASCENT_PROGRESS marker carries the chunk and the target Y', () => {
   const line = formatAscentProgress(10, 34, 66)
   const pass = line === 'ASCENT_PROGRESS from_y=10 to_y=34 target_y=66'
   return { pass, detail: line }
+})
+
+// --- PILLAR_UP pocket escape (headroom clear / grounded relocation) -------------
+
+addCase('a diggable ceiling block is cleared and the pillar step then proceeds (1-block pocket)', () => {
+  // Live cell: feet (40,8,31), cobblestone ceiling at (40,9,31).
+  const decision = classifyHeadroomBlocker({
+    cell: { x: 40, y: 9, z: 31 },
+    name: 'cobblestone',
+    diggable: true,
+    fluidOrHazard: false,
+    floodRisk: false,
+    toolOk: true,
+  })
+  const noObstacle = classifyHeadroomBlocker(null)
+  const step = evaluatePillarStep({
+    placeableCount: 62,
+    columnSafe: true,
+    remaining: 24,
+    footingSolid: true,
+    headroomClear: true,
+  })
+  const pass =
+    decision.kind === 'dig' &&
+    decision.obstacle.name === 'cobblestone' &&
+    decision.obstacle.cell.y === 9 &&
+    noObstacle.kind === 'refuse' &&
+    noObstacle.reason === 'no_obstacle' &&
+    step.ok
+  return {
+    pass,
+    detail: `decision=${decision.kind} obstacle=${decision.kind === 'dig' ? `${decision.obstacle.name}@${decision.obstacle.cell.y}` : '-'} noObstacle=${noObstacle.kind}/${noObstacle.kind === 'refuse' ? noObstacle.reason : 'dig'} step=${step.ok ? 'ok' : step.reason}`,
+  }
+})
+
+addCase('an undiggable ceiling refuses with the typed marker and offers the adjacent open column', () => {
+  const ceiling = { x: 40, y: 9, z: 31 }
+  const feet = { x: 40, y: 8, z: 31 }
+  // Live inventory: cobblestone x62 and no pickaxe -> selectDigTool refuses the
+  // stone-family ceiling, which used to be a silent `false` from clearPillarHeadroom.
+  const decision = classifyHeadroomBlocker({
+    cell: ceiling,
+    name: 'cobblestone',
+    diggable: true,
+    fluidOrHazard: false,
+    floodRisk: false,
+    toolOk: false,
+  })
+  const marker =
+    decision.kind === 'refuse'
+      ? formatPillarRefused({ reason: 'no_headroom', cell: feet, obstacle: decision.obstacle, cause: decision.reason })
+      : 'not-refused'
+  // Live step geometry: E/W/N walls, S (40,8,32) open with air at +1 and +2.
+  const probes: PillarColumnProbe[] = [
+    { cell: { x: 41, y: 8, z: 31 }, supported: true, feetClear: true, headClear: true, aboveHeadClear: true, unsafe: true },
+    { cell: { x: 39, y: 8, z: 31 }, supported: true, feetClear: false, headClear: false, aboveHeadClear: false, unsafe: false },
+    { cell: { x: 40, y: 8, z: 30 }, supported: true, feetClear: false, headClear: false, aboveHeadClear: false, unsafe: false },
+    { cell: { x: 40, y: 8, z: 32 }, supported: true, feetClear: true, headClear: true, aboveHeadClear: true, unsafe: false },
+  ]
+  const fallback = selectPillarFallbackColumn(probes, feet)
+  const pass =
+    decision.kind === 'refuse' &&
+    decision.reason === 'needs_tool' &&
+    marker === 'PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31 cause=needs_tool' &&
+    fallback !== null &&
+    fallback.x === 40 &&
+    fallback.y === 8 &&
+    fallback.z === 32
+  return {
+    pass,
+    detail: `decision=${decision.kind}${decision.kind === 'refuse' ? `/${decision.reason}` : ''} marker=${marker} fallback=${fallback === null ? 'none' : `${fallback.x},${fallback.y},${fallback.z}`}`,
+  }
+})
+
+addCase('fluid, flood-risk and unbreakable ceilings refuse with their own causes (never dug)', () => {
+  const fluid = classifyHeadroomBlocker({
+    cell: { x: 40, y: 9, z: 31 },
+    name: 'water',
+    diggable: false,
+    fluidOrHazard: true,
+    floodRisk: true,
+    toolOk: false,
+  })
+  const flood = classifyHeadroomBlocker({
+    cell: { x: 40, y: 10, z: 31 },
+    name: 'dirt',
+    diggable: true,
+    fluidOrHazard: false,
+    floodRisk: true,
+    toolOk: true,
+  })
+  const unbreakable = classifyHeadroomBlocker({
+    cell: { x: 40, y: 9, z: 31 },
+    name: 'bedrock',
+    diggable: false,
+    fluidOrHazard: false,
+    floodRisk: false,
+    toolOk: false,
+  })
+  const pass =
+    fluid.kind === 'refuse' &&
+    fluid.reason === 'fluid_or_hazard' &&
+    flood.kind === 'refuse' &&
+    flood.reason === 'flood_risk' &&
+    unbreakable.kind === 'refuse' &&
+    unbreakable.reason === 'not_diggable'
+  return {
+    pass,
+    detail: `fluid=${fluid.kind}/${fluid.kind === 'refuse' ? fluid.reason : ''} flood=${flood.kind}/${flood.kind === 'refuse' ? flood.reason : ''} unbreakable=${unbreakable.kind}/${unbreakable.kind === 'refuse' ? unbreakable.reason : ''}`,
+  }
+})
+
+addCase('the fallback picks the nearest open same-level column and keeps probe order as tie-break', () => {
+  const open = (cell: Vec3Json): PillarColumnProbe => ({
+    cell,
+    supported: true,
+    feetClear: true,
+    headClear: true,
+    aboveHeadClear: true,
+    unsafe: false,
+  })
+  const feet = { x: 40, y: 8, z: 31 }
+  const diagonal = { x: 41, y: 8, z: 32 }
+  const first = selectPillarFallbackColumn([open({ x: 41, y: 8, z: 31 }), open(diagonal)], feet)
+  const tie = selectPillarFallbackColumn([open({ x: 40, y: 8, z: 32 }), open({ x: 41, y: 8, z: 31 })], feet)
+  const level = selectPillarFallbackColumn([open({ x: 40, y: 9, z: 32 }), open({ x: 40, y: 8, z: 30 })], feet)
+  const pass =
+    first?.x === 41 &&
+    first?.z === 31 &&
+    tie?.x === 40 &&
+    tie?.z === 32 &&
+    level?.y === 8 &&
+    selectPillarFallbackColumn([], feet) === null
+  return {
+    pass,
+    detail: `nearest=${first?.x},${first?.y},${first?.z} tie=${tie?.x},${tie?.y},${tie?.z} sameLevel=${level?.x},${level?.y},${level?.z} empty=null`,
+  }
+})
+
+addCase('a non-pocket pillar proceeds and a walled pocket offers no relocation', () => {
+  const step = evaluatePillarStep({
+    placeableCount: 1,
+    columnSafe: true,
+    remaining: 4,
+    footingSolid: true,
+    headroomClear: true,
+  })
+  const walled: PillarColumnProbe[] = [
+    { cell: { x: 41, y: 8, z: 31 }, supported: true, feetClear: false, headClear: false, aboveHeadClear: false, unsafe: false },
+    { cell: { x: 39, y: 8, z: 31 }, supported: true, feetClear: false, headClear: false, aboveHeadClear: false, unsafe: false },
+    { cell: { x: 40, y: 8, z: 30 }, supported: true, feetClear: false, headClear: false, aboveHeadClear: false, unsafe: false },
+    { cell: { x: 40, y: 8, z: 32 }, supported: true, feetClear: false, headClear: false, aboveHeadClear: false, unsafe: false },
+  ]
+  const fallback = selectPillarFallbackColumn(walled, { x: 40, y: 8, z: 31 })
+  const pass = step.ok && fallback === null
+  return { pass, detail: `step=${step.ok ? 'ok' : step.reason} fallback=${fallback === null ? 'none' : 'offered'}` }
+})
+
+addCase('the live pocket marker sequence pins refusal, relocation and the executed step', () => {
+  const obstacle = { cell: { x: 40, y: 9, z: 31 }, name: 'cobblestone' }
+  const refused = formatPillarRefused({
+    reason: 'no_headroom',
+    cell: { x: 40, y: 8, z: 31 },
+    obstacle,
+    cause: 'needs_tool',
+  })
+  const relocate = formatPillarRelocate({ x: 40, y: 8, z: 31 }, { x: 40, y: 8, z: 32 }, obstacle)
+  const step = formatPillarUpStep(1, 8, 9, 'cobblestone')
+  const pass =
+    refused === 'PILLAR_REFUSED reason=no_headroom cell=40,8,31 obstacle=cobblestone@40,9,31 cause=needs_tool' &&
+    relocate === 'PILLAR_RELOCATE from=40,8,31 to=40,8,32 obstacle=cobblestone@40,9,31' &&
+    step === 'PILLAR_UP_STEP step=1 from_y=8 to_y=9 placed=cobblestone'
+  return { pass, detail: `${refused} | ${relocate} | ${step}` }
 })
 
 // --- candidate wiring -----------------------------------------------------------

@@ -134,6 +134,131 @@ export function resolvePillarStep(input: {
   return null
 }
 
+// --- PILLAR_UP headroom clearing (M2 pocket escape) ----------------------------
+//
+// Live blocker (main ff2c733, runner.out action#99/#195): the bot sat in a pocket
+// at feet (40,8,31) with the player column capped by `cobblestone` at (40,9,31).
+// `clearPillarHeadroom` returned false with no log, so the executor reported the
+// opaque `no_headroom` and nothing identified the obstacle. The silent return
+// came from the old boolean API: a missing pickaxe (`selectDigTool` ->
+// `needs_pickaxe_tier_1`) was indistinguishable from an unbreakable block. The
+// pure decision below owns the classification so every refusal carries the exact
+// obstacle cell/name and cause into the `PILLAR_REFUSED` marker.
+
+/** Why a blocked jump-headroom cell could not be opened. */
+export type HeadroomClearRefusal =
+  | 'no_obstacle'
+  | 'not_diggable'
+  | 'needs_tool'
+  | 'fluid_or_hazard'
+  | 'flood_risk'
+  | 'dig_failed'
+
+export interface HeadroomObstacle {
+  cell: Vec3Json
+  name: string
+}
+
+export interface HeadroomBlockerProbe {
+  /** first non-passable cell above the feet (feet+1 before feet+2) */
+  cell: Vec3Json
+  /** live block name at the cell (`''` when the read missed) */
+  name: string
+  /** registry `diggable` flag (false for bedrock and friends) */
+  diggable: boolean
+  /** the block itself is a fluid/hazard and is never dug */
+  fluidOrHazard: boolean
+  /** a fluid/hazard touches the opened cell, so a dig could flood the pocket */
+  floodRisk: boolean
+  /** a usable tool for this block is in the inventory (`selectDigTool(...).ok`) */
+  toolOk: boolean
+}
+
+export type HeadroomClearDecision =
+  | { kind: 'dig'; obstacle: HeadroomObstacle }
+  | { kind: 'refuse'; obstacle: HeadroomObstacle | null; reason: HeadroomClearRefusal }
+
+export type HeadroomClearOutcome =
+  | { cleared: true }
+  | { cleared: false; obstacle: HeadroomObstacle | null; reason: HeadroomClearRefusal }
+
+/**
+ * Pure classification of the cell blocking the jump headroom. `null` (or an
+ * empty name) means the scan found no solid obstacle while the caller measured
+ * headroom as insufficient - a stale/partial read that must surface as
+ * `no_obstacle` instead of a silent `false`.
+ */
+export function classifyHeadroomBlocker(probe: HeadroomBlockerProbe | null): HeadroomClearDecision {
+  if (probe === null || probe.name === '') return { kind: 'refuse', obstacle: null, reason: 'no_obstacle' }
+  const obstacle: HeadroomObstacle = { cell: probe.cell, name: probe.name }
+  if (probe.fluidOrHazard) return { kind: 'refuse', obstacle, reason: 'fluid_or_hazard' }
+  if (!probe.diggable) return { kind: 'refuse', obstacle, reason: 'not_diggable' }
+  if (probe.floodRisk) return { kind: 'refuse', obstacle, reason: 'flood_risk' }
+  if (!probe.toolOk) return { kind: 'refuse', obstacle, reason: 'needs_tool' }
+  return { kind: 'dig', obstacle }
+}
+
+/** One probed neighbour column for the grounded pillar fallback. */
+export interface PillarColumnProbe {
+  /** feet cell of the neighbour column (same Y as the refused column) */
+  cell: Vec3Json
+  /** full solid support under the column */
+  supported: boolean
+  /** the feet cell itself is open */
+  feetClear: boolean
+  /** the block above the feet is open */
+  headClear: boolean
+  /** the second jump cell above the feet is open (2-block headroom) */
+  aboveHeadClear: boolean
+  /** fluid/hazard anywhere in the neighbour column (feet-1..feet+2) */
+  unsafe: boolean
+}
+
+/**
+ * Deterministic selection of an adjacent, grounded pillar column when the
+ * current column's ceiling cannot be cleared. Only same-level columns with
+ * solid support and 2-block headroom qualify; the caller passes probes in a
+ * fixed direction/level order, and strict `<` keeps that order as the
+ * tie-break, so there is no randomness and no flip-flop.
+ */
+export function selectPillarFallbackColumn(
+  probes: readonly PillarColumnProbe[],
+  selfFeet: Vec3Json,
+): Vec3Json | null {
+  let best: { cell: Vec3Json; score: number } | null = null
+  for (const probe of probes) {
+    if (!probe.supported || !probe.feetClear || !probe.headClear || !probe.aboveHeadClear) continue
+    if (probe.unsafe) continue
+    const dy = Math.abs(probe.cell.y - selfFeet.y)
+    const horizontal = Math.hypot(probe.cell.x - selfFeet.x, probe.cell.z - selfFeet.z)
+    const score = dy * 100 + horizontal
+    if (best === null || score < best.score) best = { cell: probe.cell, score }
+  }
+  return best?.cell ?? null
+}
+
+/** The exact log line emitted when a PILLAR_UP step is refused. */
+export function formatPillarRefused(input: {
+  reason: PillarStepRefusal
+  cell: Vec3Json
+  obstacle: HeadroomObstacle | null
+  cause?: HeadroomClearRefusal | null
+}): string {
+  const obstacle =
+    input.obstacle === null
+      ? 'none'
+      : `${input.obstacle.name}@${input.obstacle.cell.x},${input.obstacle.cell.y},${input.obstacle.cell.z}`
+  const cause = input.cause === undefined || input.cause === null ? '' : ` cause=${input.cause}`
+  return `PILLAR_REFUSED reason=${input.reason} cell=${input.cell.x},${input.cell.y},${input.cell.z} obstacle=${obstacle}${cause}`
+}
+
+/** The exact log line emitted when the pillar relocates to an open neighbour. */
+export function formatPillarRelocate(from: Vec3Json, to: Vec3Json, obstacle: HeadroomObstacle | null): string {
+  const bounded =
+    obstacle === null ? 'none' : `${obstacle.name}@${obstacle.cell.x},${obstacle.cell.y},${obstacle.cell.z}`
+  return `PILLAR_RELOCATE from=${from.x},${from.y},${from.z} to=${to.x},${to.y},${to.z} obstacle=${bounded}`
+}
+
 export interface HazardBlockLike {
   kind: string
   position: Vec3Json
