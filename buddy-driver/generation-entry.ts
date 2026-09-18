@@ -348,6 +348,7 @@ function delay(ms: number, resources?: GenerationResources): Promise<void> {
 }
 
 interface LedgerGoal {
+  kind?: string
   targetItem?: string | null
   status?: string
 }
@@ -371,7 +372,7 @@ const PICKAXE_RANK: Record<string, number> = {
  * live world or inventory (consumables like ingots/logs are excluded - those are
  * legitimately spent and their rungs express the current front, not history).
  */
-function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Record<string, number>, world: ResidentWorldMemory): boolean {
+export function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Record<string, number>, world: ResidentWorldMemory): boolean {
   const done = new Set<string>()
   for (const goal of ledger.goals ?? []) {
     if (goal.status === 'done' && typeof goal.targetItem === 'string') done.add(goal.targetItem)
@@ -381,7 +382,30 @@ function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Record<string, numbe
   }
   if (done.has('crafting_table') && !(has(counts, 'crafting_table') || world.craftingTables.length > 0)) return false
   if (done.has('furnace') && !(has(counts, 'furnace') || world.furnaces.length > 0)) return false
+  const hasUsableFurnace = has(counts, 'furnace') || world.furnaces.length > 0
+  const hasUnfinishedFurnaceAcquisition = (ledger.goals ?? []).some(
+    (goal) =>
+      (goal.status === 'active' || goal.status === 'pending') &&
+      (goal.kind === 'craft' || goal.kind === 'place') &&
+      goal.targetItem === 'furnace',
+  )
+  if (hasUsableFurnace && hasUnfinishedFurnaceAcquisition) return false
   return true
+}
+
+export function selectLedgerSnapshot(
+  hostSnapshot: GoalQueueSnapshot | null,
+  derivedSnapshot: GoalQueueSnapshot | null,
+  counts: Record<string, number>,
+  world: ResidentWorldMemory,
+): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot } | null {
+  if (hostSnapshot !== null) {
+    return ledgerIsConsistent(hostSnapshot, counts, world) ? { source: 'host-snapshot', snapshot: hostSnapshot } : null
+  }
+  if (derivedSnapshot !== null && ledgerIsConsistent(derivedSnapshot, counts, world)) {
+    return { source: 'derived-file', snapshot: derivedSnapshot }
+  }
+  return null
 }
 
 function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number>, world: ResidentWorldMemory): string | null {
@@ -425,21 +449,20 @@ function restoreLedgerIntoController(
   world: ResidentWorldMemory,
   log: (event: string, detail?: Record<string, unknown>) => void,
 ): void {
-  const candidates: Array<{ source: string; snapshot: GoalQueueSnapshot }> = []
-  if (hostSnapshot !== null && Array.isArray(hostSnapshot.goals) && typeof hostSnapshot.counter === 'number') {
-    candidates.push({ source: 'host-snapshot', snapshot: hostSnapshot })
-  }
+  let derivedSnapshot: GoalQueueSnapshot | null = null
   if (ledgerPath !== null && existsSync(ledgerPath)) {
     try {
       const parsed = JSON.parse(readFileSync(ledgerPath, 'utf8')) as GoalQueueSnapshot
-      if (Array.isArray(parsed.goals) && typeof parsed.counter === 'number') candidates.push({ source: 'derived-file', snapshot: parsed })
+      if (Array.isArray(parsed.goals) && typeof parsed.counter === 'number') derivedSnapshot = parsed
     } catch (error) {
       log('ERROR', { where: 'restoreLedgerIntoController.read', message: error instanceof Error ? error.message : String(error) })
     }
   }
-  const chosen = candidates.find((candidate) => ledgerIsConsistent(candidate.snapshot, counts, world))
-  if (chosen === undefined) {
-    if (candidates.length > 0) log('LEDGER_STALE', { reason: 'live inventory regressed below recorded goals', source: candidates[0]?.source ?? 'none' })
+  const chosen = selectLedgerSnapshot(hostSnapshot, derivedSnapshot, counts, world)
+  if (chosen === null) {
+    if (hostSnapshot !== null || derivedSnapshot !== null) {
+      log('LEDGER_STALE', { reason: 'live inventory regressed below recorded goals', source: hostSnapshot !== null ? 'host-snapshot' : 'derived-file' })
+    }
     return
   }
   try {
