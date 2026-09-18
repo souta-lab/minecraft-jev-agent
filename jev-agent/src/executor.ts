@@ -36,6 +36,7 @@ import {
   formatPillarRefused,
   formatPillarRelocate,
   formatTunnelEntryRefused,
+  headroomAcrossFootprint,
   planReuseLeg,
   resolvePillarStep,
 } from './verticalPlan.ts'
@@ -1664,7 +1665,7 @@ export class Executor {
         if (!climb.ok) {
           const endEntity = this.bot.entity as typeof this.bot.entity & {
             isCollidedHorizontally?: boolean
-            jumpTicks?: number
+            isCollidedVertically?: boolean
           }
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
@@ -1679,6 +1680,7 @@ export class Executor {
             supportName: footing.name,
             launchFeetBlock: launchFeetBlock?.name ?? null,
             launchHeadBlock: launchHeadBlock?.name ?? null,
+            launchAboveHeadBlock: this.currentBlockAt({ x: feet.x, y: feet.y + 2, z: feet.z })?.name ?? null,
             endPosition: {
               x: endEntity.position.x,
               y: endEntity.position.y,
@@ -1687,7 +1689,8 @@ export class Executor {
             endOnGround: endEntity.onGround,
             endVelocityY: endEntity.velocity.y,
             endCollidedHorizontally: endEntity.isCollidedHorizontally ?? null,
-            endJumpTicks: endEntity.jumpTicks ?? null,
+            endCollidedVertically: endEntity.isCollidedVertically ?? null,
+            endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
             forcedRepositions: forcedTracker.value - forcedBefore,
           })
           break
@@ -1727,9 +1730,9 @@ export class Executor {
     let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
     for (let attempt = 0; attempt < PILLAR_SEARCH_POLICY.headroomAttempts; attempt += 1) {
       const position = this.bot.entity.position
-      if (this.headroomAt(column.x, position.y, column.z)) return { cleared: true }
-      const feetY = Math.floor(position.y + 1e-4)
-      const blockingCell = this.blockingHeadroomCell(column.x, feetY, column.z)
+      const headroom = this.headroomAt(column.x, position.y, column.z, position)
+      if (headroom.clear) return { cleared: true }
+      const blockingCell = headroom.blocker
       if (blockingCell === null) continue
       const block = this.currentBlockAt(blockingCell)
       if (block === null || block.boundingBox === 'empty') continue
@@ -1772,18 +1775,9 @@ export class Executor {
       }
       this.ensureOwned(epoch, signal)
     }
-    if (this.headroomAt(column.x, this.bot.entity.position.y, column.z)) return { cleared: true }
+    const headroom = this.headroomAt(column.x, this.bot.entity.position.y, column.z, this.bot.entity.position)
+    if (headroom.clear) return { cleared: true }
     return last
-  }
-
-  /** Lowest non-passable cell above the feet: the obstacle the jump headroom hits. */
-  private blockingHeadroomCell(x: number, feetY: number, z: number): Vec3Json | null {
-    for (const y of [feetY + 1, feetY + 2]) {
-      const block = this.currentBlockAt({ x, y, z })
-      if (block === null || block.boundingBox === 'empty') continue
-      return { x, y, z }
-    }
-    return null
   }
 
   /**
@@ -2005,7 +1999,7 @@ export class Executor {
         // feet+2 while the step itself was clear.
         const currentHeadroom = this.hasJumpHeadroom()
         const landingHeadroom =
-          climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z)
+          climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z).clear
         const jumpAllowed = landingHeadroom || currentHeadroom
 
         const standingStill = this.bot.entity.onGround === true && Date.now() - lastProgressAt > 250
@@ -3190,14 +3184,24 @@ export class Executor {
    * `feetY` is the standing level, so `Math.floor` identifies the feet block;
    * `Math.round` read one cell too high and rejected valid 1-block climbs.
    */
-  private headroomAt(x: number, feetY: number, z: number): boolean {
-    const feet = Math.floor(feetY + 1e-4)
-    return headroomSufficient(this.passableAt(x, feet + 1, z), this.passableAt(x, feet + 2, z))
+  private headroomAt(
+    x: number,
+    feetY: number,
+    z: number,
+    center: { x: number; z: number } = { x: x + 0.5, z: z + 0.5 },
+  ): { clear: boolean; blocker: Vec3Json | null } {
+    const halfWidth = this.bot.entity.width > 0 ? this.bot.entity.width / 2 : 0.3
+    return headroomAcrossFootprint({
+      center,
+      feetY,
+      halfWidth,
+      isPassable: (cellX, cellY, cellZ) => this.passableAt(cellX, cellY, cellZ),
+    })
   }
 
   private hasJumpHeadroom(): boolean {
     const position = this.bot.entity.position
-    return this.headroomAt(Math.floor(position.x), position.y, Math.floor(position.z))
+    return this.headroomAt(Math.floor(position.x), position.y, Math.floor(position.z), position).clear
   }
 
   private solidSupportAt(x: number, y: number, z: number): boolean {
