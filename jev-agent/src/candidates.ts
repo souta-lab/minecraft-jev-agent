@@ -30,7 +30,7 @@ import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks } from './verticalPlan.ts'
-import type { VerticalPlan } from './verticalPlan.ts'
+import type { VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
@@ -1609,6 +1609,12 @@ function verticalPlanMeta(
       meta.tunnelX = vertical.tunnel.x
       meta.tunnelY = vertical.tunnel.y
       meta.tunnelZ = vertical.tunnel.z
+      if (vertical.clear !== undefined) {
+        meta.tunnelClearX = vertical.clear.cell.x
+        meta.tunnelClearY = vertical.clear.cell.y
+        meta.tunnelClearZ = vertical.clear.cell.z
+        meta.tunnelClearName = vertical.clear.name
+      }
       return meta
     case 'staircase':
       meta.stairDir = vertical.dir
@@ -1659,6 +1665,63 @@ function verticalPlanLabel(vertical: VerticalPlan | null): string {
   }
 }
 
+/**
+ * The same vertical input the primary plan used, minus the remembered tunnel, so
+ * the executor can fall back to a different vertical plan when the live reuse
+ * entry turns out to be unusable.
+ */
+function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
+  return {
+    selfFeetY: state.self.position.y,
+    selfPosition: state.self.position,
+    target,
+    tunnel: state.signals.lastTunnel,
+    descent: state.descent,
+    stepCuts: state.stepCuts,
+    placeable: selectPlaceableBlock(state.inventory.counts),
+    columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
+  }
+}
+
+function fallbackVerticalMeta(fallback: VerticalPlan | null): Record<string, string | number | boolean> {
+  if (fallback === null || fallback.kind === 'reuse') return { fallbackVertical: 'none' }
+  switch (fallback.kind) {
+    case 'staircase':
+      return {
+        fallbackVertical: 'staircase',
+        fallbackStairDir: fallback.dir,
+        fallbackStairToY: fallback.toY,
+        fallbackStairDigX: fallback.dig.x,
+        fallbackStairDigY: fallback.dig.y,
+        fallbackStairDigZ: fallback.dig.z,
+        fallbackStairStepX: fallback.step.x,
+        fallbackStairStepY: fallback.step.y,
+        fallbackStairStepZ: fallback.step.z,
+        fallbackStairBlockName: fallback.digName ?? 'unknown',
+      }
+    case 'staircase-up':
+      return {
+        fallbackVertical: 'staircase-up',
+        fallbackUpDir: fallback.dir,
+        fallbackUpToY: fallback.toY,
+        fallbackUpDigX: fallback.dig.x,
+        fallbackUpDigY: fallback.dig.y,
+        fallbackUpDigZ: fallback.dig.z,
+        fallbackUpStepX: fallback.step.x,
+        fallbackUpStepY: fallback.step.y,
+        fallbackUpStepZ: fallback.step.z,
+        fallbackUpBlockName: fallback.digName ?? 'unknown',
+      }
+    case 'pillar':
+      return {
+        fallbackVertical: 'pillar',
+        fallbackPillarToY: fallback.toY,
+        fallbackPillarSteps: fallback.steps,
+        fallbackPillarPlaceName: fallback.placeName,
+      }
+  }
+}
+
 function knownStationRetrievalCandidate(
   state: WorldState,
   options: CandidateOptions,
@@ -1666,17 +1729,15 @@ function knownStationRetrievalCandidate(
 ): Candidate {
   const isFurnace = known.name.includes('furnace')
   const purpose = isFurnace ? 'smelt' : stationRetrievalPurpose(state)
-  const vertical = planVerticalApproach({
-    selfFeetY: state.self.position.y,
-    selfPosition: state.self.position,
-    target: known.position,
-    tunnel: state.signals.lastTunnel,
-    descent: state.descent,
-    stepCuts: state.stepCuts,
-    placeable: selectPlaceableBlock(state.inventory.counts),
-    columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-  })
-  const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
+  const vertical = planVerticalApproach(verticalInputFor(state, known.position))
+  const tunnelFallback =
+    vertical?.kind === 'reuse'
+      ? planVerticalApproach({ ...verticalInputFor(state, known.position), tunnel: null })
+      : null
+  const verticalMeta = {
+    ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y),
+    ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+  }
   return {
     id: `RETRIEVE:known:station:${known.name}:${blockId('b', known.position)}`,
     kind: 'RETRIEVE',
@@ -1877,17 +1938,15 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     // Issue #45: a remembered resource below the current level needs a vertical
     // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
     // horizontal bearing and falls back to WAIT.
-    const vertical = planVerticalApproach({
-      selfFeetY: state.self.position.y,
-      selfPosition: state.self.position,
-      target: known.position,
-      tunnel: state.signals.lastTunnel,
-      descent: state.descent,
-      stepCuts: state.stepCuts,
-      placeable: selectPlaceableBlock(state.inventory.counts),
-      columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-    })
-    const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
+    const vertical = planVerticalApproach(verticalInputFor(state, known.position))
+    const tunnelFallback =
+      vertical?.kind === 'reuse'
+        ? planVerticalApproach({ ...verticalInputFor(state, known.position), tunnel: null })
+        : null
+    const verticalMeta = {
+      ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y),
+      ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+    }
     const verticalLabel = verticalPlanLabel(vertical)
     return [
       {
