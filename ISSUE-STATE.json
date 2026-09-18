@@ -45,6 +45,15 @@
       "compliance": "unknown",
       "note": "Lifecycle/resource cleanup fixtures exist; issue explicitly requires >=20 changed-hash reloads plus recovery cycles."
     },
+    "136": {
+      "acceptanceClass": "architecture-surface-contract",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "fail",
+      "note": "Static inspection of current main confirms planner, controller, and OptionSpec disagree: a vertical targetY is treated as surface success, while the planner description also requires a log. No live acceptance is claimed."
+    },
     "3": {
       "acceptanceClass": "resident-restart-live",
       "policy": "defined",
