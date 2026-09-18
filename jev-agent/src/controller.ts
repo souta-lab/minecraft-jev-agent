@@ -26,8 +26,18 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
-import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
+import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
+import {
+  classifyAbandonRequest,
+  formatAbandonEnforced,
+  formatAbandonSuppressed,
+  OptionAttemptTracker,
+  resolveAbandonCooldownMs,
+  resolveUnproductiveAttemptLimit,
+  selectLadderOption,
+} from './abandonPolicy.ts'
+import type { AbandonClassification } from './abandonPolicy.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -182,6 +192,14 @@ export interface JevAgentOptions {
    * a replan, still subject to the deterministic prerequisite guard.
    */
   betaAuthority: boolean
+  /**
+   * #79: after this many settled attempts with `verified=false && progress=0`,
+   * an abandon request is enforced even while `betaAuthority=false` (shadow).
+   * A never-attempted option stays protected (speculative suppression).
+   */
+  unproductiveAttemptLimit: number
+  /** #79: how long an enforced option stays retired before it may be retried. */
+  abandonCooldownMs: number
   verbose: boolean
   scanRadius: number
   reach: number
@@ -245,6 +263,8 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   logDir: 'logs',
   forceFallbackPolicy: false,
   betaAuthority: resolveBetaAuthority(),
+  unproductiveAttemptLimit: resolveUnproductiveAttemptLimit(),
+  abandonCooldownMs: resolveAbandonCooldownMs(),
   verbose: true,
   scanRadius: 48,
   reach: 4.5,
@@ -421,6 +441,17 @@ interface PendingDecision {
   healthAtDecision: number
 }
 
+/** #79: the controller's actual abandon decision for one Jev result. */
+interface AbandonVerdict {
+  adopt: boolean
+  enforced: boolean
+  suppressed: boolean
+  classification: AbandonClassification
+  vote: BetaAuthorityDecision
+  optionId: string
+  planId: string | null
+}
+
 const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'JEV_HEADS',
   'BETA_SHADOW',
@@ -551,6 +582,12 @@ export class JevController {
   private lastDecisionId: string | null = null
   /** whether the last beta abandon vote actually led to a replan (#46 guard). */
   private lastAbandonAdopted = false
+  /** #79: per-option unproductive-attempt counter (reset on verified progress). */
+  private readonly optionAttempts = new OptionAttemptTracker()
+  /** #79: prereq paths retired by enforcement, keyed by goal then path. */
+  private readonly abandonedPrereqPaths = new Map<string, Map<PrereqPath, number>>()
+  /** #79: the prereq path chosen on the last tick, retired on enforcement. */
+  private prereqChosenPath: PrereqPath | null = null
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastProgress = 0
@@ -1264,32 +1301,148 @@ export class JevController {
     })
   }
 
-  private logHeads(result: JevResult, chainId: string | null = null): void {
+  private logHeads(result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void {
     const action = decisionIdFrom(result) ?? 'WAIT'
     const abandon = result.answers.abandon_option?.probability ?? null
-    const vote = this.betaDecision(result)
-    // JEV_HEADS reports what the controller ACTUALLY did, never beta's raw vote.
-    // In the default shadow mode a β=1 logs `-> continue` and ABANDON_REASON is
-    // not emitted; the vote survives only in the BETA_SHADOW record.
+    const vote = verdict.vote
     this.logger.info(
       'heads',
-      formatJevHeads(action, abandon, vote.adopt),
+      formatJevHeads(action, abandon, verdict.adopt),
       {
         action,
         abandon,
-        decision: vote.adopt ? 'replan' : 'continue',
+        decision: verdict.adopt ? 'replan' : 'continue',
         abandonRequested: abandonRequested(result),
         betaAuthority: this.options.betaAuthority,
         betaShadowed: vote.shadowed,
+        abandonEnforced: verdict.enforced,
+        abandonSuppressed: verdict.suppressed,
+        attempts: verdict.classification.attempts,
         chainId,
       },
       this.tickCounter,
     )
-    if (vote.adopt) {
+    if (verdict.adopt) {
       const reason = this.abandonReason(action, abandon)
       const option = action === 'WAIT' ? 'none' : prerequisiteOptionName(action)
       this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
     }
+  }
+
+  /**
+   * #79: decide what to do with one abandon request. Uses the per-option
+   * attempt counter, so a SPECULATIVE request (attempts < limit) is suppressible
+   * in shadow mode while a DEMONSTRABLY UNPRODUCTIVE one (attempts >= limit with
+   * verified=false && progress=0) is enforced regardless of `betaAuthority`.
+   */
+  private abandonVerdict(decision: JevResult, optionId: string, planId: string | null): AbandonVerdict {
+    const requested = abandonRequested(decision)
+    const now = Date.now()
+    const state = this.optionAttempts.stateFor(optionId, planId)
+    const classification = classifyAbandonRequest({
+      abandonRequested: requested,
+      betaAuthority: this.options.betaAuthority,
+      attempts: state.attempts,
+      lastVerified: state.verified,
+      lastProgressDelta: state.progressDelta,
+      attemptLimit: this.options.unproductiveAttemptLimit,
+      alreadyAbandoned: this.optionAttempts.isAbandoned(optionId, planId, now, this.options.abandonCooldownMs),
+    })
+    const vote = this.betaDecision(decision)
+    if (!requested) return { adopt: false, enforced: false, suppressed: false, classification, vote, optionId, planId }
+    if (classification.reason === 'unproductive') {
+      return { adopt: true, enforced: true, suppressed: false, classification, vote, optionId, planId }
+    }
+    if (classification.reason === 'authority') {
+      return { adopt: vote.adopt, enforced: false, suppressed: vote.shadowed, classification, vote, optionId, planId }
+    }
+    return { adopt: false, enforced: false, suppressed: classification.suppressed, classification, vote, optionId, planId }
+  }
+
+  private applyAbandon(result: JevResult, verdict: AbandonVerdict): boolean {
+    if (verdict.enforced) {
+      const probability = result.answers.abandon_option?.probability ?? null
+      this.logger.warn(
+        'heads',
+        formatAbandonEnforced({
+          optionId: verdict.optionId,
+          attempts: verdict.classification.attempts,
+          verified: verdict.classification.verified,
+          progressDelta: verdict.classification.progressDelta,
+          betaAuthority: this.options.betaAuthority,
+          betaShadowed: verdict.vote.shadowed,
+          abandonRequested: true,
+        }),
+        {
+          optionId: verdict.optionId,
+          planId: verdict.planId,
+          attempts: verdict.classification.attempts,
+          betaAuthority: this.options.betaAuthority,
+          betaShadowed: verdict.vote.shadowed,
+          abandonRequested: true,
+          action: 'abandon',
+        },
+        this.tickCounter,
+      )
+      this.enforceUnproductiveAbandon(verdict.optionId, verdict.planId, verdict.classification.attempts, probability)
+      return true
+    }
+    if (this.options.betaAuthority) return this.adoptAbandon(result)
+    if (verdict.suppressed && abandonRequested(result)) {
+      this.logger.info(
+        'heads',
+        formatAbandonSuppressed({
+          optionId: verdict.optionId,
+          reason: verdict.classification.reason === 'cooldown' ? 'cooldown' : 'speculative',
+          attempts: verdict.classification.attempts,
+        }),
+        {
+          optionId: verdict.optionId,
+          planId: verdict.planId,
+          reason: verdict.classification.reason,
+          attempts: verdict.classification.attempts,
+          mode: 'shadow',
+          action: 'continue',
+        },
+        this.tickCounter,
+      )
+    }
+    return false
+  }
+
+  /**
+   * #79: retire the unproductive option and advance the ladder. A smelt
+   * prerequisite retires its current path so `applyFurnacePrereq` selects the
+   * next feasible rung (place_held -> use_known_station -> craft_and_place ->
+   * escalate) instead of re-selecting the abandoned one. Otherwise the existing
+   * exception-driven replan is the abandon action.
+   */
+  private enforceUnproductiveAbandon(
+    optionId: string,
+    planId: string | null,
+    attempts: number,
+    probability: number | null,
+  ): void {
+    const now = Date.now()
+    this.optionAttempts.markAbandoned(optionId, planId, now)
+    if (this.prereqPlan !== null && this.prereqChosenPath !== null) {
+      const current = this.prereqChosenPath
+      const goalKey = this.prereqGoalKey ?? this.currentGoalKey()
+      const bucket = this.abandonedPrereqPaths.get(goalKey) ?? new Map<PrereqPath, number>()
+      bucket.set(current, now)
+      this.abandonedPrereqPaths.set(goalKey, bucket)
+      const next = nextPrereqPath(this.prereqPlan, current)
+      this.prereqForcedPath = next
+      this.prereqProgress = null
+      this.prereqLoggedKey = null
+      this.logger.warn(
+        'agent',
+        `PREREQ_ABANDON from=${current} to=${next ?? 'none'} reason=unproductive attempts=${attempts}`,
+        { from: current, to: next, reason: 'unproductive', attempts, goal: goalKey },
+        this.tickCounter,
+      )
+    }
+    this.summonLlm('no_progress', `abandon_option=${probability} enforced: ${optionId} unproductive after ${attempts} attempts`)
   }
 
   /** Why beta/controller chose abandon, from the deterministic failure signals. */
@@ -1554,9 +1707,13 @@ export class JevController {
         },
         this.tickCounter,
       )
-      this.logHeads(result, chainId)
+      const planGoal = state.goalQueue.current
+      const optionId = optionIdForGoal(planGoal) ?? this.currentGoalKey()
+      const planId = planRevisionForGoal(planGoal)
+      const verdict = this.abandonVerdict(result, optionId, planId)
+      this.logHeads(result, verdict, chainId)
       this.logShadowMetrics(state)
-      if (this.options.betaAuthority) this.lastAbandonAdopted = this.adoptAbandon(result)
+      this.lastAbandonAdopted = this.applyAbandon(result, verdict)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {
@@ -1638,8 +1795,12 @@ export class JevController {
     })
 
     const pending = this.pendingDecisions.get(result.epoch)
+    let completedOptionId: string | null = null
+    let completedPlanId: string | null = null
     if (pending !== undefined) {
       this.pendingDecisions.delete(result.epoch)
+      completedOptionId = pending.record.optionId
+      completedPlanId = pending.record.goalQueueState.current?.id ?? null
       attachResult(pending.record, {
         actionId: result.actionId,
         success: result.status === 'done' && result.verified,
@@ -1687,6 +1848,21 @@ export class JevController {
     } else if (result.status === 'done' && result.verified) {
       const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
       if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
+    }
+
+    if (completedOptionId !== null) {
+      this.optionAttempts.noteOutcome(
+        {
+          optionId: completedOptionId,
+          planId: completedPlanId,
+          verified: result.verified,
+          progressDelta: result.itemsGained,
+        },
+        Date.now(),
+      )
+    }
+
+    if (result.status === 'done') {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.delete(candidate.itemName)
       }
@@ -2874,16 +3050,20 @@ export class JevController {
       this.prereqProgress = null
       this.prereqLoggedKey = null
     }
-    let chosen: PrereqPath | null = decision.chosen
+    let chosen: PrereqPath | null = null
+    const abandoned = this.abandonedPrereqSet(goalKey, Date.now())
     if (
       this.prereqForcedPath !== null &&
+      !abandoned.has(this.prereqForcedPath) &&
       decision.options.some((option) => option.feasible && option.path === this.prereqForcedPath)
     ) {
       chosen = this.prereqForcedPath
     } else {
-      this.prereqForcedPath = null
+      chosen = selectLadderOption(decision.options, abandoned)
+      this.prereqForcedPath = chosen
     }
     this.prereqPlan = decision
+    this.prereqChosenPath = chosen
     const logKey = `${goalKey}|${chosen ?? 'none'}`
     if (this.prereqLoggedKey !== logKey) {
       this.prereqLoggedKey = logKey
@@ -2915,9 +3095,10 @@ export class JevController {
     this.prereqProgress = evaluated.progress
     if (!evaluated.stalled) return kept
 
-    const next = nextPrereqPath(decision, chosen)
+    const next = selectLadderOption(decision.options, new Set<string>([...abandoned, chosen]))
     if (next === null) return kept
     this.prereqForcedPath = next
+    this.prereqChosenPath = next
     this.prereqProgress = null
     this.prereqLoggedKey = null
     this.logger.warn(
@@ -2932,12 +3113,24 @@ export class JevController {
     })
   }
 
+  private abandonedPrereqSet(goalKey: string, now: number): Set<PrereqPath> {
+    const bucket = this.abandonedPrereqPaths.get(goalKey)
+    const abandoned = new Set<PrereqPath>()
+    if (bucket === undefined) return abandoned
+    for (const [path, at] of bucket) {
+      if (now - at < this.options.abandonCooldownMs) abandoned.add(path)
+    }
+    return abandoned
+  }
+
   private resetFurnacePrereq(): void {
     this.prereqPlan = null
     this.prereqForcedPath = null
     this.prereqGoalKey = null
     this.prereqLoggedKey = null
     this.prereqProgress = null
+    this.prereqChosenPath = null
+    this.abandonedPrereqPaths.clear()
   }
 
   private logStaleKnownResources(state: WorldState): void {
