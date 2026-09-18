@@ -39,7 +39,7 @@ import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
-import { StateFingerprintMemory } from './moveFailMemory.ts'
+import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -105,6 +105,13 @@ export interface CandidateOptions {
    * prerequisite planner stops choosing an unreachable remembered station.
    */
   unreachableStations?: ReadonlySet<string>
+  /**
+   * Coordinate keys currently blacklisted by durable movement failure memory.
+   * Candidate selection consumes this fact before it chooses an exploration or
+   * retrieval target; filtering only after generation would leave WAIT as the
+   * apparent fallback when the sole target is restored from a prior generation.
+   */
+  blacklistedMoveTargets?: ReadonlySet<string>
   /** failures at one MOVE/RETRIEVE target before the generator stops offering it (default 4) */
   moveFailureLimit?: number
   /** failures at one DESCEND step before the generator stops offering it (default 3) */
@@ -318,7 +325,13 @@ function generateRawCandidates(
   }
 
   if (strategy === 'explore_cave') {
-    const explore = pickExplore(state, state.terrain.standable, focusItem, options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
+    const explore = pickExplore(
+      state,
+      state.terrain.standable,
+      focusItem,
+      options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+      options.blacklistedMoveTargets,
+    )
     if (explore !== null) {
       candidates.unshift({
         id: `EXPLORE_CAVE:${blockId('p', explore)}`,
@@ -385,7 +398,7 @@ function generateRawCandidates(
   }
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
-  const retreat = pickRetreat(state, state.terrain.standable, danger)
+  const retreat = pickRetreat(state, state.terrain.standable, danger, options.blacklistedMoveTargets)
   if (retreat !== null) {
     candidates.push({
       id: `RETREAT:${blockId('p', retreat)}`,
@@ -409,7 +422,13 @@ function generateRawCandidates(
   candidates.push(...retrievalCandidates(state, options, focusItem))
   if (candidates.length === 0) {
     const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
-    const explore = pickExplore(state, state.terrain.standable, focusItem, moveFailureLimit)
+    const explore = pickExplore(
+      state,
+      state.terrain.standable,
+      focusItem,
+      moveFailureLimit,
+      options.blacklistedMoveTargets,
+    )
     if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < moveFailureLimit) {
       candidates.push({
         id: `MOVE:${blockId('p', explore)}`,
@@ -553,6 +572,10 @@ function mineCandidates(
       if (moveCount >= maxMoves) continue
       if (failureCount(state.signals.failedCandidates, `MOVE:${blockId('b', block.position)}`) >= (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)) continue
       if (spot === null || atSpot) continue
+      if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) {
+        if (block.distance <= (options.tunnelMaxDistance ?? DEFAULT_TUNNEL_MAX_DISTANCE)) tunnelTargets.push(block)
+        continue
+      }
       moveCount += 1
       moveActions.push({
         id: `MOVE:${blockId('b', block.position)}`,
@@ -916,11 +939,16 @@ function knownPlacementCells(state: WorldState): Vec3Json[] {
  * the bot is now. The target itself is the last resort - arriving there
  * re-senses its neighbourhood and the next solve step finds a neighbouring cell.
  */
-function placementApproachCell(state: WorldState, target: Vec3Json): Vec3Json {
+function placementApproachCell(
+  state: WorldState,
+  target: Vec3Json,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): Vec3Json {
   const here = distance(state.self.position, target)
   const options = state.terrain.standable.filter(
     (cell) =>
       !placementIntersectsBody(cell, state.self.position) &&
+      !isBlacklistedMoveTarget(state, blacklistedMoveTargets, cell) &&
       !(cell.x === target.x && cell.y === target.y && cell.z === target.z) &&
       distance(cell, target) < here,
   )
@@ -936,7 +964,7 @@ function placementApproachCandidate(
   target: Vec3Json,
   purpose: string,
 ): Candidate {
-  const approach = placementApproachCell(state, target)
+  const approach = placementApproachCell(state, target, options.blacklistedMoveTargets)
   return {
     id: `MOVE:${blockId('p', approach)}`,
     kind: 'MOVE',
@@ -1879,13 +1907,18 @@ function visibleBlockFor(state: WorldState, want: RetrievalWant): BlockState | n
   return state.blocks.find((block) => block.kind === 'log') ?? null
 }
 
-function knownResourceFor(state: WorldState, want: RetrievalWant): KnownResource | null {
+function knownResourceFor(
+  state: WorldState,
+  want: RetrievalWant,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): KnownResource | null {
   const known = state.signals.knownResources ?? []
   let best: KnownResource | null = null
   for (const resource of known) {
     const matches = want.kind === 'ore' ? want.blockNames.includes(resource.name) : resource.name.endsWith('_log')
     if (!matches) continue
     if (resourceDepleted(state, resource)) continue
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
     if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
       best = resource
     }
@@ -1927,7 +1960,7 @@ export function staleKnownResources(
 
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
   if (visibleBlockFor(state, want) !== null) return []
-  const known = knownResourceFor(state, want)
+  const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
   if (known !== null) {
     const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
     if (
@@ -1976,7 +2009,12 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     ]
   }
   if (want.kind !== 'log') return []
-  const spot = surfaceSpot(state, want.item, options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
+  const spot = surfaceSpot(
+    state,
+    want.item,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
   if (spot === null) return []
   return [
     {
@@ -2018,10 +2056,16 @@ function retrievalCandidates(state: WorldState, options: CandidateOptions, focus
   return []
 }
 
-function surfaceSpot(state: WorldState, item: string, moveFailureLimit: number): Vec3Json | null {
+function surfaceSpot(
+  state: WorldState,
+  item: string,
+  moveFailureLimit: number,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): Vec3Json | null {
   let best: Vec3Json | null = null
   for (const spot of state.terrain.standable) {
     if (spot.y <= state.self.position.y + 2) continue
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
     const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
     if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
     if (best === null || spot.y > best.y) best = spot
@@ -2056,6 +2100,7 @@ function pickRetreat(
   state: WorldState,
   standable: Vec3Json[],
   danger: BlockState | null,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
   const hurt = state.self.health <= 6
   if (danger === null && !hurt) return null
@@ -2063,6 +2108,7 @@ function pickRetreat(
   let best: Vec3Json | null = null
   let bestScore = Number.NEGATIVE_INFINITY
   for (const spot of standable) {
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
     const score = distance(spot, threat)
     if (score > bestScore) {
       bestScore = score
@@ -2089,10 +2135,12 @@ function pickExplore(
   standable: Vec3Json[],
   focusItem: string | null,
   moveFailureLimit: number,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
   const options = standable.filter(
     (spot) =>
       distance(spot, state.self.position) > 1.5 &&
+      !isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot) &&
       failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < moveFailureLimit,
   )
   if (options.length === 0) return null
@@ -2124,6 +2172,14 @@ function pickExplore(
     }
   }
   return best
+}
+
+function isBlacklistedMoveTarget(
+  state: WorldState,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  position: Vec3Json,
+): boolean {
+  return blacklistedMoveTargets?.has(moveFailureKey(state.self.dimension, position)) ?? false
 }
 
 // --- affordance gate (#11 v2): only mechanically reachable targets are presented
