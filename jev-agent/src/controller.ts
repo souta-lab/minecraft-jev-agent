@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ReachabilityGateOptions } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -39,6 +39,18 @@ import {
   selectLadderOption,
 } from './abandonPolicy.ts'
 import type { AbandonClassification } from './abandonPolicy.ts'
+import {
+  AbandonmentLedger,
+  formatProtectionAbandonConflict,
+  PROTECTION_ABANDON_CONFLICT,
+  reconcileProtection,
+} from './protectionConflict.ts'
+import {
+  CANDIDATE_COMMIT_RELEASED,
+  CANDIDATE_FLAP,
+  evaluateCandidateFlap,
+} from './candidateCommitment.ts'
+import type { CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -49,17 +61,22 @@ import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
-import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
+import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
+import { PICKAXE_TIER_ORDER } from './gameData.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
-import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
+import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
+import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
@@ -76,7 +93,7 @@ import {
   moveFailureKey,
   StateFingerprintMemory,
 } from './moveFailMemory.ts'
-import type { MoveFailureReason } from './moveFailMemory.ts'
+import type { MoveFailEntry, MoveFailureReason } from './moveFailMemory.ts'
 import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
@@ -93,12 +110,13 @@ import {
   prerequisiteOptionName,
   shouldAdoptAbandon,
 } from './placementGuard.ts'
-import type { AbandonReason } from './placementGuard.ts'
+import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import {
   evaluatePrereqStall,
   evaluateRetrieveAbandon,
   formatPrereqOptionDetail,
   formatPrereqOptionFor,
+  formatPrereqRankShadow,
   formatPrereqSwitch,
   isInventorySourced,
   knownStationKey,
@@ -108,10 +126,11 @@ import {
   prereqOptionReason,
   prereqProgressSignature,
   prereqSubjectForGoal,
+  resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
   selectPrereqPath,
 } from './prereqOption.ts'
-import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
+import type { PrereqDecision, PrereqPath, PrereqProgress, PrereqRankPolicy, RetrieveUnverifiedState } from './prereqOption.ts'
 import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
@@ -235,6 +254,10 @@ export interface JevAgentOptions {
   eventSink?: (event: string, detail: Record<string, unknown>) => void
   /** durable known-resource coordinates injected by the resident host (issue #43) */
   knownResources?: KnownResource[]
+  /** coordinate-level movement failures restored from the resident's class-A memory */
+  moveFailureEntries?: readonly MoveFailEntry[]
+  /** called after movement failure memory changes so the HOST can persist a DTO snapshot */
+  onMoveFailureMemoryChange?: (entries: readonly MoveFailEntry[]) => void
   /**
    * #44: minimum spacing between replans for the same summon reason. A second
    * replan inside the window (with unchanged inputs) reuses the current plan.
@@ -242,6 +265,12 @@ export interface JevAgentOptions {
   replanThrottleMs: number
   /** #44: position delta in blocks that counts as new information. */
   replanPositionDelta: number
+  /**
+   * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
+   * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
+   * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
+   */
+  prereqRankPolicy: PrereqRankPolicy
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -285,6 +314,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   actuation: 'pathfinder',
   replanThrottleMs: resolveReplanThrottleMs(),
   replanPositionDelta: resolveReplanPositionDelta(),
+  prereqRankPolicy: resolvePrereqRankPolicy(),
 }
 
 export interface RunSummary {
@@ -423,8 +453,57 @@ export function classifyMoveOutcome(verified: boolean, moved: number): MoveOutco
   return moved < 0.5 ? 'no-progress' : 'arrived'
 }
 
+/** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
+export function guardMoveFailureReason(
+  candidate: Pick<Candidate, 'kind'> | undefined,
+  code: GuardCode,
+): MoveFailureReason | null {
+  if (candidate === undefined || !isTrackedMoveKind(candidate.kind)) return null
+  return code === 'NO_PATH' ? 'unreachable' : null
+}
+
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
+}
+
+/** Item names whose VERIFIED placement registers a usable smelt station. */
+export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
+
+/**
+ * The mirrored registration marker for a station this controller verified
+ * placing. `source=placed` is deterministic truth: only the executor's strict
+ * placement post-condition (the block exists at the target) reaches this path,
+ * never a sensed or remembered coincidence.
+ */
+export function formatStationRegisteredPlaced(kind: string, at: Vec3Json): string {
+  const x = Math.round(at.x)
+  const y = Math.round(at.y)
+  const z = Math.round(at.z)
+  return `STATION_REGISTERED kind=${kind} source=placed at=${x},${y},${z}`
+}
+
+/**
+ * Register a verified placed station in the in-generation station list.
+ * Idempotent per (item, cell): a repeated verified placement at the same cell is
+ * recorded once, so the STATION_REGISTERED marker fires exactly once per placed
+ * cell while the station stays selectable for the rest of the generation.
+ */
+export function registerPlacedStation(
+  stations: KnownResource[],
+  item: string,
+  at: Vec3Json,
+): { added: boolean; station: KnownResource } {
+  const station: KnownResource = {
+    name: item,
+    kind: 'station',
+    position: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) },
+  }
+  const cellKey = (entry: { name: string; position: Vec3Json }): string =>
+    `${entry.name}@${Math.round(entry.position.x)},${Math.round(entry.position.y)},${Math.round(entry.position.z)}`
+  const key = cellKey(station)
+  if (stations.some((entry) => cellKey(entry) === key)) return { added: false, station }
+  stations.push(station)
+  return { added: true, station }
 }
 
 /** A guard path probe is synchronous; this caps how long it may think. */
@@ -482,6 +561,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CAUSAL',
   'SHADOW_METRICS',
   'TOOL_CHOICE',
+  'QUEUE_DEPTH',
+  'PLACE_REFUSED',
   'DIG_PATH',
   'JUMP_ATTEMPT',
   'JUMP_FAIL',
@@ -489,6 +570,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCEND_LIMIT',
   'STAIRCASE',
   'REUSE_TUNNEL',
+  'TUNNEL_ENTRY_REFUSED',
+  'LOCAL_CLEAR',
   'ASCEND_STEP',
   'ASCENT_PROGRESS',
   'PILLAR_UP',
@@ -518,15 +601,23 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
+  'PREREQ_RANK_SHADOW',
   'PREREQ_SWITCH',
   'FURNACE_READY',
+  'STATION_REGISTERED',
   'SMELT_DONE',
+  'SMELT_INPUT_PREREQ',
+  'CRAFT_INGREDIENT_PREREQ',
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
+  'LOG_ROUTE',
+  PROTECTION_ABANDON_CONFLICT,
+  CANDIDATE_FLAP,
+  CANDIDATE_COMMIT_RELEASED,
 ])
 
 /**
@@ -535,6 +626,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
  * already warned about this, but it was not a mirrored marker, so it never
  * surfaced as the binding condition. Pure and exported so the contract is
  * unit-testable without a bot.
+ *
+ * The line has exactly one meaning per field:
+ *   - `blockedBy` is the CURRENT GOAL's own deterministic blocker (its unmet
+ *     precondition, else its own target's refusal reason, else
+ *     `no_productive_action`). It is never a withheld sibling's reason.
+ *   - `missing` is the ordered, bounded union of each withheld candidate's
+ *     missing capability, tagged with that candidate's id:
+ *     `["MINE:b40_10_33:tool:pickaxe@0","RETRIEVE:known:x:needs_ascend"]`.
  */
 export function formatCandidateStarvation(
   presented: number,
@@ -542,7 +641,7 @@ export function formatCandidateStarvation(
   blockedBy: string,
   missing: readonly string[] = [],
 ): string {
-  const all = missing.length > 0 ? ` missing=[${missing.join(',')}]` : ''
+  const all = missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''
   return `CANDIDATE_STARVATION presented=${presented} productive=0 goal="${goal}" blockedBy=${blockedBy}${all}`
 }
 
@@ -558,29 +657,182 @@ export function candidateStarvationLine(
   return productive ? null : formatCandidateStarvation(candidates.length, goal, blockedBy, missing)
 }
 
+/** Upper bound on the `missing=[...]` union so the marker stays one readable line. */
+export const MAX_STARVATION_MISSING = 8
+
 /**
- * Every distinct capability the withheld candidates named, in candidate order,
- * deduped. The starvation line prints this whole ordered list so a single
- * blocked target cannot hide a second, independently actionable need.
+ * Each withheld candidate's missing capability, in candidate order, each token
+ * tagged with its candidate id (`<candidateId>:<capability>`). A candidate whose
+ * refusal names no capability contributes its reason instead, so no withheld
+ * target is silently dropped. Deduped and bounded (`MAX_STARVATION_MISSING`) so
+ * the list stays a stable, readable ordered set.
  */
-export function candidateStarvationMissing(withheld: readonly CandidateReachability[]): string[] {
-  return [...new Set(withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)))]
+export function candidateStarvationMissing(
+  withheld: readonly CandidateReachability[],
+  limit: number = MAX_STARVATION_MISSING,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const entry of withheld) {
+    const capabilities = entry.result.missingCapabilities.map(capabilityKey)
+    const labels = capabilities.length > 0 ? capabilities : [entry.result.reason]
+    for (const label of labels) {
+      const token = `${entry.candidate.id}:${label}`
+      if (seen.has(token)) continue
+      seen.add(token)
+      out.push(token)
+      if (out.length >= limit) return out
+    }
+  }
+  return out
+}
+
+/** True when a withheld candidate is a route for `item` itself (not a sibling). */
+function candidateTargetsItem(candidate: Candidate, item: string): boolean {
+  if (candidate.targetName === item) return true
+  if (candidate.itemName === item) return true
+  const known = candidate.meta.knownName
+  return typeof known === 'string' && known === item
 }
 
 /**
- * The primary reason the offered set is starved: the first withheld capability,
- * else the first reachability reason, else the last failure code. `blockedBy`
- * stays ONE reason - the full ordered capability list is reported separately.
+ * The single reason the STARVED GOAL has no productive candidate, derived only
+ * from the goal's own deterministic state: an unmet compiled precondition, else
+ * the refusal reason of the goal's OWN route candidate (a withheld candidate
+ * whose target is the goal's target item), else `no_productive_action`. A
+ * withheld candidate for some other target (a prerequisite, a sibling) must
+ * never leak into `blockedBy` - it belongs in `missing` tagged with its id.
  */
-export function candidateStarvationBlockedBy(
+export function goalStarvationBlockedBy(
+  preconditionCause: string | null,
+  goal: Pick<QueuedGoal, 'kind' | 'targetItem'> | null,
   withheld: readonly CandidateReachability[],
-  lastFailureCode: string | null,
 ): string {
-  const capabilities = candidateStarvationMissing(withheld)
-  if (capabilities.length > 0) return capabilities[0] ?? 'unknown_capability'
-  const reasons = [...new Set(withheld.map((entry) => entry.result.reason))]
-  if (reasons.length > 0) return reasons[0] ?? 'unknown_reason'
-  return lastFailureCode ?? 'no_productive_candidate'
+  if (preconditionCause !== null) return preconditionCause
+  if (goal === null || goal.kind !== 'collect') return 'no_productive_action'
+  const target = goal.targetItem
+  if (target === null) return 'no_productive_action'
+  const own = withheld.find((entry) => candidateTargetsItem(entry.candidate, target))
+  return own?.result.reason ?? 'no_productive_action'
+}
+
+function isProductiveCandidate(candidate: Candidate): boolean {
+  return candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE'
+}
+
+/**
+ * The starvation contract's actionable-goal clause: if the current goal is a
+ * craft whose recipe inputs are held, the offered set must contain a productive
+ * candidate. The candidate gate already runs this ladder, but it runs before the
+ * controller's own filters (move-failure memory, furnace prerequisite), so the
+ * last productive candidate can be removed afterwards. This backfills the
+ * deterministic self-contained craft step for the current craft goal only when
+ * nothing productive survives, so `productive` is > 0 and no starvation line is
+ * emitted for a craftable goal.
+ */
+export function ensureCraftStepActionable(
+  state: WorldState,
+  candidates: readonly Candidate[],
+  options: CandidateOptions,
+): Candidate[] {
+  if (candidates.some(isProductiveCandidate)) return [...candidates]
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'craft') return [...candidates]
+  const seen = new Set(candidates.map((candidate) => candidate.id))
+  const step = selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id))
+  return step.length === 0 ? [...candidates] : [...candidates, ...step]
+}
+
+/** Capability name for one unmet predicate, used in the `precondition:<cause>` blockedBy. */
+function preconditionCauseName(predicate: Predicate): string {
+  switch (predicate.kind) {
+    case 'pickaxeRankAtLeast':
+      return 'pickaxe'
+    case 'inventoryAtLeast':
+      return predicate.item
+    case 'inventoryClassAtLeast':
+      return `class:${predicate.cls}`
+    case 'stationKnown':
+      return `station:${predicate.station}`
+    case 'oreKnown':
+      return `ore:${predicate.item}`
+    case 'dimensionIs':
+      return `dimension:${predicate.dimension}`
+    case 'levelAtMost':
+      return `y<=${predicate.y}`
+    case 'levelAtLeast':
+      return `y>=${predicate.y}`
+    case 'healthAtLeast':
+      return 'health'
+    case 'custom':
+      return `custom:${predicate.id}`
+  }
+}
+
+export interface SurfaceRecoveryEvaluation {
+  /** The code-owned vertical predicate; Y alone is never sufficient. */
+  vertical: PredicateEvaluation
+  /** Inventory count for the explicit recovery resource, e.g. the log class. */
+  have: number
+  required: number
+  resourceSatisfied: boolean
+  satisfied: boolean
+}
+
+/**
+ * Evaluate the existing return-recovery contract as plain data.
+ *
+ * The planner describes this route as "reach the upper access hint and collect
+ * a log". Keep those two facts together at the controller boundary so a high
+ * remembered ore/station coordinate cannot be mistaken for verified surface
+ * truth. The function is pure and intentionally uses the same level predicate
+ * that the Option compiler emits.
+ */
+export function evaluateSurfaceRecovery(
+  goal: Pick<QueuedGoal, 'kind' | 'targetY' | 'dimension' | 'targetItem' | 'requiredCount'>,
+  snapshot: {
+    position: Vec3Json | null
+    dimension: string | null
+    inventory: Readonly<Record<string, number>>
+  },
+): SurfaceRecoveryEvaluation | null {
+  if (goal.kind !== 'surface') return null
+  const predicate = predicateForGoal(goal)
+  if (predicate === null || predicate.kind !== 'levelAtLeast') return null
+  const vertical = evaluateSpatialPredicate(predicate, {
+    position: snapshot.position,
+    dimension: snapshot.dimension,
+  })
+  const required = Math.max(1, goal.requiredCount)
+  const target = goal.targetItem
+  let have = 0
+  if (target !== null) {
+    for (const [name, count] of Object.entries(snapshot.inventory)) {
+      if (isResourceClass(target) ? matchesResourceClass(name, target) : name === target) have += count
+    }
+  }
+  const resourceSatisfied = target === null || have >= required
+  return {
+    vertical,
+    have,
+    required,
+    resourceSatisfied,
+    satisfied: vertical.satisfied && resourceSatisfied,
+  }
+}
+
+/**
+ * The code-owned precondition that stops `goal` from starting, rendered as a
+ * `blockedBy` cause (`precondition:pickaxe`), or null when it is startable. A
+ * deterministic block must be surfaced instead of a generic `verify_failed`
+ * spin, so the starvation line names what actually has to be produced.
+ */
+export function goalPreconditionCause(goal: PlannedGoal | null, snapshot: OptionWorldSnapshot): string | null {
+  if (goal === null) return null
+  const { ok, unmet } = evaluatePredicates(compilePlannedGoal(goal, snapshot).preconditions, snapshot)
+  if (ok) return null
+  const first = unmet[0]
+  return first === undefined ? null : `precondition:${preconditionCauseName(first)}`
 }
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -688,6 +940,7 @@ export class JevController {
   private prereqChosenPath: PrereqPath | null = null
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
+  private lastLogRouteSignature = ''
   private lastProgress = 0
   private lastProgressAt = Date.now()
 
@@ -716,25 +969,34 @@ export class JevController {
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
-  private readonly moveFailMemory = new MoveFailMemory({
-    failureLimit: MOVE_FAILMEM_LIMIT,
-    cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
-    maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
-  })
+  private moveFailMemory: MoveFailMemory
   /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
   private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
   private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
   /** last logged REACHABILITY signature per candidate, so markers change with facts. */
   private readonly reachabilityLogSignatures = new Map<string, string>()
+  /** last logged PLACE_REFUSED signature, so one geometry dead end is one line. */
+  private lastPlacementRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
   private lastOscillationAt = 0
   /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
   private readonly placementRetries = new Map<string, number>()
+  /**
+   * Stations this generation verified placing. They are selectable and reachable
+   * for the rest of the generation (the durable WorldMemory path only lands on a
+   * later generation), so a placed furnace is never lost when the bot walks out
+   * of the near-field sensor radius.
+   */
+  private readonly placedStations: KnownResource[] = []
   /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
   private lastPlacedFurnaceCount = 0
+  /** Last mirrored `SMELT_INPUT_PREREQ` line, so a stable state logs it once. */
+  private lastSmeltInputPrereqLine: string | null = null
+  /** Last mirrored `CRAFT_INGREDIENT_PREREQ` line, so a stable state logs it once. */
+  private lastCraftIngredientPrereqLine: string | null = null
   /** #58: the last scored furnace-prerequisite plan and its selected path. */
   private prereqPlan: PrereqDecision | null = null
   private prereqForcedPath: PrereqPath | null = null
@@ -742,14 +1004,29 @@ export class JevController {
   private prereqLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
-  /** #78: options excluded for the current goal after repeated unverified failure. */
-  private readonly abandonedRetrievePaths = new Set<PrereqPath>()
+  /** #78: options excluded for the current goal after repeated unverified failure (path -> fingerprint). */
+  private readonly abandonedRetrievePaths = new Map<PrereqPath, string>()
   /** #78: consecutive `verified=false progressDelta=0` retrieve outcomes. */
   private retrieveUnverified: RetrieveUnverifiedState | null = null
   /** #78: last quantized position / swap pair / state signature. */
   private oscillationState: OscillationState | null = null
   /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
   private readonly actionUnverified = new Map<string, number>()
+  /**
+   * #11 v2 §6: abandonment is a FACT recorded under the state fingerprint that
+   * produced it, so the precondition guard cannot re-protect an option that was
+   * deterministically abandoned while the state is unchanged.
+   */
+  private readonly abandonedOptions = new AbandonmentLedger()
+  /** #11 v2 §7: anti-thrash commitment - one candidate until a fact changes. */
+  private commitmentState: CandidateFlapState | null = null
+  /** verified-outcome counter; a change clears the flap window and the commitment. */
+  private progressEpoch = 0
+  private commitmentProgressEpoch = 0
+  /** Semantic per-tick fingerprint (inventory/world/topology), never the clock. */
+  private lastStateFingerprint = ''
+  /** The fingerprint that produced each abandoned prerequisite-path fact. */
+  private readonly abandonedPrereqFingerprints = new Map<string, string>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -767,6 +1044,7 @@ export class JevController {
   constructor(bot: Bot, options: Partial<JevAgentOptions> = {}) {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
+    this.moveFailMemory = this.createMoveFailMemory()
     this.replanThrottle = new ReplanThrottle(this.options.replanThrottleMs, this.options.replanPositionDelta)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
@@ -846,6 +1124,7 @@ export class JevController {
   setOptions(partial: Partial<JevAgentOptions>): void {
     if (this.running) throw new Error('setOptions() cannot be called while the agent is running')
     this.options = normalizeOptions({ ...this.options, ...partial })
+    this.moveFailMemory = this.createMoveFailMemory()
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.harvestedGoalCount = 0
     this.queue = new GoalQueue()
@@ -869,6 +1148,15 @@ export class JevController {
     this.scheduler = this.buildScheduler()
     this.executor = new Executor(this.bot, this.logger, executorOptions(this.options, this.scheduler))
     this.system2 = new StubSystem2(this.system2Writer)
+  }
+
+  private createMoveFailMemory(): MoveFailMemory {
+    return new MoveFailMemory({
+      failureLimit: MOVE_FAILMEM_LIMIT,
+      cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
+      maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
+      initialEntries: this.options.moveFailureEntries,
+    })
   }
 
   private buildScheduler(): DecisionScheduler {
@@ -958,10 +1246,13 @@ export class JevController {
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
+    const depthBefore = this.queue.state.depth
     const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
       reason: plan.note,
       onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
+      onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
     })
+    this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `bootstrap`)
     this.subgoalCount = added.length
     this.planSupplied = true
     const restored = this.loadLedger()
@@ -1117,7 +1408,7 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
-      this.signals.knownResources = (this.options.knownResources ?? []).filter(
+      this.signals.knownResources = this.knownResourcesForSensor().filter(
         (resource) => !this.unreachableResources.has(resourceKey(resource)),
       )
       this.updateStallSignal()
@@ -1168,10 +1459,11 @@ export class JevController {
           tick: this.tickCounter,
           goal: this.goal,
           goalQueue: this.queue.state,
+          currentOption: this.currentOptionContext(),
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
-          rememberedStations: this.options.knownResources ?? [],
+          rememberedStations: this.knownResourcesForSensor(),
         },
         sensorOptions(this.options),
       )
@@ -1179,6 +1471,7 @@ export class JevController {
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
+      this.lastStateFingerprint = this.stateFingerprint(state)
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -1186,15 +1479,28 @@ export class JevController {
       }
 
       const unreachableStations = this.unreachableStationKeys(state)
-      const grounded = generateGroundedCandidates(
-        state,
-        candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+      const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
+      const groundingOptions = candidateOptions(
+        this.options,
+        this.recipeIndex,
+        unreachableStations,
+        this.reachabilityGateOptions(),
+        blacklistedMoveTargets,
       )
+      const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
+      this.logPlacementRefusal(grounded.placeRefusal)
+      this.logSmeltInputPrereq(state, groundingOptions)
+      this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
+      // The gate's self-contained craft ladder runs before these controller
+      // filters, so a move-failure-memory prune can strip the last productive
+      // candidate. Backfill the deterministic craft step for the current craft
+      // goal here so an inputs-held craft is never reported as starved.
+      candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -1226,6 +1532,7 @@ export class JevController {
       this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
+      this.logLogRoute(candidates)
       this.logFuelSatisfaction(state)
 
       const actionable = candidates.filter(
@@ -1240,7 +1547,8 @@ export class JevController {
           this.noProductiveKey = key
           this.noProductiveRepeats = 1
         }
-        const blockedBy = candidateStarvationBlockedBy(grounded.withheld, this.signals.lastFailureCode)
+        const preconditionCause = this.currentGoalPreconditionCause(state)
+        const blockedBy = goalStarvationBlockedBy(preconditionCause, this.queue.current, grounded.withheld)
         const missing = candidateStarvationMissing(grounded.withheld)
         const starvation = candidateStarvationLine(
           candidates,
@@ -1300,8 +1608,9 @@ export class JevController {
       this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
+      const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(rawChosenId, dangerGate, candidates)
+      const gated = this.applyDangerGate(committedId, dangerGate, candidates)
       const chosenId = gated.chosenId
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
@@ -1322,17 +1631,24 @@ export class JevController {
           tick: this.tickCounter,
           goal: this.goal,
           goalQueue: this.queue.state,
+          currentOption: this.currentOptionContext(),
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
-          rememberedStations: this.options.knownResources ?? [],
+          rememberedStations: this.knownResourcesForSensor(),
         },
         sensorOptions(this.options),
       )
       const freshCandidates = this.filterMoveCandidates(
         generateGroundedCandidates(
           freshState,
-          candidateOptions(this.options, this.recipeIndex, this.unreachableStationKeys(freshState), this.reachabilityGateOptions()),
+          candidateOptions(
+            this.options,
+            this.recipeIndex,
+            this.unreachableStationKeys(freshState),
+            this.reachabilityGateOptions(),
+            this.blacklistedMoveTargets(freshState),
+          ),
         ).candidates,
         freshState,
         false,
@@ -1381,7 +1697,12 @@ export class JevController {
       })
 
       if (!guarded.ok) {
-        this.onGuardReject(guarded, decision, record)
+        this.onGuardReject(
+          guarded,
+          decision,
+          record,
+          freshCandidates.find((candidate) => candidate.id === guarded.candidateId),
+        )
         return
       }
 
@@ -1445,13 +1766,22 @@ export class JevController {
    * so a β=1 cannot discard a prerequisite (#22/#55).
    */
   private betaDecision(decision: JevResult): BetaAuthorityDecision {
-    return betaAuthorityDecision({
+    const vote = betaAuthorityDecision({
       betaAuthority: this.options.betaAuthority,
       abandonRequested: abandonRequested(decision),
       actionId: decisionIdFrom(decision),
       goals: this.unfinishedGoals(),
       placedFurnaceCount: this.lastPlacedFurnaceCount,
     })
+    if (!vote.protection.protect) return vote
+    const abandonedReason = this.abandonedOptions.reasonUnder(vote.protection.option, this.lastStateFingerprint)
+    if (abandonedReason === null) return vote
+    this.logProtectionAbandonConflict(vote.protection.option, abandonedReason, 'authority')
+    return {
+      ...vote,
+      adopt: this.options.betaAuthority && !vote.shadowed,
+      protection: { ...vote.protection, protect: false },
+    }
   }
 
   private logHeads(result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void {
@@ -1584,6 +1914,7 @@ export class JevController {
       const bucket = this.abandonedPrereqPaths.get(goalKey) ?? new Map<PrereqPath, number>()
       bucket.set(current, now)
       this.abandonedPrereqPaths.set(goalKey, bucket)
+      this.abandonedPrereqFingerprints.set(`${goalKey}|${current}`, this.lastStateFingerprint)
       const next = nextPrereqPath(this.prereqPlan, current)
       this.prereqForcedPath = next
       this.prereqProgress = null
@@ -1595,6 +1926,7 @@ export class JevController {
         this.tickCounter,
       )
     }
+    this.markOptionAbandoned(this.lastDecisionId ?? optionId, 'unproductive')
     this.summonLlm('no_progress', `abandon_option=${probability} enforced: ${optionId} unproductive after ${attempts} attempts`)
   }
 
@@ -1698,18 +2030,21 @@ export class JevController {
     const vote = this.betaDecision(decision)
     const probability = decision.answers.abandon_option?.probability ?? null
     if (vote.adopt) {
+      this.markOptionAbandoned(decisionIdFrom(decision), 'authority')
       this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
       return true
     }
-    if (vote.protection.protect && !this.placeRetryExhausted()) {
+    const protection = this.reconciledProtection(vote.protection, decisionIdFrom(decision) ?? 'abandon')
+    if (protection.protect && !this.placeRetryExhausted()) {
       this.logger.warn(
         'heads',
-        vote.protection.line,
-        { option: vote.protection.option, because: vote.protection.because, actionId: decisionIdFrom(decision), abandon: probability },
+        protection.line,
+        { option: protection.option, because: protection.because, actionId: decisionIdFrom(decision), abandon: probability },
         this.tickCounter,
       )
       return false
     }
+    this.markOptionAbandoned(decisionIdFrom(decision), 'authority')
     this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
     return true
   }
@@ -1729,11 +2064,13 @@ export class JevController {
       abandonRequested: true,
     })
     if (guard.adopt) return false
+    const protection = this.reconciledProtection(guard.protection, reason)
+    if (!protection.protect) return false
     if (this.placeRetryExhausted()) return false
     this.logger.warn(
       'heads',
-      guard.protection.line,
-      { option: guard.protection.option, because: guard.protection.because, reason },
+      protection.line,
+      { option: protection.option, because: protection.because, reason },
       this.tickCounter,
     )
     return true
@@ -1754,6 +2091,144 @@ export class JevController {
   /** Unfinished goals in plan order; the protection guard spans the whole plan. */
   private unfinishedGoals(): QueuedGoal[] {
     return this.queue.state.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+  }
+
+  /**
+   * #11 v2 §6/§7 semantic fingerprint of the WORLD the controller is deciding
+   * against: rounded body position, inventory, remembered stations, sensed
+   * furnaces and the current goal row. Deliberately excludes the tick counter,
+   * wall clock and controller memory (failure counters), so a failed-but-
+   * unchanged world keeps a recorded abandonment valid while an actual
+   * world/inventory/topology change clears it.
+   */
+  private stateFingerprint(state: WorldState): string {
+    const inventory = Object.entries(state.inventory.counts)
+      .filter(([, count]) => count > 0)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, count]) => `${name}=${count}`)
+      .join(',')
+    const position = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
+    const stations = (state.signals.knownResources ?? [])
+      .filter((resource) => resource.kind === 'station')
+      .map((resource) => `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`)
+      .sort()
+      .join(';')
+    const furnaces = (state.furnaces ?? [])
+      .filter(isSensedStation)
+      .map((station) => `${station.x},${station.y},${station.z}`)
+      .sort()
+      .join(';')
+    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}`
+    return `fp1|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
+  }
+
+  /**
+   * #11 v2 §6: protection and abandonment are mutually exclusive under one
+   * fingerprint. When the guard still claims a protected option that the
+   * abandonment ledger retired for the same fingerprint, the fact wins, the
+   * contradiction is surfaced with the mirrored marker, and protection is off.
+   */
+  private reconciledProtection(protection: PrerequisiteProtection, reason: string): PrerequisiteProtection {
+    const abandonedReason = protection.protect
+      ? this.abandonedOptions.reasonUnder(protection.option, this.lastStateFingerprint)
+      : null
+    const reconciliation = reconcileProtection({ protection, abandonedReason })
+    if (reconciliation.conflictLine !== null && abandonedReason !== null) {
+      this.logProtectionAbandonConflict(protection.option, abandonedReason, reason)
+    }
+    return reconciliation.protect === protection.protect
+      ? protection
+      : { ...protection, protect: reconciliation.protect }
+  }
+
+  private logProtectionAbandonConflict(option: string, abandonedReason: string, reason: string): void {
+    if (!this.abandonedOptions.claimConflict(option, this.lastStateFingerprint)) return
+    this.logger.warn(
+      'heads',
+      formatProtectionAbandonConflict(option, 'abandoned', abandonedReason),
+      { option, action: 'abandoned', abandonedReason, reason, fingerprint: this.lastStateFingerprint },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Record a deterministic abandonment under the current fingerprint. If the
+   * precondition guard would still protect the same option right now, the
+   * contradiction is emitted once (the live defect A sequence).
+   */
+  private markOptionAbandoned(optionId: string | null, reason: string): void {
+    if (optionId === null) return
+    const option = prerequisiteOptionName(optionId)
+    const guard = shouldAdoptAbandon({
+      actionId: optionId,
+      goals: this.unfinishedGoals(),
+      placedFurnaceCount: this.lastPlacedFurnaceCount,
+      abandonRequested: true,
+    })
+    if (guard.protection.protect) this.logProtectionAbandonConflict(option, reason, 'abandoned')
+    this.abandonedOptions.markAbandoned(option, this.lastStateFingerprint, reason)
+  }
+
+  /**
+   * #11 v2 §7: one candidate until a fact changes. While a flap window is
+   * active the policy's raw choice is replaced by the cheap-feasible commitment;
+   * a deterministic rejection releases it to the next cheapest feasible.
+   */
+  private applyCandidateCommitment(
+    chosenId: string,
+    candidates: readonly Candidate[],
+    state: WorldState,
+  ): string {
+    const progressed = this.progressEpoch !== this.commitmentProgressEpoch
+    this.commitmentProgressEpoch = this.progressEpoch
+    const offered: readonly FlapCandidate[] = candidates.map((candidate, index) => ({
+      id: candidate.id,
+      cost: this.candidateCommitCost(candidate, index),
+    }))
+    const decision = evaluateCandidateFlap({
+      previous: this.commitmentState,
+      chosenId,
+      fingerprint: this.lastStateFingerprint,
+      progressed,
+      candidates: offered,
+      invalid: this.deterministicInvalid(candidates, state),
+    })
+    this.commitmentState = decision.state
+    if (decision.line !== null) {
+      this.logger.warn(
+        'policy',
+        decision.line,
+        { chosenId, committedId: decision.state.committedId, fingerprint: this.lastStateFingerprint },
+        this.tickCounter,
+      )
+    }
+    if (decision.releaseLine !== null) {
+      this.logger.warn(
+        'policy',
+        decision.releaseLine,
+        { chosenId, committedId: decision.state.committedId },
+        this.tickCounter,
+      )
+    }
+    return decision.chosenId
+  }
+
+  /** The caller's existing cost policy: a declared cost, else the generator order. */
+  private candidateCommitCost(candidate: Candidate, index: number): number {
+    const cost = candidate.meta.cost
+    if (typeof cost === 'number') return cost
+    const prereqCost = candidate.meta.prereqCost
+    if (typeof prereqCost === 'number') return prereqCost
+    return index
+  }
+
+  /** Candidate ids deterministic feasibility has already rejected. */
+  private deterministicInvalid(candidates: readonly Candidate[], state: WorldState): ReadonlySet<string> {
+    const invalid = new Set<string>(this.withheldCandidateIds)
+    for (const candidate of candidates) {
+      if (unreachableMove(candidate, state) !== null) invalid.add(candidate.id)
+    }
+    return invalid
   }
 
   /**
@@ -1890,6 +2365,7 @@ export class JevController {
     guarded: Extract<GuardResult, { ok: false }>,
     decision: JevResult,
     record: DecisionRecord,
+    candidate: Candidate | undefined,
   ): void {
     attachResult(record, {
       actionId: guarded.candidateId,
@@ -1924,10 +2400,13 @@ export class JevController {
     )
     this.recentEvents.push(`guard ${guarded.code} on ${guarded.candidateId}`)
     this.noteCandidateFailure(guarded.candidateId)
+    const movementFailure = guardMoveFailureReason(candidate, guarded.code)
+    if (candidate !== undefined && movementFailure !== null) this.recordMoveFailure(candidate, movementFailure)
     this.recordFailure(guarded.code, guarded.reason)
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+    if (result.itemsGained > 0 || result.blockRemoved) this.progressEpoch += 1
     this.recentOutcomes.push({
       actionId: result.actionId,
       status: result.status,
@@ -2020,6 +2499,21 @@ export class JevController {
     if (result.status === 'done') {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.delete(candidate.itemName)
+        if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
+          const registered = registerPlacedStation(this.placedStations, candidate.itemName, candidate.target)
+          if (registered.added) {
+            this.logger.info(
+              'agent',
+              formatStationRegisteredPlaced('furnace', candidate.target),
+              {
+                kind: 'furnace',
+                source: 'placed',
+                at: `${Math.round(candidate.target.x)},${Math.round(candidate.target.y)},${Math.round(candidate.target.z)}`,
+              },
+              this.tickCounter,
+            )
+          }
+        }
         if (candidate.meta.furnaceSource === 'held' && candidate.target !== null) {
           this.signals.heldFurnacePlacedAt = blockId('b', candidate.target)
         }
@@ -2167,6 +2661,7 @@ export class JevController {
     const switched = this.advancePrereqAfterUnverified()
     const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
     if (budget.abandon) {
+      this.markOptionAbandoned(result.actionId, 'action_unverified')
       this.logger.warn(
         'agent',
         budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
@@ -2280,7 +2775,7 @@ export class JevController {
 
   private escapeOscillation(state: OscillationState): void {
     this.oscillationState = null
-    this.abandonedRetrievePaths.add('use_known_station')
+    this.abandonedRetrievePaths.set('use_known_station', this.lastStateFingerprint)
     if (this.activeRetrieval !== null) {
       this.unreachableResources.add(this.retrievalKey(this.activeRetrieval))
       this.noteCandidateFailure(this.activeRetrieval.id)
@@ -2545,8 +3040,11 @@ export class JevController {
           this.tickCounter,
         )
       }
-      const surfaceEntity = this.bot.entity
-      if (surfaceEntity === undefined || surfaceEntity.position.y < current.targetY) return
+      const evaluation = evaluateSurfaceRecovery(current, {
+        ...this.predicateSnapshot(),
+        inventory: this.inventorySnapshot(),
+      })
+      if (evaluation === null || !evaluation.satisfied) return
       const beforeId = current.id
       const beforeDescription = current.description
       this.queue.markDone()
@@ -2567,8 +3065,16 @@ export class JevController {
       this.digMemory.markResourceProgress()
       this.logger.warn(
         'agent',
-        `RETURN_TO_SURFACE goal=${beforeId} reached=true y=${Math.round(surfaceEntity.position.y)} target_y=${current.targetY}`,
-        { from: beforeId, to: after?.id ?? null, trigger, y: surfaceEntity.position.y, targetY: current.targetY },
+        `RETURN_TO_SURFACE goal=${beforeId} reached=true predicate=levelAtLeast+inventory y=${Math.round(evaluation.vertical.y ?? 0)} target_y=${current.targetY} log=${evaluation.have}/${evaluation.required}`,
+        {
+          from: beforeId,
+          to: after?.id ?? null,
+          trigger,
+          y: evaluation.vertical.y,
+          targetY: current.targetY,
+          resourceHave: evaluation.have,
+          resourceRequired: evaluation.required,
+        },
         this.tickCounter,
       )
       if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}`)
@@ -2649,6 +3155,25 @@ export class JevController {
       }
       return
     }
+    if (current.kind === 'surface') {
+      const evaluation = evaluateSurfaceRecovery(current, {
+        ...this.predicateSnapshot(),
+        inventory: this.inventorySnapshot(),
+      })
+      const have = evaluation?.have ?? 0
+      this.goal = {
+        id: current.id,
+        description: current.description,
+        targetItem: current.targetItem ?? '',
+        requiredCount: current.requiredCount,
+        startCount: 0,
+        haveCount: have,
+        progress: evaluation?.satisfied === true ? 1 : Math.min(1, have / Math.max(1, current.requiredCount)),
+        complete: evaluation?.satisfied === true,
+        startedAtMs: current.createdAt,
+      }
+      return
+    }
     if (current.targetItem === null) return
     const have = this.effectiveHave()
     if (current.kind === 'place') {
@@ -2685,6 +3210,42 @@ export class JevController {
       counts[item.name] = (counts[item.name] ?? 0) + item.count
     }
     return counts
+  }
+
+  private currentGoalPreconditionCause(state: WorldState): string | null {
+    const current = this.queue.state.current
+    if (current === null) return null
+    return goalPreconditionCause(queuedToPlanned(current), this.optionSnapshot(state))
+  }
+
+  private optionSnapshot(state: WorldState): OptionWorldSnapshot {
+    const counts = this.inventorySnapshot()
+    let toolRank = 0
+    for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
+      const name = PICKAXE_TIER_ORDER[i]
+      if (name !== undefined && (counts[name] ?? 0) > 0) toolRank = i + 1
+    }
+    const knownStations = new Set<'crafting_table' | 'furnace'>()
+    if ((counts['crafting_table'] ?? 0) > 0) knownStations.add('crafting_table')
+    if ((counts['furnace'] ?? 0) > 0) knownStations.add('furnace')
+    if (state.craftingTables.length > 0) knownStations.add('crafting_table')
+    if ((state.furnaces?.length ?? 0) > 0) knownStations.add('furnace')
+    const knownOres: string[] = []
+    for (const resource of this.options.knownResources ?? []) {
+      if (resource.name === 'furnace') knownStations.add('furnace')
+      if (resource.name === 'crafting_table') knownStations.add('crafting_table')
+      if (resource.kind === 'ore') knownOres.push(resource.name)
+    }
+    const position = this.bot.entity?.position
+    return makeOptionSnapshot({
+      inventory: counts,
+      dimension: this.bot.game?.dimension ?? null,
+      position: position === undefined ? null : { x: position.x, y: position.y, z: position.z },
+      health: this.bot.health ?? null,
+      toolRank,
+      knownStations: [...knownStations],
+      knownOres,
+    })
   }
 
   private logSubgoalStart(goal: QueuedGoal, inventory: Record<string, number>, cause: string): void {
@@ -2788,10 +3349,13 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
+        const depthBefore = this.queue.state.depth
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
           reason: plan.note,
           onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+          onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
         })
+        this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `summon:${reason}`)
         this.waitReplans = 0
         if (added.length > 0) {
           this.chosenCounts.clear()
@@ -3330,12 +3894,37 @@ export class JevController {
     this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
   }
 
+  private currentOptionContext(): CurrentOptionContext | null {
+    const current = this.queue.state.current
+    if (current === null || typeof current.optionInstanceId !== 'string' || current.optionInstanceId.length === 0) return null
+    const optionId = current.optionTemplateId ?? optionIdForGoal(current) ?? this.currentGoalKey()
+    const attempts = this.optionAttempts.stateFor(optionId, current.id)
+    return currentOptionContextForQueuedGoal(current, {
+      failures: attempts.attempts,
+      verifiedProgress: current.haveCount,
+      lastProgressAt: current.updatedAt,
+    })
+  }
+
   private currentGoalKey(): string {
     const current = this.queue.state.current
     if (current !== null) {
       return `${current.kind}:${current.targetItem ?? current.description}:${current.requiredCount}`
     }
     return `objective:${this.goal.targetItem}:${this.goal.requiredCount}`
+  }
+
+  private logQueueDepthDelta(before: number, op: string, reason: string): void {
+    const state = this.queue.state
+    const delta = state.depth - before
+    if (delta === 0) return
+    const signed = delta > 0 ? `+${delta}` : `${delta}`
+    this.logger.info(
+      'queue',
+      `QUEUE_DEPTH delta=${signed} depth=${state.depth} done=${state.done} op=${op} reason=${reason}`,
+      { delta, depth: state.depth, done: state.done, op, reason },
+      this.tickCounter,
+    )
   }
 
   private noProductiveSignature(state: WorldState): string {
@@ -3411,7 +4000,29 @@ export class JevController {
    * authoritative, and switch to the next-best path when the chosen one stalls.
    * Never abandons the parent goal: the placement guard keeps the prerequisite
    * protected and the switch only re-routes HOW it is satisfied.
+   *
+   * #11 v2: the feasible path is chosen by cost and the #78 rank winner is
+   * shadow-logged (`PREREQ_RANK_SHADOW`); abandonment only demotes a path, so a
+   * feasible route is never dropped to null/WAIT.
    */
+  /**
+   * Durable known resources plus the stations this controller verified placing,
+   * deduplicated by (name, cell). The sensor's remembered-station merge and the
+   * candidate ladder consume the same list, so a placed furnace is selectable on
+   * the very next tick without waiting for a generation swap.
+   */
+  private knownResourcesForSensor(): KnownResource[] {
+    const out: KnownResource[] = []
+    const seen = new Set<string>()
+    for (const resource of [...(this.options.knownResources ?? []), ...this.placedStations]) {
+      const key = resourceKey(resource)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(resource)
+    }
+    return out
+  }
+
   /**
    * M2 blocker: remembered stations whose grounded retrieve the move-failure
    * memory has blacklisted (`MOVE_TARGET_SKIPPED`) or the reachability gate has
@@ -3419,16 +4030,43 @@ export class JevController {
    * as an explicit unreachable set. Without it the planner keeps choosing
    * `use_known_station`, the blacklist filter removes every candidate of that
    * path, and the resident collapses to WAIT.
+   *
+   * The sensor's remembered furnace entries are included because a placed-by-us
+   * furnace is evicted from `signals.knownResources` once the move-failure
+   * memory blacklists its cell, yet it is still offered by `knownFurnaces`; an
+   * unblacklisted copy would re-issue the failing RETRIEVE forever.
    */
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
     const keys = new Set<string>()
     const dimension = state.self.dimension
-    for (const resource of state.signals.knownResources ?? []) {
-      if (resource.kind !== 'station') continue
-      const retrieveId = `RETRIEVE:known:station:${resource.name}:${blockId('b', resource.position)}`
+    const consider = (name: string, position: Vec3Json): void => {
+      const retrieveId = `RETRIEVE:known:station:${name}:${blockId('b', position)}`
       const withheld = this.withheldCandidateIds.has(retrieveId)
-      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, resource.position)) continue
-      keys.add(knownStationKey({ name: resource.name, position: resource.position }))
+      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, position)) return
+      keys.add(knownStationKey({ name, position }))
+    }
+    for (const resource of state.signals.knownResources ?? []) {
+      if (resource.kind === 'station') consider(resource.name, resource.position)
+    }
+    for (const station of state.furnaces ?? []) {
+      if (isSensedStation(station)) continue
+      consider('furnace', station)
+    }
+    return keys
+  }
+
+  /**
+   * Feed the active coordinate blacklist into candidate selection. The
+   * post-generation filter remains the final guard, but selection must see
+   * restored entries too; otherwise pickExplore/retrievalCandidates chooses a
+   * target that filterMoveCandidates immediately removes, leaving only WAIT.
+   */
+  private blacklistedMoveTargets(state: WorldState): ReadonlySet<string> {
+    const dimension = state.self.dimension
+    const keys = new Set<string>()
+    for (const entry of this.moveFailMemory.snapshot()) {
+      if (entry.dimension !== dimension) continue
+      if (this.moveFailMemory.isBlacklisted(dimension, entry)) keys.add(entry.key)
     }
     return keys
   }
@@ -3448,7 +4086,13 @@ export class JevController {
     }
     const input = furnacePrereqInputFromState(
       state,
-      candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+      candidateOptions(
+        this.options,
+        this.recipeIndex,
+        unreachableStations,
+        this.reachabilityGateOptions(),
+        this.blacklistedMoveTargets(state),
+      ),
     )
     const decision = planPrereqOptions(input)
     const goalKey = this.currentGoalKey()
@@ -3461,7 +4105,9 @@ export class JevController {
       this.retrieveUnverified = null
     }
     const abandoned = this.abandonedPrereqSet(goalKey, Date.now())
-    for (const path of this.abandonedRetrievePaths) abandoned.add(path)
+    for (const [path, fingerprint] of this.abandonedRetrievePaths) {
+      if (fingerprint === this.lastStateFingerprint) abandoned.add(path)
+    }
     const base = selectPrereqPath(decision, abandoned)
     const forced = this.prereqForcedPath !== null && !abandoned.has(this.prereqForcedPath) ? this.prereqForcedPath : null
     const chosen = preferPrereqPath(base, forced, decision)
@@ -3477,6 +4123,17 @@ export class JevController {
         {
           chosen,
           options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
+        },
+        this.tickCounter,
+      )
+      this.logger.info(
+        'agent',
+        formatPrereqRankShadow(decision, chosen),
+        {
+          policy: decision.policy,
+          costChoice: chosen,
+          rankChoice: decision.rankBaseline,
+          agree: chosen === decision.rankBaseline,
         },
         this.tickCounter,
       )
@@ -3547,7 +4204,9 @@ export class JevController {
     const abandoned = new Set<PrereqPath>()
     if (bucket === undefined) return abandoned
     for (const [path, at] of bucket) {
-      if (now - at < this.options.abandonCooldownMs) abandoned.add(path)
+      if (now - at >= this.options.abandonCooldownMs) continue
+      if (this.abandonedPrereqFingerprints.get(`${goalKey}|${path}`) !== this.lastStateFingerprint) continue
+      abandoned.add(path)
     }
     return abandoned
   }
@@ -3560,6 +4219,7 @@ export class JevController {
     this.prereqProgress = null
     this.prereqChosenPath = null
     this.abandonedRetrievePaths.clear()
+    this.abandonedPrereqFingerprints.clear()
     this.retrieveUnverified = null
   }
 
@@ -3576,13 +4236,14 @@ export class JevController {
       { option: candidate.id, unverified, goal: this.currentGoalKey() },
       this.tickCounter,
     )
-    this.abandonedRetrievePaths.add('use_known_station')
+    this.abandonedRetrievePaths.set('use_known_station', this.lastStateFingerprint)
     if (candidate.target !== null) {
       const knownName =
         typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'station'
       this.unreachableResources.add(this.retrievalKey({ knownName, target: candidate.target }))
     }
     this.noteCandidateFailure(candidate.id)
+    this.markOptionAbandoned(candidate.id, 'retrieve_unverified')
     this.activeRetrieval = null
     this.retrievalTrack = null
     this.retrieveUnverified = null
@@ -3651,6 +4312,27 @@ export class JevController {
   }
 
   /**
+   * The `LOG_ROUTE` marker: which log route the policy has on offer this tick
+   * (`mode=mine_sensed|retrieve_known|ascend_then_mine|explore`), so a frozen
+   * non-yield MINE can never again pass as progress. Deduped by
+   * (mode, target, candidate) so a stable route is one auditable line; the
+   * `trigger=... -> action=...` line still records the action actually chosen.
+   */
+  private logLogRoute(candidates: readonly Candidate[]): void {
+    const route = logRouteOf(candidates)
+    if (route === null) return
+    const signature = `${route.mode}|${route.target.x},${route.target.y},${route.target.z}|${route.candidateId}`
+    if (signature === this.lastLogRouteSignature) return
+    this.lastLogRouteSignature = signature
+    this.logger.info(
+      'candidates',
+      formatLogRoute(route),
+      { mode: route.mode, target: route.target, candidateId: route.candidateId },
+      this.tickCounter,
+    )
+  }
+
+  /**
    * #11 v2 affordance gate: `REACHABILITY target=<x,y,z> reachable=<bool>
    * reason=<reason> missing=[...]` for every evaluated target whose facts
    * changed, and `CANDIDATE_WITHHELD reason=<reason> candidate=<id>` for every
@@ -3707,6 +4389,57 @@ export class JevController {
         this.tickCounter,
       )
     }
+  }
+
+  /**
+   * Surface the generator's typed placement refusal (`PLACE_REFUSED
+   * reason=no_support|no_clearance|out_of_reach cell=x,y,z item=...`) once per
+   * distinct refusal, so a geometry dead end is an explicit fact instead of the
+   * silence that let a held station stall the craft goal.
+   */
+  private logPlacementRefusal(refusal: PlaceRefusal | null): void {
+    const key =
+      refusal === null ? null : `${refusal.reason}|${blockId('p', refusal.cell)}|${refusal.item}`
+    if (key === this.lastPlacementRefusalKey) return
+    this.lastPlacementRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn(
+      'agent',
+      formatPlaceRefusal(refusal),
+      { reason: refusal.reason, cell: refusal.cell, item: refusal.item },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Mirror the smelt input prerequisite once per distinct line: which concrete
+   * input the current smelt goal needs, whether it is held, and whether the
+   * deterministic collect route was offered. Data-driven input (a `*_log` for
+   * charcoal, raw_iron for iron_ingot), so the marker names the item the bot
+   * must collect instead of letting the goal starve silently.
+   */
+  private logSmeltInputPrereq(state: WorldState, options: CandidateOptions): void {
+    const entry = smeltInputPrereq(state, options)
+    const line = entry === null ? null : formatSmeltInputPrereq(entry)
+    if (line === this.lastSmeltInputPrereqLine) return
+    this.lastSmeltInputPrereqLine = line
+    if (entry === null || line === null) return
+    this.logger.warn('agent', line, { ...entry }, this.tickCounter)
+  }
+
+  /**
+   * Mirror the craft ingredient prerequisite once per distinct line: which
+   * ingredient the current craft goal is missing and which producer the
+   * candidate generator offers for it (`collect log` for the live wooden_pickaxe
+   * shape, `craft oak_planks` when the plan already has an executable step).
+   */
+  private logCraftIngredientPrereq(state: WorldState, options: CandidateOptions): void {
+    const entry = craftIngredientPrereq(state, options)
+    const line = entry === null ? null : formatCraftIngredientPrereq(entry)
+    if (line === this.lastCraftIngredientPrereqLine) return
+    this.lastCraftIngredientPrereqLine = line
+    if (entry === null || line === null) return
+    this.logger.warn('agent', line, { ...entry }, this.tickCounter)
   }
 
   /** Gate facts, shared by both candidate generations in one tick. */
@@ -3798,6 +4531,7 @@ export class JevController {
       { actionId: candidate.id, key, attempts: result.entry.attempts, reason, kind: candidate.kind },
       this.tickCounter,
     )
+    this.notifyMoveFailureMemory()
     if (!result.newlyBlacklisted) return
     this.logger.warn(
       'agent',
@@ -3816,6 +4550,17 @@ export class JevController {
       this.lastMoveTarget = null
     }
     this.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, this.tickCounter)
+    this.notifyMoveFailureMemory()
+  }
+
+  private notifyMoveFailureMemory(): void {
+    const callback = this.options.onMoveFailureMemoryChange
+    if (callback === undefined) return
+    try {
+      callback(this.moveFailMemory.snapshot().map((entry) => ({ ...entry })))
+    } catch (error) {
+      this.logger.warn('agent', 'MOVE_FAILMEM_PERSIST_FAILED', { message: error instanceof Error ? error.message : String(error) }, this.tickCounter)
+    }
   }
 
   private currentDimension(): string {
@@ -3855,6 +4600,7 @@ export class JevController {
         { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
         this.tickCounter,
       )
+      this.notifyMoveFailureMemory()
     }
     this.escalate(
       'progress_stall',
@@ -4018,8 +4764,17 @@ function candidateOptions(
   recipes: RecipeIndex,
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
+  blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
 ): CandidateOptions {
-  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations, reachability }
+  return {
+    ...defaultCandidateOptions,
+    reach: options.reach,
+    recipes,
+    unreachableStations,
+    blacklistedMoveTargets,
+    reachability,
+    prereqRankPolicy: options.prereqRankPolicy,
+  }
 }
 
 function subgoalState(goal: QueuedGoal, have: number): GoalState {
@@ -4062,6 +4817,7 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
     actuationPort: options.actuationPort,
     hooks: {
       onPathCompleted: (event) => {
+        options.eventSink?.('PATH_CALLBACK', { phase: 'completed', ...event })
         scheduler.notify('path_completed', {
           actionId: event.actionId,
           target: event.target,
@@ -4069,6 +4825,7 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
         })
       },
       onPathFailed: (event) => {
+        options.eventSink?.('PATH_CALLBACK', { phase: 'failed', ...event })
         const trigger: DecisionTrigger =
           event.outcome === 'noPath' ? 'path_no_path' : event.outcome === 'timeout' ? 'action_timeout' : 'path_stuck'
         scheduler.notify(trigger, {

@@ -304,10 +304,19 @@ export function unreachableMove(
   if (candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE') return null
   const target = candidate.target
   if (target === null) return null
+  // A generated vertical-plan MOVE is intentionally not a horizontal
+  // canDig=false path probe: its executor first runs the guarded staircase or
+  // pillar leg, then re-plans the standable spot from the new Y. Treating it
+  // as unreachable here would retire it before the executor can act.
+  if (hasVerticalPlan(candidate)) return null
   const dy = Math.round(target.y - state.self.position.y)
   if (dy > MOVE_VERTICAL_GAP_LIMIT) return { target, dy }
   if (canComputePath !== undefined && canComputePath !== null && !canComputePath(target)) return { target, dy }
   return null
+}
+
+function hasVerticalPlan(candidate: Candidate): boolean {
+  return candidate.meta.vertical === 'reuse' || candidate.meta.vertical === 'staircase' || candidate.meta.vertical === 'staircase-up' || candidate.meta.vertical === 'pillar'
 }
 
 /**
@@ -342,6 +351,13 @@ function guardWalkToBlock(
   if (hazard !== null) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the movement target`)
   }
+  if (target.y < VOID_FLOOR) {
+    return deny(candidate.id, 'NO_SUPPORT', `(${target.x},${target.y},${target.z}) is below the world floor (void)`)
+  }
+  // The vertical leg is the path for this candidate.  The ordinary stock
+  // canDig=false probe only knows horizontal locomotion and would reject a
+  // safe pillar/staircase MOVE before Executor.runMove can execute it.
+  if (hasVerticalPlan(candidate)) return { ok: true, candidate }
   return guardPathComputable(candidate, context, target)
 }
 

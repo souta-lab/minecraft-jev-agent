@@ -9,18 +9,26 @@ import type { GuardContext } from './src/policy.ts'
 import {
   ASCENT_PROGRESS_EPSILON,
   classifyHeadroomBlocker,
+  evaluateAscentColumn,
   evaluatePillarStep,
   evaluateRetrievalProgress,
+  evaluateTunnelEntry,
   formatAscentProgress,
+  formatLocalClear,
   formatPillarRefused,
   formatPillarRelocate,
+  formatTunnelEntryRefused,
+  headroomAcrossFootprint,
+  LOCAL_CLEAR_RADIUS,
   PILLAR_UP_STEP_CAP,
   pillarColumnUnsafeFromBlocks,
+  planReuseLeg,
   planVerticalApproach,
+  planVerticalApproachDetailed,
   resolvePillarStep,
   selectPillarFallbackColumn,
 } from './src/verticalPlan.ts'
-import type { PillarColumnProbe, RetrievalProgressState } from './src/verticalPlan.ts'
+import type { PillarColumnProbe, RetrievalProgressState, TunnelEntryBlockerProbe } from './src/verticalPlan.ts'
 import { formatPillarUpStep } from './src/pillarJump.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -530,6 +538,35 @@ addCase('a pillar step refuses without a placeable, on a hazard column, without 
   }
 })
 
+addCase('jump headroom includes adjacent cells touched by the player footprint', () => {
+  const blocked = new Set(['38,24,33'])
+  const isPassable = (x: number, y: number, z: number): boolean => !blocked.has(`${x},${y},${z}`)
+  const nearBoundary = headroomAcrossFootprint({
+    center: { x: 39.28, z: 33.48 },
+    feetY: 23.5,
+    halfWidth: 0.3,
+    isPassable,
+  })
+  const centered = headroomAcrossFootprint({
+    center: { x: 39.5, z: 33.5 },
+    feetY: 23.5,
+    halfWidth: 0.3,
+    isPassable,
+  })
+  const pass =
+    !nearBoundary.clear &&
+    nearBoundary.blocker !== null &&
+    nearBoundary.blocker.x === 38 &&
+    nearBoundary.blocker.y === 24 &&
+    nearBoundary.blocker.z === 33 &&
+    centered.clear &&
+    centered.blocker === null
+  return {
+    pass,
+    detail: `nearBoundary=${nearBoundary.clear ? 'clear' : `blocked@${nearBoundary.blocker?.x},${nearBoundary.blocker?.y},${nearBoundary.blocker?.z}`} centered=${centered.clear ? 'clear' : 'blocked'}`,
+  }
+})
+
 addCase('a hazard in the bot column refuses the pillar plan even with a placeable held', () => {
   const feet = { x: 39, y: 31, z: 33 }
   const inColumn = pillarColumnUnsafeFromBlocks(feet, [
@@ -991,6 +1028,383 @@ addCase('a retrieval that stops closing distance for N ticks escalates', () => {
   }
   const pass = outcomes.join(',') === 'tracking,tracking,tracking,tracking,tracking,stalled,tracking'
   return { pass, detail: outcomes.join(',') }
+})
+
+// --- tunnel entry validation (M2 FURNACE_READY) ---------------------------------
+
+const blockedBy = (cell: Vec3Json, name: string, ok = true): TunnelEntryBlockerProbe => ({
+  cell,
+  name,
+  diggable: ok,
+  fluidOrHazard: false,
+  floodRisk: false,
+  toolOk: ok,
+})
+
+addCase('a reused tunnel whose entry is blocked yields the clearance step, never a blind waypoint', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const tunnel = { x: 40, y: 30, z: 33 }
+  const decision = planVerticalApproachDetailed({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 25, z: 33 },
+    tunnel,
+    descent: [],
+    tunnelEntry: {
+      cell: tunnel,
+      bodyClear: false,
+      headClear: true,
+      supportSolid: true,
+      blocker: blockedBy(tunnel, 'cobblestone'),
+    },
+  })
+  const pass =
+    decision.plan?.kind === 'reuse' &&
+    decision.plan.clear?.cell.y === 30 &&
+    decision.plan.clear?.name === 'cobblestone' &&
+    decision.tunnelRefusal === null
+  return { pass, detail: JSON.stringify(decision) }
+})
+
+addCase('a blocked entry cell with an enterable alternate reuses the next entry cell', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const tunnel = { x: 40, y: 30, z: 33 }
+  const alternate = { x: 40, y: 29, z: 33 }
+  const decision = planVerticalApproachDetailed({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 25, z: 33 },
+    tunnel,
+    descent: [],
+    tunnelEntry: {
+      cell: tunnel,
+      bodyClear: false,
+      headClear: true,
+      supportSolid: true,
+      blocker: blockedBy(tunnel, 'bedrock', false),
+    },
+    tunnelAlternates: [{ cell: alternate, bodyClear: true, headClear: true, supportSolid: true }],
+  })
+  const pass =
+    decision.plan?.kind === 'reuse' &&
+    decision.plan.tunnel.x === alternate.x &&
+    decision.plan.tunnel.y === alternate.y &&
+    decision.plan.clear === undefined &&
+    decision.tunnelRefusal === null
+  return { pass, detail: JSON.stringify(decision) }
+})
+
+addCase('a blocked waypoint 1.5 m away produces a local clearance attempt, not path_stuck', () => {
+  const leg = planReuseLeg({
+    entry: { kind: 'enterable' },
+    pathFailed: true,
+    distanceToTunnel: 1.5,
+    approachBlockages: [
+      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+      { cell: { x: 32, y: 35, z: 35 }, passable: true },
+    ],
+  })
+  const far = planReuseLeg({
+    entry: { kind: 'enterable' },
+    pathFailed: true,
+    distanceToTunnel: LOCAL_CLEAR_RADIUS + 5,
+    approachBlockages: [
+      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+    ],
+  })
+  const multiple = planReuseLeg({
+    entry: { kind: 'enterable' },
+    pathFailed: true,
+    distanceToTunnel: 1.5,
+    approachBlockages: [
+      { cell: { x: 32, y: 36, z: 36 }, passable: false, name: 'cobblestone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+      { cell: { x: 31, y: 36, z: 35 }, passable: false, name: 'stone', diggable: true, fluidOrHazard: false, floodRisk: false, toolOk: true },
+    ],
+  })
+  const pass =
+    leg.action === 'clear-approach' &&
+    leg.cell.x === 32 &&
+    leg.cell.z === 36 &&
+    far.action === 'fail' &&
+    far.code === 'path_stuck' &&
+    multiple.action === 'fail'
+  return { pass, detail: `near=${leg.action} far=${far.action} multiple=${multiple.action}` }
+})
+
+addCase('a tunnel with no usable entry refuses with the typed marker and selects a different plan', () => {
+  const feet = { x: 28, y: 57, z: 35 }
+  const tunnel = { x: 27, y: 53, z: 35 }
+  const decision = planVerticalApproachDetailed({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 25, y: 49, z: 36 },
+    tunnel,
+    descent: [downStep('W', -1, 0, feet)],
+    tunnelEntry: { cell: tunnel, bodyClear: true, headClear: true, supportSolid: false, blocker: null },
+  })
+  const marker = formatTunnelEntryRefused({
+    reason: 'no_support',
+    cell: tunnel,
+  })
+  const pass =
+    decision.plan?.kind === 'staircase' &&
+    decision.tunnelRefusal?.reason === 'no_support' &&
+    decision.tunnelRefusal.cell.y === 53 &&
+    marker === 'TUNNEL_ENTRY_REFUSED reason=no_support cell=27,53,35'
+  return { pass, detail: `${JSON.stringify(decision)} marker=${marker}` }
+})
+
+addCase('a normally enterable tunnel is unaffected (no regression)', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const tunnel = { x: 40, y: 30, z: 33 }
+  const decision = planVerticalApproachDetailed({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 25, z: 33 },
+    tunnel,
+    descent: [],
+    tunnelEntry: { cell: tunnel, bodyClear: true, headClear: true, supportSolid: true, blocker: null },
+  })
+  const unverified = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 25, z: 33 },
+    tunnel,
+    descent: [],
+  })
+  const pass =
+    decision.plan?.kind === 'reuse' &&
+    decision.plan.tunnel.x === 40 &&
+    decision.plan.clear === undefined &&
+    decision.tunnelRefusal === null &&
+    unverified?.kind === 'reuse'
+  return { pass, detail: JSON.stringify(decision) }
+})
+
+addCase('an undiggable entry with no alternate refuses as no_clearance and the exact marker fires', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const tunnel = { x: 40, y: 30, z: 33 }
+  const decision = planVerticalApproachDetailed({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 25, z: 33 },
+    tunnel,
+    descent: [],
+    tunnelEntry: {
+      cell: tunnel,
+      bodyClear: true,
+      headClear: false,
+      supportSolid: true,
+      blocker: blockedBy({ x: 40, y: 31, z: 33 }, 'bedrock', false),
+    },
+  })
+  const enter = evaluateTunnelEntry({ cell: tunnel, bodyClear: true, headClear: true, supportSolid: true })
+  const marker = formatTunnelEntryRefused({ reason: 'no_clearance', cell: { x: 40, y: 31, z: 33 } })
+  const pass =
+    decision.tunnelRefusal?.reason === 'no_clearance' &&
+    decision.tunnelRefusal.cell.y === 31 &&
+    decision.plan === null &&
+    enter.kind === 'enterable' &&
+    marker === 'TUNNEL_ENTRY_REFUSED reason=no_clearance cell=40,31,33'
+  return { pass, detail: `refusal=${JSON.stringify(decision.tunnelRefusal)} enter=${enter.kind} marker=${marker}` }
+})
+
+addCase('the LOCAL_CLEAR marker carries the cell, block, tool and tier', () => {
+  const line = formatLocalClear({ x: 32, y: 35, z: 35 }, 'cobblestone', 'pickaxe', 1)
+  const hand = formatLocalClear({ x: 1, y: 2, z: 3 }, 'dirt', null, null)
+  const pass =
+    line === 'LOCAL_CLEAR cell=32,35,35 block=cobblestone tool=pickaxe tier=1' &&
+    hand === 'LOCAL_CLEAR cell=1,2,3 block=dirt tool=hand tier=0'
+  return { pass, detail: `${line} | ${hand}` }
+})
+
+addCase('a reuse retrieval candidate carries the no-tunnel fallback vertical plan', () => {
+  const feet = { x: 28, y: 57, z: 35 }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 25, y: 49, z: 36 } }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({})),
+    signals: signals({ knownResources: [known], lastTunnel: { x: 27, y: 53, z: 35 } }),
+    descent: [downStep('W', -1, 0, feet)],
+  })
+  const retrieve = retrieveOf(generateCandidates(state, defaultCandidateOptions))
+  const pass =
+    retrieve !== null &&
+    retrieve.meta.vertical === 'reuse' &&
+    retrieve.meta.fallbackVertical === 'staircase' &&
+    retrieve.meta.fallbackStairDigY === 56 &&
+    retrieve.meta.tunnelClearX === undefined
+  return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('the safe_column fact: a clearable column with the held tool is satisfied', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'cobblestone',
+    safe: true,
+    reason: 'safe',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({ stone_pickaxe: 1 }).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'clearable' &&
+      decision.cell.x === 32 &&
+      decision.cell.y === 35 &&
+      decision.blocker.name === 'cobblestone' &&
+      decision.blocker.toolOk &&
+      decision.blocker.requiredTool === 'pickaxe',
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: clearable geometry without the tool refuses as no_tool', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'cobblestone',
+    safe: true,
+    reason: 'safe',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'no_tool' &&
+      decision.cell.x === 32 &&
+      decision.blocker?.requiredTool === 'pickaxe' &&
+      decision.blocker?.requiredTier === 0,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: an unsafe cut names no_clearance at the cut cell', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'N',
+    dx: 0,
+    dz: -1,
+    cut: { x: 31, y: 35, z: 36 },
+    step: { x: 31, y: 35, z: 36 },
+    name: 'cobblestone',
+    safe: false,
+    reason: 'no solid landing under the cut',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 30 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({ stone_pickaxe: 1 }).counts,
+  })
+  return {
+    pass: decision.kind === 'refuse' && decision.reason === 'no_clearance' && decision.cell.z === 36,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: a standable cell one level up is a clear column', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 63, z: 37 },
+    stepCuts: [],
+    standable: [feet, { x: 32, y: 35, z: 37 }],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'clear' && decision.cell.x === 32 && decision.cell.y === 35,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: no geometry names the target-aligned cardinal cell', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 30 },
+    stepCuts: [],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'no_clearance' &&
+      decision.cell.x === 31 &&
+      decision.cell.y === 35 &&
+      decision.cell.z === 36 &&
+      decision.blocker === null,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: a hazard next to a clear cell disqualifies the column', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [],
+    standable: [feet, { x: 32, y: 35, z: 37 }],
+    hazards: [{ x: 32, y: 36, z: 37 }],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'refuse' && decision.reason === 'no_clearance' && decision.cell.x === 32,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: a shovel/axe cut still clears by hand (no false no_tool)', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'dirt',
+    safe: true,
+    reason: 'safe',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'clearable' && decision.blocker.toolOk,
+    detail: JSON.stringify(decision),
+  }
 })
 
 let failures = 0

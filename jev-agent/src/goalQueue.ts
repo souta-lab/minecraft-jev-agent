@@ -18,6 +18,7 @@
 //
 // The queue is deliberately plain data so it can be: handed to Jev inside the
 // world state, written to the decision log, and unit-tested with no bot at all.
+import type { OptionSpec } from './optionSpec.ts'
 import {
   abandonDetail,
   formatProtectedGoalAbandoned,
@@ -27,6 +28,7 @@ import {
   splitProtectedGoals,
 } from './protectedGoals.ts'
 import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
+import { compilePlannedGoal, queuedToPlanned, stableOptionInstanceId } from './optionSpec.ts'
 
 export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
 
@@ -50,6 +52,24 @@ export interface ApplyPlanOptions {
   reason?: string
   /** Audit sink for protection and readiness-merge decisions, so the controller can log them. */
   onProtection?: (line: string) => void
+  /** Audit sink for goals skipped because an identical unfinished instance is already queued. */
+  onDuplicate?: (line: string) => void
+}
+
+export const DUPLICATE_GOAL_SKIPPED = 'DUPLICATE_GOAL_SKIPPED'
+
+/**
+ * Identity of one goal *instance*: `stableOptionInstanceId` over the compiled
+ * spec, so target count / dimension / targetY / predicate distinguish real
+ * instances while byte-identical repeats collapse. The queue keys dedup on this
+ * rather than the `gN:` runtime id, which changes on every enqueue.
+ */
+export function goalInstanceKey(goal: PlannedGoal | QueuedGoal): string {
+  return stableOptionInstanceId(compilePlannedGoal('id' in goal ? queuedToPlanned(goal) : goal))
+}
+
+export function formatDuplicateGoalSkipped(goal: PlannedGoal): string {
+  return `${DUPLICATE_GOAL_SKIPPED} instance=${goalInstanceKey(goal)} description="${goal.description}"`
 }
 
 export interface QueuedGoal {
@@ -69,11 +89,19 @@ export interface QueuedGoal {
   targetItem: string | null
   requiredCount: number
   /**
-   * Predicate goal (#41): success is `position.y <= targetY`, not an item count.
+   * Predicate goal (#41/#136): success is a code-owned level predicate, not an item count alone.
    * Absent for item-counted goals and for ledgers written before #41.
    */
   targetY?: number | null
   dimension?: string | null
+  /** Issue #56: named predicate preserved from a compiled Option target. */
+  targetPredicate?: string | null
+  /** Issue #56: exact compiled Option identity; absent when the compiler is disabled. */
+  optionInstanceId?: string
+  /** Issue #56: stable semantic Option template id. */
+  optionTemplateId?: string
+  /** Issue #56: the full plain-data spec survives queue persistence/restart. */
+  optionSpec?: OptionSpec
   /** how many relevant items the bot held when the goal was created */
   startCount: number
   /** live progress toward `requiredCount` (collect goals) */
@@ -93,9 +121,17 @@ export interface PlannedGoal {
   description: string
   targetItem?: string | null
   requiredCount?: number
-  /** Predicate goal (#41): complete when `position.y <= targetY` in `dimension`. */
+  /** Predicate goal (#41/#136): complete when the code-owned level predicate holds in `dimension`. */
   targetY?: number | null
   dimension?: string | null
+  /** Issue #56: named predicate preserved from a compiled Option target. */
+  targetPredicate?: string | null
+  /** Issue #56: exact compiled Option identity; absent when the compiler is disabled. */
+  optionInstanceId?: string
+  /** Issue #56: stable semantic Option template id. */
+  optionTemplateId?: string
+  /** Issue #56: the full plain-data spec survives queue persistence/restart. */
+  optionSpec?: OptionSpec
   detail?: string
   /** Issue #55: deterministic prerequisite; a patch/replace may not drop it. */
   protected?: boolean
@@ -290,6 +326,21 @@ export class GoalQueue {
     }
     const now = Date.now()
     const added: QueuedGoal[] = []
+    // Insert once per distinct unfinished instance: a plan re-applied on an
+    // unchanged tick must not grow the queue with copies of goals still pending.
+    const unfinishedInstances = new Set<string>()
+    for (const goal of this.goals) {
+      if (goal.status === 'pending' || goal.status === 'active') unfinishedInstances.add(goalInstanceKey(goal))
+    }
+    const insert = (plan: PlannedGoal): void => {
+      const key = goalInstanceKey(plan)
+      if (unfinishedInstances.has(key)) {
+        options.onDuplicate?.(formatDuplicateGoalSkipped(plan))
+        return
+      }
+      unfinishedInstances.add(key)
+      added.push(this.enqueue(plan, origin, now))
+    }
     // #46 regression: the planner proved this smelt ready, so a protected goal
     // re-inserted behind it must not leapfrog it back to the head.
     const readySmelt = planned.find(isReadyIronSmelt)
@@ -297,15 +348,16 @@ export class GoalQueue {
     const readyHead = readySmelt !== undefined && firstReinserted !== undefined ? readySmelt : undefined
     if (readyHead !== undefined && firstReinserted !== undefined) {
       options.onProtection?.(formatReadyHeadPriority(readyHead, firstReinserted))
-      added.push(this.enqueue(readyHead, origin, now))
+      insert(readyHead)
     }
     for (const original of reinserted) {
       options.onProtection?.(formatProtectedGoalReinserted(original, op, options.reason ?? 'not_in_replacement'))
       this.goals.push(original)
+      unfinishedInstances.add(goalInstanceKey(original))
     }
     for (const plan of planned) {
       if (plan === readyHead) continue
-      added.push(this.enqueue(plan, origin, now))
+      insert(plan)
     }
     this.activate()
     return added
@@ -323,6 +375,10 @@ export class GoalQueue {
       requiredCount: Math.max(1, Math.floor(plan.requiredCount ?? 1)),
       targetY: plan.targetY ?? null,
       dimension: plan.dimension ?? null,
+      ...(plan.targetPredicate === undefined ? {} : { targetPredicate: plan.targetPredicate ?? null }),
+      ...(plan.optionInstanceId === undefined ? {} : { optionInstanceId: plan.optionInstanceId }),
+      ...(plan.optionTemplateId === undefined ? {} : { optionTemplateId: plan.optionTemplateId }),
+      ...(plan.optionSpec === undefined ? {} : { optionSpec: plan.optionSpec }),
       startCount: 0,
       haveCount: 0,
       status: 'pending',

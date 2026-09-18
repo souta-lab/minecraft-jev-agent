@@ -40,8 +40,10 @@ export function resolvePrereqStallTicks(
 /**
  * Cost model. Deliberately small integers so the ordering is easy to read in a
  * log line and stable in tests. `place_held` carries a base cost so an item
- * already in hand beats everything; rank (`prereqRank`) decides between source
- * classes, cost only breaks ties inside a class (#78).
+ * already in hand beats a short walk; a remembered world station carries the
+ * access cost of stale knowledge, so an inventory-sourced path still wins at
+ * equal-or-slightly-worse geometry (#78) WITHOUT letting the hand-authored
+ * `prereqRank` decide the choice (#11 v2).
  */
 export const PREREQ_COSTS = {
   /** cost of the single PLACE interaction */
@@ -52,7 +54,32 @@ export const PREREQ_COSTS = {
   missingStone: 2,
   /** flat extra cost when the target is on another level (plus |dy|) */
   verticalPenalty: 8,
+  /**
+   * Fixed access cost of a remembered world station: the coordinate is stale
+   * knowledge, so the journey must be made AND the station verified on arrival
+   * (the measured #78 loop burned a full retrieve on an unverified station).
+   * Keeps `place_held` (and `craft_and_place`) cheaper unless the station is
+   * genuinely closer than the inventory-sourced geometry.
+   */
+  worldStationAccess: 4,
 } as const
+
+/**
+ * #11 v2: the source-class ranking (`prereqRank`) is a transition-only semantic
+ * policy. In `cost` mode (default) the cheapest FEASIBLE path is chosen and the
+ * rank order is logged as a shadow baseline; `rank` mode restores the #78
+ * ordering for A/B comparison. `BUDDY_PREREQ_RANK_POLICY=rank` selects it.
+ */
+export type PrereqRankPolicy = 'cost' | 'rank'
+
+export const PREREQ_RANK_POLICY_DEFAULT: PrereqRankPolicy = 'cost'
+
+/** `BUDDY_PREREQ_RANK_POLICY` override; anything but `rank` keeps the default. */
+export function resolvePrereqRankPolicy(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): PrereqRankPolicy {
+  return env.BUDDY_PREREQ_RANK_POLICY === 'rank' ? 'rank' : PREREQ_RANK_POLICY_DEFAULT
+}
 
 /**
  * Cobblestone-equivalent units the 3x3 furnace recipe needs, derived from
@@ -114,6 +141,11 @@ export interface PrereqInput {
    */
   unreachableStations?: ReadonlySet<string>
   self: Vec3Json
+  /**
+   * #11 v2 ordering policy for the feasible ladder. Omitted = cost (default);
+   * `rank` restores the #78 source-class order for A/B (`BUDDY_PREREQ_RANK_POLICY`).
+   */
+  rankPolicy?: PrereqRankPolicy
 }
 
 export interface PrereqOption {
@@ -132,6 +164,10 @@ export interface PrereqDecision {
   options: PrereqOption[]
   /** the ready-to-log `PREREQ_OPTION ...` line */
   line: string
+  /** the ordering policy that produced `chosen` (#11 v2) */
+  policy: PrereqRankPolicy
+  /** what the #78 rank order would have chosen - logged, never followed (#11 v2) */
+  rankBaseline: PrereqPath | null
 }
 
 function round1(value: number): number {
@@ -232,38 +268,40 @@ export function prereqOptionReason(path: PrereqPath): string {
 }
 
 /**
- * Pick the path the controller will actually follow. Inventory-sourced paths
- * (`place_held`, then `craft_and_place`) always win over world retrieval; a path
- * already abandoned for this planning cycle is never re-selected. Returns null
- * when every feasible path is abandoned.
+ * Pick the path the controller will actually follow from the policy-ordered
+ * feasible options. An abandoned path is demoted, but abandonment is a
+ * PREFERENCE, not an elimination: when every feasible path has been abandoned
+ * the cheapest feasible one is still returned, because "run the best grounded
+ * route again" is strictly better than collapsing to WAIT/starvation with a
+ * feasible route on the table (#11 v2). Null means nothing is feasible at all.
  */
 export function selectPrereqPath(
   decision: PrereqDecision,
   abandoned: ReadonlySet<PrereqPath> = new Set<PrereqPath>(),
 ): PrereqPath | null {
-  const feasible = decision.options.filter((option) => option.feasible && !abandoned.has(option.path))
+  const feasible = decision.options.filter((option) => option.feasible)
   if (feasible.length === 0) return null
-  const held = feasible.find((option) => option.path === 'place_held')
-  if (held !== undefined) return 'place_held'
-  const craft = feasible.find((option) => option.path === 'craft_and_place')
-  if (craft !== undefined) return 'craft_and_place'
-  return feasible[0]?.path ?? null
+  const preferred = feasible.find((option) => !abandoned.has(option.path)) ?? feasible[0]
+  return preferred?.path ?? null
 }
 
 /**
- * A stalled path may be forced to the next-best one, but a forced world path
- * must never outrank an available inventory-sourced path (#78). `forced` wins
- * only when its rank is at least as good as the inventory-first baseline.
+ * A stalled path may be forced to the next-best one. An explicit `forced` path
+ * that is still feasible IS the caller's decision (the stall/unverified advance)
+ * and wins; the #78 source-class guard is gone because rank no longer decides
+ * (#11 v2). `base` is the policy-ordered selection and is the fallback when the
+ * forced path is missing/infeasible. Never null while a feasible option exists.
  */
 export function preferPrereqPath(
   base: PrereqPath | null,
   forced: PrereqPath | null,
   decision: PrereqDecision,
 ): PrereqPath | null {
-  if (forced === null) return base
-  if (!decision.options.some((option) => option.feasible && option.path === forced)) return base
-  if (base === null) return forced
-  return prereqRank(forced) <= prereqRank(base) ? forced : base
+  const best = selectPrereqPath(decision)
+  if (forced !== null && decision.options.some((option) => option.feasible && option.path === forced)) {
+    return forced
+  }
+  return base ?? best
 }
 
 /** Issue #78: repeated unverified zero-progress retrieves are abandoned. */
@@ -338,9 +376,14 @@ function knownStationOption(input: PrereqInput): PrereqOption {
   const walk = distance(input.self, known.position)
   const dy = Math.abs(known.position.y - input.self.y)
   const vertical = dy > 1 ? PREREQ_COSTS.verticalPenalty + dy : 0
-  const cost = walk + vertical
+  const cost = walk + vertical + PREREQ_COSTS.worldStationAccess
   const suffix = vertical > 0 ? ` walk=${round1(walk)}m vertical=${round1(vertical)}` : ` walk=${round1(walk)}m`
-  return { path: 'use_known_station', feasible: true, cost, reason: `known${suffix}` }
+  return {
+    path: 'use_known_station',
+    feasible: true,
+    cost,
+    reason: `known${suffix} access=${PREREQ_COSTS.worldStationAccess}`,
+  }
 }
 
 function craftAndPlaceOption(input: PrereqInput): PrereqOption {
@@ -368,15 +411,25 @@ function craftAndPlaceOption(input: PrereqInput): PrereqOption {
  * cost. Feasible options are returned cheapest-first; the chosen one is the
  * head. Infeasible options are kept (with the reason they lost) after the
  * feasible ones so the log shows what was considered and why it was rejected.
+ *
+ * #11 v2: `rankPolicy: 'cost'` (default) orders by cost and ties by rank;
+ * `'rank'` restores the #78 source-class order. Either way `rankBaseline` names
+ * what the rank order would have chosen, so the controller can shadow-log it.
  */
 export function planPrereqOptions(input: PrereqInput): PrereqDecision {
+  const policy = input.rankPolicy ?? PREREQ_RANK_POLICY_DEFAULT
   const options: PrereqOption[] = [placeHeldOption(input), knownStationOption(input), craftAndPlaceOption(input)]
+  const byCost = (a: PrereqOption, b: PrereqOption): number =>
+    a.cost - b.cost || prereqRank(a.path) - prereqRank(b.path)
+  const byRank = (a: PrereqOption, b: PrereqOption): number =>
+    prereqRank(a.path) - prereqRank(b.path) || a.cost - b.cost
   const feasible = options
     .filter((option) => option.feasible)
-    .sort((a, b) => prereqRank(a.path) - prereqRank(b.path) || a.cost - b.cost)
+    .sort(policy === 'rank' ? byRank : byCost)
   const infeasible = options.filter((option) => !option.feasible)
   const ordered = [...feasible, ...infeasible]
   const chosen = feasible[0] ?? null
+  const rankBaseline = [...feasible].sort(byRank)[0]?.path ?? null
   const over = ordered.filter((option) => option.path !== chosen?.path).map((option) => option.path)
   if (chosen === null) {
     const rejected = infeasible.map((option) => option.path).join(',')
@@ -385,6 +438,8 @@ export function planPrereqOptions(input: PrereqInput): PrereqDecision {
       chosen: null,
       options: ordered,
       line: formatPrereqOption('none', [], `no_feasible_path rejected=[${rejected}]`),
+      policy,
+      rankBaseline,
     }
   }
   const reason = `${chosen.path} cost=${round1(chosen.cost)}`
@@ -393,7 +448,20 @@ export function planPrereqOptions(input: PrereqInput): PrereqDecision {
     chosen: chosen.path,
     options: ordered,
     line: formatPrereqOption(chosen.path, over, reason),
+    policy,
+    rankBaseline,
   }
+}
+
+/**
+ * Issue #11 v2: the shadow baseline of the rank policy. `cost_choice` is the
+ * path actually followed, `rank_choice` what #78 ranking would have picked;
+ * `agree=false` is the transition evidence that the two policies diverge.
+ */
+export function formatPrereqRankShadow(decision: PrereqDecision, chosen: PrereqPath | null): string {
+  const chosenName = chosen ?? 'none'
+  const rankName = decision.rankBaseline ?? 'none'
+  return `PREREQ_RANK_SHADOW policy=${decision.policy} cost_choice=${chosenName} rank_choice=${rankName} agree=${chosenName === rankName}`
 }
 
 /** The next-cheapest feasible path after `current`, or null when none is left. */

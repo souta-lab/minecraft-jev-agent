@@ -143,7 +143,7 @@ export function emptyAgentSnapshot(overrides: Partial<AgentSnapshot> = {}): Agen
 }
 
 function memoryScore(memory: ResidentWorldMemory): number {
-  return memory.craftingTables.length + memory.furnaces.length + memory.discoveredOres.length
+  return memory.craftingTables.length + memory.furnaces.length + memory.discoveredOres.length + memory.moveFailures.length
 }
 
 export function normalizeAgentSnapshot(raw: Record<string, unknown>, now = Date.now()): AgentSnapshot {

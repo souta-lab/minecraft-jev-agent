@@ -25,6 +25,7 @@
     "durable-writes-test": "node ../jev-agent/node_modules/.bin/tsx test-durable-writes.mts",
     "skill-strategy-test": "node ../jev-agent/node_modules/.bin/tsx test-skill-strategy.mts",
     "observability-test": "node ../jev-agent/node_modules/.bin/tsx test-observability.mts",
+    "planner-mode-test": "node ../jev-agent/node_modules/.bin/tsx test-planner-mode.mts",
     "simdeath-test": "node ../jev-agent/node_modules/.bin/tsx test-simdeath.mts",
     "reconnect-lease-test": "node ../jev-agent/node_modules/.bin/tsx test-reconnect-lease.mts",
     "reload-lifecycle-test": "node ../jev-agent/node_modules/.bin/tsx test-reload-lifecycle.mts",

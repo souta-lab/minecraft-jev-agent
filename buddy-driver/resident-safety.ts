@@ -293,6 +293,13 @@ export class GenerationResourceRegistry implements GenerationResources {
     return { listeners: this.listeners.length, timers: this.timers.size }
   }
 
+  /** Listener ownership by event, used to separate active temporary resources from leaks. */
+  ownedListenerCounts(): Record<string, number> {
+    const counts: Record<string, number> = {}
+    for (const entry of this.listeners) counts[entry.event] = (counts[entry.event] ?? 0) + 1
+    return counts
+  }
+
   isDisposed(): boolean {
     return this.disposed
   }

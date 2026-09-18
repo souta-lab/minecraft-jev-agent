@@ -10,6 +10,7 @@
 //   3. replayed in the pure guard unit test with no bot at all.
 import type { Bot } from 'mineflayer'
 import type { GoalQueueState } from './goalQueue.ts'
+import type { CurrentOptionContext } from './optionSpec.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
@@ -312,6 +313,8 @@ export type WorldState = {
   goal: GoalState
   /** the long-horizon plan from System 2 (see goalQueue.ts), consumed by Jev */
   goalQueue: GoalQueueState
+  /** #56: the exact compiled Option instance currently being evaluated by Jev */
+  currentOption?: CurrentOptionContext | null
   recentEvents: string[]
   signals: AgentSignals
 }
@@ -346,6 +349,8 @@ export interface SensorInput {
   tick: number
   goal: GoalState
   goalQueue: GoalQueueState
+  /** #56: the exact compiled Option instance currently being evaluated by Jev */
+  currentOption?: CurrentOptionContext | null
   /** the item the current subgoal targets, used to focus the block scan */
   focusItem?: string | null
   recentEvents: string[]
@@ -1211,6 +1216,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     headroomCuts: buildHeadroomCuts(bot, options, self),
     goal: input.goal,
     goalQueue: input.goalQueue,
+    currentOption: input.currentOption ?? null,
     recentEvents: input.recentEvents.slice(-12),
     signals: input.signals,
   }

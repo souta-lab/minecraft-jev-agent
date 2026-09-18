@@ -41,6 +41,8 @@ export interface OwnershipPorts {
 }
 
 export interface SwapPorts extends OwnershipPorts {
+  /** Host evidence hook after the incumbent has quiesced and before ownership commits. */
+  afterQuiesce?: (generation: SwapGeneration) => void
   /** construct a fresh generation from the previously-loaded module (rollback) */
   buildResume(): SwapGeneration | null
   /** dispose a superseded generation; returns tracked resources still live */
@@ -113,6 +115,7 @@ export async function swapGeneration(ports: SwapPorts, next: SwapGeneration): Pr
     } catch (error) {
       ports.log('ERROR', { where: 'swap.quiesce', id: previous.id, message: messageOf(error) })
     }
+    ports.afterQuiesce?.(previous)
   }
   commitOwner(ports, next)
   try {

@@ -11,6 +11,7 @@ import {
 } from './resident-safety.ts'
 import type { GenerationResourceCounts } from './resident-types.ts'
 import { commitOwner, swapGeneration, type OwnershipFields, type SwapPorts } from './generation-swap.ts'
+import { ReloadArbiter } from './reload-arbiter.ts'
 
 interface LogEntry {
   event: string
@@ -123,6 +124,118 @@ const cases: Case[] = []
 const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
+
+function settle(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
+}
+
+interface Deferred {
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: unknown) => void
+}
+
+function deferred(): Deferred {
+  let resolvePromise: (() => void) | null = null
+  let rejectPromise: ((error: unknown) => void) | null = null
+  const promise = new Promise<void>((resolve, reject) => {
+    resolvePromise = resolve
+    rejectPromise = reject
+  })
+  return {
+    promise,
+    resolve: () => resolvePromise?.(),
+    reject: (error) => rejectPromise?.(error),
+  }
+}
+
+addCase('#13 reload requests never overlap and coalesce one follow-up trigger', async () => {
+  const starts: string[] = []
+  const gates = new Map<string, Deferred>()
+  let active = 0
+  let maxActive = 0
+  const arbiter = new ReloadArbiter(async (trigger) => {
+    starts.push(trigger)
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    const gate = deferred()
+    gates.set(trigger, gate)
+    await gate.promise
+    active -= 1
+  })
+  const first = arbiter.request('source-changed')
+  const second = arbiter.request('control')
+  const third = arbiter.request('source-changed')
+  gates.get('source-changed')?.resolve()
+  await settle()
+  const followUpStarted = starts.join(',') === 'source-changed,control' && arbiter.running && arbiter.pendingTrigger === null
+  gates.get('control')?.resolve()
+  await settle()
+  const pass =
+    first === 'started' &&
+    second === 'queued' &&
+    third === 'queued' &&
+    followUpStarted &&
+    starts.length === 2 &&
+    maxActive === 1 &&
+    active === 0 &&
+    !arbiter.running
+  return {
+    pass,
+    detail: `requests=[${first},${second},${third}] starts=[${starts.join(',')}] maxActive=${maxActive} pending=${arbiter.pendingTrigger} running=${arbiter.running}`,
+  }
+})
+
+addCase('#13 a failed reload releases the arbiter and still runs the queued request', async () => {
+  const starts: string[] = []
+  const logs: string[] = []
+  const followUp = deferred()
+  const arbiter = new ReloadArbiter(
+    async (trigger) => {
+      starts.push(trigger)
+      if (trigger === 'source-changed') throw new Error('forced reload failure')
+      await followUp.promise
+    },
+    () => true,
+    (event) => logs.push(event),
+  )
+  const first = arbiter.request('source-changed')
+  const second = arbiter.request('control')
+  await settle()
+  const followUpStarted = starts.join(',') === 'source-changed,control' && arbiter.running
+  followUp.resolve()
+  await settle()
+  const pass =
+    first === 'started' &&
+    second === 'queued' &&
+    followUpStarted &&
+    starts.length === 2 &&
+    logs.includes('ERROR') &&
+    !arbiter.running
+  return {
+    pass,
+    detail: `starts=[${starts.join(',')}] logs=[${logs.join(',')}] running=${arbiter.running}`,
+  }
+})
+
+addCase('#13 shutdown drops a queued reload without interrupting the active one', async () => {
+  const starts: string[] = []
+  const gate = deferred()
+  const arbiter = new ReloadArbiter(async (trigger) => {
+    starts.push(trigger)
+    await gate.promise
+  })
+  const first = arbiter.request('source-changed')
+  const second = arbiter.request('control')
+  arbiter.stop()
+  gate.resolve()
+  await settle()
+  const pass = first === 'started' && second === 'queued' && starts.join(',') === 'source-changed' && !arbiter.running && arbiter.pendingTrigger === null
+  return {
+    pass,
+    detail: `requests=[${first},${second}] starts=[${starts.join(',')}] running=${arbiter.running} pending=${arbiter.pendingTrigger}`,
+  }
+})
 
 addCase('#49 forced failed reload rolls back to one consistent owner (A/B disposed, C live)', async () => {
   const harness = makeHarness(() => new FakeGeneration({ id: 'C' }))
@@ -265,14 +378,16 @@ addCase('#13 generation-owned listeners are removable and untracked by the lease
   ;(bot as unknown as { on(event: string, fn: () => void): void }).on('physicsTick', handler)
   ;(bot as unknown as { on(event: string, fn: () => void): void }).on('physicsTick', handler)
   const before = registry.counts()
+  const owned = registry.ownedListenerCounts()
   const removed = registry.dispose()
   const pass =
     emitter.listenerCount('physicsTick') === 0 &&
     before.listeners === 2 &&
+    owned.physicsTick === 2 &&
     removed.listeners === 0 &&
     removed.timers === 0 &&
     registry.isDisposed()
-  return { pass, detail: `before=${JSON.stringify(before)} after=${JSON.stringify(removed)} emitterListeners=${emitter.listenerCount('physicsTick')}` }
+  return { pass, detail: `before=${JSON.stringify(before)} owned=${JSON.stringify(owned)} after=${JSON.stringify(removed)} emitterListeners=${emitter.listenerCount('physicsTick')}` }
 })
 
 let failures = 0

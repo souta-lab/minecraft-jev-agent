@@ -17,19 +17,22 @@
 //   4. the jev-calls.jsonl perception snapshot is size-bounded.
 //
 // Run: npx tsx test-perception.mts
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import {
-  candidateStarvationBlockedBy,
   candidateStarvationLine,
   candidateStarvationMissing,
   formatCandidateStarvation,
+  goalPreconditionCause,
+  goalStarvationBlockedBy,
   MIRRORED_MARKERS,
 } from './src/controller.ts'
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { CandidateReachability } from './src/candidates.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
-import type { QueuedGoal } from './src/goalQueue.ts'
+import type { PlannedGoal, QueuedGoal } from './src/goalQueue.ts'
+import { makeOptionSnapshot } from './src/optionSpec.ts'
 import { boundedStateSnapshot, JEV_SNAPSHOT_LIMITS } from './src/jev.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, KnownResource, StationEntry, Vec3Json, WorldState } from './src/state.ts'
@@ -258,9 +261,9 @@ addCase('(3) a 1-element candidate set emits the mirrored CANDIDATE_STARVATION m
   )
   const candidates = generateCandidates(state, craftOptions)
   const goal = 'craft:furnace:1'
-  const blockedBy = candidateStarvationBlockedBy([], null)
+  const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'furnace' }, [])
   const line = candidateStarvationLine(candidates, goal, false, blockedBy)
-  const expected = 'CANDIDATE_STARVATION presented=1 productive=0 goal="craft:furnace:1" blockedBy=no_productive_candidate'
+  const expected = 'CANDIDATE_STARVATION presented=1 productive=0 goal="craft:furnace:1" blockedBy=no_productive_action'
   const pass =
     candidates.length === 1 &&
     candidates[0]?.kind === 'WAIT' &&
@@ -283,7 +286,7 @@ addCase('(3) a productive candidate set emits no starvation marker', () => {
   return { pass, detail: `productive=${productive} line=${line ?? 'none'}` }
 })
 
-addCase('(3) blockedBy is the primary withheld capability; missing=[all] stays ordered', () => {
+addCase('(3) missing=[...] tags every withheld capability with its candidate id', () => {
   const withheld: CandidateReachability[] = [
     {
       candidate: {
@@ -310,20 +313,101 @@ addCase('(3) blockedBy is the primary withheld capability; missing=[all] stays o
       suppressed: false,
     },
   ]
-  const blockedBy = candidateStarvationBlockedBy(withheld, null)
+  const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'furnace' }, withheld)
   const missing = candidateStarvationMissing(withheld)
-
   const line = formatCandidateStarvation(2, 'craft:furnace:1', blockedBy, missing)
   const pass =
-    blockedBy === 'ascend_plan' &&
-    missing.join(',') === 'ascend_plan,placeable_block' &&
+    blockedBy === 'no_productive_action' &&
+    missing.join(',') ===
+      'RETRIEVE:known:station:furnace:b29_61_35:ascend_plan,RETRIEVE:known:station:furnace:b29_61_35:placeable_block' &&
     line ===
-      'CANDIDATE_STARVATION presented=2 productive=0 goal="craft:furnace:1" blockedBy=ascend_plan missing=[ascend_plan,placeable_block]'
+      'CANDIDATE_STARVATION presented=2 productive=0 goal="craft:furnace:1" blockedBy=no_productive_action missing=["RETRIEVE:known:station:furnace:b29_61_35:ascend_plan","RETRIEVE:known:station:furnace:b29_61_35:placeable_block"]'
   return { pass, detail: `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line}"` }
 })
 
-// --- (4) the persisted perception snapshot is bounded --------------------------
+addCase('(3) a withheld sibling reason never leaks into blockedBy', () => {
+  const withheld: CandidateReachability[] = [
+    {
+      candidate: {
+        id: 'RETRIEVE:known:station:crafting_table:b40_29_35',
+        kind: 'RETRIEVE',
+        label: 'x',
+        targetName: 'crafting_table',
+        target: { x: 40, y: 29, z: 35 },
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: false,
+        hasStandableAdjacent: true,
+        meta: { knownName: 'crafting_table' },
+      },
+      result: {
+        reachable: false,
+        reason: 'needs_descend',
+        missingCapabilities: [{ kind: 'tool', tool: 'pickaxe', tier: 0 }],
+      },
+      fingerprint: 'fp',
+      withheld: true,
+      suppressed: false,
+    },
+  ]
+  const goal = { kind: 'craft' as const, targetItem: 'wooden_pickaxe' }
+  const blockedBy = goalStarvationBlockedBy(null, goal, withheld)
+  const missing = candidateStarvationMissing(withheld)
+  const line = formatCandidateStarvation(2, 'craft:wooden_pickaxe:1', blockedBy, missing)
+  const pass =
+    blockedBy === 'no_productive_action' &&
+    missing.join(',') === 'RETRIEVE:known:station:crafting_table:b40_29_35:tool:pickaxe@0' &&
+    line ===
+      'CANDIDATE_STARVATION presented=2 productive=0 goal="craft:wooden_pickaxe:1" blockedBy=no_productive_action missing=["RETRIEVE:known:station:crafting_table:b40_29_35:tool:pickaxe@0"]'
+  return { pass, detail: `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line}"` }
+})
 
+addCase('(3) a collect goal names its own withheld route reason', () => {
+  const withheld: CandidateReachability[] = [
+    {
+      candidate: {
+        id: 'RETRIEVE:known:oak_log:b0_110_0',
+        kind: 'RETRIEVE',
+        label: 'x',
+        targetName: 'oak_log',
+        target: { x: 0, y: 110, z: 0 },
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: false,
+        hasStandableAdjacent: true,
+        meta: { knownName: 'oak_log' },
+      },
+      result: { reachable: false, reason: 'needs_ascend', missingCapabilities: [] },
+      fingerprint: 'fp',
+      withheld: true,
+      suppressed: false,
+    },
+  ]
+  const blockedBy = goalStarvationBlockedBy(null, { kind: 'collect', targetItem: 'oak_log' }, withheld)
+  const missing = candidateStarvationMissing(withheld)
+  const pass = blockedBy === 'needs_ascend' && missing.join(',') === 'RETRIEVE:known:oak_log:b0_110_0:needs_ascend'
+  return { pass, detail: `blockedBy=${blockedBy} missing=[${missing.join(',')}]` }
+})
+
+addCase('(3) an unmet deterministic precondition is reported as blockedBy=precondition:pickaxe', () => {
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const noPickaxe = makeOptionSnapshot({ inventory: { cobblestone: 42, stick: 2 }, toolRank: 0 })
+  const withPickaxe = makeOptionSnapshot({ inventory: { cobblestone: 42, stick: 2, stone_pickaxe: 1 }, toolRank: 2 })
+  const cause = goalPreconditionCause(rawIron, noPickaxe)
+  const line = formatCandidateStarvation(2, 'collect:raw_iron:3', cause ?? 'verify_failed', [])
+  const cleared = goalPreconditionCause(rawIron, withPickaxe)
+  const pass =
+    cause === 'precondition:pickaxe' &&
+    line === 'CANDIDATE_STARVATION presented=2 productive=0 goal="collect:raw_iron:3" blockedBy=precondition:pickaxe' &&
+    cleared === null
+  return { pass, detail: `cause=${cause} line="${line}" cleared=${String(cleared)}` }
+})
+
+// --- (4) the persisted perception snapshot is bounded --------------------------
 addCase('(4) a pathological state snapshots under the byte bound with true totals in bounds', () => {
   const base = perceive([], { crafting_table: [], furnace: [] })
   const long = 'x'.repeat(200)
@@ -391,6 +475,22 @@ addCase('(4) a normal state keeps its decision-critical perception fields', () =
     snapshot.goal.targetItem === 'furnace' &&
     snapshot.bounds.craftingTables === 1
   return { pass, detail: JSON.stringify(snapshot.craftingTables) }
+})
+
+addCase('(5) the SMELT_INPUT_PREREQ marker is mirrored and emitted from the tick', () => {
+  const source = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const mirrored = MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ')
+  const wired = source.includes('this.logSmeltInputPrereq(state, groundingOptions)')
+  const formatter = source.includes('formatSmeltInputPrereq')
+  return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
+})
+
+addCase('(6) the CRAFT_INGREDIENT_PREREQ marker is mirrored and emitted from the tick', () => {
+  const source = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const mirrored = MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')
+  const wired = source.includes('this.logCraftIngredientPrereq(state, groundingOptions)')
+  const formatter = source.includes('formatCraftIngredientPrereq')
+  return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
 })
 
 let failures = 0
