@@ -361,3 +361,108 @@ export function detectOscillation(history: readonly Vec3Like[], options: Oscilla
 export function samePosition(a: Vec3Like, b: Vec3Like, epsilon = 0.75): boolean {
   return Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) <= epsilon
 }
+
+// --- state-conditioned failure memory (#11 v2 §6, affordance reachability) -----
+//
+// The cooldown form above re-opens a proven-unreachable target on a wall clock,
+// so a 52-block climb was attempted again every 30 s forever. Reachability uses
+// the same persisted-fact idea keyed by a SEMANTIC state fingerprint instead:
+// target C proven unreachable for reason R under fingerprint F is not offered
+// again while F is unchanged. It becomes selectable again the moment the
+// relevant state (tool held / placeable block / headroom / topology) changes,
+// with no timer and no retry count. Failure history stays readable via
+// `snapshot()` and `check()`.
+
+export interface FingerprintFailure {
+  key: string
+  fingerprint: string
+  reason: string
+  at: number
+}
+
+export interface FingerprintCheck {
+  known: boolean
+  suppressed: boolean
+  fingerprint: string | null
+  reason: string | null
+  at: number | null
+}
+
+export interface StateFingerprintMemoryOptions {
+  /** hard cap on tracked targets; oldest evicted first (default 256) */
+  maxEntries?: number
+  /** clock injection for deterministic tests */
+  now?: () => number
+}
+
+export class StateFingerprintMemory {
+  private readonly entries = new Map<string, FingerprintFailure>()
+  readonly maxEntries: number
+  private readonly now: () => number
+
+  constructor(options: StateFingerprintMemoryOptions = {}) {
+    this.maxEntries = Math.max(1, Math.floor(options.maxEntries ?? DEFAULT_MOVE_MAX_ENTRIES))
+    this.now = options.now ?? ((): number => Date.now())
+  }
+
+  /**
+   * Remember that `key` failed for `reason` under `fingerprint`. Re-recording an
+   * identical fact keeps the original timestamp (history is a fact, not a count).
+   */
+  record(key: string, fingerprint: string, reason: string): FingerprintFailure {
+    const existing = this.entries.get(key)
+    if (existing !== undefined && existing.fingerprint === fingerprint && existing.reason === reason) {
+      return existing
+    }
+    const entry: FingerprintFailure = { key, fingerprint, reason, at: this.now() }
+    this.entries.delete(key)
+    this.entries.set(key, entry)
+    this.evictIfNeeded()
+    return entry
+  }
+
+  /** True while the unchanged fingerprint still proves the recorded failure. */
+  isSuppressed(key: string, fingerprint: string): boolean {
+    return this.entries.get(key)?.fingerprint === fingerprint
+  }
+
+  check(key: string, fingerprint: string): FingerprintCheck {
+    const entry = this.entries.get(key)
+    if (entry === undefined) {
+      return { known: false, suppressed: false, fingerprint: null, reason: null, at: null }
+    }
+    return {
+      known: true,
+      suppressed: entry.fingerprint === fingerprint,
+      fingerprint: entry.fingerprint,
+      reason: entry.reason,
+      at: entry.at,
+    }
+  }
+
+  /** The state changed so much that the proof no longer holds. */
+  forget(key: string): boolean {
+    return this.entries.delete(key)
+  }
+
+  size(): number {
+    return this.entries.size
+  }
+
+  snapshot(): FingerprintFailure[] {
+    return [...this.entries.values()]
+  }
+
+  clear(): void {
+    this.entries.clear()
+  }
+
+  /** Bounded memory: evict the oldest entry first. */
+  private evictIfNeeded(): void {
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next()
+      if (oldest.done === true) return
+      this.entries.delete(oldest.value)
+    }
+  }
+}
