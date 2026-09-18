@@ -861,7 +861,10 @@ addCase('an above-level remembered ore with a safe step-cut emits a staircase-up
 
 addCase('an above-level remembered ore without a placeable keeps an explicit vertical=none', () => {
   const feet = { x: 39, y: 31, z: 33 }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 53, y: 36, z: 33 } }
+  // dy=3 stays inside the walkable band, so the affordance gate presents it and
+  // the vertical plan stays explicitly 'none' (a dy>4 climb without a plan is
+  // withheld as needs_ascend by the gate; see test-reachability.mts).
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 53, y: 34, z: 33 } }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),
@@ -872,7 +875,7 @@ addCase('an above-level remembered ore without a placeable keeps an explicit ver
   const pass =
     retrieve !== null &&
     retrieve.meta.vertical === 'none' &&
-    retrieve.meta.verticalToY === 36
+    retrieve.meta.verticalToY === 34
   return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
 })
 

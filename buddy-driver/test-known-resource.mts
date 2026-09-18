@@ -126,13 +126,14 @@ function worldState(overrides: {
   goal?: GoalState
   blocks?: BlockState[]
   knownResources?: KnownResource[]
+  inventory?: InventoryState
 }): WorldState {
   return {
     schemaVersion: 1,
     tick: 7,
     timestampMs: 1_700_000_000_000,
     self: self(overrides.position),
-    inventory: inventory({ stone_pickaxe: 1 }),
+    inventory: overrides.inventory ?? inventory({ stone_pickaxe: 1 }),
     entities: [],
     blocks: overrides.blocks ?? [],
     terrain: { standable: [overrides.position] },
@@ -227,7 +228,9 @@ addCase('cobblestone descent proxy with queued raw_iron still emits a raw_iron R
       queuedGoal({ id: 'g-cobble', targetItem: 'cobblestone', description: 'collect 41 x cobblestone (descend toward ore levels)' }),
       queuedGoal({ id: 'g-iron', targetItem: 'raw_iron', description: 'collect 3 x raw_iron' }),
     ),
-    knownResources: [{ name: 'iron_ore', kind: 'ore', position: { x: 31, y: 44, z: 34 }, dimension: 'minecraft:overworld', worldEpoch: 2 }],
+    // dy=-3 stays inside the walkable band; a deeper drop without a descent plan
+    // is withheld as needs_descend by the affordance gate.
+    knownResources: [{ name: 'iron_ore', kind: 'ore', position: { x: 31, y: 57, z: 34 }, dimension: 'minecraft:overworld', worldEpoch: 2 }],
   })
   const candidates = generateCandidates(state, defaultCandidateOptions)
   const retrieve = candidates.find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
@@ -236,7 +239,7 @@ addCase('cobblestone descent proxy with queued raw_iron still emits a raw_iron R
     retrieve !== undefined &&
     retrieve.meta.resource === 'raw_iron' &&
     retrieve.target?.x === 31 &&
-    retrieve.target?.y === 44 &&
+    retrieve.target?.y === 57 &&
     retrieve.target?.z === 34 &&
     actionable.length === 1 &&
     actionable[0]?.kind === 'RETRIEVE'
@@ -276,6 +279,9 @@ addCase('a remembered log beyond proof distance grounds a charcoal RETRIEVE', ()
     goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
     goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal' })),
     knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 6, y: 68, z: 0 } }],
+    // the 8-block climb needs a placeable block for the pillar plan, else the
+    // affordance gate withholds the retrieval (needs_ascend).
+    inventory: inventory({ stone_pickaxe: 1, cobblestone: 4 }),
   })
   const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
   return {

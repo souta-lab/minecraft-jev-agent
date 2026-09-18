@@ -4,7 +4,7 @@
 // No bot, no network.
 //
 // Run: npx tsx test-fuel-guard.mts
-import { formatFuelSatisfied, fuelSatisfaction, generateCandidates, goalCollectsFuel, goalWantsFuel, defaultCandidateOptions } from './src/candidates.ts'
+import { defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, generateCandidates, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './src/policy.ts'
 import { findInventoryFuel } from './src/resourceClass.ts'
@@ -205,7 +205,9 @@ addCase('without held fuel the surface retrieval is still emitted', () => {
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
     current: queuedGoal({}),
-    inventory: inventory({}),
+    // a placeable block makes the 6-block climb mechanically reachable, so the
+    // affordance gate presents the retrieval (needs_ascend otherwise).
+    inventory: inventory({ cobblestone: 4 }),
     standable: [
       { x: 0, y: 60, z: 0 },
       { x: 2, y: 66, z: 0 },
@@ -280,7 +282,7 @@ function surfaceLog(): BlockState {
   }
 }
 
-addCase('the unreachable surface MOVE is generated, flagged, and retired at the failure limit', () => {
+addCase('the unreachable surface MOVE is withheld by the affordance gate instead of retried', () => {
   const base = {
     position: { x: 25, y: 52, z: 36 } as Vec3Json,
     goal: goal({}),
@@ -288,21 +290,40 @@ addCase('the unreachable surface MOVE is generated, flagged, and retired at the 
     inventory: inventory({ oak_log: 2 }),
     blocks: [surfaceLog()],
   }
+  const grounded = generateGroundedCandidates(worldState(base), defaultCandidateOptions)
+  const withheld = grounded.withheld.find((entry) => entry.candidate.id === 'MOVE:b33_68_27')
+  const reason = withheld === undefined ? null : unreachableMove(withheld.candidate, worldState(base))
+  const pass =
+    !grounded.candidates.some((entry) => entry.id === 'MOVE:b33_68_27') &&
+    withheld !== undefined &&
+    withheld.result.reason === 'needs_ascend' &&
+    reason !== null &&
+    reason.dy === 16
+  return {
+    pass,
+    detail: `presented=${grounded.candidates.some((entry) => entry.id === 'MOVE:b33_68_27')} withheld=${withheld?.result.reason ?? 'none'} dy=${reason?.dy ?? 'none'}`,
+  }
+})
+
+addCase('a reachable surface MOVE is still retired at the failure limit', () => {
+  const base = {
+    position: { x: 33, y: 67, z: 36 } as Vec3Json,
+    goal: goal({}),
+    current: queuedGoal({}),
+    inventory: inventory({ oak_log: 2 }),
+    blocks: [surfaceLog()],
+  }
   const fresh = generateCandidates(worldState(base), defaultCandidateOptions)
-  const candidate = fresh.find((entry) => entry.id === 'MOVE:b33_68_27') ?? null
-  const reason = candidate === null ? null : unreachableMove(candidate, worldState(base))
   const retired = generateCandidates(
     worldState({ ...base, failedCandidates: { 'MOVE:b33_68_27': 4 } }),
     defaultCandidateOptions,
   )
   const pass =
-    candidate !== null &&
-    reason !== null &&
-    reason.dy === 16 &&
+    fresh.some((entry) => entry.id === 'MOVE:b33_68_27') &&
     !retired.some((entry) => entry.id === 'MOVE:b33_68_27')
   return {
     pass,
-    detail: `generated=${candidate !== null} reason=${reason === null ? 'reachable' : reason.dy} retired=${!retired.some((entry) => entry.id === 'MOVE:b33_68_27')}`,
+    detail: `generated=${fresh.some((entry) => entry.id === 'MOVE:b33_68_27')} retired=${!retired.some((entry) => entry.id === 'MOVE:b33_68_27')}`,
   }
 })
 
