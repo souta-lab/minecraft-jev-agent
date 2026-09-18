@@ -136,6 +136,36 @@ export interface GroundedCandidatesResult {
   reachability: CandidateReachability[]
   /** the subset whose target is not mechanically reachable */
   withheld: CandidateReachability[]
+  /**
+   * Typed placement-geometry refusal: a held station could not be placed from
+   * the terrain the sensor already knows. Non-null means the refusal was
+   * surfaced (never silent), even when no alternative candidate exists.
+   */
+  placeRefusal: PlaceRefusal | null
+}
+
+/**
+ * Why a held station could not be placed from the terrain the sensor already
+ * knows, naming the exact cell the mechanical solve evaluated:
+ *
+ *   - `no_support`   no standable terrain is known; the only air cell (the bot's
+ *                    own head space) has no block under it to place onto;
+ *   - `no_clearance` the only known placeable cell is the bot's own body cell,
+ *                    so the placement is blocked by the bot itself;
+ *   - `out_of_reach` a valid placement cell exists but is beyond interaction
+ *                    reach; the bot must walk closer first.
+ */
+export type PlaceRefusalReason = 'no_support' | 'no_clearance' | 'out_of_reach'
+
+export interface PlaceRefusal {
+  item: string
+  reason: PlaceRefusalReason
+  cell: Vec3Json
+}
+
+/** The exact `PLACE_REFUSED` observability line for one typed refusal. */
+export function formatPlaceRefusal(refusal: PlaceRefusal): string {
+  return `PLACE_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} item=${refusal.item}`
 }
 
 const DEFAULT_MOVE_MIN_DISTANCE = 0
@@ -247,14 +277,16 @@ export function generateGroundedCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
-  return applyReachabilityGate(generateRawCandidates(state, options), state, options)
+  const raw = generateRawCandidates(state, options)
+  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal)
 }
 
 function generateRawCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
-): Candidate[] {
+): RawCandidatesResult {
   let candidates: Candidate[] = []
+  let placeRefusal: PlaceRefusal | null = null
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -262,9 +294,12 @@ function generateRawCandidates(
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
 
   switch (goalKind) {
-    case 'craft':
-      candidates.push(...craftCandidates(state, options, focusItem))
+    case 'craft': {
+      const craft = craftCandidates(state, options, focusItem)
+      candidates.push(...craft.candidates)
+      placeRefusal = craft.placeRefusal
       break
+    }
     case 'smelt':
       candidates.push(...smeltCandidates(state, options, focusItem))
       break
@@ -419,7 +454,7 @@ function generateRawCandidates(
     })
   }
 
-  return candidates
+  return { candidates, placeRefusal }
 }
 
 /**
@@ -838,14 +873,182 @@ function placeStationCandidate(
   }
 }
 
+/** One held-station placement solve: an in-reach spot, or the typed reason it was refused. */
+interface HeldStationPlacement {
+  spot: Vec3Json | null
+  refusal: PlaceRefusal | null
+  /** grounded alternative offered instead of silence (approach MOVE / clear-headroom MINE) */
+  alternative: Candidate | null
+}
+
+/**
+ * True when a block placed at `cell` would intersect the bot's own body. Mirrors
+ * the sensor's `nearBody < 1.0` rule in `buildPlacementSpots`, so the terrain
+ * solve can never pick the cell the bot is standing in.
+ */
+function placementIntersectsBody(cell: Vec3Json, self: Vec3Json): boolean {
+  return distance({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, self) < 1.0
+}
+
+/** Nearest-first known placement cells: the strict live spots plus the sensed standable terrain. */
+function knownPlacementCells(state: WorldState): Vec3Json[] {
+  const seen = new Set<string>()
+  const cells: Vec3Json[] = []
+  for (const cell of [...state.placementSpots, ...state.terrain.standable]) {
+    const key = blockId('p', cell)
+    if (seen.has(key)) continue
+    seen.add(key)
+    cells.push(cell)
+  }
+  cells.sort((a, b) => distance(a, state.self.position) - distance(b, state.self.position))
+  return cells
+}
+
+/**
+ * The known standable cell that walks the bot toward an out-of-reach placement
+ * cell: nearest to the target among the cells strictly closer to the target than
+ * the bot is now. The target itself is the last resort - arriving there
+ * re-senses its neighbourhood and the next solve step finds a neighbouring cell.
+ */
+function placementApproachCell(state: WorldState, target: Vec3Json): Vec3Json {
+  const here = distance(state.self.position, target)
+  const options = state.terrain.standable.filter(
+    (cell) =>
+      !placementIntersectsBody(cell, state.self.position) &&
+      !(cell.x === target.x && cell.y === target.y && cell.z === target.z) &&
+      distance(cell, target) < here,
+  )
+  options.sort((a, b) => distance(a, target) - distance(b, target))
+  return options[0] ?? target
+}
+
+/** Grounded MOVE toward an out-of-reach placement cell; carries the refusal token in its meta. */
+function placementApproachCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  item: string,
+  target: Vec3Json,
+  purpose: string,
+): Candidate {
+  const approach = placementApproachCell(state, target)
+  return {
+    id: `MOVE:${blockId('p', approach)}`,
+    kind: 'MOVE',
+    label: `walk to (${approach.x},${approach.y},${approach.z}) to bring the placement cell (${target.x},${target.y},${target.z}) within reach, then place ${item} to ${purpose}`,
+    targetName: null,
+    target: approach,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(approach, state.self.position) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: approach.x,
+      y: approach.y,
+      z: approach.z,
+      placeRefused: 'out_of_reach',
+      placeRefusedCell: blockId('p', target),
+      placeItem: item,
+    },
+  }
+}
+
+/** Grounded clear-headroom alternative: the safe ceiling MINE that opens placement space when the bot blocks it. */
+function placementHeadroomAlternative(
+  state: WorldState,
+  options: CandidateOptions,
+  refusal: PlaceRefusal,
+): Candidate | null {
+  const cut = headroomCandidates(state, options)[0]
+  if (cut === undefined) return null
+  return {
+    ...cut,
+    meta: {
+      ...cut.meta,
+      placeRefused: refusal.reason,
+      placeRefusedCell: blockId('p', refusal.cell),
+      placeItem: refusal.item,
+    },
+  }
+}
+
+/**
+ * The mechanical held-station placement solve over the terrain the sensor already
+ * knows:
+ *
+ *   1. the strict live spots (`placementSpots`) keep their old priority;
+ *   2. otherwise a sensed standable cell (air + 2-block clearance + solid support)
+ *      outside the bot's body is a placement cell when it is within reach;
+ *   3. an out-of-reach valid cell refuses with `out_of_reach` and offers the
+ *      approach MOVE; the bot's own body cell refuses with `no_clearance` and
+ *      offers the clear-headroom MINE; no standable terrain at all refuses with
+ *      `no_support` at the bot's unsupported head cell.
+ */
+function heldStationPlacement(
+  state: WorldState,
+  options: CandidateOptions,
+  item: string,
+  purpose: string,
+): HeldStationPlacement {
+  const failureCountFor = (cell: Vec3Json): number =>
+    state.signals.failedCandidates[`PLACE:${item}:${blockId('p', cell)}`] ?? 0
+  const retryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
+
+  if (state.placementSpots.length > 0) {
+    const spot =
+      state.placementSpots.find((cell) => failureCountFor(cell) < retryLimit) ?? state.placementSpots[0]
+    if (spot !== undefined) return { spot, refusal: null, alternative: null }
+  }
+
+  let bodyCell: Vec3Json | null = null
+  let outOfReach: Vec3Json | null = null
+  for (const cell of knownPlacementCells(state)) {
+    if (placementIntersectsBody(cell, state.self.position)) {
+      bodyCell = bodyCell ?? cell
+      continue
+    }
+    if (failureCountFor(cell) >= retryLimit) continue
+    if (distance(cell, state.self.eyePosition) <= options.reach) {
+      return { spot: cell, refusal: null, alternative: null }
+    }
+    outOfReach = outOfReach ?? cell
+  }
+
+  if (outOfReach !== null) {
+    const refusal: PlaceRefusal = { item, reason: 'out_of_reach', cell: outOfReach }
+    return { spot: null, refusal, alternative: placementApproachCandidate(state, options, item, outOfReach, purpose) }
+  }
+
+  if (bodyCell !== null) {
+    const refusal: PlaceRefusal = { item, reason: 'no_clearance', cell: bodyCell }
+    return { spot: null, refusal, alternative: placementHeadroomAlternative(state, options, refusal) }
+  }
+
+  const headCell: Vec3Json = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y) + 1,
+    z: Math.floor(state.self.position.z),
+  }
+  const refusal: PlaceRefusal = { item, reason: 'no_support', cell: headCell }
+  return { spot: null, refusal, alternative: placementHeadroomAlternative(state, options, refusal) }
+}
+
 /**
  * CRAFT/PLACE candidates driven by the pure recipe planner: exactly one grounded
  * step toward the current craft subgoal, or nothing when no step is executable
  * in this world state.
  */
-function craftCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
+function craftCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+): CraftCandidatesResult {
+  const none: CraftCandidatesResult = { candidates: [], placeRefusal: null }
   const recipes = options.recipes ?? null
-  if (recipes === null || focusItem === null) return []
+  if (recipes === null || focusItem === null) return none
+  // #58 keeps sensed-only semantics and is focus-aware; placespot supplied the result shape.
   const tableAvailable = sensedCraftingTableAvailable(state, options, focusItem)
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
   const op = plan.op
@@ -856,10 +1059,10 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
   // falling through keeps (c), the existing craft-a-table-from-planks step.
   if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
-    if (acquisition.length > 0) return acquisition
+    if (acquisition.candidates.length > 0 || acquisition.placeRefusal !== null) return acquisition
   }
 
-  if (op === null) return []
+  if (op === null) return none
 
   if (op.type === 'craft') {
     const nearestTable = state.craftingTables.find(isSensedStation) ?? null
@@ -880,13 +1083,37 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
             (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
             (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
         ) ?? state.placementSpots[0]
-      if (spot === undefined) return []
-      return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
+      if (spot === undefined) return none
+      return {
+        candidates: [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)],
+        placeRefusal: null,
+      }
     }
   }
 
   const step = craftPlanStepCandidate(state, options, op, focusItem)
-  return step === null ? [] : [step]
+  return {
+    candidates: step.candidate === null ? [] : [step.candidate],
+    placeRefusal: step.refusal,
+  }
+}
+
+/** One craft-plan step plus any placement refusal met while resolving it. */
+interface CraftStep {
+  candidate: Candidate | null
+  refusal: PlaceRefusal | null
+}
+
+/** The craft path's candidates plus the typed placement refusal when a held station could not be placed. */
+interface CraftCandidatesResult {
+  candidates: Candidate[]
+  placeRefusal: PlaceRefusal | null
+}
+
+/** Raw candidates plus the placement refusal one of them refused, for the gate to surface. */
+interface RawCandidatesResult {
+  candidates: Candidate[]
+  placeRefusal: PlaceRefusal | null
 }
 
 /**
@@ -900,43 +1127,43 @@ function craftPlanStepCandidate(
   options: CandidateOptions,
   op: CraftOp,
   focusItem: string,
-): Candidate | null {
+): CraftStep {
   if (op.type === 'craft') {
     const table = op.requiresTable ? state.craftingTables.find(isSensedStation) ?? null : null
-    if (op.requiresTable && table === null) return null
+    if (op.requiresTable && table === null) return { candidate: null, refusal: null }
     const where = table === null ? 'inventory 2x2' : `at crafting_table (${table.x},${table.y},${table.z})`
     return {
-      id: `CRAFT:${op.item}`,
-      kind: 'CRAFT',
-      label: `${describeCraftOp(op)} ${where}, ${focusItem} subgoal`,
-      targetName: op.item,
-      target: table,
-      targetEntityId: null,
-      itemName: op.item,
-      requiresTool: false,
-      toolName: null,
-      inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
-      hasStandableAdjacent: true,
-      meta: {
-        tick: state.tick,
-        craftItem: op.item,
-        craftCount: op.count,
-        requiresTable: op.requiresTable,
+      candidate: {
+        id: `CRAFT:${op.item}`,
+        kind: 'CRAFT',
+        label: `${describeCraftOp(op)} ${where}, ${focusItem} subgoal`,
+        targetName: op.item,
+        target: table,
+        targetEntityId: null,
+        itemName: op.item,
+        requiresTool: false,
+        toolName: null,
+        inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          craftItem: op.item,
+          craftCount: op.count,
+          requiresTable: op.requiresTable,
+        },
       },
+      refusal: null,
     }
   }
 
-  const failed = state.signals.failedCandidates
-  const spot =
-    state.placementSpots.find(
-      (candidate) =>
-        (failed[`PLACE:${op.item}:${blockId('p', candidate)}`] ?? 0) <
-        (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
-    ) ??
-    state.placementSpots[0] ??
-    null
-  if (spot === null) return null
-  return placeStationCandidate(state, options, op.item, spot, `craft ${focusItem}`)
+  const placement = heldStationPlacement(state, options, op.item, `craft ${focusItem}`)
+  if (placement.spot !== null) {
+    return {
+      candidate: placeStationCandidate(state, options, op.item, placement.spot, `craft ${focusItem}`),
+      refusal: null,
+    }
+  }
+  return { candidate: placement.alternative, refusal: placement.refusal }
 }
 
 /**
@@ -956,7 +1183,7 @@ export function selfContainedCraftCandidates(
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, sensedCraftingTableAvailable(state, options, focusItem))
   if (plan.op === null) return []
   const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
-  return step === null ? [] : [step]
+  return step.candidate === null ? [] : [step.candidate]
 }
 
 /**
@@ -1158,30 +1385,40 @@ function planRequiresTable(
  *   (b) walk to a remembered table the move-failure blacklist has not excluded;
  *   (c) else nothing - when the materials are held, `planNextCraftStep` already
  *       returns the 2x2 craft-table step and the caller falls through to it.
+ *
+ * `heldStationPlacement` is the same mechanical solve the place branch uses, so
+ * a held table the known terrain can host is placed even when the strict live
+ * spot scan is empty; a genuine geometry dead end is refused with its typed
+ * reason and the grounded alternative instead of collapsing to nothing.
  */
 function tableAcquisitionCandidates(
   state: WorldState,
   options: CandidateOptions,
   focusItem: string,
-): Candidate[] {
-  const failed = state.signals.failedCandidates
-  if ((state.inventory.counts.crafting_table ?? 0) > 0 && state.placementSpots.length > 0) {
-    const spot =
-      state.placementSpots.find(
-        (candidate) =>
-          (failed[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
-          (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
-      ) ?? state.placementSpots[0]
-    if (spot !== undefined) {
-      return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
-    }
-  }
+): CraftCandidatesResult {
+  const holdsTable = (state.inventory.counts.crafting_table ?? 0) > 0
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
   const remembered = knownStations(state, 'crafting_table').find(
     (station) => !unreachableStations.has(knownStationKey(station)),
   )
-  if (remembered !== undefined) return [knownStationRetrievalCandidate(state, options, remembered)]
-  return []
+  if (holdsTable) {
+    const placement = heldStationPlacement(state, options, 'crafting_table', `craft ${focusItem}`)
+    if (placement.spot !== null) {
+      return {
+        candidates: [placeStationCandidate(state, options, 'crafting_table', placement.spot, `craft ${focusItem}`)],
+        placeRefusal: null,
+      }
+    }
+    if (remembered !== undefined) {
+      return { candidates: [knownStationRetrievalCandidate(state, options, remembered)], placeRefusal: null }
+    }
+    return {
+      candidates: placement.alternative === null ? [] : [placement.alternative],
+      placeRefusal: placement.refusal,
+    }
+  }
+  if (remembered !== undefined) return { candidates: [knownStationRetrievalCandidate(state, options, remembered)], placeRefusal: null }
+  return { candidates: [], placeRefusal: null }
 }
 
 /**
@@ -1835,6 +2072,7 @@ export function applyReachabilityGate(
   raw: readonly Candidate[],
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
+  placeRefusal: PlaceRefusal | null = null,
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -1893,7 +2131,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld }
+  return { candidates, reachability, withheld, placeRefusal }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
@@ -2126,6 +2364,10 @@ function capabilityAcquisitionCandidates(
 ): Candidate[] {
   const out: Candidate[] = []
   const seen = new Set<string>(existingIds)
+  // A candidate already withheld this cycle must never be re-emitted: the
+  // acquisition pass would re-evaluate the same id and double-record its
+  // refusal (issue: duplicated withheld work).
+  for (const entry of withheld) seen.add(entry.candidate.id)
   for (const entry of withheld) {
     for (const capability of entry.result.missingCapabilities) {
       let source: Candidate[] = []
@@ -2133,7 +2375,7 @@ function capabilityAcquisitionCandidates(
         source = headroomCandidates(state, options)
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
-        if (item !== null) source = craftCandidates(state, options, item)
+        if (item !== null) source = craftCandidates(state, options, item).candidates
       }
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue

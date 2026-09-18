@@ -13,6 +13,7 @@
     "movement-patch:check": "node scripts/apply-movement-patch.mjs --check",
     "move-failmem-test": "tsx test-move-failmem.mts",
     "reachability-test": "tsx test-reachability.mts",
+    "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
     "pit-escape-test": "tsx test-pit-escape.mts",
     "pillar-jump-test": "tsx test-pillar-jump.mts",
