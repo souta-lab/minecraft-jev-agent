@@ -29,7 +29,8 @@ import { findInventoryFuel, matchesResourceClass, resourceMatches } from './reso
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { planVerticalApproach } from './verticalPlan.ts'
+import { selectPlaceableBlock, planVerticalApproach } from './verticalPlan.ts'
+import type { VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
@@ -1163,6 +1164,77 @@ function stationRetrievalPurpose(state: WorldState): string {
   return 'craft a furnace'
 }
 
+/**
+ * Flatten a vertical plan into candidate meta, mirroring the executor's
+ * `vertical=reuse|staircase|staircase-up|pillar` contract.
+ */
+function verticalPlanMeta(
+  vertical: VerticalPlan | null,
+  fallbackFromY: number,
+  fallbackToY: number,
+): Record<string, string | number | boolean> {
+  const meta: Record<string, string | number | boolean> = {
+    vertical: vertical?.kind ?? 'none',
+    verticalFromY: vertical?.fromY ?? fallbackFromY,
+    verticalToY: vertical?.toY ?? fallbackToY,
+  }
+  switch (vertical?.kind) {
+    case undefined:
+      return meta
+    case 'reuse':
+      meta.tunnelX = vertical.tunnel.x
+      meta.tunnelY = vertical.tunnel.y
+      meta.tunnelZ = vertical.tunnel.z
+      return meta
+    case 'staircase':
+      meta.stairDir = vertical.dir
+      meta.stairFromY = vertical.fromY
+      meta.stairToY = vertical.toY
+      meta.stairDigX = vertical.dig.x
+      meta.stairDigY = vertical.dig.y
+      meta.stairDigZ = vertical.dig.z
+      meta.stairStepX = vertical.step.x
+      meta.stairStepY = vertical.step.y
+      meta.stairStepZ = vertical.step.z
+      meta.stairBlockName = vertical.digName ?? 'unknown'
+      return meta
+    case 'staircase-up':
+      meta.upDir = vertical.dir
+      meta.upFromY = vertical.fromY
+      meta.upToY = vertical.toY
+      meta.upDigX = vertical.dig.x
+      meta.upDigY = vertical.dig.y
+      meta.upDigZ = vertical.dig.z
+      meta.upStepX = vertical.step.x
+      meta.upStepY = vertical.step.y
+      meta.upStepZ = vertical.step.z
+      meta.upBlockName = vertical.digName ?? 'unknown'
+      return meta
+    case 'pillar':
+      meta.pillarFromY = vertical.fromY
+      meta.pillarToY = vertical.toY
+      meta.pillarSteps = vertical.steps
+      meta.pillarPlaceName = vertical.placeName
+      meta.pillarPlaceCount = vertical.placeCount
+      return meta
+  }
+}
+
+function verticalPlanLabel(vertical: VerticalPlan | null): string {
+  switch (vertical?.kind) {
+    case undefined:
+      return ''
+    case 'reuse':
+      return ` (reuse the tunnel at ${vertical.tunnel.x},${vertical.tunnel.y},${vertical.tunnel.z})`
+    case 'staircase':
+      return ` (dig a staircase down from y=${vertical.fromY} toward y=${vertical.toY})`
+    case 'staircase-up':
+      return ` (cut a staircase up at (${vertical.dig.x},${vertical.dig.y},${vertical.dig.z}) from y=${vertical.fromY} toward y=${vertical.toY})`
+    case 'pillar':
+      return ` (pillar up ${vertical.steps} block(s) from y=${vertical.fromY} toward y=${vertical.toY} with ${vertical.placeName})`
+  }
+}
+
 function knownStationRetrievalCandidate(
   state: WorldState,
   options: CandidateOptions,
@@ -1176,16 +1248,14 @@ function knownStationRetrievalCandidate(
     target: known.position,
     tunnel: state.signals.lastTunnel,
     descent: state.descent,
+    stepCuts: state.stepCuts,
+    placeable: selectPlaceableBlock(state.inventory.counts),
   })
-  const verticalMeta: Record<string, string | number | boolean> = {
-    vertical: vertical?.kind ?? 'none',
-    verticalFromY: vertical?.fromY ?? Math.floor(state.self.position.y),
-    verticalToY: vertical?.toY ?? known.position.y,
-  }
+  const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
   return {
     id: `RETRIEVE:known:station:${known.name}:${blockId('b', known.position)}`,
     kind: 'RETRIEVE',
-    label: `return to the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) to ${purpose}, ${distance(known.position, state.self.position)}m away`,
+    label: `return to the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) to ${purpose}, ${distance(known.position, state.self.position)}m away${verticalPlanLabel(vertical)}`,
     targetName: known.name,
     target: known.position,
     targetEntityId: null,
@@ -1380,35 +1450,11 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
       target: known.position,
       tunnel: state.signals.lastTunnel,
       descent: state.descent,
+      stepCuts: state.stepCuts,
+      placeable: selectPlaceableBlock(state.inventory.counts),
     })
-    const verticalMeta: Record<string, string | number | boolean> = {
-      vertical: vertical?.kind ?? 'none',
-      verticalFromY: vertical?.fromY ?? Math.floor(state.self.position.y),
-      verticalToY: vertical?.toY ?? known.position.y,
-    }
-    if (vertical?.kind === 'reuse') {
-      verticalMeta.tunnelX = vertical.tunnel.x
-      verticalMeta.tunnelY = vertical.tunnel.y
-      verticalMeta.tunnelZ = vertical.tunnel.z
-    }
-    if (vertical?.kind === 'staircase') {
-      verticalMeta.stairDir = vertical.dir
-      verticalMeta.stairFromY = vertical.fromY
-      verticalMeta.stairToY = vertical.toY
-      verticalMeta.stairDigX = vertical.dig.x
-      verticalMeta.stairDigY = vertical.dig.y
-      verticalMeta.stairDigZ = vertical.dig.z
-      verticalMeta.stairStepX = vertical.step.x
-      verticalMeta.stairStepY = vertical.step.y
-      verticalMeta.stairStepZ = vertical.step.z
-      verticalMeta.stairBlockName = vertical.digName ?? 'unknown'
-    }
-    const verticalLabel =
-      vertical?.kind === 'reuse'
-        ? ` (reuse the tunnel at ${vertical.tunnel.x},${vertical.tunnel.y},${vertical.tunnel.z})`
-        : vertical?.kind === 'staircase'
-          ? ` (dig a staircase down from y=${vertical.fromY} toward y=${vertical.toY})`
-          : ''
+    const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
+    const verticalLabel = verticalPlanLabel(vertical)
     return [
       {
         id,

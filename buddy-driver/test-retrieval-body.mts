@@ -10,7 +10,7 @@
 //  - known-resource retrieval candidates are grounded and visible blocks win.
 import { defaultCandidateOptions, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
-import type { BlockState, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
+import type { BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 import { emptyGoalQueueState } from '../jev-agent/src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import { mergeKnownResources } from './generation-entry.ts'
@@ -129,6 +129,7 @@ function worldState(overrides: {
   inventory?: InventoryState
   blocks?: BlockState[]
   knownResources?: KnownResource[]
+  stepCuts?: StepCut[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -145,6 +146,7 @@ function worldState(overrides: {
     goal: overrides.goal ?? goal({}),
     goalQueue: overrides.goalQueue,
     recentEvents: [],
+    stepCuts: overrides.stepCuts,
     signals: {
       consecutiveFailures: 0,
       lastFailureCode: null,
@@ -320,6 +322,56 @@ addCase('a remembered log within proof distance but absent from the scan stays d
   })
   const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
   return { pass: retrieve === undefined, detail: retrieve === undefined ? 'suppressed (depleted)' : `${retrieve.id}` }
+})
+
+addCase('a remembered ore far above the resident grounds a bounded pillar-up retrieval (#45 up)', () => {
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 61, z: 0 } }
+  const state = worldState({
+    position: { x: 39, y: 31, z: 33 },
+    goalQueue: queueWith(queuedGoal({})),
+    knownResources: [known],
+    inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
+  })
+  const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
+  const steps = retrieve?.meta.pillarSteps
+  const pass =
+    retrieve !== undefined &&
+    retrieve.meta.vertical === 'pillar' &&
+    retrieve.meta.pillarPlaceName === 'cobblestone' &&
+    typeof steps === 'number' &&
+    steps >= 1 &&
+    steps <= 8 &&
+    retrieve.meta.verticalToY === 31 + steps
+  return { pass, detail: retrieve === undefined ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('a safe step-cut above the resident grounds an up-staircase retrieval (#45 up)', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+    step: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+    name: 'cobblestone',
+    safe: true,
+    reason: 'safe',
+  }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 60, y: 55, z: 33 } }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({})),
+    knownResources: [known],
+    inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
+    stepCuts: [cut],
+  })
+  const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
+  const pass =
+    retrieve !== undefined &&
+    retrieve.meta.vertical === 'staircase-up' &&
+    retrieve.meta.upDir === 'E' &&
+    retrieve.meta.upDigY === 32
+  return { pass, detail: retrieve === undefined ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
 })
 
 let failures = 0

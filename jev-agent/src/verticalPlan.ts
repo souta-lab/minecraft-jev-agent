@@ -14,11 +14,50 @@
 // It also carries the pure progress assertion used by the controller: while a
 // RETRIEVE is active, if the distance to the target does not decrease over N
 // ticks the caller logs `RETRIEVE_STALLED` and escalates instead of WAITing.
-import type { DescentOption, Vec3Json } from './state.ts'
+import type { DescentOption, StepCut, Vec3Json } from './state.ts'
 import { distance } from './state.ts'
 
 /** A vertical gap larger than this (blocks) needs an explicit vertical plan. */
 export const VERTICAL_GAP = 1
+
+/**
+ * Upper bound on one PILLAR_UP action. The executor climbs at most this many
+ * one-block placements, then the next decision re-plans from the new Y, so a
+ * 30-block climb is a bounded sequence of actions instead of one unbounded one.
+ */
+export const PILLAR_UP_STEP_CAP = 8
+
+/**
+ * Blocks that may be placed under the feet for a PILLAR_UP, in preference order.
+ * The first name with a positive inventory count wins, so the choice is
+ * deterministic and only solid, non-hazard building blocks are ever used.
+ */
+export const PILLAR_PLACE_PRIORITY: readonly string[] = [
+  'cobblestone',
+  'stone',
+  'deepslate',
+  'andesite',
+  'diorite',
+  'granite',
+  'dirt',
+  'netherrack',
+  'oak_planks',
+  'spruce_planks',
+]
+
+export interface PlaceableBlock {
+  name: string
+  count: number
+}
+
+/** Pick the held pillar block from inventory counts; null when none is usable. */
+export function selectPlaceableBlock(counts: Readonly<Record<string, number>>): PlaceableBlock | null {
+  for (const name of PILLAR_PLACE_PRIORITY) {
+    const count = counts[name] ?? 0
+    if (count > 0) return { name, count }
+  }
+  return null
+}
 
 /** Default progress-assertion window (ticks) before a RETRIEVE is called stalled. */
 export const RETRIEVAL_STALL_TICKS_DEFAULT = 40
@@ -54,6 +93,29 @@ export type VerticalPlan =
       harvestTool: DescentOption['digHarvestTool']
       harvestTier: DescentOption['digHarvestTier']
     }
+  | {
+      /** the up mirror: cut the upper block of a 2-block face, then step up */
+      kind: 'staircase-up'
+      dir: StepCut['dir']
+      fromY: number
+      toY: number
+      /** block above-and-ahead to dig (the sensor-validated step cut) */
+      dig: Vec3Json
+      /** feet cell the bot climbs into after the dig */
+      step: Vec3Json
+      digName: string | null
+    }
+  | {
+      /** place a held block under the airborne feet and land on it, one at a time */
+      kind: 'pillar'
+      fromY: number
+      /** the Y this action climbs to: min(target, fromY + steps) */
+      toY: number
+      /** bounded one-block placements this action will attempt (>= 1) */
+      steps: number
+      placeName: string
+      placeCount: number
+    }
 
 export interface VerticalInput {
   /** bot feet Y (fractional is fine; it is floored) */
@@ -62,6 +124,10 @@ export interface VerticalInput {
   target: Vec3Json
   tunnel: Vec3Json | null | undefined
   descent: readonly DescentOption[] | undefined
+  /** sensor step cuts (`state.stepCuts`), the grounded up-staircase primitive */
+  stepCuts?: readonly StepCut[] | null
+  /** held pillar block; when absent an upward gap has no grounded plan */
+  placeable?: PlaceableBlock | null
 }
 
 function withinTunnelReach(tunnel: Vec3Json, targetY: number, fromY: number, dy: number): boolean {
@@ -69,26 +135,79 @@ function withinTunnelReach(tunnel: Vec3Json, targetY: number, fromY: number, dy:
   return tunnel.y > fromY && tunnel.y <= targetY + 1
 }
 
+function selectUpStep(input: VerticalInput, fromY: number, targetY: number): VerticalPlan | null {
+  const targetSignX = Math.sign(input.target.x - input.selfPosition.x)
+  const targetSignZ = Math.sign(input.target.z - input.selfPosition.z)
+  let best: StepCut | null = null
+  let bestScore = Number.POSITIVE_INFINITY
+  for (const cut of input.stepCuts ?? []) {
+    if (!cut.safe) continue
+    // The up mirror of the down staircase cuts the block directly above the
+    // landing step; a higher cut is a 2-block jump and is not grounded.
+    if (cut.cut.y !== fromY + 1) continue
+    const alignment = cut.dx * targetSignX + cut.dz * targetSignZ
+    const score = (alignment > 0 ? 0 : 10) + distance(cut.step, input.selfPosition) * 0.1
+    if (score < bestScore) {
+      bestScore = score
+      best = cut
+    }
+  }
+  if (best === null) return null
+  return {
+    kind: 'staircase-up',
+    dir: best.dir,
+    fromY,
+    toY: targetY,
+    dig: best.cut,
+    step: best.step,
+    digName: best.name,
+  }
+}
+
+function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: number): VerticalPlan | null {
+  const upStep = selectUpStep(input, fromY, targetY)
+  if (upStep !== null) return upStep
+  const placeable = input.placeable ?? null
+  if (placeable === null || placeable.count < 1) return null
+  const steps = Math.min(dy, PILLAR_UP_STEP_CAP)
+  if (steps < 1) return null
+  return {
+    kind: 'pillar',
+    fromY,
+    toY: fromY + steps,
+    steps,
+    placeName: placeable.name,
+    placeCount: placeable.count,
+  }
+}
+
 /**
  * Decide the vertical leg of a retrieval. Pure: same input -> same plan.
  * Returns null when the target is level (horizontal path handles it) or when an
- * upward gap has no safe dig-up primitive yet (the caller falls back to
- * explorer/climb candidates and the stall assertion).
+ * upward gap has neither a safe step cut nor a held pillar block, in which case
+ * the caller falls back to explorer/climb candidates and the stall assertion.
  */
 export function planVerticalApproach(input: VerticalInput): VerticalPlan | null {
   const fromY = Math.floor(input.selfFeetY)
   const targetY = input.target.y
   const dy = targetY - fromY
-  if (Math.abs(dy) <= VERTICAL_GAP) return null
+  if (dy === 0) return null
 
   const tunnel = input.tunnel ?? null
+
+  if (dy > 0) {
+    if (tunnel !== null && withinTunnelReach(tunnel, targetY, fromY, dy)) {
+      return { kind: 'reuse', tunnel, fromY, toY: targetY }
+    }
+    return planUpward(input, fromY, targetY, dy)
+  }
+
+  // A one-block drop needs no vertical leg (the horizontal path steps down it).
+  if (Math.abs(dy) <= VERTICAL_GAP) return null
+
   if (tunnel !== null && withinTunnelReach(tunnel, targetY, fromY, dy)) {
     return { kind: 'reuse', tunnel, fromY, toY: targetY }
   }
-
-  // Only a downward staircase is mechanically supported (dig the floor of the
-  // adjacent cell and drop in). An upward gap relies on step/climb candidates.
-  if (dy >= 0) return null
 
   const steps = (input.descent ?? []).filter(
     (step) => step.mode === 'down' && step.safe && step.diggable === true,
