@@ -10,7 +10,7 @@ import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { guardCandidate } from './src/policy.ts'
 import type { GuardContext } from './src/policy.ts'
-import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StationEntry, Vec3Json, WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -105,7 +105,7 @@ function worldState(overrides: {
   inventory?: InventoryState
   blocks?: BlockState[]
   standable?: Vec3Json[]
-  furnaces?: Vec3Json[]
+  furnaces?: StationEntry[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -332,7 +332,7 @@ addCase('a non-oak held log is accepted as charcoal fuel instead of waiting', ()
     goalQueue: queueWith(smeltGoal),
     signals: signals(),
     inventory: inventory({ spruce_log: 2, spruce_planks: 1 }),
-    furnaces: [{ x: 1, y: 60, z: 0 }],
+    furnaces: [{ x: 1, y: 60, z: 0, source: 'sensed' }],
   })
   const smelt = generateCandidates(state, defaultCandidateOptions).find((candidate) => candidate.kind === 'SMELT')
   const fuel = smelt === undefined ? '' : String(smelt.meta.fuelItem)

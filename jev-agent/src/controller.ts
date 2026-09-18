@@ -58,7 +58,7 @@ import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
+import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
@@ -476,7 +476,7 @@ interface AbandonVerdict {
   planId: string | null
 }
 
-const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
+export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'JEV_HEADS',
   'BETA_SHADOW',
   'CAUSAL',
@@ -526,7 +526,42 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ACTION_UNVERIFIED',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
+  'CANDIDATE_STARVATION',
 ])
+
+/**
+ * Starvation marker: the candidate set offered to the policy has no productive
+ * option, so the only possible answers are WAIT/ESCALATE. `NO_PRODUCTIVE_CANDIDATE`
+ * already warned about this, but it was not a mirrored marker, so it never
+ * surfaced as the binding condition. Pure and exported so the contract is
+ * unit-testable without a bot.
+ */
+export function formatCandidateStarvation(presented: number, goal: string, blockedBy: string): string {
+  return `CANDIDATE_STARVATION presented=${presented} productive=0 goal="${goal}" blockedBy=${blockedBy}`
+}
+
+export function candidateStarvationLine(
+  candidates: readonly Candidate[],
+  goal: string,
+  goalComplete: boolean,
+  blockedBy: string,
+): string | null {
+  if (goalComplete) return null
+  const productive = candidates.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  return productive ? null : formatCandidateStarvation(candidates.length, goal, blockedBy)
+}
+
+/** Why the offered set is starved: withheld capabilities, then reachability reasons, then the last failure code. */
+export function candidateStarvationBlockedBy(
+  withheld: readonly CandidateReachability[],
+  lastFailureCode: string | null,
+): string {
+  const capabilities = [...new Set(withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)))]
+  if (capabilities.length > 0) return capabilities.join('|')
+  const reasons = [...new Set(withheld.map((entry) => entry.result.reason))]
+  if (reasons.length > 0) return reasons.join('|')
+  return lastFailureCode ?? 'no_productive_candidate'
+}
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
  * while still writing the full run JSONL. Lets the acceptance harness observe the
@@ -1116,13 +1151,14 @@ export class JevController {
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
+          rememberedStations: this.options.knownResources ?? [],
         },
         sensorOptions(this.options),
       )
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
-      this.lastPlacedFurnaceCount = state.furnaces?.length ?? 0
+      this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -1183,6 +1219,27 @@ export class JevController {
         else {
           this.noProductiveKey = key
           this.noProductiveRepeats = 1
+        }
+        const blockedBy = candidateStarvationBlockedBy(grounded.withheld, this.signals.lastFailureCode)
+        const starvation = candidateStarvationLine(
+          candidates,
+          this.currentGoalKey(),
+          state.goal.complete,
+          blockedBy,
+        )
+        if (starvation !== null) {
+          this.logger.warn(
+            'agent',
+            starvation,
+            {
+              presented: candidates.length,
+              productive: 0,
+              goal: this.currentGoalKey(),
+              blockedBy,
+              repeat: this.noProductiveRepeats,
+            },
+            this.tickCounter,
+          )
         }
         this.logger.warn(
           'agent',
@@ -1245,6 +1302,7 @@ export class JevController {
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
+          rememberedStations: this.options.knownResources ?? [],
         },
         sensorOptions(this.options),
       )
@@ -3361,7 +3419,7 @@ export class JevController {
     // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
     // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
     // stricter targetItem check here would let a retrieval candidate through unfiltered (#78).
-    if (prereqSubjectForGoal(goal) === null || (state.furnaces?.length ?? 0) > 0) {
+    if (prereqSubjectForGoal(goal) === null || (state.furnaces ?? []).some(isSensedStation)) {
       this.resetFurnacePrereq()
       return [...candidates]
     }
