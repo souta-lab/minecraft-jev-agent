@@ -12,6 +12,7 @@ import {
   MoveFailMemory,
   moveFailureKey,
 } from './src/moveFailMemory.ts'
+import { guardMoveFailureReason } from './src/controller.ts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -56,6 +57,17 @@ check(
   'instrumentation line has the required shape',
   formatMoveFailMem(moveFailureKey(OVERWORLD, pos), third.entry.attempts, 'stuck') === 'MOVE_FAILMEM key=overworld:39,10,34 attempts=3 reason=stuck',
   formatMoveFailMem(moveFailureKey(OVERWORLD, pos), third.entry.attempts, 'stuck'),
+)
+check(
+  'a guard-level NO_PATH charges tracked movement as unreachable',
+  guardMoveFailureReason({ kind: 'MOVE' }, 'NO_PATH') === 'unreachable' &&
+    guardMoveFailureReason({ kind: 'RETRIEVE' }, 'NO_PATH') === 'unreachable',
+  `move=${guardMoveFailureReason({ kind: 'MOVE' }, 'NO_PATH')} retrieve=${guardMoveFailureReason({ kind: 'RETRIEVE' }, 'NO_PATH')}`,
+)
+check(
+  'a guard-level NO_PATH does not charge non-movement actions',
+  guardMoveFailureReason({ kind: 'MINE' }, 'NO_PATH') === null && guardMoveFailureReason({ kind: 'MOVE' }, 'OUT_OF_REACH') === null,
+  `mine=${guardMoveFailureReason({ kind: 'MINE' }, 'NO_PATH')} outOfReach=${guardMoveFailureReason({ kind: 'MOVE' }, 'OUT_OF_REACH')}`,
 )
 
 // (b) an oscillating position pair triggers OSCILLATION_DETECTED and breaks the loop ---
@@ -155,5 +167,5 @@ check(
   formatMoveTargetSkipped('overworld:39,10,34', 3, 30),
 )
 
-process.stdout.write(`\n${13 - failures}/13 move-failmem cases passed\n`)
+process.stdout.write(`\n${15 - failures}/15 move-failmem cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)

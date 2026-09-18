@@ -428,6 +428,15 @@ export function classifyMoveOutcome(verified: boolean, moved: number): MoveOutco
   return moved < 0.5 ? 'no-progress' : 'arrived'
 }
 
+/** A guard-level NO_PATH is a real movement failure, not merely a policy rejection. */
+export function guardMoveFailureReason(
+  candidate: Pick<Candidate, 'kind'> | undefined,
+  code: GuardCode,
+): MoveFailureReason | null {
+  if (candidate === undefined || !isTrackedMoveKind(candidate.kind)) return null
+  return code === 'NO_PATH' ? 'unreachable' : null
+}
+
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
 }
@@ -1512,7 +1521,12 @@ export class JevController {
       })
 
       if (!guarded.ok) {
-        this.onGuardReject(guarded, decision, record)
+        this.onGuardReject(
+          guarded,
+          decision,
+          record,
+          freshCandidates.find((candidate) => candidate.id === guarded.candidateId),
+        )
         return
       }
 
@@ -2021,6 +2035,7 @@ export class JevController {
     guarded: Extract<GuardResult, { ok: false }>,
     decision: JevResult,
     record: DecisionRecord,
+    candidate: Candidate | undefined,
   ): void {
     attachResult(record, {
       actionId: guarded.candidateId,
@@ -2055,6 +2070,8 @@ export class JevController {
     )
     this.recentEvents.push(`guard ${guarded.code} on ${guarded.candidateId}`)
     this.noteCandidateFailure(guarded.candidateId)
+    const movementFailure = guardMoveFailureReason(candidate, guarded.code)
+    if (candidate !== undefined && movementFailure !== null) this.recordMoveFailure(candidate, movementFailure)
     this.recordFailure(guarded.code, guarded.reason)
   }
 
