@@ -553,6 +553,12 @@ interface ControlWalkOptions {
    * outer nudge deadline still bounds the attempt (never a wedge).
    */
   ignoreFaceVeto?: boolean
+  /**
+   * Same-level bounded nudge: never jump and do not apply jump-headroom
+   * gating. The physics collision still owns whether the body can move; the
+   * caller supplies a tight arrival predicate and a short budget.
+   */
+  horizontalOnly?: boolean
 }
 
 export const defaultExecutorOptions: ExecutorOptions = {
@@ -1826,6 +1832,7 @@ export class Executor {
         signal,
         {
           directBearing: true,
+          horizontalOnly: true,
           budgetMs: PILLAR_RECENTER_BUDGET_MS,
           tolerance: 0.08,
           arrivedAt: atCenter,
@@ -1945,6 +1952,7 @@ export class Executor {
   ): Promise<boolean> {
     const pathfinder = this.bot.pathfinder
     if (pathfinder === undefined) return false
+    const horizontalOnly = options.horizontalOnly === true
     const anchor = options.anchor ?? null
     const reach = options.reach ?? this.options.reach
     const tolerance = options.tolerance ?? (options.range !== undefined ? Math.max(1, options.range) + 0.5 : 1.2)
@@ -2067,9 +2075,9 @@ export class Executor {
         // feet AND at the landing column. `Math.round(feet)` read one cell too
         // high and vetoed the 1-block escape at (21,63,-72): a canopy leaf sat at
         // feet+2 while the step itself was clear.
-        const currentHeadroom = this.hasJumpHeadroom()
+        const currentHeadroom = horizontalOnly ? true : this.hasJumpHeadroom()
         const landingHeadroom =
-          climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z).clear
+          !horizontalOnly && climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z).clear
         const jumpAllowed = landingHeadroom || currentHeadroom
 
         const standingStill = this.bot.entity.onGround === true && Date.now() - lastProgressAt > 250
@@ -2086,13 +2094,15 @@ export class Executor {
         const faceX = Math.floor(position.x + ux * FACE_PROBE_DIST)
         const faceZ = Math.floor(position.z + uz * FACE_PROBE_DIST)
         const faceAtFeet = this.solidSupportAt(faceX, Math.floor(position.y), faceZ)
-        const maneuver = planClimbManeuver({
-          climbDetected: climb !== null,
-          onGround: this.bot.entity.onGround === true,
-          pinned,
-          faceAtFeet,
-          standingStill,
-        })
+        const maneuver: ClimbManeuver = horizontalOnly
+          ? 'continue'
+          : planClimbManeuver({
+              climbDetected: climb !== null,
+              onGround: this.bot.entity.onGround === true,
+              pinned,
+              faceAtFeet,
+              standingStill,
+            })
         // Order matches the harness: a detected climb is attempted BEFORE any
         // recovery, because the in-loop replan alone exceeds the 250 ms
         // standing-still window and would otherwise hijack the pre-contact jump.
