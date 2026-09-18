@@ -36,6 +36,7 @@ import {
   formatPillarRefused,
   formatPillarRelocate,
   formatTunnelEntryRefused,
+  headroomAcrossFootprint,
   planReuseLeg,
   resolvePillarStep,
 } from './verticalPlan.ts'
@@ -255,6 +256,8 @@ const PLACE_VERIFY_SETTLE_MS = 500
 const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
+/** PILLAR_UP: bounded same-cell nudge away from an adjacent AABB blocker. */
+const PILLAR_RECENTER_BUDGET_MS = 1500
 /**
  * PILLAR_UP relocation budget: `PillarSearchPolicy.maxRelocations`. Two keeps
  * the action bounded while allowing one retry if the first open neighbour was
@@ -550,6 +553,14 @@ interface ControlWalkOptions {
    * outer nudge deadline still bounds the attempt (never a wedge).
    */
   ignoreFaceVeto?: boolean
+  /**
+   * Same-level bounded nudge: never jump and do not apply jump-headroom
+   * gating. The physics collision still owns whether the body can move; the
+   * caller supplies a tight arrival predicate and a short budget.
+   */
+  horizontalOnly?: boolean
+  /** Exact horizontal point for direct-bearing control, when a diagonal target is unsafe. */
+  bearingTarget?: { x: number; z: number }
 }
 
 export const defaultExecutorOptions: ExecutorOptions = {
@@ -1630,6 +1641,15 @@ export class Executor {
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
         const placeCell = { x: feet.x, y: pose.placeY, z: feet.z }
+        // Keep the launch geometry beside the failure evidence. A takeoff
+        // failure can be caused by a bad local footing interpretation, a
+        // body embedded in the feet cell, or a server correction; the marker
+        // alone cannot distinguish those cases. These reads are diagnostic
+        // only and are captured before the jump mutates the entity position.
+        const launchFeetBlock = this.currentBlockAt(feet)
+        const launchHeadBlock = this.currentBlockAt({ x: feet.x, y: feet.y + 1, z: feet.z })
+        const forcedTracker = forcedMoveTracker(this.bot)
+        const forcedBefore = forcedTracker.value
         // The jump -> apex -> place -> landing timing lives in pillarApex.ts so
         // every sub-step is injected and unit-testable without a server. The
         // old code placed on a `velocity.y <= 0.01` predicate (also true while
@@ -1653,12 +1673,35 @@ export class Executor {
         )
         this.ensureOwned(epoch, signal)
         if (!climb.ok) {
+          const endEntity = this.bot.entity as typeof this.bot.entity & {
+            isCollidedHorizontally?: boolean
+            isCollidedVertically?: boolean
+          }
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
             step: climb.fail.step,
             reason: climb.fail.reason,
             detail: climb.fail.detail ?? null,
+            launchY: beforeY,
+            supportY: pose.footingY,
+            placeY: pose.placeY,
+            landingY: pose.landingY,
+            supportName: footing.name,
+            launchFeetBlock: launchFeetBlock?.name ?? null,
+            launchHeadBlock: launchHeadBlock?.name ?? null,
+            launchAboveHeadBlock: this.currentBlockAt({ x: feet.x, y: feet.y + 2, z: feet.z })?.name ?? null,
+            endPosition: {
+              x: endEntity.position.x,
+              y: endEntity.position.y,
+              z: endEntity.position.z,
+            },
+            endOnGround: endEntity.onGround,
+            endVelocityY: endEntity.velocity.y,
+            endCollidedHorizontally: endEntity.isCollidedHorizontally ?? null,
+            endCollidedVertically: endEntity.isCollidedVertically ?? null,
+            endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
+            forcedRepositions: forcedTracker.value - forcedBefore,
           })
           break
         }
@@ -1695,12 +1738,26 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<HeadroomClearOutcome> {
     let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
+    let recenterAttempted = false
     for (let attempt = 0; attempt < PILLAR_SEARCH_POLICY.headroomAttempts; attempt += 1) {
       const position = this.bot.entity.position
-      if (this.headroomAt(column.x, position.y, column.z)) return { cleared: true }
-      const feetY = Math.floor(position.y + 1e-4)
-      const blockingCell = this.blockingHeadroomCell(column.x, feetY, column.z)
+      const headroom = this.headroomAt(column.x, position.y, column.z, position)
+      if (headroom.clear) return { cleared: true }
+      const blockingCell = headroom.blocker
       if (blockingCell === null) continue
+      // A fractional body can touch an adjacent cell even when the canonical
+      // centre of this same column has clear headroom. Re-centre once before
+      // declaring the column blocked; this is a bounded horizontal nudge and
+      // never digs or changes the selected pillar column.
+      const centeredHeadroom = this.headroomAt(column.x, position.y, column.z)
+      const adjacentBlocker = blockingCell.x !== column.x || blockingCell.z !== column.z
+      if (!recenterAttempted && adjacentBlocker && centeredHeadroom.clear) {
+        recenterAttempted = true
+        if (await this.recenterPillarColumn(candidate, column, epoch, signal)) {
+          this.ensureOwned(epoch, signal)
+          continue
+        }
+      }
       const block = this.currentBlockAt(blockingCell)
       if (block === null || block.boundingBox === 'empty') continue
       const live = this.resolveLiveDigTool(block)
@@ -1742,18 +1799,87 @@ export class Executor {
       }
       this.ensureOwned(epoch, signal)
     }
-    if (this.headroomAt(column.x, this.bot.entity.position.y, column.z)) return { cleared: true }
+    const headroom = this.headroomAt(column.x, this.bot.entity.position.y, column.z, this.bot.entity.position)
+    if (headroom.clear) return { cleared: true }
     return last
   }
 
-  /** Lowest non-passable cell above the feet: the obstacle the jump headroom hits. */
-  private blockingHeadroomCell(x: number, feetY: number, z: number): Vec3Json | null {
-    for (const y of [feetY + 1, feetY + 2]) {
-      const block = this.currentBlockAt({ x, y, z })
-      if (block === null || block.boundingBox === 'empty') continue
-      return { x, y, z }
+  /**
+   * Move to the centre of the current grounded cell when only a fractional
+   * AABB overlap blocks headroom. The custom arrival predicate is intentionally
+   * tighter than normal path arrival so a same-cell no-op cannot be reported
+   * as a successful recenter. The two axis-aligned legs avoid asking the
+   * collision resolver to escape a diagonal corner overlap in one step.
+   */
+  private async recenterPillarColumn(
+    candidate: Candidate,
+    column: { x: number; z: number },
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const origin = this.bot.entity.position.clone()
+    const center = { x: column.x + 0.5, z: column.z + 0.5 }
+    const atCenter = (): boolean => {
+      const position = this.bot.entity.position
+      return (
+        Math.floor(position.y + 1e-4) === Math.floor(origin.y + 1e-4) &&
+        Math.hypot(position.x - center.x, position.z - center.z) <= 0.08
+      )
     }
-    return null
+    if (atCenter()) return true
+    this.setPhase(candidate, epoch, 'recentering-pillar-column')
+    const floorY = Math.floor(origin.y + 1e-4)
+    const deadline = Date.now() + PILLAR_RECENTER_BUDGET_MS
+    const xFirst = Math.abs(center.x - origin.x) >= Math.abs(center.z - origin.z)
+    const legs = xFirst
+      ? [
+          { x: center.x, z: origin.z },
+          center,
+        ]
+      : [
+          { x: origin.x, z: center.z },
+          center,
+        ]
+    const atPoint = (point: { x: number; z: number }): boolean => {
+      const position = this.bot.entity.position
+      return Math.floor(position.y + 1e-4) === floorY && Math.hypot(position.x - point.x, position.z - point.z) <= 0.08
+    }
+    try {
+      for (const point of legs) {
+        if (atPoint(point)) continue
+        const budgetMs = deadline - Date.now()
+        if (budgetMs <= 0) break
+        await this.walkByControls(
+          { x: column.x, y: floorY, z: column.z },
+          epoch,
+          signal,
+          {
+            directBearing: true,
+            horizontalOnly: true,
+            bearingTarget: point,
+            budgetMs,
+            tolerance: 0.08,
+            arrivedAt: () => atPoint(point),
+          },
+        )
+      }
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.info('agent', `PILLAR_RECENTER failed reason=${error instanceof Error ? error.message : String(error)}`, {
+        actionId: candidate.id,
+        from: { x: origin.x, y: origin.y, z: origin.z },
+        to: { x: center.x, y: origin.y, z: center.z },
+      })
+      return false
+    }
+    const position = this.bot.entity.position
+    const ok = atCenter()
+    this.logger.info('agent', `PILLAR_RECENTER from=${origin.x},${origin.y},${origin.z} to=${position.x},${position.y},${position.z} ok=${ok}`, {
+      actionId: candidate.id,
+      column,
+      center,
+    })
+    return ok
   }
 
   /**
@@ -1851,6 +1977,8 @@ export class Executor {
   ): Promise<boolean> {
     const pathfinder = this.bot.pathfinder
     if (pathfinder === undefined) return false
+    const horizontalOnly = options.horizontalOnly === true
+    const bearingTarget = options.bearingTarget ?? null
     const anchor = options.anchor ?? null
     const reach = options.reach ?? this.options.reach
     const tolerance = options.tolerance ?? (options.range !== undefined ? Math.max(1, options.range) + 0.5 : 1.2)
@@ -1946,8 +2074,8 @@ export class Executor {
           break
         }
         const node = plan[index] ?? target
-        const dx = node.x + 0.5 - position.x
-        const dz = node.z + 0.5 - position.z
+        const dx = (bearingTarget?.x ?? node.x + 0.5) - position.x
+        const dz = (bearingTarget?.z ?? node.z + 0.5) - position.z
         const horizontal = Math.hypot(dx, dz)
         const ux = dx / (horizontal || 1)
         const uz = dz / (horizontal || 1)
@@ -1973,9 +2101,9 @@ export class Executor {
         // feet AND at the landing column. `Math.round(feet)` read one cell too
         // high and vetoed the 1-block escape at (21,63,-72): a canopy leaf sat at
         // feet+2 while the step itself was clear.
-        const currentHeadroom = this.hasJumpHeadroom()
+        const currentHeadroom = horizontalOnly ? true : this.hasJumpHeadroom()
         const landingHeadroom =
-          climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z)
+          !horizontalOnly && climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z).clear
         const jumpAllowed = landingHeadroom || currentHeadroom
 
         const standingStill = this.bot.entity.onGround === true && Date.now() - lastProgressAt > 250
@@ -1992,13 +2120,15 @@ export class Executor {
         const faceX = Math.floor(position.x + ux * FACE_PROBE_DIST)
         const faceZ = Math.floor(position.z + uz * FACE_PROBE_DIST)
         const faceAtFeet = this.solidSupportAt(faceX, Math.floor(position.y), faceZ)
-        const maneuver = planClimbManeuver({
-          climbDetected: climb !== null,
-          onGround: this.bot.entity.onGround === true,
-          pinned,
-          faceAtFeet,
-          standingStill,
-        })
+        const maneuver: ClimbManeuver = horizontalOnly
+          ? 'continue'
+          : planClimbManeuver({
+              climbDetected: climb !== null,
+              onGround: this.bot.entity.onGround === true,
+              pinned,
+              faceAtFeet,
+              standingStill,
+            })
         // Order matches the harness: a detected climb is attempted BEFORE any
         // recovery, because the in-loop replan alone exceeds the 250 ms
         // standing-still window and would otherwise hijack the pre-contact jump.
@@ -3160,14 +3290,24 @@ export class Executor {
    * `feetY` is the standing level, so `Math.floor` identifies the feet block;
    * `Math.round` read one cell too high and rejected valid 1-block climbs.
    */
-  private headroomAt(x: number, feetY: number, z: number): boolean {
-    const feet = Math.floor(feetY + 1e-4)
-    return headroomSufficient(this.passableAt(x, feet + 1, z), this.passableAt(x, feet + 2, z))
+  private headroomAt(
+    x: number,
+    feetY: number,
+    z: number,
+    center: { x: number; z: number } = { x: x + 0.5, z: z + 0.5 },
+  ): { clear: boolean; blocker: Vec3Json | null } {
+    const halfWidth = this.bot.entity.width > 0 ? this.bot.entity.width / 2 : 0.3
+    return headroomAcrossFootprint({
+      center,
+      feetY,
+      halfWidth,
+      isPassable: (cellX, cellY, cellZ) => this.passableAt(cellX, cellY, cellZ),
+    })
   }
 
   private hasJumpHeadroom(): boolean {
     const position = this.bot.entity.position
-    return this.headroomAt(Math.floor(position.x), position.y, Math.floor(position.z))
+    return this.headroomAt(Math.floor(position.x), position.y, Math.floor(position.z), position).clear
   }
 
   private solidSupportAt(x: number, y: number, z: number): boolean {
