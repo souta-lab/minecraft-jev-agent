@@ -89,7 +89,7 @@ export interface QueuedGoal {
   targetItem: string | null
   requiredCount: number
   /**
-   * Predicate goal (#41): success is `position.y <= targetY`, not an item count.
+   * Predicate goal (#41/#136): success is a code-owned level predicate, not an item count alone.
    * Absent for item-counted goals and for ledgers written before #41.
    */
   targetY?: number | null
@@ -121,7 +121,7 @@ export interface PlannedGoal {
   description: string
   targetItem?: string | null
   requiredCount?: number
-  /** Predicate goal (#41): complete when `position.y <= targetY` in `dimension`. */
+  /** Predicate goal (#41/#136): complete when the code-owned level predicate holds in `dimension`. */
   targetY?: number | null
   dimension?: string | null
   /** Issue #56: named predicate preserved from a compiled Option target. */

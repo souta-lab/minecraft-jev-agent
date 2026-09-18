@@ -59,6 +59,7 @@ export type OptionKind =
   | 'place'
   | 'goto'
   | 'explore'
+  | 'surface'
   | 'descend'
   | 'combat'
   | 'custom'
@@ -70,6 +71,7 @@ export const OPTION_KINDS: readonly OptionKind[] = [
   'place',
   'goto',
   'explore',
+  'surface',
   'descend',
   'combat',
   'custom',
@@ -83,7 +85,7 @@ export interface OptionTarget {
   count?: number
   /** named non-item objective (e.g. "end_portal_room") */
   predicate?: string
-  /** spatial predicate goal (#41): complete when position.y <= targetY */
+  /** spatial predicate goal (#41/#136): complete when the code-owned level predicate holds */
   targetY?: number
   /** dimension the targetY predicate must be evaluated in */
   dimension?: string
@@ -102,6 +104,7 @@ export type Predicate =
   | { readonly kind: 'oreKnown'; readonly item: string }
   | { readonly kind: 'dimensionIs'; readonly dimension: string }
   | { readonly kind: 'levelAtMost'; readonly y: number }
+  | { readonly kind: 'levelAtLeast'; readonly y: number }
   | { readonly kind: 'healthAtLeast'; readonly health: number }
   | { readonly kind: 'custom'; readonly id: string }
 
@@ -286,6 +289,9 @@ export function evaluatePredicateTruth(
     case 'levelAtMost':
       if (snapshot.position === null) return { truth: 'unknown', unknownInputs: ['position'] }
       return { truth: snapshot.position.y <= predicate.y ? 'true' : 'false', unknownInputs: [] }
+    case 'levelAtLeast':
+      if (snapshot.position === null) return { truth: 'unknown', unknownInputs: ['position'] }
+      return { truth: snapshot.position.y >= predicate.y ? 'true' : 'false', unknownInputs: [] }
     case 'healthAtLeast':
       if (snapshot.health === null) return { truth: 'unknown', unknownInputs: ['health'] }
       return { truth: snapshot.health >= predicate.health ? 'true' : 'false', unknownInputs: [] }
@@ -396,6 +402,8 @@ export function describePredicate(predicate: Predicate): string {
       return `dimension == ${predicate.dimension}`
     case 'levelAtMost':
       return `y <= ${predicate.y}`
+    case 'levelAtLeast':
+      return `y >= ${predicate.y}`
     case 'healthAtLeast':
       return `health >= ${predicate.health}`
     case 'custom':
@@ -435,6 +443,8 @@ export function validatePredicate(predicate: unknown): string | null {
       return typeof p.dimension === 'string' && p.dimension.length > 0 ? null : 'dimensionIs needs a non-empty dimension'
     case 'levelAtMost':
       return typeof p.y === 'number' && Number.isFinite(p.y) ? null : 'levelAtMost needs a finite y'
+    case 'levelAtLeast':
+      return typeof p.y === 'number' && Number.isFinite(p.y) ? null : 'levelAtLeast needs a finite y'
     case 'healthAtLeast':
       return typeof p.health === 'number' && Number.isFinite(p.health) ? null : 'healthAtLeast needs a finite health'
     case 'custom':
@@ -555,7 +565,7 @@ export function optionKindForGoal(kind: GoalKind): OptionKind {
     case 'descend':
       return 'descend'
     case 'surface':
-      return 'explore'
+      return 'surface'
     case 'recover':
       return 'combat'
     case 'unknown':
@@ -575,6 +585,8 @@ export function goalKindForOption(kind: OptionKind): GoalKind {
       return 'place'
     case 'explore':
       return 'explore'
+    case 'surface':
+      return 'surface'
     case 'descend':
       return 'descend'
     case 'combat':
@@ -593,6 +605,7 @@ const SKILLS_BY_KIND: Readonly<Record<OptionKind, readonly string[]>> = {
   place: ['PLACE_STATION'],
   goto: ['PATHFIND_TO'],
   explore: ['EXPLORE_FRONTIER'],
+  surface: ['RETURN_TO_SURFACE'],
   descend: ['STAIRCASE', 'REUSE_TUNNEL', 'BRANCH_MINE'],
   combat: ['ENGAGE_TARGET'],
   custom: [],
@@ -761,6 +774,17 @@ function successForGoal(goal: PlannedGoal): Predicate[] {
       return typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)
         ? [{ kind: 'levelAtMost', y: goal.targetY }]
         : [{ kind: 'custom', id: `descend:${item ?? 'unknown'}` }]
+    case 'surface': {
+      // #136: this recovery goal is not complete at Y alone. The planner's
+      // explicit log target is a second deterministic success predicate, so a
+      // remembered underground coordinate cannot be reported as "surface".
+      const vertical =
+        typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)
+          ? ({ kind: 'levelAtLeast', y: goal.targetY } as const)
+          : ({ kind: 'custom', id: `surface_y:${item ?? 'unknown'}` } as const)
+      const resource = item === null ? [] : ([{ kind: 'inventoryAtLeast', item, count }] as const)
+      return [vertical, ...resource]
+    }
     case 'explore':
       // #57: an explore goal qualified by a dimension is the typed `dimensionIs`
       // predicate, never a prose completion. This keeps the deterministic target
@@ -1096,6 +1120,8 @@ export function dependencyGoalForPredicate(
         requiredCount: 1,
         targetY: predicate.y,
       }
+    case 'levelAtLeast':
+      return null
     case 'dimensionIs':
       return {
         kind: 'explore',

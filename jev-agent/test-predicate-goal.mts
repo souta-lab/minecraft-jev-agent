@@ -6,6 +6,7 @@
 import {
   describeSpatialPredicate,
   evaluateSpatialPredicate,
+  levelAtLeast,
   levelAtMost,
   oreDescentTargetY,
   predicateForGoal,
@@ -169,6 +170,16 @@ addCase('levelAtMost is satisfied at or below the target Y', () => {
   }
 })
 
+addCase('#136 levelAtLeast is satisfied only at or above the recovery target', () => {
+  const at = evaluateSpatialPredicate(levelAtLeast(68), { position: { x: 0, y: 68, z: 0 }, dimension: 'overworld' })
+  const above = evaluateSpatialPredicate(levelAtLeast(68), { position: { x: 0, y: 75, z: 0 }, dimension: 'overworld' })
+  const below = evaluateSpatialPredicate(levelAtLeast(68), { position: { x: 0, y: 67, z: 0 }, dimension: 'overworld' })
+  return {
+    pass: at.satisfied && above.satisfied && !below.satisfied && describeSpatialPredicate(levelAtLeast(68)) === 'reach_at_least:Y=68',
+    detail: `at=${at.satisfied} above=${above.satisfied} below=${below.satisfied} detail=${at.detail}`,
+  }
+})
+
 addCase('a dimension-qualified predicate fails in the wrong dimension', () => {
   const right = evaluateSpatialPredicate(levelAtMost(47, 'minecraft:overworld'), { position: { x: 0, y: 47, z: 0 }, dimension: 'overworld' })
   const wrong = evaluateSpatialPredicate(levelAtMost(47, 'minecraft:overworld'), { position: { x: 0, y: 47, z: 0 }, dimension: 'the_nether' })
@@ -188,8 +199,9 @@ addCase('a null position or null dimension is handled without satisfying the pre
   }
 })
 
-addCase('predicateForGoal derives a descend predicate only from a descend goal with a targetY', () => {
+addCase('predicateForGoal derives vertical predicates for descend and recovery goals', () => {
   const descend = predicateForGoal({ kind: 'descend', targetY: 47, dimension: 'minecraft:overworld' })
+  const recover = predicateForGoal({ kind: 'surface', targetY: 68, dimension: 'minecraft:overworld' })
   const noTarget = predicateForGoal({ kind: 'descend' })
   const collect = predicateForGoal({ kind: 'collect', targetY: 47 })
   return {
@@ -197,9 +209,12 @@ addCase('predicateForGoal derives a descend predicate only from a descend goal w
       descend !== null &&
       describeSpatialPredicate(descend) === 'descend_to:Y=47' &&
       descend.dimension === 'minecraft:overworld' &&
+      recover !== null &&
+      describeSpatialPredicate(recover) === 'reach_at_least:Y=68' &&
+      recover.dimension === 'minecraft:overworld' &&
       noTarget === null &&
       collect === null,
-    detail: `descend=${descend === null ? 'null' : describeSpatialPredicate(descend)} noTarget=${noTarget} collect=${collect}`,
+    detail: `descend=${descend === null ? 'null' : describeSpatialPredicate(descend)} recover=${recover === null ? 'null' : describeSpatialPredicate(recover)} noTarget=${noTarget} collect=${collect}`,
   }
 })
 
