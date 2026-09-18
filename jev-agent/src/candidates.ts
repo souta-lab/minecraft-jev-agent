@@ -40,6 +40,8 @@ import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER } fro
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
+import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
+import type { CraftIngredientNeed } from './optionSpec.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -1105,13 +1107,20 @@ function craftCandidates(
   // M2 craft deadlock: a recipe whose chosen variant needs a 3x3 station must
   // not collapse to WAIT while a usable table is held or remembered. Offer the
   // same station ladder the smelt prerequisite path uses before the plan;
-  // falling through keeps (c), the existing craft-a-table-from-planks step.
+  // falling through keeps (c) the existing craft-a-table-from-planks step.
+  // #craft-ingredient-prereq: a missing ingredient route is merged in, so a
+  // withheld station retrieval cannot starve a craft that still needs a log.
   if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
-    if (acquisition.candidates.length > 0 || acquisition.placeRefusal !== null) return acquisition
+    const route = craftIngredientRoute(state, options, focusItem)
+    const merged = route === null ? acquisition.candidates : [...acquisition.candidates, ...route.candidates]
+    if (merged.length > 0 || acquisition.placeRefusal !== null) return { candidates: merged, placeRefusal: acquisition.placeRefusal }
   }
 
-  if (op === null) return none
+  // #craft-ingredient-prereq: no variant is satisfiable from the live inventory
+  // (the live shape: 2 planks < 3 and no log). Offer the deterministic producer
+  // route for the missing ingredient instead of starving to a WAIT-only set.
+  if (op === null) return { candidates: craftIngredientRoute(state, options, focusItem)?.candidates ?? [], placeRefusal: null }
 
   if (op.type === 'craft') {
     const nearestTable = state.craftingTables.find(isSensedStation) ?? null
@@ -1145,6 +1154,125 @@ function craftCandidates(
     candidates: step.candidate === null ? [] : [step.candidate],
     placeRefusal: step.refusal,
   }
+}
+
+/** The deterministic sourcing decision for one missing craft ingredient. */
+interface CraftIngredientRoute {
+  item: string
+  missing: string
+  /** `collect <spec>`, or `none` when no raw producer could be resolved */
+  producer: string
+  candidates: Candidate[]
+  /** true when the recipe descent stopped at the dependency depth cap */
+  depthBoundHit: boolean
+}
+
+/**
+ * Follow the recipe chain of a missing ingredient down to the first item with no
+ * recipe (log <- planks <- stick <- pickaxe). Depth-bounded by the shared
+ * dependency cap so a malformed cycle can never recurse forever; at the cap the
+ * deepest item is still returned as a collect route rather than nothing.
+ */
+function rawProducerForNeed(
+  recipes: RecipeIndex,
+  need: CraftIngredientNeed,
+  counts: Readonly<Record<string, number>>,
+  depth: number,
+  stack: ReadonlySet<string>,
+): { spec: string; depthBoundHit: boolean } | null {
+  const concrete = need.cls === null ? need.item : collectItemForClass(need.cls)
+  if (concrete === null) return null
+  const spec = matchesResourceClass(concrete, 'log') ? 'log' : concrete
+  const variants = recipes.recipesFor(concrete)
+  if (variants.length === 0) return { spec, depthBoundHit: false }
+  if (depth >= MAX_DEPENDENCY_DEPTH) return { spec, depthBoundHit: true }
+  if (stack.has(concrete)) return null
+  const selection = selectCraftIngredients(variants, counts)
+  const next = selection?.missing[0]
+  if (next === undefined) return null
+  const nextStack = new Set(stack)
+  nextStack.add(concrete)
+  return rawProducerForNeed(recipes, next, counts, depth + 1, nextStack)
+}
+
+/** Grounded candidates for a raw collect spec: visible MINE/MOVE plus the remembered RETRIEVE route. */
+function collectRouteCandidates(state: WorldState, options: CandidateOptions, spec: string): Candidate[] {
+  const candidates = [...mineCandidates(state, options, spec, null)]
+  const want = retrievalWant(spec)
+  if (want !== null) candidates.push(...retrievalCandidatesForWant(state, options, want))
+  return candidates
+}
+
+/**
+ * The ingredient-sourcing route for a craft goal whose plan is not executable:
+ * select the deterministic best recipe variant, descend to the raw producer of
+ * the first missing ingredient and offer that collect route. Mirrors
+ * `completeStartablePrerequisites` so the queue layer and the candidate layer
+ * name the same producer. Null when nothing is missing or no route exists.
+ */
+function craftIngredientRoute(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string,
+): CraftIngredientRoute | null {
+  const recipes = options.recipes ?? null
+  if (recipes === null) return null
+  const variants = recipes.recipesFor(focusItem)
+  if (variants.length === 0) return null
+  const selection = selectCraftIngredients(variants, state.inventory.counts)
+  const missing = selection?.missing[0]
+  if (missing === undefined) return null
+  const missingLabel = missing.cls === null ? missing.item : missing.cls
+  const raw = rawProducerForNeed(recipes, missing, state.inventory.counts, 0, new Set<string>())
+  if (raw === null) return { item: focusItem, missing: missingLabel, producer: 'none', candidates: [], depthBoundHit: false }
+  return {
+    item: focusItem,
+    missing: missingLabel,
+    producer: `collect ${raw.spec}`,
+    candidates: collectRouteCandidates(state, options, raw.spec),
+    depthBoundHit: raw.depthBoundHit,
+  }
+}
+
+/** The one-line `CRAFT_INGREDIENT_PREREQ` record for a craft goal's missing ingredient. */
+export interface CraftIngredientPrereqLine {
+  /** the craft goal's item, e.g. `wooden_pickaxe` */
+  item: string
+  /** the missing ingredient (`birch_planks`), or the plan's next intermediate */
+  missing: string
+  /** `craft <item>` for a satisfiable step, else `collect <spec>` (or `none`) */
+  producer: string
+  /** true when the recipe descent stopped at the shared dependency depth cap */
+  depthBoundHit: boolean
+}
+
+/**
+ * The code-owned ingredient view of the current craft goal, for the mirrored
+ * `CRAFT_INGREDIENT_PREREQ` marker. When the recipe planner already has a step,
+ * the marker names that step; otherwise it names the raw producer the same
+ * `craftIngredientRoute` offers, so the logged action always matches the
+ * presented candidates.
+ */
+export function craftIngredientPrereq(state: WorldState, options: CandidateOptions): CraftIngredientPrereqLine | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'craft') return null
+  const item = current.targetItem
+  if (item === null) return null
+  const recipes = options.recipes ?? null
+  if (recipes === null || recipes.recipesFor(item).length === 0) return null
+  const plan = planNextCraftStep(recipes, item, state.inventory.counts, sensedCraftingTableAvailable(state, options, item))
+  if (plan.op !== null) {
+    if (plan.op.type !== 'craft') return null
+    return { item, missing: plan.op.item, producer: `craft ${plan.op.item}`, depthBoundHit: false }
+  }
+  const route = craftIngredientRoute(state, options, item)
+  if (route === null) return null
+  return { item, missing: route.missing, producer: route.producer, depthBoundHit: route.depthBoundHit }
+}
+
+export function formatCraftIngredientPrereq(entry: CraftIngredientPrereqLine): string {
+  const bound = entry.depthBoundHit ? ' depth=bound' : ''
+  return `CRAFT_INGREDIENT_PREREQ item=${entry.item} missing=${entry.missing} producer=${entry.producer}${bound}`
 }
 
 /** One craft-plan step plus any placement refusal met while resolving it. */

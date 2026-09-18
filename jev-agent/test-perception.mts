@@ -485,6 +485,14 @@ addCase('(5) the SMELT_INPUT_PREREQ marker is mirrored and emitted from the tick
   return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
 })
 
+addCase('(6) the CRAFT_INGREDIENT_PREREQ marker is mirrored and emitted from the tick', () => {
+  const source = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const mirrored = MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')
+  const wired = source.includes('this.logCraftIngredientPrereq(state, groundingOptions)')
+  const formatter = source.includes('formatCraftIngredientPrereq')
+  return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
+})
+
 let failures = 0
 process.stdout.write('station perception truth (remembered vs sensed)\n')
 process.stdout.write('-'.repeat(72) + '\n')

@@ -9,7 +9,7 @@
 //
 // Run: npx tsx test-reachability.mts  (wired as `npm run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, blockId, defaultCandidateOptions, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { MIRRORED_MARKERS, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
@@ -1280,6 +1280,131 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     '(13d) a held input with no fuel is routed to the fuel producer (symmetric rule)',
     fuelMine !== undefined && fuelMine.meta.yieldItem === 'oak_log' && noFuelStarvation === null,
     `candidates=[${noFuelGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${noFuelStarvation ?? 'none'}`,
+  )
+}
+
+// (14) the craft ingredient prerequisite is a collect route, never starvation --
+//
+// Measured live on main 1ded56e (the binding M2 wedge):
+//   CANDIDATE_STARVATION presented=2 productive=0 goal="craft:wooden_pickaxe:1"
+//   blockedBy=no_productive_action missing=["RETRIEVE:known:raw_iron:b45_13_35:tool:pickaxe@0"]
+//   ABORT: wedge detected (WAIT chosen 25x)
+// Live inventory birch_planks:2, stick:2, cobblestone:170 with no pickaxe: the
+// recipe needs 3 planks, so the craft plan is unsatisfiable and the missing
+// ingredient chain (planks <- logs) was never ordered. The generator now offers
+// the same deterministic producer the option layer orders (collect log).
+{
+  const require = createRequire(import.meta.url)
+  const recipeIndex = createRecipeIndex(require('minecraft-data')('1.21.11'))
+  const craftOptions: CandidateOptions = { ...defaultCandidateOptions, recipes: recipeIndex, reachability: { memory: null } }
+  const liveFeet: Vec3Json = { x: 31.5, y: 34.5, z: 37.5 }
+  const liveInventory = inventory({
+    birch_planks: 2,
+    stick: 2,
+    cobblestone: 170,
+    dirt: 37,
+    leaf_litter: 4,
+    andesite: 7,
+  })
+  const pickaxeGoal = goal({
+    id: 'craft:wooden_pickaxe',
+    targetItem: 'wooden_pickaxe',
+    description: 'craft 1 x wooden_pickaxe',
+    requiredCount: 1,
+  })
+  const craftPick = queuedGoal({
+    id: 'g-craft-pick',
+    kind: 'craft',
+    description: 'craft 1 x wooden_pickaxe',
+    targetItem: 'wooden_pickaxe',
+    requiredCount: 1,
+  })
+  const rememberedLog: KnownResource = { name: 'birch_log', kind: 'log', position: { x: 31, y: 63, z: 37 } }
+  const remembered = worldState({
+    position: liveFeet,
+    inventory: liveInventory,
+    standable: [{ x: 31, y: 35, z: 37 }],
+    signals: signals({ knownResources: [rememberedLog] }),
+    goal: pickaxeGoal,
+    goalQueue: queueWith(craftPick),
+  })
+  const rememberedGrounded = generateGroundedCandidates(remembered, craftOptions)
+  const retrieve = rememberedGrounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:log:b31_63_37')
+  const rememberedStarvation = candidateStarvationLine(
+    rememberedGrounded.candidates,
+    'craft:wooden_pickaxe:1',
+    false,
+    goalStarvationBlockedBy(null, craftPick, rememberedGrounded.withheld),
+    candidateStarvationMissing(rememberedGrounded.withheld),
+  )
+  check(
+    '(14a) the live craft shape presents the remembered-log collect route and no starvation line',
+    retrieve !== undefined &&
+      retrieve.kind === 'RETRIEVE' &&
+      retrieve.affordance?.feasible === true &&
+      rememberedStarvation === null,
+    `candidates=[${rememberedGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${rememberedStarvation ?? 'none'}`,
+  )
+  const marker = craftIngredientPrereq(remembered, craftOptions)
+  const markerLine = marker === null ? null : formatCraftIngredientPrereq(marker)
+  check(
+    '(14b) the mirrored CRAFT_INGREDIENT_PREREQ line names the missing planks and the collect-log producer',
+    markerLine === 'CRAFT_INGREDIENT_PREREQ item=wooden_pickaxe missing=birch_planks producer=collect log' &&
+      MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ'),
+    `line="${markerLine ?? 'none'}" mirrored=${MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')}`,
+  )
+
+  const visibleLog: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 33, y: 32, z: 36 },
+    distance: 1.1,
+    diggable: true,
+    inReach: true,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 33, y: 31, z: 36 },
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const visible = worldState({
+    position: { x: 34.5, y: 32, z: 36.4 },
+    inventory: liveInventory,
+    blocks: [visibleLog],
+    goal: pickaxeGoal,
+    goalQueue: queueWith(craftPick),
+  })
+  const visibleGrounded = generateGroundedCandidates(visible, craftOptions)
+  const mine = visibleGrounded.candidates.find((candidate) => candidate.id === 'MINE:b33_32_36')
+  const visibleStarvation = candidateStarvationLine(
+    visibleGrounded.candidates,
+    'craft:wooden_pickaxe:1',
+    false,
+    goalStarvationBlockedBy(null, craftPick, visibleGrounded.withheld),
+    candidateStarvationMissing(visibleGrounded.withheld),
+  )
+  check(
+    '(14c) a visible log is presented as the MINE route for the craft ingredient',
+    mine !== undefined && mine.kind === 'MINE' && mine.meta.yieldItem === 'oak_log' && visibleStarvation === null,
+    `candidates=[${visibleGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${visibleStarvation ?? 'none'}`,
+  )
+
+  const held = worldState({
+    position: liveFeet,
+    inventory: inventory({ ...liveInventory.counts, oak_log: 1 }),
+    goal: pickaxeGoal,
+    goalQueue: queueWith(craftPick),
+  })
+  const heldGrounded = generateGroundedCandidates(held, craftOptions)
+  const heldCraft = heldGrounded.candidates.find((candidate) => candidate.kind === 'CRAFT')
+  const heldMarker = craftIngredientPrereq(held, craftOptions)
+  const heldLine = heldMarker === null ? null : formatCraftIngredientPrereq(heldMarker)
+  check(
+    '(14d) a held log yields the planks CRAFT step and the marker names that producer',
+    heldCraft !== undefined &&
+      heldCraft.id === 'CRAFT:oak_planks' &&
+      heldLine === 'CRAFT_INGREDIENT_PREREQ item=wooden_pickaxe missing=oak_planks producer=craft oak_planks',
+    `candidates=[${heldGrounded.candidates.map((candidate) => candidate.id).join(',')}] line="${heldLine ?? 'none'}"`,
   )
 }
 
