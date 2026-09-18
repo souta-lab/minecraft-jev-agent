@@ -111,6 +111,9 @@ git -C /tmp/opencode/wt-<task> push -u origin task/<name>
 # land into main, one at a time
 git fetch && git merge --no-ff origin/task/<name> && git push
 
+# sync the shared tree (only a main checkout may be reset)
+node tools/sync-shared-tree.mjs
+
 # when the shared tree holds another task's WIP and cannot be touched
 git push origin HEAD:refs/heads/tools/verify-mercury
 
@@ -363,7 +366,7 @@ regressions. Record the baseline in the lane report; never silently drop a faili
 
 | Rule | Statement | Source |
 |---|---|---|
-| Never checkout/merge/cherry-pick in the shared tree | The live host rebuilds the bundle from the work tree, so a checkout would run another branch's code and break other tasks' edits | `AGENTS.md` lines 112-131; commit `15a77f6`; incident below |
+| Shared-tree HEAD must be `main`; never checkout/merge/cherry-pick there | The live host rebuilds the bundle from the work tree, and a reset moves the current branch; the guard fails with `SYNC_HEAD_WRONG` before a non-main branch can be rewritten | `AGENTS.md` §4.0; `tools/sync-shared-tree.mjs`; issue #90 |
 | Host-layer lanes serialized | Only one lane at a time may touch `buddy-driver/agent-runner.mts`, `buddy-driver/resident-types.ts`, or `buddy-driver/package.json` | `AGENTS.md` §4.0-A; commit `f53d7ee`; conflict precedent #26/#34 vs #27/#28 |
 | Abort and delegate on conflict | Resolve conflicts inside the lane worktree, report the merged branch, then land one at a time | `AGENTS.md` lines 104-105; `git cherry-pick --abort` in `TODO.md` line 147 |
 | No force-push, no history rewrite | Explicitly forbidden | `AGENTS.md` line 128 |
