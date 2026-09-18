@@ -60,7 +60,7 @@ import type {
   WorldMemoryDelta,
 } from './resident-types.ts'
 
-export const CONTRACT_VERSION = 2
+export const CONTRACT_VERSION = 3
 
 // Loud-fail craft capability check: a future Mineflayer bump that removes the
 // private `_syncWindow` API must fail loudly here instead of silently degrading
@@ -721,7 +721,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function proposeLedger(): void {
     try {
       const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
-      ctx.proposeLedger(holder.queue.snapshot())
+      ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: holder.queue.snapshot() })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'proposeLedger', message })
@@ -776,7 +776,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     check('id', () => typeof id === 'string' && id.length > 0)
     check('startedAt', () => Number.isFinite(startedAt))
     check('rungId', () => typeof ladder.rungId === 'string' && ladder.rungId.length > 0)
-    check('contract-version', () => CONTRACT_VERSION === 2)
+    check('contract-version', () => CONTRACT_VERSION === 3)
     check('status-readable', () => {
       const s = status()
       return typeof s.running === 'boolean' && typeof s.policyKind === 'string' && s.policyKind.length > 0
