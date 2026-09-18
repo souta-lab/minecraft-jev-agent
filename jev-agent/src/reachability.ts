@@ -128,8 +128,12 @@ export function bestToolTier(counts: Readonly<Record<string, number>>, tool: Har
   return best
 }
 
-/** The `tool` capability for a barrier the inventory cannot break, or null. */
-function missingToolCapability(
+/**
+ * The `tool` capability for a barrier the inventory cannot break, or null.
+ * Exported so every candidate kind attributes its tool need from its OWN
+ * barrier (a MINE candidate's block, never a sibling candidate's path).
+ */
+export function missingToolCapability(
   barrier: ReachabilityBarrier | null,
   inventory: Readonly<Record<string, number>>,
 ): Capability | null {

@@ -21,7 +21,7 @@
 // resource to mine, the craft step to surface, or the smelt/place operation, so
 // the list stays small and every entry makes progress. Safety actions
 // (eat/retreat/attack) are always offered regardless of subgoal.
-import type { RecipeIndex } from './crafting.ts'
+import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, KnownResource, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
@@ -37,8 +37,8 @@ import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER } from './gameData.ts'
-import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, reachabilityFingerprint } from './reachability.ts'
-import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
+import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
+import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
 import { StateFingerprintMemory } from './moveFailMemory.ts'
 
 export type CandidateKind =
@@ -883,29 +883,47 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
       if (spot === undefined) return []
       return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
     }
-    if (op.requiresTable && table === null) return []
+  }
+
+  const step = craftPlanStepCandidate(state, options, op, focusItem)
+  return step === null ? [] : [step]
+}
+
+/**
+ * The single grounded candidate for one executable craft-plan op. The gate's
+ * last-resort ladder calls it with the plan already computed as if no station
+ * were available, so a table-requiring recipe falls back to crafting/placing the
+ * station itself instead of waiting on an unreachable remembered one.
+ */
+function craftPlanStepCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  op: CraftOp,
+  focusItem: string,
+): Candidate | null {
+  if (op.type === 'craft') {
+    const table = op.requiresTable ? state.craftingTables.find(isSensedStation) ?? null : null
+    if (op.requiresTable && table === null) return null
     const where = table === null ? 'inventory 2x2' : `at crafting_table (${table.x},${table.y},${table.z})`
-    return [
-      {
-        id: `CRAFT:${op.item}`,
-        kind: 'CRAFT',
-        label: `${describeCraftOp(op)} ${where}, ${focusItem} subgoal`,
-        targetName: op.item,
-        target: table,
-        targetEntityId: null,
-        itemName: op.item,
-        requiresTool: false,
-        toolName: null,
-        inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
-        hasStandableAdjacent: true,
-        meta: {
-          tick: state.tick,
-          craftItem: op.item,
-          craftCount: op.count,
-          requiresTable: op.requiresTable,
-        },
+    return {
+      id: `CRAFT:${op.item}`,
+      kind: 'CRAFT',
+      label: `${describeCraftOp(op)} ${where}, ${focusItem} subgoal`,
+      targetName: op.item,
+      target: table,
+      targetEntityId: null,
+      itemName: op.item,
+      requiresTool: false,
+      toolName: null,
+      inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        craftItem: op.item,
+        craftCount: op.count,
+        requiresTable: op.requiresTable,
       },
-    ]
+    }
   }
 
   const failed = state.signals.failedCandidates
@@ -917,8 +935,28 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
     ) ??
     state.placementSpots[0] ??
     null
-  if (spot === null) return []
-  return [placeStationCandidate(state, options, op.item, spot, `craft ${focusItem}`)]
+  if (spot === null) return null
+  return placeStationCandidate(state, options, op.item, spot, `craft ${focusItem}`)
+}
+
+/**
+ * The self-contained ladder step for the current craft goal, planned as if no
+ * station were available. Its every input comes from the live inventory, so it
+ * is executable NOW whenever it exists at all - the gate offers it before
+ * declaring starvation.
+ */
+export function selfContainedCraftCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+): Candidate[] {
+  const recipes = options.recipes ?? null
+  const current = state.goalQueue?.current ?? null
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (recipes === null || focusItem === null || (current?.kind ?? 'collect') !== 'craft') return []
+  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, state.craftingTables.some(isSensedStation))
+  if (plan.op === null) return []
+  const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
+  return step === null ? [] : [step]
 }
 
 /**
@@ -1735,10 +1773,24 @@ function pickExplore(
 // that would fix them, and suppresses a proven-unreachable target while its
 // semantic state fingerprint is unchanged.
 
-const REACHABILITY_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+const LOCOMOTION_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'MOVE',
   'RETRIEVE',
   'RETREAT',
+])
+
+/**
+ * Candidate-local capability attribution, by kind:
+ *   MINE              -> the harvest tool tier of the block IT names;
+ *   MOVE/RETRIEVE/
+ *   RETREAT           -> path/vertical feasibility of ITS OWN destination;
+ *   CRAFT/PLACE/SMELT -> not gated: the generator emits them only when their
+ *                        own recipe/input/station requirement is satisfiable
+ *                        NOW, so they must never inherit a sibling's tool need.
+ */
+const REACHABILITY_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MINE',
+  ...LOCOMOTION_GATED_KINDS,
 ])
 
 export interface ColumnFacts {
@@ -1800,6 +1852,14 @@ export function applyReachabilityGate(
   )
   run(acquisitions)
 
+  // Last-resort candidate-local ladder: one unreachable remembered station must
+  // not starve a craft goal whose own recipe inputs are all held - the step that
+  // crafts/places the station from those inputs is satisfiable NOW.
+  if (presented.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')) {
+    const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
+    run(selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
+  }
+
   const waite = presented.filter((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')
   const productive = presented.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
   const candidates = [...productive, ...waite]
@@ -1813,18 +1873,51 @@ export function applyReachabilityGate(
   return { candidates, reachability, withheld }
 }
 
-/** null when the candidate carries no locomotion destination to gate. */
+/** null when the candidate carries no capability precondition of its own. */
 function evaluateCandidate(
   candidate: Candidate,
   context: ReachabilityGateContext,
 ): CandidateReachability | null {
   const position = candidate.target
   if (position === null || !REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  if (candidate.kind === 'MINE') return evaluateMineCandidate(candidate, context)
   const target = reachabilityTargetFor(context.state, candidate)
   const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
   const abilities = deriveReachabilityAbilities(context.state, position, context.column)
   const probe = context.options.reachability?.pathProbe?.(position) ?? 'unknown'
   const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, probe)
+  return reachabilityRecord(candidate, target, world, result, context)
+}
+
+/**
+ * A MINE candidate is dug in place: its only precondition is the harvest tool
+ * tier of the block IT names. Path, vertical gap and standable approach are NOT
+ * part of its contract, so it must not be run through the locomotion evaluator
+ * (that would withhold a block already in reach).
+ */
+function evaluateMineCandidate(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+): CandidateReachability | null {
+  const barrier = barrierForCandidate(context.state, candidate)
+  if (barrier === null) return null
+  const missing = missingToolCapability(barrier, context.state.inventory.counts)
+  const result: ReachabilityResult =
+    missing === null
+      ? { reachable: true, reason: 'reachable', missingCapabilities: [] }
+      : { reachable: false, reason: 'missing_tool', missingCapabilities: [missing] }
+  const target: ReachabilityTarget = { candidateId: candidate.id, kind: candidate.kind, position: candidate.target, barrier }
+  const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+  return reachabilityRecord(candidate, target, world, result, context)
+}
+
+function reachabilityRecord(
+  candidate: Candidate,
+  target: ReachabilityTarget,
+  world: ReachabilityWorld,
+  result: ReachabilityResult,
+  context: ReachabilityGateContext,
+): CandidateReachability {
   return {
     candidate: withAffordance(candidate, result),
     result,
@@ -1853,28 +1946,43 @@ function withAffordance(candidate: Candidate, result: ReachabilityResult | null)
 }
 
 function reachabilityTargetFor(state: WorldState, candidate: Candidate): ReachabilityTarget {
+  return {
+    candidateId: candidate.id,
+    kind: candidate.kind,
+    position: candidate.target,
+    barrier: barrierForCandidate(state, candidate),
+  }
+}
+
+/**
+ * The block a candidate must break, resolved ONLY from the candidate's own
+ * coordinates: `meta.targetBlock*` when the candidate walks toward a block, else
+ * its own destination cell (a MINE candidate targets the block itself). Never a
+ * block the candidate does not name.
+ */
+function barrierForCandidate(state: WorldState, candidate: Candidate): ReachabilityBarrier | null {
   const x = candidate.meta.targetBlockX
   const y = candidate.meta.targetBlockY
   const z = candidate.meta.targetBlockZ
-  if (typeof x === 'number' && typeof y === 'number' && typeof z === 'number') {
-    const block = state.blocks.find(
-      (entry) => entry.position.x === x && entry.position.y === y && entry.position.z === z,
-    )
-    if (block !== undefined && block.harvestTool != null) {
-      return {
-        candidateId: candidate.id,
-        kind: candidate.kind,
-        position: candidate.target,
-        barrier: {
-          position: block.position,
-          name: block.name,
-          requiredTool: block.harvestTool,
-          requiredTier: block.harvestTier ?? null,
-        },
-      }
-    }
+  const cell =
+    typeof x === 'number' && typeof y === 'number' && typeof z === 'number'
+      ? { x, y, z }
+      : candidate.kind === 'MINE'
+        ? candidate.target
+        : null
+  const block =
+    cell === null
+      ? undefined
+      : state.blocks.find(
+          (entry) => entry.position.x === cell.x && entry.position.y === cell.y && entry.position.z === cell.z,
+        )
+  if (block === undefined || block.harvestTool == null) return null
+  return {
+    position: block.position,
+    name: block.name,
+    requiredTool: block.harvestTool,
+    requiredTier: block.harvestTier ?? null,
   }
-  return { candidateId: candidate.id, kind: candidate.kind, position: candidate.target, barrier: null }
 }
 
 function columnFacts(state: WorldState): ColumnFacts {
