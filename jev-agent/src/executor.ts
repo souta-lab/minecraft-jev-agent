@@ -1753,7 +1753,7 @@ export class Executor {
       const adjacentBlocker = blockingCell.x !== column.x || blockingCell.z !== column.z
       if (!recenterAttempted && adjacentBlocker && centeredHeadroom.clear) {
         recenterAttempted = true
-        if (await this.recenterPillarColumn(candidate, column, epoch, signal)) {
+        if (await this.recenterPillarColumn(candidate, column, blockingCell, epoch, signal)) {
           this.ensureOwned(epoch, signal)
           continue
         }
@@ -1814,6 +1814,7 @@ export class Executor {
   private async recenterPillarColumn(
     candidate: Candidate,
     column: { x: number; z: number },
+    blocker: Vec3Json,
     epoch: number,
     signal: AbortSignal,
   ): Promise<boolean> {
@@ -1830,7 +1831,18 @@ export class Executor {
     this.setPhase(candidate, epoch, 'recentering-pillar-column')
     const floorY = Math.floor(origin.y + 1e-4)
     const deadline = Date.now() + PILLAR_RECENTER_BUDGET_MS
-    const xFirst = Math.abs(center.x - origin.x) >= Math.abs(center.z - origin.z)
+    const deltaX = center.x - origin.x
+    const deltaZ = center.z - origin.z
+    const awayX = Math.sign(column.x - blocker.x)
+    const awayZ = Math.sign(column.z - blocker.z)
+    const xMovesAway = awayX !== 0 && Math.sign(deltaX) === awayX
+    const zMovesAway = awayZ !== 0 && Math.sign(deltaZ) === awayZ
+    const xFirst =
+      xMovesAway && !zMovesAway
+        ? true
+        : zMovesAway && !xMovesAway
+          ? false
+          : Math.abs(deltaX) > Math.abs(deltaZ)
     const legs = xFirst
       ? [
           { x: center.x, z: origin.z },
