@@ -68,6 +68,7 @@ import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
+import { ReloadArbiter } from './reload-arbiter.ts'
 import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
 
 const CONTRACT_VERSION = 3
@@ -526,6 +527,7 @@ let shuttingDown = false
 let frozen = false
 let generationRestartTimer: NodeJS.Timeout | null = null
 let reloadTimer: NodeJS.Timeout | null = null
+let reloadArbiter: ReloadArbiter | null = null
 let lastSrcSignature = ''
 let lastInventoryHash = ''
 let lastActionId: string | null = null
@@ -1403,8 +1405,19 @@ function scheduleReload(trigger: string): void {
   if (reloadTimer !== null) return
   reloadTimer = setTimeout(() => {
     reloadTimer = null
-    void performReload(trigger)
+    requestReload(trigger)
   }, RELOAD_DEBOUNCE_MS)
+}
+
+function requestReload(trigger: string): void {
+  if (reloadArbiter === null) {
+    reloadArbiter = new ReloadArbiter(
+      (nextTrigger) => performReload(nextTrigger),
+      () => !shuttingDown,
+      (event, detail) => log(event, detail),
+    )
+  }
+  reloadArbiter.request(trigger)
 }
 
 function depVersion(pkg: string): string {
@@ -1693,7 +1706,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'reload') {
-    void performReload('control')
+    requestReload('control')
     controlReply(socket, request, true, { scheduled: true })
     return
   }
@@ -1911,6 +1924,7 @@ function startControlServer(): void {
 function shutdown(reason: string): void {
   if (shuttingDown) return
   shuttingDown = true
+  reloadArbiter?.stop()
   log('SHUTDOWN', { reason })
   let acceptance: string | null = null
   try {
