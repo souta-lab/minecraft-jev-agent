@@ -781,8 +781,18 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (recipes === null || focusItem === null) return []
   const tableAvailable = state.craftingTables.length > 0
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
-  if (plan.op === null) return []
   const op = plan.op
+
+  // M2 craft deadlock: a recipe whose chosen variant needs a 3x3 station must
+  // not collapse to WAIT while a usable table is held or remembered. Offer the
+  // same station ladder the smelt prerequisite path uses before the plan;
+  // falling through keeps (c), the existing craft-a-table-from-planks step.
+  if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
+    const acquisition = tableAcquisitionCandidates(state, options, focusItem)
+    if (acquisition.length > 0) return acquisition
+  }
+
+  if (op === null) return []
 
   if (op.type === 'craft') {
     const nearestTable = state.craftingTables[0] ?? null
@@ -989,6 +999,53 @@ function craftingTableSource(
 }
 
 /**
+ * True when the recipe variant `planNextCraftStep` selected for this goal needs
+ * a placed crafting_table. Re-planning with an assumed station (only the
+ * `tableAvailable` flag changes) reports the chosen variant's own
+ * `requiresTable`, so this never guesses from a second recipe lookup.
+ */
+function planRequiresTable(
+  recipes: RecipeIndex,
+  focusItem: string,
+  counts: Readonly<Record<string, number>>,
+): boolean {
+  const op = planNextCraftStep(recipes, focusItem, counts, true).op
+  return op !== null && op.type === 'craft' && op.requiresTable
+}
+
+/**
+ * M2 craft deadlock: the station ladder for a table-requiring CRAFT goal,
+ * mirroring the smelt prerequisite path (`craftFurnaceCandidate`):
+ *
+ *   (a) place a held crafting_table at a grounded spot (inventory first, #78);
+ *   (b) walk to a remembered table the move-failure blacklist has not excluded;
+ *   (c) else nothing - when the materials are held, `planNextCraftStep` already
+ *       returns the 2x2 craft-table step and the caller falls through to it.
+ */
+function tableAcquisitionCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string,
+): Candidate[] {
+  const failed = state.signals.failedCandidates
+  if ((state.inventory.counts.crafting_table ?? 0) > 0 && state.placementSpots.length > 0) {
+    const spot =
+      state.placementSpots.find(
+        (candidate) => (failed[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) < 2,
+      ) ?? state.placementSpots[0]
+    if (spot !== undefined) {
+      return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
+    }
+  }
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const remembered = knownStations(state, 'crafting_table').find(
+    (station) => !unreachableStations.has(knownStationKey(station)),
+  )
+  if (remembered !== undefined) return [knownStationRetrievalCandidate(state, options, remembered)]
+  return []
+}
+
+/**
  * Issue #58: build the pure cost/feasibility input for the furnace precondition
  * from the live world state and the explicit station blacklist. `tableAvailable`
  * is true for any table the bot can actually reach (`craftingTableSource`), so
@@ -1094,13 +1151,25 @@ function furnaceAcquisitionCandidates(state: WorldState, options: CandidateOptio
   return out
 }
 
+/**
+ * Why a remembered non-furnace station is retrieved: a smelt goal walks to a
+ * table to craft its furnace, a table-requiring craft goal walks to one to
+ * craft its target.
+ */
+function stationRetrievalPurpose(state: WorldState): string {
+  const goal = state.goalQueue?.current ?? null
+  const focus = goal?.targetItem ?? state.goal.targetItem
+  if (goal?.kind === 'craft' && typeof focus === 'string' && focus.length > 0) return `craft ${focus}`
+  return 'craft a furnace'
+}
+
 function knownStationRetrievalCandidate(
   state: WorldState,
   options: CandidateOptions,
   known: KnownStationLike,
 ): Candidate {
   const isFurnace = known.name.includes('furnace')
-  const purpose = isFurnace ? 'smelt' : 'craft a furnace'
+  const purpose = isFurnace ? 'smelt' : stationRetrievalPurpose(state)
   const vertical = planVerticalApproach({
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,
