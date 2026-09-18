@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, staleKnownResources } from './candidates.ts'
+import { applyOptionSkillGate, blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -653,7 +653,9 @@ export function ensureCraftStepActionable(
   const current = state.goalQueue?.current ?? null
   if (current === null || current.kind !== 'craft') return [...candidates]
   const seen = new Set(candidates.map((candidate) => candidate.id))
-  const step = selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id))
+  const step = applyOptionSkillGate(selfContainedCraftCandidates(state, options), state, options.allowedSkills).filter(
+    (candidate) => !seen.has(candidate.id),
+  )
   return step.length === 0 ? [...candidates] : [...candidates, ...step]
 }
 
@@ -1307,6 +1309,7 @@ export class JevController {
         this.recipeIndex,
         unreachableStations,
         this.reachabilityGateOptions(),
+        state.currentOption?.allowedSkills ?? null,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -1458,7 +1461,13 @@ export class JevController {
       const freshCandidates = this.filterMoveCandidates(
         generateGroundedCandidates(
           freshState,
-          candidateOptions(this.options, this.recipeIndex, this.unreachableStationKeys(freshState), this.reachabilityGateOptions()),
+          candidateOptions(
+            this.options,
+            this.recipeIndex,
+            this.unreachableStationKeys(freshState),
+            this.reachabilityGateOptions(),
+            freshState.currentOption?.allowedSkills ?? null,
+          ),
         ).candidates,
         freshState,
         false,
@@ -3638,7 +3647,13 @@ export class JevController {
     }
     const input = furnacePrereqInputFromState(
       state,
-      candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+      candidateOptions(
+        this.options,
+        this.recipeIndex,
+        unreachableStations,
+        this.reachabilityGateOptions(),
+        state.currentOption?.allowedSkills ?? null,
+      ),
     )
     const decision = planPrereqOptions(input)
     const goalKey = this.currentGoalKey()
@@ -4208,8 +4223,9 @@ function candidateOptions(
   recipes: RecipeIndex,
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
+  allowedSkills: readonly string[] | null = null,
 ): CandidateOptions {
-  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations, reachability }
+  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations, reachability, allowedSkills }
 }
 
 function subgoalState(goal: QueuedGoal, have: number): GoalState {

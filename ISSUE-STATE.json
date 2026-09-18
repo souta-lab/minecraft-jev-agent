@@ -25,7 +25,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Option compiler/identity exists, but exact CurrentOptionContext still does not reach the Jev hot decision boundary."
+      "note": "CurrentOptionContext now persists the exact OptionSpec into Jev; allowedSkills gates grounded candidates and decision logs record optionSkill attribution. Live/replay/CI evidence and full Option-instance beta joining remain unverified."
     },
     "79": {
       "acceptanceClass": "closed-loop-live",

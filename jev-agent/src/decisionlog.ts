@@ -31,6 +31,8 @@ export interface DecisionCandidateLog {
   targetName: string | null
   inReach: boolean
   failedCount: number
+  /** #56: deterministic Skill attribution within the active Option. */
+  optionSkill: string | null
 }
 
 export interface DecisionJevLog {
@@ -176,6 +178,7 @@ export function logCandidates(
     targetName: candidate.targetName,
     inReach: candidate.inReach,
     failedCount: failedCandidates[candidate.id] ?? 0,
+    optionSkill: typeof candidate.meta.optionSkill === 'string' ? candidate.meta.optionSkill : null,
   }))
 }
 
