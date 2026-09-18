@@ -49,10 +49,12 @@ import { formatSkillSelected, formatStrategyBodyDelta, generateSkillPlan, skillS
 import type { SkillCandidate, SkillGenerationInput, SkillGoal } from '../jev-agent/src/skillCandidate.ts'
 import {
   compilePlannedGoal,
+  completeStartablePrerequisites,
   goalReadinessLabel,
   isOptionStartable,
   makeOptionSnapshot,
   orderGoalsByReadiness,
+  stableOptionInstanceId,
 } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
@@ -246,6 +248,14 @@ export function orderPlanGoalsByReadiness(
     }
   }
   const ordered = orderGoalsByReadiness(base, snapshot)
+  for (const inserted of ordered.inserted) {
+    log?.('PLAN_ORDER', {
+      preferred: goalReadinessLabel(inserted.prerequisite),
+      over: inserted.consumer.description,
+      reason: 'prerequisite_required',
+      need: inserted.prerequisite.targetItem ?? inserted.prerequisite.kind,
+    })
+  }
   for (const move of ordered.moves) {
     log?.('PLAN_ORDER', { preferred: move.preferred, over: move.over, reason: 'preconditions_satisfied' })
   }
@@ -749,6 +759,8 @@ export function buildLadder(
   },
 ): Ladder {
   const goals: PlannedGoal[] = []
+  const emittedIds = new Set<string>()
+  const instanceId = (goal: PlannedGoal): string => stableOptionInstanceId(compilePlannedGoal(goal))
   let rungIndex = RUNGS.length
   let rungId = 'complete'
   let prereqReplaced = false
@@ -797,16 +809,26 @@ export function buildLadder(
       }
       prereqReplaced = true
       log?.('PRECONDITION_MISSING', { goal: description, need: precondition.need, rungId: rung.id })
+      // #prereq-order: DETECTING the missing prerequisite is not enough - it must
+      // be ORDERED before the blocked rung goal. Insert the startable direct
+      // prerequisite (code-owned preconditions) and drop any goal already emitted
+      // by an earlier rung, so the queue head is the executable prerequisite.
+      const completed = completeStartablePrerequisites(rungGoals, plannerReadinessSnapshot(counts, world))
+      const ordered = completed.goals.filter((goal) => !emittedIds.has(instanceId(goal)))
+      for (const goal of ordered) emittedIds.add(instanceId(goal))
       log?.('LADDER_PREREQ', {
         goal: description,
         need: precondition.need,
         rungId: rung.id,
-        replace: rungGoals.map((goal) => goal.description),
+        replace: ordered.map((goal) => goal.description),
       })
-      for (const goal of rungGoals) goals.push(goal)
+      for (const goal of ordered) goals.push(goal)
       continue
     }
-    for (const goal of rungGoals) goals.push(goal)
+    for (const goal of rungGoals) {
+      emittedIds.add(instanceId(goal))
+      goals.push(goal)
+    }
   }
   if (goals.length === 0 && opts?.allowUpkeep !== false) {
     // Everything reachable is satisfied: keep the resident meaningfully busy.
