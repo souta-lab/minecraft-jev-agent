@@ -13,6 +13,8 @@
     "frontier:write": "node tools/frontier.mjs --write",
     "issue-state": "node tools/issue-state.mjs",
     "issue-state:check": "node tools/issue-state.mjs --check",
+    "milestone-status": "node tools/milestone-status.mjs",
+    "milestone-status:check": "node tools/milestone-status.mjs --check",
     "m2-watch": "node tools/m2-watch.mjs",
     "m2-acceptance": "node tools/m2-acceptance.mjs",
     "m2-live-gate": "node tools/m2-live-gate.mjs",
@@ -21,6 +23,7 @@
     "current-status-test": "node tools/test-current-status.mjs",
     "frontier-test": "node tools/test-frontier.mjs",
     "issue-state-test": "node tools/test-issue-state.mjs",
+    "milestone-status-test": "node tools/test-milestone-status.mjs",
     "m2-watch-test": "node tools/test-m2-watch.mjs",
     "m2-acceptance-test": "node tools/test-m2-acceptance.mjs",
     "m2-live-gate-test": "node tools/test-m2-live-gate.mjs"

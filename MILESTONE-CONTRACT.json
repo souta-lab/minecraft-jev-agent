@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "statusValues": ["PASS", "FAIL", "UNKNOWN"],
+  "milestones": {
+    "M0": {
+      "title": "Closed loop",
+      "requires": ["grounded_move", "arrival", "grounded_mine", "block_removed", "drop_or_inventory_verified"],
+      "evaluator": { "type": "manual", "reason": "No run-scoped M0 artifact gate is wired yet." }
+    },
+    "M1": {
+      "title": "Jev-only plan",
+      "requires": ["oak_log>=3", "crafting_table", "wooden_pickaxe", "cobblestone>=16", "llm_runtime_calls=0", "ordered_verified_transitions"],
+      "evaluator": { "type": "manual", "reason": "Historical M1 PASS exists, but no current run-scoped M1 artifact gate is wired yet." }
+    },
+    "M2": {
+      "title": "Iron-age closed loop",
+      "requires": ["run_scoped_prereq_option", "furnace_ready", "smelt_done:iron_ingot", "iron_pickaxe_inventory", "current_main_live_inventory"],
+      "evaluator": { "type": "command", "script": "tools/m2-live-gate.mjs", "scopeArg": "--since" }
+    },
+    "M3": {
+      "title": "Nether progression",
+      "stages": [
+        { "id": "portal_built", "requires": ["portal_frame_verified", "portal_lit_verified"] },
+        { "id": "nether_entered", "requires": ["dimension=minecraft:the_nether"] },
+        { "id": "blaze_progression", "requires": ["blaze_rod>=7"] },
+        { "id": "eyes_ready", "requires": ["ender_pearl>=12", "eye_of_ender>=12"] }
+      ],
+      "evaluator": { "type": "manual", "reason": "Portal, dimension-entry, and combat stages do not yet share a run-scoped executable gate." }
+    },
+    "M4": {
+      "title": "Ender Dragon",
+      "requires": ["stronghold_reached", "end_portal_verified", "dimension=minecraft:the_end", "dragon_killed_verified"],
+      "evaluator": { "type": "manual", "reason": "No run-scoped M4 artifact gate is wired yet." }
+    }
+  }
+}
