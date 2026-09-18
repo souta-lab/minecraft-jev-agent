@@ -65,6 +65,27 @@ when it has a genuinely distinct acceptance boundary.
 Runtime position, current rung, active queue, open PR/issue counts, and other time-sensitive facts
 belong in `CURRENT-STATUS.md` / `npm run current-status`, not in this README.
 
+## Execution modes
+
+Do not rely on implicit `auto` mode when proving reproducibility. Select the planner mode explicitly
+for acceptance work:
+
+```bash
+# deterministic high-level planner: no planner network call
+BUDDY_PLANNER=deterministic node buddy-driver/agent-runner.mts
+
+# bounded Jev high-level horizon planner (requires configured Jev/Gateway credentials)
+BUDDY_PLANNER=llm node buddy-driver/agent-runner.mts
+
+# optional exception-driven Mercury System2 repair; explicit opt-in only
+BUDDY_SYSTEM2=mercury node buddy-driver/agent-runner.mts
+```
+
+`BUDDY_PLANNER=auto` exists for convenience and currently selects the Jev planner when a usable API
+key is present; **do not use `auto` as evidence for a deterministic acceptance claim**. Mercury is a
+separate sparse System2 repair path and is never enabled merely because a key exists. Action safety,
+mechanics and postcondition verification remain deterministic in every mode.
+
 ## How to run
 
 Requires **Node >= 22** (developed on Node 25). A local **Leaf 1.21.11 server in offline mode**
