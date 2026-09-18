@@ -195,6 +195,8 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 ## 13-0. 優先順位（2026-09-18 外部レビュー改訂 — §13 を SUPERSEDE）
 
 > この節は §13（LLM誘導プランナを先に）を **supersede** する。LLM プランナ（Jev shadow → authority）は **P5**。それまでは決定論フォールバックを維持し、常駐の原子性を先に証明する。上位段の gate を満たすまで次に進まない。
+>
+> **正典順位（root `AGENTS.md` §0.7 / `DEVELOPMENT-METHOD.md` §1.1）**: 本文書は design/evidence document であり、root `AGENTS.md` を supersede しない。この「SUPERSEDE §13」は同一ファイル内の §13 を置き換える意味に限る。ここでの P0-P6 が root `AGENTS.md` §2 の現行優先順（P0 = #63 methodology/evidence integrity → P1 safety/durability → #11 Grounded Options skeleton → shadow/eval → …）と衝突する場合は root `AGENTS.md` §2 を優先する。
 
 - **P0（gate）: ビルドを緑に戻す。** `typecheck` clean / `audit-test` 9/9 / `step-pipeline-test` 6/6 / `guard-test` 12/12 / `gating-test` 6/6 / `loop-test` 7/7 / `m1-test` 5/5 / `movement-patch:check` ok。緑でない限り、他の検証は意味を持たない。
 - **P1: 常駐 generation swap を原子的にする。**

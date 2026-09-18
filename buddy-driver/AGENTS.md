@@ -4,6 +4,12 @@
 > 詳細仕様: `/home/s0u7a/mc-ai/RESIDENT-MODE.md`（正典）／欠陥票: `/home/s0u7a/mc-ai/BUDDY-DEFECTS.md`／現状: `/home/s0u7a/mc-ai/ARCHITECTURE.md`
 
 ## 優先順位（外部レビュー Sol 準拠。これを勝手に並べ替えない）
+
+> スコープ注記: このファイルは root `/home/s0u7a/mc-ai/AGENTS.md` を継承する **nearest scoped
+> AGENTS.md** であり、root を supersede しない。root `AGENTS.md` §0.7 の正典順位（human 明示指示 >
+> root AGENTS.md > nearest scoped AGENTS.md > TODO/operational queue > design/evidence docs >
+> historical）に従う。下の P0-P6 と root `AGENTS.md` §2 が衝突する場合は root を優先する
+> （`DEVELOPMENT-METHOD.md` §1.1）。
 ```
 P0 green build へ戻す（typecheck clean / audit 9/9 / step-pipeline 6/6 / guard 12/12 / gating 6/6 / loop 7/7 / m1 5/5）
 P1 resident の原子的スワップ
