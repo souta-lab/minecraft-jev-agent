@@ -200,6 +200,16 @@ function registerLiveStations(
   return added
 }
 
+/**
+ * The STATION_REGISTERED detail for a placement-verified station: `source=placed`
+ * marks the cell as placed-by-us, so the marker distinguishes deterministic
+ * placement proof from a sensed/remembered coincidence. Exported so the marker
+ * contract is unit-testable without a bot.
+ */
+export function stationRegisteredPlacedDetail(kind: StationKind, position: Vec3Json): Record<string, unknown> {
+  return { kind, source: 'placed', at: stationKey(position) }
+}
+
 const LOG_BLOCK_NAMES = [
   'oak_log',
   'birch_log',
@@ -626,12 +636,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
   }
 
-  function stationRuntimeUse(kind: StationKind, position: Vec3Json): void {
+  function stationRuntimeUse(kind: StationKind, position: Vec3Json, source: 'placed' | null = null): void {
     const durable = durableStations(kind)
+    const alreadyKnown = durable.some(
+      (station) => (station.kind ?? kind) === kind && stationKey(station) === stationKey(position),
+    )
     const registered = registerStation(durable, kind, position, Date.now())
     const selectable = kind === 'furnace' ? world.furnaces : world.craftingTables
     if (!selectable.some((current) => stationKey(current) === stationKey(registered))) selectable.push(registered)
-    stationRuntimeLog('STATION_REGISTERED', stationRegisteredDetail(kind, position))
+    if (source === 'placed') {
+      if (!alreadyKnown) stationRuntimeLog('STATION_REGISTERED', stationRegisteredPlacedDetail(kind, position))
+    } else {
+      stationRuntimeLog('STATION_REGISTERED', stationRegisteredDetail(kind, position))
+    }
     ctx.proposeWorldMemory(kind === 'furnace' ? { furnaces: [...durable] } : { craftingTables: [...durable] })
   }
 
@@ -652,7 +669,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     }
     if (event === 'FURNACE_READY') {
       const at = asVec3Json(detail?.target)
-      if (at !== null) stationRuntimeUse('furnace', at)
+      if (at !== null) stationRuntimeUse('furnace', at, detail?.source === 'placed' ? 'placed' : null)
     }
   }
 

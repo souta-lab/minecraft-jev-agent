@@ -423,6 +423,24 @@ export function formatSmeltLog(event: string, detail: Record<string, unknown>): 
   return `SMELT_PLACED input=${detail.inputItem}:${detail.inputCount} fuel=${detail.fuelItem}:${detail.fuelCount}`
 }
 
+/** The station-family items whose VERIFIED placement is itself station proof. */
+export const STATION_PLACE_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
+
+/**
+ * The `FURNACE_READY source=placed` line a verified placement must emit, or null
+ * when nothing was proven. M2 blocker: the PLACE path proved and recorded
+ * nothing - FURNACE_READY was only emitted inside `runSmelt`, so a furnace the
+ * bot placed and then walked away from was effectively lost (nothing registered
+ * it as a usable station) and the smelt goal starved to `[WAIT]`. The emission
+ * is gated by the same strict placement post-condition the action already uses,
+ * so an unverified/failed placement never registers a station.
+ */
+export function placedStationReadyLine(itemName: string, placedName: string | null, at: Vec3Json): string | null {
+  if (!STATION_PLACE_ITEMS.has(itemName)) return null
+  if (!isPlacePostconditionMet(placedName, itemName)) return null
+  return formatFurnaceReady('placed', at)
+}
+
 /**
  * #79: `true` only when the furnace slot proves the placed stack shrank. `null`
  * is an empty slot (fully consumed); `undefined` means the window does not
@@ -2343,8 +2361,10 @@ export class Executor {
     const fuelCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'fuelCount', 1)))
     const furnaceSource = readMetaString(candidate, 'furnaceSource') ?? 'known'
     this.logger.info('agent', formatFurnaceReady(furnaceSource, target), {
-      actionId: candidate.id,
+      source: furnaceSource,
+      at: `${target.x},${target.y},${target.z}`,
       target,
+      actionId: candidate.id,
       furnaceSource,
     })
     this.setPhase(candidate, epoch, 'smelting')
@@ -2505,6 +2525,15 @@ export class Executor {
         'verify_failed',
         `placeBlock did not create ${itemName} at (${target.x},${target.y},${target.z}) (found ${placedName ?? 'air'})`,
       )
+    }
+    const readyLine = placedStationReadyLine(itemName, placedName, target)
+    if (readyLine !== null) {
+      this.logger.info('agent', readyLine, {
+        source: 'placed',
+        at: `${target.x},${target.y},${target.z}`,
+        target,
+        actionId: candidate.id,
+      })
     }
     return this.buildResult(candidate, epoch, startedAt, 'done', 'placed', `placed ${itemName}`, null, {
       verified: true,

@@ -466,6 +466,46 @@ function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
 }
 
+/** Item names whose VERIFIED placement registers a usable smelt station. */
+export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
+
+/**
+ * The mirrored registration marker for a station this controller verified
+ * placing. `source=placed` is deterministic truth: only the executor's strict
+ * placement post-condition (the block exists at the target) reaches this path,
+ * never a sensed or remembered coincidence.
+ */
+export function formatStationRegisteredPlaced(kind: string, at: Vec3Json): string {
+  const x = Math.round(at.x)
+  const y = Math.round(at.y)
+  const z = Math.round(at.z)
+  return `STATION_REGISTERED kind=${kind} source=placed at=${x},${y},${z}`
+}
+
+/**
+ * Register a verified placed station in the in-generation station list.
+ * Idempotent per (item, cell): a repeated verified placement at the same cell is
+ * recorded once, so the STATION_REGISTERED marker fires exactly once per placed
+ * cell while the station stays selectable for the rest of the generation.
+ */
+export function registerPlacedStation(
+  stations: KnownResource[],
+  item: string,
+  at: Vec3Json,
+): { added: boolean; station: KnownResource } {
+  const station: KnownResource = {
+    name: item,
+    kind: 'station',
+    position: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) },
+  }
+  const cellKey = (entry: { name: string; position: Vec3Json }): string =>
+    `${entry.name}@${Math.round(entry.position.x)},${Math.round(entry.position.y)},${Math.round(entry.position.z)}`
+  const key = cellKey(station)
+  if (stations.some((entry) => cellKey(entry) === key)) return { added: false, station }
+  stations.push(station)
+  return { added: true, station }
+}
+
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750
 const { goals } = pathfinderModule
@@ -564,6 +604,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PREREQ_RANK_SHADOW',
   'PREREQ_SWITCH',
   'FURNACE_READY',
+  'STATION_REGISTERED',
   'SMELT_DONE',
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
@@ -939,6 +980,13 @@ export class JevController {
   private lastOscillationAt = 0
   /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
   private readonly placementRetries = new Map<string, number>()
+  /**
+   * Stations this generation verified placing. They are selectable and reachable
+   * for the rest of the generation (the durable WorldMemory path only lands on a
+   * later generation), so a placed furnace is never lost when the bot walks out
+   * of the near-field sensor radius.
+   */
+  private readonly placedStations: KnownResource[] = []
   /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
   private lastPlacedFurnaceCount = 0
   /** #58: the last scored furnace-prerequisite plan and its selected path. */
@@ -1352,7 +1400,7 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
-      this.signals.knownResources = (this.options.knownResources ?? []).filter(
+      this.signals.knownResources = this.knownResourcesForSensor().filter(
         (resource) => !this.unreachableResources.has(resourceKey(resource)),
       )
       this.updateStallSignal()
@@ -1407,7 +1455,7 @@ export class JevController {
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
-          rememberedStations: this.options.knownResources ?? [],
+          rememberedStations: this.knownResourcesForSensor(),
         },
         sensorOptions(this.options),
       )
@@ -1576,7 +1624,7 @@ export class JevController {
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
-          rememberedStations: this.options.knownResources ?? [],
+          rememberedStations: this.knownResourcesForSensor(),
         },
         sensorOptions(this.options),
       )
@@ -2440,6 +2488,21 @@ export class JevController {
     if (result.status === 'done') {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.delete(candidate.itemName)
+        if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
+          const registered = registerPlacedStation(this.placedStations, candidate.itemName, candidate.target)
+          if (registered.added) {
+            this.logger.info(
+              'agent',
+              formatStationRegisteredPlaced('furnace', candidate.target),
+              {
+                kind: 'furnace',
+                source: 'placed',
+                at: `${Math.round(candidate.target.x)},${Math.round(candidate.target.y)},${Math.round(candidate.target.z)}`,
+              },
+              this.tickCounter,
+            )
+          }
+        }
         if (candidate.meta.furnaceSource === 'held' && candidate.target !== null) {
           this.signals.heldFurnacePlacedAt = blockId('b', candidate.target)
         }
@@ -3932,22 +3995,51 @@ export class JevController {
    * feasible route is never dropped to null/WAIT.
    */
   /**
+   * Durable known resources plus the stations this controller verified placing,
+   * deduplicated by (name, cell). The sensor's remembered-station merge and the
+   * candidate ladder consume the same list, so a placed furnace is selectable on
+   * the very next tick without waiting for a generation swap.
+   */
+  private knownResourcesForSensor(): KnownResource[] {
+    const out: KnownResource[] = []
+    const seen = new Set<string>()
+    for (const resource of [...(this.options.knownResources ?? []), ...this.placedStations]) {
+      const key = resourceKey(resource)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(resource)
+    }
+    return out
+  }
+
+  /**
    * M2 blocker: remembered stations whose grounded retrieve the move-failure
    * memory has blacklisted (`MOVE_TARGET_SKIPPED`) or the reachability gate has
    * withheld (`CANDIDATE_WITHHELD`) are handed to the pure prerequisite planner
    * as an explicit unreachable set. Without it the planner keeps choosing
    * `use_known_station`, the blacklist filter removes every candidate of that
    * path, and the resident collapses to WAIT.
+   *
+   * The sensor's remembered furnace entries are included because a placed-by-us
+   * furnace is evicted from `signals.knownResources` once the move-failure
+   * memory blacklists its cell, yet it is still offered by `knownFurnaces`; an
+   * unblacklisted copy would re-issue the failing RETRIEVE forever.
    */
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
     const keys = new Set<string>()
     const dimension = state.self.dimension
-    for (const resource of state.signals.knownResources ?? []) {
-      if (resource.kind !== 'station') continue
-      const retrieveId = `RETRIEVE:known:station:${resource.name}:${blockId('b', resource.position)}`
+    const consider = (name: string, position: Vec3Json): void => {
+      const retrieveId = `RETRIEVE:known:station:${name}:${blockId('b', position)}`
       const withheld = this.withheldCandidateIds.has(retrieveId)
-      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, resource.position)) continue
-      keys.add(knownStationKey({ name: resource.name, position: resource.position }))
+      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, position)) return
+      keys.add(knownStationKey({ name, position }))
+    }
+    for (const resource of state.signals.knownResources ?? []) {
+      if (resource.kind === 'station') consider(resource.name, resource.position)
+    }
+    for (const station of state.furnaces ?? []) {
+      if (isSensedStation(station)) continue
+      consider('furnace', station)
     }
     return keys
   }
