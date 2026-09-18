@@ -178,8 +178,13 @@ function worldState(overrides: {
   const productive = grounded.candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
   check(
     '(13) sensed furnace + missing visible log yields the log MINE/MOVE route',
-    inputMove !== undefined && inputMove.meta.targetBlockName === 'oak_log' && unrelated === undefined && productive.length > 0,
-    `productive=[${productive.map((candidate) => candidate.id).join(',')}] input=${inputMove?.id ?? 'none'}`,
+    inputMove !== undefined &&
+      inputMove.meta.targetBlockName === 'oak_log' &&
+      inputMove.meta.vertical === 'pillar' &&
+      Number(inputMove.meta.pillarSteps) > 0 &&
+      unrelated === undefined &&
+      productive.length > 0,
+    `productive=[${productive.map((candidate) => candidate.id).join(',')}] input=${inputMove?.id ?? 'none'} vertical=${String(inputMove?.meta.vertical ?? 'none')} steps=${String(inputMove?.meta.pillarSteps ?? 0)}`,
   )
 }
 
