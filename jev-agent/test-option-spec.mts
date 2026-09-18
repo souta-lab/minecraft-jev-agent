@@ -3,17 +3,20 @@
 // for unmet preconditions (#12 generalization) and the PlannedGoal <-> OptionSpec
 // round-trip. Pure: no bot, no network, no model.
 import {
+  BLOCKED_OPTION_NOT_ENQUEUED,
   applyCompiledPlan,
   compileGoalQueue,
   compilePlannedGoal,
   compilePlannedGoals,
   dependencyGoalForPredicate,
   describePredicate,
+  emitBlockedOptionLogs,
   evaluatePredicate,
   evaluatePredicateTruth,
   evaluatePredicates,
   evaluatePredicatesTruth,
   expandOptionDependencies,
+  formatBlockedOptionLog,
   formatPredicateUnknown,
   isOptionComplete,
   isOptionStartable,
@@ -294,6 +297,85 @@ addCase('dependency expansion: place furnace expands to craft furnace then colle
   const place = order.indexOf('place:furnace')
   const ordered = cobble >= 0 && craft > cobble && place > craft
   return { pass: ordered, detail: `order=[${order.join(' -> ')}]` }
+})
+
+// #50: a blocked initiation predicate must not let the Option (or its
+// dependencies) reach the execution queue. `has_ignition_source` is a custom
+// predicate with no deterministic producer, so it blocks the whole subtree.
+const BLOCKED_PARENT_ID = 'custom:build_nether_portal'
+function blockedParentSpec(): OptionSpec {
+  return {
+    id: BLOCKED_PARENT_ID,
+    intent: 'build a lit nether portal',
+    kind: 'custom',
+    target: { predicate: 'valid_nether_portal', count: 1 },
+    preconditions: [
+      { kind: 'inventoryAtLeast', item: 'obsidian', count: 10 },
+      { kind: 'custom', id: 'has_ignition_source' },
+    ],
+    success: [{ kind: 'custom', id: 'portal_lit' }],
+    skills: [],
+    abortThreshold: 0.5,
+  }
+}
+
+addCase('blocked propagation: a blocked parent never enqueues its dependency child (#50)', () => {
+  const expansion = expandOptionDependencies(blockedParentSpec(), makeOptionSnapshot({ inventory: {} }))
+  const child = expansion.blockedOptions.find((entry) => entry.option === 'collect:obsidian')
+  const parentEntry = expansion.blockedOptions.find((entry) => entry.option === BLOCKED_PARENT_ID)
+  const logLine = child === undefined ? '' : formatBlockedOptionLog(child)
+  const logged: string[] = []
+  emitBlockedOptionLogs(expansion.blockedOptions, (event, detail) => logged.push(`${event} option=${String(detail?.option)} blockedBy=${String(detail?.blockedBy)} reason=${String(detail?.reason)}`))
+  const pass =
+    expansion.specs.length === 0 &&
+    parentEntry !== undefined &&
+    parentEntry.blockedBy === BLOCKED_PARENT_ID &&
+    child !== undefined &&
+    child.blockedBy === BLOCKED_PARENT_ID &&
+    logLine === `${BLOCKED_OPTION_NOT_ENQUEUED} option=collect:obsidian blockedBy=${BLOCKED_PARENT_ID} reason=ancestor ${BLOCKED_PARENT_ID} blocked` &&
+    logged.includes(logLine)
+  return { pass, detail: `specs=[${ids(expansion.specs).join(',')}] blocked=[${expansion.blocked.join(';')}] childLine="${logLine}"` }
+})
+
+addCase('blocked propagation: satisfying the blocking predicate releases the child to be enqueued (#50)', () => {
+  const snapshot = makeOptionSnapshot({ inventory: {} })
+  const expansion = expandOptionDependencies(blockedParentSpec(), snapshot, { custom: { has_ignition_source: () => true } })
+  const order = ids(expansion.specs)
+  const pass =
+    order.includes('collect:obsidian') &&
+    order.includes(BLOCKED_PARENT_ID) &&
+    order.indexOf('collect:obsidian') < order.indexOf(BLOCKED_PARENT_ID) &&
+    expansion.blockedOptions.length === 0
+  return { pass, detail: `order=[${order.join(' -> ')}] blockedOptions=${expansion.blockedOptions.length}` }
+})
+
+addCase('blocked propagation: an unblocked plan is byte-for-byte unchanged (#50 regression)', () => {
+  const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }]
+  const snapshot = makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 })
+  const expansion = expandOptionDependencies(compilePlannedGoal(planned[0] as PlannedGoal), snapshot)
+  const enabled = applyCompiledPlan(planned, snapshot, { enabled: true })
+  const disabled = applyCompiledPlan(planned, snapshot, { enabled: false })
+  const pass =
+    ids(expansion.specs).join(',') === 'collect:raw_iron,smelt:iron_ingot' &&
+    enabled.goals.map((goal) => goal.targetItem).join(',') === 'raw_iron,iron_ingot' &&
+    disabled.goals.length === 1 &&
+    disabled.goals[0]?.targetItem === 'iron_ingot' &&
+    expansion.blockedOptions.length === 0 &&
+    enabled.blockedOptions.length === 0
+  return { pass, detail: `expand=[${ids(expansion.specs).join(' -> ')}] enabled=[${enabled.goals.map((goal) => goal.targetItem).join(',')}] disabled=[${disabled.goals.map((goal) => goal.targetItem).join(',')}]` }
+})
+
+addCase('blocked propagation: applyCompiledPlan prunes a blocked dependency from executable goals (#50)', () => {
+  const planned: PlannedGoal[] = [{ kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 }]
+  const result = applyCompiledPlan(planned, makeOptionSnapshot({ inventory: {} }), { enabled: true, maxDepth: 0 })
+  const goals = result.goals.map((goal) => goal.targetItem).join(',')
+  const blockedIds = result.blockedOptions.map((entry) => entry.option)
+  const pass =
+    !goals.includes('cobblestone') &&
+    blockedIds.includes('craft:furnace') &&
+    result.blockedOptions.every((entry) => entry.blockedBy === entry.option) &&
+    result.blocked.some((message) => message.includes('max dependency depth'))
+  return { pass, detail: `goals=[${goals}] blockedOptions=[${blockedIds.join(',')}] blocked=[${result.blocked.join(';')}]` }
 })
 
 addCase('round-trip PlannedGoal -> OptionSpec -> goals preserves queue semantics', () => {

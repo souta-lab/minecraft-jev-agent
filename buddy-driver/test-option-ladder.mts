@@ -7,6 +7,7 @@ import { M2_PLAN_JSON, planFromJson } from '../jev-agent/src/system2.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
+import { readFileSync } from 'node:fs'
 
 interface Case {
   name: string
@@ -143,6 +144,14 @@ addCase('an unmet smelt precondition is expanded in front of the ladder goal', (
   const ids = expansion.specs.map((entry) => entry.id)
   const ok = spec.length === 1 && ids.join(',') === 'collect:raw_iron,smelt:iron_ingot'
   return { pass: ok, detail: `ids=[${ids.join(',')}] goals=[${expansion.goals.map((g) => g.targetItem).join(',')}]` }
+})
+
+addCase('the host wrapper emits the blocked-Option log and never silently drops the block (#50)', () => {
+  const source = readFileSync(new URL('./option-brain.ts', import.meta.url), 'utf8')
+  const emitsSharedMarker = source.includes('emitBlockedOptionLogs(result.blockedOptions, this.log)')
+  const carriesStructured = source.includes('blockedOptions: result.blockedOptions')
+  const goalsFromCompiled = source.includes('return { ...plan, goals: result.goals }')
+  return { pass: emitsSharedMarker && carriesStructured && goalsFromCompiled, detail: `emit=${emitsSharedMarker} structured=${carriesStructured} goalsFromCompiled=${goalsFromCompiled}` }
 })
 
 let failures = 0
