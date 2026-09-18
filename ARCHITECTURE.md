@@ -93,12 +93,12 @@ locomotion, actuator, dig/pickup, craft/smelt を担当。主要なもの:
 |---|---|
 | `agent-runner.mts` (689 行) | HOST。`mineflayer.createBot` + plugin、再接続 backoff、logger 所有、`buddy-state.json` の原子的ミラー、Unix socket 制御サーバ、reload 調停、source watcher |
 | `generation-entry.ts` (404 行) | RELOADABLE 層の入口。`JevController` + `FixedPlanSystem2` をラップ。esbuild で 1 本の hash 付きファイルに束ねる |
-| `resident-types.ts` (126 行) | HOST ↔ generation 契約。`CONTRACT_VERSION=1`、`ResidentWorldMemory`、`ResidentState`、`ResidentGeneration`（`attach`/`start`/`quiesce`/`dispose`/`status`/`stopReason`/`hasStopped`） |
+| `resident-types.ts` | HOST ↔ generation 契約。`ResidentWorldMemory`、`ResidentState`、`ResidentGeneration`（`attach`/`start`/`quiesce`/`dispose`/`status`/`structuralSmoke`/`missionPreflight`/`stopReason`/`hasStopped`）。`CONTRACT_VERSION` の code 正典（値は `RESIDENT-MODE.md` §4-A） |
 | `build.mts` (90 行) | esbuild ビルド出力 `data/resident/gen-<sha12>.mjs` |
 | `data/resident/control.sock` | mode 0600 の制御チャネル（実在を確認） |
 | `buddy-state.json` | durable mirror（`worldMemory`, `ledger`, `generations`, `reloads`, `recoveries`） |
 
-ホットリロード順序（致命）: `build → import → smokeTest → 旧世代 quiesce → snapshot → attach → start`。失敗時は旧世代を破棄する前に `resume()` でロールバック。naive な `import('./controller.ts?v=hash')` は **既知の壊れ方** で、新 controller の静的 import が古い executor/candidates に解決される（stale graph）。だから 1 ファイル 1 URL のバンドル単位でしか世代交代しない。
+ホットリロード順序（致命）: `build → import → createGeneration → attach → structuralSmoke → missionPreflight → 旧世代 quiesce → ACTION LEASE SWITCH（commit 点）→ 新世代 start → 旧世代 dispose`。失敗時は直前 module から **fresh generation** を構築してロールバックする（`generation-swap.ts`。旧世代の `resume()` は存在しない）。naive な `import('./controller.ts?v=hash')` は **既知の壊れ方** で、新 controller の静的 import が古い executor/candidates に解決される（stale graph）。だから 1 ファイル 1 URL のバンドル単位でしか世代交代しない。
 
 ---
 
@@ -377,7 +377,7 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 | `/home/s0u7a/mc-ai/jev-agent/scripts/apply-movement-patch.mjs` | postinstall 適用 + `--check`（実測 4/4 ok） |
 | `/home/s0u7a/mc-ai/buddy-driver/agent-runner.mts` | 常駐 HOST（接続、reconnect、制御 socket、reload 調停、state mirror） |
 | `/home/s0u7a/mc-ai/buddy-driver/generation-entry.ts` | RELOADABLE 層の入口（JevController + ladder planner） |
-| `/home/s0u7a/mc-ai/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION=1`） |
+| `/home/s0u7a/mc-ai/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION` の code 正典。値は `RESIDENT-MODE.md` §4-A） |
 | `/home/s0u7a/mc-ai/buddy-driver/build.mts` | esbuild バンドラ |
 | `/home/s0u7a/mc-ai/buddy-driver/buddy.log` | BOOT / BUILD / SPAWN / GENERATION_READY / RELOAD(ok=false) / SHUTDOWN |
 | `/home/s0u7a/mc-ai/buddy-driver/runner.out` | generation の agent ログ（DESCEND dig_error, smoke 失敗の文脈） |

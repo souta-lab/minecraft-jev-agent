@@ -9,6 +9,8 @@
     "build": "node build.mts",
     "start": "node agent-runner.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "contract-docs-check": "node ../tools/check-contract-docs.mjs",
+    "contract-docs-test": "node ../jev-agent/node_modules/.bin/tsx test-contract-docs.mts",
     "ladder-test": "node ../jev-agent/node_modules/.bin/tsx test-ladder.mts",
     "ladder-floor-test": "node ../jev-agent/node_modules/.bin/tsx test-ladder-floor.mts",
     "option-ladder-test": "node ../jev-agent/node_modules/.bin/tsx test-option-ladder.mts",

@@ -65,7 +65,7 @@ planner.ts:136/669       w.craftingTables / this.world.craftingTables
 ## 運用
 - デタッチ起動: `cd /home/s0u7a/mc-ai/buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &`
 - `pkill -f` は自分のコマンドラインにもマッチしてシェルごと死ぬ。停止は pid 指定で行う。
-- 変更したら **ホットリロードで反映**（`RELOAD ok=true` を確認）。CONTRACT_VERSION 不一致時はホスト再起動で解消。
+- 変更したら **ホットリロードで反映**（`RELOAD ok=true` を確認）。契約バージョンの値は `RESIDENT-MODE.md` §4-A を正典とし、ここに数値を再掲しない。不一致時は **ホスト再起動**でのみ解消する（hot reload では採用できない）。検証: `npm run contract-docs-check` / `npm run contract-docs-test`。
 
 ---
 
@@ -311,7 +311,7 @@ PY
 
 ```
 runId=run-mu5qd4ah-3xdh  connected=true frozen=false
-generations=150 reloads=50 recoveries=72  milestone=raw_iron  contractVersion=2
+generations=150 reloads=50 recoveries=72  milestone=raw_iron  contractVersion=<当時の値。現行は RESIDENT-MODE.md §4-A>
 stats: reconnects=65  reloadsChangedHash=12  reloadsSkippedUnchanged=2  reloadsFailed=0
        freezeCycles=0  wedge=true  goalComplete=false
 worldMemory: craftingTables=13  furnaces=1  discoveredOres=[coal_ore, copper_ore, iron_ore]
