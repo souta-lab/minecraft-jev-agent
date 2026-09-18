@@ -4,12 +4,15 @@
 //
 // Run: npx tsx test-retrieval-stall.mts
 import {
+  ASCENT_PROGRESS_EPSILON,
+  evaluateRetrievalProgress,
   formatKnownResourceUnreachable,
   formatRetrieveStalled,
   planRetrievalEscalation,
   resolveRetrievalStallTicks,
   RETRIEVAL_STALL_TICKS_DEFAULT,
 } from './src/verticalPlan.ts'
+import type { RetrievalProgressState } from './src/verticalPlan.ts'
 
 interface Case {
   name: string
@@ -81,6 +84,50 @@ addCase('the stall window defaults to 40 ticks and honours the override', () => 
   const pass =
     dflt === RETRIEVAL_STALL_TICKS_DEFAULT && dflt === 40 && custom === 7 && invalid === RETRIEVAL_STALL_TICKS_DEFAULT
   return { pass, detail: `default=${dflt} custom=${custom} invalid=${invalid}` }
+})
+
+// M2 ascent: altitude gain must count as progress so a long climb is never
+// dropped as unreachable while the feet Y is genuinely rising.
+
+addCase('altitude gain counts as progress and prevents an abandon while climbing', () => {
+  let track: RetrievalProgressState = { best: 300, ticks: 0, bestGap: 56 }
+  const outcomes: string[] = []
+  for (let step = 1; step <= 50; step += 1) {
+    const decision = evaluateRetrievalProgress({
+      previous: track,
+      distance: 300 - step * 0.27,
+      verticalGap: 56 - step,
+      verticalEpsilon: ASCENT_PROGRESS_EPSILON,
+      epsilon: 0.5,
+      stallTicks: 40,
+    })
+    track = { best: decision.best, ticks: decision.ticks, bestGap: decision.bestGap }
+    outcomes.push(decision.outcome)
+  }
+  const pass = !outcomes.includes('stalled') && track.bestGap === 6 && track.ticks === 0
+  return {
+    pass,
+    detail: `stalled=${outcomes.filter((outcome) => outcome === 'stalled').length} bestGap=${track.bestGap} ticks=${track.ticks}`,
+  }
+})
+
+addCase('a descent back toward the floor does not count as progress', () => {
+  let track: RetrievalProgressState = { best: 300, ticks: 0, bestGap: 20 }
+  const outcomes: string[] = []
+  for (let tick = 1; tick <= 6; tick += 1) {
+    const decision = evaluateRetrievalProgress({
+      previous: track,
+      distance: 300,
+      verticalGap: 20 + tick,
+      verticalEpsilon: ASCENT_PROGRESS_EPSILON,
+      epsilon: 0.5,
+      stallTicks: 4,
+    })
+    track = { best: decision.best, ticks: decision.ticks, bestGap: decision.bestGap }
+    outcomes.push(decision.outcome)
+  }
+  const pass = outcomes.includes('stalled') && track.bestGap === 20
+  return { pass, detail: `outcomes=[${outcomes.join(',')}] bestGap=${track.bestGap}` }
 })
 
 let failures = 0

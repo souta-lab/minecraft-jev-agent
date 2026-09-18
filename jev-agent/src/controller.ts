@@ -75,7 +75,7 @@ import {
   moveFailureKey,
 } from './moveFailMemory.ts'
 import type { MoveFailureReason } from './moveFailMemory.ts'
-import { evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
+import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
 import { DigMemory } from './worldMemory.ts'
@@ -488,6 +488,7 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'STAIRCASE',
   'REUSE_TUNNEL',
   'ASCEND_STEP',
+  'ASCENT_PROGRESS',
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'DESCEND_STALLED',
@@ -637,7 +638,7 @@ export class JevController {
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   private readonly loggedStaleResources = new Set<string>()
-  private retrievalTrack: { id: string; best: number; ticks: number } | null = null
+  private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
@@ -2798,6 +2799,10 @@ export class JevController {
    * is logged, and the next decision is forced onto a different strategy instead
    * of WAIT. Tracking is keyed on the active retrieval, not the last chosen action,
    * so an intervening WAIT no longer resets the assertion.
+   *
+   * M2 ascent: altitude gain toward the target also counts as progress (a
+   * 56-block climb moves the 3D distance by ~1/56 per step), and it re-arms the
+   * run's stall clock so a long climb is never abandoned mid-ascent.
    */
   private observeRetrievalStall(): void {
     const active = this.activeRetrieval
@@ -2816,18 +2821,35 @@ export class JevController {
       entity.position.y - active.target.y,
       entity.position.z - active.target.z,
     )
+    const verticalGap = Math.abs(entity.position.y - active.target.y)
     if (this.retrievalTrack === null || this.retrievalTrack.id !== active.id) {
-      this.retrievalTrack = { id: active.id, best: current, ticks: 0 }
+      this.retrievalTrack = { id: active.id, best: current, ticks: 0, bestGap: verticalGap }
       return
     }
+    const previousBestGap = this.retrievalTrack.bestGap
     const decision = evaluateRetrievalProgress({
-      previous: { best: this.retrievalTrack.best, ticks: this.retrievalTrack.ticks },
+      previous: {
+        best: this.retrievalTrack.best,
+        ticks: this.retrievalTrack.ticks,
+        bestGap: previousBestGap,
+      },
       distance: current,
+      verticalGap,
+      verticalEpsilon: ASCENT_PROGRESS_EPSILON,
       epsilon: RETRIEVAL_PROGRESS_EPSILON,
       stallTicks: RETRIEVAL_STALL_TICKS,
     })
     this.retrievalTrack.best = decision.best
     this.retrievalTrack.ticks = decision.ticks
+    this.retrievalTrack.bestGap = decision.bestGap
+    // Altitude gain is real progress for the whole run too: a 56-block climb
+    // does not move the goal inventory, so without this the wedge clock would
+    // keep aging while the bot is demonstrably ascending.
+    const altitudeImproved =
+      decision.outcome === 'progress' &&
+      previousBestGap !== undefined &&
+      verticalGap <= previousBestGap - ASCENT_PROGRESS_EPSILON
+    if (altitudeImproved) this.lastProgressAt = Date.now()
     if (decision.outcome === 'stalled') this.onRetrievalStall(active, current)
   }
 
