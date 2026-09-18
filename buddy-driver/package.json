@@ -10,6 +10,7 @@
     "start": "node agent-runner.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "ladder-test": "node ../jev-agent/node_modules/.bin/tsx test-ladder.mts",
+    "ladder-floor-test": "node ../jev-agent/node_modules/.bin/tsx test-ladder-floor.mts",
     "option-ladder-test": "node ../jev-agent/node_modules/.bin/tsx test-option-ladder.mts",
     "retrieval-body-test": "node ../jev-agent/node_modules/.bin/tsx test-retrieval-body.mts",
     "known-resource-test": "node ../jev-agent/node_modules/.bin/tsx test-known-resource.mts",
