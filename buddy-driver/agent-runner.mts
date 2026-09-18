@@ -184,6 +184,7 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     discoveredOres: [...normal.discoveredOres],
     knownResources: normal.knownResources.map((resource) => ({ ...resource })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+    moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
   }
 }
@@ -337,6 +338,9 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta, sourceWorldKey: WorldKey
   }
   if (delta.traversalFailures !== undefined) {
     memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
+  }
+  if (delta.moveFailures !== undefined) {
+    memory.moveFailures = delta.moveFailures.map((entry) => ({ ...entry }))
   }
   if (delta.hazards !== undefined) {
     const { production, simulation } = partitionHazardsBySource(delta.hazards)

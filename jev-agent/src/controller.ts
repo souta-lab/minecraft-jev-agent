@@ -81,7 +81,7 @@ import {
   moveFailureKey,
   StateFingerprintMemory,
 } from './moveFailMemory.ts'
-import type { MoveFailureReason } from './moveFailMemory.ts'
+import type { MoveFailEntry, MoveFailureReason } from './moveFailMemory.ts'
 import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
@@ -240,6 +240,10 @@ export interface JevAgentOptions {
   eventSink?: (event: string, detail: Record<string, unknown>) => void
   /** durable known-resource coordinates injected by the resident host (issue #43) */
   knownResources?: KnownResource[]
+  /** coordinate-level movement failures restored from the resident's class-A memory */
+  moveFailureEntries?: readonly MoveFailEntry[]
+  /** called after movement failure memory changes so the HOST can persist a DTO snapshot */
+  onMoveFailureMemoryChange?: (entries: readonly MoveFailEntry[]) => void
   /**
    * #44: minimum spacing between replans for the same summon reason. A second
    * replan inside the window (with unchanged inputs) reuses the current plan.
@@ -839,11 +843,7 @@ export class JevController {
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
-  private readonly moveFailMemory = new MoveFailMemory({
-    failureLimit: MOVE_FAILMEM_LIMIT,
-    cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
-    maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
-  })
+  private moveFailMemory: MoveFailMemory
   /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
   private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
@@ -892,6 +892,7 @@ export class JevController {
   constructor(bot: Bot, options: Partial<JevAgentOptions> = {}) {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
+    this.moveFailMemory = this.createMoveFailMemory()
     this.replanThrottle = new ReplanThrottle(this.options.replanThrottleMs, this.options.replanPositionDelta)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
@@ -971,6 +972,7 @@ export class JevController {
   setOptions(partial: Partial<JevAgentOptions>): void {
     if (this.running) throw new Error('setOptions() cannot be called while the agent is running')
     this.options = normalizeOptions({ ...this.options, ...partial })
+    this.moveFailMemory = this.createMoveFailMemory()
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.harvestedGoalCount = 0
     this.queue = new GoalQueue()
@@ -994,6 +996,15 @@ export class JevController {
     this.scheduler = this.buildScheduler()
     this.executor = new Executor(this.bot, this.logger, executorOptions(this.options, this.scheduler))
     this.system2 = new StubSystem2(this.system2Writer)
+  }
+
+  private createMoveFailMemory(): MoveFailMemory {
+    return new MoveFailMemory({
+      failureLimit: MOVE_FAILMEM_LIMIT,
+      cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
+      maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
+      initialEntries: this.options.moveFailureEntries,
+    })
   }
 
   private buildScheduler(): DecisionScheduler {
@@ -4030,6 +4041,7 @@ export class JevController {
       { actionId: candidate.id, key, attempts: result.entry.attempts, reason, kind: candidate.kind },
       this.tickCounter,
     )
+    this.notifyMoveFailureMemory()
     if (!result.newlyBlacklisted) return
     this.logger.warn(
       'agent',
@@ -4048,6 +4060,17 @@ export class JevController {
       this.lastMoveTarget = null
     }
     this.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, this.tickCounter)
+    this.notifyMoveFailureMemory()
+  }
+
+  private notifyMoveFailureMemory(): void {
+    const callback = this.options.onMoveFailureMemoryChange
+    if (callback === undefined) return
+    try {
+      callback(this.moveFailMemory.snapshot().map((entry) => ({ ...entry })))
+    } catch (error) {
+      this.logger.warn('agent', 'MOVE_FAILMEM_PERSIST_FAILED', { message: error instanceof Error ? error.message : String(error) }, this.tickCounter)
+    }
   }
 
   private currentDimension(): string {
@@ -4087,6 +4110,7 @@ export class JevController {
         { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
         this.tickCounter,
       )
+      this.notifyMoveFailureMemory()
     }
     this.escalate(
       'progress_stall',

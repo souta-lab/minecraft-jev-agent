@@ -109,7 +109,24 @@ addCase('#5(a): a speculative generation stages proposals but leaves the file by
 
     const pending = newPendingProposals()
     pending.generationId = 'gen-new'
-    stageWorldMemory(pending, { craftingTables: [{ x: 1, y: 64, z: 2 }], discoveredOres: ['iron_ore'] })
+    stageWorldMemory(pending, {
+      craftingTables: [{ x: 1, y: 64, z: 2 }],
+      discoveredOres: ['iron_ore'],
+      moveFailures: [
+        {
+          key: 'overworld:9,64,9',
+          dimension: 'overworld',
+          x: 9,
+          y: 64,
+          z: 9,
+          attempts: 3,
+          firstFailedAt: 1,
+          lastFailedAt: 2,
+          lastReason: 'unreachable',
+          blacklistedUntil: 30_000,
+        },
+      ],
+    })
     stageLedgerProposal(pending, { ledger: ledger(5), baseRevision: 10, generationId: 'gen-new' })
     stageLedgerReconciliation(pending, { generationId: 'gen-new', reason: 'live inventory regressed' })
 
@@ -121,6 +138,7 @@ addCase('#5(a): a speculative generation stages proposals but leaves the file by
       pending.worldMemory.length === 1 &&
       pending.ledger?.baseRevision === 10 &&
       (onDisk.worldMemoryByKey[WORLD_KEY]?.craftingTables.length ?? -1) === 0 &&
+      (onDisk.worldMemoryByKey[WORLD_KEY]?.moveFailures.length ?? -1) === 0 &&
       onDisk.ledger?.counter === 1
     return { pass, detail: `bytesUnchanged=${before.equals(after)} stagedDeltas=${pending.worldMemory.length} stagedLedger=${pending.ledger !== null} diskLedgerCounter=${onDisk.ledger?.counter}` }
   } finally {
@@ -221,7 +239,24 @@ addCase('#5(c): an accepted proposal commits exactly once (world memory + ledger
 
     const pending = newPendingProposals()
     pending.generationId = 'gen-now'
-    stageWorldMemory(pending, { craftingTables: [{ x: 9, y: 64, z: 9 }], discoveredOres: ['iron_ore'] })
+    stageWorldMemory(pending, {
+      craftingTables: [{ x: 9, y: 64, z: 9 }],
+      discoveredOres: ['iron_ore'],
+      moveFailures: [
+        {
+          key: 'overworld:9,64,9',
+          dimension: 'overworld',
+          x: 9,
+          y: 64,
+          z: 9,
+          attempts: 3,
+          firstFailedAt: 1,
+          lastFailedAt: 2,
+          lastReason: 'unreachable',
+          blacklistedUntil: 30_000,
+        },
+      ],
+    })
     stageLedgerProposal(pending, { ledger: ledger(3), baseRevision: 20, generationId: 'gen-now' })
 
     let saveCalls = 0
@@ -254,6 +289,7 @@ addCase('#5(c): an accepted proposal commits exactly once (world memory + ledger
       parsed.ledger?.counter === 3 &&
       parsed.worldMemoryByKey[WORLD_KEY]?.craftingTables.length === 1 &&
       parsed.worldMemoryByKey[WORLD_KEY]?.discoveredOres.includes('iron_ore') === true &&
+      parsed.worldMemoryByKey[WORLD_KEY]?.moveFailures[0]?.attempts === 3 &&
       leftovers.length === 0
     return { pass, detail: `writes=${result.writes} saveCalls=${saveCalls} revision=${parsed.revision} ledgerCounter=${parsed.ledger?.counter} tables=${parsed.worldMemoryByKey[WORLD_KEY]?.craftingTables.length} tmpLeftovers=${leftovers.length}` }
   } finally {
