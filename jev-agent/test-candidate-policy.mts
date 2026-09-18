@@ -242,6 +242,23 @@ addCase('#56: strategy prefixes are attributed to the exact Option skill', () =>
   }
 })
 
+addCase('#56: a goto Option preserves PATHFIND_TO for its MOVE candidate', () => {
+  const state = {
+    ...stateWithOption('explore'),
+    currentOption: { kind: 'goto' },
+  } as unknown as WorldState
+  const scoped = applyOptionSkillGate(
+    [candidate('MOVE:p4_10_0', 'MOVE'), candidate('MINE:b1_10_0', 'MINE'), candidate('WAIT', 'WAIT')],
+    state,
+    ['PATHFIND_TO'],
+  )
+  const pass =
+    scoped.map((entry) => entry.id).join('|') === 'MOVE:p4_10_0|WAIT' &&
+    scoped[0]?.meta.optionSkill === 'PATHFIND_TO' &&
+    scoped[1]?.meta.optionSkill === 'CONTROL'
+  return { pass, detail: scoped.map((entry) => `${entry.id}:${String(entry.meta.optionSkill)}`).join(',') }
+})
+
 let failures = 0
 process.stdout.write('M2 heuristic audit - candidate retry policy is an explicit struct\n')
 process.stdout.write('-'.repeat(72) + '\n')

@@ -394,6 +394,14 @@ export function optionSkillForCandidate(candidate: Candidate, state: WorldState)
   if (candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE') return 'CONTROL'
   if (candidate.kind === 'EAT' || candidate.kind === 'RETREAT') return 'SAFETY'
 
+  // OptionSpec `goto` is represented as an explore GoalKind when it enters
+  // the legacy queue, but its exact CurrentOptionContext still carries the
+  // `goto` kind and PATHFIND_TO skill. Preserve that distinction or the
+  // opt-in gate would discard every MOVE candidate for a valid goto Option.
+  if (state.currentOption?.kind === 'goto') {
+    return candidate.kind === 'MOVE' ? 'PATHFIND_TO' : null
+  }
+
   const prefix = candidate.id.split(':', 1)[0] ?? ''
   const prefixed = OPTION_PREFIX_SKILLS[prefix]
   if (prefixed !== undefined) return prefixed
