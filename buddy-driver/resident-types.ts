@@ -217,6 +217,7 @@ export interface AgentSnapshot {
   reloads: number
   /** how many times the host recovered after the controller stopped */
   recoveries: number
+  /** the owner active immediately before `generationId` (previous owner) */
   lastGenerationId: string | null
   /** monotonic action counter for ACTION log lines */
   actions: number
@@ -267,6 +268,38 @@ export interface GenerationStatus {
   /** true once start() has run and no irreversible action can happen before the lease */
   ready: boolean
   contractVersion: number
+}
+
+/**
+ * Issue #13/#49: a generation-owned resource ledger. The HOST creates exactly one
+ * `GenerationResources` per generation and the generation registers every bot
+ * listener / timer it owns. On teardown the host calls `dispose()`, which removes
+ * exactly those resources, and then asserts the host listener counts returned to
+ * baseline. This makes "old generation fully disposed" mechanically checkable
+ * instead of assumed from `controller.stop()`.
+ */
+export interface GenerationResourceCounts {
+  /** tracked listeners still registered after the last dispose (must be 0) */
+  listeners: number
+  /** tracked timers still active after the last dispose (must be 0) */
+  timers: number
+}
+
+/** Minimal emitter surface a tracked target must expose (bot, bot.inventory, ...). */
+export interface GenerationResourceTarget {
+  on?(event: string, fn: (...args: unknown[]) => void): unknown
+  removeListener?(event: string, fn: (...args: unknown[]) => void): unknown
+}
+
+export interface GenerationResources {
+  trackListener(target: GenerationResourceTarget, event: string, fn: (...args: unknown[]) => void): void
+  untrackListener(target: GenerationResourceTarget, event: string, fn: (...args: unknown[]) => void): void
+  untrackAll(target: GenerationResourceTarget, event?: string): void
+  trackTimer(handle: unknown): void
+  untrackTimer(handle: unknown): void
+  counts(): GenerationResourceCounts
+  /** remove every tracked resource; returns the counts that could NOT be removed */
+  dispose(): GenerationResourceCounts
 }
 
 /** Structural smoke result: must PASS with an EMPTY plan and no completed goals. */
@@ -365,6 +398,8 @@ export interface GenerationContext {
   log: (event: string, detail?: Record<string, unknown>) => void
   /** the actuation lease; the generation asserts it before side effects. */
   lease: ActuationLease
+  /** host-owned resource ledger; the generation registers every listener/timer it owns. */
+  resources?: GenerationResources
   /** read-only durable semantic memory for the current world key (a COPY). */
   worldMemory: ResidentWorldMemory
   /** the world key this generation runs under. */
