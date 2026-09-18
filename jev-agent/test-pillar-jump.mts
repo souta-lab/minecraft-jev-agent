@@ -55,12 +55,15 @@ function createFakeBot(input: { y: number; gate?: boolean; floorTop?: number }) 
   }
   const controls: boolean[] = []
   const listeners = new Set<() => void>()
-  const stats = { ticks: 0, maxListeners: 0, physicsEnabledDuringJump: false, jumpApplied: 0 }
+  const stats = { ticks: 0, maxListeners: 0, physicsEnabledDuringJump: false, jumpApplied: 0, clearControlStates: 0 }
   const bot = {
     entity,
     physicsEnabled: false,
     setControlState(_control: 'jump', state: boolean): void {
       controls.push(state)
+    },
+    clearControlStates(): void {
+      stats.clearControlStates += 1
     },
     on(_event: 'physicsTick', listener: () => void): void {
       listeners.add(listener)
@@ -163,6 +166,16 @@ addCase('the pillar jump path installs the correction and a simulated onGround=f
   return {
     pass,
     detail: `airborne=${outcome.airborne} rise=${outcome.peakRise} samples=${outcome.samples} jumpApplied=${bot.stats.jumpApplied} listeners(max=${bot.stats.maxListeners},after=${bot.listenerCount()}) physicsDuring=${bot.stats.physicsEnabledDuringJump}->after=${bot.physicsEnabled} controls=[${transitions.join(',')}]`,
+  }
+})
+
+addCase('the pillar jump clears stale horizontal controls before takeoff', async () => {
+  const bot = createFakeBot({ y: 10.5 })
+  const outcome = await jumpWithGroundCorrection(bot, jumpDeps(bot, footingAt(9)))
+  const pass = outcome.airborne && bot.stats.clearControlStates === 1
+  return {
+    pass,
+    detail: `airborne=${outcome.airborne} clearControlStates=${bot.stats.clearControlStates}`,
   }
 })
 

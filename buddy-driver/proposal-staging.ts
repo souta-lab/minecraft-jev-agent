@@ -301,6 +301,9 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
       toward: { ...t.toward },
     }))
   }
+  if (delta.moveFailures !== undefined) {
+    memory.moveFailures = delta.moveFailures.map((entry) => ({ ...entry }))
+  }
   if (delta.hazards !== undefined) {
     const { production, simulation } = partitionHazardsBySource(delta.hazards)
     for (const hazard of production) mergeHazard(memory.hazards, hazard)

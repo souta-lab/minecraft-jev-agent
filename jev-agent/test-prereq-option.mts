@@ -7,11 +7,16 @@
 import {
   evaluatePrereqStall,
   formatPrereqOption,
+  formatPrereqRankShadow,
   formatPrereqSwitch,
   nextPrereqPath,
   planPrereqOptions,
+  preferPrereqPath,
+  PREREQ_RANK_POLICY_DEFAULT,
   prereqProgressSignature,
+  resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
+  selectPrereqPath,
   PREREQ_STALL_TICKS_DEFAULT,
 } from './src/prereqOption.ts'
 import type { PrereqInput, PrereqPath, PrereqProgress } from './src/prereqOption.ts'
@@ -97,6 +102,99 @@ addCase('(a4) live M2 blocker: a blacklisted known station loses to craft_and_pl
     known?.feasible === false &&
     known.reason === 'known_station_unreachable'
   return { pass, detail: `${decision.line} | known=${known?.reason ?? 'missing'}` }
+})
+
+addCase('(a5) #11 v2: the cheaper feasible path wins, rank is only a shadow baseline', () => {
+  const decision = planPrereqOptions(
+    input({
+      stoneCount: 8,
+      tableAvailable: true,
+      knownStation: { name: 'furnace', position: { x: 44, y: 0, z: 0 } },
+    }),
+  )
+  const craft = decision.options.find((option) => option.path === 'craft_and_place')
+  const known = decision.options.find((option) => option.path === 'use_known_station')
+  const shadow = formatPrereqRankShadow(decision, decision.chosen)
+  const pass =
+    decision.chosen === 'craft_and_place' &&
+    decision.policy === 'cost' &&
+    craft?.feasible === true &&
+    craft.cost === 4 &&
+    known?.feasible === true &&
+    known.cost === 48 &&
+    shadow === 'PREREQ_RANK_SHADOW policy=cost cost_choice=craft_and_place rank_choice=craft_and_place agree=true'
+  return { pass, detail: `${decision.line} | ${shadow} | craft=${craft?.cost ?? 'none'} known=${known?.cost ?? 'none'}` }
+})
+
+addCase('(a6) #11 v2: cost and rank diverge -> cost decides, rank shadow-logged, env restores rank', () => {
+  const diverging = input({
+    heldCount: 1,
+    placementSpot: { x: 5, y: 0, z: 0 },
+    knownStation: { name: 'furnace', position: { x: 0, y: 0, z: 0 } },
+  })
+  const costDecision = planPrereqOptions(diverging)
+  const rankDecision = planPrereqOptions({ ...diverging, rankPolicy: 'rank' })
+  const shadow = formatPrereqRankShadow(costDecision, costDecision.chosen)
+  const pass =
+    costDecision.chosen === 'use_known_station' &&
+    costDecision.rankBaseline === 'place_held' &&
+    shadow === 'PREREQ_RANK_SHADOW policy=cost cost_choice=use_known_station rank_choice=place_held agree=false' &&
+    rankDecision.chosen === 'place_held' &&
+    rankDecision.rankBaseline === 'place_held' &&
+    resolvePrereqRankPolicy({}) === PREREQ_RANK_POLICY_DEFAULT &&
+    PREREQ_RANK_POLICY_DEFAULT === 'cost' &&
+    resolvePrereqRankPolicy({ BUDDY_PREREQ_RANK_POLICY: 'rank' }) === 'rank' &&
+    resolvePrereqRankPolicy({ BUDDY_PREREQ_RANK_POLICY: 'nope' }) === 'cost'
+  return { pass, detail: `${shadow} | cost_choice=${costDecision.chosen} rank_choice=${rankDecision.chosen}` }
+})
+
+addCase('(2) selectPrereqPath never returns null while a feasible option exists', () => {
+  const onlyCraft = planPrereqOptions(input({ stoneCount: 8, tableAvailable: true }))
+  const withKnown = planPrereqOptions(
+    input({
+      stoneCount: 8,
+      tableAvailable: true,
+      knownStation: { name: 'furnace', position: { x: 44, y: 0, z: 0 } },
+    }),
+  )
+  const allAbandoned = new Set<PrereqPath>(['place_held', 'use_known_station', 'craft_and_place'])
+  const noFeasible = planPrereqOptions(input({}))
+  const pass =
+    selectPrereqPath(onlyCraft, new Set<PrereqPath>(['craft_and_place'])) === 'craft_and_place' &&
+    selectPrereqPath(onlyCraft, allAbandoned) === 'craft_and_place' &&
+    selectPrereqPath(withKnown, allAbandoned) === 'craft_and_place' &&
+    selectPrereqPath(withKnown, new Set<PrereqPath>(['craft_and_place'])) === 'use_known_station' &&
+    selectPrereqPath(noFeasible, new Set<PrereqPath>()) === null &&
+    selectPrereqPath(noFeasible, allAbandoned) === null
+  return {
+    pass,
+    detail: `onlyCraftAllAbandoned=${selectPrereqPath(onlyCraft, allAbandoned)} withKnown=${selectPrereqPath(withKnown, new Set(['craft_and_place']))} none=${selectPrereqPath(noFeasible, allAbandoned)}`,
+  }
+})
+
+addCase('(2) preferPrereqPath survives an abandoned forced path and stays non-null', () => {
+  const held = planPrereqOptions(
+    input({
+      heldCount: 1,
+      placementSpot: { x: 2, y: 0, z: 0 },
+      knownStation: { name: 'furnace', position: { x: 9, y: 0, z: 0 } },
+    }),
+  )
+  const craftOnly = planPrereqOptions(input({ stoneCount: 8, tableAvailable: true }))
+  const base = selectPrereqPath(craftOnly, new Set<PrereqPath>(['craft_and_place']))
+  const revived = preferPrereqPath(base, null, craftOnly)
+  const pass =
+    base === 'craft_and_place' &&
+    revived === 'craft_and_place' &&
+    preferPrereqPath(null, null, craftOnly) === 'craft_and_place' &&
+    preferPrereqPath(null, null, held) === 'place_held' &&
+    preferPrereqPath(null, 'use_known_station', held) === 'use_known_station' &&
+    preferPrereqPath('place_held', 'use_known_station', held) === 'use_known_station' &&
+    preferPrereqPath(null, null, planPrereqOptions(input({}))) === null
+  return {
+    pass,
+    detail: `abandonedForcedBase=${base} revived=${revived} fallback=${preferPrereqPath(null, null, craftOnly)} forced=${preferPrereqPath(null, 'use_known_station', held)}`,
+  }
 })
 
 addCase('(b) a stalled path switches to the next-best path instead of repeating', () => {

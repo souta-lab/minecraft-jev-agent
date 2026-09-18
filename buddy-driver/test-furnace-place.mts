@@ -11,13 +11,24 @@
 import { createRequire } from 'node:module'
 import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
+import {
+  candidateStarvationLine,
+  candidateStarvationMissing,
+  formatStationRegisteredPlaced,
+  goalStarvationBlockedBy,
+  MIRRORED_MARKERS,
+  PLACED_STATION_ITEMS,
+  registerPlacedStation,
+} from '../jev-agent/src/controller.ts'
 import { createRecipeIndex } from '../jev-agent/src/crafting.ts'
 import type { QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'
+import { executeFurnaceSmelt, formatSmeltLog, placedStationReadyLine } from '../jev-agent/src/executor.ts'
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
-import { knownStationKey, planPrereqOptions } from '../jev-agent/src/prereqOption.ts'
+import { formatPrereqRankShadow, knownStationKey, planPrereqOptions, selectPrereqPath } from '../jev-agent/src/prereqOption.ts'
+import type { PrereqPath } from '../jev-agent/src/prereqOption.ts'
 import { MoveFailMemory } from '../jev-agent/src/moveFailMemory.ts'
 import type { KnownResource } from '../jev-agent/src/state.ts'
+import { stationRegisteredPlacedDetail } from './generation-entry.ts'
 import {
   classifyAbandonReason,
   evaluatePlaceRetry,
@@ -26,7 +37,7 @@ import {
   prerequisiteProtection,
   shouldAdoptAbandon,
 } from '../jev-agent/src/placementGuard.ts'
-import type { AgentSignals, BlockState, GoalState, InventoryState, SelfState, StationEntry, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
+import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, SelfState, StationEntry, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 
 interface Case {
   name: string
@@ -95,6 +106,7 @@ function worldState(overrides: {
   placementSpots?: Vec3Json[]
   position?: Vec3Json
   craftingTables?: StationEntry[]
+  descent?: DescentOption[]
   /**
    * M2 craft-table regression: override the active subgoal so the same fixture
    * drives a `craft` goal instead of the default smelt.
@@ -127,6 +139,7 @@ function worldState(overrides: {
     craftingTables: overrides.craftingTables ?? [],
     furnaces: overrides.furnaces ?? [],
     placementSpots: overrides.placementSpots ?? [],
+    descent: overrides.descent ?? [],
     goal: smeltGoal(),
     goalQueue: {
       depth: 2,
@@ -345,6 +358,152 @@ addCase('(live) blacklisted furnace + a reachable remembered table walks to it u
   return { pass, detail: `${decision.line} | retrieve=${retrieve?.id ?? 'none'}` }
 })
 
+addCase('(live) #11 v2: smelt charcoal + cobblestone 67 + reachable remembered table is productive, never starving', () => {
+  const feet: Vec3Json = { x: 32, y: 40, z: 37 }
+  const table: Vec3Json = { x: 40, y: 29, z: 35 }
+  const furnaceStation: Vec3Json = { x: 29, y: 61, z: 35 }
+  const downStep: DescentOption = {
+    dir: 'E',
+    mode: 'down',
+    dx: 1,
+    dz: 0,
+    step: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+    wall: { x: feet.x + 1, y: feet.y, z: feet.z },
+    head: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+    floor: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: 'dirt',
+    digHarvestTool: 'pickaxe',
+    digHarvestTier: 0,
+    diggable: true,
+  }
+  const charcoal: QueuedGoal = {
+    id: 'g924:smelt:charcoal',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ cobblestone: 67, stick: 2, birch_planks: 2, wooden_pickaxe: 1, stone_pickaxe: 1 }),
+    signals: signals({
+      knownResources: [
+        { name: 'crafting_table', kind: 'station', position: table },
+        { name: 'furnace', kind: 'station', position: furnaceStation },
+      ],
+    }),
+    descent: [downStep],
+    current: charcoal,
+  })
+  const decision = planPrereqOptions(furnacePrereqInputFromState(state, defaultCandidateOptions))
+  const chosen = selectPrereqPath(decision, new Set<PrereqPath>(['craft_and_place']))
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const acquire = candidates.find((candidate) => candidate.id === 'RETRIEVE:known:station:crafting_table:b40_29_35')
+  const kept =
+    chosen === null ? [] : candidates.filter((candidate) => candidate.meta.prereqPath === undefined || candidate.meta.prereqPath === chosen)
+  const blockedBy = goalStarvationBlockedBy(null, charcoal, [])
+  const starvation = candidateStarvationLine(kept, 'smelt:charcoal:1', false, blockedBy, [])
+  const shadow = formatPrereqRankShadow(decision, chosen)
+  const pass =
+    decision.chosen === 'craft_and_place' &&
+    chosen !== null &&
+    kept.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE') &&
+    acquire !== undefined &&
+    acquire.meta.prereqPath === 'craft_and_place' &&
+    acquire.affordance?.feasible === true &&
+    starvation === null
+  return {
+    pass,
+    detail: `${decision.line} | ${shadow} | chosen=${chosen} acquire=${acquire?.id ?? 'none'} kept=[${kept.map((candidate) => candidate.id).join(',')}] starvation=${starvation ?? 'none'}`,
+  }
+})
+
+addCase('(live) #11 v2: with the world paths gone the abandoned craft path still yields the acquisition route', () => {
+  const feet: Vec3Json = { x: 32, y: 40, z: 37 }
+  const table: Vec3Json = { x: 40, y: 29, z: 35 }
+  const furnaceStation: Vec3Json = { x: 29, y: 61, z: 35 }
+  const downStep: DescentOption = {
+    dir: 'E',
+    mode: 'down',
+    dx: 1,
+    dz: 0,
+    step: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+    wall: { x: feet.x + 1, y: feet.y, z: feet.z },
+    head: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+    floor: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: 'dirt',
+    digHarvestTool: 'pickaxe',
+    digHarvestTier: 0,
+    diggable: true,
+  }
+  const charcoal: QueuedGoal = {
+    id: 'g924:smelt:charcoal',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ cobblestone: 67, stick: 2, birch_planks: 2, wooden_pickaxe: 1, stone_pickaxe: 1 }),
+    signals: signals({
+      knownResources: [
+        { name: 'crafting_table', kind: 'station', position: table },
+        { name: 'furnace', kind: 'station', position: furnaceStation },
+      ],
+    }),
+    descent: [downStep],
+    current: charcoal,
+  })
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    unreachableStations: new Set([knownStationKey({ name: 'furnace', position: furnaceStation })]),
+  }
+  const decision = planPrereqOptions(furnacePrereqInputFromState(state, options))
+  const chosen = selectPrereqPath(decision, new Set<PrereqPath>(['craft_and_place']))
+  const candidates = generateCandidates(state, options)
+  const acquire = candidates.find((candidate) => candidate.id === 'RETRIEVE:known:station:crafting_table:b40_29_35')
+  const kept = candidates.filter(
+    (candidate) => candidate.meta.prereqPath === undefined || candidate.meta.prereqPath === chosen,
+  )
+  const blockedBy = goalStarvationBlockedBy(null, charcoal, [])
+  const starvation = candidateStarvationLine(kept, 'smelt:charcoal:1', false, blockedBy, [])
+  const pass =
+    decision.chosen === 'craft_and_place' &&
+    chosen === 'craft_and_place' &&
+    acquire !== undefined &&
+    acquire.affordance?.feasible === true &&
+    starvation === null
+  return {
+    pass,
+    detail: `${decision.line} | chosen=${chosen} acquire=${acquire?.id ?? 'none'} starvation=${starvation ?? 'none'}`,
+  }
+})
+
 // --- M2 craft-table deadlock: `craft 1 x furnace` must not collapse to WAIT ---
 
 const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 39, y: 31, z: 34 } }
@@ -413,6 +572,80 @@ addCase('(live) craft 1 x furnace + blacklisted remembered table emits no doomed
   return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
+addCase('(live) a sensed table that failed pathing is re-planned as unavailable', () => {
+  const sensedTable: StationEntry = { x: 31, y: 63, z: 37, source: 'sensed' }
+  const state = worldState({
+    position: { x: 29, y: 51, z: 37 },
+    inventory: inventory({ stick: 2, birch_planks: 7, dirt: 8, leaf_litter: 4, cobblestone: 42 }),
+    craftingTables: [sensedTable],
+    signals: signals({
+      lastFailureCode: 'path_stuck',
+      failedCandidates: { 'CRAFT:wooden_pickaxe': 1 },
+    }),
+    current: craftCurrent('wooden_pickaxe'),
+  })
+
+  const candidates = generateCandidates(state, craftOptions)
+  const retry = candidates.find((candidate) => candidate.id === 'CRAFT:wooden_pickaxe')
+  const acquire = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const pass = retry === undefined && acquire !== undefined && acquire.meta.requiresTable === false
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(live) an explicitly unreachable sensed table is not treated as available', () => {
+  const sensedTable: StationEntry = { x: 31, y: 63, z: 37, source: 'sensed' }
+  const state = worldState({
+    position: { x: 29, y: 51, z: 37 },
+    inventory: inventory({ stick: 2, birch_planks: 7 }),
+    craftingTables: [sensedTable],
+    signals: signals(),
+    current: craftCurrent('wooden_pickaxe'),
+  })
+  const options: CandidateOptions = {
+    ...craftOptions,
+    unreachableStations: new Set([knownStationKey({ name: 'crafting_table', position: sensedTable })]),
+  }
+
+  const candidates = generateCandidates(state, options)
+  const retry = candidates.find((candidate) => candidate.id === 'CRAFT:wooden_pickaxe')
+  const acquire = candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const pass = retry === undefined && acquire !== undefined
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(live) furnace prerequisite skips a blacklisted sensed table and uses a remembered fallback', () => {
+  const sensedTable: StationEntry = { x: 40, y: 29, z: 35, source: 'sensed' }
+  const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 39, y: 10, z: 40 } }
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ raw_iron: 3, coal: 2, cobblestone: 119 }),
+    craftingTables: [sensedTable],
+    signals: signals({ knownResources: [rememberedTable] }),
+  })
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    unreachableStations: new Set([knownStationKey({ name: 'crafting_table', position: sensedTable })]),
+  }
+
+  const candidates = generateCandidates(state, options)
+  const craftAtSensed = candidates.find(
+    (candidate) =>
+      candidate.id === 'CRAFT:furnace' &&
+      candidate.target?.x === sensedTable.x &&
+      candidate.target?.y === sensedTable.y &&
+      candidate.target?.z === sensedTable.z,
+  )
+  const retrieveFallback = candidates.find(
+    (candidate) =>
+      candidate.id.startsWith('RETRIEVE:known:station:crafting_table') &&
+      candidate.target?.x === rememberedTable.position.x &&
+      candidate.target?.y === rememberedTable.position.y &&
+      candidate.target?.z === rememberedTable.position.z,
+  )
+  const pass = craftAtSensed === undefined && retrieveFallback !== undefined && retrieveFallback.meta.prereqPath === 'craft_and_place'
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 addCase('(live) craft 1 x furnace + no table held or remembered still crafts one from logs', () => {
   const state = worldState({
     position: { x: 39, y: 10, z: 34 },
@@ -441,6 +674,91 @@ addCase('a 2x2 craft goal never acquires a table', () => {
   const craft = candidates.find((candidate) => candidate.id === 'CRAFT:oak_planks')
   const pass = retrieve === undefined && craft !== undefined
   return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+// --- (M2 placed-station) a verified placement is itself station proof --------
+
+addCase('(placed-station) a verified furnace placement registers the registered cell once', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const stations: KnownResource[] = []
+  const first = registerPlacedStation(stations, 'furnace', at)
+  const again = registerPlacedStation(stations, 'furnace', at)
+  const line = formatStationRegisteredPlaced('furnace', at)
+  const pass =
+    PLACED_STATION_ITEMS.has('furnace') &&
+    first.added === true &&
+    again.added === false &&
+    stations.length === 1 &&
+    stations[0]?.name === 'furnace' &&
+    stations[0]?.kind === 'station' &&
+    stations[0]?.position.x === 31 &&
+    stations[0]?.position.y === 61 &&
+    stations[0]?.position.z === 35 &&
+    line === 'STATION_REGISTERED kind=furnace source=placed at=31,61,35' &&
+    MIRRORED_MARKERS.has('STATION_REGISTERED')
+  return { pass, detail: `added=${first.added}/${again.added} stations=${stations.length} line="${line}" mirrored=${MIRRORED_MARKERS.has('STATION_REGISTERED')}` }
+})
+
+addCase('(placed-station) the host registration detail renders STATION_REGISTERED kind=furnace source=placed at=31,61,35', () => {
+  const detail = stationRegisteredPlacedDetail('furnace', { x: 31, y: 61, z: 35 })
+  const line = `STATION_REGISTERED ${Object.entries(detail).map(([key, value]) => `${key}=${String(value)}`).join(' ')}`
+  const pass = line === 'STATION_REGISTERED kind=furnace source=placed at=31,61,35'
+  return { pass, detail: line }
+})
+
+addCase('(placed-station) an unverified/failed placement emits no FURNACE_READY and registers nothing', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const air = placedStationReadyLine('furnace', null, at)
+  const wrongBlock = placedStationReadyLine('furnace', 'cobblestone', at)
+  const table = placedStationReadyLine('crafting_table', 'crafting_table', at)
+  const verified = placedStationReadyLine('furnace', 'furnace', at)
+  const pass =
+    air === null &&
+    wrongBlock === null &&
+    table === null &&
+    verified === 'FURNACE_READY source=placed at=31,61,35'
+  return { pass, detail: `air=${air ?? 'null'} wrong=${wrongBlock ?? 'null'} table=${table ?? 'null'} verified="${verified ?? 'null'}"` }
+})
+
+addCase('(placed-station) FURNACE_READY is deterministic per verified placement and the registration fires once per cell', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const stations: KnownResource[] = []
+  const readyLines: string[] = []
+  let registrations = 0
+  for (let observation = 0; observation < 2; observation += 1) {
+    const line = placedStationReadyLine('furnace', 'furnace', at)
+    if (line !== null) readyLines.push(line)
+    if (registerPlacedStation(stations, 'furnace', at).added) registrations += 1
+  }
+  const pass =
+    readyLines.length === 2 &&
+    readyLines[0] === readyLines[1] &&
+    readyLines[0] === 'FURNACE_READY source=placed at=31,61,35' &&
+    registrations === 1 &&
+    stations.length === 1
+  return { pass, detail: `ready="${readyLines[0] ?? 'null'}" emissions=${readyLines.length} registrations=${registrations} stations=${stations.length}` }
+})
+
+addCase('(placed-station) a registered-but-not-sensed furnace yields the walk-to-then-smelt RETRIEVE, never WAIT-only', () => {
+  const at: Vec3Json = { x: 31, y: 61, z: 35 }
+  const registered: StationEntry = { ...at, source: 'remembered' }
+  const inputs = inventory({ raw_iron: 8, coal: 7 })
+  const state = worldState({ inventory: inputs, furnaces: [registered] })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const retrieve = productive.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:furnace'))
+  const unregistered = generateCandidates(worldState({ inventory: inputs }), defaultCandidateOptions)
+  const starved = unregistered.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')
+  const pass =
+    retrieve !== undefined &&
+    retrieve.meta.furnaceSource === 'known' &&
+    retrieve.label.includes('to smelt') &&
+    productive.length > 0 &&
+    starved
+  return {
+    pass,
+    detail: `registered=[${candidates.map((candidate) => candidate.id).join(',')}] unregistered=[${unregistered.map((candidate) => candidate.id).join(',')}]`,
+  }
 })
 
 // --- (b) bounded placement retry --------------------------------------------

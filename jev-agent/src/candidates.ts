@@ -29,17 +29,19 @@ import { findInventoryFuel, matchesResourceClass, resourceMatches } from './reso
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks } from './verticalPlan.ts'
-import type { VerticalPlan } from './verticalPlan.ts'
+import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
+import type { VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
-import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.ts'
+import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
-import { StateFingerprintMemory } from './moveFailMemory.ts'
+import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
+import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
+import type { CraftIngredientNeed } from './optionSpec.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -105,6 +107,13 @@ export interface CandidateOptions {
    * prerequisite planner stops choosing an unreachable remembered station.
    */
   unreachableStations?: ReadonlySet<string>
+  /**
+   * Coordinate keys currently blacklisted by durable movement failure memory.
+   * Candidate selection consumes this fact before it chooses an exploration or
+   * retrieval target; filtering only after generation would leave WAIT as the
+   * apparent fallback when the sole target is restored from a prior generation.
+   */
+  blacklistedMoveTargets?: ReadonlySet<string>
   /** failures at one MOVE/RETRIEVE target before the generator stops offering it (default 4) */
   moveFailureLimit?: number
   /** failures at one DESCEND step before the generator stops offering it (default 3) */
@@ -118,6 +127,12 @@ export interface CandidateOptions {
    * keeps the legacy/compiler-disabled candidate pool unchanged.
    */
   allowedSkills?: readonly string[] | null
+  /**
+   * #11 v2: ordering policy for the furnace prerequisite ladder (`cost` default,
+   * `rank` for A/B). Shared by the generator and the controller so both agree on
+   * which path the candidate set represents.
+   */
+  prereqRankPolicy?: PrereqRankPolicy
 }
 
 export interface ReachabilityGateOptions {
@@ -141,6 +156,112 @@ export interface GroundedCandidatesResult {
   reachability: CandidateReachability[]
   /** the subset whose target is not mechanically reachable */
   withheld: CandidateReachability[]
+  /**
+   * Typed placement-geometry refusal: a held station could not be placed from
+   * the terrain the sensor already knows. Non-null means the refusal was
+   * surfaced (never silent), even when no alternative candidate exists.
+   */
+  placeRefusal: PlaceRefusal | null
+}
+
+/**
+ * Why a held station could not be placed from the terrain the sensor already
+ * knows, naming the exact cell the mechanical solve evaluated:
+ *
+ *   - `no_support`   no standable terrain is known; the only air cell (the bot's
+ *                    own head space) has no block under it to place onto;
+ *   - `no_clearance` the only known placeable cell is the bot's own body cell,
+ *                    so the placement is blocked by the bot itself;
+ *   - `out_of_reach` a valid placement cell exists but is beyond interaction
+ *                    reach; the bot must walk closer first.
+ */
+export type PlaceRefusalReason = 'no_support' | 'no_clearance' | 'out_of_reach'
+
+export interface PlaceRefusal {
+  item: string
+  reason: PlaceRefusalReason
+  cell: Vec3Json
+}
+
+/** The exact `PLACE_REFUSED` observability line for one typed refusal. */
+export function formatPlaceRefusal(refusal: PlaceRefusal): string {
+  return `PLACE_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} item=${refusal.item}`
+}
+
+/**
+ * The route a log-class collect goal currently offers, mirrored as `LOG_ROUTE`:
+ *
+ *   - `mine_sensed`      a log is sensed, in reach and visible: dig it now;
+ *   - `retrieve_known`   walk to a remembered log coordinate on the same level;
+ *   - `ascend_then_mine` the remembered log is above: add the vertical leg
+ *                        (pillar / staircase-up / reuse) before the walk;
+ *   - `explore`          no log is sensed or reachable: move the body toward
+ *                        unexplored terrain instead of mining in place.
+ */
+export type LogRouteMode = 'mine_sensed' | 'retrieve_known' | 'ascend_then_mine' | 'explore'
+
+export interface LogRouteDecision {
+  mode: LogRouteMode
+  target: Vec3Json
+  candidateId: string
+}
+
+/** The candidate-meta key that carries a `LogRouteMode`; the controller mirrors it. */
+export const LOG_ROUTE_META = 'logRoute'
+
+const LOG_ROUTE_MODES: ReadonlySet<string> = new Set(['mine_sensed', 'retrieve_known', 'ascend_then_mine', 'explore'])
+
+function logRouteModeOf(candidate: Candidate): LogRouteMode | null {
+  const value = candidate.meta[LOG_ROUTE_META]
+  return typeof value === 'string' && LOG_ROUTE_MODES.has(value) ? (value as LogRouteMode) : null
+}
+
+function carriesLogRoute(candidate: Candidate): boolean {
+  return logRouteModeOf(candidate) !== null
+}
+
+/**
+ * The first presented candidate (candidate order is the policy's preference
+ * order) that carries a log route, or null. Pure and exported so the controller
+ * can mirror `LOG_ROUTE` for exactly the route the policy sees on offer.
+ */
+export function logRouteOf(candidates: readonly Candidate[]): LogRouteDecision | null {
+  for (const candidate of candidates) {
+    const mode = logRouteModeOf(candidate)
+    if (mode === null || candidate.target === null) continue
+    return { mode, target: candidate.target, candidateId: candidate.id }
+  }
+  return null
+}
+
+/** The exact `LOG_ROUTE` observability line for one route decision. */
+export function formatLogRoute(route: LogRouteDecision): string {
+  return `LOG_ROUTE mode=${route.mode} target=${route.target.x},${route.target.y},${route.target.z}`
+}
+
+/**
+ * True when the CURRENT goal is a `collect` whose item is a log-class want
+ * (`log`, `*_log`, `charcoal`, `planks`, `fuel`). Only such a goal promises the
+ * user a log, so only such a goal must always hold a body-moving log route.
+ */
+export function logCollectGoal(state: WorldState): boolean {
+  const current = state.goalQueue?.current ?? null
+  if ((current?.kind ?? 'collect') !== 'collect') return false
+  const focus = current?.targetItem ?? state.goal.targetItem ?? null
+  return focus !== null && retrievalWant(focus)?.kind === 'log'
+}
+
+function focusWantsLog(goalKind: string, focusItem: string | null): boolean {
+  return goalKind === 'collect' && focusItem !== null && retrievalWant(focusItem)?.kind === 'log'
+}
+
+/**
+ * Name the remembered-log route by the leg it actually carries: a vertical plan
+ * for an above-target makes it `ascend_then_mine`, a same-level walk is
+ * `retrieve_known` (a target one block up is stepped, not ascended).
+ */
+function logRetrieveMode(state: WorldState, target: Vec3Json, vertical: VerticalPlan | null): LogRouteMode {
+  return target.y - state.self.position.y > VERTICAL_GAP && vertical !== null ? 'ascend_then_mine' : 'retrieve_known'
 }
 
 const DEFAULT_MOVE_MIN_DISTANCE = 0
@@ -253,8 +374,8 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  const scoped = applyOptionSkillGate(raw, state, options.allowedSkills)
-  return applyReachabilityGate(scoped, state, options)
+  const scoped = applyOptionSkillGate(raw.candidates, state, options.allowedSkills)
+  return applyReachabilityGate(scoped, state, options, raw.placeRefusal)
 }
 
 const OPTION_PREFIX_SKILLS: Readonly<Record<string, string>> = {
@@ -361,8 +482,9 @@ export function applyOptionSkillGate(
 function generateRawCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
-): Candidate[] {
+): RawCandidatesResult {
   let candidates: Candidate[] = []
+  let placeRefusal: PlaceRefusal | null = null
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -370,9 +492,12 @@ function generateRawCandidates(
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
 
   switch (goalKind) {
-    case 'craft':
-      candidates.push(...craftCandidates(state, options, focusItem))
+    case 'craft': {
+      const craft = craftCandidates(state, options, focusItem)
+      candidates.push(...craft.candidates)
+      placeRefusal = craft.placeRefusal
       break
+    }
     case 'smelt':
       candidates.push(...smeltCandidates(state, options, focusItem))
       break
@@ -385,7 +510,13 @@ function generateRawCandidates(
   }
 
   if (strategy === 'explore_cave') {
-    const explore = pickExplore(state, state.terrain.standable, focusItem, options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
+    const explore = pickExplore(
+      state,
+      state.terrain.standable,
+      focusItem,
+      options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+      options.blacklistedMoveTargets,
+    )
     if (explore !== null) {
       candidates.unshift({
         id: `EXPLORE_CAVE:${blockId('p', explore)}`,
@@ -452,7 +583,7 @@ function generateRawCandidates(
   }
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
-  const retreat = pickRetreat(state, state.terrain.standable, danger)
+  const retreat = pickRetreat(state, state.terrain.standable, danger, options.blacklistedMoveTargets)
   if (retreat !== null) {
     candidates.push({
       id: `RETREAT:${blockId('p', retreat)}`,
@@ -476,22 +607,23 @@ function generateRawCandidates(
   candidates.push(...retrievalCandidates(state, options, focusItem))
   if (candidates.length === 0) {
     const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
-    const explore = pickExplore(state, state.terrain.standable, focusItem, moveFailureLimit)
+    const explore = pickExplore(
+      state,
+      state.terrain.standable,
+      focusItem,
+      moveFailureLimit,
+      options.blacklistedMoveTargets,
+    )
     if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < moveFailureLimit) {
-      candidates.push({
-        id: `MOVE:${blockId('p', explore)}`,
-        kind: 'MOVE',
-        label: moveLabel(explore, 'walk toward unexplored terrain', state.self.position),
-        targetName: null,
-        target: explore,
-        targetEntityId: null,
-        itemName: null,
-        requiresTool: false,
-        toolName: null,
-        inReach: distance(explore, state.self.position) <= options.reach,
-        hasStandableAdjacent: true,
-        meta: { tick: state.tick, x: explore.x, y: explore.y, z: explore.z },
-      })
+      candidates.push(
+        exploreMoveCandidate(
+          state,
+          options,
+          explore,
+          moveLabel(explore, 'walk toward unexplored terrain', state.self.position),
+          focusWantsLog(goalKind, focusItem) ? 'explore' : null,
+        ),
+      )
     }
   }
 
@@ -527,7 +659,7 @@ function generateRawCandidates(
     })
   }
 
-  return candidates
+  return { candidates, placeRefusal }
 }
 
 /**
@@ -575,6 +707,7 @@ function mineCandidates(
       z: block.position.z,
       diggable: block.diggable,
       yieldItem: block.yield ?? block.name,
+      ...(block.kind === 'log' ? { [LOG_ROUTE_META]: 'mine_sensed' } : {}),
     }
 
     const horizontal = Math.hypot(block.position.x + 0.5 - self.x, block.position.z + 0.5 - self.z)
@@ -620,7 +753,25 @@ function mineCandidates(
       if (moveCount >= maxMoves) continue
       if (failureCount(state.signals.failedCandidates, `MOVE:${blockId('b', block.position)}`) >= (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)) continue
       if (spot === null || atSpot) continue
+      if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) {
+        if (block.distance <= (options.tunnelMaxDistance ?? DEFAULT_TUNNEL_MAX_DISTANCE)) tunnelTargets.push(block)
+        continue
+      }
       moveCount += 1
+      // A visible resource can be many blocks above the current floor.  Keep
+      // the same deterministic vertical contract as RETRIEVE candidates on
+      // the MOVE that takes the body to its standable spot; otherwise the
+      // executor sees only a horizontal path and repeatedly stalls below the
+      // resource even though the sensor proved a safe pillar/staircase leg.
+      const vertical = planVerticalApproach(verticalInputFor(state, block.position))
+      const tunnelFallback =
+        vertical?.kind === 'reuse'
+          ? planVerticalApproach({ ...verticalInputFor(state, block.position), tunnel: null })
+          : null
+      const verticalMeta = {
+        ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), block.position.y),
+        ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+      }
       moveActions.push({
         id: `MOVE:${blockId('b', block.position)}`,
         kind: 'MOVE',
@@ -644,6 +795,7 @@ function mineCandidates(
           targetBlockZ: block.position.z,
           targetBlockName: block.name,
           distance: block.distance,
+          ...verticalMeta,
         },
       })
       continue
@@ -673,7 +825,16 @@ function mineCandidates(
  * the only way forward is navigation), so normal mining keeps priority.
  */
 function headroomCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const cuts = (state.headroomCuts ?? []).filter((cut) => cut.safe)
+  const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  // Live wedge on main 7acd849: `collect 1 x log` at y=33 re-offered the stone
+  // ceiling MINE 30x while every dig timed out (dig_timeout), because the
+  // clearance candidate ignored failure memory. A cut that has exhausted the
+  // same retry budget every other target honours is not executable now; the
+  // log route / exploration fallback must take over.
+  const cuts = (state.headroomCuts ?? []).filter(
+    (cut) =>
+      cut.safe && failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
+  )
   if (cuts.length === 0) return []
   const feet = {
     x: Math.floor(state.self.position.x),
@@ -946,28 +1107,208 @@ function placeStationCandidate(
   }
 }
 
+/** One held-station placement solve: an in-reach spot, or the typed reason it was refused. */
+interface HeldStationPlacement {
+  spot: Vec3Json | null
+  refusal: PlaceRefusal | null
+  /** grounded alternative offered instead of silence (approach MOVE / clear-headroom MINE) */
+  alternative: Candidate | null
+}
+
+/**
+ * True when a block placed at `cell` would intersect the bot's own body. Mirrors
+ * the sensor's `nearBody < 1.0` rule in `buildPlacementSpots`, so the terrain
+ * solve can never pick the cell the bot is standing in.
+ */
+function placementIntersectsBody(cell: Vec3Json, self: Vec3Json): boolean {
+  return distance({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, self) < 1.0
+}
+
+/** Nearest-first known placement cells: the strict live spots plus the sensed standable terrain. */
+function knownPlacementCells(state: WorldState): Vec3Json[] {
+  const seen = new Set<string>()
+  const cells: Vec3Json[] = []
+  for (const cell of [...state.placementSpots, ...state.terrain.standable]) {
+    const key = blockId('p', cell)
+    if (seen.has(key)) continue
+    seen.add(key)
+    cells.push(cell)
+  }
+  cells.sort((a, b) => distance(a, state.self.position) - distance(b, state.self.position))
+  return cells
+}
+
+/**
+ * The known standable cell that walks the bot toward an out-of-reach placement
+ * cell: nearest to the target among the cells strictly closer to the target than
+ * the bot is now. The target itself is the last resort - arriving there
+ * re-senses its neighbourhood and the next solve step finds a neighbouring cell.
+ */
+function placementApproachCell(
+  state: WorldState,
+  target: Vec3Json,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): Vec3Json {
+  const here = distance(state.self.position, target)
+  const options = state.terrain.standable.filter(
+    (cell) =>
+      !placementIntersectsBody(cell, state.self.position) &&
+      !isBlacklistedMoveTarget(state, blacklistedMoveTargets, cell) &&
+      !(cell.x === target.x && cell.y === target.y && cell.z === target.z) &&
+      distance(cell, target) < here,
+  )
+  options.sort((a, b) => distance(a, target) - distance(b, target))
+  return options[0] ?? target
+}
+
+/** Grounded MOVE toward an out-of-reach placement cell; carries the refusal token in its meta. */
+function placementApproachCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  item: string,
+  target: Vec3Json,
+  purpose: string,
+): Candidate {
+  const approach = placementApproachCell(state, target, options.blacklistedMoveTargets)
+  return {
+    id: `MOVE:${blockId('p', approach)}`,
+    kind: 'MOVE',
+    label: `walk to (${approach.x},${approach.y},${approach.z}) to bring the placement cell (${target.x},${target.y},${target.z}) within reach, then place ${item} to ${purpose}`,
+    targetName: null,
+    target: approach,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(approach, state.self.position) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: approach.x,
+      y: approach.y,
+      z: approach.z,
+      placeRefused: 'out_of_reach',
+      placeRefusedCell: blockId('p', target),
+      placeItem: item,
+    },
+  }
+}
+
+/** Grounded clear-headroom alternative: the safe ceiling MINE that opens placement space when the bot blocks it. */
+function placementHeadroomAlternative(
+  state: WorldState,
+  options: CandidateOptions,
+  refusal: PlaceRefusal,
+): Candidate | null {
+  const cut = headroomCandidates(state, options)[0]
+  if (cut === undefined) return null
+  return {
+    ...cut,
+    meta: {
+      ...cut.meta,
+      placeRefused: refusal.reason,
+      placeRefusedCell: blockId('p', refusal.cell),
+      placeItem: refusal.item,
+    },
+  }
+}
+
+/**
+ * The mechanical held-station placement solve over the terrain the sensor already
+ * knows:
+ *
+ *   1. the strict live spots (`placementSpots`) keep their old priority;
+ *   2. otherwise a sensed standable cell (air + 2-block clearance + solid support)
+ *      outside the bot's body is a placement cell when it is within reach;
+ *   3. an out-of-reach valid cell refuses with `out_of_reach` and offers the
+ *      approach MOVE; the bot's own body cell refuses with `no_clearance` and
+ *      offers the clear-headroom MINE; no standable terrain at all refuses with
+ *      `no_support` at the bot's unsupported head cell.
+ */
+function heldStationPlacement(
+  state: WorldState,
+  options: CandidateOptions,
+  item: string,
+  purpose: string,
+): HeldStationPlacement {
+  const failureCountFor = (cell: Vec3Json): number =>
+    state.signals.failedCandidates[`PLACE:${item}:${blockId('p', cell)}`] ?? 0
+  const retryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
+
+  if (state.placementSpots.length > 0) {
+    const spot =
+      state.placementSpots.find((cell) => failureCountFor(cell) < retryLimit) ?? state.placementSpots[0]
+    if (spot !== undefined) return { spot, refusal: null, alternative: null }
+  }
+
+  let bodyCell: Vec3Json | null = null
+  let outOfReach: Vec3Json | null = null
+  for (const cell of knownPlacementCells(state)) {
+    if (placementIntersectsBody(cell, state.self.position)) {
+      bodyCell = bodyCell ?? cell
+      continue
+    }
+    if (failureCountFor(cell) >= retryLimit) continue
+    if (distance(cell, state.self.eyePosition) <= options.reach) {
+      return { spot: cell, refusal: null, alternative: null }
+    }
+    outOfReach = outOfReach ?? cell
+  }
+
+  if (outOfReach !== null) {
+    const refusal: PlaceRefusal = { item, reason: 'out_of_reach', cell: outOfReach }
+    return { spot: null, refusal, alternative: placementApproachCandidate(state, options, item, outOfReach, purpose) }
+  }
+
+  if (bodyCell !== null) {
+    const refusal: PlaceRefusal = { item, reason: 'no_clearance', cell: bodyCell }
+    return { spot: null, refusal, alternative: placementHeadroomAlternative(state, options, refusal) }
+  }
+
+  const headCell: Vec3Json = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y) + 1,
+    z: Math.floor(state.self.position.z),
+  }
+  const refusal: PlaceRefusal = { item, reason: 'no_support', cell: headCell }
+  return { spot: null, refusal, alternative: placementHeadroomAlternative(state, options, refusal) }
+}
+
 /**
  * CRAFT/PLACE candidates driven by the pure recipe planner: exactly one grounded
  * step toward the current craft subgoal, or nothing when no step is executable
  * in this world state.
  */
-function craftCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
+function craftCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+): CraftCandidatesResult {
+  const none: CraftCandidatesResult = { candidates: [], placeRefusal: null }
   const recipes = options.recipes ?? null
-  if (recipes === null || focusItem === null) return []
-  const tableAvailable = state.craftingTables.some(isSensedStation)
+  if (recipes === null || focusItem === null) return none
+  // #58 keeps sensed-only semantics and is focus-aware; placespot supplied the result shape.
+  const tableAvailable = sensedCraftingTableAvailable(state, options, focusItem)
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
   const op = plan.op
 
   // M2 craft deadlock: a recipe whose chosen variant needs a 3x3 station must
   // not collapse to WAIT while a usable table is held or remembered. Offer the
   // same station ladder the smelt prerequisite path uses before the plan;
-  // falling through keeps (c), the existing craft-a-table-from-planks step.
+  // falling through keeps (c) the existing craft-a-table-from-planks step.
+  // #craft-ingredient-prereq: a missing ingredient route is merged in, so a
+  // withheld station retrieval cannot starve a craft that still needs a log.
   if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
-    if (acquisition.length > 0) return acquisition
+    const route = craftIngredientRoute(state, options, focusItem)
+    const merged = route === null ? acquisition.candidates : [...acquisition.candidates, ...route.candidates]
+    if (merged.length > 0 || acquisition.placeRefusal !== null) return { candidates: merged, placeRefusal: acquisition.placeRefusal }
   }
 
-  if (op === null) return []
+  // #craft-ingredient-prereq: no variant is satisfiable from the live inventory
+  // (the live shape: 2 planks < 3 and no log). Offer the deterministic producer
+  // route for the missing ingredient instead of starving to a WAIT-only set.
+  if (op === null) return { candidates: craftIngredientRoute(state, options, focusItem)?.candidates ?? [], placeRefusal: null }
 
   if (op.type === 'craft') {
     const nearestTable = state.craftingTables.find(isSensedStation) ?? null
@@ -988,13 +1329,161 @@ function craftCandidates(state: WorldState, options: CandidateOptions, focusItem
             (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
             (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
         ) ?? state.placementSpots[0]
-      if (spot === undefined) return []
-      return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
+      if (spot === undefined) return none
+      return {
+        candidates: [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)],
+        placeRefusal: null,
+      }
     }
   }
 
   const step = craftPlanStepCandidate(state, options, op, focusItem)
-  return step === null ? [] : [step]
+  return {
+    candidates: step.candidate === null ? [] : [step.candidate],
+    placeRefusal: step.refusal,
+  }
+}
+
+/** The deterministic sourcing decision for one missing craft ingredient. */
+interface CraftIngredientRoute {
+  item: string
+  missing: string
+  /** `collect <spec>`, or `none` when no raw producer could be resolved */
+  producer: string
+  candidates: Candidate[]
+  /** true when the recipe descent stopped at the dependency depth cap */
+  depthBoundHit: boolean
+}
+
+/** Immutable state of the ingredient recipe descent. */
+interface IngredientDescent {
+  recipes: RecipeIndex
+  counts: Readonly<Record<string, number>>
+  depth: number
+  stack: ReadonlySet<string>
+}
+
+/**
+ * Follow the recipe chain of a missing ingredient down to the first item with no
+ * recipe (log <- planks <- stick <- pickaxe). Depth-bounded by the shared
+ * dependency cap so a malformed cycle can never recurse forever; at the cap the
+ * deepest item is still returned as a collect route rather than nothing.
+ */
+function rawProducerForNeed(
+  need: CraftIngredientNeed,
+  descent: IngredientDescent,
+): { spec: string; depthBoundHit: boolean } | null {
+  const concrete = need.cls === null ? need.item : collectItemForClass(need.cls)
+  if (concrete === null) return null
+  const spec = matchesResourceClass(concrete, 'log') ? 'log' : concrete
+  const variants = descent.recipes.recipesFor(concrete)
+  if (variants.length === 0) return { spec, depthBoundHit: false }
+  if (descent.depth >= MAX_DEPENDENCY_DEPTH) return { spec, depthBoundHit: true }
+  if (descent.stack.has(concrete)) return null
+  const selection = selectCraftIngredients(variants, descent.counts)
+  const next = selection?.missing[0]
+  if (next === undefined) return null
+  const stack = new Set(descent.stack)
+  stack.add(concrete)
+  return rawProducerForNeed(next, { ...descent, depth: descent.depth + 1, stack })
+}
+
+/** Grounded candidates for a raw collect spec: visible MINE/MOVE plus the remembered RETRIEVE route. */
+function collectRouteCandidates(state: WorldState, options: CandidateOptions, spec: string): Candidate[] {
+  const candidates = [...mineCandidates(state, options, spec, null)]
+  const want = retrievalWant(spec)
+  if (want !== null) candidates.push(...retrievalCandidatesForWant(state, options, want))
+  return candidates
+}
+
+/**
+ * The ingredient-sourcing route for a craft goal whose plan is not executable:
+ * select the deterministic best recipe variant, descend to the raw producer of
+ * the first missing ingredient and offer that collect route. Mirrors
+ * `completeStartablePrerequisites` so the queue layer and the candidate layer
+ * name the same producer. Null when nothing is missing or no route exists.
+ */
+function craftIngredientRoute(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string,
+): CraftIngredientRoute | null {
+  const recipes = options.recipes ?? null
+  if (recipes === null) return null
+  const variants = recipes.recipesFor(focusItem)
+  if (variants.length === 0) return null
+  const selection = selectCraftIngredients(variants, state.inventory.counts)
+  const missing = selection?.missing[0]
+  if (missing === undefined) return null
+  const missingLabel = missing.cls === null ? missing.item : missing.cls
+  const raw = rawProducerForNeed(missing, { recipes, counts: state.inventory.counts, depth: 0, stack: new Set<string>() })
+  if (raw === null) return { item: focusItem, missing: missingLabel, producer: 'none', candidates: [], depthBoundHit: false }
+  return {
+    item: focusItem,
+    missing: missingLabel,
+    producer: `collect ${raw.spec}`,
+    candidates: collectRouteCandidates(state, options, raw.spec),
+    depthBoundHit: raw.depthBoundHit,
+  }
+}
+
+/** The one-line `CRAFT_INGREDIENT_PREREQ` record for a craft goal's missing ingredient. */
+export interface CraftIngredientPrereqLine {
+  /** the craft goal's item, e.g. `wooden_pickaxe` */
+  item: string
+  /** the missing ingredient (`birch_planks`), or the plan's next intermediate */
+  missing: string
+  /** `craft <item>` for a satisfiable step, else `collect <spec>` (or `none`) */
+  producer: string
+  /** true when the recipe descent stopped at the shared dependency depth cap */
+  depthBoundHit: boolean
+}
+
+/**
+ * The code-owned ingredient view of the current craft goal, for the mirrored
+ * `CRAFT_INGREDIENT_PREREQ` marker. When the recipe planner already has a step,
+ * the marker names that step; otherwise it names the raw producer the same
+ * `craftIngredientRoute` offers, so the logged action always matches the
+ * presented candidates.
+ */
+export function craftIngredientPrereq(state: WorldState, options: CandidateOptions): CraftIngredientPrereqLine | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'craft') return null
+  const item = current.targetItem
+  if (item === null) return null
+  const recipes = options.recipes ?? null
+  if (recipes === null || recipes.recipesFor(item).length === 0) return null
+  const plan = planNextCraftStep(recipes, item, state.inventory.counts, sensedCraftingTableAvailable(state, options, item))
+  if (plan.op !== null) {
+    if (plan.op.type !== 'craft') return null
+    return { item, missing: plan.op.item, producer: `craft ${plan.op.item}`, depthBoundHit: false }
+  }
+  const route = craftIngredientRoute(state, options, item)
+  if (route === null) return null
+  return { item, missing: route.missing, producer: route.producer, depthBoundHit: route.depthBoundHit }
+}
+
+export function formatCraftIngredientPrereq(entry: CraftIngredientPrereqLine): string {
+  const bound = entry.depthBoundHit ? ' depth=bound' : ''
+  return `CRAFT_INGREDIENT_PREREQ item=${entry.item} missing=${entry.missing} producer=${entry.producer}${bound}`
+}
+
+/** One craft-plan step plus any placement refusal met while resolving it. */
+interface CraftStep {
+  candidate: Candidate | null
+  refusal: PlaceRefusal | null
+}
+
+/** The craft path's candidates plus the typed placement refusal when a held station could not be placed. */
+interface CraftCandidatesResult {
+  candidates: Candidate[]
+  placeRefusal: PlaceRefusal | null
+}
+
+/** Raw candidates plus the placement refusal one of them refused, for the gate to surface. */
+interface RawCandidatesResult {
+  candidates: Candidate[]
+  placeRefusal: PlaceRefusal | null
 }
 
 /**
@@ -1008,43 +1497,43 @@ function craftPlanStepCandidate(
   options: CandidateOptions,
   op: CraftOp,
   focusItem: string,
-): Candidate | null {
+): CraftStep {
   if (op.type === 'craft') {
     const table = op.requiresTable ? state.craftingTables.find(isSensedStation) ?? null : null
-    if (op.requiresTable && table === null) return null
+    if (op.requiresTable && table === null) return { candidate: null, refusal: null }
     const where = table === null ? 'inventory 2x2' : `at crafting_table (${table.x},${table.y},${table.z})`
     return {
-      id: `CRAFT:${op.item}`,
-      kind: 'CRAFT',
-      label: `${describeCraftOp(op)} ${where}, ${focusItem} subgoal`,
-      targetName: op.item,
-      target: table,
-      targetEntityId: null,
-      itemName: op.item,
-      requiresTool: false,
-      toolName: null,
-      inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
-      hasStandableAdjacent: true,
-      meta: {
-        tick: state.tick,
-        craftItem: op.item,
-        craftCount: op.count,
-        requiresTable: op.requiresTable,
+      candidate: {
+        id: `CRAFT:${op.item}`,
+        kind: 'CRAFT',
+        label: `${describeCraftOp(op)} ${where}, ${focusItem} subgoal`,
+        targetName: op.item,
+        target: table,
+        targetEntityId: null,
+        itemName: op.item,
+        requiresTool: false,
+        toolName: null,
+        inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          craftItem: op.item,
+          craftCount: op.count,
+          requiresTable: op.requiresTable,
+        },
       },
+      refusal: null,
     }
   }
 
-  const failed = state.signals.failedCandidates
-  const spot =
-    state.placementSpots.find(
-      (candidate) =>
-        (failed[`PLACE:${op.item}:${blockId('p', candidate)}`] ?? 0) <
-        (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
-    ) ??
-    state.placementSpots[0] ??
-    null
-  if (spot === null) return null
-  return placeStationCandidate(state, options, op.item, spot, `craft ${focusItem}`)
+  const placement = heldStationPlacement(state, options, op.item, `craft ${focusItem}`)
+  if (placement.spot !== null) {
+    return {
+      candidate: placeStationCandidate(state, options, op.item, placement.spot, `craft ${focusItem}`),
+      refusal: null,
+    }
+  }
+  return { candidate: placement.alternative, refusal: placement.refusal }
 }
 
 /**
@@ -1061,10 +1550,37 @@ export function selfContainedCraftCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   if (recipes === null || focusItem === null || (current?.kind ?? 'collect') !== 'craft') return []
-  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, state.craftingTables.some(isSensedStation))
+  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, sensedCraftingTableAvailable(state, options, focusItem))
   if (plan.op === null) return []
   const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
-  return step === null ? [] : [step]
+  return step.candidate === null ? [] : [step.candidate]
+}
+
+/**
+ * A sensed station is not automatically a usable station.  A craft action can
+ * fail after the sensor sees a table when the table is above a disconnected
+ * ledge or otherwise has no path from the current position.  Once the exact
+ * craft candidate has a path failure, re-plan as if the table were absent so
+ * the recipe ladder can craft/place a local table or retrieve another one.
+ *
+ * The explicit blacklist remains authoritative when the controller has already
+ * proved the coordinate unreachable.  The path-failure check is deliberately
+ * scoped to the same CRAFT:<item> candidate; unrelated movement failures must
+ * not make every nearby table disappear.
+ */
+function sensedCraftingTableAvailable(state: WorldState, options: CandidateOptions, focusItem: string): boolean {
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  // Sensed stations use the same explicit reachability blacklist as remembered
+  // stations. A stale sensor result must not bypass MOVE_FAILMEM and re-enter
+  // the same CRAFT:furnace -> JUMP_FAIL loop on every prerequisite decision.
+  const sensed = state.craftingTables.find(
+    (position) => isSensedStation(position) && !unreachableStations.has(knownStationKey({ name: 'crafting_table', position })),
+  )
+  if (sensed === undefined) return false
+  const craftFailures = state.signals.failedCandidates[`CRAFT:${focusItem}`] ?? 0
+  const lastFailure = state.signals.lastFailureCode
+  const pathFailure = lastFailure === 'path_no_path' || lastFailure === 'path_stuck'
+  return !(craftFailures > 0 && pathFailure)
 }
 
 /**
@@ -1115,15 +1631,26 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
 /**
  * SMELT candidate for a `smelt` subgoal: a placed furnace is in sensor range,
  * the input and a fuel item are in the inventory, and the output is still short.
+ * With no sensed furnace the goal is still satisfiable: the acquisition ladder
+ * sources a REGISTERED furnace (durable known resource or a remembered
+ * placed-by-us station) through `knownFurnaces` and offers the
+ * walk-to-then-smelt RETRIEVE rather than nothing.
  */
 function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
+  const inputSpec = smeltInputName(focusItem)
+  if (inputSpec === null) return []
   const furnace = (state.furnaces ?? []).find(isSensedStation) ?? null
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
-  if (inputItem === null) return []
   const fuelItem = smeltFuelFor(state)
-  if (fuelItem === null) return []
+  if (inputItem === null || fuelItem === null) {
+    // Not executable yet: the input/fuel is a code-owned precondition
+    // (optionSpec#smeltPreconditions), so offer the deterministic collect route
+    // for the missing producer instead of starving to WAIT. `fuel` is the
+    // data-driven class route (a log or coal), symmetric with the input route.
+    return mineCandidates(state, options, inputItem === null ? inputSpec : 'fuel', null)
+  }
 
   const haveOutput = state.inventory.counts[focusItem] ?? 0
   const required = state.goalQueue?.current?.requiredCount ?? state.goal.requiredCount
@@ -1180,6 +1707,58 @@ function smeltFuelFor(state: WorldState): string | null {
   return findInventoryFuel(state.inventory.counts)?.item ?? null
 }
 
+/** The one-line `SMELT_INPUT_PREREQ` record for a smelt goal's input producer. */
+export interface SmeltInputPrereqLine {
+  /** the smelt output the goal wants, e.g. `charcoal` */
+  item: string
+  /** concrete input item: held when present, else the nearest world producer */
+  input: string
+  present: boolean
+  /** `insert_collect` when the missing input offers a collect route */
+  action: 'insert_collect' | 'none' | 'no_collect_route'
+}
+
+/**
+ * The code-owned input-prerequisite view of the current smelt goal, for the
+ * mirrored `SMELT_INPUT_PREREQ` marker. Data-driven: the input comes from
+ * gameData.smeltInputFor, so charcoal reports a `*_log` and iron_ingot reports
+ * raw_iron. The route is the same `mineCandidates` set the generator offers for
+ * a missing input, so the logged action always matches the presented candidates.
+ */
+export function smeltInputPrereq(state: WorldState, options: CandidateOptions): SmeltInputPrereqLine | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'smelt') return null
+  const item = current.targetItem
+  if (item === null) return null
+  const inputSpec = smeltInputName(item)
+  if (inputSpec === null) return null
+  if ((state.furnaces ?? []).find(isSensedStation) === undefined) return null
+  const held = smeltInputFor(state, item)
+  if (held !== null) return { item, input: held, present: true, action: 'none' }
+  const route = mineCandidates(state, options, inputSpec, null)
+  return {
+    item,
+    input: nearestProducerYield(state, inputSpec) ?? inputSpec,
+    present: false,
+    action: route.length > 0 ? 'insert_collect' : 'no_collect_route',
+  }
+}
+
+export function formatSmeltInputPrereq(entry: SmeltInputPrereqLine): string {
+  return `SMELT_INPUT_PREREQ item=${entry.item} input=${entry.input} present=${entry.present} action=${entry.action}`
+}
+
+/** Nearest mineable block whose yield satisfies `spec` (`oak_log` for `log`). */
+function nearestProducerYield(state: WorldState, spec: string): string | null {
+  let best: BlockState | null = null
+  for (const block of state.blocks) {
+    if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
+    if (!resourceMatches(block.yield ?? block.name, spec)) continue
+    if (best === null || block.distance < best.distance) best = block
+  }
+  return best === null ? null : (best.yield ?? best.name)
+}
+
 const EMPTY_STATIONS: ReadonlySet<string> = new Set<string>()
 
 /** Remembered stations of one kind, nearest first. */
@@ -1194,30 +1773,89 @@ function knownStations(state: WorldState, station: string): KnownStationLike[] {
 }
 
 /**
- * Where the furnace craft step gets its 3x3 station. A sensed table is used in
- * place; a remembered reachable table is walked to; a held table is placed
- * first. Blacklisted stations are skipped, so the M2 blocker cannot re-select a
- * station the move-failure memory already proved unreachable.
+ * Furnace coordinates the smelt prerequisite can walk to. Durable known
+ * resources are the primary source; the sensor's REMEMBERED station entries are
+ * merged in too, because a furnace this bot placed and the controller registered
+ * is a usable station even after the bot leaves the near-field scan radius - it
+ * must yield the walk-to-then-smelt RETRIEVE instead of collapsing to WAIT.
+ */
+function knownFurnaces(state: WorldState): KnownStationLike[] {
+  const found = knownStations(state, 'furnace')
+  const seen = new Set(found.map((station) => knownStationKey(station)))
+  for (const entry of state.furnaces ?? []) {
+    if (isSensedStation(entry)) continue
+    const station: KnownStationLike = { name: 'furnace', position: { x: entry.x, y: entry.y, z: entry.z } }
+    const key = knownStationKey(station)
+    if (seen.has(key)) continue
+    seen.add(key)
+    found.push(station)
+  }
+  found.sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
+  return found
+}
+
+/**
+ * A sensed station is not automatically a grounded route (mirror of
+ * `sensedCraftingTableAvailable` for craft goals): once the exact `CRAFT:furnace`
+ * step failed with a path failure, re-plan as if that table were absent so the
+ * ladder falls through to a remembered/held table. The controller's explicit
+ * blacklist applies to the sensed cell exactly like its remembered copy - they
+ * are the SAME coordinate, and the live M2 loop blacklisted the remembered
+ * `crafting_table@40,29,35` while a `CRAFT:furnace` at the sensed copy of that
+ * cell was still offered, producing `ABANDON_REASON ... reason=unreachable`.
+ */
+function sensedTableUsable(
+  state: WorldState,
+  unreachableStations: ReadonlySet<string>,
+  sensed: Vec3Json,
+): boolean {
+  if (unreachableStations.has(knownStationKey({ name: 'crafting_table', position: sensed }))) return false
+  const craftFailures = state.signals.failedCandidates['CRAFT:furnace'] ?? 0
+  const lastFailure = state.signals.lastFailureCode
+  const pathFailure = lastFailure === 'path_no_path' || lastFailure === 'path_stuck'
+  return !(craftFailures > 0 && pathFailure)
+}
+
+/**
+ * Where the furnace craft step gets its 3x3 station, as a ladder of GROUNDED
+ * routes. A sensed table only serves the in-place CRAFT when it is inside
+ * interaction reach; otherwise the sub-step is an acquisition (retrieve a
+ * remembered table / place a held one), and only as a last resort is the CRAFT
+ * step issued against a distant sensed table the executor must walk to. A
+ * proven-unreachable coordinate (blacklist) or a table that already failed a
+ * pathing CRAFT is never re-selected as if it were fresh.
  */
 function craftingTableSource(
   state: WorldState,
-  unreachableStations: ReadonlySet<string>,
-  placeSpotRetryLimit: number,
+  options: CandidateOptions,
 ): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
-  const sensed = state.craftingTables.find(isSensedStation)
-  if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const placeSpotRetryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
+  // Sensed stations use the same explicit reachability blacklist and path-failure
+  // memory as remembered stations: a stale sensor result must not bypass
+  // MOVE_FAILMEM and re-enter the same CRAFT:furnace -> JUMP_FAIL loop. The first
+  // USABLE sensed table wins; blacklisted/failed cells are skipped, not fatal.
+  const sensed = state.craftingTables.find(
+    (position) =>
+      isSensedStation(position) && sensedTableUsable(state, unreachableStations, position),
+  )
+  const sensedInReach = sensed !== undefined && distance(sensed, state.self.eyePosition) <= options.reach
+  if (sensed !== undefined && sensedInReach) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
   const remembered = knownStations(state, 'crafting_table').find(
     (station) => !unreachableStations.has(knownStationKey(station)),
   )
   if (remembered !== undefined) return { kind: 'remembered', station: remembered }
-  if ((state.inventory.counts.crafting_table ?? 0) <= 0) return null
-  const spot =
-    state.placementSpots.find(
-      (candidate) =>
-        (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
-        placeSpotRetryLimit,
-    ) ?? state.placementSpots[0]
-  return spot === undefined ? null : { kind: 'held-place', spot }
+  if ((state.inventory.counts.crafting_table ?? 0) > 0) {
+    const spot =
+      state.placementSpots.find(
+        (candidate) =>
+          (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+          placeSpotRetryLimit,
+      ) ?? state.placementSpots[0]
+    if (spot !== undefined) return { kind: 'held-place', spot }
+  }
+  if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
+  return null
 }
 
 /**
@@ -1243,30 +1881,40 @@ function planRequiresTable(
  *   (b) walk to a remembered table the move-failure blacklist has not excluded;
  *   (c) else nothing - when the materials are held, `planNextCraftStep` already
  *       returns the 2x2 craft-table step and the caller falls through to it.
+ *
+ * `heldStationPlacement` is the same mechanical solve the place branch uses, so
+ * a held table the known terrain can host is placed even when the strict live
+ * spot scan is empty; a genuine geometry dead end is refused with its typed
+ * reason and the grounded alternative instead of collapsing to nothing.
  */
 function tableAcquisitionCandidates(
   state: WorldState,
   options: CandidateOptions,
   focusItem: string,
-): Candidate[] {
-  const failed = state.signals.failedCandidates
-  if ((state.inventory.counts.crafting_table ?? 0) > 0 && state.placementSpots.length > 0) {
-    const spot =
-      state.placementSpots.find(
-        (candidate) =>
-          (failed[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
-          (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
-      ) ?? state.placementSpots[0]
-    if (spot !== undefined) {
-      return [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)]
-    }
-  }
+): CraftCandidatesResult {
+  const holdsTable = (state.inventory.counts.crafting_table ?? 0) > 0
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
   const remembered = knownStations(state, 'crafting_table').find(
     (station) => !unreachableStations.has(knownStationKey(station)),
   )
-  if (remembered !== undefined) return [knownStationRetrievalCandidate(state, options, remembered)]
-  return []
+  if (holdsTable) {
+    const placement = heldStationPlacement(state, options, 'crafting_table', `craft ${focusItem}`)
+    if (placement.spot !== null) {
+      return {
+        candidates: [placeStationCandidate(state, options, 'crafting_table', placement.spot, `craft ${focusItem}`)],
+        placeRefusal: null,
+      }
+    }
+    if (remembered !== undefined) {
+      return { candidates: [knownStationRetrievalCandidate(state, options, remembered)], placeRefusal: null }
+    }
+    return {
+      candidates: placement.alternative === null ? [] : [placement.alternative],
+      placeRefusal: placement.refusal,
+    }
+  }
+  if (remembered !== undefined) return { candidates: [knownStationRetrievalCandidate(state, options, remembered)], placeRefusal: null }
+  return { candidates: [], placeRefusal: null }
 }
 
 /**
@@ -1283,7 +1931,7 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     if (count > 0 && matchesResourceClass(name, 'stone')) stoneCount += count
   }
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
-  const furnaces = knownStations(state, 'furnace')
+  const furnaces = knownFurnaces(state)
   const reachableFurnace = furnaces.find((station) => !unreachableStations.has(knownStationKey(station))) ?? null
   return {
     goal: state.goalQueue?.current ?? null,
@@ -1291,15 +1939,12 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     placedCount: (state.furnaces ?? []).filter(isSensedStation).length,
     stoneCount,
     tableAvailable:
-      craftingTableSource(
-        state,
-        unreachableStations,
-        options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT,
-      ) !== null,
+      craftingTableSource(state, options) !== null,
     placementSpot: state.placementSpots.length > 0 ? leastFailedPlacementSpot(state, 'furnace') : null,
     knownStation: reachableFurnace ?? furnaces[0] ?? null,
     unreachableStations,
     self: state.self.position,
+    rankPolicy: options.prereqRankPolicy,
   }
 }
 
@@ -1324,11 +1969,7 @@ function candidatesForPrereqPath(
 
 /** CRAFT/PLACE step toward a furnace: use a table in reach, walk to a remembered one, or place a held one. */
 function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
-  const source = craftingTableSource(
-    state,
-    options.unreachableStations ?? EMPTY_STATIONS,
-    options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT,
-  )
+  const source = craftingTableSource(state, options)
   if (source === null) return []
   if (source.kind === 'held-place') {
     return [placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)]
@@ -1417,6 +2058,12 @@ function verticalPlanMeta(
       meta.tunnelX = vertical.tunnel.x
       meta.tunnelY = vertical.tunnel.y
       meta.tunnelZ = vertical.tunnel.z
+      if (vertical.clear !== undefined) {
+        meta.tunnelClearX = vertical.clear.cell.x
+        meta.tunnelClearY = vertical.clear.cell.y
+        meta.tunnelClearZ = vertical.clear.cell.z
+        meta.tunnelClearName = vertical.clear.name
+      }
       return meta
     case 'staircase':
       meta.stairDir = vertical.dir
@@ -1467,6 +2114,63 @@ function verticalPlanLabel(vertical: VerticalPlan | null): string {
   }
 }
 
+/**
+ * The same vertical input the primary plan used, minus the remembered tunnel, so
+ * the executor can fall back to a different vertical plan when the live reuse
+ * entry turns out to be unusable.
+ */
+function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
+  return {
+    selfFeetY: state.self.position.y,
+    selfPosition: state.self.position,
+    target,
+    tunnel: state.signals.lastTunnel,
+    descent: state.descent,
+    stepCuts: state.stepCuts,
+    placeable: selectPlaceableBlock(state.inventory.counts),
+    columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
+  }
+}
+
+function fallbackVerticalMeta(fallback: VerticalPlan | null): Record<string, string | number | boolean> {
+  if (fallback === null || fallback.kind === 'reuse') return { fallbackVertical: 'none' }
+  switch (fallback.kind) {
+    case 'staircase':
+      return {
+        fallbackVertical: 'staircase',
+        fallbackStairDir: fallback.dir,
+        fallbackStairToY: fallback.toY,
+        fallbackStairDigX: fallback.dig.x,
+        fallbackStairDigY: fallback.dig.y,
+        fallbackStairDigZ: fallback.dig.z,
+        fallbackStairStepX: fallback.step.x,
+        fallbackStairStepY: fallback.step.y,
+        fallbackStairStepZ: fallback.step.z,
+        fallbackStairBlockName: fallback.digName ?? 'unknown',
+      }
+    case 'staircase-up':
+      return {
+        fallbackVertical: 'staircase-up',
+        fallbackUpDir: fallback.dir,
+        fallbackUpToY: fallback.toY,
+        fallbackUpDigX: fallback.dig.x,
+        fallbackUpDigY: fallback.dig.y,
+        fallbackUpDigZ: fallback.dig.z,
+        fallbackUpStepX: fallback.step.x,
+        fallbackUpStepY: fallback.step.y,
+        fallbackUpStepZ: fallback.step.z,
+        fallbackUpBlockName: fallback.digName ?? 'unknown',
+      }
+    case 'pillar':
+      return {
+        fallbackVertical: 'pillar',
+        fallbackPillarToY: fallback.toY,
+        fallbackPillarSteps: fallback.steps,
+        fallbackPillarPlaceName: fallback.placeName,
+      }
+  }
+}
+
 function knownStationRetrievalCandidate(
   state: WorldState,
   options: CandidateOptions,
@@ -1474,17 +2178,15 @@ function knownStationRetrievalCandidate(
 ): Candidate {
   const isFurnace = known.name.includes('furnace')
   const purpose = isFurnace ? 'smelt' : stationRetrievalPurpose(state)
-  const vertical = planVerticalApproach({
-    selfFeetY: state.self.position.y,
-    selfPosition: state.self.position,
-    target: known.position,
-    tunnel: state.signals.lastTunnel,
-    descent: state.descent,
-    stepCuts: state.stepCuts,
-    placeable: selectPlaceableBlock(state.inventory.counts),
-    columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-  })
-  const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
+  const vertical = planVerticalApproach(verticalInputFor(state, known.position))
+  const tunnelFallback =
+    vertical?.kind === 'reuse'
+      ? planVerticalApproach({ ...verticalInputFor(state, known.position), tunnel: null })
+      : null
+  const verticalMeta = {
+    ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y),
+    ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+  }
   return {
     id: `RETRIEVE:known:station:${known.name}:${blockId('b', known.position)}`,
     kind: 'RETRIEVE',
@@ -1593,7 +2295,9 @@ function hasLogInInventory(state: WorldState): boolean {
  * current subgoal first, then the queued goals. A `collect cobblestone (descend
  * toward ore levels)` proxy must not hide the real need (raw_iron) when a
  * remembered ore coordinate exists, so callers consult the queue, not only
- * `focusItem`. Pure.
+ * `focusItem`. An active smelt is a prerequisite barrier, however: future
+ * queue retrievals must not steal the body while its furnace/input path is
+ * unresolved (#73). Pure.
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
@@ -1603,8 +2307,10 @@ function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalW
     needs.push({ item, fuel })
   }
   push(focusItem, goalWantsFuel(current))
-  push(state.goal.targetItem, goalWantsFuel(current))
-  for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued))
+  if (current?.kind !== 'smelt') {
+    push(state.goal.targetItem, goalWantsFuel(current))
+    for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued))
+  }
   const wants: RetrievalWant[] = []
   for (const need of needs) {
     if (need.fuel && fuelNeedSatisfiedByInventory(state, need.item)) continue
@@ -1615,20 +2321,45 @@ function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalW
   return wants
 }
 
-function visibleBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
-  if (want.kind === 'ore') {
-    return state.blocks.find((block) => block.kind === 'ore' && resourceMatches(block.yield, want.item)) ?? null
-  }
-  return state.blocks.find((block) => block.kind === 'log') ?? null
+function mineableNow(block: BlockState): boolean {
+  return block.diggable && block.inReach && block.visible !== false
 }
 
-function knownResourceFor(state: WorldState, want: RetrievalWant): KnownResource | null {
+/**
+ * The sensed block that already serves the want THIS tick - the same
+ * precondition as `mineCandidates`' MINE arm, so its presence means the item is
+ * obtainable without leaving, and a remembered-coordinate trip must not be
+ * offered on top of it.
+ *
+ * Presence in `state.blocks` alone is NOT a route: a log sensed only at
+ * distance (live shape at y=33: surface logs 32 blocks above, no walk-up
+ * access) cannot be mined here. Treating those as visible suppressed
+ * `RETRIEVE:known:*`, which is the ascent leg that reaches the remembered
+ * surface trees, and left the clearance MINE as the only action.
+ */
+function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
+  if (want.kind === 'ore') {
+    return (
+      state.blocks.find(
+        (block) => block.kind === 'ore' && resourceMatches(block.yield, want.item) && mineableNow(block),
+      ) ?? null
+    )
+  }
+  return state.blocks.find((block) => block.kind === 'log' && mineableNow(block)) ?? null
+}
+
+function knownResourceFor(
+  state: WorldState,
+  want: RetrievalWant,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): KnownResource | null {
   const known = state.signals.knownResources ?? []
   let best: KnownResource | null = null
   for (const resource of known) {
     const matches = want.kind === 'ore' ? want.blockNames.includes(resource.name) : resource.name.endsWith('_log')
     if (!matches) continue
     if (resourceDepleted(state, resource)) continue
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
     if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
       best = resource
     }
@@ -1669,8 +2400,8 @@ export function staleKnownResources(
 }
 
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
-  if (visibleBlockFor(state, want) !== null) return []
-  const known = knownResourceFor(state, want)
+  if (mineableBlockFor(state, want) !== null) return []
+  const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
   if (known !== null) {
     const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
     if (
@@ -1681,18 +2412,17 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     // Issue #45: a remembered resource below the current level needs a vertical
     // leg (reuse a tunnel, else dig a staircase step) or retrieval stalls at the
     // horizontal bearing and falls back to WAIT.
-    const vertical = planVerticalApproach({
-      selfFeetY: state.self.position.y,
-      selfPosition: state.self.position,
-      target: known.position,
-      tunnel: state.signals.lastTunnel,
-      descent: state.descent,
-      stepCuts: state.stepCuts,
-      placeable: selectPlaceableBlock(state.inventory.counts),
-      columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-    })
-    const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
+    const vertical = planVerticalApproach(verticalInputFor(state, known.position))
+    const tunnelFallback =
+      vertical?.kind === 'reuse'
+        ? planVerticalApproach({ ...verticalInputFor(state, known.position), tunnel: null })
+        : null
+    const verticalMeta = {
+      ...verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y),
+      ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+    }
     const verticalLabel = verticalPlanLabel(vertical)
+    const logRoute = want.kind === 'log' ? logRetrieveMode(state, known.position, vertical) : null
     return [
       {
         id,
@@ -1716,12 +2446,18 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
           y: known.position.y,
           z: known.position.z,
           ...verticalMeta,
+          ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
         },
       },
     ]
   }
   if (want.kind !== 'log') return []
-  const spot = surfaceSpot(state, want.item, options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
+  const spot = surfaceSpot(
+    state,
+    want.item,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
   if (spot === null) return []
   return [
     {
@@ -1745,6 +2481,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
         x: spot.x,
         y: spot.y,
         z: spot.z,
+        [LOG_ROUTE_META]: 'explore',
       },
     },
   ]
@@ -1763,10 +2500,16 @@ function retrievalCandidates(state: WorldState, options: CandidateOptions, focus
   return []
 }
 
-function surfaceSpot(state: WorldState, item: string, moveFailureLimit: number): Vec3Json | null {
+function surfaceSpot(
+  state: WorldState,
+  item: string,
+  moveFailureLimit: number,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): Vec3Json | null {
   let best: Vec3Json | null = null
   for (const spot of state.terrain.standable) {
     if (spot.y <= state.self.position.y + 2) continue
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
     const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
     if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
     if (best === null || spot.y > best.y) best = spot
@@ -1801,6 +2544,7 @@ function pickRetreat(
   state: WorldState,
   standable: Vec3Json[],
   danger: BlockState | null,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
   const hurt = state.self.health <= 6
   if (danger === null && !hurt) return null
@@ -1808,6 +2552,7 @@ function pickRetreat(
   let best: Vec3Json | null = null
   let bestScore = Number.NEGATIVE_INFINITY
   for (const spot of standable) {
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
     const score = distance(spot, threat)
     if (score > bestScore) {
       bestScore = score
@@ -1834,10 +2579,12 @@ function pickExplore(
   standable: Vec3Json[],
   focusItem: string | null,
   moveFailureLimit: number,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
   const options = standable.filter(
     (spot) =>
       distance(spot, state.self.position) > 1.5 &&
+      !isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot) &&
       failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < moveFailureLimit,
   )
   if (options.length === 0) return null
@@ -1869,6 +2616,70 @@ function pickExplore(
     }
   }
   return best
+}
+
+function isBlacklistedMoveTarget(
+  state: WorldState,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  position: Vec3Json,
+): boolean {
+  return blacklistedMoveTargets?.has(moveFailureKey(state.self.dimension, position)) ?? false
+}
+
+function exploreMoveCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spot: Vec3Json,
+  label: string,
+  logRoute: LogRouteMode | null,
+): Candidate {
+  return {
+    id: `MOVE:${blockId('p', spot)}`,
+    kind: 'MOVE',
+    label,
+    targetName: null,
+    target: spot,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(spot, state.self.position) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: spot.x,
+      y: spot.y,
+      z: spot.z,
+      ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
+    },
+  }
+}
+
+/**
+ * The `explore` leg of a log route: the nearest standable frontier that reduces
+ * the distance to the nearest sensed/remembered log bearing. Used by the gate
+ * when every log MINE/MOVE/RETRIEVE this tick was withheld, so the policy still
+ * has a body change instead of a stationary non-yield MINE.
+ */
+function logExploreCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const spot = pickExplore(
+    state,
+    state.terrain.standable,
+    focusItem,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
+  if (spot === null) return []
+  return [
+    exploreMoveCandidate(
+      state,
+      options,
+      spot,
+      moveLabel(spot, 'explore toward the log bearing', state.self.position),
+      'explore',
+    ),
+  ]
 }
 
 // --- affordance gate (#11 v2): only mechanically reachable targets are presented
@@ -1920,6 +2731,7 @@ export function applyReachabilityGate(
   raw: readonly Candidate[],
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
+  placeRefusal: PlaceRefusal | null = null,
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -1960,6 +2772,16 @@ export function applyReachabilityGate(
   )
   run(acquisitions)
 
+  // A log-class collect goal must never be left with a stationary non-yield
+  // MINE as its only productive action (live wedge on 7acd849: `MINE:b30_35_35`
+  // stone ceiling, 30x dig_timeout, chosen 25x). When every log MINE/MOVE/
+  // RETRIEVE this tick was withheld, offer the exploration MOVE so the policy
+  // still has a body change that can lead to a log.
+  if (logCollectGoal(state) && !presented.some(carriesLogRoute)) {
+    const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
+    run(logExploreCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
+  }
+
   // Last-resort candidate-local ladder: one unreachable remembered station must
   // not starve a craft goal whose own recipe inputs are all held - the step that
   // crafts/places the station from those inputs is satisfiable NOW.
@@ -1978,7 +2800,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld }
+  return { candidates, reachability, withheld, placeRefusal }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
@@ -1998,15 +2820,60 @@ function evaluateCandidate(
 }
 
 /**
+ * True when this MINE names a log-class block (the item a `collect log` goal
+ * must actually obtain). Log MINEs additionally carry the block-facts contract
+ * below; a stone clearance MINE does not.
+ */
+function isLogMine(candidate: Candidate): boolean {
+  if (candidate.kind !== 'MINE') return false
+  const yieldItem = candidate.meta.yieldItem
+  if (typeof yieldItem === 'string' && matchesResourceClass(yieldItem, 'log')) return true
+  return typeof candidate.targetName === 'string' && candidate.targetName.endsWith('_log')
+}
+
+function mineBlockFor(state: WorldState, candidate: Candidate): BlockState | undefined {
+  const target = candidate.target
+  if (target === null) return undefined
+  return state.blocks.find(
+    (entry) =>
+      entry.position.x === target.x && entry.position.y === target.y && entry.position.z === target.z,
+  )
+}
+
+/**
  * A MINE candidate is dug in place: its only precondition is the harvest tool
  * tier of the block IT names. Path, vertical gap and standable approach are NOT
  * part of its contract, so it must not be run through the locomotion evaluator
  * (that would withhold a block already in reach).
+ *
+ * A LOG MINE is stricter: it must name a block that is present in the sensed
+ * world AND in reach (the exact `mineCandidates` MINE arm). A log typed as
+ * MINE while out of reach or absent from `state.blocks` cannot yield the item,
+ * so it is withheld with `out_of_reach` rather than presented as executable.
  */
 function evaluateMineCandidate(
   candidate: Candidate,
   context: ReachabilityGateContext,
 ): CandidateReachability | null {
+  if (isLogMine(candidate)) {
+    const block = mineBlockFor(context.state, candidate)
+    const inReach = block !== undefined && block.inReach === true && block.visible !== false
+    if (!inReach) {
+      const result: ReachabilityResult = {
+        reachable: false,
+        reason: 'out_of_reach',
+        missingCapabilities: [{ kind: 'standable_approach' }],
+      }
+      const target: ReachabilityTarget = {
+        candidateId: candidate.id,
+        kind: candidate.kind,
+        position: candidate.target,
+        barrier: barrierForCandidate(context.state, candidate),
+      }
+      const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+      return reachabilityRecord(candidate, target, world, result, context)
+    }
+  }
   const barrier = barrierForCandidate(context.state, candidate)
   if (barrier === null) return null
   const missing = missingToolCapability(barrier, context.state.inventory.counts)
@@ -2102,13 +2969,23 @@ function columnFacts(state: WorldState): ColumnFacts {
   const ownCut = (state.headroomCuts ?? []).find(
     (cut) => cut.pos.x === feet.x && cut.pos.z === feet.z && (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
   )
+  // The sensor reports standable FEET cells. The body's feet cell is floor(y),
+  // but a body standing on a partial block (slab/path/stair, live y=34.5) has
+  // its standable cell one level above the floor cell. Live starvation (main
+  // 104e689, fingerprint foot=0) withheld every ascend target as
+  // `safe_column` for exactly that stance, so the fact must match all three.
+  const footingSolid = state.terrain.standable.some((spot) => {
+    const cell = { x: Math.floor(spot.x), y: Math.floor(spot.y), z: Math.floor(spot.z) }
+    return (
+      cell.x === feet.x &&
+      cell.z === feet.z &&
+      (cell.y === feet.y || cell.y === feet.y - 1 || cell.y === feet.y + 1)
+    )
+  })
   return {
     placeable: selectPlaceableBlock(state.inventory.counts),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-    footingSolid: state.terrain.standable.some((spot) => {
-      const cell = { x: Math.floor(spot.x), y: Math.floor(spot.y), z: Math.floor(spot.z) }
-      return cell.x === feet.x && cell.z === feet.z && (cell.y === feet.y || cell.y === feet.y - 1)
-    }),
+    footingSolid,
     headroomClear: ownCut === undefined,
     headroomCell: ownCut?.pos ?? null,
   }
@@ -2151,20 +3028,35 @@ export function deriveReachabilityAbilities(
     columnSafe: column.columnSafe,
   })
 
-  // A pillar plan is only mechanically executable from a supported, safe column
-  // with jump headroom. Live evidence: PILLAR_UP was planned 1647x but refused
-  // with `reason=no_footing` / `reason=no_headroom cause=needs_tool`, so a plan
-  // alone must not count as an available ascend ability.
+  // The ascent column is a FACT, not a plan: an adjacent/forward cell whose
+  // 2-block body column one level up is clear (walkable step) or clearable
+  // (one diggable blocker + the held tool) with solid support and no hazard.
+  const ascent = evaluateAscentColumn({
+    selfFeetY: state.self.position.y,
+    selfPosition: state.self.position,
+    target,
+    stepCuts: state.stepCuts,
+    standable: state.terrain.standable,
+    hazards: state.blocks.filter((block) => block.kind === 'hazard').map((block) => block.position),
+    inventory: counts,
+  })
+
+  // A plan counts as an available ascend only when it is mechanically
+  // executable NOW: a pillar needs a supported, safe column with jump headroom;
+  // an up-staircase needs the held tool for the block it cuts, or the executor
+  // would walk into a dig it cannot finish (`RETRIEVE staircase cannot dig`).
   const ascendPlanAvailable =
-    plan !== null &&
-    (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear))
+    (plan !== null &&
+      (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
+      (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')) ||
+    ascent.kind === 'clear'
 
   const ascendMissing: Capability[] = []
   if (dy > ASCEND_GAP_LIMIT && !ascendPlanAvailable) {
     if (column.placeable === null) ascendMissing.push({ kind: 'placeable_block' })
-    if (!column.columnSafe) ascendMissing.push({ kind: 'safe_column' })
-    else if (!column.footingSolid) ascendMissing.push({ kind: 'safe_column' })
     if (!column.headroomClear) {
+      // The blocked jump cell is the binding immediate fact; the acquisition
+      // pass offers its clearance, so the column is not additionally refused.
       ascendMissing.push({ kind: 'headroom', cell: column.headroomCell })
       const cell = column.headroomCell
       const blocker =
@@ -2179,6 +3071,20 @@ export function deriveReachabilityAbilities(
         if (bestToolTier(counts, blocker.harvestTool) < tier) {
           ascendMissing.push({ kind: 'tool', tool: blocker.harvestTool, tier })
         }
+      }
+    } else if (ascent.kind === 'refuse') {
+      // Name the specific absent fact (`safe_column:no_clearance@x,y,z` /
+      // `safe_column:no_tool@x,y,z:pickaxe@n`) instead of a bare token.
+      const requiredTool = ascent.blocker?.requiredTool ?? null
+      ascendMissing.push({
+        kind: 'safe_column',
+        reason: ascent.reason,
+        cell: ascent.cell,
+        tool: requiredTool,
+        tier: ascent.blocker?.requiredTier ?? null,
+      })
+      if (ascent.reason === 'no_tool' && requiredTool !== null) {
+        ascendMissing.push({ kind: 'tool', tool: requiredTool, tier: ascent.blocker?.requiredTier ?? 0 })
       }
     }
     if (ascendMissing.length === 0) ascendMissing.push({ kind: 'ascend_plan' })
@@ -2211,6 +3117,10 @@ function capabilityAcquisitionCandidates(
 ): Candidate[] {
   const out: Candidate[] = []
   const seen = new Set<string>(existingIds)
+  // A candidate already withheld this cycle must never be re-emitted: the
+  // acquisition pass would re-evaluate the same id and double-record its
+  // refusal (issue: duplicated withheld work).
+  for (const entry of withheld) seen.add(entry.candidate.id)
   for (const entry of withheld) {
     for (const capability of entry.result.missingCapabilities) {
       let source: Candidate[] = []
@@ -2218,7 +3128,7 @@ function capabilityAcquisitionCandidates(
         source = headroomCandidates(state, options)
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
-        if (item !== null) source = craftCandidates(state, options, item)
+        if (item !== null) source = craftCandidates(state, options, item).candidates
       }
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue

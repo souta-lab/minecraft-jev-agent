@@ -109,7 +109,10 @@ addCase('a reset with raw_iron resumes at the iron_ingot rung, not wood (#reset-
   const resume = deriveResumeRung(counts, world())
   const ladder = buildLadder(counts, world(), undefined, { resumeRungIndex: resume.rungIndex })
   const expectIndex = RUNGS.findIndex((candidate) => candidate.id === 'iron_ingot')
-  const noWoodGoal = !ladder.goals.some((goal) => goal.targetItem === 'log')
+  // The wood RUNG must not be re-selected: its goal is `collect 3 x log`. A
+  // deeper prerequisite (sticks <- planks <- logs) may still add `collect 1 x
+  // log` for a later pickaxe craft, which is not a wood-rung resume.
+  const noWoodRungGoal = !ladder.goals.some((goal) => goal.targetItem === 'log' && (goal.requiredCount ?? 1) >= 3)
   const noWoodenPickaxe = !ladder.goals.some((goal) => goal.targetItem === 'wooden_pickaxe')
   return {
     pass:
@@ -118,7 +121,7 @@ addCase('a reset with raw_iron resumes at the iron_ingot rung, not wood (#reset-
       resume.invEmpty === false &&
       resume.fallbackFrom === null &&
       ladder.rungId === 'iron_ingot' &&
-      noWoodGoal &&
+      noWoodRungGoal &&
       noWoodenPickaxe,
     detail: `resume=${resume.rungId}@${resume.rungIndex} invEmpty=${resume.invEmpty} ladder=${ladder.rungId} goals=[${ladder.goals.map((g) => g.targetItem).join(',')}]`,
   }

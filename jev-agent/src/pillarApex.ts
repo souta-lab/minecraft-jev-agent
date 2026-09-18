@@ -42,6 +42,16 @@ export interface PillarFail {
   detail?: string
 }
 
+/**
+ * A takeoff can fail before any placement side effect. A bounded relocation
+ * may therefore retry from a different grounded column; apex, placement, and
+ * landing failures must remain terminal for the current column because they
+ * may already have mutated world state.
+ */
+export function shouldRelocatePillarAfterFailure(fail: Pick<PillarFail, 'step' | 'reason'>): boolean {
+  return fail.step === 'takeoff' && ['no_physics_tick', 'no_support', 'no_rise'].includes(fail.reason)
+}
+
 /** The exact live marker emitted when a PILLAR_UP sub-step fails. */
 export function formatPillarFail(fail: PillarFail): string {
   return `PILLAR_FAIL step=${fail.step} reason=${fail.reason} y=${round2(fail.y)} rise=${round2(fail.rise)} samples=${fail.samples}`
@@ -117,7 +127,14 @@ export async function pillarStepUp(
   }
 
   const jump = await jumpWithGroundCorrection(bot, deps)
-  if (!jump.airborne) return fail('takeoff', jump.failure ?? 'no_rise', jump.samples)
+  if (!jump.airborne) {
+    return fail(
+      'takeoff',
+      jump.failure ?? 'no_rise',
+      jump.samples,
+      `ticks=${jump.ticks} impulses=${jump.impulses} peakRise=${round2(jump.peakRise)}`,
+    )
+  }
 
   deps.ensureOwned?.()
   const apexDeadline = deps.now() + deps.apexBudgetMs

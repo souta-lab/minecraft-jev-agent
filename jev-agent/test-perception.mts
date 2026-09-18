@@ -17,6 +17,7 @@
 //   4. the jev-calls.jsonl perception snapshot is size-bounded.
 //
 // Run: npx tsx test-perception.mts
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import {
   candidateStarvationLine,
@@ -474,6 +475,22 @@ addCase('(4) a normal state keeps its decision-critical perception fields', () =
     snapshot.goal.targetItem === 'furnace' &&
     snapshot.bounds.craftingTables === 1
   return { pass, detail: JSON.stringify(snapshot.craftingTables) }
+})
+
+addCase('(5) the SMELT_INPUT_PREREQ marker is mirrored and emitted from the tick', () => {
+  const source = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const mirrored = MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ')
+  const wired = source.includes('this.logSmeltInputPrereq(state, groundingOptions)')
+  const formatter = source.includes('formatSmeltInputPrereq')
+  return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
+})
+
+addCase('(6) the CRAFT_INGREDIENT_PREREQ marker is mirrored and emitted from the tick', () => {
+  const source = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const mirrored = MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')
+  const wired = source.includes('this.logCraftIngredientPrereq(state, groundingOptions)')
+  const formatter = source.includes('formatCraftIngredientPrereq')
+  return { pass: mirrored && wired && formatter, detail: `mirrored=${mirrored} wired=${wired} formatter=${formatter}` }
 })
 
 let failures = 0

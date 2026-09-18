@@ -68,6 +68,7 @@ import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
+import { ReloadArbiter } from './reload-arbiter.ts'
 import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
 
 const CONTRACT_VERSION = 3
@@ -107,8 +108,16 @@ const HEARTBEAT_MS = 15000
 const OBSERVE_MS = 1500
 const RELOAD_DEBOUNCE_MS = 1200
 const GEN_RESTART_MS = 3000
+const LISTENER_BASELINE_POLL_MS = 25
+const LISTENER_BASELINE_MAX_POLLS = 200
 const GOAL_ITEM = 'iron_ingot'
 const GOAL_COUNT = 3
+
+// The generation scheduler owns these bot listeners in the default resident
+// configuration.  The HOST must not capture its leak baseline until this set
+// is attached; otherwise deterministic bootstrap (which awaits its plan
+// before scheduler.start()) makes a healthy generation look like a leak.
+const GENERATION_SCHEDULER_EVENTS = ['goal_reached', 'blockUpdate', 'entitySpawn', 'health', 'playerCollect'] as const
 
 for (const dir of [DATA, LOGS, JEV_LOGS, FREEZE_DIR]) mkdirSync(dir, { recursive: true })
 
@@ -183,6 +192,7 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     discoveredOres: [...normal.discoveredOres],
     knownResources: normal.knownResources.map((resource) => ({ ...resource })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+    moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
   }
 }
@@ -336,6 +346,9 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta, sourceWorldKey: WorldKey
   }
   if (delta.traversalFailures !== undefined) {
     memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
+  }
+  if (delta.moveFailures !== undefined) {
+    memory.moveFailures = delta.moveFailures.map((entry) => ({ ...entry }))
   }
   if (delta.hazards !== undefined) {
     const { production, simulation } = partitionHazardsBySource(delta.hazards)
@@ -526,6 +539,7 @@ let shuttingDown = false
 let frozen = false
 let generationRestartTimer: NodeJS.Timeout | null = null
 let reloadTimer: NodeJS.Timeout | null = null
+let reloadArbiter: ReloadArbiter | null = null
 let lastSrcSignature = ''
 let lastInventoryHash = ''
 let lastActionId: string | null = null
@@ -539,7 +553,10 @@ let disconnectReasonSeen: DisconnectReason | null = null
 let disconnectDetail: string | null = null
 let generationHash: string | null = null
 let listenerBaseline: Record<string, number> = {}
+let listenerHostBaseline: Record<string, number> = {}
 let baselineCaptured = false
+let listenerBaselineTimer: NodeJS.Timeout | null = null
+let listenerBaselineGeneration: ResidentGeneration | null = null
 let startPosition: Vec3Json | null = null
 let lastStatus: GenerationStatus | null = null
 let deathResetPending = false
@@ -672,8 +689,73 @@ function listenerCounts(): Record<string, number> {
   return counts
 }
 
+function expectedListenerCounts(): Record<string, number> {
+  const expected = { ...listenerBaseline }
+  if (generation === null || Object.keys(listenerBaseline).length === 0) return expected
+  const registry = generationRegistries.get(generation.id)
+  if (registry === undefined || Object.keys(listenerHostBaseline).length === 0) return expected
+  const owned = registry.ownedListenerCounts()
+  for (const event of LISTENER_EVENTS) {
+    const hostCount = listenerHostBaseline[event]
+    if (hostCount !== undefined) expected[event] = hostCount + (owned[event] ?? 0)
+  }
+  return expected
+}
+
 function listenerLeak(): boolean {
-  return Object.keys(listenerBaseline).some((event) => (listenerCounts()[event] ?? 0) > (listenerBaseline[event] ?? 0))
+  const current = listenerCounts()
+  const expected = expectedListenerCounts()
+  return Object.keys(listenerBaseline).some((event) => (current[event] ?? 0) > (expected[event] ?? 0))
+}
+
+function clearListenerBaselineTimer(): void {
+  if (listenerBaselineTimer !== null) {
+    clearTimeout(listenerBaselineTimer)
+    listenerBaselineTimer = null
+  }
+  listenerBaselineGeneration = null
+}
+
+function listenerBaselineReady(beforeStart: Record<string, number>, current: Record<string, number>): boolean {
+  return GENERATION_SCHEDULER_EVENTS.every((event) => (current[event] ?? 0) > (beforeStart[event] ?? 0))
+}
+
+function scheduleListenerBaseline(gen: ResidentGeneration, beforeStart: Record<string, number>): void {
+  if (baselineCaptured || listenerBaselineTimer !== null || listenerBaselineGeneration !== null) return
+  listenerBaselineGeneration = gen
+  let polls = 0
+
+  const poll = (): void => {
+    listenerBaselineTimer = null
+    if (listenerBaselineGeneration !== gen) return
+    if (baselineCaptured || generation !== gen || gen.hasStopped() || shuttingDown) {
+      listenerBaselineGeneration = null
+      return
+    }
+    const listeners = listenerCounts()
+    if (listenerBaselineReady(beforeStart, listeners)) {
+      baselineCaptured = true
+      listenerBaseline = listeners
+      listenerBaselineGeneration = null
+      log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id, polls })
+      return
+    }
+    polls += 1
+    if (polls >= LISTENER_BASELINE_MAX_POLLS) {
+      listenerBaselineGeneration = null
+      log('LISTENER_BASELINE_UNKNOWN', {
+        generationId: gen.id,
+        polls,
+        beforeStart,
+        listeners,
+        requiredEvents: GENERATION_SCHEDULER_EVENTS,
+      })
+      return
+    }
+    listenerBaselineTimer = setTimeout(poll, LISTENER_BASELINE_POLL_MS)
+  }
+
+  listenerBaselineTimer = setTimeout(poll, 0)
 }
 
 async function loadGenerationModule(force: boolean): Promise<GenerationModule | null> {
@@ -802,6 +884,7 @@ function registerGenerationResources(gen: ResidentGeneration, ctx: GenerationCon
  * logged instead of silently accepting it (#13).
  */
 function disposeGeneration(gen: ResidentGeneration): GenerationResourceCounts {
+  if (listenerBaselineGeneration === gen) clearListenerBaselineTimer()
   try {
     gen.dispose()
   } catch (error) {
@@ -816,6 +899,14 @@ function disposeGeneration(gen: ResidentGeneration): GenerationResourceCounts {
     generationStopWatch.delete(gen.id)
   }
   const hostListeners = listenerCounts()
+  log('LISTENERS', {
+    phase: 'after_dispose',
+    generationId: gen.id,
+    listeners: hostListeners,
+    baseline: listenerBaseline,
+    hostBaseline: listenerHostBaseline,
+    tracked,
+  })
   log('GENERATION_DISPOSED', { id: gen.id, listeners: tracked.listeners, timers: tracked.timers, hostListeners: hostListeners.physicsTick ?? 0 })
   if (listenerLeak()) {
     log('WARN', { where: 'generation-dispose', id: gen.id, reason: 'listener-count-did-not-return-to-baseline', listeners: hostListeners, baseline: listenerBaseline, tracked })
@@ -838,6 +929,7 @@ function ownershipPorts(): OwnershipPorts {
 function makeSwapPorts(previousModule: GenerationModule | null): SwapPorts {
   return {
     ...ownershipPorts(),
+    afterQuiesce: (target) => log('LISTENERS', { phase: 'after_quiesce', generationId: target.id, listeners: listenerCounts() }),
     buildResume: () => {
       if (previousModule === null || bot === null) return null
       const pending = newPendingProposals()
@@ -902,6 +994,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     } catch {
       // best effort
     }
+    log('LISTENERS', { phase: 'after_quiesce', generationId: old.id, listeners: listenerCounts() })
     disposeGeneration(old)
   }
   const mod = await loadGenerationModule(false)
@@ -926,6 +1019,9 @@ async function startGeneration(trigger: string): Promise<boolean> {
   const preflight = runMissionPreflight(gen)
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
   commitOwner(ownershipPorts(), gen)
+  const listenersBeforeStart = listenerCounts()
+  listenerHostBaseline = { ...listenersBeforeStart }
+  log('LISTENERS', { phase: 'before_start', generationId: gen.id, listeners: listenersBeforeStart })
   try {
     gen.start()
   } catch (error) {
@@ -937,11 +1033,10 @@ async function startGeneration(trigger: string): Promise<boolean> {
     discardStagedProposals(gen.id, 'start-failed')
     throw error
   }
+  log('LISTENERS', { phase: 'after_start', generationId: gen.id, listeners: listenerCounts() })
   lastActionId = null
   if (!baselineCaptured) {
-    baselineCaptured = true
-    listenerBaseline = listenerCounts()
-    log('LISTENER_BASELINE', { listeners: listenerBaseline, generationId: gen.id })
+    scheduleListenerBaseline(gen, listenersBeforeStart)
   }
   state.generations += 1
   commitStagedProposals(gen.id, 'generation-start')
@@ -1196,7 +1291,10 @@ function connect(): void {
       state.dimension = observedDimension
     }
     if (game?.levelName !== undefined) state.levelName = game.levelName
+    clearListenerBaselineTimer()
     baselineCaptured = false
+    listenerBaseline = {}
+    listenerHostBaseline = {}
     log('SPAWN', {
       pos: entity === undefined ? '?' : fmtPos({ x: entity.position.x, y: entity.position.y, z: entity.position.z }),
       version: created.version,
@@ -1299,6 +1397,7 @@ setInterval(() => {
       id: action.id,
       kind: action.kind,
       phase: action.phase,
+      generationId: generation.id,
       pos: fmtPos(truth.position),
       rung: status.rungId,
     })
@@ -1403,8 +1502,19 @@ function scheduleReload(trigger: string): void {
   if (reloadTimer !== null) return
   reloadTimer = setTimeout(() => {
     reloadTimer = null
-    void performReload(trigger)
+    requestReload(trigger)
   }, RELOAD_DEBOUNCE_MS)
+}
+
+function requestReload(trigger: string): void {
+  if (reloadArbiter === null) {
+    reloadArbiter = new ReloadArbiter(
+      (nextTrigger) => performReload(nextTrigger),
+      () => !shuttingDown,
+      (event, detail) => log(event, detail),
+    )
+  }
+  reloadArbiter.request(trigger)
 }
 
 function depVersion(pkg: string): string {
@@ -1435,6 +1545,7 @@ function gitCommit(): string | null {
 
 function writeAcceptance(): string {
   const counts = listenerCounts()
+  const expected = expectedListenerCounts()
   const record: AcceptanceRecord = {
     record: 'acceptance',
     runId,
@@ -1469,6 +1580,7 @@ function writeAcceptance(): string {
     reloadsFailed: stats.reloadsFailed,
     freezeCycles: stats.freezeCycles,
     listenerBaseline,
+    listenerExpected: expected,
     listenerCurrent: counts,
     listenerLeak: listenerLeak(),
     worldMemoryKeys: Object.keys(state.worldMemoryByKey),
@@ -1547,8 +1659,17 @@ async function performReload(trigger: string): Promise<void> {
     // generationId (and of rollback/disposal); `state.lastGenerationId` is set by
     // `commitOwner` to the superseded id, which test-reload-lifecycle pins.
     nextSeed.revision = state.revision
+    log('LISTENERS', { phase: 'before_start', generationId: candidate.id, listeners: listenerCounts() })
     const outcome = await swapGeneration(makeSwapPorts(previousModule), candidate)
     candidate = null
+    const outcomeGenerationId = 'generationId' in outcome ? outcome.generationId : null
+    log('LISTENERS', {
+      phase: 'after_start',
+      generationId: outcomeGenerationId,
+      listeners: listenerCounts(),
+      expected: expectedListenerCounts(),
+      outcome: outcome.status,
+    })
     if (outcome.status !== 'committed') {
       if (outcome.status === 'rolled-back') {
         discardStagedProposals(outcome.from, 'reload-rolled-back-candidate')
@@ -1686,6 +1807,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       },
       listeners: listenerCounts(),
       listenerBaseline,
+      listenerExpected: expectedListenerCounts(),
       listenerLeak: listenerLeak(),
       acceptancePath: join(DATA, `acceptance-${runId}.json`),
       status,
@@ -1693,7 +1815,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'reload') {
-    void performReload('control')
+    requestReload('control')
     controlReply(socket, request, true, { scheduled: true })
     return
   }
@@ -1836,7 +1958,13 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'leakcheck') {
-    controlReply(socket, request, true, { listeners: listenerCounts(), listenerBaseline, listenerLeak: listenerLeak(), heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576) })
+    controlReply(socket, request, true, {
+      listeners: listenerCounts(),
+      listenerBaseline,
+      listenerExpected: expectedListenerCounts(),
+      listenerLeak: listenerLeak(),
+      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    })
     return
   }
   if (cmd === 'gc') {
@@ -1911,6 +2039,8 @@ function startControlServer(): void {
 function shutdown(reason: string): void {
   if (shuttingDown) return
   shuttingDown = true
+  clearListenerBaselineTimer()
+  reloadArbiter?.stop()
   log('SHUTDOWN', { reason })
   let acceptance: string | null = null
   try {

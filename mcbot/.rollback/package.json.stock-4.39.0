@@ -1,0 +1,14 @@
+{
+  "name": "mcbot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal stock Mineflayer offline bot for the local Leaf 26.1.2 sandbox server",
+  "main": "bot.mjs",
+  "scripts": {
+    "start": "node bot.mjs"
+  },
+  "dependencies": {
+    "mineflayer": "^4.39.0"
+  }
+}

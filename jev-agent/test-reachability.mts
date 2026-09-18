@@ -9,16 +9,17 @@
 //
 // Run: npx tsx test-reachability.mts  (wired as `npm run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
-import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
+import { MIRRORED_MARKERS, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { capabilityKey, evaluateReachability, formatCandidateWithheld, formatReachability, reachabilityFingerprint } from './src/reachability.ts'
 import type { ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './src/reachability.ts'
-import { StateFingerprintMemory } from './src/moveFailMemory.ts'
-import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import { moveFailureKey, StateFingerprintMemory } from './src/moveFailMemory.ts'
+import { knownStationKey } from './src/prereqOption.ts'
+import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, StationEntry, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -108,7 +109,10 @@ function worldState(overrides: {
   standable?: Vec3Json[]
   headroomCuts?: WorldState['headroomCuts']
   descent?: WorldState['descent']
+  stepCuts?: WorldState['stepCuts']
   blocks?: BlockState[]
+  furnaces?: WorldState['furnaces']
+  craftingTables?: WorldState['craftingTables']
   goal?: GoalState
   goalQueue?: GoalQueueState
 }): WorldState {
@@ -121,17 +125,67 @@ function worldState(overrides: {
     entities: [],
     blocks: overrides.blocks ?? [],
     terrain: { standable: overrides.standable ?? [overrides.position] },
-    craftingTables: [],
-    furnaces: [],
+    craftingTables: overrides.craftingTables ?? [],
+    furnaces: overrides.furnaces ?? [],
     placementSpots: [],
     descent: overrides.descent ?? [],
-    stepCuts: [],
+    stepCuts: overrides.stepCuts ?? [],
     headroomCuts: overrides.headroomCuts ?? [],
     goal: overrides.goal ?? goal(),
     goalQueue: overrides.goalQueue ?? queueWith(queuedGoal()),
     recentEvents: [],
     signals: overrides.signals ?? signals(),
   }
+}
+
+// (13) a smelt goal with a sensed furnace must pursue a missing visible input.
+// The live failure shape had a furnace in range and no log in inventory, while
+// an oak log was visible above. Before this bridge, smeltCandidates returned
+// [] and retrievalCandidates intentionally skipped visible logs, so the final
+// fallback selected unrelated underground MOVE targets.
+{
+  const log: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 33, y: 68, z: 27 },
+    distance: 38.49,
+    diggable: true,
+    inReach: false,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 32, y: 67, z: 27 },
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const smelt = queuedGoal({
+    id: 'g-charcoal-input',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const state = worldState({
+    position: { x: 34.49, y: 31, z: 37.5 },
+    inventory: inventory({ birch_planks: 2, cobblestone: 158, stick: 2, dirt: 37, stone_pickaxe: 1 }),
+    blocks: [log],
+    furnaces: [{ x: 37, y: 30, z: 37, source: 'sensed' }],
+    goal: goal({ id: 'smelt:charcoal', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }),
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(state, optionsWith(null))
+  const inputMove = grounded.candidates.find((candidate) => candidate.id === 'MOVE:b33_68_27')
+  const unrelated = grounded.candidates.find((candidate) => candidate.id.startsWith('MOVE:p'))
+  const productive = grounded.candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  check(
+    '(13) sensed furnace + missing visible log yields the log MINE/MOVE route',
+    inputMove !== undefined &&
+      inputMove.meta.targetBlockName === 'oak_log' &&
+      inputMove.meta.vertical === 'pillar' &&
+      Number(inputMove.meta.pillarSteps) > 0 &&
+      unrelated === undefined &&
+      productive.length > 0,
+    `productive=[${productive.map((candidate) => candidate.id).join(',')}] input=${inputMove?.id ?? 'none'} vertical=${String(inputMove?.meta.vertical ?? 'none')} steps=${String(inputMove?.meta.pillarSteps ?? 0)}`,
+  )
 }
 
 const BOT: Vec3Json = { x: 0, y: 60, z: 0 }
@@ -710,6 +764,89 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     )
   }
 
+  // (f) live M2: a sensed table 11 blocks below is ACQUIRED, never blind-CRAFTed.
+  //
+  // Measured live: `CRAFT:furnace` targeted a sensed crafting_table at (40,29,35)
+  // from y=40; the executor's `pathing-to-table` GoalNear failed (`noPath`) and
+  // the hop loop never descended, so the candidate was abandoned as unreachable
+  // and the smelt goal starved - while the reachability gate reported the SAME
+  // table coordinate reachable (`RETRIEVE:known:station:crafting_table:b40_29_35
+  // reachable=true`). The furnace craft's table sub-step must therefore be the
+  // acquisition candidate (placespot ladder), not a blind CRAFT walk.
+  {
+    const feet: Vec3Json = { x: 32, y: 40, z: 37 }
+    const table: Vec3Json = { x: 40, y: 29, z: 35 }
+    const smeltCharcoal = queuedGoal({
+      id: 'g-charcoal',
+      kind: 'smelt',
+      description: 'smelt 1 x charcoal',
+      targetItem: 'charcoal',
+      requiredCount: 1,
+    })
+    const downStep: DescentOption = {
+      dir: 'E',
+      mode: 'down',
+      dx: 1,
+      dz: 0,
+      step: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+      wall: { x: feet.x + 1, y: feet.y, z: feet.z },
+      head: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+      floor: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+      wallSolid: false,
+      headSolid: false,
+      floorSolid: true,
+      safe: true,
+      reason: 'safe',
+      digName: 'dirt',
+      digHarvestTool: 'pickaxe',
+      digHarvestTier: 0,
+      diggable: true,
+    }
+    const liveInventory = inventory({
+      cobblestone: 67,
+      stick: 2,
+      birch_planks: 2,
+      wooden_pickaxe: 1,
+      stone_pickaxe: 1,
+    })
+    const withSensedTable = worldState({
+      position: feet,
+      inventory: liveInventory,
+      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: table }] }),
+      descent: [downStep],
+      goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 }),
+      goalQueue: queueWith(smeltCharcoal),
+    })
+    withSensedTable.craftingTables = [{ ...table, source: 'sensed' }]
+    const grounded = generateGroundedCandidates(withSensedTable, craftOptions)
+    const acquire = grounded.candidates.find(
+      (candidate) => candidate.id === 'RETRIEVE:known:station:crafting_table:b40_29_35',
+    )
+    const blindCraft = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
+    const blockedBy = goalStarvationBlockedBy(null, smeltCharcoal, grounded.withheld)
+    const missing = candidateStarvationMissing(grounded.withheld)
+    const line = candidateStarvationLine(grounded.candidates, 'smelt:charcoal:1', false, blockedBy, missing)
+    check(
+      '(f) a sensed table out of reach is routed through its acquisition candidate, not CRAFT:furnace',
+      acquire !== undefined &&
+        acquire.meta.prereqPath === 'craft_and_place' &&
+        acquire.affordance?.feasible === true &&
+        blindCraft === undefined &&
+        line === null,
+      `acquire=${acquire?.id ?? 'none'} affordance=${JSON.stringify(acquire?.affordance ?? null)} blindCraft=${blindCraft?.id ?? 'none'} starvation=${line ?? 'none'}`,
+    )
+
+    const blacklisted = new Set([knownStationKey({ name: 'crafting_table', position: table })])
+    const blockedOptions: CandidateOptions = { ...craftOptions, unreachableStations: blacklisted }
+    const blockedGrounded = generateGroundedCandidates(withSensedTable, blockedOptions)
+    const doomedCraft = blockedGrounded.candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
+    check(
+      '(f) a blacklisted table cell is not re-offered as a fresh sensed CRAFT',
+      doomedCraft === undefined,
+      blockedGrounded.candidates.map((candidate) => candidate.id).join(',') || 'none',
+    )
+  }
+
   // (c) a MINE candidate requires the harvest tool tier of the block IT names.
   {
     const ironOre: BlockState = {
@@ -784,6 +921,491 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       retrieve === undefined ? `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` : JSON.stringify(retrieve.affordance),
     )
   }
+}
+
+// (12) the ascent-column capability: `safe_column` computed from real geometry ---
+//
+// Live starvation on main 104e689 (18:04:48, bot on a partial block at y=34.5,
+// cobblestone 130, stone+wooden pickaxe held, remembered stations at y=61/63):
+//   CANDIDATE_STARVATION presented=2 productive=0 goal="smelt:charcoal:1"
+//   blockedBy=no_productive_action missing=["RETRIEVE:known:station:
+//   crafting_table:b31_63_37:safe_column","RETRIEVE:known:station:
+//   furnace:b29_61_35:safe_column"]
+// The capability is now the FACT (clear or clearable adjacent column with
+// support + tool + no hazard), never a bare token.
+{
+  const feet: Vec3Json = { x: 31, y: 34, z: 37 }
+  const furnaceOnly: KnownResource[] = [{ name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } }]
+  const smelt = queuedGoal({
+    id: 'g-charcoal',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const charcoal = goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 })
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'cobblestone',
+    safe: true,
+    reason: 'safe',
+  }
+
+  check(
+    'the safe_column capability key names the reason and the cell (never a bare token)',
+    capabilityKey({ kind: 'safe_column', reason: 'no_clearance', cell: { x: 31, y: 35, z: 37 }, tool: null, tier: null }) ===
+      'safe_column:no_clearance@31,35,37' &&
+      capabilityKey({ kind: 'safe_column', reason: 'no_tool', cell: { x: 32, y: 35, z: 37 }, tool: 'pickaxe', tier: 0 }) ===
+        'safe_column:no_tool@32,35,37:pickaxe@0',
+    `no_clearance=${capabilityKey({ kind: 'safe_column', reason: 'no_clearance', cell: { x: 31, y: 35, z: 37 }, tool: null, tier: null })} no_tool=${capabilityKey({ kind: 'safe_column', reason: 'no_tool', cell: { x: 32, y: 35, z: 37 }, tool: 'pickaxe', tier: 0 })}`,
+  )
+
+  // (a) a clearable column + the held tool satisfies the capability and the
+  // staircase-up clearance/ascend leg is offered; no starvation line fires.
+  {
+    const state = worldState({
+      position: feet,
+      inventory: inventory({ stone_pickaxe: 1 }),
+      stepCuts: [cut],
+      signals: signals({ knownResources: furnaceOnly }),
+      goal: charcoal,
+      goalQueue: queueWith(smelt),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const retrieve = grounded.candidates.find((candidate) => candidate.kind === 'RETRIEVE')
+    const line = candidateStarvationLine(
+      grounded.candidates,
+      'smelt:charcoal:1',
+      false,
+      'no_productive_action',
+      candidateStarvationMissing(grounded.withheld),
+    )
+    check(
+      '(12a) a clearable column with the held tool is satisfied and offers the staircase-up leg',
+      retrieve !== undefined &&
+        retrieve.affordance?.feasible === true &&
+        retrieve.meta.vertical === 'staircase-up' &&
+        retrieve.meta.upDigX === 32 &&
+        retrieve.meta.upDigY === 35 &&
+        retrieve.meta.upDigZ === 37 &&
+        line === null,
+      retrieve === undefined
+        ? `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`
+        : `meta=${JSON.stringify(retrieve.meta)} starvation=${line ?? 'none'}`,
+    )
+  }
+
+  // (b) the same geometry without the tool is refused by name: the cell and the
+  // required tool tier are both carried, and the tool ladder stays actionable.
+  {
+    const state = worldState({
+      position: feet,
+      inventory: inventory({ dirt: 4 }),
+      stepCuts: [cut],
+      signals: signals({ knownResources: furnaceOnly }),
+      goal: charcoal,
+      goalQueue: queueWith(smelt),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
+    const missing = withheld?.result.missingCapabilities.map(capabilityKey) ?? []
+    check(
+      '(12b) clearable geometry without the tool refuses as safe_column:no_tool with the tier',
+      withheld !== undefined &&
+        withheld.result.reason === 'needs_ascend' &&
+        missing.join(',') === 'safe_column:no_tool@32,35,37:pickaxe@0,tool:pickaxe@0',
+      `missing=[${missing.join(',')}]`,
+    )
+  }
+
+  // (c) no geometry at all refuses by name: `safe_column:no_clearance@cell`.
+  {
+    const state = worldState({
+      position: { x: 31.5, y: 34.5, z: 37.5 },
+      inventory: inventory({ dirt: 4 }),
+      standable: [],
+      signals: signals({ knownResources: furnaceOnly }),
+      goal: charcoal,
+      goalQueue: queueWith(smelt),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
+    const missing = withheld?.result.missingCapabilities.map(capabilityKey) ?? []
+    check(
+      '(12c) absent geometry refuses as safe_column:no_clearance with the examined cell',
+      withheld !== undefined && missing.join(',') === 'safe_column:no_clearance@30,35,37',
+      `missing=[${missing.join(',')}]`,
+    )
+  }
+
+  // (d) the live shape: the partial-block stance (standable cell one level up)
+  // with cobblestone + pickaxes presents a productive ascent route.
+  {
+    const state = worldState({
+      position: { x: 31.5, y: 34.5, z: 37.5 },
+      inventory: inventory({ cobblestone: 130, stone_pickaxe: 1, wooden_pickaxe: 1 }),
+      standable: [{ x: 31, y: 35, z: 37 }],
+      signals: signals({
+        knownResources: [
+          { name: 'crafting_table', kind: 'station', position: { x: 31, y: 63, z: 37 } },
+          { name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } },
+        ],
+      }),
+      goal: charcoal,
+      goalQueue: queueWith(smelt),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const productive = grounded.candidates.filter(
+      (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
+    )
+    const retrieves = productive.filter((candidate) => candidate.kind === 'RETRIEVE')
+    const line = candidateStarvationLine(
+      grounded.candidates,
+      'smelt:charcoal:1',
+      false,
+      'no_productive_action',
+      candidateStarvationMissing(grounded.withheld),
+    )
+    check(
+      '(12d) the live starvation shape yields a productive ascent route (no CANDIDATE_STARVATION)',
+      retrieves.length > 0 &&
+        retrieves.every((candidate) => candidate.affordance?.feasible === true) &&
+        line === null,
+      `productive=[${productive.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`,
+    )
+  }
+
+  // (e) a clear step one level up satisfies the capability without a dig plan.
+  {
+    const state = worldState({
+      position: feet,
+      inventory: inventory({ stick: 1 }),
+      standable: [feet, { x: 32, y: 35, z: 37 }],
+      signals: signals({ knownResources: furnaceOnly }),
+      goal: charcoal,
+      goalQueue: queueWith(smelt),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const retrieve = grounded.candidates.find((candidate) => candidate.kind === 'RETRIEVE')
+    check(
+      '(12e) a standable cell one level up is a clear ascent column (no placeable block needed)',
+      retrieve !== undefined && retrieve.affordance?.feasible === true,
+      retrieve === undefined
+        ? `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`
+        : JSON.stringify(retrieve.affordance),
+    )
+  }
+
+  // (f) downward and level retrieves are unaffected by the ascend classification.
+  {
+    const below: Vec3Json = { x: 40, y: 29, z: 35 }
+    const level: Vec3Json = { x: 40, y: 48, z: 35 }
+    const downStep: DescentOption = {
+      dir: 'E',
+      mode: 'down',
+      dx: 1,
+      dz: 0,
+      step: { x: 39, y: 47, z: 37 },
+      wall: { x: 31, y: 48, z: 37 },
+      head: { x: 31, y: 49, z: 37 },
+      floor: { x: 31, y: 47, z: 37 },
+      wallSolid: false,
+      headSolid: false,
+      floorSolid: true,
+      safe: true,
+      reason: 'safe',
+      digName: 'stone',
+      digHarvestTool: 'pickaxe',
+      digHarvestTier: 0,
+      diggable: true,
+    }
+    const oreGoal = queuedGoal({ id: 'g-ore', kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 })
+    const ore: KnownResource = { name: 'iron_ore', kind: 'ore', position: below }
+    const down = worldState({
+      position: { x: 30, y: 48, z: 37 },
+      inventory: inventory({ stone_pickaxe: 1 }),
+      descent: [downStep],
+      signals: signals({ knownResources: [ore] }),
+      goal: goal({ id: 'collect:raw_iron', targetItem: 'raw_iron', requiredCount: 3 }),
+      goalQueue: queueWith(oreGoal),
+    })
+    const downGrounded = generateGroundedCandidates(down, optionsWith(null))
+    const downRetrieve = downGrounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:raw_iron:b40_29_35')
+    const levelGrounded = generateGroundedCandidates(
+      worldState({
+        position: { x: 30, y: 48, z: 37 },
+        inventory: inventory({ stone_pickaxe: 1 }),
+        signals: signals({ knownResources: [{ ...ore, position: level }] }),
+        goal: goal({ id: 'collect:raw_iron', targetItem: 'raw_iron', requiredCount: 3 }),
+        goalQueue: queueWith(oreGoal),
+      }),
+      optionsWith(null),
+    )
+    const levelRetrieve = levelGrounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:raw_iron:b40_48_35')
+    check(
+      '(12f) downward and level retrieves are presented with feasible=true (unaffected)',
+      downRetrieve !== undefined &&
+        downRetrieve.affordance?.feasible === true &&
+        levelRetrieve !== undefined &&
+        levelRetrieve.affordance?.feasible === true,
+      `down=${downRetrieve?.affordance?.reason ?? 'none'} level=${levelRetrieve?.affordance?.reason ?? 'none'}`,
+    )
+  }
+}
+
+// A coordinate blacklist restored from a previous generation must participate
+// in target selection, not only in the controller's post-generation filter.
+// Otherwise the nearest exploration target is regenerated, filtered out, and
+// the policy is left with WAIT even though another standable target exists.
+{
+  const blocked: Vec3Json = { x: 2, y: 60, z: 0 }
+  const alternate: Vec3Json = { x: 3, y: 60, z: 0 }
+  const state = worldState({ position: BOT, standable: [BOT, blocked, alternate] })
+  const grounded = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    blacklistedMoveTargets: new Set([moveFailureKey('overworld', blocked)]),
+  })
+  const ids = grounded.candidates.map((candidate) => candidate.id)
+  check(
+    'a restored movement blacklist is applied before exploration target selection',
+    !ids.includes(`MOVE:${blockId('p', blocked)}`) && ids.includes(`MOVE:${blockId('p', alternate)}`),
+    `candidates=${ids.join(',')}`,
+  )
+}
+
+// (13) the smelt input/fuel prerequisite is a collect route, never starvation --
+//
+// Measured live on 9af0096 with a REGISTERED furnace at 37,30,37 (2.7m) and no
+// log held:
+//   CANDIDATE_STARVATION presented=2 productive=0 goal="smelt:charcoal:1"
+//   blockedBy=no_productive_action missing=[] repeat=25
+// The smelt's input/fuel is now a code-owned precondition (optionSpec), and the
+// candidate generator offers the same deterministic collect route, so the goal
+// reports what must be collected instead of collapsing to WAIT.
+{
+  const liveFeet: Vec3Json = { x: 34.5, y: 32, z: 36.4 }
+  const furnace: StationEntry = { x: 37, y: 30, z: 37, source: 'sensed' }
+  const liveInventory = inventory({
+    birch_planks: 2,
+    cobblestone: 158,
+    stick: 2,
+    dirt: 37,
+    leaf_litter: 4,
+    stone_pickaxe: 1,
+    coal: 7,
+  })
+  const log: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 33, y: 32, z: 36 },
+    distance: 1.1,
+    diggable: true,
+    inReach: true,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 33, y: 31, z: 36 },
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const charcoal = goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 })
+  const smelt = queuedGoal({
+    id: 'g-charcoal',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const live = worldState({
+    position: liveFeet,
+    inventory: liveInventory,
+    furnaces: [furnace],
+    blocks: [log],
+    goal: charcoal,
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(live, optionsWith(null))
+  const mine = grounded.candidates.find((candidate) => candidate.id === 'MINE:b33_32_36')
+  const starvation = candidateStarvationLine(grounded.candidates, 'smelt:charcoal:1', false, 'no_productive_action', [])
+  const entry = smeltInputPrereq(live, optionsWith(null))
+  const line = entry === null ? null : formatSmeltInputPrereq(entry)
+  check(
+    '(13a) the live smelt shape presents the log collect route and no starvation line',
+    mine !== undefined && mine.kind === 'MINE' && mine.meta.yieldItem === 'oak_log' && starvation === null,
+    `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${starvation ?? 'none'}`,
+  )
+  check(
+    '(13b) the mirrored SMELT_INPUT_PREREQ line names the concrete log and the inserted collect',
+    line === 'SMELT_INPUT_PREREQ item=charcoal input=oak_log present=false action=insert_collect' &&
+      MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ'),
+    `line="${line ?? 'none'}" mirrored=${MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ')}`,
+  )
+
+  const held = worldState({
+    position: liveFeet,
+    inventory: inventory({ ...liveInventory.counts, oak_log: 1 }),
+    furnaces: [furnace],
+    blocks: [log],
+    goal: charcoal,
+    goalQueue: queueWith(smelt),
+  })
+  const heldGrounded = generateGroundedCandidates(held, optionsWith(null))
+  const heldSmelt = heldGrounded.candidates.find((candidate) => candidate.id === 'SMELT:charcoal')
+  const heldEntry = smeltInputPrereq(held, optionsWith(null))
+  const heldLine = heldEntry === null ? null : formatSmeltInputPrereq(heldEntry)
+  check(
+    '(13c) a held log yields the SMELT candidate and the marker reports present=true',
+    heldSmelt !== undefined &&
+      heldLine === 'SMELT_INPUT_PREREQ item=charcoal input=oak_log present=true action=none',
+    `candidates=[${heldGrounded.candidates.map((candidate) => candidate.id).join(',')}] line="${heldLine ?? 'none'}"`,
+  )
+
+  const noFuel = worldState({
+    position: liveFeet,
+    inventory: inventory({ raw_iron: 3, stone_pickaxe: 1 }),
+    furnaces: [furnace],
+    blocks: [log],
+    goal: goal({ id: 'smelt:iron_ingot', targetItem: 'iron_ingot', description: 'smelt 3 x iron_ingot', requiredCount: 3 }),
+    goalQueue: queueWith(
+      queuedGoal({ id: 'g-iron', kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }),
+    ),
+  })
+  const noFuelGrounded = generateGroundedCandidates(noFuel, optionsWith(null))
+  const fuelMine = noFuelGrounded.candidates.find((candidate) => candidate.id === 'MINE:b33_32_36')
+  const noFuelStarvation = candidateStarvationLine(noFuelGrounded.candidates, 'smelt:iron_ingot:3', false, 'no_productive_action', [])
+  check(
+    '(13d) a held input with no fuel is routed to the fuel producer (symmetric rule)',
+    fuelMine !== undefined && fuelMine.meta.yieldItem === 'oak_log' && noFuelStarvation === null,
+    `candidates=[${noFuelGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${noFuelStarvation ?? 'none'}`,
+  )
+}
+
+// (14) the craft ingredient prerequisite is a collect route, never starvation --
+//
+// Measured live on main 1ded56e (the binding M2 wedge):
+//   CANDIDATE_STARVATION presented=2 productive=0 goal="craft:wooden_pickaxe:1"
+//   blockedBy=no_productive_action missing=["RETRIEVE:known:raw_iron:b45_13_35:tool:pickaxe@0"]
+//   ABORT: wedge detected (WAIT chosen 25x)
+// Live inventory birch_planks:2, stick:2, cobblestone:170 with no pickaxe: the
+// recipe needs 3 planks, so the craft plan is unsatisfiable and the missing
+// ingredient chain (planks <- logs) was never ordered. The generator now offers
+// the same deterministic producer the option layer orders (collect log).
+{
+  const require = createRequire(import.meta.url)
+  const recipeIndex = createRecipeIndex(require('minecraft-data')('1.21.11'))
+  const craftOptions: CandidateOptions = { ...defaultCandidateOptions, recipes: recipeIndex, reachability: { memory: null } }
+  const liveFeet: Vec3Json = { x: 31.5, y: 34.5, z: 37.5 }
+  const liveInventory = inventory({
+    birch_planks: 2,
+    stick: 2,
+    cobblestone: 170,
+    dirt: 37,
+    leaf_litter: 4,
+    andesite: 7,
+  })
+  const pickaxeGoal = goal({
+    id: 'craft:wooden_pickaxe',
+    targetItem: 'wooden_pickaxe',
+    description: 'craft 1 x wooden_pickaxe',
+    requiredCount: 1,
+  })
+  const craftPick = queuedGoal({
+    id: 'g-craft-pick',
+    kind: 'craft',
+    description: 'craft 1 x wooden_pickaxe',
+    targetItem: 'wooden_pickaxe',
+    requiredCount: 1,
+  })
+  const rememberedLog: KnownResource = { name: 'birch_log', kind: 'log', position: { x: 31, y: 63, z: 37 } }
+  const remembered = worldState({
+    position: liveFeet,
+    inventory: liveInventory,
+    standable: [{ x: 31, y: 35, z: 37 }],
+    signals: signals({ knownResources: [rememberedLog] }),
+    goal: pickaxeGoal,
+    goalQueue: queueWith(craftPick),
+  })
+  const rememberedGrounded = generateGroundedCandidates(remembered, craftOptions)
+  const retrieve = rememberedGrounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:log:b31_63_37')
+  const rememberedStarvation = candidateStarvationLine(
+    rememberedGrounded.candidates,
+    'craft:wooden_pickaxe:1',
+    false,
+    goalStarvationBlockedBy(null, craftPick, rememberedGrounded.withheld),
+    candidateStarvationMissing(rememberedGrounded.withheld),
+  )
+  check(
+    '(14a) the live craft shape presents the remembered-log collect route and no starvation line',
+    retrieve !== undefined &&
+      retrieve.kind === 'RETRIEVE' &&
+      retrieve.affordance?.feasible === true &&
+      rememberedStarvation === null,
+    `candidates=[${rememberedGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${rememberedStarvation ?? 'none'}`,
+  )
+  const marker = craftIngredientPrereq(remembered, craftOptions)
+  const markerLine = marker === null ? null : formatCraftIngredientPrereq(marker)
+  check(
+    '(14b) the mirrored CRAFT_INGREDIENT_PREREQ line names the missing planks and the collect-log producer',
+    markerLine === 'CRAFT_INGREDIENT_PREREQ item=wooden_pickaxe missing=birch_planks producer=collect log' &&
+      MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ'),
+    `line="${markerLine ?? 'none'}" mirrored=${MIRRORED_MARKERS.has('CRAFT_INGREDIENT_PREREQ')}`,
+  )
+
+  const visibleLog: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 33, y: 32, z: 36 },
+    distance: 1.1,
+    diggable: true,
+    inReach: true,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 33, y: 31, z: 36 },
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const visible = worldState({
+    position: { x: 34.5, y: 32, z: 36.4 },
+    inventory: liveInventory,
+    blocks: [visibleLog],
+    goal: pickaxeGoal,
+    goalQueue: queueWith(craftPick),
+  })
+  const visibleGrounded = generateGroundedCandidates(visible, craftOptions)
+  const mine = visibleGrounded.candidates.find((candidate) => candidate.id === 'MINE:b33_32_36')
+  const visibleStarvation = candidateStarvationLine(
+    visibleGrounded.candidates,
+    'craft:wooden_pickaxe:1',
+    false,
+    goalStarvationBlockedBy(null, craftPick, visibleGrounded.withheld),
+    candidateStarvationMissing(visibleGrounded.withheld),
+  )
+  check(
+    '(14c) a visible log is presented as the MINE route for the craft ingredient',
+    mine !== undefined && mine.kind === 'MINE' && mine.meta.yieldItem === 'oak_log' && visibleStarvation === null,
+    `candidates=[${visibleGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${visibleStarvation ?? 'none'}`,
+  )
+
+  const held = worldState({
+    position: liveFeet,
+    inventory: inventory({ ...liveInventory.counts, oak_log: 1 }),
+    goal: pickaxeGoal,
+    goalQueue: queueWith(craftPick),
+  })
+  const heldGrounded = generateGroundedCandidates(held, craftOptions)
+  const heldCraft = heldGrounded.candidates.find((candidate) => candidate.kind === 'CRAFT')
+  const heldMarker = craftIngredientPrereq(held, craftOptions)
+  const heldLine = heldMarker === null ? null : formatCraftIngredientPrereq(heldMarker)
+  check(
+    '(14d) a held log yields the planks CRAFT step and the marker names that producer',
+    heldCraft !== undefined &&
+      heldCraft.id === 'CRAFT:oak_planks' &&
+      heldLine === 'CRAFT_INGREDIENT_PREREQ item=wooden_pickaxe missing=oak_planks producer=craft oak_planks',
+    `candidates=[${heldGrounded.candidates.map((candidate) => candidate.id).join(',')}] line="${heldLine ?? 'none'}"`,
+  )
 }
 
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)

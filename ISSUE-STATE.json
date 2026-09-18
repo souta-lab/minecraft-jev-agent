@@ -10,13 +10,13 @@
   },
   "issues": {
     "4": {
-      "acceptanceClass": "resident-reproducibility",
+      "acceptanceClass": "offline-reproducibility",
       "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "fail",
-      "note": "Current planner code still defaults to auto and enables Jev when a key exists; static POLICY vs IMPLEMENTED mismatch is enough for FAIL."
+      "implementation": "landed",
+      "verification": "offline",
+      "observation": "pass",
+      "compliance": "pass",
+      "note": "PR #139 merged as 6a5248d. The resolver defaults to deterministic and requires explicit BUDDY_PLANNER=llm|jev|on; the branch fixture covered the 13-case mode matrix. No live planner authority claim is made."
     },
     "56": {
       "acceptanceClass": "architecture-dataflow",
@@ -44,6 +44,15 @@
       "observation": "not-run",
       "compliance": "unknown",
       "note": "Lifecycle/resource cleanup fixtures exist; issue explicitly requires >=20 changed-hash reloads plus recovery cycles."
+    },
+    "136": {
+      "acceptanceClass": "architecture-surface-contract",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "fail",
+      "note": "Static inspection of current main confirms planner, controller, and OptionSpec disagree: a vertical targetY is treated as surface success, while the planner description also requires a log. No live acceptance is claimed."
     },
     "3": {
       "acceptanceClass": "resident-restart-live",

@@ -30,12 +30,23 @@ import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcon
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
+  evaluateTunnelEntry,
   formatAscentProgress,
+  formatLocalClear,
   formatPillarRefused,
   formatPillarRelocate,
+  formatTunnelEntryRefused,
+  headroomAcrossFootprint,
+  planReuseLeg,
   resolvePillarStep,
 } from './verticalPlan.ts'
-import type { HeadroomClearOutcome, HeadroomObstacle } from './verticalPlan.ts'
+import type {
+  ApproachBlockage,
+  HeadroomClearOutcome,
+  HeadroomObstacle,
+  TunnelEntryBlockerProbe,
+  TunnelEntryProbe,
+} from './verticalPlan.ts'
 import {
   decidePillarPlaceBlock,
   decidePillarRelocation,
@@ -44,7 +55,7 @@ import {
   formatPillarSearch,
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
-import { formatPillarFail, pillarStepUp } from './pillarApex.ts'
+import { formatPillarFail, pillarStepUp, shouldRelocatePillarAfterFailure } from './pillarApex.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
@@ -78,6 +89,7 @@ export type FailureCode =
   | 'path_no_path'
   | 'path_timeout'
   | 'path_stuck'
+  | 'tunnel_entry_refused'
   | 'out_of_reach'
   | 'dig_error'
   | 'dig_timeout'
@@ -244,6 +256,8 @@ const PLACE_VERIFY_SETTLE_MS = 500
 const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
+/** PILLAR_UP: bounded same-cell nudge away from an adjacent AABB blocker. */
+const PILLAR_RECENTER_BUDGET_MS = 1500
 /**
  * PILLAR_UP relocation budget: `PillarSearchPolicy.maxRelocations`. Two keeps
  * the action bounded while allowing one retry if the first open neighbour was
@@ -412,6 +426,24 @@ export function formatSmeltLog(event: string, detail: Record<string, unknown>): 
   return `SMELT_PLACED input=${detail.inputItem}:${detail.inputCount} fuel=${detail.fuelItem}:${detail.fuelCount}`
 }
 
+/** The station-family items whose VERIFIED placement is itself station proof. */
+export const STATION_PLACE_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
+
+/**
+ * The `FURNACE_READY source=placed` line a verified placement must emit, or null
+ * when nothing was proven. M2 blocker: the PLACE path proved and recorded
+ * nothing - FURNACE_READY was only emitted inside `runSmelt`, so a furnace the
+ * bot placed and then walked away from was effectively lost (nothing registered
+ * it as a usable station) and the smelt goal starved to `[WAIT]`. The emission
+ * is gated by the same strict placement post-condition the action already uses,
+ * so an unverified/failed placement never registers a station.
+ */
+export function placedStationReadyLine(itemName: string, placedName: string | null, at: Vec3Json): string | null {
+  if (!STATION_PLACE_ITEMS.has(itemName)) return null
+  if (!isPlacePostconditionMet(placedName, itemName)) return null
+  return formatFurnaceReady('placed', at)
+}
+
 /**
  * #79: `true` only when the furnace slot proves the placed stack shrank. `null`
  * is an empty slot (fully consumed); `undefined` means the window does not
@@ -521,6 +553,14 @@ interface ControlWalkOptions {
    * outer nudge deadline still bounds the attempt (never a wedge).
    */
   ignoreFaceVeto?: boolean
+  /**
+   * Same-level bounded nudge: never jump and do not apply jump-headroom
+   * gating. The physics collision still owns whether the body can move; the
+   * caller supplies a tight arrival predicate and a short budget.
+   */
+  horizontalOnly?: boolean
+  /** Exact horizontal point for direct-bearing control, when a diagonal target is unsafe. */
+  bearingTarget?: { x: number; z: number }
 }
 
 export const defaultExecutorOptions: ExecutorOptions = {
@@ -919,7 +959,71 @@ export class Executor {
     this.setPhase(candidate, epoch, 'pathing')
     const before = this.distanceToFeet(target)
     const startPosition = this.bot.entity.position.clone()
+    const startY = startPosition.y
     const anchorBefore = anchor === null ? null : this.distanceToEyes(anchor)
+
+    // A visible resource may be above the current floor.  MINE/MOVE candidates
+    // carry the same vertical contract as RETRIEVE candidates so navigation
+    // does not throw away the deterministic ascent plan and then retry a
+    // horizontal path that cannot reach the resource's Y level.
+    const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    let activeVertical = vertical
+    let verticalStep = false
+    if (vertical !== 'none') {
+      this.setPhase(candidate, epoch, 'vertical')
+      if (vertical === 'reuse') {
+        const reuse = await this.runReuseVerticalLeg(candidate, epoch, signal, target)
+        verticalStep = reuse.step
+        if (reuse.refused) {
+          const fallback = readMetaString(candidate, 'fallbackVertical')
+          if (fallback === null || fallback === 'none') {
+            throw new ExecutorError(
+              'tunnel_entry_refused',
+              `${candidate.id} reuse tunnel entry not usable and no fallback vertical plan`,
+            )
+          }
+          activeVertical = fallback
+          this.logger.info('agent', `TUNNEL_ENTRY_FALLBACK vertical=${fallback}`, { actionId: candidate.id, target })
+          verticalStep = await this.runVerticalLeg(candidate, fallback, true, epoch, signal, target, startY)
+        }
+      } else {
+        verticalStep = await this.runVerticalLeg(candidate, vertical, false, epoch, signal, target, startY)
+      }
+
+      this.ensureOwned(epoch, signal)
+      const startFloorY = Math.floor(startY)
+      const climbedTo = Math.floor(this.bot.entity.position.y)
+      const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
+      if (verticalStep && climbedTo > startFloorY) {
+        this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
+          actionId: candidate.id,
+          target,
+          vertical: activeVertical,
+        })
+      }
+      // Preserve bounded ascent as durable MOVE progress.  The next sensor
+      // tick re-plans from the new Y instead of sending a canDig=false
+      // horizontal path back down to the original standable spot.
+      if (verticalStep && climbedTo > startFloorY && target.y - climbedTo > 1) {
+        return this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'done',
+          'arrived',
+          `climbed from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
+          null,
+          {
+            verified: true,
+            blockRemoved: dugVertical && verticalStep,
+            dropObserved: false,
+            itemsGained: 0,
+            goalItemCount: this.countGoalItem(),
+            progressed: true,
+          },
+        )
+      }
+    }
     let pathError: unknown = null
     try {
       // STOCK-FIRST: `pathTo` drives the stock pathfinder (`setGoal`) as the
@@ -990,58 +1094,39 @@ export class Executor {
     // Issue #45: close the vertical gap first (reuse a recorded tunnel, else dig
     // one guarded staircase step), then approach horizontally. Without this the
     // canDig=false walk stops at the resource's horizontal bearing and stalls.
+    // M2 FURNACE_READY: reuse is validated live; an unusable entry either clears
+    // the one blocking cell or falls back to a different vertical plan.
     const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    let activeVertical = vertical
     let verticalStep = false
     if (vertical === 'reuse') {
-      const tunnel = readMetaPoint(candidate, 'tunnelX', 'tunnelY', 'tunnelZ')
-      if (tunnel !== null) {
-        this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id, target })
-        this.setPhase(candidate, epoch, 'reuse-tunnel')
-        await this.pathToNear(tunnel, 1, epoch, signal)
-        this.ensureOwned(epoch, signal)
+      const reuse = await this.runReuseVerticalLeg(candidate, epoch, signal, target)
+      verticalStep = reuse.step
+      if (reuse.refused) {
+        const fallback = readMetaString(candidate, 'fallbackVertical')
+        if (fallback === null || fallback === 'none') {
+          throw new ExecutorError(
+            'tunnel_entry_refused',
+            `${candidate.id} reuse tunnel entry not usable and no fallback vertical plan`,
+          )
+        }
+        activeVertical = fallback
+        this.logger.info('agent', `TUNNEL_ENTRY_FALLBACK vertical=${fallback}`, { actionId: candidate.id, target })
+        verticalStep = await this.runVerticalLeg(candidate, fallback, true, epoch, signal, target, startY)
       }
-    } else if (vertical === 'staircase') {
-      const dig = readMetaPoint(candidate, 'stairDigX', 'stairDigY', 'stairDigZ')
-      const step = readMetaPoint(candidate, 'stairStepX', 'stairStepY', 'stairStepZ')
-      if (dig !== null && step !== null) {
-        const fromY = Math.floor(startY)
-        const toY = readMetaNumber(candidate, 'stairToY', target.y)
-        this.logger.info('agent', `STAIRCASE from_y=${fromY} to_y=${toY}`, { actionId: candidate.id, dig, step })
-        verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
-      }
-    } else if (vertical === 'staircase-up') {
-      const dig = readMetaPoint(candidate, 'upDigX', 'upDigY', 'upDigZ')
-      const step = readMetaPoint(candidate, 'upStepX', 'upStepY', 'upStepZ')
-      if (dig !== null && step !== null) {
-        const fromY = Math.floor(startY)
-        const toY = readMetaNumber(candidate, 'upToY', target.y)
-        const dir = readMetaString(candidate, 'upDir') ?? 'unknown'
-        this.logger.info('agent', `ASCEND_STEP from_y=${fromY} to_y=${toY} dir=${dir}`, { actionId: candidate.id, dig, step })
-        verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal, 'GoalGetToBlock')
-      }
-    } else if (vertical === 'pillar') {
-      const placeName = readMetaString(candidate, 'pillarPlaceName')
-      const steps = Math.floor(readMetaNumber(candidate, 'pillarSteps', 0))
-      if (placeName !== null && steps >= 1) {
-        const fromY = Math.floor(startY)
-        const toY = Math.floor(readMetaNumber(candidate, 'pillarToY', target.y))
-        this.logger.info('agent', `PILLAR_UP from_y=${fromY} to_y=${toY} place=${placeName} steps=${steps}`, {
-          actionId: candidate.id,
-          target,
-        })
-        verticalStep = await this.pillarUp(candidate, { placeName, toY, steps }, epoch, signal)
-      }
+    } else {
+      verticalStep = await this.runVerticalLeg(candidate, vertical, false, epoch, signal, target, startY)
     }
 
     this.ensureOwned(epoch, signal)
     const startFloorY = Math.floor(startY)
     const climbedTo = Math.floor(this.bot.entity.position.y)
-    const dugVertical = vertical === 'staircase' || vertical === 'staircase-up'
+    const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
     if (verticalStep && climbedTo > startFloorY) {
       this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
         actionId: candidate.id,
         target,
-        vertical,
+        vertical: activeVertical,
       })
     }
     // M2 ascent persistence: a bounded climb chunk that has not yet closed the
@@ -1087,7 +1172,7 @@ export class Executor {
     const verticalProgress = Math.abs(endY - target.y) < Math.abs(startY - target.y) - 0.01
     this.logger.info(
       'executor',
-      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${vertical}`,
+      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${activeVertical}`,
       { target, actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
@@ -1160,6 +1245,245 @@ export class Executor {
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
     }
+    return true
+  }
+
+  private async runVerticalLeg(
+    candidate: Candidate,
+    vertical: string,
+    fallback: boolean,
+    epoch: number,
+    signal: AbortSignal,
+    target: Vec3Json,
+    startY: number,
+  ): Promise<boolean> {
+    const keyBase = this.verticalKeyBase(vertical, fallback)
+    if (keyBase === null) return false
+    if (vertical === 'staircase') {
+      const dig = readMetaPoint(candidate, `${keyBase}DigX`, `${keyBase}DigY`, `${keyBase}DigZ`)
+      const step = readMetaPoint(candidate, `${keyBase}StepX`, `${keyBase}StepY`, `${keyBase}StepZ`)
+      if (dig === null || step === null) return false
+      const fromY = Math.floor(startY)
+      const toY = readMetaNumber(candidate, `${keyBase}ToY`, target.y)
+      this.logger.info('agent', `STAIRCASE from_y=${fromY} to_y=${toY}`, { actionId: candidate.id, dig, step })
+      return this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
+    }
+    if (vertical === 'staircase-up') {
+      const dig = readMetaPoint(candidate, `${keyBase}DigX`, `${keyBase}DigY`, `${keyBase}DigZ`)
+      const step = readMetaPoint(candidate, `${keyBase}StepX`, `${keyBase}StepY`, `${keyBase}StepZ`)
+      if (dig === null || step === null) return false
+      const fromY = Math.floor(startY)
+      const toY = readMetaNumber(candidate, `${keyBase}ToY`, target.y)
+      const dir = readMetaString(candidate, `${keyBase}Dir`) ?? 'unknown'
+      this.logger.info('agent', `ASCEND_STEP from_y=${fromY} to_y=${toY} dir=${dir}`, {
+        actionId: candidate.id,
+        dig,
+        step,
+      })
+      return this.digRetrievalStaircase(candidate, dig, step, epoch, signal, 'GoalGetToBlock')
+    }
+    const placeName = readMetaString(candidate, `${keyBase}PlaceName`)
+    const steps = Math.floor(readMetaNumber(candidate, `${keyBase}Steps`, 0))
+    if (placeName === null || steps < 1) return false
+    const fromY = Math.floor(startY)
+    const toY = Math.floor(readMetaNumber(candidate, `${keyBase}ToY`, target.y))
+    this.logger.info('agent', `PILLAR_UP from_y=${fromY} to_y=${toY} place=${placeName} steps=${steps}`, {
+      actionId: candidate.id,
+      target,
+    })
+    return this.pillarUp(candidate, { placeName, toY, steps }, epoch, signal)
+  }
+
+  private verticalKeyBase(vertical: string, fallback: boolean): string | null {
+    if (vertical === 'staircase') return fallback ? 'fallbackStair' : 'stair'
+    if (vertical === 'staircase-up') return fallback ? 'fallbackUp' : 'up'
+    if (vertical === 'pillar') return fallback ? 'fallbackPillar' : 'pillar'
+    return null
+  }
+
+  /**
+   * The reuse leg. Validates the remembered tunnel entry against the live world,
+   * clears the one blocking cell when it is diggable, walks, and on a near
+   * `path_stuck` attempts a local clearance for the single identified approach
+   * cell before giving up. An entry that is fundamentally unusable (no clearance
+   * openable, or no support) returns `refused` so the caller selects a different
+   * vertical plan instead of escalating a 1.5 m gap to `pathfinder_stuck`.
+   */
+  private async runReuseVerticalLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    target: Vec3Json,
+  ): Promise<{ step: boolean; refused: boolean }> {
+    const tunnel = readMetaPoint(candidate, 'tunnelX', 'tunnelY', 'tunnelZ')
+    if (tunnel === null) return { step: false, refused: false }
+
+    const planClear = readMetaPoint(candidate, 'tunnelClearX', 'tunnelClearY', 'tunnelClearZ')
+    if (planClear !== null) {
+      await this.localClearCell(candidate, planClear, readMetaString(candidate, 'tunnelClearName'), epoch, signal)
+    }
+
+    const entry = evaluateTunnelEntry(this.probeTunnelEntry(tunnel))
+    if (entry.kind === 'clear') {
+      await this.localClearCell(candidate, entry.blocker.cell, entry.blocker.name, epoch, signal)
+    } else if (entry.kind === 'refuse') {
+      this.logger.info('agent', formatTunnelEntryRefused({ reason: entry.reason, cell: entry.cell }), {
+        actionId: candidate.id,
+        target,
+      })
+      return { step: false, refused: true }
+    }
+
+    this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id, target })
+    this.setPhase(candidate, epoch, 'reuse-tunnel')
+    let pathFailed = false
+    try {
+      await this.pathToNear(tunnel, 1, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      if (!(error instanceof ExecutorError)) throw error
+      if (error.code !== 'path_stuck' && error.code !== 'path_no_path') throw error
+      pathFailed = true
+    }
+    if (!pathFailed) {
+      this.ensureOwned(epoch, signal)
+      return { step: false, refused: false }
+    }
+
+    const leg = planReuseLeg({
+      entry,
+      pathFailed: true,
+      distanceToTunnel: this.distanceToFeet(tunnel),
+      approachBlockages: this.probeApproachBlockages(tunnel),
+    })
+    if (leg.action === 'clear-approach') {
+      const blockName = this.currentBlockAt(leg.cell)?.name ?? null
+      const cleared = await this.localClearCell(candidate, leg.cell, blockName, epoch, signal)
+      if (cleared) {
+        try {
+          await this.pathToNear(tunnel, 1, epoch, signal)
+          this.ensureOwned(epoch, signal)
+          return { step: false, refused: false }
+        } catch (retry) {
+          if (retry instanceof ActionCancelled) throw retry
+        }
+      }
+    }
+    if (leg.action === 'refuse') {
+      this.logger.info('agent', formatTunnelEntryRefused({ reason: leg.reason, cell: leg.cell }), {
+        actionId: candidate.id,
+        target,
+      })
+      return { step: false, refused: true }
+    }
+    throw new ExecutorError('path_stuck', `packet locomotion blocked before (${tunnel.x},${tunnel.y},${tunnel.z})`)
+  }
+
+  private probeTunnelEntry(cell: Vec3Json): TunnelEntryProbe {
+    const bodyClear = this.passableAt(cell.x, cell.y, cell.z)
+    const headClear = this.passableAt(cell.x, cell.y + 1, cell.z)
+    const supportSolid = this.solidSupportAt(cell.x, cell.y - 1, cell.z)
+    let blocker: TunnelEntryBlockerProbe | null = null
+    if (!bodyClear || !headClear) {
+      const blockerCell = !bodyClear ? cell : { x: cell.x, y: cell.y + 1, z: cell.z }
+      const block = this.currentBlockAt(blockerCell)
+      if (block !== null && block.boundingBox !== 'empty') {
+        const live = this.resolveLiveDigTool(block)
+        blocker = {
+          cell: blockerCell,
+          name: block.name,
+          diggable: block.diggable === true,
+          fluidOrHazard: PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name),
+          floodRisk: !this.cellClearOfFluids(blockerCell),
+          toolOk: live.ok,
+        }
+      }
+    }
+    return { cell, bodyClear, headClear, supportSolid, blocker }
+  }
+
+  private probeApproachBlockages(tunnel: Vec3Json): ApproachBlockage[] {
+    const position = this.bot.entity.position
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+    const sx = Math.sign(tunnel.x - feet.x)
+    const sz = Math.sign(tunnel.z - feet.z)
+    const cells: Vec3Json[] = []
+    const addColumn = (x: number, y: number, z: number): void => {
+      cells.push({ x, y, z })
+      cells.push({ x, y: y + 1, z })
+    }
+    if (sx !== 0) addColumn(feet.x + sx, feet.y, feet.z)
+    if (sz !== 0) addColumn(feet.x, feet.y, feet.z + sz)
+    if (sx !== 0 && sz !== 0) addColumn(feet.x + sx, feet.y, feet.z + sz)
+
+    const out: ApproachBlockage[] = []
+    const seen = new Set<string>()
+    for (const cell of cells) {
+      const key = `${cell.x},${cell.y},${cell.z}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (this.passableAt(cell.x, cell.y, cell.z)) {
+        out.push({ cell, passable: true })
+        continue
+      }
+      const block = this.currentBlockAt(cell)
+      const live = block !== null ? this.resolveLiveDigTool(block) : null
+      out.push({
+        cell,
+        passable: false,
+        name: block?.name,
+        diggable: block?.diggable === true,
+        fluidOrHazard: block !== null && (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)),
+        floodRisk: !this.cellClearOfFluids(cell),
+        toolOk: live?.ok === true,
+      })
+    }
+    return out
+  }
+
+  private async localClearCell(
+    candidate: Candidate,
+    cell: Vec3Json,
+    nameHint: string | null,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const block = this.currentBlockAt(cell)
+    if (block === null || block.boundingBox === 'empty') return false
+    const live = this.resolveLiveDigTool(block)
+    this.logger.info('agent', formatLocalClear(cell, block.name, live.tool, live.tier), {
+      actionId: candidate.id,
+      hint: nameHint,
+    })
+    if (!live.ok) {
+      this.logger.warn(
+        'executor',
+        `LOCAL_CLEAR cannot dig ${block.name} at (${cell.x},${cell.y},${cell.z}): ${live.reason}`,
+        { actionId: candidate.id },
+      )
+      return false
+    }
+    try {
+      await this.equipTool(
+        {
+          ...candidate,
+          toolName: live.tool,
+          toolTier: live.tier,
+          requiresTool: live.tool !== null,
+          meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
+        },
+        epoch,
+        signal,
+      )
+      await this.digBlock(block, epoch, signal)
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.warn('executor', `LOCAL_CLEAR dig failed: ${error instanceof Error ? error.message : String(error)}`, {
+        actionId: candidate.id,
+      })
+      return false
+    }
+    this.ensureOwned(epoch, signal)
     return true
   }
 
@@ -1238,11 +1562,51 @@ export class Executor {
           isSolid: (y) => this.solidSupportAt(feet.x, y, feet.z),
         })
         if (placeStack === undefined || pose === null) {
-          this.logger.warn(
-            'executor',
-            formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
-            { actionId: candidate.id, ...feet },
-          )
+          if (pose === null && placeStack !== undefined) {
+            this.logger.warn(
+              'executor',
+              formatPillarRefused({ reason: 'no_footing', cell: feet, obstacle: null }),
+              { actionId: candidate.id, ...feet },
+            )
+            refusedColumns.add(pillarColumnKey(feet))
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations })
+            const fallback = relocation.target
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation from no-footing column to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
+          }
+          if (!(pose === null && placeStack !== undefined)) {
+            this.logger.warn(
+              'executor',
+              formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
+              { actionId: candidate.id, ...feet },
+            )
+          }
           break
         }
         const columnSafe = !this.pillarColumnUnsafe()
@@ -1317,6 +1681,15 @@ export class Executor {
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
         const placeCell = { x: feet.x, y: pose.placeY, z: feet.z }
+        // Keep the launch geometry beside the failure evidence. A takeoff
+        // failure can be caused by a bad local footing interpretation, a
+        // body embedded in the feet cell, or a server correction; the marker
+        // alone cannot distinguish those cases. These reads are diagnostic
+        // only and are captured before the jump mutates the entity position.
+        const launchFeetBlock = this.currentBlockAt(feet)
+        const launchHeadBlock = this.currentBlockAt({ x: feet.x, y: feet.y + 1, z: feet.z })
+        const forcedTracker = forcedMoveTracker(this.bot)
+        const forcedBefore = forcedTracker.value
         // The jump -> apex -> place -> landing timing lives in pillarApex.ts so
         // every sub-step is injected and unit-testable without a server. The
         // old code placed on a `velocity.y <= 0.01` predicate (also true while
@@ -1340,13 +1713,70 @@ export class Executor {
         )
         this.ensureOwned(epoch, signal)
         if (!climb.ok) {
+          const endEntity = this.bot.entity as typeof this.bot.entity & {
+            isCollidedHorizontally?: boolean
+            isCollidedVertically?: boolean
+          }
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
             step: climb.fail.step,
             reason: climb.fail.reason,
             detail: climb.fail.detail ?? null,
+            launchY: beforeY,
+            supportY: pose.footingY,
+            placeY: pose.placeY,
+            landingY: pose.landingY,
+            supportName: footing.name,
+            launchFeetBlock: launchFeetBlock?.name ?? null,
+            launchHeadBlock: launchHeadBlock?.name ?? null,
+            launchAboveHeadBlock: this.currentBlockAt({ x: feet.x, y: feet.y + 2, z: feet.z })?.name ?? null,
+            endPosition: {
+              x: endEntity.position.x,
+              y: endEntity.position.y,
+              z: endEntity.position.z,
+            },
+            endOnGround: endEntity.onGround,
+            endVelocityY: endEntity.velocity.y,
+            endCollidedHorizontally: endEntity.isCollidedHorizontally ?? null,
+            endCollidedVertically: endEntity.isCollidedVertically ?? null,
+            endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
+            forcedRepositions: forcedTracker.value - forcedBefore,
           })
+          if (shouldRelocatePillarAfterFailure(climb.fail)) {
+            refusedColumns.add(pillarColumnKey(feet))
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations, failure: climb.fail.reason })
+            const fallback = relocation.target
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+                failure: climb.fail.reason,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation after takeoff failure to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id, failure: climb.fail.reason },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
+          }
           break
         }
         climbed += 1
@@ -1382,12 +1812,26 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<HeadroomClearOutcome> {
     let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
+    let recenterAttempted = false
     for (let attempt = 0; attempt < PILLAR_SEARCH_POLICY.headroomAttempts; attempt += 1) {
       const position = this.bot.entity.position
-      if (this.headroomAt(column.x, position.y, column.z)) return { cleared: true }
-      const feetY = Math.floor(position.y + 1e-4)
-      const blockingCell = this.blockingHeadroomCell(column.x, feetY, column.z)
+      const headroom = this.headroomAt(column.x, position.y, column.z, position)
+      if (headroom.clear) return { cleared: true }
+      const blockingCell = headroom.blocker
       if (blockingCell === null) continue
+      // A fractional body can touch an adjacent cell even when the canonical
+      // centre of this same column has clear headroom. Re-centre once before
+      // declaring the column blocked; this is a bounded horizontal nudge and
+      // never digs or changes the selected pillar column.
+      const centeredHeadroom = this.headroomAt(column.x, position.y, column.z)
+      const adjacentBlocker = blockingCell.x !== column.x || blockingCell.z !== column.z
+      if (!recenterAttempted && adjacentBlocker && centeredHeadroom.clear) {
+        recenterAttempted = true
+        if (await this.recenterPillarColumn(candidate, column, blockingCell, epoch, signal)) {
+          this.ensureOwned(epoch, signal)
+          continue
+        }
+      }
       const block = this.currentBlockAt(blockingCell)
       if (block === null || block.boundingBox === 'empty') continue
       const live = this.resolveLiveDigTool(block)
@@ -1429,18 +1873,110 @@ export class Executor {
       }
       this.ensureOwned(epoch, signal)
     }
-    if (this.headroomAt(column.x, this.bot.entity.position.y, column.z)) return { cleared: true }
+    const headroom = this.headroomAt(column.x, this.bot.entity.position.y, column.z, this.bot.entity.position)
+    if (headroom.clear) return { cleared: true }
     return last
   }
 
-  /** Lowest non-passable cell above the feet: the obstacle the jump headroom hits. */
-  private blockingHeadroomCell(x: number, feetY: number, z: number): Vec3Json | null {
-    for (const y of [feetY + 1, feetY + 2]) {
-      const block = this.currentBlockAt({ x, y, z })
-      if (block === null || block.boundingBox === 'empty') continue
-      return { x, y, z }
+  /**
+   * Move to a safe interior point of the current grounded cell when only a
+   * fractional AABB overlap blocks headroom. The custom arrival predicate is
+   * intentionally tighter than normal path arrival so a same-cell no-op cannot
+   * be reported as a successful recenter. The two axis-aligned legs avoid
+   * asking the collision resolver to escape a diagonal corner overlap in one
+   * step, while the boundary-derived target avoids extending the footprint
+   * farther into unsupported neighbouring cells than necessary.
+   */
+  private async recenterPillarColumn(
+    candidate: Candidate,
+    column: { x: number; z: number },
+    blocker: Vec3Json,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const origin = this.bot.entity.position.clone()
+    const halfWidth = this.bot.entity.width > 0 ? this.bot.entity.width / 2 : 0.3
+    const margin = 0.04
+    const minX = column.x + halfWidth + margin
+    const maxX = column.x + 1 - halfWidth - margin
+    const minZ = column.z + halfWidth + margin
+    const maxZ = column.z + 1 - halfWidth - margin
+    const destination = {
+      x: blocker.x < column.x ? minX : blocker.x > column.x ? maxX : column.x + 0.5,
+      z: blocker.z < column.z ? minZ : blocker.z > column.z ? maxZ : column.z + 0.5,
     }
-    return null
+    const atDestination = (): boolean => {
+      const position = this.bot.entity.position
+      return (
+        Math.floor(position.y + 1e-4) === Math.floor(origin.y + 1e-4) &&
+        Math.hypot(position.x - destination.x, position.z - destination.z) <= 0.08
+      )
+    }
+    if (atDestination()) return true
+    this.setPhase(candidate, epoch, 'recentering-pillar-column')
+    const floorY = Math.floor(origin.y + 1e-4)
+    const deadline = Date.now() + PILLAR_RECENTER_BUDGET_MS
+    const deltaX = destination.x - origin.x
+    const deltaZ = destination.z - origin.z
+    const awayX = Math.sign(column.x - blocker.x)
+    const awayZ = Math.sign(column.z - blocker.z)
+    const xMovesAway = awayX !== 0 && Math.sign(deltaX) === awayX
+    const zMovesAway = awayZ !== 0 && Math.sign(deltaZ) === awayZ
+    const xFirst =
+      xMovesAway && !zMovesAway
+        ? true
+        : zMovesAway && !xMovesAway
+          ? false
+          : Math.abs(deltaX) > Math.abs(deltaZ)
+    const legs = xFirst
+      ? [
+          { x: destination.x, z: origin.z },
+          destination,
+        ]
+      : [
+          { x: origin.x, z: destination.z },
+          destination,
+        ]
+    const atPoint = (point: { x: number; z: number }): boolean => {
+      const position = this.bot.entity.position
+      return Math.floor(position.y + 1e-4) === floorY && Math.hypot(position.x - point.x, position.z - point.z) <= 0.08
+    }
+    try {
+      for (const point of legs) {
+        if (atPoint(point)) continue
+        const budgetMs = deadline - Date.now()
+        if (budgetMs <= 0) break
+        await this.walkByControls(
+          { x: column.x, y: floorY, z: column.z },
+          epoch,
+          signal,
+          {
+            directBearing: true,
+            horizontalOnly: true,
+            bearingTarget: point,
+            budgetMs,
+            tolerance: 0.08,
+            arrivedAt: () => atPoint(point),
+          },
+        )
+      }
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      this.logger.info('agent', `PILLAR_RECENTER failed reason=${error instanceof Error ? error.message : String(error)}`, {
+        actionId: candidate.id,
+        from: { x: origin.x, y: origin.y, z: origin.z },
+        to: { x: destination.x, y: origin.y, z: destination.z },
+      })
+      return false
+    }
+    const position = this.bot.entity.position
+    const ok = atDestination()
+    this.logger.info('agent', `PILLAR_RECENTER from=${origin.x},${origin.y},${origin.z} to=${position.x},${position.y},${position.z} ok=${ok}`, {
+      actionId: candidate.id,
+      column,
+      destination,
+    })
+    return ok
   }
 
   /**
@@ -1538,6 +2074,8 @@ export class Executor {
   ): Promise<boolean> {
     const pathfinder = this.bot.pathfinder
     if (pathfinder === undefined) return false
+    const horizontalOnly = options.horizontalOnly === true
+    const bearingTarget = options.bearingTarget ?? null
     const anchor = options.anchor ?? null
     const reach = options.reach ?? this.options.reach
     const tolerance = options.tolerance ?? (options.range !== undefined ? Math.max(1, options.range) + 0.5 : 1.2)
@@ -1633,8 +2171,8 @@ export class Executor {
           break
         }
         const node = plan[index] ?? target
-        const dx = node.x + 0.5 - position.x
-        const dz = node.z + 0.5 - position.z
+        const dx = (bearingTarget?.x ?? node.x + 0.5) - position.x
+        const dz = (bearingTarget?.z ?? node.z + 0.5) - position.z
         const horizontal = Math.hypot(dx, dz)
         const ux = dx / (horizontal || 1)
         const uz = dz / (horizontal || 1)
@@ -1660,9 +2198,9 @@ export class Executor {
         // feet AND at the landing column. `Math.round(feet)` read one cell too
         // high and vetoed the 1-block escape at (21,63,-72): a canopy leaf sat at
         // feet+2 while the step itself was clear.
-        const currentHeadroom = this.hasJumpHeadroom()
+        const currentHeadroom = horizontalOnly ? true : this.hasJumpHeadroom()
         const landingHeadroom =
-          climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z)
+          !horizontalOnly && climb !== null && this.headroomAt(climb.x, climb.top + 1, climb.z).clear
         const jumpAllowed = landingHeadroom || currentHeadroom
 
         const standingStill = this.bot.entity.onGround === true && Date.now() - lastProgressAt > 250
@@ -1679,13 +2217,15 @@ export class Executor {
         const faceX = Math.floor(position.x + ux * FACE_PROBE_DIST)
         const faceZ = Math.floor(position.z + uz * FACE_PROBE_DIST)
         const faceAtFeet = this.solidSupportAt(faceX, Math.floor(position.y), faceZ)
-        const maneuver = planClimbManeuver({
-          climbDetected: climb !== null,
-          onGround: this.bot.entity.onGround === true,
-          pinned,
-          faceAtFeet,
-          standingStill,
-        })
+        const maneuver: ClimbManeuver = horizontalOnly
+          ? 'continue'
+          : planClimbManeuver({
+              climbDetected: climb !== null,
+              onGround: this.bot.entity.onGround === true,
+              pinned,
+              faceAtFeet,
+              standingStill,
+            })
         // Order matches the harness: a detected climb is attempted BEFORE any
         // recovery, because the in-loop replan alone exceeds the 250 ms
         // standing-still window and would otherwise hijack the pre-contact jump.
@@ -2112,8 +2652,10 @@ export class Executor {
     const fuelCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'fuelCount', 1)))
     const furnaceSource = readMetaString(candidate, 'furnaceSource') ?? 'known'
     this.logger.info('agent', formatFurnaceReady(furnaceSource, target), {
-      actionId: candidate.id,
+      source: furnaceSource,
+      at: `${target.x},${target.y},${target.z}`,
       target,
+      actionId: candidate.id,
       furnaceSource,
     })
     this.setPhase(candidate, epoch, 'smelting')
@@ -2274,6 +2816,15 @@ export class Executor {
         'verify_failed',
         `placeBlock did not create ${itemName} at (${target.x},${target.y},${target.z}) (found ${placedName ?? 'air'})`,
       )
+    }
+    const readyLine = placedStationReadyLine(itemName, placedName, target)
+    if (readyLine !== null) {
+      this.logger.info('agent', readyLine, {
+        source: 'placed',
+        at: `${target.x},${target.y},${target.z}`,
+        target,
+        actionId: candidate.id,
+      })
     }
     return this.buildResult(candidate, epoch, startedAt, 'done', 'placed', `placed ${itemName}`, null, {
       verified: true,
@@ -2836,14 +3387,24 @@ export class Executor {
    * `feetY` is the standing level, so `Math.floor` identifies the feet block;
    * `Math.round` read one cell too high and rejected valid 1-block climbs.
    */
-  private headroomAt(x: number, feetY: number, z: number): boolean {
-    const feet = Math.floor(feetY + 1e-4)
-    return headroomSufficient(this.passableAt(x, feet + 1, z), this.passableAt(x, feet + 2, z))
+  private headroomAt(
+    x: number,
+    feetY: number,
+    z: number,
+    center: { x: number; z: number } = { x: x + 0.5, z: z + 0.5 },
+  ): { clear: boolean; blocker: Vec3Json | null } {
+    const halfWidth = this.bot.entity.width > 0 ? this.bot.entity.width / 2 : 0.3
+    return headroomAcrossFootprint({
+      center,
+      feetY,
+      halfWidth,
+      isPassable: (cellX, cellY, cellZ) => this.passableAt(cellX, cellY, cellZ),
+    })
   }
 
   private hasJumpHeadroom(): boolean {
     const position = this.bot.entity.position
-    return this.headroomAt(Math.floor(position.x), position.y, Math.floor(position.z))
+    return this.headroomAt(Math.floor(position.x), position.y, Math.floor(position.z), position).clear
   }
 
   private solidSupportAt(x: number, y: number, z: number): boolean {

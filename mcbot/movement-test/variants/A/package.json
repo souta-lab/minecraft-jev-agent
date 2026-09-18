@@ -1,0 +1,7 @@
+{
+  "name": "mt-variant-A",
+  "private": true,
+  "type": "commonjs",
+  "comment": "A = unmodified published mineflayer@4.39.0 (npm registry)",
+  "dependencies": { "mineflayer": "4.39.0" }
+}

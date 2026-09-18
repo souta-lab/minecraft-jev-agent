@@ -53,6 +53,8 @@ export interface MoveFailMemoryOptions {
   maxEntries?: number
   /** clock injection for deterministic tests */
   now?: () => number
+  /** entries restored from the HOST-owned class-A world memory */
+  initialEntries?: readonly MoveFailEntry[]
 }
 
 export interface MoveFailRecordResult {
@@ -124,6 +126,39 @@ export class MoveFailMemory {
     this.cooldownMs = Math.max(0, options.cooldownMs ?? DEFAULT_MOVE_COOLDOWN_MS)
     this.maxEntries = Math.max(1, Math.floor(options.maxEntries ?? DEFAULT_MOVE_MAX_ENTRIES))
     this.now = options.now ?? ((): number => Date.now())
+    if (options.initialEntries !== undefined) this.restore(options.initialEntries)
+  }
+
+  /** Restore only data-shaped entries; the caller never hands a class instance across the resident boundary. */
+  restore(entries: readonly MoveFailEntry[]): void {
+    this.entries.clear()
+    const now = this.now()
+    for (const source of entries) {
+      if (source === null || typeof source !== 'object') continue
+      if (!Number.isFinite(source.x) || !Number.isFinite(source.y) || !Number.isFinite(source.z)) continue
+      const dimension = typeof source.dimension === 'string' && source.dimension.length > 0 ? source.dimension : 'overworld'
+      const position = { x: Math.round(source.x), y: Math.round(source.y), z: Math.round(source.z) }
+      const attempts = Number.isFinite(source.attempts) ? Math.max(0, Math.floor(source.attempts)) : 0
+      const firstFailedAt = Number.isFinite(source.firstFailedAt) ? source.firstFailedAt : now
+      const lastFailedAt = Number.isFinite(source.lastFailedAt) ? source.lastFailedAt : firstFailedAt
+      const lastReason: MoveFailureReason =
+        source.lastReason === 'stuck' || source.lastReason === 'no_path' || source.lastReason === 'no_progress'
+          ? source.lastReason
+          : 'unreachable'
+      const blacklistedUntil = Number.isFinite(source.blacklistedUntil) ? Math.max(0, source.blacklistedUntil) : 0
+      const entry: MoveFailEntry = {
+        key: moveFailureKey(dimension, position),
+        dimension,
+        ...position,
+        attempts,
+        firstFailedAt,
+        lastFailedAt,
+        lastReason,
+        blacklistedUntil,
+      }
+      this.entries.set(entry.key, entry)
+    }
+    this.evictIfNeeded()
   }
 
   /** Record one failed attempt at a coordinate. */

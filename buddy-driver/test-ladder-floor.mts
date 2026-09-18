@@ -5,11 +5,11 @@ import { emptyWorldMemory } from './resident-types.ts'
 import {
   PlannerBrain,
   buildPlanOptions,
-  deriveSurfaceTargetY,
+  deriveUpperAccessTargetY,
   ladderFloorGoals,
   resolveRungSourceOfTruth,
   rungIndexById,
-  surfaceReturnApplies,
+  upperAccessRecoveryApplies,
 } from './planner.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
@@ -169,13 +169,13 @@ addCase('(f) the portal rung supplies its typed prerequisite chain from the dete
   }
 })
 
-addCase('(g) the surface target derives from the highest remembered y, else a bounded rise', () => {
+addCase('(g) the upper-access hint derives from the highest remembered y, else a bounded rise', () => {
   const world = { ...emptyWorldMemory(), knownResources: [{ name: 'iron_ore', kind: 'ore' as const, x: 37, y: 67, z: 33 }] }
-  const remembered = deriveSurfaceTargetY(world, 10)
-  const bounded = deriveSurfaceTargetY(emptyWorldMemory(), 10)
+  const remembered = deriveUpperAccessTargetY(world, 10)
+  const bounded = deriveUpperAccessTargetY(emptyWorldMemory(), 10)
   return {
-    pass: remembered === 68 && bounded === 74 && surfaceReturnApplies(world, 10),
-    detail: `remembered=${remembered} bounded=${bounded} applies=${surfaceReturnApplies(world, 10)}`,
+    pass: remembered === 68 && bounded === 74 && upperAccessRecoveryApplies(world, 10),
+    detail: `remembered=${remembered} bounded=${bounded} applies=${upperAccessRecoveryApplies(world, 10)}`,
   }
 })
 
@@ -197,15 +197,17 @@ addCase('(h) a capability gap forces the surface-return goal to the queue head (
   const head = plan.goals[0]
   const queue = new GoalQueue()
   queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
-  const policy = log.find((entry) => entry.event === 'SURFACE_RETURN_POLICY')
+  const policy = log.find((entry) => entry.event === 'UPPER_ACCESS_RECOVERY_POLICY')
   return {
     pass:
       head?.kind === 'surface' &&
       head.strategy === 'return_to_surface' &&
+      head.description.includes('recover vertical access') &&
+      head.targetItem === 'log' &&
       head.targetY === 68 &&
       plan.op === 'replace' &&
       queue.current?.kind === 'surface' &&
-      policy?.detail?.chosen === 'return_to_surface' &&
+      policy?.detail?.chosen === 'recover_vertical_access' &&
       policy?.detail?.reason === 'capability_gap' &&
       Array.isArray(policy?.detail?.alternatives),
     detail: `head=${head?.kind}:${head?.strategy} targetY=${head?.targetY} queueHead=${queue.current?.kind} policy=${JSON.stringify(policy?.detail)}`,
