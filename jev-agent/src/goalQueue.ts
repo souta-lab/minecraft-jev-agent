@@ -18,6 +18,7 @@
 //
 // The queue is deliberately plain data so it can be: handed to Jev inside the
 // world state, written to the decision log, and unit-tested with no bot at all.
+import type { OptionSpec } from './optionSpec.ts'
 import {
   abandonDetail,
   formatProtectedGoalAbandoned,
@@ -74,6 +75,14 @@ export interface QueuedGoal {
    */
   targetY?: number | null
   dimension?: string | null
+  /** Issue #56: named predicate preserved from a compiled Option target. */
+  targetPredicate?: string | null
+  /** Issue #56: exact compiled Option identity; absent when the compiler is disabled. */
+  optionInstanceId?: string
+  /** Issue #56: stable semantic Option template id. */
+  optionTemplateId?: string
+  /** Issue #56: the full plain-data spec survives queue persistence/restart. */
+  optionSpec?: OptionSpec
   /** how many relevant items the bot held when the goal was created */
   startCount: number
   /** live progress toward `requiredCount` (collect goals) */
@@ -96,6 +105,14 @@ export interface PlannedGoal {
   /** Predicate goal (#41): complete when `position.y <= targetY` in `dimension`. */
   targetY?: number | null
   dimension?: string | null
+  /** Issue #56: named predicate preserved from a compiled Option target. */
+  targetPredicate?: string | null
+  /** Issue #56: exact compiled Option identity; absent when the compiler is disabled. */
+  optionInstanceId?: string
+  /** Issue #56: stable semantic Option template id. */
+  optionTemplateId?: string
+  /** Issue #56: the full plain-data spec survives queue persistence/restart. */
+  optionSpec?: OptionSpec
   detail?: string
   /** Issue #55: deterministic prerequisite; a patch/replace may not drop it. */
   protected?: boolean
@@ -323,6 +340,10 @@ export class GoalQueue {
       requiredCount: Math.max(1, Math.floor(plan.requiredCount ?? 1)),
       targetY: plan.targetY ?? null,
       dimension: plan.dimension ?? null,
+      ...(plan.targetPredicate === undefined ? {} : { targetPredicate: plan.targetPredicate ?? null }),
+      ...(plan.optionInstanceId === undefined ? {} : { optionInstanceId: plan.optionInstanceId }),
+      ...(plan.optionTemplateId === undefined ? {} : { optionTemplateId: plan.optionTemplateId }),
+      ...(plan.optionSpec === undefined ? {} : { optionSpec: plan.optionSpec }),
       startCount: 0,
       haveCount: 0,
       status: 'pending',
