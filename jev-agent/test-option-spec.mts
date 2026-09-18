@@ -12,6 +12,7 @@ import {
   evaluatePredicate,
   evaluatePredicates,
   expandOptionDependencies,
+  formatOptionDedupeLine,
   isOptionComplete,
   isOptionStartable,
   makeOptionSnapshot,
@@ -19,6 +20,7 @@ import {
   orderGoalsByReadiness,
   resolveOptionCompilerEnabled,
   snapshotFromResident,
+  stableOptionInstanceId,
   validateOptionSpec,
   validatePredicate,
 } from './src/optionSpec.ts'
@@ -306,6 +308,66 @@ addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
     result.ready.length === 0 &&
     result.blocked.length === 2
   return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
+})
+
+addCase('(#52) repeated same-kind collect with different counts keeps both instances', () => {
+  const planned: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 3 x log', targetItem: 'log', requiredCount: 3 },
+    { kind: 'craft', description: 'craft 1 x crafting_table', targetItem: 'crafting_table', requiredCount: 1 },
+    { kind: 'collect', description: 'collect 2 x log', targetItem: 'log', requiredCount: 2 },
+  ]
+  const result = applyCompiledPlan(planned, makeOptionSnapshot({ inventory: {} }), { enabled: true })
+  const instanceIds = result.specs.map((spec) => stableOptionInstanceId(spec))
+  const goals = result.goals.map((goal) => `${goal.targetItem}:${goal.requiredCount}`)
+  const pass =
+    result.specs.length === 3 &&
+    instanceIds[0] === 'collect:log#c3' &&
+    instanceIds[2] === 'collect:log#c2' &&
+    new Set(instanceIds).size === instanceIds.length &&
+    goals.join(',') === 'log:3,crafting_table:1,log:2' &&
+    result.deduped.length === 0
+  return { pass, detail: `instanceIds=[${instanceIds.join(',')}] goals=[${goals.join(',')}] deduped=${result.deduped.length}` }
+})
+
+addCase('(#52) fully identical Options collapse once and log OPTION_DEDUPED', () => {
+  const planned: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 3 x log', targetItem: 'log', requiredCount: 3 },
+    { kind: 'collect', description: 'collect 3 x log', targetItem: 'log', requiredCount: 3 },
+  ]
+  const lines: string[] = []
+  const result = applyCompiledPlan(planned, makeOptionSnapshot({ inventory: {} }), {
+    enabled: true,
+    onDedupe: (record) => lines.push(formatOptionDedupeLine(record)),
+  })
+  const pass =
+    result.specs.length === 1 &&
+    result.goals.length === 1 &&
+    result.deduped.length === 1 &&
+    result.deduped[0]?.id === 'collect:log#c3' &&
+    result.deduped[0]?.instances === 2 &&
+    lines.length === 1 &&
+    lines[0] === 'OPTION_DEDUPED id=collect:log#c3 instances=2'
+  return { pass, detail: `specs=${result.specs.length} goals=${result.goals.length} lines=[${lines.join(';')}]` }
+})
+
+addCase('(#52) instance identity is deterministic and discriminates count/dimension/Y', () => {
+  const planned: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 },
+    { kind: 'descend', description: 'descend to y<=16', targetItem: null, requiredCount: 1, targetY: 16, dimension: 'minecraft:overworld' },
+    { kind: 'descend', description: 'descend to y<=12', targetItem: null, requiredCount: 1, targetY: 12, dimension: 'minecraft:overworld' },
+  ]
+  const first = compilePlannedGoals(planned).map((spec) => stableOptionInstanceId(spec))
+  const second = compilePlannedGoals(planned.map((goal) => ({ ...goal }))).map((spec) => stableOptionInstanceId(spec))
+  const descendY16 = first[1]
+  const descendY12 = first[2]
+  const pass =
+    first.length === planned.length &&
+    first.join('|') === second.join('|') &&
+    first[0] === 'collect:raw_iron#c3' &&
+    descendY16 === 'descend:descend_to_y_16#dminecraft_overworld~y16' &&
+    descendY12 === 'descend:descend_to_y_12#dminecraft_overworld~y12' &&
+    new Set(first).size === first.length
+  return { pass, detail: `first=[${first.join(',')}] stable=${first.join('|') === second.join('|')}` }
 })
 
 let failures = 0
