@@ -2,7 +2,16 @@
 // deterministic ladder floor that always supplies the next horizon on queue_empty.
 import type { Bot } from 'mineflayer'
 import { emptyWorldMemory } from './resident-types.ts'
-import { PlannerBrain, buildPlanOptions, ladderFloorGoals, resolveRungSourceOfTruth, rungIndexById } from './planner.ts'
+import {
+  PlannerBrain,
+  buildPlanOptions,
+  deriveSurfaceTargetY,
+  ladderFloorGoals,
+  resolveRungSourceOfTruth,
+  rungIndexById,
+  surfaceReturnApplies,
+} from './planner.ts'
+import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { LlmSummonReason, System2PlanRequest } from '../jev-agent/src/system2.ts'
 
@@ -47,6 +56,10 @@ function request(reason: LlmSummonReason, depth: number): System2PlanRequest {
     recentEvents: [],
     recentOutcomes: [],
   }
+}
+
+function botAt(y: number, counts: Record<string, number>): Bot {
+  return { ...(botWith(counts) as object), entity: { position: { x: 0, y, z: 0 } } } as unknown as Bot
 }
 
 const EARLY_ITEMS = new Set(['log', 'wooden_pickaxe', 'crafting_table', 'planks', 'stick'])
@@ -153,6 +166,67 @@ addCase('(f) the portal rung supplies its typed prerequisite chain from the dete
       obsidianGoal.core === true &&
       frameGoal?.core === true,
     detail: `idx=${index} supplied=${floor.supplied} order=flint@${flint},steel@${steel},obsidian@${obsidian},frame@${frame}`,
+  }
+})
+
+addCase('(g) the surface target derives from the highest remembered y, else a bounded rise', () => {
+  const world = { ...emptyWorldMemory(), knownResources: [{ name: 'iron_ore', kind: 'ore' as const, x: 37, y: 67, z: 33 }] }
+  const remembered = deriveSurfaceTargetY(world, 10)
+  const bounded = deriveSurfaceTargetY(emptyWorldMemory(), 10)
+  return {
+    pass: remembered === 68 && bounded === 74 && surfaceReturnApplies(world, 10),
+    detail: `remembered=${remembered} bounded=${bounded} applies=${surfaceReturnApplies(world, 10)}`,
+  }
+})
+
+addCase('(h) a capability gap forces the surface-return goal to the queue head (deterministic fallback)', async () => {
+  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+  const world = { ...emptyWorldMemory(), knownResources: [{ name: 'iron_ore', kind: 'ore' as const, x: 37, y: 67, z: 33 }] }
+  const brain = new PlannerBrain({
+    bot: botAt(10, ISSUE_INVENTORY),
+    world,
+    log: hostLog(log),
+    cachePath: '/tmp/opencode/wt-surface-nonexistent-planner-cache.json',
+    mode: 'deterministic',
+  })
+  const gapRequest: System2PlanRequest = {
+    ...request('no_progress', 1),
+    recentEvents: ['CAPABILITY_GAP reason=ascend_blocked attempts=41 target_y=67'],
+  }
+  const plan = await brain.plan(gapRequest)
+  const head = plan.goals[0]
+  const queue = new GoalQueue()
+  queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+  const policy = log.find((entry) => entry.event === 'SURFACE_RETURN_POLICY')
+  return {
+    pass:
+      head?.kind === 'surface' &&
+      head.strategy === 'return_to_surface' &&
+      head.targetY === 68 &&
+      plan.op === 'replace' &&
+      queue.current?.kind === 'surface' &&
+      policy?.detail?.chosen === 'return_to_surface' &&
+      policy?.detail?.reason === 'capability_gap' &&
+      Array.isArray(policy?.detail?.alternatives),
+    detail: `head=${head?.kind}:${head?.strategy} targetY=${head?.targetY} queueHead=${queue.current?.kind} policy=${JSON.stringify(policy?.detail)}`,
+  }
+})
+
+addCase('(i) without a capability gap the deterministic floor never emits the surface goal', async () => {
+  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+  const world = { ...emptyWorldMemory(), knownResources: [{ name: 'iron_ore', kind: 'ore' as const, x: 37, y: 67, z: 33 }] }
+  const brain = new PlannerBrain({
+    bot: botAt(10, ISSUE_INVENTORY),
+    world,
+    log: hostLog(log),
+    cachePath: '/tmp/opencode/wt-surface-nonexistent-planner-cache.json',
+    mode: 'deterministic',
+  })
+  const plan = await brain.plan(request('queue_empty', 0))
+  const surface = plan.goals.some((goal) => goal.kind === 'surface')
+  return {
+    pass: !surface && plan.goals.length > 0,
+    detail: `surface=${surface} goals=[${plan.goals.map((goal) => goal.kind).join(',')}]`,
   }
 })
 

@@ -34,7 +34,7 @@ import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } fr
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import { findInventoryFuel, matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
-import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
+import { hasBodyDelta, parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
 import { netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
@@ -1204,6 +1204,84 @@ export function buildBodyChangeOption(
   return { id: `body_change_${front?.id ?? 'upkeep'}`, title: `body-changing replan toward ${oreRung?.id ?? front?.id ?? 'ore'}`, goals }
 }
 
+/** Localized policy for the deterministic surface-return horizon. */
+export interface SurfaceReturnPolicy {
+  /** minimum rise above the live y before the horizon is offered */
+  minRiseBlocks: number
+  /** bounded rise used when no remembered surface feature exists above the bot */
+  boundedRiseBlocks: number
+  /** blocks above the highest remembered surface feature to target */
+  marginBlocks: number
+}
+
+export const DEFAULT_SURFACE_RETURN_POLICY: SurfaceReturnPolicy = {
+  minRiseBlocks: 8,
+  boundedRiseBlocks: 64,
+  marginBlocks: 1,
+}
+
+/** Highest remembered y that can stand for the surface (resource or station). */
+export function highestRememberedSurfaceY(world: ResidentWorldMemory): number | null {
+  let best: number | null = null
+  for (const resource of world.knownResources) {
+    if (best === null || resource.y > best) best = resource.y
+  }
+  for (const station of [...world.craftingTables, ...world.furnaces]) {
+    if (best === null || station.y > best) best = station.y
+  }
+  return best
+}
+
+/** Deterministic surface target: remembered surface + margin, else a bounded rise. */
+export function deriveSurfaceTargetY(
+  world: ResidentWorldMemory,
+  botY: number,
+  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+): number {
+  const remembered = highestRememberedSurfaceY(world)
+  if (remembered !== null && remembered > botY + policy.minRiseBlocks) return Math.floor(remembered) + policy.marginBlocks
+  return Math.floor(botY) + policy.boundedRiseBlocks
+}
+
+/** A real queue goal: climb to the surface y and recover a log to re-tool with. */
+export function surfaceReturnGoal(
+  world: ResidentWorldMemory,
+  botY: number,
+  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+): PlannedGoal {
+  const targetY = deriveSurfaceTargetY(world, botY, policy)
+  return {
+    kind: 'surface',
+    strategy: 'return_to_surface',
+    description: `return to the surface at y>=${targetY} and collect 1 x log`,
+    targetItem: 'log',
+    requiredCount: 1,
+    targetY,
+  }
+}
+
+export function buildSurfaceReturnOption(
+  world: ResidentWorldMemory,
+  botY: number,
+  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+): PlanOption {
+  return {
+    id: 'return_to_surface',
+    title: `return to the surface (capability recovery, y>=${deriveSurfaceTargetY(world, botY, policy)})`,
+    goals: [surfaceReturnGoal(world, botY, policy)],
+    strategy: 'return_to_surface',
+  }
+}
+
+/** True when a surface return is a meaningful alternative at this altitude. */
+export function surfaceReturnApplies(
+  world: ResidentWorldMemory,
+  botY: number,
+  policy: SurfaceReturnPolicy = DEFAULT_SURFACE_RETURN_POLICY,
+): boolean {
+  return deriveSurfaceTargetY(world, botY, policy) > botY + policy.minRiseBlocks
+}
+
 /**
  * Map a strategy id chosen by the upper LLM onto a bounded, grounded goal list.
  * This is the ONLY thing the LLM influences: System One still decides every
@@ -1601,6 +1679,20 @@ export class PlannerBrain implements System2Brain {
     this.firstCall = false
     this.emitMilestones(counts)
     const fallbackOption = options[0] ?? FRONT_FALLBACK
+    const capabilityGap = parseCapabilityGap(request.recentEvents)
+    const entity = this.bot.entity
+    const botY = entity === undefined ? null : entity.position.y
+    const surfaceOption = botY === null ? null : buildSurfaceReturnOption(this.world, botY)
+    const forcedSurface = capabilityGap !== null && surfaceOption !== null ? surfaceOption : null
+    const surfaceApplies = botY !== null && surfaceReturnApplies(this.world, botY)
+    const horizonOptions =
+      surfaceOption !== null && (capabilityGap !== null || surfaceApplies) ? [...options, surfaceOption] : options
+
+    if (forcedSurface !== null) {
+      this.logSurfaceReturnPolicy(forcedSurface, options)
+      this.logPlan('fallback', forcedSurface, reason, started, 0, 'capability gap -> return_to_surface')
+      return this.finishPlan(forcedSurface, request, 'capability gap -> return_to_surface', true, true)
+    }
 
     const waitStreak = trailingWaitStreak(request.recentOutcomes)
     const stalled = waitStreak >= 3
@@ -1697,7 +1789,7 @@ export class PlannerBrain implements System2Brain {
       bypass: bypassCache,
     })
     if (cached !== undefined) {
-      const option = options.find((entry) => entry.id === cached.optionId) ?? deterministicOption
+      const option = horizonOptions.find((entry) => entry.id === cached.optionId) ?? deterministicOption
       this.logPlan('llm', option, reason, started, 0, `cached plan (${option.id})`, true)
       return this.finishPlan(option, request, `cached plan ${option.id}`, stalled)
     }
@@ -1713,7 +1805,7 @@ export class PlannerBrain implements System2Brain {
     }
 
     try {
-      const chosen = await this.askLlm(options, request)
+      const chosen = await this.askLlm(horizonOptions, request)
       this.calls += 1
       this.cache.lastCallAt = Date.now()
       this.cache.entries[stateHash] = {
@@ -1726,7 +1818,7 @@ export class PlannerBrain implements System2Brain {
       }
       this.trimCache()
       this.saveCache()
-      const option = stalled ? deterministicOption : (options.find((entry) => entry.id === chosen.optionId) ?? fallbackOption)
+      const option = stalled ? deterministicOption : (horizonOptions.find((entry) => entry.id === chosen.optionId) ?? fallbackOption)
       const note = chosen.unknownChoice !== null ? `unknown choice ${chosen.unknownChoice} -> ${option.id}` : `llm chose ${option.id}`
       this.logPlan('llm', option, reason, started, chosen.costUsd, note, false, chosen.latencyMs, chosen)
       return this.finishPlan(option, request, note, stalled)
@@ -1740,8 +1832,8 @@ export class PlannerBrain implements System2Brain {
 
   // -- internals ------------------------------------------------------------
 
-  private finishPlan(option: PlanOption, request: System2PlanRequest, note: string, force = false): System2Plan {
-    option = this.applyReadinessOrder(option)
+  private finishPlan(option: PlanOption, request: System2PlanRequest, note: string, force = false, keepHead = false): System2Plan {
+    if (!keepHead) option = this.applyReadinessOrder(option)
     this.withSkills(option)
     this.emitBodyDelta(option.strategy ?? option.id, option)
     const queue = request.goalQueueState
@@ -1986,6 +2078,19 @@ export class PlannerBrain implements System2Brain {
           }
         : {}),
       note,
+    })
+  }
+
+  private logSurfaceReturnPolicy(option: PlanOption, alternatives: readonly PlanOption[]): void {
+    const targetY = option.goals[0]?.targetY ?? null
+    const entity = this.bot.entity
+    const botY = entity === undefined ? null : entity.position.y
+    this.log('SURFACE_RETURN_POLICY', {
+      chosen: option.id,
+      targetY,
+      score: targetY !== null && botY !== null ? Math.round(targetY - botY) : null,
+      alternatives: alternatives.map((entry) => entry.id),
+      reason: 'capability_gap',
     })
   }
 
