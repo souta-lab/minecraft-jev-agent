@@ -1167,6 +1167,14 @@ interface CraftIngredientRoute {
   depthBoundHit: boolean
 }
 
+/** Immutable state of the ingredient recipe descent. */
+interface IngredientDescent {
+  recipes: RecipeIndex
+  counts: Readonly<Record<string, number>>
+  depth: number
+  stack: ReadonlySet<string>
+}
+
 /**
  * Follow the recipe chain of a missing ingredient down to the first item with no
  * recipe (log <- planks <- stick <- pickaxe). Depth-bounded by the shared
@@ -1174,25 +1182,22 @@ interface CraftIngredientRoute {
  * deepest item is still returned as a collect route rather than nothing.
  */
 function rawProducerForNeed(
-  recipes: RecipeIndex,
   need: CraftIngredientNeed,
-  counts: Readonly<Record<string, number>>,
-  depth: number,
-  stack: ReadonlySet<string>,
+  descent: IngredientDescent,
 ): { spec: string; depthBoundHit: boolean } | null {
   const concrete = need.cls === null ? need.item : collectItemForClass(need.cls)
   if (concrete === null) return null
   const spec = matchesResourceClass(concrete, 'log') ? 'log' : concrete
-  const variants = recipes.recipesFor(concrete)
+  const variants = descent.recipes.recipesFor(concrete)
   if (variants.length === 0) return { spec, depthBoundHit: false }
-  if (depth >= MAX_DEPENDENCY_DEPTH) return { spec, depthBoundHit: true }
-  if (stack.has(concrete)) return null
-  const selection = selectCraftIngredients(variants, counts)
+  if (descent.depth >= MAX_DEPENDENCY_DEPTH) return { spec, depthBoundHit: true }
+  if (descent.stack.has(concrete)) return null
+  const selection = selectCraftIngredients(variants, descent.counts)
   const next = selection?.missing[0]
   if (next === undefined) return null
-  const nextStack = new Set(stack)
-  nextStack.add(concrete)
-  return rawProducerForNeed(recipes, next, counts, depth + 1, nextStack)
+  const stack = new Set(descent.stack)
+  stack.add(concrete)
+  return rawProducerForNeed(next, { ...descent, depth: descent.depth + 1, stack })
 }
 
 /** Grounded candidates for a raw collect spec: visible MINE/MOVE plus the remembered RETRIEVE route. */
@@ -1223,7 +1228,7 @@ function craftIngredientRoute(
   const missing = selection?.missing[0]
   if (missing === undefined) return null
   const missingLabel = missing.cls === null ? missing.item : missing.cls
-  const raw = rawProducerForNeed(recipes, missing, state.inventory.counts, 0, new Set<string>())
+  const raw = rawProducerForNeed(missing, { recipes, counts: state.inventory.counts, depth: 0, stack: new Set<string>() })
   if (raw === null) return { item: focusItem, missing: missingLabel, producer: 'none', candidates: [], depthBoundHit: false }
   return {
     item: focusItem,
