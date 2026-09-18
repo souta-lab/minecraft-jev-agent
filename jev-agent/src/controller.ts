@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -613,6 +613,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
+  'LOG_ROUTE',
   PROTECTION_ABANDON_CONFLICT,
   CANDIDATE_FLAP,
   CANDIDATE_COMMIT_RELEASED,
@@ -938,6 +939,7 @@ export class JevController {
   private prereqChosenPath: PrereqPath | null = null
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
+  private lastLogRouteSignature = ''
   private lastProgress = 0
   private lastProgressAt = Date.now()
 
@@ -1526,6 +1528,7 @@ export class JevController {
       this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
+      this.logLogRoute(candidates)
       this.logFuelSatisfaction(state)
 
       const actionable = candidates.filter(
@@ -4300,6 +4303,27 @@ export class JevController {
       'candidates',
       `generated ${candidates.length} executable candidate(s); skipped ${countBlockedLogs(state)} blocked log(s) (canDig=false, no walk-up access)`,
       { ids: candidates.map((candidate) => candidate.id), detail: candidates.map((candidate) => candidate.label) },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The `LOG_ROUTE` marker: which log route the policy has on offer this tick
+   * (`mode=mine_sensed|retrieve_known|ascend_then_mine|explore`), so a frozen
+   * non-yield MINE can never again pass as progress. Deduped by
+   * (mode, target, candidate) so a stable route is one auditable line; the
+   * `trigger=... -> action=...` line still records the action actually chosen.
+   */
+  private logLogRoute(candidates: readonly Candidate[]): void {
+    const route = logRouteOf(candidates)
+    if (route === null) return
+    const signature = `${route.mode}|${route.target.x},${route.target.y},${route.target.z}|${route.candidateId}`
+    if (signature === this.lastLogRouteSignature) return
+    this.lastLogRouteSignature = signature
+    this.logger.info(
+      'candidates',
+      formatLogRoute(route),
+      { mode: route.mode, target: route.target, candidateId: route.candidateId },
       this.tickCounter,
     )
   }
