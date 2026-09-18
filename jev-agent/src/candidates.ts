@@ -29,7 +29,7 @@ import { findInventoryFuel, matchesResourceClass, resourceMatches } from './reso
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn } from './verticalPlan.ts'
+import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
 import type { VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
@@ -179,6 +179,82 @@ export interface PlaceRefusal {
 /** The exact `PLACE_REFUSED` observability line for one typed refusal. */
 export function formatPlaceRefusal(refusal: PlaceRefusal): string {
   return `PLACE_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} item=${refusal.item}`
+}
+
+/**
+ * The route a log-class collect goal currently offers, mirrored as `LOG_ROUTE`:
+ *
+ *   - `mine_sensed`      a log is sensed, in reach and visible: dig it now;
+ *   - `retrieve_known`   walk to a remembered log coordinate on the same level;
+ *   - `ascend_then_mine` the remembered log is above: add the vertical leg
+ *                        (pillar / staircase-up / reuse) before the walk;
+ *   - `explore`          no log is sensed or reachable: move the body toward
+ *                        unexplored terrain instead of mining in place.
+ */
+export type LogRouteMode = 'mine_sensed' | 'retrieve_known' | 'ascend_then_mine' | 'explore'
+
+export interface LogRouteDecision {
+  mode: LogRouteMode
+  target: Vec3Json
+  candidateId: string
+}
+
+/** The candidate-meta key that carries a `LogRouteMode`; the controller mirrors it. */
+export const LOG_ROUTE_META = 'logRoute'
+
+const LOG_ROUTE_MODES: ReadonlySet<string> = new Set(['mine_sensed', 'retrieve_known', 'ascend_then_mine', 'explore'])
+
+function logRouteModeOf(candidate: Candidate): LogRouteMode | null {
+  const value = candidate.meta[LOG_ROUTE_META]
+  return typeof value === 'string' && LOG_ROUTE_MODES.has(value) ? (value as LogRouteMode) : null
+}
+
+function carriesLogRoute(candidate: Candidate): boolean {
+  return logRouteModeOf(candidate) !== null
+}
+
+/**
+ * The first presented candidate (candidate order is the policy's preference
+ * order) that carries a log route, or null. Pure and exported so the controller
+ * can mirror `LOG_ROUTE` for exactly the route the policy sees on offer.
+ */
+export function logRouteOf(candidates: readonly Candidate[]): LogRouteDecision | null {
+  for (const candidate of candidates) {
+    const mode = logRouteModeOf(candidate)
+    if (mode === null || candidate.target === null) continue
+    return { mode, target: candidate.target, candidateId: candidate.id }
+  }
+  return null
+}
+
+/** The exact `LOG_ROUTE` observability line for one route decision. */
+export function formatLogRoute(route: LogRouteDecision): string {
+  return `LOG_ROUTE mode=${route.mode} target=${route.target.x},${route.target.y},${route.target.z}`
+}
+
+/**
+ * True when the CURRENT goal is a `collect` whose item is a log-class want
+ * (`log`, `*_log`, `charcoal`, `planks`, `fuel`). Only such a goal promises the
+ * user a log, so only such a goal must always hold a body-moving log route.
+ */
+export function logCollectGoal(state: WorldState): boolean {
+  const current = state.goalQueue?.current ?? null
+  if ((current?.kind ?? 'collect') !== 'collect') return false
+  const focus = current?.targetItem ?? state.goal.targetItem ?? null
+  return focus !== null && retrievalWant(focus)?.kind === 'log'
+}
+
+function focusWantsLog(goalKind: string, focusItem: string | null): boolean {
+  return goalKind === 'collect' && focusItem !== null && retrievalWant(focusItem)?.kind === 'log'
+}
+
+/**
+ * Name the remembered-log route by the leg it actually carries: a vertical plan
+ * for an above-target makes it `ascend_then_mine`, a same-level walk is
+ * `retrieve_known` (a target one block up is stepped, not ascended).
+ */
+function logRetrieveMode(state: WorldState, target: Vec3Json, vertical: VerticalPlan | null): LogRouteMode {
+  return target.y - state.self.position.y > VERTICAL_GAP && vertical !== null ? 'ascend_then_mine' : 'retrieve_known'
 }
 
 const DEFAULT_MOVE_MIN_DISTANCE = 0
@@ -430,20 +506,15 @@ function generateRawCandidates(
       options.blacklistedMoveTargets,
     )
     if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < moveFailureLimit) {
-      candidates.push({
-        id: `MOVE:${blockId('p', explore)}`,
-        kind: 'MOVE',
-        label: moveLabel(explore, 'walk toward unexplored terrain', state.self.position),
-        targetName: null,
-        target: explore,
-        targetEntityId: null,
-        itemName: null,
-        requiresTool: false,
-        toolName: null,
-        inReach: distance(explore, state.self.position) <= options.reach,
-        hasStandableAdjacent: true,
-        meta: { tick: state.tick, x: explore.x, y: explore.y, z: explore.z },
-      })
+      candidates.push(
+        exploreMoveCandidate(
+          state,
+          options,
+          explore,
+          moveLabel(explore, 'walk toward unexplored terrain', state.self.position),
+          focusWantsLog(goalKind, focusItem) ? 'explore' : null,
+        ),
+      )
     }
   }
 
@@ -527,6 +598,7 @@ function mineCandidates(
       z: block.position.z,
       diggable: block.diggable,
       yieldItem: block.yield ?? block.name,
+      ...(block.kind === 'log' ? { [LOG_ROUTE_META]: 'mine_sensed' } : {}),
     }
 
     const horizontal = Math.hypot(block.position.x + 0.5 - self.x, block.position.z + 0.5 - self.z)
@@ -644,7 +716,16 @@ function mineCandidates(
  * the only way forward is navigation), so normal mining keeps priority.
  */
 function headroomCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const cuts = (state.headroomCuts ?? []).filter((cut) => cut.safe)
+  const failureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  // Live wedge on main 7acd849: `collect 1 x log` at y=33 re-offered the stone
+  // ceiling MINE 30x while every dig timed out (dig_timeout), because the
+  // clearance candidate ignored failure memory. A cut that has exhausted the
+  // same retry budget every other target honours is not executable now; the
+  // log route / exploration fallback must take over.
+  const cuts = (state.headroomCuts ?? []).filter(
+    (cut) =>
+      cut.safe && failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
+  )
   if (cuts.length === 0) return []
   const feet = {
     x: Math.floor(state.self.position.x),
@@ -2000,11 +2081,31 @@ function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalW
   return wants
 }
 
-function visibleBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
+function mineableNow(block: BlockState): boolean {
+  return block.diggable && block.inReach && block.visible !== false
+}
+
+/**
+ * The sensed block that already serves the want THIS tick - the same
+ * precondition as `mineCandidates`' MINE arm, so its presence means the item is
+ * obtainable without leaving, and a remembered-coordinate trip must not be
+ * offered on top of it.
+ *
+ * Presence in `state.blocks` alone is NOT a route: a log sensed only at
+ * distance (live shape at y=33: surface logs 32 blocks above, no walk-up
+ * access) cannot be mined here. Treating those as visible suppressed
+ * `RETRIEVE:known:*`, which is the ascent leg that reaches the remembered
+ * surface trees, and left the clearance MINE as the only action.
+ */
+function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
   if (want.kind === 'ore') {
-    return state.blocks.find((block) => block.kind === 'ore' && resourceMatches(block.yield, want.item)) ?? null
+    return (
+      state.blocks.find(
+        (block) => block.kind === 'ore' && resourceMatches(block.yield, want.item) && mineableNow(block),
+      ) ?? null
+    )
   }
-  return state.blocks.find((block) => block.kind === 'log') ?? null
+  return state.blocks.find((block) => block.kind === 'log' && mineableNow(block)) ?? null
 }
 
 function knownResourceFor(
@@ -2059,7 +2160,7 @@ export function staleKnownResources(
 }
 
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
-  if (visibleBlockFor(state, want) !== null) return []
+  if (mineableBlockFor(state, want) !== null) return []
   const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
   if (known !== null) {
     const id = `RETRIEVE:known:${want.item}:${blockId('b', known.position)}`
@@ -2081,6 +2182,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
       ...(vertical?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
     }
     const verticalLabel = verticalPlanLabel(vertical)
+    const logRoute = want.kind === 'log' ? logRetrieveMode(state, known.position, vertical) : null
     return [
       {
         id,
@@ -2104,6 +2206,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
           y: known.position.y,
           z: known.position.z,
           ...verticalMeta,
+          ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
         },
       },
     ]
@@ -2138,6 +2241,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
         x: spot.x,
         y: spot.y,
         z: spot.z,
+        [LOG_ROUTE_META]: 'explore',
       },
     },
   ]
@@ -2282,6 +2386,62 @@ function isBlacklistedMoveTarget(
   return blacklistedMoveTargets?.has(moveFailureKey(state.self.dimension, position)) ?? false
 }
 
+function exploreMoveCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spot: Vec3Json,
+  label: string,
+  logRoute: LogRouteMode | null,
+): Candidate {
+  return {
+    id: `MOVE:${blockId('p', spot)}`,
+    kind: 'MOVE',
+    label,
+    targetName: null,
+    target: spot,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(spot, state.self.position) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: spot.x,
+      y: spot.y,
+      z: spot.z,
+      ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
+    },
+  }
+}
+
+/**
+ * The `explore` leg of a log route: the nearest standable frontier that reduces
+ * the distance to the nearest sensed/remembered log bearing. Used by the gate
+ * when every log MINE/MOVE/RETRIEVE this tick was withheld, so the policy still
+ * has a body change instead of a stationary non-yield MINE.
+ */
+function logExploreCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const spot = pickExplore(
+    state,
+    state.terrain.standable,
+    focusItem,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
+  if (spot === null) return []
+  return [
+    exploreMoveCandidate(
+      state,
+      options,
+      spot,
+      moveLabel(spot, 'explore toward the log bearing', state.self.position),
+      'explore',
+    ),
+  ]
+}
+
 // --- affordance gate (#11 v2): only mechanically reachable targets are presented
 //
 // Candidates are FACTS provided to Jev, so a locomotion target the body cannot
@@ -2372,6 +2532,16 @@ export function applyReachabilityGate(
   )
   run(acquisitions)
 
+  // A log-class collect goal must never be left with a stationary non-yield
+  // MINE as its only productive action (live wedge on 7acd849: `MINE:b30_35_35`
+  // stone ceiling, 30x dig_timeout, chosen 25x). When every log MINE/MOVE/
+  // RETRIEVE this tick was withheld, offer the exploration MOVE so the policy
+  // still has a body change that can lead to a log.
+  if (logCollectGoal(state) && !presented.some(carriesLogRoute)) {
+    const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
+    run(logExploreCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
+  }
+
   // Last-resort candidate-local ladder: one unreachable remembered station must
   // not starve a craft goal whose own recipe inputs are all held - the step that
   // crafts/places the station from those inputs is satisfiable NOW.
@@ -2410,15 +2580,60 @@ function evaluateCandidate(
 }
 
 /**
+ * True when this MINE names a log-class block (the item a `collect log` goal
+ * must actually obtain). Log MINEs additionally carry the block-facts contract
+ * below; a stone clearance MINE does not.
+ */
+function isLogMine(candidate: Candidate): boolean {
+  if (candidate.kind !== 'MINE') return false
+  const yieldItem = candidate.meta.yieldItem
+  if (typeof yieldItem === 'string' && matchesResourceClass(yieldItem, 'log')) return true
+  return typeof candidate.targetName === 'string' && candidate.targetName.endsWith('_log')
+}
+
+function mineBlockFor(state: WorldState, candidate: Candidate): BlockState | undefined {
+  const target = candidate.target
+  if (target === null) return undefined
+  return state.blocks.find(
+    (entry) =>
+      entry.position.x === target.x && entry.position.y === target.y && entry.position.z === target.z,
+  )
+}
+
+/**
  * A MINE candidate is dug in place: its only precondition is the harvest tool
  * tier of the block IT names. Path, vertical gap and standable approach are NOT
  * part of its contract, so it must not be run through the locomotion evaluator
  * (that would withhold a block already in reach).
+ *
+ * A LOG MINE is stricter: it must name a block that is present in the sensed
+ * world AND in reach (the exact `mineCandidates` MINE arm). A log typed as
+ * MINE while out of reach or absent from `state.blocks` cannot yield the item,
+ * so it is withheld with `out_of_reach` rather than presented as executable.
  */
 function evaluateMineCandidate(
   candidate: Candidate,
   context: ReachabilityGateContext,
 ): CandidateReachability | null {
+  if (isLogMine(candidate)) {
+    const block = mineBlockFor(context.state, candidate)
+    const inReach = block !== undefined && block.inReach === true && block.visible !== false
+    if (!inReach) {
+      const result: ReachabilityResult = {
+        reachable: false,
+        reason: 'out_of_reach',
+        missingCapabilities: [{ kind: 'standable_approach' }],
+      }
+      const target: ReachabilityTarget = {
+        candidateId: candidate.id,
+        kind: candidate.kind,
+        position: candidate.target,
+        barrier: barrierForCandidate(context.state, candidate),
+      }
+      const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+      return reachabilityRecord(candidate, target, world, result, context)
+    }
+  }
   const barrier = barrierForCandidate(context.state, candidate)
   if (barrier === null) return null
   const missing = missingToolCapability(barrier, context.state.inventory.counts)
