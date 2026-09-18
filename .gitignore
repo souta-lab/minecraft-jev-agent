@@ -12,6 +12,9 @@ buddy-state.json
 buddy-ledger.json
 buddy-driver/data/
 
+# Run-scoped acceptance artifacts (tools/run-artifacts.mjs); local evidence only
+runs/
+
 # `data/` dirs hold run artifacts; keep only the jev-agent *.mts probe sources
 data/
 !jev-agent/data/

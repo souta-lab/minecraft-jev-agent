@@ -8,8 +8,13 @@ Evidence basis: `AGENTS.md`, `TODO.md`, `PLANNERS.md`, `ARCHITECTURE.md`, `RESID
 `git ls-remote origin`, and live markers grepped from `buddy-driver/buddy.log`.
 
 This document is a snapshot. Log counters below were read on 2026-09-18 from the live
-`buddy-driver/buddy.log` (21.5 MB at read time). Anything not backed by a file, command, or log
-marker is labelled `UNVERIFIED`.
+`buddy-driver/buddy.log` (21.5 MB at read time); they are diagnostic markers, not acceptance
+(§3.1). Anything not backed by a file, command, or log marker is labelled `UNVERIFIED`.
+
+Acceptance evidence is now run-scoped (§4.2): `runs/<runId>/{manifest.json, acceptance.json,
+evidence.log}` via `tools/run-artifacts.mjs`. Gates `tools/verify-issue12.mjs` and
+`tools/verify-mercury.mjs` prefer those artifacts and label the all-time shared log as
+`FALLBACK`.
 
 Notation: every command and path is literal and re-runnable unless marked otherwise.
 
@@ -33,13 +38,42 @@ Notes on role boundaries:
 - The supervising agent is explicitly told not to wait for the user and to find work when idle
   (`AGENTS.md` §0.2). See §6 for the failure this rule exists to correct.
 - The external reviewer is named in `ARCHITECTURE.md` ("外部シニアレビュア（Sol）") and its
-  recommendations are marked as canonical in places (`RESIDENT-MODE.md` §13-0 "外部レビュー改訂"
-  supersedes §13).
+  recommendations influenced the priority order (`RESIDENT-MODE.md` §13-0 "外部レビュー改訂"
+  supersedes §13). This is a *design/evidence* document, not policy: see §1.1. It is a separate
+  AI reviewer/context, not an independent human or blind external lab, so correlated blind spots
+  remain possible; multiple AI agents improve coverage but are not independent replication.
 - Sub-agent categories are named in `TODO.md` line 88 (`quick/unspecified-low`, `deep/oracle`)
   and line 112. `quick` has a recorded failure history (see §8.7).
 - `explore`, `librarian`, `oracle` appear in `TODO.md` line 89 and line 113 as delegation targets
   for large research, to protect main-context budget. Their use is a budget measure, not a
   correctness measure.
+
+### 1.1 Canonical document authority (machine-readable, issue #63)
+
+The canonical order, highest first. A lower document MUST NOT silently supersede a higher one.
+
+```
+human explicit instruction
+> root AGENTS.md
+> nearest scoped AGENTS.md (e.g. buddy-driver/AGENTS.md)
+> current operational queue / TODO (TODO.md)
+> design / evidence docs (PLANNERS.md / RESIDENT-MODE.md / ARCHITECTURE.md / PRIOR-WORK.md)
+> historical / superseded sections
+```
+
+Rules:
+
+1. Root `AGENTS.md` §0 and §0.7 are the root policy and win over any design or scoped document.
+2. `RESIDENT-MODE.md` §13-0 is a design/evidence document. Its "SUPERSEDE §13" note only
+   supersedes `RESIDENT-MODE.md` §13 (the LLM-planner-first ordering inside the same file). It
+   does **not** outrank root `AGENTS.md`. Where §13-0's P0-P6 ladder conflicts with the current
+   root `AGENTS.md` §2 order — which now puts P0 methodology/evidence integrity (#63) first and
+   the Grounded-Options skeleton ahead of LLM-planner authority — `AGENTS.md` §2 wins.
+3. `buddy-driver/AGENTS.md` is a scoped elaboration and inherits root policy. It must be read
+   after root `AGENTS.md`, and may not silently supersede it.
+4. On conflict between a lower and a higher document: stop, set the affected claim to
+   `COMPLIANCE=UNKNOWN` (§3.1), and fix the contradictory document before using it to close or
+   prioritize work (root `AGENTS.md` §0.1, §2 item 0).
 
 ---
 
@@ -138,6 +172,86 @@ Marker vocabulary used as live proof (counts read from `buddy-driver/buddy.log` 
 
 The two zeros are included on purpose: they are the honest negative evidence for M2.
 
+These counts are diagnostic, not acceptance. A marker name is a claim about semantics, not proof
+of it; every such claim must be validated by the semantics it names (§3.1).
+
+### 3.1 Mandatory evidence-claim format (POLICY / IMPLEMENTED / OBSERVED / COMPLIANCE)
+
+Any claim that work is `fixed`, `accepted`, `green`, `safe`, or `authority-ready` must be written
+as four separated lines. A marker name or an all-time counter is never sufficient.
+
+```
+POLICY      what should happen (with the doc/section that states it)
+IMPLEMENTED what the current code actually does (file:line, and the flag/default)
+OBSERVED    what runtime logs/records actually show (run-scoped, with the exact line)
+COMPLIANCE  PASS | FAIL | UNKNOWN against POLICY, with the command that decided it
+```
+
+Rules:
+
+- `UNKNOWN` is the honest answer when IMPLEMENTED or OBSERVED is missing or ambiguous. Do not
+  upgrade `UNKNOWN` to `PASS` because a reassuring marker exists.
+- `OBSERVED` must be run-scoped where possible (§4.2). An all-time count from the shared
+  `buddy.log` is labelled `FALLBACK` and cannot by itself produce `PASS`.
+- Marker names are claims, not evidence. Validate the semantics the marker is supposed to mean.
+
+#### Worked example 1 — `BETA_SHADOW` is not proof that beta was shadow-only (issue #22)
+
+```
+POLICY      #22 / #24: `abandon_option` beta is shadow-only by default; it may never, by itself,
+            cause a replan. Source: root AGENTS.md §0.1, PLANNERS.md §3, RESIDENT-MODE.md §14.
+IMPLEMENTED `jev-agent/src/betaAuthority.ts:45-54` — with `betaAuthority:false` the decision is
+            `{adopt:false, shadowed:true}`; `jev-agent/src/jev.ts:577-580` `resolveBetaAuthority()`
+            defaults OFF (only `BUDDY_BETA_AUTHORITY=1` opts in); default wired at
+            `jev-agent/src/controller.ts:224`.
+OBSERVED    buddy.log holds 18812 `BETA_SHADOW` lines, but 18155 carry `mode=authority` (only 664
+            `mode=shadow`), and 15242 `JEV_HEADS` lines report `decision=replan`, including
+            `[2026-09-17T17:18:38.744Z] JEV_HEADS action=WAIT abandon=1 decision=replan`.
+            Post-fix line:
+            `[2026-09-18T00:31:53.030Z] BETA_SHADOW optionId=smelt:iron_ingot beta=0 ... mode=shadow betaAuthority=false`.
+COMPLIANCE  FAIL for the pre-fix window (the marker existed while beta had replan authority).
+            Command: `grep -c 'BETA_SHADOW.*mode=authority' buddy-driver/buddy.log` -> 18155.
+```
+
+Lesson: a marker named `BETA_SHADOW` is NOT proof that beta was shadow-only. Issue #22 was
+reopened for exactly this. The marker must be validated against the authority flag
+(`betaAuthority=false`) and the actual decision (`JEV_HEADS -> continue`), not its name.
+
+#### Worked example 2 — the listener leak (#13) is not closed by a marker observation
+
+```
+POLICY      RESIDENT-MODE.md §13-0 P1 / root AGENTS.md §2: listener counts must not grow across
+            reloads; `listenerLeak` must be false.
+IMPLEMENTED `buddy-driver/agent-runner.mts:518-527` listenerCounts()/listenerLeak(); baseline at
+            `:667-668`; recorded at `:1201-1203`.
+OBSERVED    Run `run-mu5qd4ah-3xdh` acceptance record: `listenerLeak=true`, `physicsTick` grew
+            2 -> 3 (`listenerCurrent.physicsTick=3` vs `listenerBaseline.physicsTick=2`). Some
+            reload lines elsewhere show `listenerLeak=false`, so the marker value is not stable.
+COMPLIANCE  FAIL for that run, and UNKNOWN for any run without a run-scoped record.
+            Command: `node tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh`.
+```
+
+Lesson: "`listenerLeak=false` observed once" does not close #13; closure needs a run-scoped
+`COMPLIANCE=PASS`, and GitHub state / implementation state / test state / live acceptance state
+are recorded separately (§7).
+
+#### Worked example 3 — the #12 gate read on run-scoped evidence
+
+```
+POLICY      Issue #12 acceptance: replace the head with the prerequisite chain and resume
+            digging; no 1-tick rotation; raw_iron actually obtained.
+IMPLEMENTED `LADDER_PREREQ` replaces the generation head from live inventory; gate at
+            `tools/verify-issue12.mjs`.
+OBSERVED    Run `run-mu67vfhn-8a18`, run-scoped (1290 lines in `runs/run-mu67vfhn-8a18/evidence.log`):
+            `LADDER_PREREQ=24`, `raw_iron=8`, `evidence maxTicks=33`, `gensLast5min=6`.
+COMPLIANCE  FAIL (4/6): `generation_survives_100_ticks` and `churn_reduced` both fail.
+            Command: `node tools/verify-issue12.mjs` -> `evidence: run-artifact (runId=run-mu67vfhn-8a18)`.
+```
+
+Lesson: the same run shows a positive resource signal (`raw_iron=8`) and negative
+churn/ticks signals at once; neither is a milestone verdict until the run-scoped record is read as
+a whole.
+
 Why "reported success without evidence" is treated as failure:
 
 1. The loop is autonomous and long-running; a false "done" silently poisons the backlog and the
@@ -159,10 +273,11 @@ All tools are read-only, print no secrets, and live under `tools/`.
 | Tool | What it measures | Decision it gates | Key evidence |
 |---|---|---|---|
 | `tools/buddy-status.mjs` | Host process count (`pgrep -af 'node agent-runner.mts'`, excluding bash wrappers), control-socket `report`, generations/reloads/recoveries/reconnects, `listenerLeak`, wedge, world memory, marker counts, latest acceptance/freeze artifact, last commit | Is the resident healthy and single-instance? Does it look stuck? | lines 19-27 (host filter), 47-50 (marker list), 105-126 |
-| `tools/verify-issue12.mjs` | 6 checks: `ladder_prereq_present`, `no_1tick_rotation`, `generation_survives_100_ticks`, `digging_resumed`, `raw_iron_obtained`, `churn_reduced` | Is #12 (precondition chain) accepted? | lines 69-76; recent 10-min window at lines 25-40 |
+| `tools/verify-issue12.mjs` | 6 checks: `ladder_prereq_present`, `no_1tick_rotation`, `generation_survives_100_ticks`, `digging_resumed`, `raw_iron_obtained`, `churn_reduced`. Prefers `runs/<runId>/evidence.log` (or a runId slice) and labels the all-time shared log `FALLBACK`. | Is #12 (precondition chain) accepted? | lines 69-76; recent 10-min window; `--run <runId>`; §4.2 |
 | `tools/verify-issue13.mjs` | Samples the control socket `--samples` times; asserts no event listener count exceeds baseline, and `listenerLeak` is false in all samples | Is the #13 listener leak closed? | lines 35-62 |
-| `tools/verify-mercury.mjs` | Mercury call records + advisor log: successful calls, no cache-hit-with-empty-plan, at least one non-empty plan, retry accounting present, no cached-strategy loop (`maxConsecutiveSameStrategy <= 2`) | Are #15/#30/#18 accepted? | lines 39-74 |
-| `tools/replay.mjs` | Deterministic offline A/B over `logs/jev/decisions.jsonl`: Policy A = recorded action, Policy B = β-as-authority (`ESCALATE` when `beta >= threshold`); reports agreement rate, divergences, verified outcomes | Should β get authority (#23/#24)? | lines 1-46; `SCHEMA_VERSION=1`, `DEFAULT_THRESHOLD=0.5` |
+| `tools/verify-mercury.mjs` | Mercury call records + advisor log: successful calls, no cache-hit-with-empty-plan, at least one non-empty plan, retry accounting present, no cached-strategy loop (`maxConsecutiveSameStrategy <= 2`). Prefers the run's `mercury-calls.jsonl` + `evidence.log`; labels all-time inputs `FALLBACK`. | Are #15/#30/#18 accepted? | `--run <runId>`; §4.2 |
+| `tools/replay.mjs` | Deterministic offline A/B over `logs/jev/decisions.jsonl`: Policy A = recorded action, Policy B = β-as-authority (`ESCALATE` when `beta >= threshold`); reports agreement rate, divergences, verified outcomes | β authority **screen** (#23), never final authority (#24); see §4.1 | lines 1-46; `SCHEMA_VERSION=1`, `DEFAULT_THRESHOLD=0.5` |
+| `tools/run-artifacts.mjs` | Writes/reads `runs/<runId>/{manifest.json,acceptance.json,evidence.log,mercury-calls.jsonl}`; slices a log by runId or time range; resolves which evidence a gate will read | Makes acceptance run-scoped and labels all-time fallbacks | §4.2 |
 | `tools/agent-report.mjs` (+ `tools/test-agent-report.mjs`) | Read-only report combining the control socket with `buddy.log`: identity, rung, current action, blockers, stuck heuristics, VERDICT | Is the agent stuck, and why? | commit `22b135e`; stuck thresholds at lines 34-41 |
 | Per-lane `test-*.mts` suites | Pure unit/behaviour tests per lane | Lane-level correctness | `jev-agent/package.json`: `replan-throttle-test`, `issue43-test`, `option-spec-test`, `retrieval-stall-test`, `vertical-plan-test`, `predicate-goal-test`, `descend-plan-test`, `fuel-guard-test`, `skill-candidate-test`, `observability-test` |
 | `tools/test-replay.mjs` | Offline fixture tests for the replay harness | Replay harness correctness | present in `tools/` |
@@ -179,8 +294,68 @@ Gate design flaws found and fixed (each is a real commit):
 | Verifier spread of a huge timestamp array | `verify-issue12` could exhaust the stack on a multi-MB log | `5689214` (PR #53) | Reduce the timestamp array instead of spreading it |
 | Missing-ledger crash on resume | Reload crash when no ledger snapshot existed | `20b6092`, merged in `8265aeb` | Guard the missing ledger in the resume path |
 
-Residual gate issue: `verify-issue12.mjs` reads the single shared `buddy.log`. A lane's counter
-window is therefore global, not per-lane (see §10).
+### 4.1 Offline replay is a promotion screen, not final authority evidence (issue #63 §3)
+
+`tools/replay.mjs` (#23) re-evaluates *recorded* states. The recorded future trajectory was
+produced by the actually-running policy, so a counterfactual authority policy would have changed
+the future state distribution. Replay is therefore valid for:
+
+```
+calibration
+agreement / disagreement analysis
+safety screening
+diagnostic labels
+```
+
+and cannot by itself prove closed-loop counterfactual superiority. Required rule:
+
+```
+offline replay = promotion precondition / screen
+closed-loop live run or isolated A/B = final authority evidence
+```
+
+No `authority-ready` claim for #24 may cite replay alone; it must cite a closed-loop live run or
+an isolated A/B.
+
+### 4.2 Run-scoped acceptance artifacts (issue #63 §4)
+
+Global logs mix commits, generations, world epochs and concurrent lanes. They remain useful for
+diagnosis but are not the authoritative acceptance source. The canonical layout is:
+
+```
+runs/<runId>/
+  manifest.json    commit, dirtyTree, generationHash, worldEpoch, seed, deps, mode,
+                   bot username, start position, server/dimension, config, window
+  acceptance.json  checks in POLICY/IMPLEMENTED/OBSERVED/COMPLIANCE form + raw AcceptanceRecord
+  evidence.log     the buddy.log lines for this run only
+  mercury-calls.jsonl  time-sliced Mercury records (when present)
+```
+
+`tools/run-artifacts.mjs` writes and reads this layout, slices a log by runId (`window`, `slice`)
+or by time range, and resolves which evidence a gate will read (`resolve`). `runs/` is git-ignored
+runtime data. Gates prefer the current run's artifacts, then a runId slice of the shared log, and
+only then fall back to all-time counts — which they label
+`FALLBACK: all-time shared buddy.log (mixes commits/worlds/lanes)`:
+
+| Gate | Run-scoped first | Fallback label |
+|---|---|---|
+| `tools/verify-issue12.mjs` | `runs/<runId>/evidence.log`, else a runId slice | `evidence: all-time-shared-log` + `!! FALLBACK` |
+| `tools/verify-mercury.mjs` | `runs/<runId>/mercury-calls.jsonl` + `evidence.log`, else a time slice | `calls/log: all-time-shared-jsonl\|-log` + `!! FALLBACK` |
+
+Real capture (issue #63 acceptance #4):
+
+```bash
+node tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh
+# -> runs/run-mu5qd4ah-3xdh/{manifest.json,acceptance.json,evidence.log,mercury-calls.jsonl}
+```
+
+---
+
+## 4.3 Baseline waiver model (issue #63 §9)
+
+"Full suite green" is not unconditional. When a lane merges with e.g. 32/33 tests, the only valid
+form is: the new failures are a subset of a pinned known baseline, and there are no new
+regressions. Record the baseline in the lane report; never silently drop a failing test.
 
 ---
 
@@ -229,7 +404,10 @@ Standing orders (`AGENTS.md` §0, `TODO.md` lines 117-128):
 - Do not wait for the user. If there is nothing to do, invent the next work.
 - Keep primary evidence (log lines, inventory, commits). Do not claim success from opinion.
 - Commit and push in small units, with a secret scan.
-- Stop condition: the Nether portal is built and all open issues are resolved (`TODO.md` line 119).
+- Stop condition (release scope, issue #63 §5): NOT "all open issues". A release `Rn` scope is
+  frozen at a commit/timestamp; blocking = P0/P1 plus explicitly `Rn`-tagged issues. New
+  non-blocking findings go to the next release unless promoted by an explicit severity rule. The
+  old "all open issues" wording let autonomous review move its own finish line indefinitely.
 
 Recorded failure of "monitoring-only" periods:
 
@@ -271,35 +449,61 @@ The backlog is issue-driven, and the external reviewer supplies code-level root 
   uncertainty band, action-only authority, trigger priority, epoch/hash staleness checks,
   monotonic subgoal ledger, `PlanOp`).
 - `ARCHITECTURE.md` §8 lists seven open questions for the reviewer to redirect.
-- `RESIDENT-MODE.md` §13-0 is titled "外部レビュー改訂" and explicitly supersedes §13, fixing the
-  priority order.
+- `RESIDENT-MODE.md` §13-0 is titled "外部レビュー改訂" and supersedes §13 *within that file*. It
+  does not outrank root `AGENTS.md`; see §1.1 and the correction below.
 - PRs are opened from `souta-lab` branches (`Merge pull request #47`, `#51`, `#53`); one open PR is
   `#2` (CI + bounded Mercury adapter), recorded as mergeable but blocked on red CI
   (`ARCHITECTURE.md` line 492).
 
-Pinned priority order (canonical):
+Canonical priority order (root policy; see §1.1):
 
-1. `RESIDENT-MODE.md` §13-0 (`P0` green build, `P1` atomic generation swap, `P2` freeze/resume,
-   `P3` M1 golden regression, `P4` 2-block movement fixture, `P5` Jev shadow then authority,
-   `P6` M2 ladder). `ARCHITECTURE.md` line 9 states this supersedes its own §7 order.
-2. `AGENTS.md` §2 priority list (`#5/#13/#28/#38/#40` safety first, then `#11` skeleton, then
-   shadow/eval, then Mercury correctness, then `#24`, M2, `#35`, `#41`, M3/M4).
-3. `TODO.md` "critical path" (current operational head).
+1. Human explicit instruction.
+2. Root `AGENTS.md` — §0.7 authority hierarchy and §2 priority. §2 now puts P0
+   methodology/evidence integrity (#63) first, then P1 safety/durability, then the #11
+   Grounded-Options skeleton, then shadow/eval, then Mercury correctness, then #24, M2, #35, #41,
+   M3/M4.
+3. Nearest scoped `AGENTS.md` (`buddy-driver/AGENTS.md`), read as an elaboration of root policy.
+4. Current operational queue (`TODO.md`).
+5. Design/evidence docs: `PLANNERS.md`, `RESIDENT-MODE.md`, `ARCHITECTURE.md`, `PRIOR-WORK.md`.
+
+Correction: an earlier revision of this document listed `RESIDENT-MODE.md` §13-0 as canonical
+priority #1, ahead of root `AGENTS.md`. That was wrong. `RESIDENT-MODE.md` §13-0 is a
+design/evidence document; its "SUPERSEDE §13" note only supersedes §13 inside the same file. Its
+P0-P6 ladder predates the Grounded-Options reordering and yields to `AGENTS.md` §2 where they
+conflict.
 
 How issues are closed or kept open:
 
 | Issue | Outcome | Evidence |
 |---|---|---|
-| `#15` cached-strategy loop | Closed as green | `TODO.md` lines 178-184: `verify-mercury` PASS 5/5, `maxConsecutiveSameStrategy=2` (was 112), `bypasses=5`, `refusals=9` |
-| `#13` listener leak | Addressed; `listenerLeak=false` observed | `TODO.md` line 210; `verify-issue13.mjs` is the gate |
+| `#15` cached-strategy loop | Claim was "closed as green"; GitHub state stayed OPEN at the #63 audit. Run-scoped re-check on 2026-09-18 is FAIL: `no_cached_strategy_loop` reports `maxConsecutiveSameStrategy=9` for `run-mu5qd4ah-3xdh`. | `node tools/verify-mercury.mjs --run run-mu5qd4ah-3xdh`; `TODO.md` lines 178-184 |
+| `#13` listener leak | OPEN. `listenerLeak=false` observed on some reloads, but the run-scoped `run-mu5qd4ah-3xdh` record shows `listenerLeak=true` (physicsTick 2 -> 3). Observation != closure. | `runs/run-mu5qd4ah-3xdh/acceptance.json`; `verify-issue13.mjs` is the gate |
 | `#12` precondition chain | Kept open | `TODO.md` line 151: gate 5/6, only `raw_iron_obtained` remains |
 | `#44` replan spin | Landed (churn 27 -> 1) | `TODO.md` lines 163-169 |
 | `#14` known-resource retrieval | Landed, but iron not obtained | `TODO.md` lines 153-159, gate 5/6 |
 
-New issues are filed from live evidence, not speculation. Examples: `#43` was opened from a live
-observation that inventory already held `charcoal:1` while the plan still scheduled charcoal
-(`TODO.md` lines 188-189); `#44`, `#45`, `#46` were opened from the spin, the retrieval stall, and
-the furnace-abandonment observations respectively.
+Issue state is recorded as five separate fields, never collapsed (issue #63 §6):
+
+```
+GitHub state | implementation state | unit/integration test state | live acceptance state | closure decision
+```
+
+A gate PASS is not a GitHub closure; an open issue is not proof the code is broken.
+
+New issues come from a mix of evidence classes (issue #63 §7). A static P1 finding is not
+"speculation": catching it before a live failure is strictly better, and the old rule "new issues
+come from live evidence" was false and is removed.
+
+```
+LIVE     embodied / runtime failure or observation
+STATIC   code / invariant violation
+ARCH     architecture / ownership / scalability inconsistency
+RESEARCH hypothesis to test
+```
+
+Examples: `#43` was opened from a live observation that inventory already held `charcoal:1` while
+the plan still scheduled charcoal (`TODO.md` lines 188-189); `#40`, `#48`, `#50`, `#54`, `#56`,
+`#57`, `#59` came from static or architecture review.
 
 ---
 
@@ -445,10 +649,9 @@ frozen rather than productive, which is why `#44` used `FREEZE` deliberately and
 1. Is the parallel-lane model scaling? `git worktree list` shows 12 worktrees and `git branch -a`
    shows many lane branches, yet the host layer must be serialized. Is the throughput gain worth
    the conflict overhead, or should lanes be capped and serialized entirely?
-2. Should gates be per-lane or global? `tools/verify-issue12.mjs` reads one shared `buddy.log` and
-   judges a recent window, so concurrent lanes contaminate each other's counters. Should each lane
-   emit its own machine-readable acceptance record, as `RESIDENT-MODE.md` §13-0 P1 already
-   proposes, and should gates read that instead?
+2. RESOLVED (2026-09-18, #63 §4): gates now prefer run-scoped artifacts (`runs/<runId>/`,
+   `tools/run-artifacts.mjs`) and label the all-time shared log `FALLBACK`. Still open: whether
+   every lane must capture a run before merge, and how to enforce that mechanically.
 3. How should autonomy and supervision be balanced? The recorded 2.5-hour monitoring gap
    (`eaa2c3c`) was corrected by a rule, not a mechanism. Is a hard "no commits in N minutes"
    circuit-breaker warranted, or is that itself a source of busywork?

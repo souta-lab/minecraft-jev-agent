@@ -4,20 +4,25 @@
 //   #15 cache invalidation: repeated identical cached strategies must be bypassed
 //   #30 patch/replace must not drop the tail of the plan
 //   #18 retry accounting should be visible
-// Usage: node tools/verify-mercury.mjs [--json] [--all] [--samples]
-//   --all     count the whole buddy.log (reproduces the historical pre-fix loop)
+// Usage: node tools/verify-mercury.mjs [--json] [--all] [--samples] [--run <runId>]
+//   --all     count the whole selected evidence (reproduces the historical pre-fix loop)
 //   --samples print the most recent ADVISOR_CACHE bypass / STRATEGY_REFUSED lines
+//   --run     pin a specific runId (default: newest run)
 // Read-only. Never prints secrets. Prints only structural fields of each record.
-import { readFileSync, existsSync } from 'node:fs'
+//
+// Evidence source (issue #63 §4): prefers run-scoped evidence — the run's
+// `runs/<runId>/mercury-calls.jsonl` + `runs/<runId>/evidence.log`, else a
+// time/runId slice — and labels the all-time shared files as FALLBACK when no
+// runId can be resolved (they mix commits/worlds/lanes).
+import { resolveRunEvidence, resolveMercuryRecords, MARKER_FALLBACK } from './run-artifacts.mjs'
 
-const FILE = '/home/s0u7a/mc-ai/buddy-driver/logs/jev/mercury-calls.jsonl'
 const JSON_OUT = process.argv.includes('--json')
-if (!existsSync(FILE)) {
-  console.log(`mercury-calls.jsonl not found at ${FILE}`)
-  process.exit(2)
-}
-const records = readFileSync(FILE, 'utf8').trim().split('\n').filter(Boolean)
-  .map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+const RUN_ARG = (() => {
+  const i = process.argv.indexOf('--run')
+  return i >= 0 ? process.argv[i + 1] : null
+})()
+const mer = await resolveMercuryRecords({ runId: RUN_ARG })
+const records = mer.records
 
 const isCacheHit = (r) => /cache/i.test(String(r.stage ?? '')) || r.cached === true || /cached/i.test(String(r.note ?? ''))
 const goalsOf = (r) => {
@@ -48,11 +53,11 @@ const checks = [
 // mercury-system2.ts caps a cached strategy at 2 replays and then emits ADVISOR_CACHE
 // bypass. By default only lines AFTER the first ADVISOR_CACHE_GUARD marker are
 // counted, so the check measures the guarded code path from its deploy boundary;
-// --all reproduces the historical failure across the whole append-only log.
-const LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
+// --all reproduces the historical failure across the whole selected evidence.
 const ALL = process.argv.includes('--all')
 const SAMPLES = process.argv.includes('--samples')
-const logLines = existsSync(LOG) ? readFileSync(LOG, 'utf8').split('\n') : []
+const ev = await resolveRunEvidence({ runId: mer.runId ?? RUN_ARG })
+const logLines = ev.lines
 const guardIndex = ALL ? -1 : logLines.findIndex((line) => line.includes('ADVISOR_CACHE_GUARD'))
 const windowLines = guardIndex >= 0 ? logLines.slice(guardIndex) : logLines
 const advisorLines = windowLines.filter((l) => l.includes('ADVISOR') && l.includes('cached=true'))
@@ -65,7 +70,7 @@ for (let i = 0; i < advisorStrategies.length; i++) {
 }
 const bypassLines = windowLines.filter((l) => l.includes('ADVISOR_CACHE bypass'))
 const refusalLines = windowLines.filter((l) => l.includes('STRATEGY_REFUSED'))
-const window = ALL ? 'full-log' : guardIndex >= 0 ? `post-guard@${guardIndex}` : 'pre-guard-full-log'
+const window = ALL ? 'full-evidence' : guardIndex >= 0 ? `post-guard@${guardIndex}` : 'pre-guard-full-evidence'
 const MAX_ALLOWED_RUN = 2
 checks.push({
   id: 'no_cached_strategy_loop',
@@ -80,6 +85,16 @@ const out = {
   passCount,
   total: checks.length,
   window,
+  evidence: {
+    runId: mer.runId ?? ev.runId ?? null,
+    callsSource: mer.source,
+    callsFallback: mer.fallback,
+    callsReason: mer.reason,
+    logSource: ev.source,
+    logFallback: ev.fallback,
+    logReason: ev.reason,
+    fallbackLabel: mer.fallback || ev.fallback ? 'FALLBACK: all-time shared files (mixes commits/worlds/lanes)' : null,
+  },
   counters: {
     total: records.length,
     ok: ok.length,
@@ -101,6 +116,9 @@ const out = {
 if (JSON_OUT) console.log(JSON.stringify(out, null, 2))
 else {
   console.log(`== Mercury acceptance: ${out.verdict} (${passCount}/${checks.length}) ==`)
+  console.log(`  calls: ${mer.source}${mer.runId ? ` (runId=${mer.runId})` : ''} records=${records.length}`)
+  console.log(`  log:   ${ev.source}${ev.runId ? ` (runId=${ev.runId})` : ''} lines=${logLines.length}`)
+  if (mer.fallback || ev.fallback) console.log(`  !! FALLBACK: shared all-time inputs in use (${mer.reason}; ${ev.reason})`)
   for (const c of checks) console.log(`  [${c.pass ? 'PASS' : 'FAIL'}] ${c.id.padEnd(32)} ${c.detail}`)
   console.log(`  counters: ${JSON.stringify(out.counters)}`)
   if (out.lastOk) console.log(`  last ok call: ${JSON.stringify(out.lastOk)}`)
