@@ -44,10 +44,10 @@ import {
   formatPillarSearch,
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
+import { formatPillarFail, pillarStepUp } from './pillarApex.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
-  jumpWithGroundCorrection,
   PILLAR_TAKEOFF_BUDGET_MS,
   PILLAR_TAKEOFF_POLL_MS,
 } from './pillarJump.ts'
@@ -1179,9 +1179,16 @@ export class Executor {
    * whenever the server pinned the body at a fractional y (the live y=10.5 /
    * 10.25 over a footing at feet-1): 1055 live hop jumps at that column all
    * measured rise=0. The shared `pillarJump.ts` correction scans the same
-   * contiguous column `resolvePillarStep` does (feet cell or feet-1), and the
-   * jump is held through a VERIFIED takeoff - a silent no-op is now a typed
-   * `place_error` instead of a placed block that never comes.
+   * contiguous column `resolvePillarStep` does (feet cell or feet-1).
+   *
+   * The second live failure (main d8a7a72, after the correction landed):
+   * `PILLAR_UP made no progress` on every attempt while one place DID consume
+   * an item, because the place was gated on `velocity.y <= 0.01` - true while
+   * standing, at the vertex, and while falling - and the landing test was an
+   * unverified `y in [placeY+1 +/- 0.1]` window. `pillarStepUp` now verifies
+   * each sub-step (takeoff, apex window, place, landing) and reports the failed
+   * one as `PILLAR_FAIL step=...`, so a consumed item can never again read as
+   * an unattributed no-progress action.
    */
   private async pillarUp(
     candidate: Candidate,
@@ -1309,46 +1316,44 @@ export class Executor {
         if (footing === null || footing.boundingBox !== 'block') break
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
-        let placed = false
-        try {
-          const jump = await jumpWithGroundCorrection(this.bot, {
+        const placeCell = { x: feet.x, y: pose.placeY, z: feet.z }
+        // The jump -> apex -> place -> landing timing lives in pillarApex.ts so
+        // every sub-step is injected and unit-testable without a server. The
+        // old code placed on a `velocity.y <= 0.01` predicate (also true while
+        // standing or falling) and never verified the block had landed.
+        const climb = await pillarStepUp(
+          this.bot,
+          {
             isSolid: solidAt,
             budgetMs: PILLAR_TAKEOFF_BUDGET_MS,
             pollMs: PILLAR_TAKEOFF_POLL_MS,
+            apexBudgetMs: PILLAR_APEX_BUDGET_MS,
+            placeSettleMs: PLACE_VERIFY_SETTLE_MS,
+            landingBudgetMs: PILLAR_LANDING_BUDGET_MS,
             sleep: (ms) => delay(ms, signal),
             now: Date.now,
-          })
-          if (!jump.airborne) {
-            throw new ExecutorError(
-              'place_error',
-              `PILLAR_UP jump never left the ground at y=${round2(beforeY)} rise=${round2(jump.peakRise)} samples=${jump.samples} onGround=${this.bot.entity.onGround === true}`,
-            )
-          }
-          const atApex = await this.waitForPillarApex(epoch, signal)
-          if (!atApex) {
-            this.logger.warn('executor', 'PILLAR_UP apex window elapsed before the rise settled; placing while airborne', {
-              actionId: candidate.id,
-              ...feet,
-            })
-          }
-          this.ensureOwned(epoch, signal)
-          await this.bot.placeBlock(footing, this.bot.entity.position.clone().set(0, 1, 0))
-          placed = true
-        } catch (error) {
-          if (error instanceof ActionCancelled) throw error
-          this.logger.warn('executor', `PILLAR_UP place failed: ${error instanceof Error ? error.message : String(error)}`, {
+            ensureOwned: () => this.ensureOwned(epoch, signal),
+            place: (face) => this.bot.placeBlock(footing, toVec3(this.bot, face)),
+            blockPlaced: () => this.currentBlockAt(placeCell)?.boundingBox === 'block',
+          },
+          { feetCell: feet, placeCell, support: footing.position },
+        )
+        this.ensureOwned(epoch, signal)
+        if (!climb.ok) {
+          this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
+            step: climb.fail.step,
+            reason: climb.fail.reason,
+            detail: climb.fail.detail ?? null,
           })
+          break
         }
-        if (!placed) break
-        const landed = await this.waitForPillarLanding({ x: feet.x, y: pose.placeY, z: feet.z }, epoch, signal)
-        if (!landed) break
         climbed += 1
         this.logger.info(
           'agent',
           formatPillarUpStep(climbed, Math.floor(beforeY), Math.floor(this.bot.entity.position.y), placeName),
-          { actionId: candidate.id, x: feet.x, z: feet.z },
+          { actionId: candidate.id, x: feet.x, z: feet.z, apexRise: climb.apexRise, samples: climb.samples },
         )
       }
       if (climbed === 0) {
@@ -1497,42 +1502,6 @@ export class Executor {
       z: Math.floor(this.bot.entity.position.z),
     }
     return this.columnUnsafeAt(feet.x, feet.y, feet.z)
-  }
-
-  /**
-   * Wait for the rise to settle after a VERIFIED takeoff (velocity.y <= 0).
-   * `false` means the window elapsed while the body was still moving up; the
-   * caller logs it and places anyway, exactly like the pre-fix timeout.
-   */
-  private async waitForPillarApex(epoch: number, signal: AbortSignal): Promise<boolean> {
-    const deadline = Date.now() + PILLAR_APEX_BUDGET_MS
-    while (Date.now() < deadline) {
-      this.ensureOwned(epoch, signal)
-      if (this.bot.entity.velocity.y <= 0.01) return true
-      await delay(PILLAR_TAKEOFF_POLL_MS, signal)
-    }
-    return false
-  }
-
-  private async waitForPillarLanding(placeCell: Vec3Json, epoch: number, signal: AbortSignal): Promise<boolean> {
-    const deadline = Date.now() + PILLAR_LANDING_BUDGET_MS
-    const landingY = placeCell.y + 1
-    while (Date.now() < deadline) {
-      this.ensureOwned(epoch, signal)
-      const placed = this.currentBlockAt(placeCell)
-      const y = this.bot.entity.position.y
-      if (
-        placed !== null &&
-        placed.boundingBox === 'block' &&
-        y >= landingY - 0.1 &&
-        y <= landingY + 0.1 &&
-        this.bot.entity.velocity.y <= 0.01
-      ) {
-        return true
-      }
-      await delay(25, signal)
-    }
-    return false
   }
 
   private anchorBlock(candidate: Candidate): Vec3Json | null {
