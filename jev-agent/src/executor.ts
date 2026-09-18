@@ -208,6 +208,17 @@ const PLACED_MAX_STEP_CUTS = 3
 /** #79: bounded settle for the PLACE post-condition (client world is one tick behind the server). */
 const PLACE_VERIFY_SETTLE_MS = 500
 
+/** PILLAR_UP: jump-apex window in which the block is placed under the feet. */
+const PILLAR_APEX_BUDGET_MS = 700
+/** PILLAR_UP: settle window for the bot to land on the placed block. */
+const PILLAR_LANDING_BUDGET_MS = 2000
+
+interface PillarUpPlan {
+  placeName: string
+  toY: number
+  steps: number
+}
+
 /** A jump is allowed only with at least two clear blocks above the feet. */
 export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): boolean {
   return above1Empty && above2Empty
@@ -912,6 +923,28 @@ export class Executor {
         this.logger.info('agent', `STAIRCASE from_y=${fromY} to_y=${toY}`, { actionId: candidate.id, dig, step })
         verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal)
       }
+    } else if (vertical === 'staircase-up') {
+      const dig = readMetaPoint(candidate, 'upDigX', 'upDigY', 'upDigZ')
+      const step = readMetaPoint(candidate, 'upStepX', 'upStepY', 'upStepZ')
+      if (dig !== null && step !== null) {
+        const fromY = Math.floor(startY)
+        const toY = readMetaNumber(candidate, 'upToY', target.y)
+        const dir = readMetaString(candidate, 'upDir') ?? 'unknown'
+        this.logger.info('agent', `ASCEND_STEP from_y=${fromY} to_y=${toY} dir=${dir}`, { actionId: candidate.id, dig, step })
+        verticalStep = await this.digRetrievalStaircase(candidate, dig, step, epoch, signal, 'GoalGetToBlock')
+      }
+    } else if (vertical === 'pillar') {
+      const placeName = readMetaString(candidate, 'pillarPlaceName')
+      const steps = Math.floor(readMetaNumber(candidate, 'pillarSteps', 0))
+      if (placeName !== null && steps >= 1) {
+        const fromY = Math.floor(startY)
+        const toY = Math.floor(readMetaNumber(candidate, 'pillarToY', target.y))
+        this.logger.info('agent', `PILLAR_UP from_y=${fromY} to_y=${toY} place=${placeName} steps=${steps}`, {
+          actionId: candidate.id,
+          target,
+        })
+        verticalStep = await this.pillarUp(candidate, { placeName, toY, steps }, epoch, signal)
+      }
     }
 
     this.ensureOwned(epoch, signal)
@@ -930,14 +963,14 @@ export class Executor {
     const after = this.distanceToFeet(target)
     const endY = this.bot.entity.position.y
     const closed = after < before - 0.01
-    const descended = Math.abs(endY - target.y) < Math.abs(startY - target.y) - 0.01
+    const verticalProgress = Math.abs(endY - target.y) < Math.abs(startY - target.y) - 0.01
     this.logger.info(
       'executor',
       `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${vertical}`,
       { target, actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
-      verified: closed || descended || verticalStep,
+      verified: closed || verticalProgress || verticalStep,
       blockRemoved: verticalStep,
       dropObserved: false,
       itemsGained: 0,
@@ -951,6 +984,7 @@ export class Executor {
     step: Vec3Json,
     epoch: number,
     signal: AbortSignal,
+    goalKind: 'GoalBlock' | 'GoalGetToBlock' = 'GoalBlock',
   ): Promise<boolean> {
     if (this.distanceToEyes(dig) > this.options.reach) {
       this.setPhase(candidate, epoch, 'pathing-to-staircase')
@@ -961,7 +995,7 @@ export class Executor {
     if (block === null || block.boundingBox === 'empty') {
       this.setPhase(candidate, epoch, 'stepping')
       try {
-        await this.pathTo(step, epoch, signal, 'GoalBlock')
+        await this.pathTo(step, epoch, signal, goalKind)
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
       }
@@ -1000,11 +1034,133 @@ export class Executor {
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'stepping')
     try {
-      await this.pathTo(step, epoch, signal, 'GoalBlock')
+      await this.pathTo(step, epoch, signal, goalKind)
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
     }
     return true
+  }
+
+  /**
+   * PILLAR_UP: place the held block into the bot's own feet cell at the jump
+   * apex and land on it, one block at a time, bounded by `plan.steps`. Refuses
+   * on a missing item, a non-solid support, or a hazard/liquid in the column.
+   */
+  private async pillarUp(
+    candidate: Candidate,
+    plan: PillarUpPlan,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const { placeName, toY, steps: maxSteps } = plan
+    const item = this.bot.inventory.items().find((entry) => entry.name === placeName)
+    if (item === undefined) {
+      this.logger.warn('executor', `PILLAR_UP refused: ${placeName} is not in the inventory`, { actionId: candidate.id })
+      return false
+    }
+    if (this.pillarColumnUnsafe()) {
+      this.logger.warn('executor', 'PILLAR_UP refused: liquid or hazard in the bot column', { actionId: candidate.id })
+      return false
+    }
+    this.setPhase(candidate, epoch, 'equipping')
+    await this.bot.equip(item, 'hand')
+    this.ensureOwned(epoch, signal)
+    let climbed = 0
+    while (climbed < maxSteps) {
+      this.ensureOwned(epoch, signal)
+      const feet = {
+        x: Math.floor(this.bot.entity.position.x),
+        y: Math.floor(this.bot.entity.position.y),
+        z: Math.floor(this.bot.entity.position.z),
+      }
+      if (feet.y >= toY) break
+      const support = this.currentBlockAt({ x: feet.x, y: feet.y - 1, z: feet.z })
+      if (support === null || support.boundingBox !== 'block') {
+        this.logger.warn('executor', `PILLAR_UP no solid support at (${feet.x},${feet.y - 1},${feet.z})`, { actionId: candidate.id })
+        break
+      }
+      this.setPhase(candidate, epoch, 'pillaring')
+      const beforeY = this.bot.entity.position.y
+      let placed = false
+      this.bot.setControlState('jump', true)
+      try {
+        const atApex = await this.waitForPillarApex(epoch, signal)
+        this.ensureOwned(epoch, signal)
+        if (!atApex) throw new ExecutorError('place_error', 'PILLAR_UP jump never left the ground')
+        await this.bot.placeBlock(support, this.bot.entity.position.clone().set(0, 1, 0))
+        placed = true
+      } catch (error) {
+        if (error instanceof ActionCancelled) throw error
+        this.logger.warn('executor', `PILLAR_UP place failed: ${error instanceof Error ? error.message : String(error)}`, {
+          actionId: candidate.id,
+          ...feet,
+        })
+      } finally {
+        this.bot.setControlState('jump', false)
+      }
+      if (!placed) break
+      const landed = await this.waitForPillarLanding(feet, epoch, signal)
+      if (!landed) break
+      climbed += 1
+      this.logger.info(
+        'agent',
+        `PILLAR_UP_STEP from_y=${Math.floor(beforeY)} to_y=${Math.floor(this.bot.entity.position.y)} placed=${placeName} step=${climbed}`,
+        { actionId: candidate.id, x: feet.x, z: feet.z },
+      )
+    }
+    if (climbed === 0) {
+      this.logger.warn('executor', `PILLAR_UP made no progress place=${placeName}`, { actionId: candidate.id })
+    }
+    return climbed > 0
+  }
+
+  private pillarColumnUnsafe(): boolean {
+    const feet = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    }
+    for (const dy of [0, 1, 2]) {
+      const block = this.currentBlockAt({ x: feet.x, y: feet.y + dy, z: feet.z })
+      if (block === null) continue
+      if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return true
+    }
+    return false
+  }
+
+  private async waitForPillarApex(epoch: number, signal: AbortSignal): Promise<boolean> {
+    const deadline = Date.now() + PILLAR_APEX_BUDGET_MS
+    const startY = this.bot.entity.position.y
+    let airborne = false
+    while (Date.now() < deadline) {
+      this.ensureOwned(epoch, signal)
+      const y = this.bot.entity.position.y
+      if (!airborne && y > startY + 0.2) airborne = true
+      if (airborne && this.bot.entity.velocity.y <= 0.01) return true
+      await delay(20, signal)
+    }
+    return airborne
+  }
+
+  private async waitForPillarLanding(feet: Vec3Json, epoch: number, signal: AbortSignal): Promise<boolean> {
+    const deadline = Date.now() + PILLAR_LANDING_BUDGET_MS
+    const landingY = feet.y + 1
+    while (Date.now() < deadline) {
+      this.ensureOwned(epoch, signal)
+      const placed = this.currentBlockAt({ x: feet.x, y: feet.y, z: feet.z })
+      const y = this.bot.entity.position.y
+      if (
+        placed !== null &&
+        placed.boundingBox === 'block' &&
+        y >= landingY - 0.1 &&
+        y <= landingY + 0.1 &&
+        this.bot.entity.velocity.y <= 0.01
+      ) {
+        return true
+      }
+      await delay(25, signal)
+    }
+    return false
   }
 
   private anchorBlock(candidate: Candidate): Vec3Json | null {
