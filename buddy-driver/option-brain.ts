@@ -6,7 +6,7 @@
 // `BUDDY_OPTION_COMPILER` is enabled, so the current behavior (and the
 // `llm.called == false` deterministic guarantee) is unchanged by default.
 import type { Bot } from 'mineflayer'
-import { applyCompiledPlan, emitBlockedOptionLogs, resolveOptionCompilerEnabled, snapshotFromResident } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, emitBlockedOptionLogs, resolveOptionCompilerEnabled, snapshotFromResident, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { bestPickaxeRank, inventoryCounts } from './planner.ts'
@@ -49,16 +49,22 @@ export class OptionCompilingSystem2 implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const plan = await this.inner.plan(request)
     if (!this.enabled || plan.goals.length === 0) return plan
-    const result = applyCompiledPlan(plan.goals, this.snapshot(), { enabled: true, maxDepth: this.maxDepth })
+    const result = applyCompiledPlan(plan.goals, this.snapshot(), {
+      enabled: true,
+      maxDepth: this.maxDepth,
+      onDedupe: (record) => this.log('OPTION_DEDUPED', { id: record.id, instances: record.instances }),
+    })
     this.log('OPTION_COMPILE', {
       enabled: true,
       planned: plan.goals.map((goal) => goal.description),
       compiled: result.goals.map((goal) => goal.description),
       specs: result.specs.map((spec) => spec.id),
+      instanceIds: result.specs.map((spec) => stableOptionInstanceId(spec)),
       added: result.added,
       blocked: result.blocked,
       blockedOptions: result.blockedOptions,
       rejected: result.rejected,
+      deduped: result.deduped,
     })
     emitBlockedOptionLogs(result.blockedOptions, this.log)
     if (result.rejected.length > 0) {
