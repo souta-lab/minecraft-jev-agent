@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, formatPlaceRefusal, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -606,6 +606,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'FURNACE_READY',
   'STATION_REGISTERED',
   'SMELT_DONE',
+  'SMELT_INPUT_PREREQ',
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
@@ -989,6 +990,8 @@ export class JevController {
   private readonly placedStations: KnownResource[] = []
   /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
   private lastPlacedFurnaceCount = 0
+  /** Last mirrored `SMELT_INPUT_PREREQ` line, so a stable state logs it once. */
+  private lastSmeltInputPrereqLine: string | null = null
   /** #58: the last scored furnace-prerequisite plan and its selected path. */
   private prereqPlan: PrereqDecision | null = null
   private prereqForcedPath: PrereqPath | null = null
@@ -1483,6 +1486,7 @@ export class JevController {
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
+      this.logSmeltInputPrereq(state, groundingOptions)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
@@ -4377,6 +4381,22 @@ export class JevController {
       { reason: refusal.reason, cell: refusal.cell, item: refusal.item },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Mirror the smelt input prerequisite once per distinct line: which concrete
+   * input the current smelt goal needs, whether it is held, and whether the
+   * deterministic collect route was offered. Data-driven input (a `*_log` for
+   * charcoal, raw_iron for iron_ingot), so the marker names the item the bot
+   * must collect instead of letting the goal starve silently.
+   */
+  private logSmeltInputPrereq(state: WorldState, options: CandidateOptions): void {
+    const entry = smeltInputPrereq(state, options)
+    const line = entry === null ? null : formatSmeltInputPrereq(entry)
+    if (line === this.lastSmeltInputPrereqLine) return
+    this.lastSmeltInputPrereqLine = line
+    if (entry === null || line === null) return
+    this.logger.warn('agent', line, { ...entry }, this.tickCounter)
   }
 
   /** Gate facts, shared by both candidate generations in one tick. */

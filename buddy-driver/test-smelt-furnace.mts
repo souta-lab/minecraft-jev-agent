@@ -258,7 +258,7 @@ addCase('readiness ordering moves a ready smelt ahead of an unmet collect and lo
 addCase('readiness ordering leaves the smelt unmarked while its inputs are not held (#46 merge evidence)', () => {
   const collect: PlannedGoal = { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 }
   const smelt: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
-  const ordered = orderPlanGoalsByReadiness([collect, smelt], { raw_iron: 1 }, emptyWorldMemory())
+  const ordered = orderPlanGoalsByReadiness([collect, smelt], { raw_iron: 1, coal: 1 }, emptyWorldMemory())
   const backSmelt = ordered.find((goal) => goal.kind === 'smelt')
   const pass =
     backSmelt?.ready !== true &&

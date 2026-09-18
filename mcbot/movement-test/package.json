@@ -1,0 +1,13 @@
+{
+  "name": "movement-test",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bare-Mineflayer A/B/C movement-fix comparison harness against the local Leaf 26.1.2 server",
+  "scripts": {
+    "probe": "node probe.mjs",
+    "probe:a": "node probe.mjs --variant A",
+    "probe:b": "node probe.mjs --variant B",
+    "probe:c": "node probe.mjs --variant C"
+  }
+}

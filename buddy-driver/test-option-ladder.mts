@@ -138,7 +138,7 @@ addCase('an unmet smelt precondition is expanded in front of the ladder goal', (
   const spec = compilePlannedGoals([{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }])
   const expansion = applyCompiledPlan(
     [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }],
-    makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 }),
+    makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 }),
     { enabled: true },
   )
   const ids = expansion.specs.map((entry) => entry.id)

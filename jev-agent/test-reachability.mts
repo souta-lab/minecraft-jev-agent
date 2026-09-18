@@ -9,9 +9,9 @@
 //
 // Run: npx tsx test-reachability.mts  (wired as `npm run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, blockId, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, defaultCandidateOptions, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
-import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
+import { MIRRORED_MARKERS, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -19,7 +19,7 @@ import { capabilityKey, evaluateReachability, formatCandidateWithheld, formatRea
 import type { ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './src/reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './src/moveFailMemory.ts'
 import { knownStationKey } from './src/prereqOption.ts'
-import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, StationEntry, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -1169,6 +1169,112 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     'a restored movement blacklist is applied before exploration target selection',
     !ids.includes(`MOVE:${blockId('p', blocked)}`) && ids.includes(`MOVE:${blockId('p', alternate)}`),
     `candidates=${ids.join(',')}`,
+  )
+}
+
+// (13) the smelt input/fuel prerequisite is a collect route, never starvation --
+//
+// Measured live on 9af0096 with a REGISTERED furnace at 37,30,37 (2.7m) and no
+// log held:
+//   CANDIDATE_STARVATION presented=2 productive=0 goal="smelt:charcoal:1"
+//   blockedBy=no_productive_action missing=[] repeat=25
+// The smelt's input/fuel is now a code-owned precondition (optionSpec), and the
+// candidate generator offers the same deterministic collect route, so the goal
+// reports what must be collected instead of collapsing to WAIT.
+{
+  const liveFeet: Vec3Json = { x: 34.5, y: 32, z: 36.4 }
+  const furnace: StationEntry = { x: 37, y: 30, z: 37, source: 'sensed' }
+  const liveInventory = inventory({
+    birch_planks: 2,
+    cobblestone: 158,
+    stick: 2,
+    dirt: 37,
+    leaf_litter: 4,
+    stone_pickaxe: 1,
+    coal: 7,
+  })
+  const log: BlockState = {
+    kind: 'log',
+    name: 'oak_log',
+    position: { x: 33, y: 32, z: 36 },
+    distance: 1.1,
+    diggable: true,
+    inReach: true,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 33, y: 31, z: 36 },
+    yield: 'oak_log',
+    harvestTool: null,
+    harvestTier: null,
+  }
+  const charcoal = goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 })
+  const smelt = queuedGoal({
+    id: 'g-charcoal',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const live = worldState({
+    position: liveFeet,
+    inventory: liveInventory,
+    furnaces: [furnace],
+    blocks: [log],
+    goal: charcoal,
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(live, optionsWith(null))
+  const mine = grounded.candidates.find((candidate) => candidate.id === 'MINE:b33_32_36')
+  const starvation = candidateStarvationLine(grounded.candidates, 'smelt:charcoal:1', false, 'no_productive_action', [])
+  const entry = smeltInputPrereq(live, optionsWith(null))
+  const line = entry === null ? null : formatSmeltInputPrereq(entry)
+  check(
+    '(13a) the live smelt shape presents the log collect route and no starvation line',
+    mine !== undefined && mine.kind === 'MINE' && mine.meta.yieldItem === 'oak_log' && starvation === null,
+    `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${starvation ?? 'none'}`,
+  )
+  check(
+    '(13b) the mirrored SMELT_INPUT_PREREQ line names the concrete log and the inserted collect',
+    line === 'SMELT_INPUT_PREREQ item=charcoal input=oak_log present=false action=insert_collect' &&
+      MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ'),
+    `line="${line ?? 'none'}" mirrored=${MIRRORED_MARKERS.has('SMELT_INPUT_PREREQ')}`,
+  )
+
+  const held = worldState({
+    position: liveFeet,
+    inventory: inventory({ ...liveInventory.counts, oak_log: 1 }),
+    furnaces: [furnace],
+    blocks: [log],
+    goal: charcoal,
+    goalQueue: queueWith(smelt),
+  })
+  const heldGrounded = generateGroundedCandidates(held, optionsWith(null))
+  const heldSmelt = heldGrounded.candidates.find((candidate) => candidate.id === 'SMELT:charcoal')
+  const heldEntry = smeltInputPrereq(held, optionsWith(null))
+  const heldLine = heldEntry === null ? null : formatSmeltInputPrereq(heldEntry)
+  check(
+    '(13c) a held log yields the SMELT candidate and the marker reports present=true',
+    heldSmelt !== undefined &&
+      heldLine === 'SMELT_INPUT_PREREQ item=charcoal input=oak_log present=true action=none',
+    `candidates=[${heldGrounded.candidates.map((candidate) => candidate.id).join(',')}] line="${heldLine ?? 'none'}"`,
+  )
+
+  const noFuel = worldState({
+    position: liveFeet,
+    inventory: inventory({ raw_iron: 3, stone_pickaxe: 1 }),
+    furnaces: [furnace],
+    blocks: [log],
+    goal: goal({ id: 'smelt:iron_ingot', targetItem: 'iron_ingot', description: 'smelt 3 x iron_ingot', requiredCount: 3 }),
+    goalQueue: queueWith(
+      queuedGoal({ id: 'g-iron', kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }),
+    ),
+  })
+  const noFuelGrounded = generateGroundedCandidates(noFuel, optionsWith(null))
+  const fuelMine = noFuelGrounded.candidates.find((candidate) => candidate.id === 'MINE:b33_32_36')
+  const noFuelStarvation = candidateStarvationLine(noFuelGrounded.candidates, 'smelt:iron_ingot:3', false, 'no_productive_action', [])
+  check(
+    '(13d) a held input with no fuel is routed to the fuel producer (symmetric rule)',
+    fuelMine !== undefined && fuelMine.meta.yieldItem === 'oak_log' && noFuelStarvation === null,
+    `candidates=[${noFuelGrounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${noFuelStarvation ?? 'none'}`,
   )
 }
 
