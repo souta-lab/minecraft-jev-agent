@@ -485,6 +485,37 @@ export function stableOptionId(goal: PlannedGoal): string {
   return `${goal.kind}:${tail}${goal.strategy === undefined ? '' : `:strategy=${goal.strategy}`}`
 }
 
+/**
+ * Issue #52: precise identity of one Option *instance kind* inside a plan.
+ *
+ * `stableOptionId` (and therefore `OptionSpec.id`) is the OptionTemplateId: the
+ * semantic capability, e.g. `collect:log`. That is the right key for capability
+ * lookup, priors, metrics and cache namespaces, but it is the WRONG key for
+ * global dedupe: a valid plan may repeat the same capability as genuinely
+ * distinct steps (`collect log x3` early, `collect log x2` later as fuel), and a
+ * `Set` keyed on the template silently deleted the later occurrence.
+ *
+ * This appends only the *discriminating target fields* (count, dimension,
+ * targetY, named predicate). It is a pure function of plain spec data, so:
+ *   - distinct instances (different count/dimension/Y/predicate) stay distinct;
+ *   - fully identical instances produce the same id and still collapse;
+ *   - recompiling the same plan yields byte-identical ids (deterministic).
+ * It deliberately does NOT encode plan position or random data: occurrence
+ * identity belongs to the runtime/graph layer, not the semantic id.
+ */
+export function stableOptionInstanceId(spec: OptionSpec): string {
+  const parts: string[] = []
+  const count = Math.max(1, Math.floor(spec.target.count ?? 1))
+  if (count !== 1) parts.push(`c${count}`)
+  const dimension = spec.target.dimension
+  if (typeof dimension === 'string' && dimension.length > 0) parts.push(`d${slug(dimension)}`)
+  const targetY = spec.target.targetY
+  if (typeof targetY === 'number' && Number.isFinite(targetY)) parts.push(`y${targetY}`)
+  const predicate = spec.target.predicate
+  if (typeof predicate === 'string' && predicate.length > 0) parts.push(`p${slug(predicate)}`)
+  return parts.length === 0 ? spec.id : `${spec.id}#${parts.join('~')}`
+}
+
 export function optionKindForGoal(kind: GoalKind): OptionKind {
   switch (kind) {
     case 'collect':
@@ -994,11 +1025,12 @@ export function expandOptionDependencies(
   }
 
   const walk = (current: OptionSpec, depth: number, blockedByAncestor: string | null): void => {
-    if (seen.has(current.id)) return
+    const instanceId = stableOptionInstanceId(current)
+    if (seen.has(instanceId)) return
     if (blockedByAncestor !== null) {
       // #50: a blocked ancestor poisons its whole dependency subtree. Surface the
       // descendant as a pruned dependency-expansion request; never enqueue it.
-      seen.add(current.id)
+      seen.add(instanceId)
       recordBlock(current.id, blockedByAncestor, `ancestor ${blockedByAncestor} blocked`)
       return
     }
@@ -1007,12 +1039,12 @@ export function expandOptionDependencies(
       recordBlock(current.id, current.id, `max dependency depth ${maxDepth} exceeded`)
       return
     }
-    if (visiting.has(current.id)) {
+    if (visiting.has(instanceId)) {
       blocked.push(`${current.id}: dependency cycle`)
       recordBlock(current.id, current.id, 'dependency cycle')
       return
     }
-    visiting.add(current.id)
+    visiting.add(instanceId)
     const { unmet } = evaluatePredicates(current.preconditions, snapshot, custom)
     const dependencies: OptionSpec[] = []
     const blockedReasons: string[] = []
@@ -1030,8 +1062,8 @@ export function expandOptionDependencies(
       // #50: I(o) is false and cannot be produced deterministically. The Option is
       // not startable, so neither it nor its dependencies may be handed to the
       // execution queue. Record the block and prune the subtree.
-      visiting.delete(current.id)
-      seen.add(current.id)
+      visiting.delete(instanceId)
+      seen.add(instanceId)
       for (const reason of blockedReasons) {
         blocked.push(`${current.id}: ${reason}`)
         recordBlock(current.id, current.id, reason)
@@ -1044,9 +1076,9 @@ export function expandOptionDependencies(
     for (const dependencySpec of dependencies) {
       walk(dependencySpec, depth + 1, null)
     }
-    visiting.delete(current.id)
-    if (!seen.has(current.id)) {
-      seen.add(current.id)
+    visiting.delete(instanceId)
+    if (!seen.has(instanceId)) {
+      seen.add(instanceId)
       if (current.id !== spec.id) added.push(current.id)
       ordered.push(current)
     }
@@ -1059,6 +1091,19 @@ export function expandOptionDependencies(
 // ---------------------------------------------------------------------------
 // flag-gated compile entry points
 // ---------------------------------------------------------------------------
+
+/** Issue #52: a global dedupe collapse, surfaced instead of silently dropping. */
+export interface OptionDedupeRecord {
+  /** precise instance identity that collapsed */
+  id: string
+  /** how many compiled instances shared that identity (always >= 2) */
+  instances: number
+}
+
+/** The exact host-log line shape, also used by tests. */
+export function formatOptionDedupeLine(record: OptionDedupeRecord): string {
+  return `OPTION_DEDUPED id=${record.id} instances=${record.instances}`
+}
 
 export interface OptionCompileResult {
   /** whether the compiled goal chain may replace the planned goals */
@@ -1075,6 +1120,8 @@ export interface OptionCompileResult {
   blockedOptions: BlockedOptionEntry[]
   /** planned goals rejected because no valid OptionSpec could be built */
   rejected: Array<{ description: string; reason: string }>
+  /** identical instances that were collapsed (observability for #52) */
+  deduped: OptionDedupeRecord[]
 }
 
 /**
@@ -1083,19 +1130,31 @@ export interface OptionCompileResult {
  * When `enabled` is false (the default) the returned `goals` are the input goals
  * unchanged - the current behavior stays intact - while `specs` still carries the
  * compiled Options for opt-in shadow logging.
+ *
+ * Dedupe keys on the precise instance identity (#52), not the template id, so a
+ * repeated capability with a different count/dimension/Y survives. Identical
+ * instances still collapse, and every collapse is reported (`deduped` + the
+ * `onDedupe` callback) so it is never a silent drop.
  */
 export function applyCompiledPlan(
   planned: readonly PlannedGoal[],
   snapshot: OptionWorldSnapshot,
-  options?: { enabled?: boolean; custom?: CustomPredicateRegistry; maxDepth?: number },
+  options?: {
+    enabled?: boolean
+    custom?: CustomPredicateRegistry
+    maxDepth?: number
+    onDedupe?: (record: OptionDedupeRecord) => void
+  },
 ): OptionCompileResult {
   const enabled = options?.enabled ?? resolveOptionCompilerEnabled()
   const specs: OptionSpec[] = []
-  const seen = new Set<string>()
+  const order: string[] = []
+  const counts = new Map<string, number>()
   const added: string[] = []
   const blocked: string[] = []
   const blockedOptions: BlockedOptionEntry[] = []
   const rejected: Array<{ description: string; reason: string }> = []
+  const deduped: OptionDedupeRecord[] = []
 
   for (const goal of planned) {
     const spec = compilePlannedGoal(goal)
@@ -1106,8 +1165,14 @@ export function applyCompiledPlan(
     }
     const expansion = expandOptionDependencies(spec, snapshot, { custom: options?.custom, maxDepth: options?.maxDepth })
     for (const expanded of expansion.specs) {
-      if (seen.has(expanded.id)) continue
-      seen.add(expanded.id)
+      const instanceId = stableOptionInstanceId(expanded)
+      const previous = counts.get(instanceId)
+      if (previous !== undefined) {
+        counts.set(instanceId, previous + 1)
+        continue
+      }
+      counts.set(instanceId, 1)
+      order.push(instanceId)
       specs.push(expanded)
     }
     for (const id of expansion.added) if (!added.includes(id)) added.push(id)
@@ -1118,6 +1183,14 @@ export function applyCompiledPlan(
     }
   }
 
+  for (const instanceId of order) {
+    const instances = counts.get(instanceId) ?? 1
+    if (instances < 2) continue
+    const record: OptionDedupeRecord = { id: instanceId, instances }
+    deduped.push(record)
+    options?.onDedupe?.(record)
+  }
+
   return {
     enabled,
     specs,
@@ -1126,6 +1199,7 @@ export function applyCompiledPlan(
     blocked,
     blockedOptions,
     rejected,
+    deduped,
   }
 }
 
