@@ -199,7 +199,15 @@ addCase('#30: a 4-goal Mercury patch keeps the 3 new tail goals', async () => {
     { kind: 'craft', description: 'craft 1 x iron_pickaxe', targetItem: 'iron_pickaxe', requiredCount: 1 },
   ]
   const brain = new PlannerBrain({
-    bot: botHolding([{ name: 'coal', count: 2 }]),
+    // The tail's smelt/craft chains are satisfiable from these inputs (the craft
+    // ingredient contract now orders producers for missing sticks/ingots), so the
+    // patch normalization is what this case exercises.
+    bot: botHolding([
+      { name: 'coal', count: 2 },
+      { name: 'stick', count: 2 },
+      { name: 'stone_pickaxe', count: 1 },
+      { name: 'furnace', count: 1 },
+    ]),
     world: emptyWorldMemory(),
     log: hostLog(logs),
     cachePath: join(dir, 'planner-cache.json'),
@@ -237,7 +245,7 @@ addCase('#30: a replace with a different tail is applied, not downgraded', async
     { kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 },
   ]
   const brain = new PlannerBrain({
-    bot: makeBot(),
+    bot: botHolding([{ name: 'stick', count: 2 }, { name: 'stone_pickaxe', count: 1 }, { name: 'furnace', count: 1 }]),
     world: emptyWorldMemory(),
     log: hostLog([]),
     cachePath: join(dir, 'planner-cache.json'),

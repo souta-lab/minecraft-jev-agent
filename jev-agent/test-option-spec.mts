@@ -9,6 +9,7 @@ import {
   compilePlannedGoal,
   compilePlannedGoals,
   currentOptionContextForQueuedGoal,
+  dependencyGoalForItem,
   dependencyGoalForPredicate,
   describePredicate,
   emitBlockedOptionLogs,
@@ -22,6 +23,7 @@ import {
   formatOptionDedupeLine,
   isOptionComplete,
   isOptionStartable,
+  MAX_DEPENDENCY_DEPTH,
   makeOptionSnapshot,
   optionSpecToPlannedGoal,
   optionSpecsToPlannedGoals,
@@ -518,7 +520,10 @@ addCase('readiness ordering is stable when every goal is ready (#46)', () => {
   return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] moves=${result.moves.length}` }
 })
 
-addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
+addCase('readiness ordering keeps blocked goals in stable order behind the satisfiable producer (#46)', () => {
+  // #craft-ingredient-prereq: with a log held the diamond's pickaxe chain has a
+  // startable producer (craft wooden_pickaxe, executable by the craft skill), so
+  // it heads the plan; the genuinely blocked goals keep their input order.
   const snapshot = makeOptionSnapshot({ inventory: { oak_log: 1 }, toolRank: 0 })
   const goals: PlannedGoal[] = [
     { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
@@ -526,11 +531,14 @@ addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
   ]
   const result = orderGoalsByReadiness(goals, snapshot)
   const pass =
-    result.goals[0]?.targetItem === 'diamond' &&
-    result.goals[1]?.targetItem === 'iron_ingot' &&
-    result.ready.length === 0 &&
+    result.goals.length === 3 &&
+    result.goals[0]?.kind === 'craft' &&
+    result.goals[0]?.targetItem === 'wooden_pickaxe' &&
+    result.goals[1]?.targetItem === 'diamond' &&
+    result.goals[2]?.targetItem === 'iron_ingot' &&
+    result.ready.length === 1 &&
     result.blocked.length === 2
-  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
+  return { pass, detail: `order=[${result.goals.map((goal) => `${goal.kind}:${goal.targetItem}`).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
 })
 
 addCase('readiness ordering marks a startable goal ready and leaves blocked goals unmarked (#46 merge evidence)', () => {
@@ -677,6 +685,92 @@ addCase('prereq-order: missing fuel inserts its producer and dedupes with the in
   }
 })
 
+addCase('prereq-order: craft wooden_pickaxe with 2 planks + 2 sticks inserts collect log (#craft-ingredient-prereq)', () => {
+  const pickaxe: PlannedGoal = { kind: 'craft', description: 'craft 1 x wooden_pickaxe', targetItem: 'wooden_pickaxe', requiredCount: 1 }
+  const snapshot = makeOptionSnapshot({ inventory: { birch_planks: 2, stick: 2 }, toolRank: 0 })
+  const result = orderGoalsByReadiness([pickaxe], snapshot)
+  const head = result.goals[0]
+  const insertion = result.inserted[0]
+  const pass =
+    result.goals.length === 2 &&
+    head?.kind === 'collect' &&
+    head.targetItem === 'log' &&
+    head.requiredCount === 1 &&
+    result.goals[1]?.targetItem === 'wooden_pickaxe' &&
+    insertion?.prerequisite.targetItem === 'log' &&
+    insertion.consumer.targetItem === 'wooden_pickaxe' &&
+    result.blocked.length === 1 &&
+    result.unresolved.length === 0
+  return { pass, detail: `order=[${result.goals.map((goal) => `${goal.kind}:${goal.targetItem}`).join(',')}] inserted=${result.inserted.length} unresolved=${result.unresolved.length}` }
+})
+
+addCase('prereq-order: craft wooden_pickaxe with 3 planks + 2 sticks inserts nothing (#craft-ingredient-prereq)', () => {
+  const pickaxe: PlannedGoal = { kind: 'craft', description: 'craft 1 x wooden_pickaxe', targetItem: 'wooden_pickaxe', requiredCount: 1 }
+  const result = orderGoalsByReadiness([pickaxe], makeOptionSnapshot({ inventory: { birch_planks: 3, stick: 2 }, toolRank: 0 }))
+  const pass =
+    result.goals.length === 1 &&
+    result.goals[0]?.targetItem === 'wooden_pickaxe' &&
+    result.inserted.length === 0 &&
+    result.ready.length === 1 &&
+    result.unresolved.length === 0
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} ready=${result.ready.length}` }
+})
+
+addCase('prereq-order: a deeper craft chain (stone_pickaxe <- sticks <- planks <- logs) resolves within the depth bound (#craft-ingredient-prereq)', () => {
+  const stone: PlannedGoal = { kind: 'craft', description: 'craft 1 x stone_pickaxe', targetItem: 'stone_pickaxe', requiredCount: 1 }
+  const result = orderGoalsByReadiness([stone], makeOptionSnapshot({ inventory: { cobblestone: 3 }, toolRank: 0 }))
+  const head = result.goals[0]
+  const pass =
+    result.goals.length === 2 &&
+    head?.kind === 'collect' &&
+    head.targetItem === 'log' &&
+    result.goals[1]?.targetItem === 'stone_pickaxe' &&
+    result.inserted.length === 1 &&
+    result.inserted[0]?.prerequisite.targetItem === 'log' &&
+    result.unresolved.length === 0 &&
+    MAX_DEPENDENCY_DEPTH === 16
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} depthCap=${MAX_DEPENDENCY_DEPTH} unresolved=${result.unresolved.length}` }
+})
+
+addCase('prereq-order: a held log makes the pickaxe chain producible, so nothing is inserted (#craft-ingredient-prereq)', () => {
+  const pickaxe: PlannedGoal = { kind: 'craft', description: 'craft 1 x wooden_pickaxe', targetItem: 'wooden_pickaxe', requiredCount: 1 }
+  const result = orderGoalsByReadiness(
+    [pickaxe],
+    makeOptionSnapshot({ inventory: { birch_planks: 2, stick: 2, oak_log: 1 }, toolRank: 0 }),
+  )
+  const pass = result.goals.length === 1 && result.goals[0]?.targetItem === 'wooden_pickaxe' && result.inserted.length === 0 && result.ready.length === 1
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} ready=${result.ready.length}` }
+})
+
+addCase('dependency expansion: craft wooden_pickaxe expands to collect log -> craft planks -> the pickaxe (#craft-ingredient-prereq)', () => {
+  const pickaxe: PlannedGoal = { kind: 'craft', description: 'craft 1 x wooden_pickaxe', targetItem: 'wooden_pickaxe', requiredCount: 1 }
+  const snapshot = makeOptionSnapshot({ inventory: { birch_planks: 2, stick: 2 }, toolRank: 0 })
+  const expansion = expandOptionDependencies(compilePlannedGoal(pickaxe, snapshot), snapshot)
+  const order = ids(expansion.specs)
+  const pass =
+    order.join(',') === 'collect:log,craft:birch_planks,craft:wooden_pickaxe' &&
+    expansion.blocked.length === 0 &&
+    expansion.blockedOptions.length === 0
+  return { pass, detail: `order=[${order.join(' -> ')}] blocked=[${expansion.blocked.join(';')}]` }
+})
+
+addCase('dependencyGoalForItem is recipe-driven: planks craft, ore stays collect, a log normalizes to the class (#craft-ingredient-prereq)', () => {
+  const planks = dependencyGoalForItem('birch_planks', 1)
+  const rawIron = dependencyGoalForItem('raw_iron', 3)
+  const log = dependencyGoalForItem('birch_log', 1)
+  const ingot = dependencyGoalForItem('iron_ingot', 3)
+  const pass =
+    planks.kind === 'craft' &&
+    planks.targetItem === 'birch_planks' &&
+    rawIron.kind === 'collect' &&
+    rawIron.targetItem === 'raw_iron' &&
+    log.kind === 'collect' &&
+    log.targetItem === 'log' &&
+    log.description === 'collect 1 x log' &&
+    ingot.kind === 'smelt'
+  return { pass, detail: `planks=${planks.kind} rawIron=${rawIron.kind} log=${log.kind}:${log.targetItem} ingot=${ingot.kind}` }
+})
+
 addCase('expanding levelAtMost(46) yields a descend dependency carrying targetY=46 (#57)', () => {
   const owner: OptionSpec = {
     id: 'fixture:level',
@@ -788,7 +882,10 @@ addCase('(#52) repeated same-kind collect with different counts keeps both insta
     { kind: 'craft', description: 'craft 1 x crafting_table', targetItem: 'crafting_table', requiredCount: 1 },
     { kind: 'collect', description: 'collect 2 x log', targetItem: 'log', requiredCount: 2 },
   ]
-  const result = applyCompiledPlan(planned, makeOptionSnapshot({ inventory: {} }), { enabled: true })
+  // The craft goal's own ingredient chain is a separate contract (locked by the
+  // craft prereq-order cases below), so this fixture holds the planks to keep the
+  // #52 identity assertion focused on the repeated collect instances.
+  const result = applyCompiledPlan(planned, makeOptionSnapshot({ inventory: { acacia_planks: 4 } }), { enabled: true })
   const instanceIds = result.specs.map((spec) => stableOptionInstanceId(spec))
   const goals = result.goals.map((goal) => `${goal.targetItem}:${goal.requiredCount}`)
   const pass =

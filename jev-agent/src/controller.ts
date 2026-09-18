@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -607,6 +607,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'STATION_REGISTERED',
   'SMELT_DONE',
   'SMELT_INPUT_PREREQ',
+  'CRAFT_INGREDIENT_PREREQ',
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
@@ -828,7 +829,7 @@ export function evaluateSurfaceRecovery(
  */
 export function goalPreconditionCause(goal: PlannedGoal | null, snapshot: OptionWorldSnapshot): string | null {
   if (goal === null) return null
-  const { ok, unmet } = evaluatePredicates(compilePlannedGoal(goal).preconditions, snapshot)
+  const { ok, unmet } = evaluatePredicates(compilePlannedGoal(goal, snapshot).preconditions, snapshot)
   if (ok) return null
   const first = unmet[0]
   return first === undefined ? null : `precondition:${preconditionCauseName(first)}`
@@ -994,6 +995,8 @@ export class JevController {
   private lastPlacedFurnaceCount = 0
   /** Last mirrored `SMELT_INPUT_PREREQ` line, so a stable state logs it once. */
   private lastSmeltInputPrereqLine: string | null = null
+  /** Last mirrored `CRAFT_INGREDIENT_PREREQ` line, so a stable state logs it once. */
+  private lastCraftIngredientPrereqLine: string | null = null
   /** #58: the last scored furnace-prerequisite plan and its selected path. */
   private prereqPlan: PrereqDecision | null = null
   private prereqForcedPath: PrereqPath | null = null
@@ -1489,6 +1492,7 @@ export class JevController {
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logSmeltInputPrereq(state, groundingOptions)
+      this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
@@ -4419,6 +4423,21 @@ export class JevController {
     const line = entry === null ? null : formatSmeltInputPrereq(entry)
     if (line === this.lastSmeltInputPrereqLine) return
     this.lastSmeltInputPrereqLine = line
+    if (entry === null || line === null) return
+    this.logger.warn('agent', line, { ...entry }, this.tickCounter)
+  }
+
+  /**
+   * Mirror the craft ingredient prerequisite once per distinct line: which
+   * ingredient the current craft goal is missing and which producer the
+   * candidate generator offers for it (`collect log` for the live wooden_pickaxe
+   * shape, `craft oak_planks` when the plan already has an executable step).
+   */
+  private logCraftIngredientPrereq(state: WorldState, options: CandidateOptions): void {
+    const entry = craftIngredientPrereq(state, options)
+    const line = entry === null ? null : formatCraftIngredientPrereq(entry)
+    if (line === this.lastCraftIngredientPrereqLine) return
+    this.lastCraftIngredientPrereqLine = line
     if (entry === null || line === null) return
     this.logger.warn('agent', line, { ...entry }, this.tickCounter)
   }

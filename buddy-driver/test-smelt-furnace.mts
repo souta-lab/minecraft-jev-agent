@@ -260,10 +260,17 @@ addCase('readiness ordering leaves the smelt unmarked while its inputs are not h
   const smelt: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
   const ordered = orderPlanGoalsByReadiness([collect, smelt], { raw_iron: 1, coal: 1 }, emptyWorldMemory())
   const backSmelt = ordered.find((goal) => goal.kind === 'smelt')
+  const diamondIndex = ordered.findIndex((goal) => goal.targetItem === 'diamond')
+  const smeltIndex = ordered.findIndex((goal) => goal.kind === 'smelt')
+  // The craft ingredient contract heads the plan with the satisfiable producer
+  // (`collect 1 x log` for the diamond pickaxe chain); the smelt must stay
+  // unmarked and keep its place behind the diamond goal.
   const pass =
     backSmelt?.ready !== true &&
-    ordered[0]?.targetItem === 'diamond' &&
-    ordered[1]?.kind === 'smelt'
+    ordered[0]?.targetItem === 'log' &&
+    diamondIndex >= 0 &&
+    smeltIndex >= 0 &&
+    diamondIndex < smeltIndex
   return { pass, detail: `order=[${ordered.map((goal) => goal.targetItem).join(',')}] smeltReady=${String(backSmelt?.ready)}` }
 })
 
