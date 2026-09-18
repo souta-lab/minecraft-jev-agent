@@ -735,7 +735,10 @@ export class JevController {
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
-    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+      reason: plan.note,
+      onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
+    })
     this.subgoalCount = added.length
     this.planSupplied = true
     const restored = this.loadLedger()
@@ -2184,7 +2187,10 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
-        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+          reason: plan.note,
+          onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+        })
         this.waitReplans = 0
         if (added.length > 0) {
           this.chosenCounts.clear()

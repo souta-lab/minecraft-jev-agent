@@ -112,6 +112,10 @@ export interface OptionSpec {
   skills: string[]
   /** beta threshold for this Option (default 0.5) */
   abortThreshold: number
+  /** Issue #55: prerequisite Option that a replan must not drop. */
+  protected?: boolean
+  /** Issue #55: core/rung Option that a replan must not drop. */
+  core?: boolean
 }
 
 /** The beta threshold used when a spec does not override it. */
@@ -520,6 +524,8 @@ export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
     success: successForGoal(goal),
     skills: [...SKILLS_BY_KIND[kind]],
     abortThreshold: DEFAULT_ABORT_THRESHOLD,
+    ...(goal.protected === true ? { protected: true } : {}),
+    ...(goal.core === true ? { core: true } : {}),
   }
 }
 
@@ -533,6 +539,8 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     description: goal.description,
     targetItem: goal.targetItem,
     requiredCount: goal.requiredCount,
+    ...(goal.protected === true ? { protected: true } : {}),
+    ...(goal.core === true ? { core: true } : {}),
   }
 }
 
@@ -617,6 +625,8 @@ export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
   if (typeof spec.target.item === 'string' && spec.target.item.length > 0) goal.targetItem = spec.target.item
   if (typeof spec.target.targetY === 'number' && Number.isFinite(spec.target.targetY)) goal.targetY = spec.target.targetY
   if (typeof spec.target.dimension === 'string' && spec.target.dimension.length > 0) goal.dimension = spec.target.dimension
+  if (spec.protected === true) goal.protected = true
+  if (spec.core === true) goal.core = true
   return goal
 }
 
