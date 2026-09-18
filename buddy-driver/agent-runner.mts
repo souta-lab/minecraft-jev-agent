@@ -70,6 +70,7 @@ import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, 
 import { commitLedgerProposal } from './ledger-guard.ts'
 import { ReloadArbiter } from './reload-arbiter.ts'
 import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
+import { acceptanceMetadata } from './acceptance-metadata.ts'
 
 const CONTRACT_VERSION = 3
 const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
@@ -1546,6 +1547,7 @@ function gitCommit(): string | null {
 function writeAcceptance(): string {
   const counts = listenerCounts()
   const expected = expectedListenerCounts()
+  const metadata = acceptanceMetadata(bot, lastStatus)
   const record: AcceptanceRecord = {
     record: 'acceptance',
     runId,
@@ -1563,6 +1565,7 @@ function writeAcceptance(): string {
       'mineflayer-pathfinder': depVersion('mineflayer-pathfinder'),
       vec3: depVersion('vec3'),
     },
+    ...metadata,
     serverId: state.serverId,
     dimension: state.dimension,
     levelName: state.levelName,

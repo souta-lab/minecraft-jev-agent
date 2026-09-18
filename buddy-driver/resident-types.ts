@@ -391,6 +391,14 @@ export interface AcceptanceRecord {
   stateSchemaVersion: number
   stateRevision: number
   dependencies: Record<string, string>
+  /** Mineflayer's connected server version, captured at acceptance time. */
+  serverVersion: string | null
+  /** Server difficulty from the connected Mineflayer game state. */
+  difficulty: string | null
+  /** Jev policy model identifier (not a secret/key). */
+  jevModel: string | null
+  /** System2/Mercury planner model identifier (not a secret/key). */
+  system2Model: string | null
   serverId: string
   dimension: string
   levelName: string | null
