@@ -59,6 +59,7 @@ import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
+import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
 
 const CONTRACT_VERSION = 3
 const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
@@ -280,7 +281,12 @@ function commitHostLedger(ledger: GoalQueueSnapshot, source: string): void {
   saveState(`ledger-host:${source}`)
 }
 
-function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
+function applyWorldMemoryDelta(delta: WorldMemoryDelta, sourceWorldKey: WorldKey): void {
+  const currentKey = currentWorldKey()
+  if (!acceptsWorldMemoryProposal(sourceWorldKey, currentKey)) {
+    log('WORLDMEMORY_REJECTED', { reason: 'world-key-mismatch', sourceWorldKey, currentWorldKey: currentKey })
+    return
+  }
   const memory = keyedMemory()
   if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables, 'crafting_table')
   if (delta.furnaces !== undefined) mergeStationDtos(memory.furnaces, delta.furnaces, 'furnace')
@@ -656,14 +662,15 @@ interface GenerationSeed {
 }
 
 function makeGenerationContext(b: Bot, seed: GenerationSeed = { revision: state.revision }): GenerationContext {
+  const generationWorldKey = currentWorldKey()
   return {
     bot: b,
     log,
     lease,
     resources: new GenerationResourceRegistry(),
     worldMemory: cloneMemory(keyedMemory()),
-    worldKey: currentWorldKey(),
-    proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
+    worldKey: generationWorldKey,
+    proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta, generationWorldKey),
     proposeLedger: (proposal) => onGenerationLedgerProposal(proposal, 'generation'),
     get snapshotRevision(): number {
       return seed.revision
@@ -1662,12 +1669,30 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'worldreset') {
-    state.worldEpoch += 1
-    state.generationId = null
-    keyedMemory()
-    saveState('worldreset')
-    log('WORLD_EPOCH', { worldEpoch: state.worldEpoch, worldKey: currentWorldKey() })
-    controlReply(socket, request, true, { worldEpoch: state.worldEpoch, worldKey: currentWorldKey() })
+    const reset = await resetWorldEpoch({
+      getActive: () => generation,
+      detachActive: (active) => {
+        generation = null
+        state.lastGenerationId = active.id
+        state.generationId = null
+      },
+      revokeLease: (reason) => revokeLease(reason),
+      disposeActive: (active) => disposeGeneration(active as ResidentGeneration),
+      incrementEpoch: () => {
+        state.worldEpoch += 1
+        return state.worldEpoch
+      },
+      initializeMemory: () => {
+        archiveLedger('worldreset')
+        keyedMemory()
+        state.ledger = null
+        pendingResetReason = 'worldreset'
+      },
+      persist: () => saveState('worldreset'),
+      startGeneration: () => startGeneration('worldreset'),
+    })
+    log('WORLD_EPOCH', { worldEpoch: reset.epoch, worldKey: currentWorldKey(), generationStarted: reset.started })
+    controlReply(socket, request, true, { worldEpoch: reset.epoch, worldKey: currentWorldKey(), generationStarted: reset.started })
     return
   }
   if (cmd === 'acceptance') {

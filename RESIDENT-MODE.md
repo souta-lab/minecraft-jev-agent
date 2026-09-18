@@ -200,7 +200,7 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
 - コマンド（`agent-runner.mts` のハンドラに実装されている実集合）:
   - 照会のみ: `report` / `status`（同義、全 state を返す） / `goal` / `milestone` / `acceptance`
   - 実行: `reload` / `freeze` / `resume` / `gc` / `leakcheck` / `simdeath`（既定 soft。`simdeath --hard` または `{hard:true}` で破壊的）
-  - 破壊的（使わない）: `worldreset`（worldEpoch が変わる） / `quit`
+  - 破壊的（使わない）: `worldreset`（worldEpoch が変わる。active generation を quiesce/dispose し、ledger を archive して新しい memory namespace で fresh generation を開始する operator assertion） / `quit`
   - 注意: `goal` / `milestone` は値を返すだけで注入できない。未実装の `mode` / `retry` は**コマンドではない**（mode 切替はフルリロードで行う）
 - `report` / `status` の応答には `contractVersion`（稼働中 HOST の値）と `status.contractVersion`（世代の値）が入る（§4-D）
 - **mode切替はフルリロードで行う**（`createJevPolicy` が構築時に種別固定のため。決定論モードの `llm.called==false` を clean に証明するため）
@@ -401,4 +401,3 @@ Option: collect 3 x raw_iron
 ・補助診断（danger等）はトリガ条件付きでのみ質問に含める（トークン/コスト削減）
 ・決定論モードでは π を決定論ポリシー、β を決定論述語にフォールバック（llm.called==false を維持）
 ```
-
