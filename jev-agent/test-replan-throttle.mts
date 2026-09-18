@@ -5,6 +5,7 @@ import {
   DEFAULT_CAPABILITY_GAP_POLICY,
   evaluateCapabilityGap,
   formatCapabilityGap,
+  formatCapabilityGapPolicy,
   formatReplanThrottled,
   hasBodyDelta,
   hashReplanInputs,
@@ -229,6 +230,131 @@ addCase('normal movement and real altitude gain never fire the capability gap', 
   return {
     pass: tooClose.gap === false && tooClose.state === null && decision.gap === false,
     detail: `tooClose=${tooClose.gap} climbing=${decision.gap}`,
+  }
+})
+
+// The live 2026-09-18 altitude trace (buddy.log): the body repeatedly climbs
+// to ~13-14 and falls back to ~8.8-9.5, never net-advancing. A transient peak
+// must not look like progress, so the gap has to fire inside this window.
+const LIVE_ALTITUDE_SAWTOOTH = [
+  11.0, 11.0, 11.0, 11.0, 11.0, 11.0, 11.0, 11.0, 11.0, 11.0, 11.0,
+  10.5,
+  11.0, 11.0, 11.0, 11.0,
+  11.8, 8.8, 13.0, 8.8, 9.5, 14.0, 12.0, 14.0,
+] as const
+
+const sawtoothAt = (tick: number): number => LIVE_ALTITUDE_SAWTOOTH[tick % LIVE_ALTITUDE_SAWTOOTH.length] ?? 0
+
+addCase('the live altitude sawtooth is never progress and fires the gap as oscillation', () => {
+  const targetKey = 'known:raw_iron@37,67,33'
+  let decision = evaluateCapabilityGap(null, { y: sawtoothAt(0), targetY: 67, targetKey, ascendRefused: true })
+  for (let tick = 1; tick < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, {
+      y: sawtoothAt(tick),
+      targetY: 67,
+      targetKey,
+      ascendRefused: true,
+    })
+  }
+  const line = formatCapabilityGap(decision)
+  const policyLine = formatCapabilityGapPolicy(decision)
+  return {
+    pass:
+      decision.gap &&
+      decision.reason === 'ascend_blocked' &&
+      decision.attempts === DEFAULT_CAPABILITY_GAP_POLICY.windowTicks &&
+      decision.heuristic.chosen === 'escalate' &&
+      decision.heuristic.reason === 'oscillation' &&
+      decision.heuristic.alternatives.includes('keep_climbing') &&
+      line === 'CAPABILITY_GAP reason=ascend_blocked attempts=40 target_y=67' &&
+      policyLine === 'CAPABILITY_GAP_POLICY chosen=escalate score=3 alternatives=[keep_climbing] reason=oscillation',
+    detail: `line=${line} policy=${policyLine}`,
+  }
+})
+
+addCase('a repeated 13->8.8->14->9.5 sawtooth is no progress even at its peaks', () => {
+  const targetKey = 'known:raw_iron@37,67,33'
+  const pattern = [13.0, 8.8, 14.0, 9.5] as const
+  const at = (tick: number): number => pattern[tick % pattern.length] ?? 0
+  let decision = evaluateCapabilityGap(null, { y: at(0), targetY: 67, targetKey, ascendRefused: true })
+  for (let tick = 1; tick < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: at(tick), targetY: 67, targetKey, ascendRefused: true })
+  }
+  return {
+    pass: decision.gap && decision.heuristic.reason === 'oscillation',
+    detail: `gap=${decision.gap} heuristic=${JSON.stringify(decision.heuristic)}`,
+  }
+})
+
+addCase('genuine monotonic climbing is net progress and re-anchors the window upward', () => {
+  const targetKey = 'known:raw_iron@37,67,33'
+  let decision = evaluateCapabilityGap(null, { y: 10, targetY: 67, targetKey, ascendRefused: false })
+  for (let tick = 1; tick < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: 10 + tick, targetY: 67, targetKey, ascendRefused: false })
+  }
+  const policyLine = formatCapabilityGapPolicy(decision)
+  return {
+    pass:
+      decision.gap === false &&
+      decision.heuristic.chosen === 'keep_climbing' &&
+      decision.heuristic.reason === 'progress' &&
+      decision.state?.ticks === 0 &&
+      decision.state?.startY === 49 &&
+      policyLine === 'CAPABILITY_GAP_POLICY chosen=keep_climbing score=39 alternatives=[escalate] reason=progress',
+    detail: `policy=${policyLine} state=${JSON.stringify(decision.state)}`,
+  }
+})
+
+addCase('a climb that falls back to a previously held altitude is not progress', () => {
+  const targetKey = 'known:raw_iron@37,67,33'
+  let decision = evaluateCapabilityGap(null, { y: 11, targetY: 67, targetKey, ascendRefused: true })
+  decision = evaluateCapabilityGap(decision.state, { y: 12.5, targetY: 67, targetKey, ascendRefused: true })
+  for (let tick = 2; tick < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: 11, targetY: 67, targetKey, ascendRefused: true })
+  }
+  return {
+    pass:
+      decision.gap &&
+      decision.heuristic.reason === 'no_net_progress' &&
+      formatCapabilityGap(decision) === 'CAPABILITY_GAP reason=ascend_blocked attempts=40 target_y=67',
+    detail: `heuristic=${JSON.stringify(decision.heuristic)}`,
+  }
+})
+
+addCase('returns below the best are tolerated up to the policy limit while the best is held', () => {
+  const targetKey = 'known:raw_iron@37,67,33'
+  let decision = evaluateCapabilityGap(null, { y: 11, targetY: 67, targetKey, ascendRefused: true })
+  decision = evaluateCapabilityGap(decision.state, { y: 10, targetY: 67, targetKey, ascendRefused: true })
+  decision = evaluateCapabilityGap(decision.state, { y: 12.5, targetY: 67, targetKey, ascendRefused: true })
+  decision = evaluateCapabilityGap(decision.state, { y: 11.5, targetY: 67, targetKey, ascendRefused: true })
+  for (let tick = 4; tick < DEFAULT_CAPABILITY_GAP_POLICY.windowTicks; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: 12.5, targetY: 67, targetKey, ascendRefused: true })
+  }
+  return {
+    pass:
+      decision.gap === false &&
+      decision.heuristic.reason === 'progress' &&
+      decision.state?.returnsBelowBest === 0,
+    detail: `gap=${decision.gap} heuristic=${JSON.stringify(decision.heuristic)}`,
+  }
+})
+
+addCase('reaching the target clears the window and its stored state', () => {
+  const targetKey = 'known:raw_iron@37,67,33'
+  let decision = evaluateCapabilityGap(null, { y: 10, targetY: 67, targetKey, ascendRefused: true })
+  for (let tick = 1; tick < 20; tick += 1) {
+    decision = evaluateCapabilityGap(decision.state, { y: 10, targetY: 67, targetKey, ascendRefused: true })
+  }
+  const midway = decision.state
+  decision = evaluateCapabilityGap(midway, { y: 67.2, targetY: 67, targetKey, ascendRefused: true })
+  return {
+    pass:
+      midway !== null &&
+      midway.ticks === 20 &&
+      decision.gap === false &&
+      decision.state === null &&
+      decision.heuristic.reason === 'target_reached',
+    detail: `midwayTicks=${midway?.ticks} state=${decision.state} reason=${decision.heuristic.reason}`,
   }
 })
 

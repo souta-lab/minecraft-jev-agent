@@ -218,10 +218,16 @@ export interface CapabilityGapPolicy {
   minClimbBlocks: number
   /** bounded observation window, in decision ticks */
   windowTicks: number
-  /** altitude gain at or below this does not count as progress */
+  /** net altitude gain at or below this (toward the target) does not count as progress */
   altitudeEpsilon: number
   /** refused ascend attempts within the window that make the gap fire */
   minAscendRefusals: number
+  /**
+   * Returns below the best altitude more than this many times inside the window
+   * are an oscillation: the body keeps giving back ground it already held, so
+   * the window is no progress even when a transient peak looked like a climb.
+   */
+  maxReturnsBelowBest: number
 }
 
 export const DEFAULT_CAPABILITY_GAP_POLICY: CapabilityGapPolicy = {
@@ -229,12 +235,17 @@ export const DEFAULT_CAPABILITY_GAP_POLICY: CapabilityGapPolicy = {
   windowTicks: 40,
   altitudeEpsilon: 0.9,
   minAscendRefusals: 3,
+  maxReturnsBelowBest: 2,
 }
 
 export interface CapabilityGapState {
   /** remembered target the window is tracking; a new target restarts the window */
   targetKey: string
-  /** feet y when the window opened */
+  /**
+   * Progress anchor: the best feet y when the window opened/re-armed. Progress
+   * is `bestY - startY`, never `currentY - startY`, so a fall back to an
+   * altitude the body already held can never be counted as progress again.
+   */
   startY: number
   /** highest feet y seen inside the window */
   bestY: number
@@ -242,6 +253,10 @@ export interface CapabilityGapState {
   ticks: number
   /** refused ascend attempts observed inside the window */
   ascendRefusals: number
+  /** times the body dropped below `bestY - altitudeEpsilon` inside the window */
+  returnsBelowBest: number
+  /** latch so one continuous descent counts as one return */
+  belowBest: boolean
 }
 
 export interface CapabilityGapObservation {
@@ -252,17 +267,64 @@ export interface CapabilityGapObservation {
   ascendRefused: boolean
 }
 
+export type CapabilityGapHeuristicReason =
+  | 'no_target'
+  | 'target_reached'
+  | 'target_in_range'
+  | 'progress'
+  | 'oscillation'
+  | 'no_net_progress'
+  | 'insufficient_evidence'
+
+/** Localized policy surface: the window's verdict in `{chosen, score, alternatives, reason}` form. */
+export interface CapabilityGapHeuristic {
+  chosen: 'escalate' | 'keep_climbing'
+  /** net altitude gained inside the window (the progress measure) */
+  score: number
+  alternatives: string[]
+  reason: CapabilityGapHeuristicReason
+}
+
 export interface CapabilityGapDecision {
   gap: boolean
   attempts: number
   targetY: number | null
   reason: 'ascend_blocked' | null
   state: CapabilityGapState | null
+  heuristic: CapabilityGapHeuristic
+}
+
+interface CapabilityGapVerdict {
+  targetY: number | null
+  state: CapabilityGapState | null
+  gap: boolean
+  attempts: number
+  heuristic: CapabilityGapHeuristic
+}
+
+function capabilityGapDecision(verdict: CapabilityGapVerdict): CapabilityGapDecision {
+  return {
+    gap: verdict.gap,
+    attempts: verdict.attempts,
+    targetY: verdict.targetY,
+    reason: verdict.gap ? 'ascend_blocked' : null,
+    state: verdict.state,
+    heuristic: verdict.heuristic,
+  }
 }
 
 /** Exact marker the controller emits when the pure predicate fires. */
 export function formatCapabilityGap(decision: CapabilityGapDecision): string {
   return `CAPABILITY_GAP reason=ascend_blocked attempts=${decision.attempts} target_y=${Math.round(decision.targetY ?? 0)}`
+}
+
+/**
+ * Localized heuristic log line (audit rule): `alternatives` lists the losing
+ * options; they are only logged when the window's verdict is emitted.
+ */
+export function formatCapabilityGapPolicy(decision: CapabilityGapDecision): string {
+  const { chosen, score, alternatives, reason } = decision.heuristic
+  return `CAPABILITY_GAP_POLICY chosen=${chosen} score=${score} alternatives=[${alternatives.join(',')}] reason=${reason}`
 }
 
 export const CAPABILITY_GAP_MARKER = 'CAPABILITY_GAP'
@@ -289,9 +351,15 @@ export function parseCapabilityGap(events: readonly string[]): CapabilityGapSign
 
 /**
  * Bounded-window trap detector. Fires only when a remembered target sits
- * `minClimbBlocks` above the agent, the window never gained altitude, AND at
- * least `minAscendRefusals` ascend attempts were refused. Any real altitude gain
- * or reaching the target restarts the window, so normal movement never fires it.
+ * `minClimbBlocks` above the agent, the window made no NET progress toward it,
+ * AND at least `minAscendRefusals` ascend attempts were refused.
+ *
+ * Net progress is measured against the window's anchor (the best altitude when
+ * the window opened, re-armed upward after proven progress): a transient climb
+ * that falls back to ground the body already held is not progress. Repeated
+ * returns below the window's best altitude (`maxReturnsBelowBest`) are an
+ * explicit oscillation and make the window no-progress. Genuine monotonic
+ * climbing and reaching the target keep the gap cleared.
  */
 export function evaluateCapabilityGap(
   previous: CapabilityGapState | null,
@@ -299,18 +367,73 @@ export function evaluateCapabilityGap(
   policy: CapabilityGapPolicy = DEFAULT_CAPABILITY_GAP_POLICY,
 ): CapabilityGapDecision {
   const { y, targetY, targetKey } = observation
-  if (targetY === null || targetKey === null || targetY - y < policy.minClimbBlocks) {
-    return { gap: false, attempts: 0, targetY, reason: null, state: null }
-  }
+  const cleared = (reason: CapabilityGapHeuristicReason): CapabilityGapDecision =>
+    capabilityGapDecision({
+      targetY,
+      state: null,
+      gap: false,
+      attempts: 0,
+      heuristic: { chosen: 'keep_climbing', score: 0, alternatives: ['escalate'], reason },
+    })
+  if (targetY === null || targetKey === null) return cleared('no_target')
+  if (y >= targetY) return cleared('target_reached')
+  if (targetY - y < policy.minClimbBlocks) return cleared('target_in_range')
+
   const restart = previous === null || previous.targetKey !== targetKey
-  const startY = restart ? y : previous.startY
-  const bestY = restart ? y : Math.max(previous.bestY, y)
-  const ticks = (restart ? 0 : previous.ticks) + 1
-  const ascendRefusals = (restart ? 0 : previous.ascendRefusals) + (observation.ascendRefused ? 1 : 0)
-  if (bestY - startY > policy.altitudeEpsilon || y >= targetY) {
-    return { gap: false, attempts: 0, targetY, reason: null, state: { targetKey, startY: y, bestY: y, ticks: 0, ascendRefusals: 0 } }
+  const window: CapabilityGapState = restart
+    ? { targetKey, startY: y, bestY: y, ticks: 0, ascendRefusals: 0, returnsBelowBest: 0, belowBest: false }
+    : previous
+  const bestY = Math.max(window.bestY, y)
+  const belowBest = y < bestY - policy.altitudeEpsilon
+  const returnsBelowBest = window.returnsBelowBest + (belowBest && !window.belowBest ? 1 : 0)
+  const ticks = window.ticks + 1
+  const ascendRefusals = window.ascendRefusals + (observation.ascendRefused ? 1 : 0)
+  // Net progress TOWARD the target: the best altitude must improve over the
+  // anchor, the body must still hold it, and it must not be a sawtooth of
+  // returns below that same best altitude.
+  const netGain = Math.round((bestY - window.startY) * 100) / 100
+  const score = Math.round(netGain * 10) / 10
+  const progressed =
+    netGain > policy.altitudeEpsilon &&
+    !belowBest &&
+    returnsBelowBest <= policy.maxReturnsBelowBest
+
+  if (ticks >= policy.windowTicks && progressed) {
+    return capabilityGapDecision({
+      targetY,
+      state: { targetKey, startY: bestY, bestY, ticks: 0, ascendRefusals: 0, returnsBelowBest: 0, belowBest: false },
+      gap: false,
+      attempts: 0,
+      heuristic: { chosen: 'keep_climbing', score, alternatives: ['escalate'], reason: 'progress' },
+    })
   }
-  const state: CapabilityGapState = { targetKey, startY, bestY, ticks, ascendRefusals }
-  const gap = ticks >= policy.windowTicks && ascendRefusals >= policy.minAscendRefusals
-  return { gap, attempts: ascendRefusals, targetY, reason: gap ? 'ascend_blocked' : null, state }
+
+  const state: CapabilityGapState = {
+    targetKey,
+    startY: window.startY,
+    bestY,
+    ticks,
+    ascendRefusals,
+    returnsBelowBest,
+    belowBest,
+  }
+  const windowDone = ticks >= policy.windowTicks
+  const gap = windowDone && ascendRefusals >= policy.minAscendRefusals
+  const reason: CapabilityGapHeuristicReason = !gap
+    ? 'insufficient_evidence'
+    : returnsBelowBest > policy.maxReturnsBelowBest
+      ? 'oscillation'
+      : 'no_net_progress'
+  return capabilityGapDecision({
+    targetY,
+    state,
+    gap,
+    attempts: ascendRefusals,
+    heuristic: {
+      chosen: gap ? 'escalate' : 'keep_climbing',
+      score,
+      alternatives: gap ? ['keep_climbing'] : ['escalate'],
+      reason,
+    },
+  })
 }
