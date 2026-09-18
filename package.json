@@ -26,6 +26,7 @@
     "milestone-status-test": "node tools/test-milestone-status.mjs",
     "m2-watch-test": "node tools/test-m2-watch.mjs",
     "m2-acceptance-test": "node tools/test-m2-acceptance.mjs",
-    "m2-live-gate-test": "node tools/test-m2-live-gate.mjs"
+    "m2-live-gate-test": "node tools/test-m2-live-gate.mjs",
+    "run-artifacts-test": "node tools/test-run-artifacts.mjs"
   }
 }

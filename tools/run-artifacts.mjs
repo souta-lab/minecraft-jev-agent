@@ -131,6 +131,11 @@ export async function newestRunIdFromLog(log = BUDDY_LOG) {
   const text = await fsp.readFile(log, 'utf8')
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
+    // Only BOOT establishes a new run boundary. A late asynchronous event can
+    // carry an older runId after a newer host has booted; treating any trailing
+    // runId-bearing line as the current run would make acceptance gates read
+    // the wrong evidence window.
+    if (!/\bBOOT\b/.test(lines[i])) continue
     const id = runIdOfLine(lines[i])
     if (id) return id
   }
