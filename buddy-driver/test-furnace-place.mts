@@ -9,10 +9,11 @@
 //   (c) the abandon reason is logged in one line.
 // Plus a fixture that drives held-furnace -> PLACE -> SMELT -> SMELT_DONE.
 import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from '../jev-agent/src/candidates.ts'
-import type { Candidate } from '../jev-agent/src/candidates.ts'
+import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
 import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
-import { planPrereqOptions } from '../jev-agent/src/prereqOption.ts'
+import { knownStationKey, planPrereqOptions } from '../jev-agent/src/prereqOption.ts'
+import { MoveFailMemory } from '../jev-agent/src/moveFailMemory.ts'
 import type { KnownResource } from '../jev-agent/src/state.ts'
 import {
   classifyAbandonReason,
@@ -89,17 +90,19 @@ function worldState(overrides: {
   signals?: AgentSignals
   furnaces?: Vec3Json[]
   placementSpots?: Vec3Json[]
+  position?: Vec3Json
+  craftingTables?: Vec3Json[]
 }): WorldState {
   return {
     schemaVersion: 1,
     tick: 7,
     timestampMs: 1_700_000_000_000,
-    self: self({ x: 29, y: 61, z: 35 }),
+    self: self(overrides.position ?? { x: 29, y: 61, z: 35 }),
     inventory: overrides.inventory ?? inventory({}),
     entities: [],
     blocks: [] as BlockState[],
-    terrain: { standable: [{ x: 29, y: 61, z: 35 }] },
-    craftingTables: [],
+    terrain: { standable: [overrides.position ?? { x: 29, y: 61, z: 35 }] },
+    craftingTables: overrides.craftingTables ?? [],
     furnaces: overrides.furnaces ?? [],
     placementSpots: overrides.placementSpots ?? [],
     goal: smeltGoal(),
@@ -226,6 +229,82 @@ addCase('(#58) held furnace + far known station logs PREREQ_OPTION chosen=place_
     candidate.id.startsWith('PLACE:furnace') &&
     candidate.meta.prereqPath === 'place_held'
   return { pass, detail: `${decision.line} first=${candidate?.id ?? 'none'} path=${String(candidate?.meta.prereqPath)}` }
+})
+
+// --- (live M2 blocker) a blacklisted station must not collapse the ladder to WAIT
+
+/** Reproduce the controller's blacklist: move-failure memory rows -> station keys. */
+function blacklistFromMemory(memory: MoveFailMemory, state: WorldState): ReadonlySet<string> {
+  const keys = new Set<string>()
+  for (const resource of state.signals.knownResources ?? []) {
+    if (resource.kind !== 'station') continue
+    if (!memory.isBlacklisted(state.self.dimension, resource.position)) continue
+    keys.add(knownStationKey({ name: resource.name, position: resource.position }))
+  }
+  return keys
+}
+
+addCase('(live) blacklisted remembered furnace + held table chooses craft_and_place, never only WAIT', () => {
+  const knownFurnace: KnownResource = { name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ raw_iron: 8, coal: 7, cobblestone: 119, crafting_table: 1 }),
+    signals: signals({ knownResources: [knownFurnace] }),
+    placementSpots: [{ x: 38, y: 10, z: 34 }],
+  })
+  const memory = new MoveFailMemory({ failureLimit: 1 })
+  memory.record(state.self.dimension, knownFurnace.position, 'unreachable')
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    unreachableStations: blacklistFromMemory(memory, state),
+  }
+
+  const decision = planPrereqOptions(furnacePrereqInputFromState(state, options))
+  const known = decision.options.find((option) => option.path === 'use_known_station')
+  const candidates = generateCandidates(state, options)
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const place = productive.find((candidate) => candidate.id.startsWith('PLACE:crafting_table'))
+  const retrieve = candidates.find((candidate) => candidate.id.includes('station:furnace'))
+  const pass =
+    decision.chosen === 'craft_and_place' &&
+    known?.feasible === false &&
+    known.reason === 'known_station_unreachable' &&
+    place !== undefined &&
+    place.meta.prereqPath === 'craft_and_place' &&
+    retrieve === undefined &&
+    productive.length > 0
+  return {
+    pass,
+    detail: `${decision.line} | candidates=[${candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
+addCase('(live) blacklisted furnace + a reachable remembered table walks to it under craft_and_place', () => {
+  const knownFurnace: KnownResource = { name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }
+  const knownTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 39, y: 10, z: 40 } }
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ raw_iron: 8, coal: 7, cobblestone: 119 }),
+    signals: signals({ knownResources: [knownFurnace, knownTable] }),
+    placementSpots: [{ x: 38, y: 10, z: 34 }],
+  })
+  const memory = new MoveFailMemory({ failureLimit: 1 })
+  memory.record(state.self.dimension, knownFurnace.position, 'unreachable')
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    unreachableStations: blacklistFromMemory(memory, state),
+  }
+
+  const decision = planPrereqOptions(furnacePrereqInputFromState(state, options))
+  const candidates = generateCandidates(state, options)
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const retrieveFurnace = candidates.find((candidate) => candidate.id.includes('station:furnace'))
+  const pass =
+    decision.chosen === 'craft_and_place' &&
+    retrieve !== undefined &&
+    retrieve.meta.prereqPath === 'craft_and_place' &&
+    retrieveFurnace === undefined
+  return { pass, detail: `${decision.line} | retrieve=${retrieve?.id ?? 'none'}` }
 })
 
 // --- (b) bounded placement retry --------------------------------------------

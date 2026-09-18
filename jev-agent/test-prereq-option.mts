@@ -81,6 +81,24 @@ addCase('(a3) #78: crafting from held materials beats a close known station', ()
   return { pass, detail: decision.line }
 })
 
+addCase('(a4) live M2 blocker: a blacklisted known station loses to craft_and_place, not WAIT', () => {
+  const decision = planPrereqOptions(
+    input({
+      stoneCount: 119,
+      tableAvailable: true,
+      knownStation: { name: 'furnace', position: { x: 22, y: 66, z: 29 } },
+      unreachableStations: new Set(['furnace@22,66,29']),
+      self: { x: 39, y: 10, z: 34 },
+    }),
+  )
+  const known = decision.options.find((option) => option.path === 'use_known_station')
+  const pass =
+    decision.chosen === 'craft_and_place' &&
+    known?.feasible === false &&
+    known.reason === 'known_station_unreachable'
+  return { pass, detail: `${decision.line} | known=${known?.reason ?? 'missing'}` }
+})
+
 addCase('(b) a stalled path switches to the next-best path instead of repeating', () => {
   const decision = planPrereqOptions(
     input({
