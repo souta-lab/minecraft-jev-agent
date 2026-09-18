@@ -657,6 +657,24 @@ function variantRequirements(recipe: RecipeView): Map<string, IngredientPredicat
 }
 
 /**
+ * True when at least one recipe variant for `item` has every ingredient held
+ * (class-aware). `isOptionStartable` alone is not enough for a craft
+ * prerequisite: `craftPreconditions` intersects all variants, so a multi-variant
+ * recipe (wooden_pickaxe over every plank type) yields no predicate and would
+ * look startable with an empty inventory.
+ */
+function anyRecipeVariantCraftable(item: string, snapshot: OptionWorldSnapshot): boolean {
+  const variants = recipesFor(item)
+  if (variants.length === 0) return false
+  return variants.some((variant) => {
+    for (const predicate of variantRequirements(variant).values()) {
+      if (!evaluatePredicate(predicate, snapshot)) return false
+    }
+    return true
+  })
+}
+
+/**
  * Initiation predicates derived from deterministic ladder policy (#12) plus
  * minecraft-data mechanics (#54): harvest tiers from `blocks[].harvestTools`,
  * ingredient counts from `recipes`. Strategic rules minecraft-data cannot
@@ -673,7 +691,13 @@ function preconditionsForGoal(goal: PlannedGoal): Predicate[] {
     }
     case 'craft': {
       const preconditions = craftPreconditions(item)
-      if (item === 'stone_pickaxe') preconditions.push({ kind: 'pickaxeRankAtLeast', rank: 1 })
+      // A stone pickaxe is craftable from 3 stone + 2 sticks. The "some pickaxe"
+      // strategic rule is only needed to MINE that stone, and it is already
+      // implied by the `collect cobblestone` dependency (that collect goal's own
+      // harvest tier is rank 1). Requiring it unconditionally made
+      // `craft 1 x stone_pickaxe` unstartable on a bot that already held
+      // cobblestone, so the blocked ore goal stayed the queue head and spun
+      // (prereq-order blocker: `collect raw_iron` behind a craftable pickaxe).
       return preconditions
     }
     case 'smelt':
@@ -801,8 +825,65 @@ export interface ReadinessOrderResult {
   ready: PlannedGoal[]
   /** goals with at least one unmet precondition */
   blocked: PlannedGoal[]
+  /** prerequisite goals inserted in front of a blocked consumer (see #prereq-order) */
+  inserted: InsertedPrerequisite[]
   /** ready goals that were moved ahead of a blocked goal (for PLAN_ORDER) */
   moves: Array<{ preferred: string; over: string }>
+}
+
+/** One prerequisite goal inserted immediately before the blocked goal it unblocks. */
+export interface InsertedPrerequisite {
+  prerequisite: PlannedGoal
+  consumer: PlannedGoal
+}
+
+export interface PrerequisiteCompletion {
+  /** input goals in order, each preceded by the startable prerequisites unblocking it */
+  goals: PlannedGoal[]
+  inserted: InsertedPrerequisite[]
+}
+
+/**
+ * Deterministic dependency ordering (#prereq-order): for every goal with an unmet
+ * precondition, insert the DIRECT prerequisite Option produced by
+ * `dependencyGoalForPredicate` immediately before it, but only when that
+ * prerequisite is itself startable in the snapshot. A prerequisite that is not
+ * executable right now cannot be ordered into a head that would still be blocked,
+ * so the stable order is preserved rather than inventing an unexecutable step.
+ * Pure and order-preserving; identity is the #52 instance id, so a prerequisite
+ * already queued ahead of its consumer is never duplicated.
+ */
+export function completeStartablePrerequisites(
+  goals: readonly PlannedGoal[],
+  snapshot: OptionWorldSnapshot,
+  custom?: CustomPredicateRegistry,
+): PrerequisiteCompletion {
+  const out: PlannedGoal[] = []
+  const inserted: InsertedPrerequisite[] = []
+  const present = new Set<string>()
+  for (const goal of goals) {
+    const spec = compilePlannedGoal(goal)
+    if (!isOptionStartable(spec, snapshot, custom)) {
+      const { unmet } = evaluatePredicates(spec.preconditions, snapshot, custom)
+      for (const predicate of unmet) {
+        const dependency = dependencyGoalForPredicate(predicate, spec, snapshot)
+        if (dependency === null) continue
+        const dependencySpec = compilePlannedGoal(dependency)
+        if (dependencySpec.id === spec.id) continue
+        if (!isOptionStartable(dependencySpec, snapshot, custom)) continue
+        if (dependency.kind === 'craft' && typeof dependency.targetItem === 'string' && !anyRecipeVariantCraftable(dependency.targetItem, snapshot)) continue
+        const instanceId = stableOptionInstanceId(dependencySpec)
+        if (present.has(instanceId)) continue
+        const prerequisite: PlannedGoal = dependency.ready === true ? dependency : { ...dependency, ready: true }
+        out.push(prerequisite)
+        inserted.push({ prerequisite, consumer: goal })
+        present.add(instanceId)
+      }
+    }
+    out.push(goal)
+    present.add(stableOptionInstanceId(spec))
+  }
+  return { goals: out, inserted }
 }
 
 /**
@@ -811,33 +892,39 @@ export interface ReadinessOrderResult {
  * dependency chain, so a producer is never blocked while its consumer is ready.
  * Ready goals are returned carrying `ready: true` so the GoalQueue merge keeps
  * the proven ordering when it re-inserts protected goals.
+ *
+ * #prereq-order: before partitioning, any missing DIRECT prerequisite that is
+ * startable now is inserted in front of its blocked consumer, so a goal whose
+ * precondition is unmet never stays the executing head while its satisfiable
+ * prerequisite is absent from the plan.
  */
 export function orderGoalsByReadiness(
   goals: readonly PlannedGoal[],
   snapshot: OptionWorldSnapshot,
   custom?: CustomPredicateRegistry,
 ): ReadinessOrderResult {
+  const completed = completeStartablePrerequisites(goals, snapshot, custom)
   const ready: PlannedGoal[] = []
   const blocked: PlannedGoal[] = []
   const isReady: boolean[] = []
-  for (const goal of goals) {
+  for (const goal of completed.goals) {
     const startable = isOptionStartable(compilePlannedGoal(goal), snapshot, custom)
     isReady.push(startable)
     if (startable) ready.push(goal.ready === true ? goal : { ...goal, ready: true })
     else blocked.push(goal)
   }
   const moves: Array<{ preferred: string; over: string }> = []
-  for (let j = 0; j < goals.length; j += 1) {
+  for (let j = 0; j < completed.goals.length; j += 1) {
     if (isReady[j] === true) continue
-    const overGoal = goals[j]
+    const overGoal = completed.goals[j]
     if (overGoal === undefined) continue
-    for (let i = j + 1; i < goals.length; i += 1) {
-      const candidate = goals[i]
+    for (let i = j + 1; i < completed.goals.length; i += 1) {
+      const candidate = completed.goals[i]
       if (candidate === undefined || isReady[i] !== true) continue
       moves.push({ preferred: goalReadinessLabel(candidate), over: overGoal.description })
     }
   }
-  return { goals: [...ready, ...blocked], ready, blocked, moves }
+  return { goals: [...ready, ...blocked], ready, blocked, inserted: completed.inserted, moves }
 }
 
 /** OptionSpec -> PlannedGoal, so compiled Options seed the existing GoalQueue. */
