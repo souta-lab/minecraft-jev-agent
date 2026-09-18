@@ -12,7 +12,7 @@
 import type { Candidate } from './src/candidates.ts'
 import { buildQuestions, AUTHORITATIVE_QUESTION_NAMES, QUESTION_NAMES, questionNamesFor, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES } from './src/jev.ts'
 import type { JevAnswer, JevQuestionType, JevResult } from './src/jev.ts'
-import { GoalQueue } from './src/goalQueue.ts'
+import { DUPLICATE_GOAL_SKIPPED, GoalQueue } from './src/goalQueue.ts'
 import { buildStubPlan, evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2.ts'
 import type { System2PlanRequest } from './src/system2.ts'
 
@@ -176,6 +176,40 @@ addCase('queue consumes the stub plan in order and completes on progress', () =>
   return {
     pass,
     detail: `first depth=${first.depth} current=${first.current?.description}; after completion current=${second.current?.description} done=${second.done}`,
+  }
+})
+
+addCase('repeated ticks with unchanged state do NOT grow the queue depth', () => {
+  const queue = new GoalQueue()
+  const plan = [
+    { kind: 'collect' as const, description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 },
+    { kind: 'craft' as const, description: 'craft 1 x stone_pickaxe', targetItem: 'stone_pickaxe', requiredCount: 1 },
+  ]
+  queue.applyPlan(plan, 'llm', 'replace')
+  const firstDepth = queue.state.depth
+  const duplicates: string[] = []
+  for (let tick = 0; tick < 5; tick += 1) {
+    queue.applyPlan(plan, 'llm', 'continue', { onDuplicate: (line) => duplicates.push(line) })
+  }
+  const afterDepth = queue.state.depth
+  const distinct = new GoalQueue()
+  distinct.applyPlan(
+    [
+      { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 },
+      { kind: 'collect', description: 'collect 6 x raw_iron', targetItem: 'raw_iron', requiredCount: 6 },
+    ],
+    'llm',
+    'replace',
+  )
+  const pass =
+    firstDepth === 2 &&
+    afterDepth === 2 &&
+    duplicates.length === 10 &&
+    duplicates.every((line) => line.startsWith(DUPLICATE_GOAL_SKIPPED)) &&
+    distinct.state.depth === 2
+  return {
+    pass,
+    detail: `firstDepth=${firstDepth} afterRepeats=${afterDepth} duplicates=${duplicates.length} distinctCounts=${distinct.state.depth}`,
   }
 })
 

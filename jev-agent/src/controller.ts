@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, selfContainedCraftCandidates, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -538,6 +538,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
  * already warned about this, but it was not a mirrored marker, so it never
  * surfaced as the binding condition. Pure and exported so the contract is
  * unit-testable without a bot.
+ *
+ * The line has exactly one meaning per field:
+ *   - `blockedBy` is the CURRENT GOAL's own deterministic blocker (its unmet
+ *     precondition, else its own target's refusal reason, else
+ *     `no_productive_action`). It is never a withheld sibling's reason.
+ *   - `missing` is the ordered, bounded union of each withheld candidate's
+ *     missing capability, tagged with that candidate's id:
+ *     `["MINE:b40_10_33:tool:pickaxe@0","RETRIEVE:known:x:needs_ascend"]`.
  */
 export function formatCandidateStarvation(
   presented: number,
@@ -545,7 +553,7 @@ export function formatCandidateStarvation(
   blockedBy: string,
   missing: readonly string[] = [],
 ): string {
-  const all = missing.length > 0 ? ` missing=[${missing.join(',')}]` : ''
+  const all = missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''
   return `CANDIDATE_STARVATION presented=${presented} productive=0 goal="${goal}" blockedBy=${blockedBy}${all}`
 }
 
@@ -561,29 +569,90 @@ export function candidateStarvationLine(
   return productive ? null : formatCandidateStarvation(candidates.length, goal, blockedBy, missing)
 }
 
+/** Upper bound on the `missing=[...]` union so the marker stays one readable line. */
+export const MAX_STARVATION_MISSING = 8
+
 /**
- * Every distinct capability the withheld candidates named, in candidate order,
- * deduped. The starvation line prints this whole ordered list so a single
- * blocked target cannot hide a second, independently actionable need.
+ * Each withheld candidate's missing capability, in candidate order, each token
+ * tagged with its candidate id (`<candidateId>:<capability>`). A candidate whose
+ * refusal names no capability contributes its reason instead, so no withheld
+ * target is silently dropped. Deduped and bounded (`MAX_STARVATION_MISSING`) so
+ * the list stays a stable, readable ordered set.
  */
-export function candidateStarvationMissing(withheld: readonly CandidateReachability[]): string[] {
-  return [...new Set(withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)))]
+export function candidateStarvationMissing(
+  withheld: readonly CandidateReachability[],
+  limit: number = MAX_STARVATION_MISSING,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const entry of withheld) {
+    const capabilities = entry.result.missingCapabilities.map(capabilityKey)
+    const labels = capabilities.length > 0 ? capabilities : [entry.result.reason]
+    for (const label of labels) {
+      const token = `${entry.candidate.id}:${label}`
+      if (seen.has(token)) continue
+      seen.add(token)
+      out.push(token)
+      if (out.length >= limit) return out
+    }
+  }
+  return out
+}
+
+/** True when a withheld candidate is a route for `item` itself (not a sibling). */
+function candidateTargetsItem(candidate: Candidate, item: string): boolean {
+  if (candidate.targetName === item) return true
+  if (candidate.itemName === item) return true
+  const known = candidate.meta.knownName
+  return typeof known === 'string' && known === item
 }
 
 /**
- * The primary reason the offered set is starved: the first withheld capability,
- * else the first reachability reason, else the last failure code. `blockedBy`
- * stays ONE reason - the full ordered capability list is reported separately.
+ * The single reason the STARVED GOAL has no productive candidate, derived only
+ * from the goal's own deterministic state: an unmet compiled precondition, else
+ * the refusal reason of the goal's OWN route candidate (a withheld candidate
+ * whose target is the goal's target item), else `no_productive_action`. A
+ * withheld candidate for some other target (a prerequisite, a sibling) must
+ * never leak into `blockedBy` - it belongs in `missing` tagged with its id.
  */
-export function candidateStarvationBlockedBy(
+export function goalStarvationBlockedBy(
+  preconditionCause: string | null,
+  goal: Pick<QueuedGoal, 'kind' | 'targetItem'> | null,
   withheld: readonly CandidateReachability[],
-  lastFailureCode: string | null,
 ): string {
-  const capabilities = candidateStarvationMissing(withheld)
-  if (capabilities.length > 0) return capabilities[0] ?? 'unknown_capability'
-  const reasons = [...new Set(withheld.map((entry) => entry.result.reason))]
-  if (reasons.length > 0) return reasons[0] ?? 'unknown_reason'
-  return lastFailureCode ?? 'no_productive_candidate'
+  if (preconditionCause !== null) return preconditionCause
+  if (goal === null || goal.kind !== 'collect') return 'no_productive_action'
+  const target = goal.targetItem
+  if (target === null) return 'no_productive_action'
+  const own = withheld.find((entry) => candidateTargetsItem(entry.candidate, target))
+  return own?.result.reason ?? 'no_productive_action'
+}
+
+function isProductiveCandidate(candidate: Candidate): boolean {
+  return candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE'
+}
+
+/**
+ * The starvation contract's actionable-goal clause: if the current goal is a
+ * craft whose recipe inputs are held, the offered set must contain a productive
+ * candidate. The candidate gate already runs this ladder, but it runs before the
+ * controller's own filters (move-failure memory, furnace prerequisite), so the
+ * last productive candidate can be removed afterwards. This backfills the
+ * deterministic self-contained craft step for the current craft goal only when
+ * nothing productive survives, so `productive` is > 0 and no starvation line is
+ * emitted for a craftable goal.
+ */
+export function ensureCraftStepActionable(
+  state: WorldState,
+  candidates: readonly Candidate[],
+  options: CandidateOptions,
+): Candidate[] {
+  if (candidates.some(isProductiveCandidate)) return [...candidates]
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'craft') return [...candidates]
+  const seen = new Set(candidates.map((candidate) => candidate.id))
+  const step = selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id))
+  return step.length === 0 ? [...candidates] : [...candidates, ...step]
 }
 
 /** Capability name for one unmet predicate, used in the `precondition:<cause>` blockedBy. */
@@ -999,10 +1068,13 @@ export class JevController {
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
+    const depthBefore = this.queue.state.depth
     const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
       reason: plan.note,
       onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
+      onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
     })
+    this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `bootstrap`)
     this.subgoalCount = added.length
     this.planSupplied = true
     const restored = this.loadLedger()
@@ -1227,15 +1299,23 @@ export class JevController {
       }
 
       const unreachableStations = this.unreachableStationKeys(state)
-      const grounded = generateGroundedCandidates(
-        state,
-        candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+      const groundingOptions = candidateOptions(
+        this.options,
+        this.recipeIndex,
+        unreachableStations,
+        this.reachabilityGateOptions(),
       )
+      const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
+      // The gate's self-contained craft ladder runs before these controller
+      // filters, so a move-failure-memory prune can strip the last productive
+      // candidate. Backfill the deterministic craft step for the current craft
+      // goal here so an inputs-held craft is never reported as starved.
+      candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -1282,7 +1362,7 @@ export class JevController {
           this.noProductiveRepeats = 1
         }
         const preconditionCause = this.currentGoalPreconditionCause(state)
-        const blockedBy = preconditionCause ?? candidateStarvationBlockedBy(grounded.withheld, this.signals.lastFailureCode)
+        const blockedBy = goalStarvationBlockedBy(preconditionCause, this.queue.current, grounded.withheld)
         const missing = candidateStarvationMissing(grounded.withheld)
         const starvation = candidateStarvationLine(
           candidates,
@@ -2866,10 +2946,13 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
+        const depthBefore = this.queue.state.depth
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
           reason: plan.note,
           onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+          onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
         })
+        this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `summon:${reason}`)
         this.waitReplans = 0
         if (added.length > 0) {
           this.chosenCounts.clear()
@@ -3414,6 +3497,19 @@ export class JevController {
       return `${current.kind}:${current.targetItem ?? current.description}:${current.requiredCount}`
     }
     return `objective:${this.goal.targetItem}:${this.goal.requiredCount}`
+  }
+
+  private logQueueDepthDelta(before: number, op: string, reason: string): void {
+    const state = this.queue.state
+    const delta = state.depth - before
+    if (delta === 0) return
+    const signed = delta > 0 ? `+${delta}` : `${delta}`
+    this.logger.info(
+      'queue',
+      `QUEUE_DEPTH delta=${signed} depth=${state.depth} done=${state.done} op=${op} reason=${reason}`,
+      { delta, depth: state.depth, done: state.done, op, reason },
+      this.tickCounter,
+    )
   }
 
   private noProductiveSignature(state: WorldState): string {

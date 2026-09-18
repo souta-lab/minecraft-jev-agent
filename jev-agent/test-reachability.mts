@@ -11,7 +11,7 @@
 import { createRequire } from 'node:module'
 import { applyReachabilityGate, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
-import { candidateStarvationBlockedBy, candidateStarvationLine, candidateStarvationMissing } from './src/controller.ts'
+import { candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -623,7 +623,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
       )
       const craft = productive.find((candidate) => candidate.kind === 'CRAFT')
-      const blockedBy = candidateStarvationBlockedBy(grounded.withheld, null)
+      const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
       const missing = candidateStarvationMissing(grounded.withheld)
       const line = candidateStarvationLine(grounded.candidates, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
       check(
@@ -662,16 +662,51 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       descent: [stoneDownStep(feet)],
     })
     const grounded = generateGroundedCandidates(state, craftOptions)
-    const blockedBy = candidateStarvationBlockedBy(grounded.withheld, null)
+    const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'stone_pickaxe' }, grounded.withheld)
     const missing = candidateStarvationMissing(grounded.withheld)
     const line = candidateStarvationLine(grounded.candidates, 'craft:stone_pickaxe:1', false, blockedBy, missing)
     check(
-      '(b) a stone craft with no planks keeps blockedBy=tool:pickaxe@0 from its own route',
-      blockedBy === 'tool:pickaxe@0' &&
-        missing.join(',') === 'tool:pickaxe@0' &&
-        line ===
-          'CANDIDATE_STARVATION presented=2 productive=0 goal="craft:stone_pickaxe:1" blockedBy=tool:pickaxe@0 missing=[tool:pickaxe@0]',
+      '(b) a withheld station reason never becomes the craft goal blockedBy',
+      blockedBy === 'no_productive_action' &&
+        missing.length > 0 &&
+        missing.every((token) => token.startsWith('RETRIEVE:known:station:crafting_table:b40_29_35:')) &&
+        line !== null &&
+        line.includes('blockedBy=no_productive_action') &&
+        !line.includes('tool:pickaxe@0 missing') &&
+        line.includes('missing=["RETRIEVE:known:station:crafting_table:b40_29_35:tool:pickaxe@0"]'),
       `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line ?? 'none'}"`,
+    )
+  }
+
+  // (e) live-shape regression: the gate's self-contained craft step is skipped
+  // when a reachable station retrieve is offered, then the controller's own
+  // move-fail filter removes it. The backfill must still present the craft step.
+  {
+    const state = worldState({
+      position: bot,
+      inventory: inventory({ birch_planks: 7, stick: 2, cobblestone: 42 }),
+      goal: goal({ targetItem: 'wooden_pickaxe', description: 'craft 1 x wooden_pickaxe', requiredCount: 1 }),
+      goalQueue: queueWith(craftGoal('wooden_pickaxe')),
+      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: { x: 32, y: 48, z: 37 } }] }),
+    })
+    const grounded = generateGroundedCandidates(state, craftOptions)
+    // simulate the controller pruning every locomotion candidate (move-fail memory)
+    const afterControllerFilters = grounded.candidates.filter(
+      (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE',
+    )
+    const beforeProductive = afterControllerFilters.filter(
+      (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
+    )
+    const restored = ensureCraftStepActionable(state, afterControllerFilters, craftOptions)
+    const productive = restored.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+    const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
+    const line = candidateStarvationLine(restored, 'craft:wooden_pickaxe:1', false, blockedBy, candidateStarvationMissing(grounded.withheld))
+    check(
+      '(e) the controller backfill makes a craftable wooden_pickaxe productive with no starvation line',
+      beforeProductive.length === 0 &&
+        productive.some((candidate) => candidate.id === 'CRAFT:crafting_table') &&
+        line === null,
+      `before=[${afterControllerFilters.map((candidate) => candidate.id).join(',')}] after=[${restored.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`,
     )
   }
 
