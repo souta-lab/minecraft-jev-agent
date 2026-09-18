@@ -24,6 +24,8 @@ jobs:
           node-version: '22'
       - name: Frontier fixtures
         run: npm run frontier-test
+      - name: Issue-state fixtures
+        run: npm run issue-state-test
       - name: Issue graph fixtures
         run: npm run issue-graph-test
       - name: Current-status fixtures
@@ -32,6 +34,8 @@ jobs:
         run: npm run lane-guard-test
       - name: Live issue-routing invariant
         run: npm run frontier:check
+      - name: Live issue-evidence invariant
+        run: npm run issue-state:check
 
   core-deterministic:
     runs-on: ubuntu-latest
