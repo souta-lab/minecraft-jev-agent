@@ -38,6 +38,12 @@ import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
+import {
+  PICKAXE_TIER_ORDER,
+  loadGameData,
+  requiredPickaxeRank1,
+  requiredPickaxeRankForItem1,
+} from '../jev-agent/src/gameData.ts'
 import { formatSkillSelected, formatStrategyBodyDelta, generateSkillPlan, skillSignature } from '../jev-agent/src/skillCandidate.ts'
 import type { SkillCandidate, SkillGenerationInput, SkillGoal } from '../jev-agent/src/skillCandidate.ts'
 import {
@@ -91,12 +97,11 @@ export function has(counts: Counts, name: string): boolean {
   return (counts[name] ?? 0) > 0
 }
 
-/** 0 none, 1 wooden, 2 stone, 3 iron, 4 diamond+ */
+/** 0 none, 1 wooden, 2 stone, 3 iron, 4 diamond+ (order from gameData.ts #54). */
 export function bestPickaxeRank(counts: Counts): number {
-  const order = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe']
   let rank = 0
-  for (let i = 0; i < order.length; i += 1) {
-    const name = order[i]
+  for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
+    const name = PICKAXE_TIER_ORDER[i]
     if (name !== undefined && has(counts, name)) rank = Math.max(rank, i + 1)
   }
   return rank
@@ -449,9 +454,10 @@ export interface PreconditionResult {
  * tool/material prerequisite is missing must never enter the queue: that is what
  * wedged the resident on `collect raw_iron` with an empty inventory. */
 export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory): PreconditionResult {
+  const ranks = loadGameData()
   switch (rung.id) {
     case 'cobblestone':
-      return { ok: bestPickaxeRank(c) >= 1, need: 'wooden_pickaxe' }
+      return { ok: bestPickaxeRank(c) >= (requiredPickaxeRank1(ranks, 'cobblestone') ?? 1), need: 'wooden_pickaxe' }
     case 'furnace':
       return { ok: countClass(c, 'stone') >= 8 || has(c, 'furnace') || w.furnaces.length > 0, need: '8 x stone' }
     case 'stone_pickaxe':
@@ -459,7 +465,7 @@ export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory):
     case 'charcoal':
       return { ok: has(c, 'furnace') || w.furnaces.length > 0, need: 'placed furnace' }
     case 'raw_iron':
-      return { ok: bestPickaxeRank(c) >= 2, need: 'stone_pickaxe' }
+      return { ok: bestPickaxeRank(c) >= (requiredPickaxeRankForItem1(ranks, 'raw_iron') ?? 2), need: 'stone_pickaxe' }
     case 'iron_ingot':
       return {
         ok: (has(c, 'furnace') || w.furnaces.length > 0) && (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 1,
@@ -470,7 +476,7 @@ export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory):
     case 'iron_gear':
       return { ok: (c['iron_ingot'] ?? 0) >= 3, need: 'iron_ingot' }
     case 'diamond':
-      return { ok: bestPickaxeRank(c) >= 2, need: 'stone_pickaxe' }
+      return { ok: bestPickaxeRank(c) >= (requiredPickaxeRankForItem1(ranks, 'diamond') ?? 3), need: 'iron_pickaxe' }
     case 'diamond_pickaxe':
       return { ok: has(c, 'diamond'), need: 'diamond' }
     default:
