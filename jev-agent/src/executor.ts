@@ -232,6 +232,8 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
  */
 const VERTICAL_HOP_RISE_MS = 180
 const VERTICAL_HOP_PUSH_MS = 260
+/** How far ahead the terrain-contact probe reads the facing column (blocks). */
+const FACE_PROBE_DIST = 0.8
 
 export type ClimbManeuver = 'pre-contact-jump' | 'vertical-hop' | 'continue'
 
@@ -260,6 +262,48 @@ export function planClimbManeuver(input: ClimbManeuverInput): ClimbManeuver {
   if (input.climbDetected && input.onGround && !contact) return 'pre-contact-jump'
   if (contact || input.standingStill) return 'vertical-hop'
   return 'continue'
+}
+
+/**
+ * The vertical-hop body rule. A free body (`pinned=false`) holds `forward`
+ * through the jump so the packet carries the horizontal component and the body
+ * carries onto the lip (live A/B: rise 1.12/1.17/1.18/1.20 when forward was held
+ * with `pinned=false still=true`). A pinned body releases forward for the pure
+ * jump — the server rejects a blocked forward push combined with a jump — and
+ * only pushes forward once airborne. Live release data: `rise=0` on 296/296
+ * attempts, so a released-forward free hop can never satisfy `hopOk`.
+ */
+export function hopHoldsForward(pinned: boolean): boolean {
+  return !pinned
+}
+
+export interface HopOutcome {
+  dy: number
+  occupiedTarget: boolean
+  hopOk: boolean
+  /** The JUMP_ESCAPE marker emitted when the hop cleared the step, else null. */
+  escapeMarker: string | null
+}
+
+/**
+ * The hop outcome and its JUMP_ESCAPE marker, extracted so the pit-escape
+ * regression can assert the marker without a live bot. `hopOk` is unchanged:
+ * `dy >= 0.75` (the measured 1-block climb) or a landing on the target node.
+ */
+export function evaluateHop(before: Vec3Json, after: Vec3Json, node: Vec3Json): HopOutcome {
+  const dy = after.y - before.y
+  const occupiedTarget =
+    Math.hypot(after.x - (node.x + 0.5), after.z - (node.z + 0.5)) <= 1.1 &&
+    Math.abs(after.y - node.y) <= 1
+  const hopOk = dy >= 0.75 || occupiedTarget
+  return {
+    dy,
+    occupiedTarget,
+    hopOk,
+    escapeMarker: hopOk
+      ? `JUMP_ESCAPE rise=${round2(dy)} from=(${round2(before.x)},${round2(before.y)},${round2(before.z)}) to=(${round2(after.x)},${round2(after.y)},${round2(after.z)}) target=(${node.x},${node.y},${node.z})`
+      : null,
+  }
 }
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
@@ -1336,11 +1380,12 @@ export class Executor {
         // step, so contact is also read from the terrain: a solid block at the
         // feet level directly ahead, within closing distance. A blocked forward
         // push combined with a jump is rejected by the server (position
-        // teleport), so contact must take the forward-released hop path.
-        const faceAtFeet =
-          climb !== null &&
-          climbDist <= 1.05 &&
-          this.solidSupportAt(climb.x, Math.floor(position.y), climb.z)
+        // teleport), so contact must take the hop path. `climb` is `none` in the
+        // live pit (no 1-2 rise is visible from inside it), so the facing column
+        // is probed directly instead of gating on a detected climb.
+        const faceX = Math.floor(position.x + ux * FACE_PROBE_DIST)
+        const faceZ = Math.floor(position.z + uz * FACE_PROBE_DIST)
+        const faceAtFeet = this.solidSupportAt(faceX, Math.floor(position.y), faceZ)
         const maneuver = planClimbManeuver({
           climbDetected: climb !== null,
           onGround: this.bot.entity.onGround === true,
@@ -1439,10 +1484,11 @@ export class Executor {
             { target, anchor },
           )
           // Harness-proven pit recipe (movement-test/vertical.mjs#navigateTo): a
-          // held pure jump is accepted while pressed into terrain, then forward
-          // is pushed while airborne so the body clears the step. Never combine
-          // the blocked forward push with the jump: the server teleports back.
-          this.bot.setControlState('forward', false)
+          // free body holds forward through the jump so the packet carries its
+          // horizontal component, then forward keeps pushing while airborne; a
+          // pinned body releases forward for the pure jump because the server
+          // rejects a blocked forward push combined with a jump.
+          this.bot.setControlState('forward', hopHoldsForward(pinned))
           this.bot.setControlState('jump', true)
           await delay(VERTICAL_HOP_RISE_MS, signal)
           this.bot.setControlState('jump', false)
@@ -1450,11 +1496,8 @@ export class Executor {
           await delay(VERTICAL_HOP_PUSH_MS, signal)
           this.bot.setControlState('forward', false)
           const afterHop = this.bot.entity.position
-          const dy = afterHop.y - beforeHop.y
-          const occupiedTarget =
-            Math.hypot(afterHop.x - (node.x + 0.5), afterHop.z - (node.z + 0.5)) <= 1.1 &&
-            Math.abs(afterHop.y - node.y) <= 1
-          const hopOk = dy >= 0.75 || occupiedTarget
+          const hop = evaluateHop(beforeHop, afterHop, node)
+          const { dy, occupiedTarget, hopOk } = hop
           this.logger.info(
             'executor',
             `JUMP_ATTEMPT dy=1 ok=${hopOk} attempts=${hopAttempts} from=(${round2(beforeHop.x)},${round2(beforeHop.y)},${round2(beforeHop.z)}) to=(${round2(afterHop.x)},${round2(afterHop.y)},${round2(afterHop.z)}) rise=${round2(dy)} target=(${node.x},${node.y},${node.z}) occupiedTarget=${occupiedTarget}`,
@@ -1464,11 +1507,9 @@ export class Executor {
             hopAttempts = 0
             lastPosition = afterHop.clone()
             lastProgressAt = Date.now()
-            this.logger.info(
-              'executor',
-              `JUMP_ESCAPE rise=${round2(dy)} from=(${round2(beforeHop.x)},${round2(beforeHop.y)},${round2(beforeHop.z)}) to=(${round2(afterHop.x)},${round2(afterHop.y)},${round2(afterHop.z)}) target=(${node.x},${node.y},${node.z})`,
-              { target, anchor, rise: dy },
-            )
+            if (hop.escapeMarker !== null) {
+              this.logger.info('executor', hop.escapeMarker, { target, anchor, rise: dy })
+            }
             continue
           }
           hopAttempts += 1

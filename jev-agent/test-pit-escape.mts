@@ -10,7 +10,7 @@ import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts
 import type { Candidate } from './src/candidates.ts'
 import { classifyMoveOutcome } from './src/controller.ts'
 import { formatMoveTargetSkipped, filterBlacklistedMoves, MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
-import { planClimbManeuver } from './src/executor.ts'
+import { evaluateHop, hopHoldsForward, planClimbManeuver } from './src/executor.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 
@@ -183,6 +183,47 @@ addCase('a free approach jumps pre-contact while forward is unblocked', () => {
   })
   const pass = maneuver === 'pre-contact-jump' && airborne === 'continue'
   return { pass, detail: `grounded=${maneuver} airborne=${airborne}` }
+})
+
+addCase('the vertical hop holds forward when the body is free and releases it when pinned', () => {
+  const free = hopHoldsForward(false)
+  const pinned = hopHoldsForward(true)
+  const pass = free === true && pinned === false
+  return { pass, detail: `pinned=false -> forward=${free}; pinned=true -> forward=${pinned}` }
+})
+
+addCase('a hop rising dy >= 0.75 emits the JUMP_ESCAPE marker (the released-forward hop cannot)', () => {
+  const before = { x: 40.55, y: 8, z: 31.95 }
+  const node = { x: 42, y: 10, z: 33 }
+  // Live pre-fix rises with forward held: 1.12 / 1.17 / 1.18 / 1.20.
+  const hopOutcomes = [1.12, 1.17, 1.18, 1.2].map((rise) =>
+    evaluateHop(before, { x: 40.32, y: before.y + rise, z: 31.84 }, node),
+  )
+  const escaped = hopOutcomes.every(
+    (hop) =>
+      hop.hopOk &&
+      hop.dy >= 0.75 &&
+      hop.escapeMarker !== null &&
+      hop.escapeMarker.startsWith('JUMP_ESCAPE rise=') &&
+      hop.escapeMarker.includes('from=(40.55,8,31.95)') &&
+      hop.escapeMarker.includes('target=(42,10,33)'),
+  )
+  // The regression: the released-forward hop ends where it started (dy=0) and
+  // this target node is outside the occupied window -> no JUMP_ESCAPE.
+  const released = evaluateHop(before, { ...before }, node)
+  // The unchanged `|| occupiedTarget` arm: a hop landing on the node still escapes.
+  const settled = evaluateHop(before, { x: 40.6, y: 8, z: 32.2 }, { x: 40, y: 9, z: 32 })
+  const pass =
+    escaped &&
+    released.dy === 0 &&
+    !released.hopOk &&
+    released.escapeMarker === null &&
+    settled.hopOk &&
+    settled.escapeMarker !== null
+  return {
+    pass,
+    detail: `rise=1.12 -> ${hopOutcomes[0]?.escapeMarker ?? 'none'}; released-forward -> ok=${released.hopOk} marker=${released.escapeMarker ?? 'none'}; occupiedTarget -> ok=${settled.hopOk}`,
+  }
 })
 
 addCase('an unverified MOVE that wandered 1.66m is never an arrival (classifier)', () => {
