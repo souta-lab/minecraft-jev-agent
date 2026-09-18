@@ -32,6 +32,8 @@ jobs:
         run: npm run current-status-test
       - name: Lane-guard fixtures
         run: npm run lane-guard-test
+      - name: Milestone contract fixtures
+        run: npm run milestone-status:check && npm run milestone-status-test
       - name: M2 evidence tooling fixtures
         run: npm run m2-watch-test && npm run m2-acceptance-test && npm run m2-live-gate-test
       - name: Live issue-routing invariant
