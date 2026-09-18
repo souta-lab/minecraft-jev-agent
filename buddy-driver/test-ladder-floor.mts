@@ -128,14 +128,31 @@ addCase('(e) PlannerBrain answers queue_empty with PLAN source=ladder rung=iron_
   }
 })
 
-addCase('(f) an incomplete rung with no emittable step logs QUEUE_EMPTY_UNSUPPLIED', () => {
-  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+addCase('(f) the portal rung supplies its typed prerequisite chain from the deterministic floor', () => {
   const index = rungIndexById('nether_portal')
-  const floor = ladderFloorGoals({}, emptyWorldMemory(), { resumeRungIndex: index, log: hostLog(log) })
-  const unsupplied = log.find((entry) => entry.event === 'QUEUE_EMPTY_UNSUPPLIED')
+  const floor = ladderFloorGoals(
+    { diamond: 3, diamond_pickaxe: 1 },
+    emptyWorldMemory(),
+    { resumeRungIndex: index },
+  )
+  const flint = floor.goals.findIndex((goal) => goal.targetItem === 'flint')
+  const steel = floor.goals.findIndex((goal) => goal.targetItem === 'flint_and_steel')
+  const obsidian = floor.goals.findIndex((goal) => goal.targetItem === 'obsidian')
+  const frame = floor.goals.findIndex((goal) => goal.kind === 'place' && goal.targetItem === 'nether_portal')
+  const obsidianGoal = floor.goals[obsidian]
+  const frameGoal = floor.goals[frame]
   return {
-    pass: index >= 0 && !floor.supplied && unsupplied?.detail?.rung === 'nether_portal',
-    detail: `idx=${index} supplied=${floor.supplied} log=${JSON.stringify(unsupplied?.detail)}`,
+    pass:
+      index >= 0 &&
+      floor.supplied &&
+      flint >= 0 &&
+      steel > flint &&
+      obsidian > steel &&
+      frame > obsidian &&
+      obsidianGoal?.protected === true &&
+      obsidianGoal.core === true &&
+      frameGoal?.core === true,
+    detail: `idx=${index} supplied=${floor.supplied} order=flint@${flint},steel@${steel},obsidian@${obsidian},frame@${frame}`,
   }
 })
 
