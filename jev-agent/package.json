@@ -21,6 +21,7 @@
     "game-data-test": "tsx test-game-data.mts",
     "skill-candidate-test": "tsx test-skill-candidate.mts",
     "observability-test": "tsx test-observability.mts",
+    "action-verify-test": "tsx test-action-verify.mts",
     "beta-authority-test": "tsx test-beta-authority.mts",
     "wire-prereq-beta-test": "tsx test-wire-prereq-beta.mts",
     "m1-test": "tsx test-m1.mts",

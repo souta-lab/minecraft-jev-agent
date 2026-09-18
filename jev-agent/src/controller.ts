@@ -83,6 +83,7 @@ import {
 import type { PrereqDecision, PrereqPath, PrereqProgress } from './prereqOption.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
+import { evaluateUnverifiedBudget, formatActionUnverified, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -404,6 +405,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PRECONDITION_PROTECTED',
   'PLACE_RETRY',
   'ABANDON_REASON',
+  'ABANDON_REASON=action_unverified',
+  'ACTION_UNVERIFIED',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -537,6 +540,8 @@ export class JevController {
   private prereqLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
+  /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
+  private readonly actionUnverified = new Map<string, number>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -1616,7 +1621,11 @@ export class JevController {
       return
     }
 
-    if (result.status === 'done') {
+    if (result.unverifiedPostcondition !== undefined) {
+      this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
+    } else if (result.status === 'done' && result.verified) {
+      const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
+      if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.delete(candidate.itemName)
       }
@@ -1706,6 +1715,70 @@ export class JevController {
         ? deferred.detail
         : { actionId: result.actionId, status: result.status, failure: result.failure }
     this.requestDecision(trigger, detail)
+  }
+
+  /**
+   * #79: a `done`/`verified=false`/`progressDelta=0` action is a FAILURE. Log
+   * ACTION_UNVERIFIED with the plan/strategy/post-condition, charge the failure,
+   * advance the furnace prerequisite path so the plan is never re-queued
+   * unchanged, and after UNVERIFIED_ACTION_LIMIT attempts for one planId emit
+   * `ABANDON_REASON=action_unverified` and wake System 2 for a different option.
+   */
+  private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
+    const planId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
+    const strategy = pending?.record.strategy ?? null
+    const key = planId ?? result.actionId
+    const attempts = (this.actionUnverified.get(key) ?? 0) + 1
+    this.actionUnverified.set(key, attempts)
+    this.logger.warn(
+      'agent',
+      formatActionUnverified({ planId, actionId: result.actionId, strategy, postcondition }),
+      { planId, actionId: result.actionId, strategy, attempts, postcondition, progressDelta: result.itemsGained, detail: result.detail },
+      this.tickCounter,
+    )
+    this.noteCandidateFailure(result.actionId)
+    this.recordFailure('verify_failed', `${result.actionId} unverified: ${result.detail}`)
+
+    const switched = this.advancePrereqAfterUnverified()
+    const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
+    if (budget.abandon) {
+      this.logger.warn(
+        'agent',
+        budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+        { planId: key, attempts, strategy, switched, postcondition },
+        this.tickCounter,
+      )
+    }
+    if (!switched) {
+      this.summonLlm(
+        budget.abandon ? 'action_impossible' : 'no_progress',
+        `action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+      )
+    }
+  }
+
+  /**
+   * #79/#58: an unverified prerequisite attempt must not repeat the same path.
+   * Advance the scored furnace-prerequisite plan to the next feasible option
+   * (place_held -> use_known_station -> craft_and_place). The parent goal is
+   * never abandoned here.
+   */
+  private advancePrereqAfterUnverified(): boolean {
+    if (this.prereqPlan === null) return false
+    const current = this.prereqForcedPath ?? this.prereqPlan.chosen
+    if (current === null) return false
+    const next = nextPrereqPath(this.prereqPlan, current)
+    if (next === null) return false
+    this.prereqForcedPath = next
+    this.prereqProgress = null
+    this.prereqLoggedKey = null
+    this.logger.warn(
+      'agent',
+      `PREREQ_SWITCH from=${current} to=${next} reason=action_unverified`,
+      { from: current, to: next, reason: 'action_unverified', goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+    return true
   }
 
   private syncTerrainSignals(state: WorldState): void {
