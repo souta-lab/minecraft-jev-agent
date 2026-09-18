@@ -169,6 +169,30 @@ export interface OptionSpec {
   core?: boolean
 }
 
+/** Runtime facts attached to the exact queue instance of a compiled Option. */
+export interface OptionRuntimeState {
+  startedAt: number
+  verifiedProgress: number
+  failures: number
+  lastProgressAt: number
+}
+
+/**
+ * The code-owned Option contract visible at the Jev decision boundary.
+ * `instanceId` is the GoalQueue row id; `templateId` is the stable Option id.
+ */
+export interface CurrentOptionContext {
+  instanceId: string
+  templateId: string
+  kind: OptionKind
+  target: OptionTarget
+  preconditions: Predicate[]
+  success: Predicate[]
+  allowedSkills: string[]
+  abortThreshold: number
+  runtime: OptionRuntimeState
+}
+
 /** The beta threshold used when a spec does not override it. */
 export const DEFAULT_ABORT_THRESHOLD = 0.5
 
@@ -733,6 +757,7 @@ export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
   if (typeof goal.targetItem === 'string' && goal.targetItem.length > 0) target.item = goal.targetItem
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) target.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) target.dimension = goal.dimension
+  if (typeof goal.targetPredicate === 'string' && goal.targetPredicate.length > 0) target.predicate = goal.targetPredicate
   return {
     id: stableOptionId(goal),
     intent: goal.description,
@@ -761,20 +786,54 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.strategy === undefined ? {} : { strategy: goal.strategy }),
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
+    ...(goal.targetPredicate === undefined ? {} : { targetPredicate: goal.targetPredicate }),
+    ...(goal.optionInstanceId === undefined ? {} : { optionInstanceId: goal.optionInstanceId }),
+    ...(goal.optionTemplateId === undefined ? {} : { optionTemplateId: goal.optionTemplateId }),
+    ...(goal.optionSpec === undefined ? {} : { optionSpec: goal.optionSpec }),
   }
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) planned.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) planned.dimension = goal.dimension
   return planned
 }
 
+/** Return the exact persisted spec, or deterministically compile a legacy row. */
+export function optionSpecForQueuedGoal(goal: QueuedGoal): OptionSpec {
+  return goal.optionSpec ?? compilePlannedGoal(queuedToPlanned(goal))
+}
+
+/** Reconstruct the CurrentOptionContext for the exact runtime queue instance. */
+export function currentOptionContextForQueuedGoal(
+  goal: QueuedGoal | null | undefined,
+  runtime: Partial<OptionRuntimeState> = {},
+): CurrentOptionContext | null {
+  if (goal === null || goal === undefined || typeof goal.optionInstanceId !== 'string' || goal.optionInstanceId.length === 0) return null
+  const spec = optionSpecForQueuedGoal(goal)
+  return {
+    instanceId: goal.id,
+    templateId: goal.optionTemplateId ?? spec.id,
+    kind: spec.kind,
+    target: { ...spec.target },
+    preconditions: [...spec.preconditions],
+    success: [...spec.success],
+    allowedSkills: [...spec.skills],
+    abortThreshold: spec.abortThreshold,
+    runtime: {
+      startedAt: runtime.startedAt ?? goal.createdAt,
+      verifiedProgress: runtime.verifiedProgress ?? goal.haveCount,
+      failures: runtime.failures ?? 0,
+      lastProgressAt: runtime.lastProgressAt ?? goal.updatedAt,
+    },
+  }
+}
+
 /** Compile the current goal plus every pending goal, in queue order. */
 export function compileGoalQueue(state: GoalQueueState): OptionSpec[] {
-  const goals: PlannedGoal[] = []
-  if (state.current !== null) goals.push(queuedToPlanned(state.current))
+  const specs: OptionSpec[] = []
+  if (state.current !== null) specs.push(optionSpecForQueuedGoal(state.current))
   for (const goal of state.goals) {
-    if (goal.status === 'pending') goals.push(queuedToPlanned(goal))
+    if (goal.status === 'pending') specs.push(optionSpecForQueuedGoal(goal))
   }
-  return compilePlannedGoals(goals)
+  return specs
 }
 
 // ---------------------------------------------------------------------------
@@ -851,8 +910,18 @@ export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
   if (typeof spec.target.item === 'string' && spec.target.item.length > 0) goal.targetItem = spec.target.item
   if (typeof spec.target.targetY === 'number' && Number.isFinite(spec.target.targetY)) goal.targetY = spec.target.targetY
   if (typeof spec.target.dimension === 'string' && spec.target.dimension.length > 0) goal.dimension = spec.target.dimension
+  if (typeof spec.target.predicate === 'string' && spec.target.predicate.length > 0) goal.targetPredicate = spec.target.predicate
   if (spec.protected === true) goal.protected = true
   if (spec.core === true) goal.core = true
+  goal.optionInstanceId = stableOptionInstanceId(spec)
+  goal.optionTemplateId = spec.id
+  goal.optionSpec = {
+    ...spec,
+    target: { ...spec.target },
+    preconditions: [...spec.preconditions],
+    success: [...spec.success],
+    skills: [...spec.skills],
+  }
   return goal
 }
 
