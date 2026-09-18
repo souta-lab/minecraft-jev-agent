@@ -33,6 +33,7 @@
     "descend-plan-test": "tsx test-descend-plan.mts",
     "replan-throttle-test": "tsx test-replan-throttle.mts",
     "protected-goals-test": "tsx test-protected-goals.mts",
+    "nether-portal-test": "tsx test-nether-portal.mts",
     "step-pipeline-test": "tsx data/step-pipeline-test.mts",
     "step-cut-test": "tsx data/step-cut-test.mts",
     "m1": "tsx m1.mts",
