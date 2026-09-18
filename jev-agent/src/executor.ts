@@ -34,9 +34,16 @@ import {
   formatPillarRefused,
   formatPillarRelocate,
   resolvePillarStep,
-  selectPillarFallbackColumn,
 } from './verticalPlan.ts'
-import type { HeadroomClearOutcome, HeadroomObstacle, PillarColumnProbe } from './verticalPlan.ts'
+import type { HeadroomClearOutcome, HeadroomObstacle } from './verticalPlan.ts'
+import {
+  decidePillarPlaceBlock,
+  decidePillarRelocation,
+  decidePillarStepBudget,
+  DEFAULT_PILLAR_SEARCH_POLICY,
+  formatPillarSearch,
+} from './pillarSearch.ts'
+import type { PillarColumnProbe } from './pillarSearch.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
@@ -237,12 +244,11 @@ const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
 /**
- * PILLAR_UP: bounded same-action relocations away from columns whose ceiling
- * cannot be cleared. Two keeps the action bounded while allowing one retry if
- * the first open neighbour was mis-read; the refused-column set stops any
- * ping-pong between two cells.
+ * PILLAR_UP relocation budget: `PillarSearchPolicy.maxRelocations`. Two keeps
+ * the action bounded while allowing one retry if the first open neighbour was
+ * mis-read; the refused-column set stops any ping-pong between two cells.
  */
-const MAX_PILLAR_RELOCATIONS = 2
+const PILLAR_SEARCH_POLICY = DEFAULT_PILLAR_SEARCH_POLICY
 
 /** Stable key for the refused-column set (never fed back into world state). */
 function pillarColumnKey(cell: Vec3Json): string {
@@ -1204,6 +1210,11 @@ export class Executor {
       this.logger.warn('executor', 'PILLAR_UP refused: liquid or hazard in the bot column', { actionId: candidate.id })
       return false
     }
+    this.logger.info('agent', formatPillarSearch(decidePillarPlaceBlock(this.inventoryCounts(), PILLAR_SEARCH_POLICY)), {
+      actionId: candidate.id,
+    })
+    const budget = decidePillarStepBudget(toY - Math.floor(this.bot.entity.position.y), PILLAR_SEARCH_POLICY)
+    this.logger.info('agent', formatPillarSearch(budget), { actionId: candidate.id })
     this.setPhase(candidate, epoch, 'equipping')
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
@@ -1261,9 +1272,16 @@ export class Executor {
               { actionId: candidate.id, ...feet, obstacle: blocked?.obstacle?.name ?? null },
             )
           }
-          if (step.reason === 'no_headroom' && relocations < MAX_PILLAR_RELOCATIONS) {
+          if (step.reason === 'no_headroom') {
             refusedColumns.add(pillarColumnKey(feet))
-            const fallback = this.findPillarFallbackColumn(feet, refusedColumns)
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations })
+            const fallback = relocation.target
             if (fallback !== null) {
               this.logger.info('agent', formatPillarRelocate(feet, fallback, blocked?.obstacle ?? null), {
                 actionId: candidate.id,
@@ -1370,7 +1388,7 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<HeadroomClearOutcome> {
     let last: HeadroomClearOutcome = { cleared: false, obstacle: null, reason: 'no_obstacle' }
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < PILLAR_SEARCH_POLICY.headroomAttempts; attempt += 1) {
       const position = this.bot.entity.position
       if (this.headroomAt(column.x, position.y, column.z)) return { cleared: true }
       const feetY = Math.floor(position.y + 1e-4)
@@ -1432,12 +1450,12 @@ export class Executor {
   }
 
   /**
-   * Grounded pillar fallback: probe the eight same-level neighbours in a fixed
-   * order and let `selectPillarFallbackColumn` pick the nearest one with solid
-   * support and 2-block headroom. Columns already refused this action are
-   * excluded so the climb cannot ping-pong between two blocked cells.
+   * Grounded pillar fallback probes: the eight same-level neighbours in a fixed
+   * order. Columns already refused this action are excluded so the climb cannot
+   * ping-pong between two blocked cells; the ranking/refusal decision belongs to
+   * `decidePillarRelocation` (pillarSearch.ts).
    */
-  private findPillarFallbackColumn(feet: Vec3Json, refused: ReadonlySet<string>): Vec3Json | null {
+  private probePillarColumns(feet: Vec3Json, refused: ReadonlySet<string>): PillarColumnProbe[] {
     const dirs: readonly { dx: number; dz: number }[] = [
       { dx: 1, dz: 0 },
       { dx: -1, dz: 0 },
@@ -1461,7 +1479,7 @@ export class Executor {
         unsafe: this.columnUnsafeAt(cell.x, cell.y, cell.z),
       })
     }
-    return selectPillarFallbackColumn(probes, feet)
+    return probes
   }
 
   /** True when no fluid/hazard block touches the cell (a dig there cannot flood it). */

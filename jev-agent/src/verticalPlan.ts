@@ -16,6 +16,17 @@
 // ticks the caller logs `RETRIEVE_STALLED` and escalates instead of WAITing.
 import type { DescentOption, StepCut, Vec3Json } from './state.ts'
 import { distance } from './state.ts'
+import {
+  decidePillarStepBudget,
+  DEFAULT_PILLAR_SEARCH_POLICY,
+  PILLAR_PLACE_PRIORITY,
+  rankPillarFallbackColumns,
+  selectPlaceableBlock,
+} from './pillarSearch.ts'
+import type { PlaceableBlock, PillarColumnProbe } from './pillarSearch.ts'
+
+export { PILLAR_PLACE_PRIORITY, selectPlaceableBlock }
+export type { PlaceableBlock, PillarColumnProbe }
 
 /** A vertical gap larger than this (blocks) needs an explicit vertical plan. */
 export const VERTICAL_GAP = 1
@@ -32,8 +43,11 @@ export const VERTICAL_GAP = 1
  * each action bounded (~40 s worst case) while covering a 50+ block gap in a
  * handful of ticks; the executor additionally stops a partial climb without a
  * horizontal walk, so each tick's chunk is durable.
+ *
+ * Owned by `PillarSearchPolicy.stepCap` (pillarSearch.ts) so the bound is a
+ * localized search/cost decision that can log chosen/alternatives/reason.
  */
-export const PILLAR_UP_STEP_CAP = 24
+export const PILLAR_UP_STEP_CAP = DEFAULT_PILLAR_SEARCH_POLICY.stepCap
 
 /**
  * Altitude gain (blocks) toward a retrieval target that counts as progress in
@@ -42,38 +56,6 @@ export const PILLAR_UP_STEP_CAP = 24
  * 0.5 m distance epsilon).
  */
 export const ASCENT_PROGRESS_EPSILON = 0.9
-
-/**
- * Blocks that may be placed under the feet for a PILLAR_UP, in preference order.
- * The first name with a positive inventory count wins, so the choice is
- * deterministic and only solid, non-hazard building blocks are ever used.
- */
-export const PILLAR_PLACE_PRIORITY: readonly string[] = [
-  'cobblestone',
-  'stone',
-  'deepslate',
-  'andesite',
-  'diorite',
-  'granite',
-  'dirt',
-  'netherrack',
-  'oak_planks',
-  'spruce_planks',
-]
-
-export interface PlaceableBlock {
-  name: string
-  count: number
-}
-
-/** Pick the held pillar block from inventory counts; null when none is usable. */
-export function selectPlaceableBlock(counts: Readonly<Record<string, number>>): PlaceableBlock | null {
-  for (const name of PILLAR_PLACE_PRIORITY) {
-    const count = counts[name] ?? 0
-    if (count > 0) return { name, count }
-  }
-  return null
-}
 
 /** Why a PILLAR_UP step is refused; `reached` is the normal loop end. */
 export type PillarStepRefusal = 'reached' | 'no_placeable' | 'unsafe_column' | 'no_footing' | 'no_headroom'
@@ -198,43 +180,18 @@ export function classifyHeadroomBlocker(probe: HeadroomBlockerProbe | null): Hea
   return { kind: 'dig', obstacle }
 }
 
-/** One probed neighbour column for the grounded pillar fallback. */
-export interface PillarColumnProbe {
-  /** feet cell of the neighbour column (same Y as the refused column) */
-  cell: Vec3Json
-  /** full solid support under the column */
-  supported: boolean
-  /** the feet cell itself is open */
-  feetClear: boolean
-  /** the block above the feet is open */
-  headClear: boolean
-  /** the second jump cell above the feet is open (2-block headroom) */
-  aboveHeadClear: boolean
-  /** fluid/hazard anywhere in the neighbour column (feet-1..feet+2) */
-  unsafe: boolean
-}
-
 /**
  * Deterministic selection of an adjacent, grounded pillar column when the
- * current column's ceiling cannot be cleared. Only same-level columns with
- * solid support and 2-block headroom qualify; the caller passes probes in a
- * fixed direction/level order, and strict `<` keeps that order as the
- * tie-break, so there is no randomness and no flip-flop.
+ * current column's ceiling cannot be cleared. Delegates to
+ * `rankPillarFallbackColumns` (pillarSearch.ts) so the audited ranking has one
+ * owner; the caller passes probes in a fixed direction/level order, and the
+ * stable sort keeps that order as the tie-break.
  */
 export function selectPillarFallbackColumn(
   probes: readonly PillarColumnProbe[],
   selfFeet: Vec3Json,
 ): Vec3Json | null {
-  let best: { cell: Vec3Json; score: number } | null = null
-  for (const probe of probes) {
-    if (!probe.supported || !probe.feetClear || !probe.headClear || !probe.aboveHeadClear) continue
-    if (probe.unsafe) continue
-    const dy = Math.abs(probe.cell.y - selfFeet.y)
-    const horizontal = Math.hypot(probe.cell.x - selfFeet.x, probe.cell.z - selfFeet.z)
-    const score = dy * 100 + horizontal
-    if (best === null || score < best.score) best = { cell: probe.cell, score }
-  }
-  return best?.cell ?? null
+  return rankPillarFallbackColumns(probes, selfFeet)[0]?.cell ?? null
 }
 
 /** The exact log line emitted when a PILLAR_UP step is refused. */
@@ -404,7 +361,8 @@ function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: nu
   if (input.columnSafe === false) return null
   const placeable = input.placeable ?? null
   if (placeable === null || placeable.count < 1) return null
-  const steps = Math.min(dy, PILLAR_UP_STEP_CAP)
+  const budget = decidePillarStepBudget(dy)
+  const steps = budget.steps
   if (steps < 1) return null
   return {
     kind: 'pillar',
