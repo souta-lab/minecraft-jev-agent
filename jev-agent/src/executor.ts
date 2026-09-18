@@ -1630,6 +1630,15 @@ export class Executor {
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
         const placeCell = { x: feet.x, y: pose.placeY, z: feet.z }
+        // Keep the launch geometry beside the failure evidence. A takeoff
+        // failure can be caused by a bad local footing interpretation, a
+        // body embedded in the feet cell, or a server correction; the marker
+        // alone cannot distinguish those cases. These reads are diagnostic
+        // only and are captured before the jump mutates the entity position.
+        const launchFeetBlock = this.currentBlockAt(feet)
+        const launchHeadBlock = this.currentBlockAt({ x: feet.x, y: feet.y + 1, z: feet.z })
+        const forcedTracker = forcedMoveTracker(this.bot)
+        const forcedBefore = forcedTracker.value
         // The jump -> apex -> place -> landing timing lives in pillarApex.ts so
         // every sub-step is injected and unit-testable without a server. The
         // old code placed on a `velocity.y <= 0.01` predicate (also true while
@@ -1653,12 +1662,33 @@ export class Executor {
         )
         this.ensureOwned(epoch, signal)
         if (!climb.ok) {
+          const endEntity = this.bot.entity as typeof this.bot.entity & {
+            isCollidedHorizontally?: boolean
+            jumpTicks?: number
+          }
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
             step: climb.fail.step,
             reason: climb.fail.reason,
             detail: climb.fail.detail ?? null,
+            launchY: beforeY,
+            supportY: pose.footingY,
+            placeY: pose.placeY,
+            landingY: pose.landingY,
+            supportName: footing.name,
+            launchFeetBlock: launchFeetBlock?.name ?? null,
+            launchHeadBlock: launchHeadBlock?.name ?? null,
+            endPosition: {
+              x: endEntity.position.x,
+              y: endEntity.position.y,
+              z: endEntity.position.z,
+            },
+            endOnGround: endEntity.onGround,
+            endVelocityY: endEntity.velocity.y,
+            endCollidedHorizontally: endEntity.isCollidedHorizontally ?? null,
+            endJumpTicks: endEntity.jumpTicks ?? null,
+            forcedRepositions: forcedTracker.value - forcedBefore,
           })
           break
         }
