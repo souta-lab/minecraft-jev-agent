@@ -10,14 +10,19 @@ import {
   dependencyGoalForPredicate,
   describePredicate,
   evaluatePredicate,
+  evaluatePredicateTruth,
   evaluatePredicates,
+  evaluatePredicatesTruth,
   expandOptionDependencies,
+  formatPredicateUnknown,
   isOptionComplete,
   isOptionStartable,
   makeOptionSnapshot,
   optionSpecsToPlannedGoals,
+  optionStartabilityTruth,
   orderGoalsByReadiness,
   resolveOptionCompilerEnabled,
+  setPredicateUnknownSink,
   snapshotFromResident,
   validateOptionSpec,
   validatePredicate,
@@ -55,6 +60,29 @@ function sameGoal(a: PlannedGoal, b: PlannedGoal): boolean {
     (a.targetItem ?? null) === (b.targetItem ?? null) &&
     (a.requiredCount ?? 1) === (b.requiredCount ?? 1)
   )
+}
+
+function withPredicateUnknownCapture<T>(run: (lines: string[]) => T): T {
+  const lines: string[] = []
+  setPredicateUnknownSink((line) => {
+    lines.push(line)
+  })
+  try {
+    return run(lines)
+  } finally {
+    setPredicateUnknownSink(null)
+  }
+}
+
+const HEALTH_SPEC: OptionSpec = {
+  id: 'custom:survive',
+  intent: 'stay alive',
+  kind: 'custom',
+  target: { count: 1 },
+  preconditions: [{ kind: 'healthAtLeast', health: 10 }],
+  success: [],
+  skills: [],
+  abortThreshold: 0.5,
 }
 
 addCase('OptionSpec validation accepts a well-formed compiled spec', () => {
@@ -119,6 +147,95 @@ addCase('predicate: pickaxe rank, health and unknown custom ids fail closed', ()
   const custom = evaluatePredicate({ kind: 'custom', id: 'not-registered' }, snapshot)
   const customRegistered = evaluatePredicate({ kind: 'custom', id: 'yes' }, snapshot, { yes: () => true })
   return { pass: rank2 && !rank3 && healthy && !custom && customRegistered, detail: `rank2=${rank2} rank3=${rank3} healthy=${healthy} unknown=${custom} registered=${customRegistered}` }
+})
+
+addCase('healthAtLeast: unknown health fails closed and logs PREDICATE_UNKNOWN (#59)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const unknownSnapshot = makeOptionSnapshot({ inventory: {}, health: null })
+    const value = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, unknownSnapshot)
+    const truth = evaluatePredicateTruth({ kind: 'healthAtLeast', health: 10 }, unknownSnapshot)
+    const startable = isOptionStartable(HEALTH_SPEC, unknownSnapshot)
+    const expected = formatPredicateUnknown({ kind: 'healthAtLeast', health: 10 }, ['health'])
+    const logged = lines.includes(expected) && lines.every((line) => line.startsWith('PREDICATE_UNKNOWN'))
+    return {
+      pass: value === false && truth.truth === 'unknown' && !startable && logged && lines.length >= 2,
+      detail: `value=${value} truth=${truth.truth} startable=${startable} lines=${JSON.stringify(lines)}`,
+    }
+  })
+})
+
+addCase('healthAtLeast: known-good true, known-bad false, no unknown log', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const below = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, makeOptionSnapshot({ inventory: {}, health: 9 }))
+    const at = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, makeOptionSnapshot({ inventory: {}, health: 10 }))
+    const above = evaluatePredicate({ kind: 'healthAtLeast', health: 10 }, makeOptionSnapshot({ inventory: {}, health: 20 }))
+    return { pass: !below && at && above && lines.length === 0, detail: `health9=${below} health10=${at} health20=${above} logs=${lines.length}` }
+  })
+})
+
+addCase('dimensionIs/levelAtMost: unknown input fails closed and logs (#59 audit)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const noDimension = makeOptionSnapshot({ inventory: {}, dimension: null, position: { x: 0, y: 12, z: 0 } })
+    const noPosition = makeOptionSnapshot({ inventory: {}, dimension: 'overworld', position: null })
+    const dimensionUnknown = evaluatePredicate({ kind: 'dimensionIs', dimension: 'overworld' }, noDimension)
+    const levelUnknown = evaluatePredicate({ kind: 'levelAtMost', y: 16 }, noPosition)
+    const dimensionKnown = evaluatePredicate({ kind: 'dimensionIs', dimension: 'overworld' }, makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:overworld' }))
+    const levelGood = evaluatePredicate({ kind: 'levelAtMost', y: 16 }, makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 12, z: 0 } }))
+    const levelBad = evaluatePredicate({ kind: 'levelAtMost', y: 16 }, makeOptionSnapshot({ inventory: {}, position: { x: 0, y: 20, z: 0 } }))
+    const logged =
+      lines.some((line) => line === 'PREDICATE_UNKNOWN name=dimensionIs input=dimension=null -> false') &&
+      lines.some((line) => line === 'PREDICATE_UNKNOWN name=levelAtMost input=position=null -> false')
+    return {
+      pass: !dimensionUnknown && !levelUnknown && dimensionKnown && levelGood && !levelBad && logged,
+      detail: `dimUnknown=${dimensionUnknown} levelUnknown=${levelUnknown} dimKnown=${dimensionKnown} levelGood=${levelGood} levelBad=${levelBad} lines=${JSON.stringify(lines)}`,
+    }
+  })
+})
+
+addCase('tri-state: unknown is not true and fresh health re-enables startability (#59)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const unknownSnapshot = makeOptionSnapshot({ inventory: {}, health: null })
+    const freshSnapshot = makeOptionSnapshot({ inventory: {}, health: 20 })
+    const cold = optionStartabilityTruth(HEALTH_SPEC, unknownSnapshot)
+    const warm = optionStartabilityTruth(HEALTH_SPEC, freshSnapshot)
+    const aggregate = evaluatePredicatesTruth([{ kind: 'healthAtLeast', health: 10 }], unknownSnapshot)
+    return {
+      pass:
+        cold === 'unknown' &&
+        warm === 'true' &&
+        aggregate.truth === 'unknown' &&
+        aggregate.unknown.length === 1 &&
+        isOptionStartable(HEALTH_SPEC, freshSnapshot) &&
+        !isOptionStartable(HEALTH_SPEC, unknownSnapshot),
+      detail: `cold=${cold} warm=${warm} aggregate=${aggregate.truth} unknown=${aggregate.unknown.length} logs=${lines.length}`,
+    }
+  })
+})
+
+addCase('custom: unregistered id is a proven false, not an unknown (#59 audit)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const snapshot = makeOptionSnapshot({ inventory: {} })
+    const value = evaluatePredicate({ kind: 'custom', id: 'not-registered' }, snapshot)
+    const truth = evaluatePredicateTruth({ kind: 'custom', id: 'not-registered' }, snapshot)
+    return { pass: value === false && truth.truth === 'false' && lines.length === 0, detail: `value=${value} truth=${truth.truth} logs=${lines.length}` }
+  })
+})
+
+addCase('tri-state aggregate prefers a proven false over an unknown (#59)', () => {
+  return withPredicateUnknownCapture((lines) => {
+    const snapshot = makeOptionSnapshot({ inventory: {}, health: null })
+    const result = evaluatePredicatesTruth(
+      [
+        { kind: 'healthAtLeast', health: 10 },
+        { kind: 'inventoryAtLeast', item: 'diamond', count: 1 },
+      ],
+      snapshot,
+    )
+    return {
+      pass: result.truth === 'false' && result.unknown.length === 1 && result.unmet.length === 2 && lines.length === 1,
+      detail: `truth=${result.truth} unknown=${result.unknown.length} unmet=${result.unmet.length} logs=${lines.length}`,
+    }
+  })
 })
 
 addCase('I(o): smelt iron_ingot is not startable without furnace + raw_iron', () => {

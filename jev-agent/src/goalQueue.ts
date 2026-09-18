@@ -18,6 +18,15 @@
 //
 // The queue is deliberately plain data so it can be: handed to Jev inside the
 // world state, written to the decision log, and unit-tested with no bot at all.
+import {
+  abandonDetail,
+  formatProtectedGoalAbandoned,
+  formatProtectedGoalDroppedRejected,
+  formatProtectedGoalReinserted,
+  isProtectedGoal,
+  splitProtectedGoals,
+} from './protectedGoals.ts'
+
 export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'unknown'
 
 /** Where a goal came from, for the decision log / debugging. */
@@ -27,8 +36,23 @@ export type GoalStatus = 'pending' | 'active' | 'done' | 'impossible'
 
 export type PlanOp = 'continue' | 'patch' | 'replace' | 'abort'
 
+export interface ApplyPlanOptions {
+  /** Replan reason, surfaced in the PROTECTED_GOAL_* / ABANDON_REASON audit lines. */
+  reason?: string
+  /** Audit sink for protection decisions, so the controller can log them. */
+  onProtection?: (line: string) => void
+}
+
 export interface QueuedGoal {
   id: string
+  /**
+   * Issue #55: deterministic prerequisite marking. When true, a `patch`/
+   * `replace` may not drop this goal without an explicit `abort`; the queue
+   * re-inserts it and logs `PROTECTED_GOAL_REINSERTED`.
+   */
+  protected?: boolean
+  /** Issue #55: a core/rung goal that advances the current milestone. */
+  core?: boolean
   kind: GoalKind
   description: string
   /** item this goal targets, when the kind is `collect` */
@@ -62,6 +86,10 @@ export interface PlannedGoal {
   targetY?: number | null
   dimension?: string | null
   detail?: string
+  /** Issue #55: deterministic prerequisite; a patch/replace may not drop it. */
+  protected?: boolean
+  /** Issue #55: core/rung goal; a patch/replace may not drop it. */
+  core?: boolean
 }
 
 export interface GoalQueueState {
@@ -172,27 +200,57 @@ export class GoalQueue {
 
   /**
    * Adopt a plan. Unfinished goals are dropped and replaced; completed goals stay
-   * so the queue remains a truthful history for the log.
+   * so the queue remains a truthful history for the log. Issue #55: protected/
+   * core unfinished goals are re-inserted (or the op is rejected) instead of
+   * being silently dropped.
    */
-  applyPlan(planned: readonly PlannedGoal[], origin: GoalOrigin, op: PlanOp = 'replace'): QueuedGoal[] {
+  applyPlan(
+    planned: readonly PlannedGoal[],
+    origin: GoalOrigin,
+    op: PlanOp = 'replace',
+    options: ApplyPlanOptions = {},
+  ): QueuedGoal[] {
     if (op === 'abort') {
       const now = Date.now()
       for (const goal of this.goals) {
         if (goal.status === 'done') continue
+        const protect = isProtectedGoal(goal)
         goal.status = 'impossible'
-        goal.detail = 'aborted by replan'
+        goal.detail = abandonDetail(options.reason, protect)
         goal.updatedAt = now
+        if (protect) options.onProtection?.(formatProtectedGoalAbandoned(goal, options.reason ?? 'abort'))
       }
       this.activate()
       return []
     }
     if (op === 'continue') {
       // keep every existing goal (done and unfinished) and append the new tail
-    } else if (op === 'patch') {
-      // keep completed history and the currently active goal; replace the pending tail
-      this.goals = this.goals.filter((goal) => goal.status === 'done' || goal.status === 'active')
     } else {
-      this.goals = this.goals.filter((goal) => goal.status === 'done')
+      const unfinishedProtected = this.goals.filter(
+        (goal) => (goal.status === 'pending' || goal.status === 'active') && isProtectedGoal(goal),
+      )
+      const { dropped } = splitProtectedGoals(unfinishedProtected, planned)
+      if (planned.length === 0 && dropped.length > 0) {
+        for (const goal of dropped) {
+          options.onProtection?.(formatProtectedGoalDroppedRejected(goal, op, options.reason ?? 'empty_replan'))
+        }
+        this.activate()
+        return []
+      }
+      const droppedQueued = unfinishedProtected.filter((goal) => dropped.some((found) => found.id === goal.id))
+      if (op === 'patch') {
+        // keep completed history and the currently active goal; replace the pending tail
+        this.goals = this.goals.filter((goal) => goal.status === 'done' || goal.status === 'active')
+      } else {
+        this.goals = this.goals.filter((goal) => goal.status === 'done')
+      }
+      const keptIds = new Set(this.goals.map((goal) => goal.id))
+      const now = Date.now()
+      for (const original of droppedQueued) {
+        if (keptIds.has(original.id)) continue
+        options.onProtection?.(formatProtectedGoalReinserted(original, op, options.reason ?? 'not_in_replacement'))
+        this.goals.push({ ...original, status: 'pending', updatedAt: now })
+      }
     }
     const now = Date.now()
     const added: QueuedGoal[] = []
@@ -213,6 +271,8 @@ export class GoalQueue {
         createdAt: now,
         updatedAt: now,
         detail: plan.detail ?? null,
+        protected: plan.protected === true,
+        core: plan.core === true,
       }
       this.goals.push(goal)
       added.push(goal)

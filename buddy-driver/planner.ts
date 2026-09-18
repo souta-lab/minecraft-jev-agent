@@ -544,10 +544,10 @@ export function furnacePrereqGoals(
   knownFurnaces: number | undefined = 0,
 ): PlannedGoal[] {
   if ((placedFurnacesNear ?? 0) > 0) return []
-  const place: PlannedGoal = { kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
+  const place: PlannedGoal = { kind: 'place', description: 'place 1 x furnace', targetItem: 'furnace', requiredCount: 1, protected: true }
   if (has(counts, 'furnace')) return [place]
   if ((knownFurnaces ?? 0) > 0) return []
-  const craft: PlannedGoal = { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1 }
+  const craft: PlannedGoal = { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1, protected: true }
   const stoneHave = countClass(counts, 'stone')
   if (stoneHave >= 8) return [craft, place]
   const need = Math.max(1, 8 - stoneHave)
@@ -556,6 +556,7 @@ export function furnacePrereqGoals(
     description: `collect ${need} x cobblestone (furnace material)`,
     targetItem: 'cobblestone',
     requiredCount: need,
+    protected: true,
   }
   return [collect, craft, place]
 }
@@ -575,7 +576,7 @@ function withFurnacePrereq(
 /** A rung's goals, with the predicate descent prerequisite prepended for
  * ore rungs whose ore is not held yet (#12, #41). */
 export function rungGoalsWithPrereq(rung: Rung, c: Counts, w: ResidentWorldMemory): PlannedGoal[] {
-  const base = rung.goals(c, w)
+  const base = rung.goals(c, w).map((goal) => (goal.core === true ? goal : { ...goal, core: true }))
   if (!needsOreDescent(rung.id, c)) return base
   const oreItem = ORE_RUNG_ITEM[rung.id]
   if (oreItem === undefined) return base
