@@ -99,11 +99,42 @@ export interface KnownResourceJson {
   lastSeenAt?: number
 }
 
+/** The two station kinds the resident remembers coordinates for. */
+export type StationKind = 'crafting_table' | 'furnace'
+
+/**
+ * Issue #31: a station coordinate is a mutable RECORD, not an immortal point.
+ *
+ * `status` is the health/reachability state:
+ *   known       - remembered but not yet re-verified this/last generation
+ *   verified    - the block was observed present (and not proven unreachable)
+ *   missing     - validation failed: the block is gone / a different block
+ *   unreachable - validation failed: the pathfinder could not reach it
+ *   invalidated - terminal: N failures or stale age; never selected again
+ *
+ * The metadata fields are optional so legacy/durable JSON and pure test
+ * fixtures keep parsing; `normalizeStation()` in `station-memory.ts` fills the
+ * defaults on every read and the runtime writer always populates them.
+ */
+export interface KnownStation extends Vec3Json {
+  kind?: StationKind
+  /** epoch ms the coordinate was first recorded */
+  firstSeenAt?: number
+  /** epoch ms the block was last observed present */
+  lastVerifiedAt?: number
+  /** health/reachability state (issue #31) */
+  status?: StationStatus
+  /** consecutive failed validations; at STATION_MAX_FAILURES the record is invalidated */
+  failures?: number
+}
+
+export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | 'invalidated'
+
 export interface ResidentWorldMemory {
-  /** placed crafting_table stations discovered by scanning the loaded world */
-  craftingTables: Vec3Json[]
-  /** placed furnace stations discovered by scanning the loaded world */
-  furnaces: Vec3Json[]
+  /** placed crafting_table stations discovered by scanning the loaded world (#31: validated records) */
+  craftingTables: KnownStation[]
+  /** placed furnace stations discovered by scanning the loaded world (#31: validated records) */
+  furnaces: KnownStation[]
   /** "x,y,z:block" -> times mined (depletion model, best-effort) */
   mined: Record<string, number>
   /** ore block names seen at least once in the world state */
@@ -145,8 +176,11 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
 
 /** What the generation proposes; the HOST is the only writer that commits it. */
 export interface WorldMemoryDelta {
-  craftingTables?: Vec3Json[]
-  furnaces?: Vec3Json[]
+  craftingTables?: KnownStation[]
+  furnaces?: KnownStation[]
+  /** station records proven gone/invalidated; the host drops them from the durable
+   * store so a stale coordinate is never served to a later generation (#31) */
+  removeStations?: KnownStation[]
   discoveredOres?: string[]
   knownResources?: KnownResourceJson[]
   /** cells proven gone (mined/replaced); the host drops them from the durable store (#14) */

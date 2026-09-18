@@ -33,14 +33,17 @@ import type {
   GenerationStatus,
   HazardSource,
   KnownResourceJson,
+  KnownStation,
   ResidentGeneration,
   ResidentWorldMemory,
+  StationKind,
   StructuralSmokeResult,
   Vec3Json,
   WorldKey,
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
+import { normalizeStation, stationKey } from './station-memory.ts'
 import {
   capturePreLossInventory,
   parseRehearsalMode,
@@ -162,8 +165,8 @@ function keyedMemory(): ResidentWorldMemory {
 function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
   const normal = normalizeWorldMemory(memory)
   return {
-    craftingTables: normal.craftingTables.map((p) => ({ ...p })),
-    furnaces: normal.furnaces.map((p) => ({ ...p })),
+    craftingTables: normal.craftingTables.map((station) => normalizeStation(station, 'crafting_table')),
+    furnaces: normal.furnaces.map((station) => normalizeStation(station, 'furnace')),
     mined: { ...normal.mined },
     discoveredOres: [...normal.discoveredOres],
     knownResources: normal.knownResources.map((resource) => ({ ...resource })),
@@ -277,8 +280,12 @@ function commitHostLedger(ledger: GoalQueueSnapshot, source: string): void {
 
 function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
   const memory = keyedMemory()
-  if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables)
-  if (delta.furnaces !== undefined) mergeStationDtos(memory.furnaces, delta.furnaces)
+  if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables, 'crafting_table')
+  if (delta.furnaces !== undefined) mergeStationDtos(memory.furnaces, delta.furnaces, 'furnace')
+  if (delta.removeStations !== undefined) {
+    removeStationDtos(memory.craftingTables, delta.removeStations, 'crafting_table')
+    removeStationDtos(memory.furnaces, delta.removeStations, 'furnace')
+  }
   if (delta.discoveredOres !== undefined) {
     for (const ore of delta.discoveredOres) {
       if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
@@ -338,17 +345,36 @@ function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHazard {
   return existing
 }
 
-function mergeStationDtos(target: Vec3Json[], found: Vec3Json[]): number {
-  const seen = new Set(target.map((p) => `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`))
-  let added = 0
-  for (const pos of found) {
-    const key = `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    target.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) })
-    added += 1
+function mergeStationDtos(target: KnownStation[], found: readonly KnownStation[], kind: StationKind): number {
+  let changed = 0
+  for (const station of found) {
+    const key = stationKey(station)
+    const existing = target.find((current) => stationKey(current) === key)
+    if (existing === undefined) {
+      target.push(normalizeStation(station, kind))
+      changed += 1
+      continue
+    }
+    Object.assign(existing, normalizeStation({ ...existing, ...station }, kind))
+    changed += 1
   }
-  return added
+  return changed
+}
+
+function removeStationDtos(target: KnownStation[], gone: readonly KnownStation[], kind: StationKind): number {
+  let removed = 0
+  for (const station of gone) {
+    if ((station.kind ?? kind) !== kind) continue
+    const key = stationKey(station)
+    for (let index = target.length - 1; index >= 0; index -= 1) {
+      const current = target[index]
+      if (current !== undefined && stationKey(current) === key) {
+        target.splice(index, 1)
+        removed += 1
+      }
+    }
+  }
+  return removed
 }
 
 function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[]): number {

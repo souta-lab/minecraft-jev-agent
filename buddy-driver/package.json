@@ -17,6 +17,7 @@
     "smelt-furnace-test": "node ../jev-agent/node_modules/.bin/tsx test-smelt-furnace.mts",
     "furnace-place-test": "node ../jev-agent/node_modules/.bin/tsx test-furnace-place.mts",
     "state-snapshot-test": "node ../jev-agent/node_modules/.bin/tsx test-state-snapshot.mts",
+    "station-memory-test": "node ../jev-agent/node_modules/.bin/tsx test-station-memory.mts",
     "ledger-guard-test": "node ../jev-agent/node_modules/.bin/tsx test-ledger-guard.mts",
     "skill-strategy-test": "node ../jev-agent/node_modules/.bin/tsx test-skill-strategy.mts",
     "observability-test": "node ../jev-agent/node_modules/.bin/tsx test-observability.mts",
