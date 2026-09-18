@@ -28,6 +28,14 @@ import type { CraftRecipeLike } from './craftWindow.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 import { evaluatePillarStep, resolvePillarStep, formatAscentProgress } from './verticalPlan.ts'
+import {
+  formatPillarUpStep,
+  installGroundCorrection,
+  jumpWithGroundCorrection,
+  PILLAR_TAKEOFF_BUDGET_MS,
+  PILLAR_TAKEOFF_POLL_MS,
+} from './pillarJump.ts'
+import type { SolidAt } from './pillarJump.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -1142,9 +1150,13 @@ export class Executor {
    * (node_modules/prismarine-physics/index.js:721-725) and this Leaf 26.1
    * server ships no 26.1 collision shapes (README "Environment findings"), so
    * mineflayer reports onGround=false while a solid block is underfoot. The
-   * control walk already patches that at executor.ts:1286-1292; pillarUp did
-   * not, so `setControlState('jump')` was a no-op. The same correction is
-   * installed for the whole climb here.
+   * first correction only probed 0.1 blocks below the raw feet, so it missed
+   * whenever the server pinned the body at a fractional y (the live y=10.5 /
+   * 10.25 over a footing at feet-1): 1055 live hop jumps at that column all
+   * measured rise=0. The shared `pillarJump.ts` correction scans the same
+   * contiguous column `resolvePillarStep` does (feet cell or feet-1), and the
+   * jump is held through a VERIFIED takeoff - a silent no-op is now a typed
+   * `place_error` instead of a placed block that never comes.
    */
   private async pillarUp(
     candidate: Candidate,
@@ -1165,8 +1177,12 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
-    const onPhysicsTick = (): void => this.correctStandingOnGround()
-    this.bot.on('physicsTick', onPhysicsTick)
+    const solidAt: SolidAt = (x, y, z) => this.solidSupportAt(x, y, z)
+    // Exactly the control-walk mechanism, kept for the whole climb: physics on
+    // and the stale onGround flag patched from the block grid on every tick.
+    const savedPhysics = this.bot.physicsEnabled
+    const uninstallGroundCorrection = installGroundCorrection(this.bot, solidAt)
+    this.bot.physicsEnabled = true
     try {
       let climbed = 0
       while (climbed < maxSteps) {
@@ -1223,12 +1239,28 @@ export class Executor {
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
         let placed = false
-        this.correctStandingOnGround()
-        this.bot.setControlState('jump', true)
         try {
+          const jump = await jumpWithGroundCorrection(this.bot, {
+            isSolid: solidAt,
+            budgetMs: PILLAR_TAKEOFF_BUDGET_MS,
+            pollMs: PILLAR_TAKEOFF_POLL_MS,
+            sleep: (ms) => delay(ms, signal),
+            now: Date.now,
+          })
+          if (!jump.airborne) {
+            throw new ExecutorError(
+              'place_error',
+              `PILLAR_UP jump never left the ground at y=${round2(beforeY)} rise=${round2(jump.peakRise)} samples=${jump.samples} onGround=${this.bot.entity.onGround === true}`,
+            )
+          }
           const atApex = await this.waitForPillarApex(epoch, signal)
+          if (!atApex) {
+            this.logger.warn('executor', 'PILLAR_UP apex window elapsed before the rise settled; placing while airborne', {
+              actionId: candidate.id,
+              ...feet,
+            })
+          }
           this.ensureOwned(epoch, signal)
-          if (!atApex) throw new ExecutorError('place_error', 'PILLAR_UP jump never left the ground')
           await this.bot.placeBlock(footing, this.bot.entity.position.clone().set(0, 1, 0))
           placed = true
         } catch (error) {
@@ -1237,8 +1269,6 @@ export class Executor {
             actionId: candidate.id,
             ...feet,
           })
-        } finally {
-          this.bot.setControlState('jump', false)
         }
         if (!placed) break
         const landed = await this.waitForPillarLanding({ x: feet.x, y: pose.placeY, z: feet.z }, epoch, signal)
@@ -1246,7 +1276,7 @@ export class Executor {
         climbed += 1
         this.logger.info(
           'agent',
-          `PILLAR_UP_STEP from_y=${Math.floor(beforeY)} to_y=${Math.floor(this.bot.entity.position.y)} placed=${placeName} step=${climbed}`,
+          formatPillarUpStep(climbed, Math.floor(beforeY), Math.floor(this.bot.entity.position.y), placeName),
           { actionId: candidate.id, x: feet.x, z: feet.z },
         )
       }
@@ -1255,7 +1285,8 @@ export class Executor {
       }
       return climbed > 0
     } finally {
-      this.bot.removeListener('physicsTick', onPhysicsTick)
+      uninstallGroundCorrection()
+      this.bot.physicsEnabled = savedPhysics
       this.bot.setControlState('jump', false)
     }
   }
@@ -1325,17 +1356,6 @@ export class Executor {
     return true
   }
 
-  /**
-   * This server reports `onGround=false` while a solid block is underfoot
-   * (missing 26.1 collision shapes), and prismarine-physics gates every jump on
-   * that flag (index.js:721-725), so `jump` control is silently discarded.
-   * Correct the flag from the block grid.
-   */
-  private correctStandingOnGround(): void {
-    const below = this.bot.blockAt(this.bot.entity.position.offset(0, -0.1, 0))
-    if (below !== null && below.boundingBox === 'block') this.bot.entity.onGround = true
-  }
-
   private pillarColumnUnsafe(): boolean {
     const feet = {
       x: Math.floor(this.bot.entity.position.x),
@@ -1350,18 +1370,19 @@ export class Executor {
     return false
   }
 
+  /**
+   * Wait for the rise to settle after a VERIFIED takeoff (velocity.y <= 0).
+   * `false` means the window elapsed while the body was still moving up; the
+   * caller logs it and places anyway, exactly like the pre-fix timeout.
+   */
   private async waitForPillarApex(epoch: number, signal: AbortSignal): Promise<boolean> {
     const deadline = Date.now() + PILLAR_APEX_BUDGET_MS
-    const startY = this.bot.entity.position.y
-    let airborne = false
     while (Date.now() < deadline) {
       this.ensureOwned(epoch, signal)
-      const y = this.bot.entity.position.y
-      if (!airborne && y > startY + 0.2) airborne = true
-      if (airborne && this.bot.entity.velocity.y <= 0.01) return true
-      await delay(20, signal)
+      if (this.bot.entity.velocity.y <= 0.01) return true
+      await delay(PILLAR_TAKEOFF_POLL_MS, signal)
     }
-    return airborne
+    return false
   }
 
   private async waitForPillarLanding(placeCell: Vec3Json, epoch: number, signal: AbortSignal): Promise<boolean> {
@@ -1464,9 +1485,8 @@ export class Executor {
     // The sensor reads `onGround` from Mineflayer, but on this server the flag
     // can be stale while a solid block is underfoot; correct it from the block
     // grid so the recipe's pre-emptive-jump decision is reliable.
-    const onPhysicsTick = (): void => this.correctStandingOnGround()
+    const uninstallGroundCorrection = installGroundCorrection(this.bot, (x, y, z) => this.solidSupportAt(x, y, z))
     this.bot.physicsEnabled = true
-    this.bot.on('physicsTick', onPhysicsTick)
     const until = Date.now() + options.budgetMs
     let lastProgressAt = Date.now()
     let lastPosition = this.bot.entity.position.clone()
@@ -1734,7 +1754,7 @@ export class Executor {
       )
       return false
     } finally {
-      this.bot.removeListener('physicsTick', onPhysicsTick)
+      uninstallGroundCorrection()
       this.bot.setControlState('forward', false)
       this.bot.setControlState('jump', false)
       this.bot.setControlState('back', false)
