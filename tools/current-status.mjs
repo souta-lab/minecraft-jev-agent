@@ -214,8 +214,22 @@ export async function deriveStatus(options = {}) {
     if (report === null || report === undefined) {
       section('Resident snapshot', 'UNKNOWN', ['live: unavailable'])
     } else {
+      const data = report?.data && typeof report.data === 'object' ? report.data : null
+      const stats = data?.stats && typeof data.stats === 'object' ? data.stats : null
+      const evidenceValue = (value) => {
+        if (value === null || value === undefined) return 'UNKNOWN'
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+        return JSON.stringify(value)
+      }
+      const reloadSemantics = [
+        `- reload semantics: data.reloads=${evidenceValue(data?.reloads)} (total hot reload operations); ` +
+          `data.stats.reloadsChangedHash=${evidenceValue(stats?.reloadsChangedHash)} (hash-changing); ` +
+          `data.stats.reloadsSkippedUnchanged=${evidenceValue(stats?.reloadsSkippedUnchanged)} (unchanged hash); ` +
+          `data.stats.reloadsFailed=${evidenceValue(stats?.reloadsFailed)} (failed)`,
+      ]
       section('Resident snapshot', 'EVIDENCE', [
         'live: report received',
+        ...reloadSemantics,
         '```json',
         JSON.stringify(report, null, 2),
         '```',

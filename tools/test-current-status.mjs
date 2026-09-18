@@ -45,6 +45,18 @@ function makeRunner({ ghOk = true } = {}) {
 
 const offlineResident = async () => null
 
+const residentWithReloadCounters = async () => ({
+  ok: true,
+  data: {
+    reloads: 17,
+    stats: {
+      reloadsChangedHash: 5,
+      reloadsSkippedUnchanged: 11,
+      reloadsFailed: 1,
+    },
+  },
+})
+
 // 1. Happy path: every value comes from the injected output.
 {
   const { markdown, commands } = await deriveStatus({ run: makeRunner(), readResident: offlineResident })
@@ -76,7 +88,17 @@ const offlineResident = async () => null
   ok('exact evidence commands are printed')
 }
 
-// 2. Failing gh -> UNKNOWN, no crash, no fabricated zero.
+// 2. Resident reload fields are labeled by semantic meaning, not by a legacy key.
+{
+  const { markdown } = await deriveStatus({ run: makeRunner(), readResident: residentWithReloadCounters })
+  assert.match(markdown, /reload semantics: data\.reloads=17 \(total hot reload operations\)/)
+  assert.match(markdown, /data\.stats\.reloadsChangedHash=5 \(hash-changing\)/)
+  assert.match(markdown, /data\.stats\.reloadsSkippedUnchanged=11 \(unchanged hash\)/)
+  assert.match(markdown, /data\.stats\.reloadsFailed=1 \(failed\)/)
+  ok('resident reload counters are labeled by semantic meaning')
+}
+
+// 3. Failing gh -> UNKNOWN, no crash, no fabricated zero.
 {
   const { markdown } = await deriveStatus({ run: makeRunner({ ghOk: false }), readResident: offlineResident })
   assert.match(markdown, /## Open pull requests — UNKNOWN/)
@@ -88,7 +110,7 @@ const offlineResident = async () => null
   ok('failing gh degrades to UNKNOWN with no fabricated zero')
 }
 
-// 3. --write writes CURRENT-STATUS.md including the evidence-commands section.
+// 4. --write writes CURRENT-STATUS.md including the evidence-commands section.
 {
   const dir = mkdtempSync(join(tmpdir(), 'current-status-'))
   try {
