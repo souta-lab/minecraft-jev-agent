@@ -1267,6 +1267,10 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
 /**
  * SMELT candidate for a `smelt` subgoal: a placed furnace is in sensor range,
  * the input and a fuel item are in the inventory, and the output is still short.
+ * With no sensed furnace the goal is still satisfiable: the acquisition ladder
+ * sources a REGISTERED furnace (durable known resource or a remembered
+ * placed-by-us station) through `knownFurnaces` and offers the
+ * walk-to-then-smelt RETRIEVE rather than nothing.
  */
 function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
@@ -1340,6 +1344,28 @@ function knownStations(state: WorldState, station: string): KnownStationLike[] {
   for (const resource of state.signals.knownResources ?? []) {
     if (resource.kind !== 'station' || !resource.name.includes(station)) continue
     found.push({ name: resource.name, position: resource.position })
+  }
+  found.sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
+  return found
+}
+
+/**
+ * Furnace coordinates the smelt prerequisite can walk to. Durable known
+ * resources are the primary source; the sensor's REMEMBERED station entries are
+ * merged in too, because a furnace this bot placed and the controller registered
+ * is a usable station even after the bot leaves the near-field scan radius - it
+ * must yield the walk-to-then-smelt RETRIEVE instead of collapsing to WAIT.
+ */
+function knownFurnaces(state: WorldState): KnownStationLike[] {
+  const found = knownStations(state, 'furnace')
+  const seen = new Set(found.map((station) => knownStationKey(station)))
+  for (const entry of state.furnaces ?? []) {
+    if (isSensedStation(entry)) continue
+    const station: KnownStationLike = { name: 'furnace', position: { x: entry.x, y: entry.y, z: entry.z } }
+    const key = knownStationKey(station)
+    if (seen.has(key)) continue
+    seen.add(key)
+    found.push(station)
   }
   found.sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
   return found
@@ -1482,7 +1508,7 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     if (count > 0 && matchesResourceClass(name, 'stone')) stoneCount += count
   }
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
-  const furnaces = knownStations(state, 'furnace')
+  const furnaces = knownFurnaces(state)
   const reachableFurnace = furnaces.find((station) => !unreachableStations.has(knownStationKey(station))) ?? null
   return {
     goal: state.goalQueue?.current ?? null,
