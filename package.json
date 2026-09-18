@@ -8,8 +8,12 @@
     "issue-graph": "node tools/issue-graph.mjs",
     "current-status": "node tools/current-status.mjs",
     "current-status:write": "node tools/current-status.mjs --write",
+    "frontier": "node tools/frontier.mjs",
+    "frontier:check": "node tools/frontier.mjs --check",
+    "frontier:write": "node tools/frontier.mjs --write",
     "lane-guard-test": "node tools/test-lane-guard.mjs",
     "issue-graph-test": "node tools/test-issue-graph.mjs",
-    "current-status-test": "node tools/test-current-status.mjs"
+    "current-status-test": "node tools/test-current-status.mjs",
+    "frontier-test": "node tools/test-frontier.mjs"
   }
 }
