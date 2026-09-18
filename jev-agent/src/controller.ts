@@ -53,6 +53,18 @@ import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
+import {
+  detectOscillation,
+  filterBlacklistedMoves,
+  formatMoveFailMem,
+  formatMoveFailMemReset,
+  formatMoveTargetSkipped,
+  formatOscillationDetected,
+  isTrackedMoveKind,
+  MoveFailMemory,
+  moveFailureKey,
+} from './moveFailMemory.ts'
+import type { MoveFailureReason } from './moveFailMemory.ts'
 import { evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
@@ -337,6 +349,35 @@ const DESCEND_STALL_TICKS = resolveDescendStallTicks()
 const DESCEND_NO_CANDIDATE_TICKS = resolveDescendNoCandidateTicks()
 /** Distance decrease (m) that counts as real retrieval progress. */
 const RETRIEVAL_PROGRESS_EPSILON = 0.5
+/** Issue #8: failed attempts at one coordinate before it is blacklisted. */
+const MOVE_FAILMEM_LIMIT = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_LIMIT', 3)
+/** Issue #8: how long a blacklisted coordinate stays skipped. */
+const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLDOWN_MS', 30_000)
+/** Issue #8: bound on tracked coordinates (least-failed/oldest evicted first). */
+const MOVE_FAILMEM_MAX_ENTRIES = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_MAX_ENTRIES', 256)
+/** Issue #8: do not re-log the same oscillating pair more often than this. */
+const OSCILLATION_REPEAT_LOG_MS = 5_000
+
+function resolveEnvPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+/** Map an executor failure code onto a movement-failure reason. */
+function moveFailureReason(failure: string | null): MoveFailureReason {
+  switch (failure) {
+    case 'path_no_path':
+      return 'no_path'
+    case 'path_stuck':
+    case 'path_timeout':
+    case 'action_timeout':
+      return 'stuck'
+    default:
+      return 'unreachable'
+  }
+}
 
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
@@ -396,6 +437,10 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCEND_PROGRESS',
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
+  'MOVE_FAILMEM',
+  'MOVE_FAILMEM_RESET',
+  'MOVE_TARGET_SKIPPED',
+  'OSCILLATION_DETECTED',
   'RETURN_TO_KNOWN_RESOURCE',
   'RETRIEVE_STALLED',
   'KNOWN_RESOURCE_STALE',
@@ -529,6 +574,16 @@ export class JevController {
   private readonly unreachableResources = new Set<string>()
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
+  /** #8: exact coordinate failure memory (count, cooldown, dimension). */
+  private readonly moveFailMemory = new MoveFailMemory({
+    failureLimit: MOVE_FAILMEM_LIMIT,
+    cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
+    maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
+  })
+  /** #8: the movement target currently owning the body, blacklisted on oscillation. */
+  private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
+  private lastOscillationPair: string | null = null
+  private lastOscillationAt = 0
   /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
   private readonly placementRetries = new Map<string, number>()
   /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
@@ -977,6 +1032,7 @@ export class JevController {
 
       let candidates = generateCandidates(state, candidateOptions(this.options, this.recipeIndex))
       candidates = this.applyFurnacePrereq(state, candidates)
+      candidates = this.filterMoveCandidates(candidates, state)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -1086,7 +1142,11 @@ export class JevController {
         },
         sensorOptions(this.options),
       )
-      const freshCandidates = generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex))
+      const freshCandidates = this.filterMoveCandidates(
+        generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex)),
+        freshState,
+        false,
+      )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
         this.guardRejections += 1
@@ -1138,6 +1198,7 @@ export class JevController {
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
+      this.rememberMoveTarget(guarded.candidate)
 
       const claim = this.executor.claim(guarded.candidate)
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
@@ -1672,6 +1733,12 @@ export class JevController {
           this.activeRetrieval = null
           this.retrievalTrack = null
           this.noteCandidateSuccess(result.actionId)
+          this.recordMoveSuccess(candidate)
+        } else {
+          // `status=done verified=false progressDelta=0` is the live #78 loop: a
+          // retrieval that reports completion while producing nothing must charge
+          // the coordinate failure memory so it is eventually skipped.
+          this.recordMoveFailure(candidate, 'no_progress')
         }
       }
       if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
@@ -1691,6 +1758,9 @@ export class JevController {
             this.tickCounter,
           )
           this.noteCandidateFailure(result.actionId)
+          this.recordMoveFailure(candidate, 'no_progress')
+        } else {
+          this.recordMoveSuccess(candidate)
         }
       }
       this.actionStart = null
@@ -1700,6 +1770,7 @@ export class JevController {
       this.noteCandidateFailure(result.actionId)
     } else {
       this.noteCandidateFailure(result.actionId)
+      this.recordMoveFailure(candidate, moveFailureReason(result.failure))
       this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
     }
 
@@ -1823,6 +1894,7 @@ export class JevController {
       { traveled, net, efficiency, windowStart: first, windowEnd: last },
       this.tickCounter,
     )
+    this.detectMoveOscillation()
   }
 
   private logDescendPlan(candidate: Candidate): void {
@@ -2968,6 +3040,109 @@ export class JevController {
       )
     }
     this.noteCandidateFailure(candidate.id)
+    this.recordMoveFailure(candidate, 'unreachable')
+  }
+
+  /** #8: drop movement targets still inside their blacklist cooldown. */
+  private filterMoveCandidates(candidates: readonly Candidate[], state: WorldState, log = true): Candidate[] {
+    const dimension = state.self.dimension
+    const { kept, skipped } = filterBlacklistedMoves(candidates, this.moveFailMemory, dimension)
+    if (!log) return kept
+    for (const entry of skipped) {
+      this.logger.warn(
+        'agent',
+        formatMoveTargetSkipped(entry.key, entry.attempts, entry.cooldownSeconds),
+        {
+          actionId: entry.candidate.id,
+          key: entry.key,
+          attempts: entry.attempts,
+          cooldown: entry.cooldownSeconds,
+          reason: entry.reason,
+        },
+        this.tickCounter,
+      )
+    }
+    return kept
+  }
+
+  private rememberMoveTarget(candidate: Candidate): void {
+    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    this.lastMoveTarget = { dimension: this.currentDimension(), position: { ...candidate.target } }
+  }
+
+  private recordMoveFailure(candidate: Candidate, reason: MoveFailureReason): void {
+    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    const dimension = this.currentDimension()
+    const result = this.moveFailMemory.record(dimension, candidate.target, reason)
+    const key = moveFailureKey(dimension, candidate.target)
+    this.logger.warn(
+      'agent',
+      formatMoveFailMem(key, result.entry.attempts, reason),
+      { actionId: candidate.id, key, attempts: result.entry.attempts, reason, kind: candidate.kind },
+      this.tickCounter,
+    )
+    if (!result.newlyBlacklisted) return
+    this.logger.warn(
+      'agent',
+      formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
+      { actionId: candidate.id, key, attempts: result.entry.attempts, reason },
+      this.tickCounter,
+    )
+  }
+
+  private recordMoveSuccess(candidate: Candidate): void {
+    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    const dimension = this.currentDimension()
+    const key = moveFailureKey(dimension, candidate.target)
+    if (!this.moveFailMemory.reset(dimension, candidate.target)) return
+    if (this.lastMoveTarget !== null && this.lastMoveTarget.position.x === candidate.target.x && this.lastMoveTarget.position.z === candidate.target.z) {
+      this.lastMoveTarget = null
+    }
+    this.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, this.tickCounter)
+  }
+
+  private currentDimension(): string {
+    const game = this.bot.game
+    return game === undefined ? 'overworld' : game.dimension
+  }
+
+  /**
+   * #8: an A/B position pair repeating without progress is an oscillation, not a
+   * path. Log it, blacklist the target that caused it, and clear the window so the
+   * detector cannot fire on the same stale samples again.
+   */
+  private detectMoveOscillation(): void {
+    const detection = detectOscillation(this.positionWindow)
+    if (!detection.detected || detection.from === null || detection.to === null) return
+    const fromKey = `${detection.from.x},${detection.from.y},${detection.from.z}`
+    const toKey = `${detection.to.x},${detection.to.y},${detection.to.z}`
+    const pair = `${fromKey}|${toKey}`
+    const now = Date.now()
+    this.positionWindow.length = 0
+    if (pair === this.lastOscillationPair && now - this.lastOscillationAt < OSCILLATION_REPEAT_LOG_MS) return
+    this.lastOscillationPair = pair
+    this.lastOscillationAt = now
+    this.logger.warn(
+      'agent',
+      formatOscillationDetected(detection.from, detection.to, detection.cycles, 'blacklist'),
+      { from: fromKey, to: toKey, cycles: detection.cycles, action: 'blacklist' },
+      this.tickCounter,
+    )
+    const target = this.lastMoveTarget
+    if (target !== null) {
+      const result = this.moveFailMemory.blacklist(target.dimension, target.position, 'no_progress')
+      const key = moveFailureKey(target.dimension, target.position)
+      this.logger.warn(
+        'agent',
+        formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
+        { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
+        this.tickCounter,
+      )
+    }
+    this.escalate(
+      'progress_stall',
+      `OSCILLATION_DETECTED from=${fromKey} to=${toKey} cycles=${detection.cycles}; blacklisting the movement target`,
+    )
   }
 
   private syntheticWait(): JevResult {
