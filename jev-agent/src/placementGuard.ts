@@ -141,6 +141,11 @@ export function formatAbandonReason(option: string, reason: AbandonReason): stri
   return `ABANDON_REASON option=${option} reason=${reason}`
 }
 
+/** The smelt actually opened a usable furnace; `source` proves held vs remembered. */
+export function formatFurnaceReady(source: string, at: Vec3Json): string {
+  return `FURNACE_READY source=${source} at=${at.x},${at.y},${at.z}`
+}
+
 export function formatPlaceRetry(at: Vec3Json, reason: string): string {
   return `PLACE_RETRY at=${at.x},${at.y},${at.z} reason=${reason}`
 }

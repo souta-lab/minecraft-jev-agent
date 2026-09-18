@@ -131,7 +131,7 @@ const FOOD_ITEMS = new Set([
 
 const HAZARD_DANGER_RADIUS = 3
 
-function blockId(prefix: 'b' | 'p', position: Vec3Json): string {
+export function blockId(prefix: 'b' | 'p', position: Vec3Json): string {
   return `${prefix}${position.x}_${position.y}_${position.z}`
 }
 
@@ -891,6 +891,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
         fuelCount,
         outputItem: focusItem,
         count,
+        ...(state.signals.heldFurnacePlacedAt === blockId('b', furnace) ? { furnaceSource: 'held' } : {}),
       },
     },
   ]

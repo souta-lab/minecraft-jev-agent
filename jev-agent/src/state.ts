@@ -253,6 +253,11 @@ export type AgentSignals = {
   descendLimitReached?: boolean
   /** durable known-resource coordinates injected by the host (issue #43) */
   knownResources?: KnownResource[]
+  /**
+   * #78: block key (`bX_Y_Z`) of a furnace the bot placed from a held item, so
+   * the SMELT candidate can report `furnaceSource=held` to FURNACE_READY.
+   */
+  heldFurnacePlacedAt?: string | null
 }
 
 export type WorldState = {

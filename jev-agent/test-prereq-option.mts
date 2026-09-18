@@ -69,7 +69,7 @@ addCase('(a2) crafting beats walking when the known station is far and materials
   return { pass, detail: decision.line }
 })
 
-addCase('(a3) a close known station beats crafting when no furnace is held', () => {
+addCase('(a3) #78: crafting from held materials beats a close known station', () => {
   const decision = planPrereqOptions(
     input({
       stoneCount: 8,
@@ -77,7 +77,7 @@ addCase('(a3) a close known station beats crafting when no furnace is held', () 
       knownStation: { name: 'furnace', position: { x: 3, y: 0, z: 0 } },
     }),
   )
-  const pass = decision.chosen === 'use_known_station'
+  const pass = decision.chosen === 'craft_and_place'
   return { pass, detail: decision.line }
 })
 
