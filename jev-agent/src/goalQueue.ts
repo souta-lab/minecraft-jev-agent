@@ -26,6 +26,7 @@ import {
   isProtectedGoal,
   splitProtectedGoals,
 } from './protectedGoals.ts'
+import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
 
 export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'unknown'
 
@@ -46,7 +47,7 @@ export type GoalStrategy =
 export interface ApplyPlanOptions {
   /** Replan reason, surfaced in the PROTECTED_GOAL_* / ABANDON_REASON audit lines. */
   reason?: string
-  /** Audit sink for protection decisions, so the controller can log them. */
+  /** Audit sink for protection and readiness-merge decisions, so the controller can log them. */
   onProtection?: (line: string) => void
 }
 
@@ -105,6 +106,25 @@ export interface PlannedGoal {
    * means "not proven ready", never "blocked forever".
    */
   ready?: boolean
+}
+
+/**
+ * Audit marker for the #46 regression fix: a ready incoming goal kept the head
+ * over a protected goal the merge re-inserted behind it.
+ */
+export const READY_HEAD_PRIORITY = 'READY_HEAD_PRIORITY'
+
+/**
+ * True for the M2 iron smelt whose preconditions the planner proved in its
+ * readiness snapshot. The queue trusts the proof (`ready`) instead of
+ * recomputing inventory state it does not own.
+ */
+export function isReadyIronSmelt(goal: PlannedGoal): boolean {
+  return goal.kind === 'smelt' && goal.targetItem === PROTECTED_SMELT_ITEM && goal.ready === true
+}
+
+export function formatReadyHeadPriority(readyGoal: PlannedGoal, over: QueuedGoal): string {
+  return `${READY_HEAD_PRIORITY} preferred=${readyGoal.kind}_${readyGoal.targetItem ?? 'unknown'} over=${over.id} reason=preconditions_satisfied`
 }
 
 export interface GoalQueueState {
@@ -238,6 +258,7 @@ export class GoalQueue {
       this.activate()
       return []
     }
+    const reinserted: QueuedGoal[] = []
     if (op === 'continue') {
       // keep every existing goal (done and unfinished) and append the new tail
     } else {
@@ -263,38 +284,56 @@ export class GoalQueue {
       const now = Date.now()
       for (const original of droppedQueued) {
         if (keptIds.has(original.id)) continue
-        options.onProtection?.(formatProtectedGoalReinserted(original, op, options.reason ?? 'not_in_replacement'))
-        this.goals.push({ ...original, status: 'pending', updatedAt: now })
+        reinserted.push({ ...original, status: 'pending', updatedAt: now })
       }
     }
     const now = Date.now()
     const added: QueuedGoal[] = []
+    // #46 regression: the planner proved this smelt ready, so a protected goal
+    // re-inserted behind it must not leapfrog it back to the head.
+    const readySmelt = planned.find(isReadyIronSmelt)
+    const firstReinserted = reinserted[0]
+    const readyHead = readySmelt !== undefined && firstReinserted !== undefined ? readySmelt : undefined
+    if (readyHead !== undefined && firstReinserted !== undefined) {
+      options.onProtection?.(formatReadyHeadPriority(readyHead, firstReinserted))
+      added.push(this.enqueue(readyHead, origin, now))
+    }
+    for (const original of reinserted) {
+      options.onProtection?.(formatProtectedGoalReinserted(original, op, options.reason ?? 'not_in_replacement'))
+      this.goals.push(original)
+    }
     for (const plan of planned) {
-      this.counter += 1
-      const goal: QueuedGoal = {
-        id: `g${this.counter}:${plan.kind}${plan.targetItem != null ? `:${plan.targetItem}` : ''}`,
-        kind: plan.kind,
-        ...(plan.strategy === undefined ? {} : { strategy: plan.strategy }),
-        description: plan.description,
-        targetItem: plan.targetItem ?? null,
-        requiredCount: Math.max(1, Math.floor(plan.requiredCount ?? 1)),
-        targetY: plan.targetY ?? null,
-        dimension: plan.dimension ?? null,
-        startCount: 0,
-        haveCount: 0,
-        status: 'pending',
-        origin,
-        createdAt: now,
-        updatedAt: now,
-        detail: plan.detail ?? null,
-        protected: plan.protected === true,
-        core: plan.core === true,
-      }
-      this.goals.push(goal)
-      added.push(goal)
+      if (plan === readyHead) continue
+      added.push(this.enqueue(plan, origin, now))
     }
     this.activate()
     return added
+  }
+
+  /** Build the queued form of an incoming planned goal, assigning its id. */
+  private enqueue(plan: PlannedGoal, origin: GoalOrigin, now: number): QueuedGoal {
+    this.counter += 1
+    const goal: QueuedGoal = {
+      id: `g${this.counter}:${plan.kind}${plan.targetItem != null ? `:${plan.targetItem}` : ''}`,
+      kind: plan.kind,
+      ...(plan.strategy === undefined ? {} : { strategy: plan.strategy }),
+      description: plan.description,
+      targetItem: plan.targetItem ?? null,
+      requiredCount: Math.max(1, Math.floor(plan.requiredCount ?? 1)),
+      targetY: plan.targetY ?? null,
+      dimension: plan.dimension ?? null,
+      startCount: 0,
+      haveCount: 0,
+      status: 'pending',
+      origin,
+      createdAt: now,
+      updatedAt: now,
+      detail: plan.detail ?? null,
+      protected: plan.protected === true,
+      core: plan.core === true,
+    }
+    this.goals.push(goal)
+    return goal
   }
 
   /** Record live progress on the current inventory-counted goal (`collect`/`craft`); completes it if met. */

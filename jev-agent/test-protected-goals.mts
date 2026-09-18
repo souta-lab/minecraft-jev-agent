@@ -10,12 +10,14 @@
 //   (d) an equivalent producer in the replacement satisfies the protected goal;
 //   (e) an empty replace while protected work remains is rejected wholesale;
 //   (f) snapshot/restore keeps the protection identity;
-//   (g) the OptionSpec compiler round-trips protected/core.
+//   (g) the OptionSpec compiler round-trips protected/core;
+//   (h) a READY iron smelt keeps the head over a re-inserted protected goal
+//       (#46 regression), with (i) as the non-ready control.
 //
 // Run: node ../jev-agent/node_modules/.bin/tsx test-protected-goals.mts
-import { GoalQueue } from './src/goalQueue.ts'
+import { GoalQueue, READY_HEAD_PRIORITY } from './src/goalQueue.ts'
 import type { PlannedGoal, QueuedGoal } from './src/goalQueue.ts'
-import { compilePlannedGoals, optionSpecsToPlannedGoals } from './src/optionSpec.ts'
+import { compilePlannedGoal, compilePlannedGoals, isOptionStartable, makeOptionSnapshot, optionSpecsToPlannedGoals } from './src/optionSpec.ts'
 import { PROTECTED_GOAL_DROPPED_REJECTED, PROTECTED_GOAL_REINSERTED } from './src/protectedGoals.ts'
 
 interface Case {
@@ -194,6 +196,81 @@ addCase('(g) the OptionSpec compiler round-trips protected/core', () => {
     back[1]?.core === true &&
     back[1]?.protected === undefined
   return { pass, detail: `roundTrip=[${back.map((goal) => `${goal.kind}:p=${String(goal.protected)}:c=${String(goal.core)}`).join(',')}]` }
+})
+
+addCase('(h) a READY iron smelt keeps the head over a protected goal re-inserted by replace (#46 regression)', () => {
+  const queue = new GoalQueue()
+  queue.applyPlan(
+    [{ kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1, core: true }],
+    'mechanical',
+  )
+  const smelt: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
+  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, coal: 1 }, knownStations: ['furnace'], toolRank: 1 })
+  const ready = isOptionStartable(compilePlannedGoal(smelt), snapshot)
+  const lines: string[] = []
+  const added = queue.applyPlan([{ ...smelt, ready }], 'llm', 'replace', {
+    reason: 'mercury repair',
+    onProtection: (line) => lines.push(line),
+  })
+  const goals = queue.state.goals.filter((goal) => goal.status !== 'done')
+  const smeltIndex = goals.findIndex((goal) => goal.kind === 'smelt')
+  const diamondIndex = goals.findIndex((goal) => goal.targetItem === 'diamond')
+  const diamond = findGoal(queue, 'collect', 'diamond')
+  const readyLine = lines.find((line) => line.startsWith(READY_HEAD_PRIORITY))
+  const reinserted = lines.filter((line) => line.startsWith(PROTECTED_GOAL_REINSERTED))
+  const pass =
+    ready === true &&
+    added.length === 1 &&
+    added[0]?.kind === 'smelt' &&
+    queue.current?.kind === 'smelt' &&
+    queue.current?.targetItem === 'iron_ingot' &&
+    smeltIndex !== -1 &&
+    diamondIndex !== -1 &&
+    smeltIndex < diamondIndex &&
+    diamond !== undefined &&
+    diamond.status === 'pending' &&
+    diamond.core === true &&
+    reinserted.length === 1 &&
+    reinserted[0]?.includes('collect:diamond') === true &&
+    readyLine !== undefined &&
+    readyLine.includes('preferred=smelt_iron_ingot') &&
+    readyLine.includes('reason=preconditions_satisfied') &&
+    readyLine.includes(`over=${diamond.id}`)
+  return {
+    pass,
+    detail: `ready=${ready} current=${queue.current?.description ?? 'none'} order=[${goals.map((goal) => goal.targetItem).join(',')}] lines=[${lines.join(' | ')}]`,
+  }
+})
+
+addCase('(i) a non-ready iron smelt does not steal the head from a protected goal (#46 regression control)', () => {
+  const queue = new GoalQueue()
+  queue.applyPlan(
+    [{ kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1, core: true }],
+    'mechanical',
+  )
+  const smelt: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
+  const ready = isOptionStartable(compilePlannedGoal(smelt), makeOptionSnapshot({ inventory: {}, toolRank: 0 }))
+  const lines: string[] = []
+  queue.applyPlan([{ ...smelt, ready }], 'llm', 'replace', {
+    reason: 'inputs not held',
+    onProtection: (line) => lines.push(line),
+  })
+  const goals = queue.state.goals.filter((goal) => goal.status !== 'done')
+  const smeltIndex = goals.findIndex((goal) => goal.kind === 'smelt')
+  const diamondIndex = goals.findIndex((goal) => goal.targetItem === 'diamond')
+  const pass =
+    ready === false &&
+    queue.current?.kind === 'collect' &&
+    queue.current?.targetItem === 'diamond' &&
+    goals[0]?.targetItem === 'diamond' &&
+    smeltIndex > diamondIndex &&
+    diamondIndex !== -1 &&
+    lines.every((line) => !line.startsWith(READY_HEAD_PRIORITY)) &&
+    lines.filter((line) => line.startsWith(PROTECTED_GOAL_REINSERTED)).length === 1
+  return {
+    pass,
+    detail: `ready=${ready} current=${queue.current?.description ?? 'none'} order=[${goals.map((goal) => goal.targetItem).join(',')}] lines=[${lines.join(' | ')}]`,
+  }
 })
 
 let failures = 0
