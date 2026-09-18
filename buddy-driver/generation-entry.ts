@@ -557,6 +557,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: [...ctx.worldMemory.discoveredOres],
     knownResources: (ctx.worldMemory.knownResources ?? []).map((resource) => ({ ...resource })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
+    moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -572,6 +573,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     surfaceOk: surface.ok,
     surfaceUncovered: surface.uncovered,
   })
+  if (world.moveFailures.length > 0) {
+    ctx.log('MOVE_FAILMEM_RESTORED', {
+      entries: world.moveFailures.length,
+      blacklisted: world.moveFailures.filter((entry) => entry.blacklistedUntil > Date.now()).length,
+    })
+  }
 
   const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64)
   const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32)
@@ -701,6 +708,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     knownResources: foundResources,
     removeKnownResources: staleRemovals,
     traversalFailures: world.traversalFailures,
+    moveFailures: world.moveFailures,
   }
   // The generation proposes; the HOST is the only writer that commits.
   ctx.proposeWorldMemory(proposal)
@@ -713,6 +721,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: world.discoveredOres,
     knownResources: world.knownResources.length,
     newKnownResources,
+    moveFailures: world.moveFailures.length,
     removedStations: removedStations.length,
   })
 
@@ -827,6 +836,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     eventSink: (event, detail) => {
       ctx.log(event, detail)
       handleStationEvent(event, detail)
+    },
+    moveFailureEntries: world.moveFailures,
+    onMoveFailureMemoryChange: (entries) => {
+      world.moveFailures = entries.map((entry) => ({ ...entry }))
+      ctx.proposeWorldMemory({ moveFailures: world.moveFailures })
     },
     knownResources: [
       ...world.knownResources

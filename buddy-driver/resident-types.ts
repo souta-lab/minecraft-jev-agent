@@ -16,6 +16,7 @@
 // stripping removes it completely (no runtime import, no cycle).
 import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot, GoalQueueState } from '../jev-agent/src/goalQueue.ts'
+import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
 export const CONTRACT_VERSION = 3
@@ -144,6 +145,8 @@ export interface ResidentWorldMemory {
   knownResources: KnownResourceJson[]
   /** thin 2-block-wall / stuck memory; suppress repeat attempts */
   traversalFailures: TraversalFailure[]
+  /** coordinate-level movement failure memory; survives generation recovery (#12) */
+  moveFailures: MoveFailEntry[]
   /** death coordinates; a coordinate that kills twice is excluded (hard hazard) */
   hazards: DeathHazard[]
 }
@@ -156,6 +159,7 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     discoveredOres: [],
     knownResources: [],
     traversalFailures: [],
+    moveFailures: [],
     hazards: [],
   }
 }
@@ -170,6 +174,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.discoveredOres = Array.isArray(memory.discoveredOres) ? memory.discoveredOres : []
   memory.knownResources = Array.isArray(memory.knownResources) ? memory.knownResources : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
+  memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
   return memory
 }
@@ -209,6 +214,7 @@ export interface WorldMemoryDelta {
   removeKnownResources?: KnownResourceJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
+  moveFailures?: MoveFailEntry[]
   hazards?: DeathHazard[]
 }
 

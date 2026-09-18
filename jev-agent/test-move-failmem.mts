@@ -40,6 +40,18 @@ check(
   third.newlyBlacklisted && memory.isBlacklisted(OVERWORLD, pos),
   `newlyBlacklisted=${third.newlyBlacklisted} attempts=${third.entry.attempts}`,
 )
+const restored = new MoveFailMemory({
+  failureLimit: 3,
+  cooldownMs: 10_000,
+  maxEntries: 8,
+  now: () => clock,
+  initialEntries: memory.snapshot(),
+})
+check(
+  'generation recovery restores attempts and the active blacklist',
+  restored.check(OVERWORLD, pos).attempts === 3 && restored.isBlacklisted(OVERWORLD, pos),
+  `attempts=${restored.check(OVERWORLD, pos).attempts} blacklisted=${restored.isBlacklisted(OVERWORLD, pos)}`,
+)
 const filtered = filterBlacklistedMoves(
   [
     { kind: 'MOVE', target: pos },
@@ -167,5 +179,5 @@ check(
   formatMoveTargetSkipped('overworld:39,10,34', 3, 30),
 )
 
-process.stdout.write(`\n${15 - failures}/15 move-failmem cases passed\n`)
+process.stdout.write(`\n${16 - failures}/16 move-failmem cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)

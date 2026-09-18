@@ -78,6 +78,20 @@ function currentSnapshot(): Record<string, unknown> {
         discoveredOres: ['iron_ore'],
         knownResources: [{ name: 'iron_ore', kind: 'ore', x: 9, y: 40, z: 9, dimension: 'minecraft:overworld', worldEpoch: 5 }],
         traversalFailures: [],
+        moveFailures: [
+          {
+            key: 'minecraft:overworld:9,40,9',
+            dimension: 'minecraft:overworld',
+            x: 9,
+            y: 40,
+            z: 9,
+            attempts: 3,
+            firstFailedAt: 1,
+            lastFailedAt: 2,
+            lastReason: 'unreachable',
+            blacklistedUntil: 30_000,
+          },
+        ],
         hazards: [{ x: 5, y: 30, z: 5, reason: 'lava', count: 2, firstSeenAt: 1, lastSeenAt: 2 }],
       },
     },
@@ -102,6 +116,7 @@ addCase('#40: a valid snapshot survives a restart with ledger + worldEpoch intac
     snapshot.ledger !== null &&
     snapshot.ledger.counter === 3 &&
     snapshot.ledger.goals.length === 1 &&
+    snapshot.worldMemoryByKey['127.0.0.1:25565|minecraft:overworld|5']?.moveFailures[0]?.attempts === 3 &&
     snapshot.ledger.goals[0]?.targetItem === 'raw_iron'
   return { pass, detail: `ok=${result.ok} rev=${snapshot?.revision} epoch=${snapshot?.worldEpoch} counter=${snapshot?.ledger?.counter}` }
 })
