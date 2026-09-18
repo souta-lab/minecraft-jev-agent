@@ -84,17 +84,106 @@ const mod = await import(pathToFileURL(outfile).href)  // 1ファイル=1URL=グ
 
 境界の判定基準: **失うと「接続・世界・ログ」が失われるものはホスト／1決定ぶんの派生計算で済むものはリロード層。**
 
-## 4. Generation 契約（原子スワップの要）
+## 4. Generation 契約（現行・正典）
+
+> この節が HOST ↔ generation 契約の正典。値・ライフサイクル・スワップ・拒否の観測性・移行手順は
+> すべてここに従う。コードと文書の不一致は `node tools/check-contract-docs.mjs` が FAIL で検出する
+> （`npm run contract-docs-check` / `npm run contract-docs-test`）。
+
+### 4-A. 契約バージョン（値の唯一の doc 正典）
+
 ```
-smokeTest(state)  // botに触れず、凍結データで buildWorldState→generateCandidates→guard を実行し throw しないこと
-quiesce()         // タイマー停止 / cancelCurrent(stopDigging・setGoal(null)・abort) / in-flight settle を有界待ち / listener解除
-attach(ctx)       // listener登録のみ。タイマー開始しない
-start()           // スケジューリング開始
-resume()          // スワップ失敗時に旧世代を復帰
-snapshot()/dispose()
+CONTRACT_VERSION = 3
+STATE_SCHEMA_VERSION = 3
 ```
-**スワップ順序（致命）**: `build` → `import` → `smokeTest` → ここまで全て成功してから旧世代 `quiesce` → `snapshot` を store へ → 新規 `attach`/`start`。
-失敗時は旧世代が未破棄なので `resume()` で**ゼロダウンタイム・ロールバック**。
+
+- **code 正典**: `buddy-driver/resident-types.ts` の `export const CONTRACT_VERSION`（現行 **3**）。
+- **同一値を持たなければならない code サイト**（`check-contract-docs.mjs` が全一致を検査）:
+  - `buddy-driver/resident-types.ts`（契約定義・code 正典）
+  - `buddy-driver/generation-entry.ts`（世代バンドルの export。structural smoke が `CONTRACT_VERSION === 3` を検査）
+  - `buddy-driver/agent-runner.mts`（HOST。native TS stripping のため import せず、起動時に自分の定数として焼き込む）
+- **STATE_SCHEMA_VERSION の code 正典**: `buddy-driver/state-snapshot.ts` の `AGENT_SNAPSHOT_SCHEMA_VERSION`
+  （`agent-runner.mts` は `const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION` で別名を持つ）。
+- 他の文書（`ARCHITECTURE.md` / `buddy-driver/AGENTS.md` / root `AGENTS.md` など）は**この節を参照し、数値を再掲しない**。
+  再掲は `check-contract-docs.mjs` の duplicate 検査で FAIL になる。
+
+### 4-B. ライフサイクル（`resident-types.ts` の `ResidentGeneration`）
+
+```
+attach()            // listener 登録のみ。timer は開始しない。
+start()             // スケジューリング開始。副作用の前に自世代の actuation lease を assert。
+quiesce()           // timer / in-flight action を停止し ledger を persist。settle を有界待ち。
+dispose()           // 同期 best-effort teardown。
+status()            // GenerationStatus（contractVersion を含む。機械可読）
+structuralSmoke()   // contract version / import 面 / 必須メソッド / snapshot schema /
+                    // sensor 可読 / listener 数。空 plan・完了ゴール 0 で PASS しなければならない。
+missionPreflight()  // goal 存在 / candidate 生成可能性。reload を gate しない。
+stopReason() / hasStopped()
+```
+
+- 旧契約の `smokeTest(state)` / `resume()` / `snapshot()` は**現在のコードに存在しない**。
+  これらを前提にした実装・文書は誤り（Issue #6 の drift はこれを指す）。
+- HOST→generation の受け渡しは **DATA-ONLY**。`{x,y,z}` DTO（`Vec3Json`）のみで、Block / Entity /
+  Vec3 / Window / Recipe / Bot インスタンスを永続化しない。必要箇所で `new Vec3(...)` により再水和する。
+
+### 4-C. スワップ順序と commit 点（`buddy-driver/generation-swap.ts`）
+
+```
+build -> import -> createGeneration -> attach -> structuralSmoke
+      -> missionPreflight -> 旧世代 quiesce
+      -> ACTION LEASE SWITCH + snapshot generationId（単一 commit: commitOwner()）
+      -> 新世代 start -> 旧世代 dispose
+```
+
+- commit 前に新世代は不可逆操作をできない。commit 点は `commitOwner()` が live 参照・lease・
+  `AgentSnapshot.generationId` を同時に進める 1 箇所だけで、`getLive().id == lease.activeId == generationId` が保たれる。
+- 新世代 `start()` 失敗時: `swapGeneration()` が **直前 module から新しい世代を構築**（`buildResume()`）して
+  `attach -> structuralSmoke -> commitOwner -> start`。これを `RELOAD_ROLLBACK` として記録する。
+  それも失敗したら **fail-closed**（`ROLLBACK_FAIL_CLOSED`、`generationId=null`、lease revoke）。
+- 旧世代オブジェクトを `resume()` する経路は無い。ロールバックは常に「fresh generation from previous module」。
+- state ownership: 永続ファイルの唯一の writer は **HOST**。generation は mutation proposal / snapshot を返す。
+  `{ schemaVersion, revision, worldEpoch, generationId }` を単一の原子的スナップショットで整合させる。
+- WorldMemory は **server identity + dimension + worldEpoch** で名前空間化する。
+- SERVER TRUTH（position / health / inventory / entities / open window）は reload・reconnect 後に
+  sensor から再観測し、JSON から復元しない。
+
+### 4-D. Reload 拒否は必ず観測可能（silent 禁止）
+
+契約バージョン不一致は `agent-runner.mts` の 2 か所で検出され、必ず次の 3 行が出る（`performReload` 経路）:
+
+```
+ERROR where=performReload trigger=<t> message=CONTRACT_VERSION mismatch: generation=<g> host=<h>
+RELOAD_REJECTED trigger=<t> message=CONTRACT_VERSION mismatch: generation=<g> host=<h> action=keep-previous-generation
+RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation=<g> host=<h>
+```
+
+- 起動時（`loadGenerationModule`）も `ERROR where=loadGenerationModule` に同じ `generation=<g> host=<h>` を出す。
+- 旧世代は稼働継続（ゼロダウンタイム）。**mismatch が silent に処理される経路は 0**。
+- 稼働中ホストの値は機械可読に取得できる: control socket の `report` / `status` が `contractVersion` を返し、
+  `BOOT` 行・`acceptance-<runId>.json`・`generation.status()` にも `contractVersion` が入る。
+- 実障害例（2026-09-18 10:13 JST）:
+  `RELOAD ok=false trigger=source-changed ms=63 message=CONTRACT_VERSION mismatch: generation=3 host=2`
+  → 値は観測可能だったが、文書が追随していなかったため「なぜ reload が拒否され続けるか」が説明できなかった（Issue #6）。
+
+### 4-E. 移行手順（CONTRACT_VERSION を変更するとき）
+
+1. `buddy-driver/resident-types.ts` の `CONTRACT_VERSION` を上げる／下げる（code 正典）。
+   同時に `buddy-driver/generation-entry.ts` と `buddy-driver/agent-runner.mts` のコピーを同じ値へ更新する
+   （guard が 3 サイトの一致を強制）。
+2. 本節 **4-A の `CONTRACT_VERSION = <n>`** を同じ値へ更新し、`STATE_SCHEMA_VERSION` も必要なら更新する。
+3. 破壊的な snapshot 変更を伴うなら `state-snapshot.ts` の `AGENT_SNAPSHOT_SCHEMA_VERSION` と
+   migration/reject 経路も更新する。互換変更なら上げない。
+4. **HOST を再起動する（必須。hot reload では解消しない）。** 稼働中 HOST は起動時の `CONTRACT_VERSION` を
+   自分の定数として持ち、世代バンドルの export と比較する。つまり新しい契約は reload では採用できず、
+   不一致の間は `RELOAD ok=false` が繰り返されるだけ。手順:
+   `kill <pid>`（`pkill -f` は自爆するので禁止）→ `data/resident/host.lock` が解放されたことを確認 →
+   `cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &`
+5. **検証**: 新規ブートで `BOOT ... contractVersion=<n>` が出る、または `RELOAD ok=true`（hash 変化）が出る。
+   そして `CONTRACT_VERSION mismatch` 行が 0 件であること。`node tools/buddy-status.mjs --json` の report で
+   `contractVersion == <n>` を確認する。
+6. **guard を通す**: `npm run contract-docs-check` と `npm run contract-docs-test` を緑にする。
+   片方でも赤なら移行未完了として扱う。
+
 
 ## 5. 状態の持ち越し（リロードで失ってはいけないもの）
 - サブゴール台帳: 既存 `GoalQueue.snapshot()/restore()`（`goalQueue.ts:251-259`）＋`ledgerPath`
@@ -108,7 +197,12 @@ snapshot()/dispose()
 ## 6. 制御チャネル
 - 主: Unixドメインソケット `data/resident/control.sock`（0600＝権限が認証、双方向push、`{id,cmd,args}`→`{id,ok,data}`）
 - 従: `control/inbox.jsonl` 追記（結果は `control/outbox.jsonl`、`id` で重複排除）
-- コマンド: `goal` / `milestone` / `mode llm|deterministic` / `report` / `reload` / `retry` / `freeze` / `resume` / `leakcheck` / `gc` / `quit`
+- コマンド（`agent-runner.mts` のハンドラに実装されている実集合）:
+  - 照会のみ: `report` / `status`（同義、全 state を返す） / `goal` / `milestone` / `acceptance`
+  - 実行: `reload` / `freeze` / `resume` / `gc` / `leakcheck` / `simdeath`（既定 soft。`simdeath --hard` または `{hard:true}` で破壊的）
+  - 破壊的（使わない）: `worldreset`（worldEpoch が変わる） / `quit`
+  - 注意: `goal` / `milestone` は値を返すだけで注入できない。未実装の `mode` / `retry` は**コマンドではない**（mode 切替はフルリロードで行う）
+- `report` / `status` の応答には `contractVersion`（稼働中 HOST の値）と `status.contractVersion`（世代の値）が入る（§4-D）
 - **mode切替はフルリロードで行う**（`createJevPolicy` が構築時に種別固定のため。決定論モードの `llm.called==false` を clean に証明するため）
 
 ## 7. 介入ループ（wedgeは終了ではなく凍結）
