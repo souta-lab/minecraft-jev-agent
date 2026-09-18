@@ -559,6 +559,8 @@ interface ControlWalkOptions {
    * caller supplies a tight arrival predicate and a short budget.
    */
   horizontalOnly?: boolean
+  /** Exact horizontal point for direct-bearing control, when a diagonal target is unsafe. */
+  bearingTarget?: { x: number; z: number }
 }
 
 export const defaultExecutorOptions: ExecutorOptions = {
@@ -1806,7 +1808,8 @@ export class Executor {
    * Move to the centre of the current grounded cell when only a fractional
    * AABB overlap blocks headroom. The custom arrival predicate is intentionally
    * tighter than normal path arrival so a same-cell no-op cannot be reported
-   * as a successful recenter.
+   * as a successful recenter. The two axis-aligned legs avoid asking the
+   * collision resolver to escape a diagonal corner overlap in one step.
    */
   private async recenterPillarColumn(
     candidate: Candidate,
@@ -1825,19 +1828,41 @@ export class Executor {
     }
     if (atCenter()) return true
     this.setPhase(candidate, epoch, 'recentering-pillar-column')
+    const floorY = Math.floor(origin.y + 1e-4)
+    const deadline = Date.now() + PILLAR_RECENTER_BUDGET_MS
+    const xFirst = Math.abs(center.x - origin.x) >= Math.abs(center.z - origin.z)
+    const legs = xFirst
+      ? [
+          { x: center.x, z: origin.z },
+          center,
+        ]
+      : [
+          { x: origin.x, z: center.z },
+          center,
+        ]
+    const atPoint = (point: { x: number; z: number }): boolean => {
+      const position = this.bot.entity.position
+      return Math.floor(position.y + 1e-4) === floorY && Math.hypot(position.x - point.x, position.z - point.z) <= 0.08
+    }
     try {
-      await this.walkByControls(
-        { x: column.x, y: Math.floor(origin.y + 1e-4), z: column.z },
-        epoch,
-        signal,
-        {
-          directBearing: true,
-          horizontalOnly: true,
-          budgetMs: PILLAR_RECENTER_BUDGET_MS,
-          tolerance: 0.08,
-          arrivedAt: atCenter,
-        },
-      )
+      for (const point of legs) {
+        if (atPoint(point)) continue
+        const budgetMs = deadline - Date.now()
+        if (budgetMs <= 0) break
+        await this.walkByControls(
+          { x: column.x, y: floorY, z: column.z },
+          epoch,
+          signal,
+          {
+            directBearing: true,
+            horizontalOnly: true,
+            bearingTarget: point,
+            budgetMs,
+            tolerance: 0.08,
+            arrivedAt: () => atPoint(point),
+          },
+        )
+      }
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       this.logger.info('agent', `PILLAR_RECENTER failed reason=${error instanceof Error ? error.message : String(error)}`, {
@@ -1953,6 +1978,7 @@ export class Executor {
     const pathfinder = this.bot.pathfinder
     if (pathfinder === undefined) return false
     const horizontalOnly = options.horizontalOnly === true
+    const bearingTarget = options.bearingTarget ?? null
     const anchor = options.anchor ?? null
     const reach = options.reach ?? this.options.reach
     const tolerance = options.tolerance ?? (options.range !== undefined ? Math.max(1, options.range) + 0.5 : 1.2)
@@ -2048,8 +2074,8 @@ export class Executor {
           break
         }
         const node = plan[index] ?? target
-        const dx = node.x + 0.5 - position.x
-        const dz = node.z + 0.5 - position.z
+        const dx = (bearingTarget?.x ?? node.x + 0.5) - position.x
+        const dz = (bearingTarget?.z ?? node.z + 0.5) - position.z
         const horizontal = Math.hypot(dx, dz)
         const ux = dx / (horizontal || 1)
         const uz = dz / (horizontal || 1)
