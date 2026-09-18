@@ -361,12 +361,61 @@ main tree = buildable + cleanを維持
 productivity = meaningful verified progress / blocked time / WIP age / reworkで見る
 ```
 
+<!-- merged: preserve current main policy -->
 host layer:
 
 ```text
 buddy-driver/agent-runner.mts
 buddy-driver/resident-types.ts
 buddy-driver/package.json
+<!-- merged: retained integration guidance -->
+### 4.0 ブランチ運用（競合防止・必須）
+```
+・サブエージェント／並行タスクは **必ず専用ブランチを切って作業する**（例: `task/issue-12-precondition-chain`）
+・★共有ツリーで `git checkout` しない。**`git worktree add` で別ディレクトリを切る**:
+    cd /home/s0u7a/mc-ai
+    git fetch origin
+    git worktree add /tmp/opencode/wt-<task> -b task/<name> origin/main
+    # 作業後: git -C /tmp/opencode/wt-<task> add -A && git -C ... commit -m "..." && git -C ... push -u origin task/<name>
+    # 終了時: git worktree remove /tmp/opencode/wt-<task>
+  理由: 常駐ホストは**作業ツリーからバンドルを生成**してホットリロードするため、
+        共有ツリーを checkout で切り替えると稼働中のエージェントが別ブランチのコードで動き出し、他のタスクの編集も壊れる
+  （実例: #21 は /tmp/opencode/wt21 を使用。これが正しい）
+・★共有ツリーの HEAD は常に `main` でなければならない。同期の `reset` は現在のブランチを動かすため、
+  非 `main` HEAD ではレーンのブランチを静かに書き換える。共有ツリーの同期は `node tools/sync-shared-tree.mjs`
+  を使い、`SYNC_HEAD_WRONG head=<branch>` で停止した場合は checkout や reset で回避しない。
+・main へ直接コミットするのは「単一の作業者しか触っていない」ことが明確な場合のみ（例: tools/, docs のみ）
+・★**ブランチ上の修正は main にマージされるまで稼働中エージェントに反映されない**
+  （常駐ホストは main ツリーからバンドルを生成するため）。したがって修正の「着地」＝ マージまでを含む。
+  マージは一度に1本ずつ、他タスクが未コミットのファイルを持つ間は行わない。
+  マージ手順: `git worktree` 側で push → main ツリーで `git fetch && git merge --no-ff origin/task/<name> && git push`
+  → 直後に `RELOAD ok=true` と該当ゲート（tools/verify-*.mjs）を確認する
+・作業完了時に main へ取り込む（`git checkout main && git pull --rebase && git merge --no-ff <branch> && git push`）。
+  force push・履歴改変は禁止
+・**作業ツリーに他タスクの未コミット変更（WIP）があるときは rebase/pull しない**
+  （ホットリロードは作業ツリーからバンドルを作るため、stash や rebase は稼働中のエージェントを壊す）
+  その場合は自分のコミットを退避ブランチへ push しておき、WIP がコミットされた後に main へ取り込む
+  （実例: `git push origin HEAD:refs/heads/tools/verify-mercury`）
+・同じファイルを2つのタスクが編集しないよう、着手前に担当ファイルを宣言する
+  （直近の分担: #12/#11=jev-agent/src/{jev,controller,policy,scheduler,system2}.ts + buddy-driver/{generation-entry,planner}.ts
+   ／ movement=executor,candidates,state ／ Mercury/CI=PRブランチ `sol/system2-ci-mercury` ／ tools・docs=誰でも）
+```
+```
+・健全性の一括確認:      node tools/buddy-status.mjs        （--json で機械可読）
+・常駐ホストは単一:      pgrep は bash ラッパーに誤マッチするので tools の判定を使う。kill は pid 指定
+・デタッチ起動:          cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &
+・サーバー:              127.0.0.1:25565 (Leaf 1.21.11, offline, peaceful)。停止時は
+                         -DPaper.IgnoreJavaVersion=true を付けて起動（Java は 21.0.13-ea のため必須）
+・制御ソケット:          data/resident/control.sock（0600, JSON Lines）
+   照会のみ: report / status / goal / milestone / acceptance
+   実行可:   freeze / resume / reload / gc / leakcheck / simdeath / quit
+   注意:     goal/milestone は注入不可（照会だけ）。worldreset は実装にあるが破壊的なので使わない
+   契約:     HOST↔generation の契約バージョンは RESIDENT-MODE.md §4-A が正典（数値を再掲しない）。
+            doc/code の不一致は buddy-driver の `npm run contract-docs-check` が FAIL で検出する。
+            不一致は hot reload では解消せず、ホスト再起動が必要（`RELOAD_REJECTED ... mismatch` が観測される）。
+・Bot名:                 AI_Buddy は常駐が占有。検証は AI_M1* / AI_M2* 等を使う。s0u7a は人間用
+・秘密:                  /home/s0u7a/.config/kimaki-secrets/ 配下は絶対に出力しない
+<!-- end merged guidance -->
 ```
 
 ### 4.0 ブランチ運用
@@ -514,4 +563,8 @@ Option継続可否のsemantic判断  -> Jev β + deterministic meta-controller
 接続 / durable authority      -> HOST
 ```
 
+<!-- merged: preserve current main policy -->
 同じsemantic questionを複数layerが所有し始めた場合は、責務重複として整理対象にする。
+<!-- merged: retained integration guidance -->
+**2つ以上のsemantic layerが同じ問いに答え始めたら設計臭。**
+<!-- end merged guidance -->
