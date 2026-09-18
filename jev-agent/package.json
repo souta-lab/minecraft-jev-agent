@@ -21,6 +21,7 @@
     "skill-candidate-test": "tsx test-skill-candidate.mts",
     "observability-test": "tsx test-observability.mts",
     "beta-authority-test": "tsx test-beta-authority.mts",
+    "wire-prereq-beta-test": "tsx test-wire-prereq-beta.mts",
     "m1-test": "tsx test-m1.mts",
     "issue43-test": "tsx test-issue43.mts",
     "fuel-guard-test": "tsx test-fuel-guard.mts",

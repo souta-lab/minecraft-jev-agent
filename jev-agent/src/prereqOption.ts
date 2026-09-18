@@ -126,6 +126,25 @@ export function formatPrereqSwitch(from: PrereqPath, to: PrereqPath): string {
   return `PREREQ_SWITCH from=${from} to=${to} reason=no_progress`
 }
 
+/**
+ * The ready-to-log `PREREQ_OPTION ...` line for a SPECIFIC chosen path.
+ *
+ * After a `PREREQ_SWITCH` the controller overrides the cost-optimal path with
+ * the next-best one (`prereqForcedPath`). Logging `decision.line` then would
+ * name the path the controller did NOT take, so the marker would disagree with
+ * the actual decision (#63: a marker name is not evidence of semantics). This
+ * renders the line for the path that is actually followed; when `chosen` is the
+ * cost-optimal path it is exactly `decision.line`.
+ */
+export function formatPrereqOptionFor(decision: PrereqDecision, chosen: PrereqPath | null): string {
+  if (chosen !== null && chosen === decision.chosen) return decision.line
+  const over = decision.options.filter((option) => option.path !== chosen).map((option) => option.path)
+  if (chosen === null) return formatPrereqOption('none', [], 'no_feasible_path')
+  const option = decision.options.find((entry) => entry.path === chosen && entry.feasible)
+  if (option === undefined) return formatPrereqOption(chosen, over, `${chosen} forced`)
+  return formatPrereqOption(chosen, over, `${chosen} cost=${round1(option.cost)}`)
+}
+
 function placeHeldOption(input: PrereqInput): PrereqOption {
   const has = input.heldCount > 0
   if (!has) return { path: 'place_held', feasible: false, cost: Number.POSITIVE_INFINITY, reason: 'no_furnace_held' }
