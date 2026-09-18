@@ -29,6 +29,8 @@ export interface ActionOutcomeInput {
   verified: boolean
   itemsGained: number
   blockRemoved?: boolean
+  /** deterministic body change with no block/item evidence (altitude gained), when known */
+  progressed?: boolean
   /** local plan revision (GoalQueue row id), when the caller knows it */
   planId?: string | null
   /** executor action id, when the caller knows it */
@@ -102,9 +104,22 @@ export function describeActionPostcondition(kind: string): string {
   }
 }
 
-/** Zero observable change: nothing was gained and no block was removed. */
-export function isZeroProgressOutcome(input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved'>): boolean {
-  return input.itemsGained <= 0 && input.blockRemoved !== true
+/**
+ * Observable progress: an item gained, a block removed, or a deterministic
+ * body change (a verified climb chunk that gained altitude). `progressed` is
+ * evidence of change only - it never makes an unverified action verified.
+ */
+export function hasObservableProgress(
+  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
+): boolean {
+  return input.itemsGained > 0 || input.blockRemoved === true || input.progressed === true
+}
+
+/** Zero observable change: nothing was gained, no block was removed, no body change proven. */
+export function isZeroProgressOutcome(
+  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
+): boolean {
+  return !hasObservableProgress(input)
 }
 
 /**

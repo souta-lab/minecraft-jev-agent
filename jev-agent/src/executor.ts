@@ -97,6 +97,12 @@ export interface ExecutionResult {
   dropObserved: boolean
   itemsGained: number
   goalItemCount: number
+  /**
+   * Deterministic evidence that the action durably changed the body even
+   * though no block was removed and no item was gained (a bounded PILLAR_UP
+   * chunk that gained altitude). Never a substitute for `verified`.
+   */
+  progressed: boolean
   /** item the action actually produced (MINE drop or crafted item), when known */
   yieldItem?: string | null
   /**
@@ -1035,6 +1041,7 @@ export class Executor {
     this.ensureOwned(epoch, signal)
     const startFloorY = Math.floor(startY)
     const climbedTo = Math.floor(this.bot.entity.position.y)
+    const dugVertical = vertical === 'staircase' || vertical === 'staircase-up'
     if (verticalStep && climbedTo > startFloorY) {
       this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
         actionId: candidate.id,
@@ -1059,10 +1066,11 @@ export class Executor {
         null,
         {
           verified: true,
-          blockRemoved: true,
+          blockRemoved: dugVertical && verticalStep,
           dropObserved: false,
           itemsGained: 0,
           goalItemCount: this.countGoalItem(),
+          progressed: true,
         },
       )
     }
@@ -1089,10 +1097,11 @@ export class Executor {
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
       verified: closed || verticalProgress || verticalStep,
-      blockRemoved: verticalStep,
+      blockRemoved: dugVertical && verticalStep,
       dropObserved: false,
       itemsGained: 0,
       goalItemCount: this.countGoalItem(),
+      progressed: !dugVertical && verticalStep,
     })
   }
 
@@ -3113,7 +3122,9 @@ export class Executor {
     phase: string,
     detail: string,
     failure: FailureCode | null,
-    extra: Pick<ExecutionResult, 'verified' | 'blockRemoved' | 'dropObserved' | 'itemsGained' | 'goalItemCount'>,
+    extra: Pick<ExecutionResult, 'verified' | 'blockRemoved' | 'dropObserved' | 'itemsGained' | 'goalItemCount'> & {
+      progressed?: boolean
+    },
   ): ExecutionResult {
     return {
       actionId: candidate.id,
@@ -3126,6 +3137,7 @@ export class Executor {
       failure,
       ms: Date.now() - startedAt,
       ...extra,
+      progressed: extra.progressed ?? false,
     }
   }
 

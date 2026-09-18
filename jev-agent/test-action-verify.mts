@@ -7,9 +7,11 @@ import {
   describeActionPostcondition,
   evaluateUnverifiedBudget,
   formatActionUnverified,
+  hasObservableProgress,
   isPlacePostconditionMet,
   isSmeltPostconditionMet,
   isUnverifiedOutcome,
+  isZeroProgressOutcome,
   UNVERIFIED_ACTION_LIMIT,
 } from './src/actionPostcondition.ts'
 import { executeFurnaceSmelt, formatSmeltLog } from './src/executor.ts'
@@ -297,6 +299,34 @@ addCase('(#79h) place that did not create the block is unverified; the block at 
     real.verdict === 'verified' &&
     real.advances === true
   return { pass, detail: `missing=${missing} wrong=${wrong} atTarget=${atTarget} | ${line}` }
+})
+
+addCase('(V2) a climb chunk that gained altitude is durable progress even with blockRemoved=false', () => {
+  const chunk = { itemsGained: 0, blockRemoved: false, progressed: true }
+  const durable = hasObservableProgress(chunk)
+  const zero = isZeroProgressOutcome(chunk)
+  const downgraded = isUnverifiedOutcome({
+    kind: 'RETRIEVE',
+    status: 'done',
+    verified: true,
+    ...chunk,
+  })
+  const pass = durable === true && zero === false && downgraded === false
+  return { pass, detail: `hasObservableProgress=${durable} zero=${zero} unverified=${downgraded}` }
+})
+
+addCase('(V2) an unverified zero-delta MOVE is not progress, so it is never success', () => {
+  const noChange = { itemsGained: 0, blockRemoved: false, progressed: false }
+  const durable = hasObservableProgress(noChange)
+  const zero = isZeroProgressOutcome(noChange)
+  const downgraded = isUnverifiedOutcome({
+    kind: 'MOVE',
+    status: 'done',
+    verified: false,
+    ...noChange,
+  })
+  const pass = durable === false && zero === true && downgraded === true
+  return { pass, detail: `hasObservableProgress=${durable} zero=${zero} unverified=${downgraded}` }
 })
 
 let failures = 0

@@ -114,7 +114,7 @@ import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
-import { evaluateUnverifiedBudget, formatActionUnverified, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -1944,11 +1944,11 @@ export class JevController {
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
-        // Only a real retrieval (a dug staircase step or an obtained item) retires
-        // the active target. The executor reports `verified=true` for a sub-metre
-        // nudge, so clearing on that would disarm the stall assertion before it
-        // can ever fire.
-        if (result.blockRemoved || result.itemsGained > 0) {
+        // Only a real retrieval (a dug staircase step, an obtained item, or a
+        // verified climb chunk that gained altitude) retires the active target.
+        // The executor reports `verified=true` for a sub-metre nudge, so clearing
+        // on that would disarm the stall assertion before it can ever fire.
+        if (hasObservableProgress(result)) {
           this.activeRetrieval = null
           this.retrievalTrack = null
           this.noteCandidateSuccess(result.actionId)
