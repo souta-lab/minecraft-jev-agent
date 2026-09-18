@@ -738,14 +738,18 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
   const planned = optionSpecToPlannedGoal(spec)
   const queue = new GoalQueue()
   const queued = queue.applyPlan([planned], 'llm')[0]
-  const context = currentOptionContextForQueuedGoal(queued)
+  const restored = new GoalQueue()
+  restored.restore(queue.snapshot())
+  const restoredCurrent = restored.current
+  const context = currentOptionContextForQueuedGoal(restoredCurrent)
   const pass =
     queued !== undefined &&
-    queued.optionInstanceId === stableOptionInstanceId(spec) &&
-    queued.optionTemplateId === spec.id &&
-    queued.optionSpec?.abortThreshold === spec.abortThreshold &&
-    queued.optionSpec?.target.predicate === spec.target.predicate &&
-    context?.instanceId === queued.id &&
+    restoredCurrent !== null &&
+    restoredCurrent.optionInstanceId === stableOptionInstanceId(spec) &&
+    restoredCurrent.optionTemplateId === spec.id &&
+    restoredCurrent.optionSpec?.abortThreshold === spec.abortThreshold &&
+    restoredCurrent.optionSpec?.target.predicate === spec.target.predicate &&
+    context?.instanceId === restoredCurrent.id &&
     context?.templateId === spec.id &&
     context?.kind === spec.kind &&
     context?.target.predicate === spec.target.predicate &&
@@ -756,7 +760,7 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
     context?.runtime.verifiedProgress === 0
   return {
     pass,
-    detail: `queued=${queued?.id} instance=${queued?.optionInstanceId} template=${queued?.optionTemplateId} context=${context?.instanceId} threshold=${context?.abortThreshold}`,
+    detail: `queued=${queued?.id} restored=${restoredCurrent?.id} instance=${restoredCurrent?.optionInstanceId} template=${restoredCurrent?.optionTemplateId} context=${context?.instanceId} threshold=${context?.abortThreshold}`,
   }
 })
 
