@@ -816,8 +816,12 @@ export function optionSpecsToPlannedGoals(specs: readonly OptionSpec[]): Planned
 // dependency expansion (#12 generalization)
 // ---------------------------------------------------------------------------
 
-/** Hard cap so a malformed dependency graph can never recurse forever. */
-export const MAX_DEPENDENCY_DEPTH = 8
+/**
+ * Hard cap so a malformed dependency graph can never recurse forever; cycles
+ * are detected separately. #54 minecraft-data harvest tiers make a valid
+ * `collect:obsidian` chain deeper than the old hand table's 8.
+ */
+export const MAX_DEPENDENCY_DEPTH = 16
 
 const SMELT_ITEMS = new Set(['charcoal', 'iron_ingot', 'gold_ingot', 'copper_ingot', 'glass'])
 const CRAFT_ITEMS = new Set([
