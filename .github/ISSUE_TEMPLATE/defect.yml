@@ -1,0 +1,66 @@
+name: Defect / correctness
+about: A concrete incorrect behavior with observable evidence
+labels: []
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed evidence
+      description: What was actually observed? Include commit/run/world identity when available. Keep observation separate from inferred cause.
+      placeholder: |
+        commit/run: ...
+        OBSERVED: ...
+        exact log/fixture: ...
+    validations:
+      required: true
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Violated invariant / expected behavior
+      description: State the deterministic contract or acceptance rule that should hold.
+    validations:
+      required: true
+  - type: dropdown
+    id: authority
+    attributes:
+      label: Authority boundary touched
+      options:
+        - mechanics / world truth
+        - safety / guard / verification
+        - Jev pi local policy
+        - Jev beta termination
+        - System2 / planning
+        - resident state / lifecycle / actuation
+        - observability / tooling
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: cause
+    attributes:
+      label: Root-cause hypothesis
+      description: Optional. Mark this as a hypothesis until code/fixture evidence proves it.
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Minimum closure evidence
+      options:
+        - deterministic unit/fixture
+        - integration / structural smoke
+        - resident reload/soak
+        - live embodied smoke
+        - closed-loop milestone acceptance
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Concrete observable conditions for closure. If live evidence is selected above, unit tests alone must not close this issue.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies / overlap
+      description: Search existing issues first. Link blocked-by, duplicate/superseded, or the active parent issue where applicable.
