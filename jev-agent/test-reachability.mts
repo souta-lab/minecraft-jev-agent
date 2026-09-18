@@ -8,14 +8,17 @@
 // target is suppressed while its state fingerprint is unchanged.
 //
 // Run: npx tsx test-reachability.mts  (wired as `npm run reachability-test`)
+import { createRequire } from 'node:module'
 import { applyReachabilityGate, defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
+import { candidateStarvationBlockedBy, candidateStarvationLine, candidateStarvationMissing } from './src/controller.ts'
+import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
-import { evaluateReachability, formatCandidateWithheld, formatReachability, reachabilityFingerprint } from './src/reachability.ts'
+import { capabilityKey, evaluateReachability, formatCandidateWithheld, formatReachability, reachabilityFingerprint } from './src/reachability.ts'
 import type { ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './src/reachability.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'
-import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -545,6 +548,207 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       'CANDIDATE_WITHHELD reason=needs_ascend candidate=RETRIEVE:known:oak_log:b0_110_0',
     formatCandidateWithheld('RETRIEVE:known:oak_log:b0_110_0', 'needs_ascend'),
   )
+}
+
+// (11) candidate-local capability attribution (craft / mine) -----------------------
+//
+// Live defect (main dc54ff4): `craft:wooden_pickaxe` with planks+sticks held
+// starved as `blockedBy=tool:pickaxe@0`. The only candidate was a walk to an
+// unreachable remembered crafting_table; the station ladder's self-contained
+// step (craft the table from planks, then craft the pickaxe) was masked by the
+// station acquisition early-return, so a satisfiable-NOW craft never appeared.
+{
+  const require = createRequire(import.meta.url)
+  const recipeIndex = createRecipeIndex(require('minecraft-data')('1.21.11'))
+  const craftOptions: CandidateOptions = { ...defaultCandidateOptions, recipes: recipeIndex }
+  const Y = 48.5
+  const bot: Vec3Json = { x: 30.9, y: Y, z: 37.8 }
+
+  function craftGoal(item: string): QueuedGoal {
+    return queuedGoal({
+      id: `g-craft-${item}`,
+      kind: 'craft',
+      description: `craft 1 x ${item}`,
+      targetItem: item,
+      requiredCount: 1,
+    })
+  }
+
+  function stoneDownStep(feet: Vec3Json): DescentOption {
+    return {
+      dir: 'E',
+      mode: 'down',
+      dx: 1,
+      dz: 0,
+      step: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+      wall: { x: feet.x + 1, y: feet.y, z: feet.z },
+      head: { x: feet.x + 1, y: feet.y + 1, z: feet.z },
+      floor: { x: feet.x + 1, y: feet.y - 1, z: feet.z },
+      wallSolid: false,
+      headSolid: false,
+      floorSolid: true,
+      safe: true,
+      reason: 'safe',
+      digName: 'stone',
+      digHarvestTool: 'pickaxe',
+      digHarvestTier: 0,
+      diggable: true,
+    }
+  }
+
+  const tableBelow: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 40, y: 29, z: 35 } }
+  const tableAbove: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 20, y: 65, z: 27 } }
+  const feet = { x: Math.floor(bot.x), y: Math.floor(bot.y), z: Math.floor(bot.z) }
+
+  // (a) planks + sticks held: the craft is PRODUCTIVE even when the only
+  // remembered table is unreachable (below and above).
+  {
+    const held = inventory({ birch_planks: 7, stick: 2 })
+    const scenarios: Array<{ label: string; known: KnownResource; descent?: DescentOption[]; standable?: Vec3Json[] }> = [
+      { label: 'below (descend staircase needs a pickaxe)', known: tableBelow, descent: [stoneDownStep(feet)] },
+      { label: 'above (ascend needs a column)', known: tableAbove, standable: [] },
+    ]
+    for (const scenario of scenarios) {
+      const state = worldState({
+        position: bot,
+        inventory: held,
+        goal: goal({ targetItem: 'wooden_pickaxe', description: 'craft 1 x wooden_pickaxe', requiredCount: 1 }),
+        goalQueue: queueWith(craftGoal('wooden_pickaxe')),
+        signals: signals({ knownResources: [scenario.known] }),
+        descent: scenario.descent,
+        standable: scenario.standable,
+      })
+      const grounded = generateGroundedCandidates(state, craftOptions)
+      const productive = grounded.candidates.filter(
+        (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
+      )
+      const craft = productive.find((candidate) => candidate.kind === 'CRAFT')
+      const blockedBy = candidateStarvationBlockedBy(grounded.withheld, null)
+      const missing = candidateStarvationMissing(grounded.withheld)
+      const line = candidateStarvationLine(grounded.candidates, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
+      check(
+        `(a) craft:wooden_pickaxe with planks+sticks held is PRODUCTIVE with the table ${scenario.label}`,
+        craft !== undefined && craft.id === 'CRAFT:crafting_table' && line === null,
+        `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`,
+      )
+      const withheldCraft = grounded.withheld.find((entry) => entry.candidate.kind === 'CRAFT')
+      check(
+        `(a) the craft candidate carries no missing capability of its own (table ${scenario.label})`,
+        withheldCraft === undefined &&
+          craft !== undefined &&
+          (craft.affordance?.missingCapabilities.length ?? -1) === 0,
+        `withheldCraft=${withheldCraft?.candidate.id ?? 'none'} craft=${craft === undefined ? 'none' : JSON.stringify(craft.affordance)}`,
+      )
+      const withheldTable = grounded.withheld.find((entry) => entry.candidate.id.includes('station:crafting_table'))
+      check(
+        `(a) the unreachable station keeps ITS OWN capability attribution (table ${scenario.label})`,
+        withheldTable !== undefined && withheldTable.result.missingCapabilities.length > 0,
+        withheldTable === undefined
+          ? 'table retrieve not withheld'
+          : `${withheldTable.candidate.id} missing=[${withheldTable.result.missingCapabilities.map(capabilityKey).join(',')}]`,
+      )
+    }
+  }
+
+  // (b) no planks held: the self-craft ladder cannot run, so the reachable-blocked
+  // stone craft is attributed the tool ITS route needs (never suppressed).
+  {
+    const state = worldState({
+      position: bot,
+      inventory: inventory({ cobblestone: 3, stick: 2 }),
+      goal: goal({ targetItem: 'stone_pickaxe', description: 'craft 1 x stone_pickaxe', requiredCount: 1 }),
+      goalQueue: queueWith(craftGoal('stone_pickaxe')),
+      signals: signals({ knownResources: [tableBelow] }),
+      descent: [stoneDownStep(feet)],
+    })
+    const grounded = generateGroundedCandidates(state, craftOptions)
+    const blockedBy = candidateStarvationBlockedBy(grounded.withheld, null)
+    const missing = candidateStarvationMissing(grounded.withheld)
+    const line = candidateStarvationLine(grounded.candidates, 'craft:stone_pickaxe:1', false, blockedBy, missing)
+    check(
+      '(b) a stone craft with no planks keeps blockedBy=tool:pickaxe@0 from its own route',
+      blockedBy === 'tool:pickaxe@0' &&
+        missing.join(',') === 'tool:pickaxe@0' &&
+        line ===
+          'CANDIDATE_STARVATION presented=2 productive=0 goal="craft:stone_pickaxe:1" blockedBy=tool:pickaxe@0 missing=[tool:pickaxe@0]',
+      `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line ?? 'none'}"`,
+    )
+  }
+
+  // (c) a MINE candidate requires the harvest tool tier of the block IT names.
+  {
+    const ironOre: BlockState = {
+      kind: 'ore',
+      name: 'iron_ore',
+      position: { x: 40, y: 47, z: 37 },
+      distance: 1.4,
+      diggable: true,
+      inReach: true,
+      hasAdjacentStandable: true,
+      adjacentStandable: { x: 39, y: 48, z: 37 },
+      yield: 'raw_iron',
+      harvestTool: 'pickaxe',
+      harvestTier: 2,
+    }
+    const mine: Candidate = {
+      id: 'MINE:b40_47_37',
+      kind: 'MINE',
+      label: 'mine iron_ore',
+      targetName: 'iron_ore',
+      target: ironOre.position,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: true,
+      toolName: 'pickaxe',
+      toolTier: 2,
+      inReach: true,
+      hasStandableAdjacent: true,
+      meta: { tick: 1, x: 40, y: 47, z: 37, yieldItem: 'raw_iron' },
+    }
+    const bare = worldState({ position: bot, inventory: inventory({}), blocks: [ironOre] })
+    const gated = applyReachabilityGate([mine], bare, craftOptions)
+    const withheld = gated.withheld.find((entry) => entry.candidate.id === 'MINE:b40_47_37')
+    check(
+      '(c) a MINE candidate for iron_ore with no pickaxe is attributed tool:pickaxe@2',
+      withheld !== undefined &&
+        withheld.result.reason === 'missing_tool' &&
+        withheld.result.missingCapabilities.map(capabilityKey).join(',') === 'tool:pickaxe@2' &&
+        gated.candidates.every((candidate) => candidate.id !== 'MINE:b40_47_37'),
+      withheld === undefined
+        ? `presented=[${gated.candidates.map((candidate) => candidate.id).join(',')}]`
+        : withheld.result.missingCapabilities.map(capabilityKey).join(','),
+    )
+    const stocked = worldState({ position: bot, inventory: inventory({ stone_pickaxe: 1 }), blocks: [ironOre] })
+    const withTool = applyReachabilityGate([mine], stocked, craftOptions)
+    const presented = withTool.candidates.find((candidate) => candidate.id === 'MINE:b40_47_37')
+    check(
+      '(c) the same MINE candidate is presented once the stone pickaxe is held',
+      presented !== undefined && presented.affordance?.feasible === true,
+      presented === undefined ? 'not presented' : JSON.stringify(presented.affordance),
+    )
+  }
+
+  // (d) a reachable RETRIEVE is unaffected by the craft attribution work.
+  {
+    const state = worldState({
+      position: bot,
+      inventory: inventory({ birch_planks: 7, stick: 2 }),
+      signals: signals({
+        knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 30, y: 48, z: 50 } }],
+      }),
+    })
+    const grounded = generateGroundedCandidates(state, craftOptions)
+    const id = 'RETRIEVE:known:oak_log:b30_48_50'
+    const retrieve = grounded.candidates.find((candidate) => candidate.id === id)
+    check(
+      '(d) a reachable RETRIEVE is still presented with feasible=true and no missing capabilities',
+      retrieve !== undefined &&
+        retrieve.affordance?.feasible === true &&
+        retrieve.affordance.missingCapabilities.length === 0 &&
+        grounded.withheld.every((entry) => entry.candidate.id !== id),
+      retrieve === undefined ? `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]` : JSON.stringify(retrieve.affordance),
+    )
+  }
 }
 
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)

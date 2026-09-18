@@ -536,8 +536,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
  * surfaced as the binding condition. Pure and exported so the contract is
  * unit-testable without a bot.
  */
-export function formatCandidateStarvation(presented: number, goal: string, blockedBy: string): string {
-  return `CANDIDATE_STARVATION presented=${presented} productive=0 goal="${goal}" blockedBy=${blockedBy}`
+export function formatCandidateStarvation(
+  presented: number,
+  goal: string,
+  blockedBy: string,
+  missing: readonly string[] = [],
+): string {
+  const all = missing.length > 0 ? ` missing=[${missing.join(',')}]` : ''
+  return `CANDIDATE_STARVATION presented=${presented} productive=0 goal="${goal}" blockedBy=${blockedBy}${all}`
 }
 
 export function candidateStarvationLine(
@@ -545,21 +551,35 @@ export function candidateStarvationLine(
   goal: string,
   goalComplete: boolean,
   blockedBy: string,
+  missing: readonly string[] = [],
 ): string | null {
   if (goalComplete) return null
   const productive = candidates.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
-  return productive ? null : formatCandidateStarvation(candidates.length, goal, blockedBy)
+  return productive ? null : formatCandidateStarvation(candidates.length, goal, blockedBy, missing)
 }
 
-/** Why the offered set is starved: withheld capabilities, then reachability reasons, then the last failure code. */
+/**
+ * Every distinct capability the withheld candidates named, in candidate order,
+ * deduped. The starvation line prints this whole ordered list so a single
+ * blocked target cannot hide a second, independently actionable need.
+ */
+export function candidateStarvationMissing(withheld: readonly CandidateReachability[]): string[] {
+  return [...new Set(withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)))]
+}
+
+/**
+ * The primary reason the offered set is starved: the first withheld capability,
+ * else the first reachability reason, else the last failure code. `blockedBy`
+ * stays ONE reason - the full ordered capability list is reported separately.
+ */
 export function candidateStarvationBlockedBy(
   withheld: readonly CandidateReachability[],
   lastFailureCode: string | null,
 ): string {
-  const capabilities = [...new Set(withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey)))]
-  if (capabilities.length > 0) return capabilities.join('|')
+  const capabilities = candidateStarvationMissing(withheld)
+  if (capabilities.length > 0) return capabilities[0] ?? 'unknown_capability'
   const reasons = [...new Set(withheld.map((entry) => entry.result.reason))]
-  if (reasons.length > 0) return reasons.join('|')
+  if (reasons.length > 0) return reasons[0] ?? 'unknown_reason'
   return lastFailureCode ?? 'no_productive_candidate'
 }
 
@@ -1221,11 +1241,13 @@ export class JevController {
           this.noProductiveRepeats = 1
         }
         const blockedBy = candidateStarvationBlockedBy(grounded.withheld, this.signals.lastFailureCode)
+        const missing = candidateStarvationMissing(grounded.withheld)
         const starvation = candidateStarvationLine(
           candidates,
           this.currentGoalKey(),
           state.goal.complete,
           blockedBy,
+          missing,
         )
         if (starvation !== null) {
           this.logger.warn(
@@ -1236,6 +1258,7 @@ export class JevController {
               productive: 0,
               goal: this.currentGoalKey(),
               blockedBy,
+              missing,
               repeat: this.noProductiveRepeats,
             },
             this.tickCounter,

@@ -7,6 +7,10 @@
 //      from tools/m2-watch.mjs; and
 //   2. the live resident inventory criteria from tools/m2-acceptance.mjs.
 //
+// The combined close/no-close gate MUST have an explicit run scope. Without
+// --since (or M2_SINCE), m2-watch falls back to all-time buddy.log evidence and
+// an old successful attempt could falsely green a fresh run.
+//
 // Exit: 0 = PASS, 1 = FAIL (at least one known criterion failed),
 //       2 = UNKNOWN (no known failure, but evidence is unavailable/unreadable).
 import { execFile } from 'node:child_process'
@@ -75,10 +79,29 @@ function watchArgs(argv) {
   return out
 }
 
-export async function runGate({ argv = process.argv.slice(2), runner = runNode, write = console.log } = {}) {
+/** True only when the causal proof is explicitly scoped to this live attempt. */
+export function hasRunScope(argv, env = process.env) {
+  const args = watchArgs(argv)
+  const sinceIndex = args.indexOf('--since')
+  if (sinceIndex !== -1 && typeof args[sinceIndex + 1] === 'string' && args[sinceIndex + 1].trim() !== '') return true
+  return typeof env.M2_SINCE === 'string' && env.M2_SINCE.trim() !== ''
+}
+
+export async function runGate({
+  argv = process.argv.slice(2),
+  runner = runNode,
+  write = console.log,
+  env = process.env,
+} = {}) {
+  if (!hasRunScope(argv, env)) {
+    write('M2_LIVE_GATE')
+    write('M2_LIVE_RESULT status=UNKNOWN reason=run_scope_required watch=2 acceptance=2')
+    return 2
+  }
+
   const [watch, acceptance] = await Promise.all([
-    runner(WATCH, watchArgs(argv)),
-    runner(ACCEPTANCE, []),
+    runner(WATCH, watchArgs(argv), { env }),
+    runner(ACCEPTANCE, [], { env }),
   ])
 
   write('M2_LIVE_GATE')
