@@ -63,6 +63,7 @@ import {
   classifyAbandonReason,
   evaluatePlaceRetry,
   formatAbandonReason,
+  isFurnacePrerequisiteOption,
   PLACE_RETRY_LIMIT,
   prerequisiteOptionName,
   shouldAdoptAbandon,
@@ -2568,6 +2569,10 @@ export class JevController {
     const count = (this.chosenCounts.get(actionId) ?? 0) + 1
     this.chosenCounts.set(actionId, count)
     if (count <= this.options.wedgeRepeatLimit) return
+    // Issue #58: a protected furnace prerequisite is owned by the prereq path
+    // controller (which switches path after PREREQ_STALL_TICKS). Aborting here
+    // would abandon the parent smelt goal, so never wedge-abort it.
+    if (this.prereqPlan !== null && isFurnacePrerequisiteOption(actionId)) return
     this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
   }
 
