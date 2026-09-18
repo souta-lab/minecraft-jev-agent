@@ -10,6 +10,7 @@
 //  - known-resource retrieval candidates are grounded and visible blocks win.
 import { defaultCandidateOptions, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
+import { PILLAR_UP_STEP_CAP } from '../jev-agent/src/verticalPlan.ts'
 import type { BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
 import { emptyGoalQueueState } from '../jev-agent/src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
@@ -119,6 +120,19 @@ function oreBlock(position: Vec3Json, name = 'iron_ore', drop = 'raw_iron'): Blo
     yield: drop,
     harvestTool: 'pickaxe',
     harvestTier: 2,
+  }
+}
+
+function hazardBlock(position: Vec3Json, name = 'lava'): BlockState {
+  return {
+    kind: 'hazard',
+    name,
+    position,
+    distance: 1,
+    diggable: false,
+    inReach: true,
+    hasAdjacentStandable: false,
+    adjacentStandable: null,
   }
 }
 
@@ -340,8 +354,61 @@ addCase('a remembered ore far above the resident grounds a bounded pillar-up ret
     retrieve.meta.pillarPlaceName === 'cobblestone' &&
     typeof steps === 'number' &&
     steps >= 1 &&
-    steps <= 8 &&
+    steps <= PILLAR_UP_STEP_CAP &&
     retrieve.meta.verticalToY === 31 + steps
+  return { pass, detail: retrieve === undefined ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('a station 56 blocks above sustains pillar chunks across decisions (#45 up)', () => {
+  const target: Vec3Json = { x: 22, y: 66, z: 29 }
+  const chunks: Array<{ fromY: number; steps: number; toY: number }> = []
+  for (const y of [10, 34, 58]) {
+    const state = worldState({
+      position: { x: 39, y, z: 33 },
+      goalQueue: queueWith(
+        queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
+      ),
+      goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
+      knownResources: [{ name: 'furnace', kind: 'station', position: target }],
+      inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
+    })
+    const retrieve = generateCandidates(state, defaultCandidateOptions).find(
+      (candidate: Candidate) => candidate.kind === 'RETRIEVE',
+    )
+    if (retrieve === undefined || retrieve.meta.vertical !== 'pillar') {
+      return { pass: false, detail: `y=${y} vertical=${retrieve?.meta.vertical ?? 'no RETRIEVE'}` }
+    }
+    chunks.push({
+      fromY: y,
+      steps: Number(retrieve.meta.pillarSteps),
+      toY: Number(retrieve.meta.verticalToY),
+    })
+  }
+  const last = chunks[chunks.length - 1]
+  const pass =
+    PILLAR_UP_STEP_CAP > 8 &&
+    chunks.length === 3 &&
+    chunks.every((chunk) => chunk.steps >= 1 && chunk.steps <= PILLAR_UP_STEP_CAP) &&
+    chunks[0]?.steps === PILLAR_UP_STEP_CAP &&
+    last?.toY === target.y
+  return { pass, detail: JSON.stringify(chunks) }
+})
+
+addCase('a hazard in the resident column refuses the station pillar plan (#45 up)', () => {
+  const state = worldState({
+    position: { x: 39, y: 10, z: 33 },
+    goalQueue: queueWith(
+      queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
+    ),
+    goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
+    knownResources: [{ name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }],
+    inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
+    blocks: [hazardBlock({ x: 39, y: 11, z: 33 })],
+  })
+  const retrieve = generateCandidates(state, defaultCandidateOptions).find(
+    (candidate: Candidate) => candidate.kind === 'RETRIEVE',
+  )
+  const pass = retrieve !== undefined && retrieve.meta.vertical === 'none'
   return { pass, detail: retrieve === undefined ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
 })
 

@@ -24,8 +24,24 @@ export const VERTICAL_GAP = 1
  * Upper bound on one PILLAR_UP action. The executor climbs at most this many
  * one-block placements, then the next decision re-plans from the new Y, so a
  * 30-block climb is a bounded sequence of actions instead of one unbounded one.
+ *
+ * M2 ascent persistence: the live target furnace sits at y=66 while the bot
+ * oscillates at y=8-11 (~56 blocks). The old bound of 8 meant every action
+ * ended mid-gap, the executor then walked back down toward the unreachable
+ * bearing (y 7.8 -> 11.0 -> 9.8), and no altitude was ever retained. 24 keeps
+ * each action bounded (~40 s worst case) while covering a 50+ block gap in a
+ * handful of ticks; the executor additionally stops a partial climb without a
+ * horizontal walk, so each tick's chunk is durable.
  */
-export const PILLAR_UP_STEP_CAP = 8
+export const PILLAR_UP_STEP_CAP = 24
+
+/**
+ * Altitude gain (blocks) toward a retrieval target that counts as progress in
+ * `evaluateRetrievalProgress`. A one-block climb must not be mistaken for a
+ * stall just because the 3D distance barely moved (56-block gap: 1/56 < the
+ * 0.5 m distance epsilon).
+ */
+export const ASCENT_PROGRESS_EPSILON = 0.9
 
 /**
  * Blocks that may be placed under the feet for a PILLAR_UP, in preference order.
@@ -57,6 +73,94 @@ export function selectPlaceableBlock(counts: Readonly<Record<string, number>>): 
     if (count > 0) return { name, count }
   }
   return null
+}
+
+/** Why a PILLAR_UP step is refused; `reached` is the normal loop end. */
+export type PillarStepRefusal = 'reached' | 'no_placeable' | 'unsafe_column' | 'no_footing' | 'no_headroom'
+
+/**
+ * The deterministic gate for one PILLAR_UP step. The executor resolves the live
+ * column and passes the observations here; every refusal path is pure, so the
+ * safety rules (no placeable, hazard column, no solid footing, blocked
+ * headroom) are unit-testable without a bot. `remaining` is the plan's bounded
+ * step budget, so `reached` also ends the loop the moment the chunk is done.
+ */
+export function evaluatePillarStep(input: {
+  placeableCount: number
+  columnSafe: boolean
+  remaining: number
+  footingSolid: boolean
+  headroomClear: boolean
+}): { ok: true } | { ok: false; reason: PillarStepRefusal } {
+  if (input.remaining < 1) return { ok: false, reason: 'reached' }
+  if (input.placeableCount < 1) return { ok: false, reason: 'no_placeable' }
+  if (!input.columnSafe) return { ok: false, reason: 'unsafe_column' }
+  if (!input.footingSolid) return { ok: false, reason: 'no_footing' }
+  if (!input.headroomClear) return { ok: false, reason: 'no_headroom' }
+  return { ok: true }
+}
+
+export interface PillarStepResolution {
+  /** Y of the topmost solid block under the feet: the placement reference. */
+  footingY: number
+  /** The cell the new block occupies (`footingY + 1`). */
+  placeY: number
+  /** The Y the feet land on after the placement (`placeY + 1`). */
+  landingY: number
+}
+
+/**
+ * Resolve one PILLAR_UP step pose from the live column. `isSolid(y)` reports
+ * whether the block at that Y in the bot's column is a full solid block.
+ *
+ * The scan starts at the feet cell because a partial mount (slab, path, snow,
+ * carpet) lives in that cell; `feetY - 1` covers the normal full-block floor.
+ * Support must be CONTIGUOUS (feet or feet-1): a solid block two cells down
+ * means the bot is airborne with a gap under it, and jumping from there would
+ * place into open air. Live evidence for the scan: 21x `PILLAR_UP no solid
+ * support at (39,9,32)` and (40,8,31)/(39,10,34) on floor(y)-1 while the bot was
+ * standing there - the old lookup read one cell below a partial mount and never
+ * grounded the step, so no PILLAR_UP_STEP ever executed.
+ */
+export function resolvePillarStep(input: {
+  feetY: number
+  isSolid: (y: number) => boolean
+}): PillarStepResolution | null {
+  const feet = Math.floor(input.feetY)
+  for (const y of [feet, feet - 1]) {
+    if (!input.isSolid(y)) continue
+    return { footingY: y, placeY: y + 1, landingY: y + 2 }
+  }
+  return null
+}
+
+export interface HazardBlockLike {
+  kind: string
+  position: Vec3Json
+}
+
+/**
+ * Sensor-side column safety for a PILLAR_UP: a scanned hazard (lava/fire/...)
+ * anywhere in the bot's own column between one below the feet and feet+2
+ * refuses the pillar plan, so the bot is never sent into a hazard cell just
+ * because it holds a placeable block. The executor re-checks against the live
+ * world.
+ */
+export function pillarColumnUnsafeFromBlocks(
+  self: Vec3Json,
+  blocks: readonly HazardBlockLike[],
+): boolean {
+  const x = Math.floor(self.x)
+  const z = Math.floor(self.z)
+  const feet = Math.floor(self.y)
+  return blocks.some(
+    (block) =>
+      block.kind === 'hazard' &&
+      block.position.x === x &&
+      block.position.z === z &&
+      block.position.y >= feet - 1 &&
+      block.position.y <= feet + 2,
+  )
 }
 
 /** Default progress-assertion window (ticks) before a RETRIEVE is called stalled. */
@@ -128,6 +232,11 @@ export interface VerticalInput {
   stepCuts?: readonly StepCut[] | null
   /** held pillar block; when absent an upward gap has no grounded plan */
   placeable?: PlaceableBlock | null
+  /**
+   * sensor-side column safety; false refuses the pillar plan (default true so
+   * pure callers that have no hazard scan keep the old behaviour)
+   */
+  columnSafe?: boolean
 }
 
 function withinTunnelReach(tunnel: Vec3Json, targetY: number, fromY: number, dy: number): boolean {
@@ -167,6 +276,7 @@ function selectUpStep(input: VerticalInput, fromY: number, targetY: number): Ver
 function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: number): VerticalPlan | null {
   const upStep = selectUpStep(input, fromY, targetY)
   if (upStep !== null) return upStep
+  if (input.columnSafe === false) return null
   const placeable = input.placeable ?? null
   if (placeable === null || placeable.count < 1) return null
   const steps = Math.min(dy, PILLAR_UP_STEP_CAP)
@@ -252,6 +362,8 @@ export interface RetrievalProgressState {
   best: number
   /** consecutive ticks without a decrease */
   ticks: number
+  /** best (smallest) |selfY - targetY| seen, when vertical tracking is on */
+  bestGap?: number
 }
 
 export type RetrievalProgressOutcome = 'progress' | 'tracking' | 'stalled'
@@ -266,20 +378,43 @@ export interface RetrievalProgressDecision extends RetrievalProgressState {
  * observations; the caller then logs `RETRIEVE_STALLED` and escalates. The tick
  * counter resets on both a real decrease and a stall so the assertion re-arms
  * instead of firing on every subsequent tick.
+ *
+ * `verticalGap` (M2 ascent): when supplied, a gain of `verticalEpsilon` blocks
+ * toward the target's Y also counts as progress and resets the counter. A
+ * 56-block climb moves the 3D distance by only ~1/56 per step, so without this
+ * the stall assertion would abandon a retrieval that is genuinely climbing.
  */
 export function evaluateRetrievalProgress(input: {
   previous: RetrievalProgressState
   distance: number
   epsilon: number
   stallTicks: number
+  verticalGap?: number
+  verticalEpsilon?: number
 }): RetrievalProgressDecision {
   const { previous, distance: current, epsilon, stallTicks } = input
-  if (current <= previous.best - epsilon) {
-    return { best: current, ticks: 0, outcome: 'progress' }
+  const verticalEpsilon = input.verticalEpsilon ?? ASCENT_PROGRESS_EPSILON
+  const gap = input.verticalGap
+  const bestGap =
+    gap === undefined ? previous.bestGap : previous.bestGap === undefined ? gap : Math.min(previous.bestGap, gap)
+  const distanceProgress = current <= previous.best - epsilon
+  const altitudeProgress =
+    gap !== undefined && previous.bestGap !== undefined && gap <= previous.bestGap - verticalEpsilon
+  if (distanceProgress || altitudeProgress) {
+    return { best: current, ticks: 0, bestGap, outcome: 'progress' }
   }
   const ticks = previous.ticks + 1
-  if (ticks >= stallTicks) return { best: previous.best, ticks: 0, outcome: 'stalled' }
-  return { best: previous.best, ticks, outcome: 'tracking' }
+  if (ticks >= stallTicks) return { best: previous.best, ticks: 0, bestGap, outcome: 'stalled' }
+  return { best: previous.best, ticks, bestGap, outcome: 'tracking' }
+}
+
+/**
+ * M2 ascent marker: one line per bounded climb chunk, emitted by the executor
+ * after a pillar/staircase-up action so the resident log proves sustained
+ * ascent as `from_y` rises toward `to_y=target_y` across ticks.
+ */
+export function formatAscentProgress(fromY: number, toY: number, targetY: number): string {
+  return `ASCENT_PROGRESS from_y=${fromY} to_y=${toY} target_y=${targetY}`
 }
 
 // --- stall escalation (issue #45 requirement 3) --------------------------------

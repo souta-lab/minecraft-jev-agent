@@ -27,6 +27,7 @@ import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
+import { evaluatePillarStep, resolvePillarStep, formatAscentProgress } from './verticalPlan.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -212,6 +213,17 @@ const PLACE_VERIFY_SETTLE_MS = 500
 const PILLAR_APEX_BUDGET_MS = 700
 /** PILLAR_UP: settle window for the bot to land on the placed block. */
 const PILLAR_LANDING_BUDGET_MS = 2000
+
+/** The cell itself plus its six face neighbours: the flood check for a dig. */
+const DIG_SAFETY_OFFSETS: readonly Vec3Json[] = [
+  { x: 0, y: 0, z: 0 },
+  { x: 0, y: 1, z: 0 },
+  { x: 0, y: -1, z: 0 },
+  { x: 1, y: 0, z: 0 },
+  { x: -1, y: 0, z: 0 },
+  { x: 0, y: 0, z: 1 },
+  { x: 0, y: 0, z: -1 },
+]
 
 interface PillarUpPlan {
   placeName: string
@@ -992,6 +1004,39 @@ export class Executor {
     }
 
     this.ensureOwned(epoch, signal)
+    const startFloorY = Math.floor(startY)
+    const climbedTo = Math.floor(this.bot.entity.position.y)
+    if (verticalStep && climbedTo > startFloorY) {
+      this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, target.y), {
+        actionId: candidate.id,
+        target,
+        vertical,
+      })
+    }
+    // M2 ascent persistence: a bounded climb chunk that has not yet closed the
+    // gap must NOT be followed by a horizontal walk to a target ~50 blocks up.
+    // canDig=false has no path there, and whatever route the pathfinder does
+    // return walks back down (live oscillation y 7.8 -> 11.0 -> 9.8), throwing
+    // the altitude away. Return the gained altitude as durable progress and let
+    // the next decision re-plan the next chunk from the new Y.
+    if (verticalStep && climbedTo > startFloorY && target.y - climbedTo > 1) {
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'done',
+        'retrieved',
+        `climbed from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
+        null,
+        {
+          verified: true,
+          blockRemoved: true,
+          dropObserved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+        },
+      )
+    }
     this.setPhase(candidate, epoch, 'approaching')
     try {
       await this.pathToNear(target, 2, epoch, signal)
@@ -1086,9 +1131,20 @@ export class Executor {
   }
 
   /**
-   * PILLAR_UP: place the held block into the bot's own feet cell at the jump
-   * apex and land on it, one block at a time, bounded by `plan.steps`. Refuses
-   * on a missing item, a non-solid support, or a hazard/liquid in the column.
+   * PILLAR_UP: place the held block under the airborne feet at the jump apex,
+   * land on it, and repeat, bounded by `plan.steps`. Refuses on a missing item,
+   * a hazard column, a missing footing, blocked headroom that cannot be cleared
+   * safely, or a failed placement.
+   *
+   * Live M2 diagnosis (zero PILLAR_UP_STEP ever executed): the action ran 21x
+   * and the apex wait failed 41x with `PILLAR_UP jump never left the ground`.
+   * prismarine-physics gates every jump on `entity.onGround`
+   * (node_modules/prismarine-physics/index.js:721-725) and this Leaf 26.1
+   * server ships no 26.1 collision shapes (README "Environment findings"), so
+   * mineflayer reports onGround=false while a solid block is underfoot. The
+   * control walk already patches that at executor.ts:1286-1292; pillarUp did
+   * not, so `setControlState('jump')` was a no-op. The same correction is
+   * installed for the whole climb here.
    */
   private async pillarUp(
     candidate: Candidate,
@@ -1109,53 +1165,175 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
-    let climbed = 0
-    while (climbed < maxSteps) {
-      this.ensureOwned(epoch, signal)
-      const feet = {
-        x: Math.floor(this.bot.entity.position.x),
-        y: Math.floor(this.bot.entity.position.y),
-        z: Math.floor(this.bot.entity.position.z),
-      }
-      if (feet.y >= toY) break
-      const support = this.currentBlockAt({ x: feet.x, y: feet.y - 1, z: feet.z })
-      if (support === null || support.boundingBox !== 'block') {
-        this.logger.warn('executor', `PILLAR_UP no solid support at (${feet.x},${feet.y - 1},${feet.z})`, { actionId: candidate.id })
-        break
-      }
-      this.setPhase(candidate, epoch, 'pillaring')
-      const beforeY = this.bot.entity.position.y
-      let placed = false
-      this.bot.setControlState('jump', true)
-      try {
-        const atApex = await this.waitForPillarApex(epoch, signal)
+    const onPhysicsTick = (): void => this.correctStandingOnGround()
+    this.bot.on('physicsTick', onPhysicsTick)
+    try {
+      let climbed = 0
+      while (climbed < maxSteps) {
         this.ensureOwned(epoch, signal)
-        if (!atApex) throw new ExecutorError('place_error', 'PILLAR_UP jump never left the ground')
-        await this.bot.placeBlock(support, this.bot.entity.position.clone().set(0, 1, 0))
-        placed = true
+        const feet = {
+          x: Math.floor(this.bot.entity.position.x),
+          y: Math.floor(this.bot.entity.position.y),
+          z: Math.floor(this.bot.entity.position.z),
+        }
+        if (feet.y >= toY) break
+        const placeStack = this.bot.inventory.items().find((entry) => entry.name === placeName)
+        const pose = resolvePillarStep({
+          feetY: this.bot.entity.position.y,
+          isSolid: (y) => this.solidSupportAt(feet.x, y, feet.z),
+        })
+        if (placeStack === undefined || pose === null) {
+          this.logger.warn(
+            'executor',
+            `PILLAR_UP step refused at (${feet.x},${feet.y},${feet.z}): ${placeStack === undefined ? 'no_placeable' : 'no_footing'} place=${placeName}`,
+            { actionId: candidate.id, ...feet },
+          )
+          break
+        }
+        const columnSafe = !this.pillarColumnUnsafe()
+        const headroomClear = columnSafe && (await this.clearPillarHeadroom(candidate, feet, epoch, signal))
+        const step = evaluatePillarStep({
+          placeableCount: placeStack.count,
+          columnSafe,
+          remaining: maxSteps - climbed,
+          footingSolid: true,
+          headroomClear,
+        })
+        if (!step.ok) {
+          if (step.reason !== 'reached') {
+            this.logger.warn(
+              'executor',
+              `PILLAR_UP step refused at (${feet.x},${feet.y},${feet.z}): ${step.reason} place=${placeName}`,
+              { actionId: candidate.id, ...feet },
+            )
+          }
+          break
+        }
+        // A headroom dig left a tool in hand; mineflayer's placeBlock sends the
+        // HELD item (generic_place.js:12-18), so re-equip the placeable first.
+        if (this.bot.heldItem === null || this.bot.heldItem.name !== placeName) {
+          const held = this.bot.inventory.items().find((entry) => entry.name === placeName)
+          if (held === undefined) break
+          this.setPhase(candidate, epoch, 'equipping')
+          await this.bot.equip(held, 'hand')
+          this.ensureOwned(epoch, signal)
+        }
+        const footing = this.currentBlockAt({ x: feet.x, y: pose.footingY, z: feet.z })
+        if (footing === null || footing.boundingBox !== 'block') break
+        this.setPhase(candidate, epoch, 'pillaring')
+        const beforeY = this.bot.entity.position.y
+        let placed = false
+        this.correctStandingOnGround()
+        this.bot.setControlState('jump', true)
+        try {
+          const atApex = await this.waitForPillarApex(epoch, signal)
+          this.ensureOwned(epoch, signal)
+          if (!atApex) throw new ExecutorError('place_error', 'PILLAR_UP jump never left the ground')
+          await this.bot.placeBlock(footing, this.bot.entity.position.clone().set(0, 1, 0))
+          placed = true
+        } catch (error) {
+          if (error instanceof ActionCancelled) throw error
+          this.logger.warn('executor', `PILLAR_UP place failed: ${error instanceof Error ? error.message : String(error)}`, {
+            actionId: candidate.id,
+            ...feet,
+          })
+        } finally {
+          this.bot.setControlState('jump', false)
+        }
+        if (!placed) break
+        const landed = await this.waitForPillarLanding({ x: feet.x, y: pose.placeY, z: feet.z }, epoch, signal)
+        if (!landed) break
+        climbed += 1
+        this.logger.info(
+          'agent',
+          `PILLAR_UP_STEP from_y=${Math.floor(beforeY)} to_y=${Math.floor(this.bot.entity.position.y)} placed=${placeName} step=${climbed}`,
+          { actionId: candidate.id, x: feet.x, z: feet.z },
+        )
+      }
+      if (climbed === 0) {
+        this.logger.warn('executor', `PILLAR_UP made no progress place=${placeName}`, { actionId: candidate.id })
+      }
+      return climbed > 0
+    } finally {
+      this.bot.removeListener('physicsTick', onPhysicsTick)
+      this.bot.setControlState('jump', false)
+    }
+  }
+
+  /**
+   * A jump needs the two cells above the feet clear (`headroomAt`). In a natural
+   * tunnel the ceiling is one of them, so the climb would keep failing even with
+   * correct grounding. Open the blocking cell(s) with live-world safety checks:
+   * never a fluid/hazard target, never a fluid/hazard touching the opened cell.
+   * Returns false when the cell cannot be opened safely; the caller turns that
+   * into a `no_headroom` step refusal and the next decision re-routes.
+   */
+  private async clearPillarHeadroom(
+    candidate: Candidate,
+    column: { x: number; z: number },
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const position = this.bot.entity.position
+      if (this.headroomAt(column.x, position.y, column.z)) return true
+      const feetY = Math.floor(position.y + 1e-4)
+      const blockY = this.passableAt(column.x, feetY + 1, column.z) ? feetY + 2 : feetY + 1
+      const block = this.currentBlockAt({ x: column.x, y: blockY, z: column.z })
+      if (block === null || block.boundingBox === 'empty') continue
+      if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return false
+      if (!this.cellClearOfFluids({ x: column.x, y: blockY + 1, z: column.z })) return false
+      const live = this.resolveLiveDigTool(block)
+      if (!live.ok) return false
+      this.logger.info('agent', `PILLAR_UP clearing headroom ${block.name} at (${column.x},${blockY},${column.z})`, {
+        actionId: candidate.id,
+      })
+      await this.equipTool(
+        {
+          ...candidate,
+          toolName: live.tool,
+          toolTier: live.tier,
+          requiresTool: live.tool !== null,
+          meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
+        },
+        epoch,
+        signal,
+      )
+      try {
+        await this.digBlock(block, epoch, signal)
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
-        this.logger.warn('executor', `PILLAR_UP place failed: ${error instanceof Error ? error.message : String(error)}`, {
-          actionId: candidate.id,
-          ...feet,
-        })
-      } finally {
-        this.bot.setControlState('jump', false)
+        this.logger.warn(
+          'executor',
+          `PILLAR_UP headroom dig failed: ${error instanceof Error ? error.message : String(error)}`,
+          { actionId: candidate.id },
+        )
+        return false
       }
-      if (!placed) break
-      const landed = await this.waitForPillarLanding(feet, epoch, signal)
-      if (!landed) break
-      climbed += 1
-      this.logger.info(
-        'agent',
-        `PILLAR_UP_STEP from_y=${Math.floor(beforeY)} to_y=${Math.floor(this.bot.entity.position.y)} placed=${placeName} step=${climbed}`,
-        { actionId: candidate.id, x: feet.x, z: feet.z },
-      )
+      this.ensureOwned(epoch, signal)
     }
-    if (climbed === 0) {
-      this.logger.warn('executor', `PILLAR_UP made no progress place=${placeName}`, { actionId: candidate.id })
+    return this.headroomAt(column.x, this.bot.entity.position.y, column.z)
+  }
+
+  /** True when no fluid/hazard block touches the cell (a dig there cannot flood it). */
+  private cellClearOfFluids(cell: Vec3Json): boolean {
+    for (const offset of DIG_SAFETY_OFFSETS) {
+      const block = this.currentBlockAt({ x: cell.x + offset.x, y: cell.y + offset.y, z: cell.z + offset.z })
+      if (block === null) continue
+      if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return false
     }
-    return climbed > 0
+    return true
+  }
+
+  /**
+   * This server reports `onGround=false` while a solid block is underfoot
+   * (missing 26.1 collision shapes), and prismarine-physics gates every jump on
+   * that flag (index.js:721-725), so `jump` control is silently discarded.
+   * Correct the flag from the block grid.
+   */
+  private correctStandingOnGround(): void {
+    const below = this.bot.blockAt(this.bot.entity.position.offset(0, -0.1, 0))
+    if (below !== null && below.boundingBox === 'block') this.bot.entity.onGround = true
   }
 
   private pillarColumnUnsafe(): boolean {
@@ -1164,7 +1342,7 @@ export class Executor {
       y: Math.floor(this.bot.entity.position.y),
       z: Math.floor(this.bot.entity.position.z),
     }
-    for (const dy of [0, 1, 2]) {
+    for (const dy of [-1, 0, 1, 2]) {
       const block = this.currentBlockAt({ x: feet.x, y: feet.y + dy, z: feet.z })
       if (block === null) continue
       if (PROBE_FLUIDS.has(block.name) || PROBE_HAZARDS.has(block.name)) return true
@@ -1186,12 +1364,12 @@ export class Executor {
     return airborne
   }
 
-  private async waitForPillarLanding(feet: Vec3Json, epoch: number, signal: AbortSignal): Promise<boolean> {
+  private async waitForPillarLanding(placeCell: Vec3Json, epoch: number, signal: AbortSignal): Promise<boolean> {
     const deadline = Date.now() + PILLAR_LANDING_BUDGET_MS
-    const landingY = feet.y + 1
+    const landingY = placeCell.y + 1
     while (Date.now() < deadline) {
       this.ensureOwned(epoch, signal)
-      const placed = this.currentBlockAt({ x: feet.x, y: feet.y, z: feet.z })
+      const placed = this.currentBlockAt(placeCell)
       const y = this.bot.entity.position.y
       if (
         placed !== null &&
@@ -1286,10 +1464,7 @@ export class Executor {
     // The sensor reads `onGround` from Mineflayer, but on this server the flag
     // can be stale while a solid block is underfoot; correct it from the block
     // grid so the recipe's pre-emptive-jump decision is reliable.
-    const onPhysicsTick = (): void => {
-      const below = this.bot.blockAt(this.bot.entity.position.offset(0, -0.1, 0))
-      if (below !== null && below.boundingBox === 'block') this.bot.entity.onGround = true
-    }
+    const onPhysicsTick = (): void => this.correctStandingOnGround()
     this.bot.physicsEnabled = true
     this.bot.on('physicsTick', onPhysicsTick)
     const until = Date.now() + options.budgetMs

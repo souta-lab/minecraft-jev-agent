@@ -29,7 +29,7 @@ import { findInventoryFuel, matchesResourceClass, resourceMatches } from './reso
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { selectPlaceableBlock, planVerticalApproach } from './verticalPlan.ts'
+import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks } from './verticalPlan.ts'
 import type { VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.ts'
@@ -1250,6 +1250,7 @@ function knownStationRetrievalCandidate(
     descent: state.descent,
     stepCuts: state.stepCuts,
     placeable: selectPlaceableBlock(state.inventory.counts),
+    columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
   })
   const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
   return {
@@ -1452,6 +1453,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
       descent: state.descent,
       stepCuts: state.stepCuts,
       placeable: selectPlaceableBlock(state.inventory.counts),
+      columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
     })
     const verticalMeta = verticalPlanMeta(vertical, Math.floor(state.self.position.y), known.position.y)
     const verticalLabel = verticalPlanLabel(vertical)
