@@ -49,9 +49,11 @@ import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, 
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
-import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
+import { abandonRequested, betaShadowContext, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, formatBetaShadowContext, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
+import { bestPickaxeRankFromCounts, buildCurrentOptionContext, formatOptionContextLog, isOptionSpecSource, makeOptionSnapshot, OPTION_CONTEXT_MARKER, OPTION_CONTEXT_MAX_OUTCOMES, stableOptionInstanceId, toOptionContextPayload } from './optionSpec.ts'
+import type { CurrentOptionContext, OptionOutcomeSummary, OptionSpec, OptionWorldSnapshot } from './optionSpec.ts'
 import { guardDecision } from './policy.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
@@ -425,6 +427,33 @@ function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
 }
 
+/**
+ * #56: the live Option snapshot for the controller's own sensor state. It is
+ * the same plain-data shape the Option compiler evaluated at plan time, rebuilt
+ * from current truth so I(o)/success(s,o) in the Jev context are not stale.
+ */
+function optionSnapshotFromState(state: WorldState): OptionWorldSnapshot {
+  const knownStations: Array<'crafting_table' | 'furnace'> = []
+  if (state.craftingTables.length > 0) knownStations.push('crafting_table')
+  if ((state.furnaces?.length ?? 0) > 0) knownStations.push('furnace')
+  const knownOres = new Set<string>()
+  for (const block of state.blocks) {
+    if (block.kind === 'ore') knownOres.add(block.name)
+  }
+  for (const resource of state.signals.knownResources ?? []) {
+    if (resource.kind === 'ore') knownOres.add(resource.name)
+  }
+  return makeOptionSnapshot({
+    inventory: state.inventory.counts,
+    dimension: state.self.dimension,
+    position: state.self.position,
+    health: state.self.health,
+    toolRank: bestPickaxeRankFromCounts(state.inventory.counts),
+    knownStations,
+    knownOres: [...knownOres],
+  })
+}
+
 /** A guard path probe is synchronous; this caps how long it may think. */
 const PATH_PROBE_TIMEOUT_MS = 750
 const { goals } = pathfinderModule
@@ -461,6 +490,8 @@ export function evaluateWaitWedge(input: WaitWedgeInput): WaitWedgeDecision {
 interface PendingDecision {
   record: DecisionRecord
   healthAtDecision: number
+  /** #56: the compiled Option instance the decision was made under, if any. */
+  optionInstanceId: string | null
 }
 
 /** #79: the controller's actual abandon decision for one Jev result. */
@@ -477,6 +508,8 @@ interface AbandonVerdict {
 const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'JEV_HEADS',
   'BETA_SHADOW',
+  'BETA_SHADOW_CTX',
+  OPTION_CONTEXT_MARKER,
   'CAUSAL',
   'SHADOW_METRICS',
   'TOOL_CHOICE',
@@ -686,6 +719,15 @@ export class JevController {
   /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
   private readonly actionUnverified = new Map<string, number>()
 
+  /** #56: the compiled Options of the last applied plan, in dependency order. */
+  private planOptionSpecs: readonly OptionSpec[] = []
+  /** #56: instance id -> compiled OptionSpec, for the queue-head join. */
+  private optionSpecsByInstance = new Map<string, OptionSpec>()
+  /** #56: the current head's Option context, rebuilt per decision (shadow). */
+  private currentOptionContext: CurrentOptionContext | null = null
+  /** #56: bounded settled-outcome memory per Option instance. */
+  private readonly optionOutcomeHistory = new Map<string, OptionOutcomeSummary[]>()
+
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
   private deferredTrigger: TriggerEvent | null = null
@@ -775,6 +817,9 @@ export class JevController {
   /** Swap in a real long-horizon model. The interface is system2.ts#System2Brain. */
   setSystem2(brain: System2Brain): void {
     this.system2 = brain
+    this.planOptionSpecs = []
+    this.optionSpecsByInstance = new Map()
+    this.currentOptionContext = null
   }
 
   /** Must be called before start(). Rebuilds every derived object. */
@@ -893,6 +938,7 @@ export class JevController {
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
+    this.syncOptionSpecs()
     const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
       reason: plan.note,
       onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
@@ -1302,7 +1348,11 @@ export class JevController {
         this.decisionWriter.write(record)
         return
       }
-      this.pendingDecisions.set(claim.epoch, { record, healthAtDecision: this.bot.health })
+      this.pendingDecisions.set(claim.epoch, {
+        record,
+        healthAtDecision: this.bot.health,
+        optionInstanceId: this.currentOptionContext?.instanceId ?? null,
+      })
       void claim.completion
         .then((result) => {
           this.onActionComplete(result, decision, guarded.candidate)
@@ -1530,6 +1580,98 @@ export class JevController {
       },
       this.tickCounter,
     )
+    const context = this.currentOptionContext
+    if (context === null) return
+    const conditioned = betaShadowContext({
+      instanceId: context.instanceId,
+      templateId: context.templateId,
+      beta,
+      actualReplan,
+      threshold: shadow.threshold,
+    })
+    this.logger.info(
+      'beta-shadow',
+      formatBetaShadowContext(conditioned),
+      {
+        ...conditioned,
+        mode: this.options.betaAuthority ? 'authority' : 'shadow',
+        betaAuthority: this.options.betaAuthority,
+        shadowed: vote.shadowed,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * #56: capture the compiled Options of the plan that was just applied. A
+   * brain without the optional capability clears them, so the context is only
+   * attached when the Option compiler actually produced the queue goals.
+   */
+  private syncOptionSpecs(): void {
+    if (!isOptionSpecSource(this.system2)) {
+      this.planOptionSpecs = []
+      this.optionSpecsByInstance = new Map()
+      return
+    }
+    const specs = this.system2.compiledOptionSpecs()
+    this.planOptionSpecs = [...specs]
+    this.optionSpecsByInstance = new Map(specs.map((spec) => [stableOptionInstanceId(spec), spec]))
+  }
+
+  /** #56: rebuild the current queue head's Option context from live truth. */
+  private buildOptionContext(state: WorldState): CurrentOptionContext | null {
+    const head = this.queue.current
+    if (head === null) return null
+    const instanceId = head.optionInstanceId
+    if (instanceId === undefined) return null
+    const spec = this.optionSpecsByInstance.get(instanceId)
+    if (spec === undefined) return null
+    const templateId = optionIdForGoal(head)
+    const attempt = templateId === null ? null : this.optionAttempts.stateFor(templateId, head.id)
+    return buildCurrentOptionContext(spec, optionSnapshotFromState(state), {
+      plan: this.planOptionSpecs,
+      runtime:
+        attempt === null
+          ? undefined
+          : {
+              attempts: attempt.attempts,
+              totalAttempts: attempt.totalAttempts,
+              lastVerified: attempt.verified,
+              lastProgressDelta: attempt.progressDelta,
+              abandoned: attempt.abandonedAtMs !== null,
+              startedAtMs: head.createdAt,
+            },
+      recentOutcomes: this.optionOutcomeHistory.get(instanceId) ?? [],
+    })
+  }
+
+  /** #56: shadow-log the bounded Option context carried into the Jev payload. */
+  private logOptionContext(context: CurrentOptionContext): void {
+    this.logger.info(
+      'option-context',
+      formatOptionContextLog(context),
+      {
+        ...toOptionContextPayload(context),
+        mode: this.options.betaAuthority ? 'authority' : 'shadow',
+      },
+      this.tickCounter,
+    )
+  }
+
+  /** #56: bounded per-instance settled-outcome memory (no raw logs). */
+  private noteOptionOutcome(instanceId: string, result: ExecutionResult): void {
+    const history = this.optionOutcomeHistory.get(instanceId) ?? []
+    history.push({
+      actionId: result.actionId,
+      status: result.status,
+      verified: result.verified,
+      progressDelta: result.itemsGained,
+      failureCode: result.failure ?? result.unverifiedPostcondition ?? null,
+      atMs: Date.now(),
+    })
+    const limit = OPTION_CONTEXT_MAX_OUTCOMES * 2
+    if (history.length > limit) history.splice(0, history.length - limit)
+    this.optionOutcomeHistory.set(instanceId, history)
   }
 
   /** Demoted semantic questions: computed by code, logged, never steering (#11). */
@@ -1707,6 +1849,9 @@ export class JevController {
     chainId: string,
   ): Promise<JevResult> {
     this.lastAbandonAdopted = false
+    // #56: the Option context is rebuilt at the decision boundary from live
+    // truth and attached to the request. Authority is unchanged.
+    this.currentOptionContext = this.buildOptionContext(state)
     const now = Date.now()
     const stateHash = stableStateHash(state)
     if (
@@ -1722,6 +1867,7 @@ export class JevController {
       )
       return this.lastDecision
     }
+    if (this.currentOptionContext !== null) this.logOptionContext(this.currentOptionContext)
 
     try {
       this.policyEpoch += 1
@@ -1731,6 +1877,7 @@ export class JevController {
         stage: `policy-tick-${this.tickCounter}-${trigger}`,
         state,
         candidates,
+        optionContext: this.currentOptionContext,
         questionNames: questionNamesFor(questionSetForTrigger(trigger)),
       })
       this.jevCalls += 1
@@ -1856,6 +2003,7 @@ export class JevController {
       this.pendingDecisions.delete(result.epoch)
       completedOptionId = pending.record.optionId
       completedPlanId = pending.record.goalQueueState.current?.id ?? null
+      if (pending.optionInstanceId !== null) this.noteOptionOutcome(pending.optionInstanceId, result)
       attachResult(pending.record, {
         actionId: result.actionId,
         success: result.status === 'done' && result.verified,
@@ -2688,6 +2836,7 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
+        this.syncOptionSpecs()
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
           reason: plan.note,
           onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
