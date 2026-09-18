@@ -29,7 +29,7 @@ import { findInventoryFuel, matchesResourceClass, resourceMatches } from './reso
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks } from './verticalPlan.ts'
+import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn } from './verticalPlan.ts'
 import type { VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
@@ -2358,13 +2358,23 @@ function columnFacts(state: WorldState): ColumnFacts {
   const ownCut = (state.headroomCuts ?? []).find(
     (cut) => cut.pos.x === feet.x && cut.pos.z === feet.z && (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
   )
+  // The sensor reports standable FEET cells. The body's feet cell is floor(y),
+  // but a body standing on a partial block (slab/path/stair, live y=34.5) has
+  // its standable cell one level above the floor cell. Live starvation (main
+  // 104e689, fingerprint foot=0) withheld every ascend target as
+  // `safe_column` for exactly that stance, so the fact must match all three.
+  const footingSolid = state.terrain.standable.some((spot) => {
+    const cell = { x: Math.floor(spot.x), y: Math.floor(spot.y), z: Math.floor(spot.z) }
+    return (
+      cell.x === feet.x &&
+      cell.z === feet.z &&
+      (cell.y === feet.y || cell.y === feet.y - 1 || cell.y === feet.y + 1)
+    )
+  })
   return {
     placeable: selectPlaceableBlock(state.inventory.counts),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
-    footingSolid: state.terrain.standable.some((spot) => {
-      const cell = { x: Math.floor(spot.x), y: Math.floor(spot.y), z: Math.floor(spot.z) }
-      return cell.x === feet.x && cell.z === feet.z && (cell.y === feet.y || cell.y === feet.y - 1)
-    }),
+    footingSolid,
     headroomClear: ownCut === undefined,
     headroomCell: ownCut?.pos ?? null,
   }
@@ -2407,20 +2417,35 @@ export function deriveReachabilityAbilities(
     columnSafe: column.columnSafe,
   })
 
-  // A pillar plan is only mechanically executable from a supported, safe column
-  // with jump headroom. Live evidence: PILLAR_UP was planned 1647x but refused
-  // with `reason=no_footing` / `reason=no_headroom cause=needs_tool`, so a plan
-  // alone must not count as an available ascend ability.
+  // The ascent column is a FACT, not a plan: an adjacent/forward cell whose
+  // 2-block body column one level up is clear (walkable step) or clearable
+  // (one diggable blocker + the held tool) with solid support and no hazard.
+  const ascent = evaluateAscentColumn({
+    selfFeetY: state.self.position.y,
+    selfPosition: state.self.position,
+    target,
+    stepCuts: state.stepCuts,
+    standable: state.terrain.standable,
+    hazards: state.blocks.filter((block) => block.kind === 'hazard').map((block) => block.position),
+    inventory: counts,
+  })
+
+  // A plan counts as an available ascend only when it is mechanically
+  // executable NOW: a pillar needs a supported, safe column with jump headroom;
+  // an up-staircase needs the held tool for the block it cuts, or the executor
+  // would walk into a dig it cannot finish (`RETRIEVE staircase cannot dig`).
   const ascendPlanAvailable =
-    plan !== null &&
-    (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear))
+    (plan !== null &&
+      (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
+      (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')) ||
+    ascent.kind === 'clear'
 
   const ascendMissing: Capability[] = []
   if (dy > ASCEND_GAP_LIMIT && !ascendPlanAvailable) {
     if (column.placeable === null) ascendMissing.push({ kind: 'placeable_block' })
-    if (!column.columnSafe) ascendMissing.push({ kind: 'safe_column' })
-    else if (!column.footingSolid) ascendMissing.push({ kind: 'safe_column' })
     if (!column.headroomClear) {
+      // The blocked jump cell is the binding immediate fact; the acquisition
+      // pass offers its clearance, so the column is not additionally refused.
       ascendMissing.push({ kind: 'headroom', cell: column.headroomCell })
       const cell = column.headroomCell
       const blocker =
@@ -2435,6 +2460,20 @@ export function deriveReachabilityAbilities(
         if (bestToolTier(counts, blocker.harvestTool) < tier) {
           ascendMissing.push({ kind: 'tool', tool: blocker.harvestTool, tier })
         }
+      }
+    } else if (ascent.kind === 'refuse') {
+      // Name the specific absent fact (`safe_column:no_clearance@x,y,z` /
+      // `safe_column:no_tool@x,y,z:pickaxe@n`) instead of a bare token.
+      const requiredTool = ascent.blocker?.requiredTool ?? null
+      ascendMissing.push({
+        kind: 'safe_column',
+        reason: ascent.reason,
+        cell: ascent.cell,
+        tool: requiredTool,
+        tier: ascent.blocker?.requiredTier ?? null,
+      })
+      if (ascent.reason === 'no_tool' && requiredTool !== null) {
+        ascendMissing.push({ kind: 'tool', tool: requiredTool, tier: ascent.blocker?.requiredTier ?? 0 })
       }
     }
     if (ascendMissing.length === 0) ascendMissing.push({ kind: 'ascend_plan' })
