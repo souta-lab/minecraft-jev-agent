@@ -477,6 +477,8 @@ export class JevController {
   private lastJevAt = 0
   private lastDecisionStateHash = ''
   private lastDecisionId: string | null = null
+  /** whether the last beta abandon vote actually led to a replan (#46 guard). */
+  private lastAbandonAdopted = false
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastProgress = 0
@@ -1181,8 +1183,7 @@ export class JevController {
    */
   private logBetaShadow(optionId: string | null, decision: JevResult, actualReplanAdopted: boolean): void {
     const beta = decision.answers.abandon_option?.probability ?? null
-    const actualReplan =
-      actualReplanAdopted || this.queue.isEmpty || (!this.options.betaShadow && abandonRequested(decision))
+    const actualReplan = actualReplanAdopted || this.queue.isEmpty || this.lastAbandonAdopted
     const shadow = betaShadowDecision({ optionId, beta, actualReplan })
     this.logger.info(
       'beta-shadow',
@@ -1253,26 +1254,27 @@ export class JevController {
    * (#11): it hands control to System 2 (Mercury when enabled, else the
    * deterministic ladder). Code still owns preconditions and completion.
    */
-  private adoptAbandon(decision: JevResult): void {
-    if (!abandonRequested(decision)) return
+  private adoptAbandon(decision: JevResult): boolean {
+    if (!abandonRequested(decision)) return false
     const probability = decision.answers.abandon_option?.probability ?? null
     const actionId = decisionIdFrom(decision)
     const guard = shouldAdoptAbandon({
       actionId,
-      goal: this.queue.current,
+      goals: this.unfinishedGoals(),
       placedFurnaceCount: this.lastPlacedFurnaceCount,
       abandonRequested: true,
     })
-    if (!guard.adopt) {
+    if (!guard.adopt && !this.placeRetryExhausted()) {
       this.logger.warn(
         'heads',
         guard.protection.line,
         { option: guard.protection.option, because: guard.protection.because, actionId, abandon: probability },
         this.tickCounter,
       )
-      return
+      return false
     }
     this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
+    return true
   }
 
   /**
@@ -1284,7 +1286,7 @@ export class JevController {
     if (reason !== 'no_progress' && reason !== 'action_impossible' && reason !== 'unknown_situation') return false
     const guard = shouldAdoptAbandon({
       actionId: this.lastDecisionId,
-      goal: this.queue.current,
+      goals: this.unfinishedGoals(),
       placedFurnaceCount: this.lastPlacedFurnaceCount,
       abandonRequested: true,
     })
@@ -1311,6 +1313,11 @@ export class JevController {
     return this.placementRetries.get(item) ?? 0
   }
 
+  /** Unfinished goals in plan order; the protection guard spans the whole plan. */
+  private unfinishedGoals(): QueuedGoal[] {
+    return this.queue.state.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+  }
+
   /**
    * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
    * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
@@ -1327,6 +1334,7 @@ export class JevController {
     const item = candidate.itemName
     const prior = this.placeRetryCount(item)
     const decision = evaluatePlaceRetry({ at, reason: result.failure ?? 'place_failed', priorRetries: prior })
+    if (item !== null) this.placementRetries.set(item, decision.count)
     if (!decision.retry) {
       this.logger.warn(
         'agent',
@@ -1336,7 +1344,6 @@ export class JevController {
       )
       return false
     }
-    if (item !== null) this.placementRetries.set(item, decision.count)
     this.logger.warn(
       'agent',
       decision.line,
@@ -1361,6 +1368,7 @@ export class JevController {
     trigger: DecisionTrigger,
     chainId: string,
   ): Promise<JevResult> {
+    this.lastAbandonAdopted = false
     const now = Date.now()
     const stateHash = stableStateHash(state)
     if (
@@ -1417,7 +1425,7 @@ export class JevController {
       )
       this.logHeads(result, chainId)
       this.logShadowMetrics(state)
-      if (!this.options.betaShadow) this.adoptAbandon(result)
+      if (!this.options.betaShadow) this.lastAbandonAdopted = this.adoptAbandon(result)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {

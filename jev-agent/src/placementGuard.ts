@@ -65,32 +65,41 @@ export function isFurnacePrerequisiteOption(actionId: string | null): boolean {
 }
 
 /** True when the active goal is the preferred smelt and no furnace is placed yet. */
-export function smeltNeedsPlacedFurnace(goal: GoalLike | null, placedFurnaceCount: number): boolean {
-  if (goal === null) return false
-  if (placedFurnaceCount > 0) return false
-  if (goal.kind !== 'smelt') return false
-  return goal.targetItem === PROTECTED_SMELT_ITEM
+export function smeltPrerequisiteTarget(goals: readonly GoalLike[], placedFurnaceCount: number): string | null {
+  if (placedFurnaceCount > 0) return null
+  const smelts = goals.filter(
+    (goal) => goal.kind === 'smelt' && typeof goal.targetItem === 'string' && goal.targetItem.length > 0,
+  )
+  if (smelts.length === 0) return null
+  const iron = smelts.find((goal) => goal.targetItem === PROTECTED_SMELT_ITEM)
+  return (iron ?? smelts[0])?.targetItem ?? null
 }
 
 export function formatPreconditionProtected(option: string, because: string): string {
   return `PRECONDITION_PROTECTED option=${option} because=${because}`
 }
 
-/** The deterministic guard: may this placement be abandoned right now? */
+/**
+ * The deterministic guard: may this placement be abandoned right now? The
+ * furnace option is protected whenever an unfinished smelt goal still needs a
+ * placed furnace - whether the smelt is the queue head or sits behind the
+ * place/craft prerequisite (the measured live shape).
+ */
 export function prerequisiteProtection(input: {
   actionId: string | null
-  goal: GoalLike | null
+  goals: readonly GoalLike[]
   placedFurnaceCount: number
 }): PrerequisiteProtection {
   const option = input.actionId === null ? 'none' : prerequisiteOptionName(input.actionId)
-  const protect = isFurnacePrerequisiteOption(input.actionId) && smeltNeedsPlacedFurnace(input.goal, input.placedFurnaceCount)
-  const because = `prerequisite_of smelt_${PROTECTED_SMELT_ITEM}`
+  const target = smeltPrerequisiteTarget(input.goals, input.placedFurnaceCount)
+  const protect = isFurnacePrerequisiteOption(input.actionId) && target !== null
+  const because = target === null ? 'prerequisite_of none' : `prerequisite_of smelt_${target}`
   return { protect, option, because, line: formatPreconditionProtected(option, because) }
 }
 
 export interface AbandonGuardInput {
   actionId: string | null
-  goal: GoalLike | null
+  goals: readonly GoalLike[]
   placedFurnaceCount: number
   abandonRequested: boolean
 }
@@ -105,7 +114,7 @@ export interface AbandonGuardDecision {
 export function shouldAdoptAbandon(input: AbandonGuardInput): AbandonGuardDecision {
   const protection = prerequisiteProtection({
     actionId: input.actionId,
-    goal: input.goal,
+    goals: input.goals,
     placedFurnaceCount: input.placedFurnaceCount,
   })
   return { adopt: input.abandonRequested && !protection.protect, protection }

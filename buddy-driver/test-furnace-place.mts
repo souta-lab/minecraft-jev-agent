@@ -134,7 +134,7 @@ const heldFurnaceInventory = inventory({ furnace: 1, raw_iron: 8, coal: 7, cobbl
 addCase('(a) PLACE:furnace is protected while it is the prerequisite of the preferred smelt', () => {
   const decision = shouldAdoptAbandon({
     actionId: 'PLACE:furnace:p29_61_35',
-    goal: { kind: 'smelt', targetItem: 'iron_ingot' },
+    goals: [{ kind: 'smelt', targetItem: 'iron_ingot' }],
     placedFurnaceCount: 0,
     abandonRequested: true,
   })
@@ -149,7 +149,7 @@ addCase('(a) PLACE:furnace is protected while it is the prerequisite of the pref
 addCase('(a) protection releases once a furnace is placed (abandon allowed)', () => {
   const decision = shouldAdoptAbandon({
     actionId: 'PLACE:furnace:p29_61_35',
-    goal: { kind: 'smelt', targetItem: 'iron_ingot' },
+    goals: [{ kind: 'smelt', targetItem: 'iron_ingot' }],
     placedFurnaceCount: 1,
     abandonRequested: true,
   })
@@ -159,7 +159,7 @@ addCase('(a) protection releases once a furnace is placed (abandon allowed)', ()
 addCase('(a) protection does not apply to an unrelated goal', () => {
   const decision = shouldAdoptAbandon({
     actionId: 'PLACE:furnace:p29_61_35',
-    goal: { kind: 'collect', targetItem: 'diamond' },
+    goals: [{ kind: 'collect', targetItem: 'diamond' }],
     placedFurnaceCount: 0,
     abandonRequested: true,
   })
@@ -167,13 +167,41 @@ addCase('(a) protection does not apply to an unrelated goal', () => {
 })
 
 addCase('(a) the craft/retrieve furnace prerequisites are protected too', () => {
-  const craft = prerequisiteProtection({ actionId: 'CRAFT:furnace', goal: { kind: 'smelt', targetItem: 'iron_ingot' }, placedFurnaceCount: 0 })
+  const craft = prerequisiteProtection({ actionId: 'CRAFT:furnace', goals: [{ kind: 'smelt', targetItem: 'iron_ingot' }], placedFurnaceCount: 0 })
   const retrieve = prerequisiteProtection({
     actionId: 'RETRIEVE:known:station:furnace:b29_61_35',
-    goal: { kind: 'smelt', targetItem: 'iron_ingot' },
+    goals: [{ kind: 'smelt', targetItem: 'iron_ingot' }],
     placedFurnaceCount: 0,
   })
   return { pass: craft.protect && retrieve.protect, detail: `craft=${craft.protect} retrieve=${retrieve.protect}` }
+})
+
+addCase('(a) the measured live shape is protected: place:furnace head with smelt:iron_ingot queued behind', () => {
+  const goals = [
+    { kind: 'place', targetItem: 'furnace' },
+    { kind: 'collect', targetItem: 'log' },
+    { kind: 'smelt', targetItem: 'charcoal' },
+    { kind: 'collect', targetItem: 'raw_iron' },
+    { kind: 'smelt', targetItem: 'iron_ingot' },
+  ]
+  const decision = shouldAdoptAbandon({
+    actionId: 'PLACE:furnace:p29_61_35',
+    goals,
+    placedFurnaceCount: 0,
+    abandonRequested: true,
+  })
+  const expected = 'PRECONDITION_PROTECTED option=PLACE:furnace because=prerequisite_of smelt_iron_ingot'
+  return { pass: decision.adopt === false && decision.protection.line === expected, detail: `adopt=${decision.adopt} line="${decision.protection.line}"` }
+})
+
+addCase('(a) an unrelated plan with no smelt is not protected', () => {
+  const decision = shouldAdoptAbandon({
+    actionId: 'PLACE:furnace:p29_61_35',
+    goals: [{ kind: 'place', targetItem: 'furnace' }, { kind: 'collect', targetItem: 'diamond' }],
+    placedFurnaceCount: 0,
+    abandonRequested: true,
+  })
+  return { pass: decision.adopt === true, detail: `adopt=${decision.adopt}` }
 })
 
 // --- (b) bounded placement retry --------------------------------------------
@@ -232,9 +260,10 @@ addCase('fixture: protected PLACE leads to a SMELT candidate and SMELT_DONE', as
   const spot: Vec3Json = { x: 31, y: 61, z: 35 }
   const beforePlace = worldState({ inventory: heldFurnaceInventory, placementSpots: [spot] })
   const place = generateCandidates(beforePlace, defaultCandidateOptions).find((entry) => entry.kind === 'PLACE')
+  const currentGoal = beforePlace.goalQueue.current
   const guard = shouldAdoptAbandon({
     actionId: place?.id ?? null,
-    goal: beforePlace.goalQueue.current,
+    goals: currentGoal === null ? [] : [currentGoal],
     placedFurnaceCount: 0,
     abandonRequested: true,
   })
