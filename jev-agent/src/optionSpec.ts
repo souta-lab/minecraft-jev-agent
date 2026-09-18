@@ -43,6 +43,14 @@ import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { ResourceClass } from './resourceClass.ts'
+import {
+  PICKAXE_TIER_ORDER,
+  loadGameData,
+  recipesFor,
+  requiredPickaxeRank1,
+  requiredPickaxeRankForItem1,
+} from './gameData.ts'
+import type { RecipeView } from './gameData.ts'
 
 export type OptionKind =
   | 'collect'
@@ -532,50 +540,99 @@ const SKILLS_BY_KIND: Readonly<Record<OptionKind, readonly string[]>> = {
   custom: [],
 }
 
-const PICKAXE_BY_RANK: Readonly<Record<number, string>> = {
-  1: 'wooden_pickaxe',
-  2: 'stone_pickaxe',
-  3: 'iron_pickaxe',
-  4: 'diamond_pickaxe',
-  5: 'netherite_pickaxe',
-}
+const PICKAXE_BY_RANK: Readonly<Record<number, string>> = Object.fromEntries(
+  PICKAXE_TIER_ORDER.map((tool, index) => [index + 1, tool]),
+)
 
 function goalCount(goal: PlannedGoal): number {
   return Math.max(1, Math.floor(goal.requiredCount ?? 1))
 }
 
-function isOreItem(item: string): boolean {
-  return ORE_SOURCES[item] !== undefined
+/**
+ * Minimum pickaxe tier (1-based) required to collect `item`, derived from
+ * minecraft-data: first try the item as a block name (stone/cobblestone), then
+ * as an ore drop (raw_iron/diamond/gold/...). The old hand table returned 2 for
+ * every ore, which wrongly allowed a stone pickaxe for diamond ore.
+ */
+function pickaxeRankForCollectItem(item: string): number | null {
+  const reg = loadGameData()
+  const asBlock = requiredPickaxeRank1(reg, item)
+  return asBlock ?? requiredPickaxeRankForItem1(reg, item)
 }
 
 /**
- * Initiation predicates derived from the deterministic ladder's precondition
- * rules (#12). They mirror `rungPrecondition` in buddy-driver/planner.ts so the
- * compiled Options describe the same rungs the ladder already emits.
+ * Craft preconditions derived from the item's minecraft-data recipe variants.
+ * An ingredient is only required when EVERY variant needs it (a necessary
+ * condition), so a bamboo-or-stick variant never forces one specific substitute
+ * and a false-positive initiation predicate is impossible. Stone-class stacks
+ * collapse to a class predicate (`8 x stone` for furnace). This is what fixed
+ * `diamond_pickaxe` requiring 1 diamond instead of 3 (#54).
+ */
+function craftPreconditions(item: string): Predicate[] {
+  const variants = recipesFor(item)
+  if (variants.length === 0) return []
+  const required = new Map<string, IngredientPredicate>()
+  let seeded = false
+  for (const variant of variants) {
+    const needs = variantRequirements(variant)
+    if (!seeded) {
+      for (const [key, predicate] of needs) required.set(key, predicate)
+      seeded = true
+      continue
+    }
+    for (const [key, predicate] of [...required]) {
+      const other = needs.get(key)
+      if (other === undefined) required.delete(key)
+      else required.set(key, { ...predicate, count: Math.min(predicate.count, other.count) })
+    }
+  }
+  return [...required.values()]
+}
+
+type IngredientPredicate = Extract<Predicate, { kind: 'inventoryAtLeast' | 'inventoryClassAtLeast' }>
+
+/**
+ * Craft intermediates that are deliberately NOT initiation predicates. Sticks
+ * are trivially produced from any plank/log and are resolved by the craft skill
+ * and the executor's recipe lookup; making them an Option precondition made the
+ * compiled chain disagree with the deterministic ladder (#54 scope note).
+ */
+const CRAFT_INTERMEDIATE_ITEMS = new Set(['stick'])
+
+function variantRequirements(recipe: RecipeView): Map<string, IngredientPredicate> {
+  const needed = new Map<string, IngredientPredicate>()
+  const stoneCount = recipe.ingredients
+    .filter((ingredient) => matchesResourceClass(ingredient.item, 'stone'))
+    .reduce((total, ingredient) => total + ingredient.count, 0)
+  if (stoneCount > 0) needed.set('class:stone', { kind: 'inventoryClassAtLeast', cls: 'stone', count: stoneCount })
+  for (const ingredient of recipe.ingredients) {
+    if (matchesResourceClass(ingredient.item, 'stone')) continue
+    if (CRAFT_INTERMEDIATE_ITEMS.has(ingredient.item)) continue
+    needed.set(`item:${ingredient.item}`, { kind: 'inventoryAtLeast', item: ingredient.item, count: ingredient.count })
+  }
+  return needed
+}
+
+/**
+ * Initiation predicates derived from deterministic ladder policy (#12) plus
+ * minecraft-data mechanics (#54): harvest tiers from `blocks[].harvestTools`,
+ * ingredient counts from `recipes`. Strategic rules minecraft-data cannot
+ * express (e.g. "stone_pickaxe needs some pickaxe") stay explicit.
  */
 function preconditionsForGoal(goal: PlannedGoal): Predicate[] {
   const item = goal.targetItem ?? null
   if (item === null) return []
   const count = goalCount(goal)
   switch (goal.kind) {
-    case 'collect':
-      if (item === 'cobblestone' || item === 'stone' || item === 'cobbled_deepslate') {
-        return [{ kind: 'pickaxeRankAtLeast', rank: 1 }]
-      }
-      if (item === 'diamond') return [{ kind: 'pickaxeRankAtLeast', rank: 2 }]
-      if (isOreItem(item)) return [{ kind: 'pickaxeRankAtLeast', rank: 2 }]
-      return []
-    case 'craft':
-      if (item === 'furnace') return [{ kind: 'inventoryClassAtLeast', cls: 'stone', count: 8 }]
-      if (item === 'stone_pickaxe') {
-        return [
-          { kind: 'inventoryClassAtLeast', cls: 'stone', count: 3 },
-          { kind: 'pickaxeRankAtLeast', rank: 1 },
-        ]
-      }
-      if (item === 'iron_pickaxe') return [{ kind: 'inventoryAtLeast', item: 'iron_ingot', count: 3 }]
-      if (item === 'diamond_pickaxe') return [{ kind: 'inventoryAtLeast', item: 'diamond', count: 1 }]
-      return []
+    case 'collect': {
+      const rank = pickaxeRankForCollectItem(item)
+      return rank === null ? [] : [{ kind: 'pickaxeRankAtLeast', rank }]
+    }
+    case 'craft': {
+      const preconditions = craftPreconditions(item)
+      if (item === 'stone_pickaxe') preconditions.push({ kind: 'pickaxeRankAtLeast', rank: 1 })
+      return preconditions
+    }
     case 'smelt':
       if (item === 'iron_ingot') {
         return [

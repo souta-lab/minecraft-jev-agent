@@ -481,7 +481,9 @@ addCase('readiness ordering moves a ready smelt ahead of an unmet collect (#46)'
 })
 
 addCase('readiness ordering is stable when every goal is ready (#46)', () => {
-  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, diamond: 1 }, knownStations: ['furnace'], toolRank: 2 })
+  // toolRank 3 = iron; diamond ore requires iron tier (#54), so this is the
+  // smallest rank at which collect:diamond is ready.
+  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, diamond: 1 }, knownStations: ['furnace'], toolRank: 3 })
   const goals: PlannedGoal[] = [
     { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
     { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },

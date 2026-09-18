@@ -45,6 +45,7 @@ import { matchesResourceClass } from './resourceClass.ts'
 import type { ResourceClass } from './resourceClass.ts'
 import { evaluatePredicates } from './optionSpec.ts'
 import type { CustomPredicateRegistry, OptionWorldSnapshot, Predicate } from './optionSpec.ts'
+import { loadGameData, requiredPickaxeRank1, requiredPickaxeRankForItem1, smeltInputFor } from './gameData.ts'
 
 /** The executable repertoire. Each kind maps to an existing grounded candidate. */
 export type SkillKind =
@@ -195,14 +196,6 @@ const CRAFT_ITEMS = new Set([
   'torch',
   'chest',
 ])
-
-const SMELT_INPUT: Readonly<Record<string, string>> = {
-  charcoal: 'log',
-  iron_ingot: 'raw_iron',
-  gold_ingot: 'raw_gold',
-  copper_ingot: 'raw_copper',
-  glass: 'sand',
-}
 
 const CLASS_DEPENDENCY_ITEM: Readonly<Record<ResourceClass, string>> = {
   log: 'oak_log',
@@ -375,9 +368,9 @@ function skill(id: string, kind: SkillKind, source: SkillSource, params: Record<
 }
 
 function toolRankAtLeast(item: string): Predicate[] {
-  if (isOreItem(item) || item === 'diamond') return [{ kind: 'pickaxeRankAtLeast', rank: 2 }]
-  if (matchesResourceClass(item, 'stone')) return [{ kind: 'pickaxeRankAtLeast', rank: 1 }]
-  return []
+  const reg = loadGameData()
+  const rank = requiredPickaxeRank1(reg, item) ?? requiredPickaxeRankForItem1(reg, item)
+  return rank === null ? [] : [{ kind: 'pickaxeRankAtLeast', rank }]
 }
 
 export function collectBlockSkill(item: string, count: number, source: SkillSource = 'goal'): SkillCandidate {
@@ -394,9 +387,9 @@ export function craftSkill(item: string, count = 1, source: SkillSource = 'goal'
 
 export function smeltSkill(item: string, count = 1, source: SkillSource = 'goal'): SkillCandidate {
   const n = Math.max(1, count)
-  const inputItem = SMELT_INPUT[item]
+  const inputItem = smeltInputFor(item)
   const preconditions: Predicate[] = [{ kind: 'stationKnown', station: 'furnace' }]
-  if (inputItem !== undefined) preconditions.push({ kind: 'inventoryAtLeast', item: inputItem, count: n })
+  if (inputItem !== null) preconditions.push({ kind: 'inventoryAtLeast', item: inputItem, count: n })
   return skill(`smelt:${item}:count=${n}`, 'smelt', source, { item, count: n }, preconditions, { item, count: n })
 }
 
@@ -411,7 +404,8 @@ export function descendToSkill(y: number, input: SkillGenerationInput, source: S
   const target: SkillTarget = { targetY: y }
   const dimension = input.goal?.dimension
   if (typeof dimension === 'string' && dimension.length > 0) target.dimension = dimension
-  const preconditions: Predicate[] = isOreItem(goalItem(input) ?? '') ? [{ kind: 'pickaxeRankAtLeast', rank: 2 }] : []
+  const item = goalItem(input)
+  const preconditions: Predicate[] = item === null ? [] : toolRankAtLeast(item)
   return skill(id, 'descend_to', source, { targetY: y, fromY: fromY ?? 0 }, preconditions, target)
 }
 
