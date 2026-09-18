@@ -60,6 +60,8 @@ import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIO
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
+import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
@@ -1168,6 +1170,7 @@ export class JevController {
           tick: this.tickCounter,
           goal: this.goal,
           goalQueue: this.queue.state,
+          currentOption: this.currentOptionContext(),
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
@@ -1322,6 +1325,7 @@ export class JevController {
           tick: this.tickCounter,
           goal: this.goal,
           goalQueue: this.queue.state,
+          currentOption: this.currentOptionContext(),
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
@@ -3328,6 +3332,18 @@ export class JevController {
     // would abandon the parent smelt goal, so never wedge-abort it.
     if (this.prereqPlan !== null && isFurnacePrerequisiteOption(actionId)) return
     this.abortWedge(`action id ${actionId} chosen ${count}x with no verified progress (limit ${this.options.wedgeRepeatLimit})`)
+  }
+
+  private currentOptionContext(): CurrentOptionContext | null {
+    const current = this.queue.state.current
+    if (current === null || typeof current.optionInstanceId !== 'string' || current.optionInstanceId.length === 0) return null
+    const optionId = current.optionTemplateId ?? optionIdForGoal(current) ?? this.currentGoalKey()
+    const attempts = this.optionAttempts.stateFor(optionId, current.id)
+    return currentOptionContextForQueuedGoal(current, {
+      failures: attempts.attempts,
+      verifiedProgress: current.haveCount,
+      lastProgressAt: current.updatedAt,
+    })
   }
 
   private currentGoalKey(): string {
