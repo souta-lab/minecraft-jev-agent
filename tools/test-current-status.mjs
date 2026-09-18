@@ -24,6 +24,8 @@ const ISSUE_STDOUT = JSON.stringify([
   { number: 7, title: 'Crash on startup', labels: [{ name: 'P0' }, { name: 'bug' }] },
   { number: 8, title: 'Slow path', labels: [{ name: 'P1' }] },
   { number: 9, title: 'Nice to have', labels: [] },
+  // The live repo carries almost no labels, so a titled priority must still count.
+  { number: 10, title: 'P1: unlabelled but titled priority', labels: [] },
 ])
 
 function makeRunner({ ghOk = true } = {}) {
@@ -57,19 +59,20 @@ const offlineResident = async () => null
   ok('pull request values come from injected gh output')
 
   assert.match(markdown, /## Open issues — EVIDENCE/)
-  assert.match(markdown, /- count: 3/)
+  assert.match(markdown, /- count: 4/)
   assert.match(markdown, /- P0: 1/)
-  assert.match(markdown, /- P1: 1/)
+  assert.match(markdown, /- P1: 2/)
   assert.match(markdown, /- #9 Nice to have — no labels/)
-  ok('issue counts and P0\/P1 derived, empty labels reported as "no labels"')
+  assert.match(markdown, /- priority source: labels first, then title prefix \(1 counted from title only\)/)
+  ok('issue counts and P0\/P1 derived from labels AND title prefix, empty labels reported as "no labels"')
 
   assert.match(markdown, /## Resident snapshot — UNKNOWN/)
   assert.match(markdown, /live: unavailable/)
   ok('missing resident socket is UNKNOWN, not fabricated')
 
-  assert.ok(commands.includes('gh pr list --state open --json number,title,headRefName'))
+  assert.ok(commands.includes('gh pr list --state open --limit 1000 --json number,title,headRefName'))
   assert.match(markdown, /## Evidence commands — EVIDENCE/)
-  assert.match(markdown, /gh issue list --state open --json number,title,labels/)
+  assert.match(markdown, /gh issue list --state open --limit 1000 --json number,title,labels/)
   ok('exact evidence commands are printed')
 }
 
@@ -98,7 +101,7 @@ const offlineResident = async () => null
     const file = readFileSync(join(dir, 'CURRENT-STATUS.md'), 'utf8')
     assert.match(file, /## Evidence commands — EVIDENCE/)
     assert.match(file, /git log -1 --format=%H%n%s%n%cI origin\/main/)
-    assert.match(file, /gh pr list --state open --json number,title,headRefName/)
+    assert.match(file, /gh pr list --state open --limit 1000 --json number,title,headRefName/)
     ok('--write output includes the evidence-commands section')
   } finally {
     rmSync(dir, { recursive: true, force: true })

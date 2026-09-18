@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-export const GH_ISSUE_LIST_COMMAND = 'gh issue list --json number,title,body,labels'
+export const GH_ISSUE_LIST_COMMAND = 'gh issue list --state open --limit 1000 --json number,title,body,labels'
 export const UNKNOWN = 'UNKNOWN'
 
 const DEPENDS_INLINE = /\b(?:depends?\s+on|blocked\s+by)\s*:?\s*#(\d+)/gi
@@ -11,7 +11,7 @@ const ANY_HEADING = /^#{1,6}\s/m
 const HASH_REF = /#(\d+)/g
 
 export function defaultGhRunner() {
-  return execFileSync('gh', ['issue', 'list', '--json', 'number,title,body,labels'], {
+    return execFileSync('gh', ['issue', 'list', '--state', 'open', '--limit', '1000', '--json', 'number,title,body,labels'], {
     encoding: 'utf8',
   })
 }

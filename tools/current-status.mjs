@@ -151,7 +151,9 @@ export async function deriveStatus(options = {}) {
     section('Base commit (origin/main)', 'UNKNOWN', [`- UNKNOWN: ${reason}`])
   }
 
-  const prResult = await trackedRun('gh', ['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName'])
+  // `gh` truncates to 30 by default; without an explicit limit the derived status
+  // silently reports a partial repo. Always request the full set.
+  const prResult = await trackedRun('gh', ['pr', 'list', '--state', 'open', '--limit', '1000', '--json', 'number,title,headRefName'])
   const prs = parseJsonArray(prResult)
   if (prs.ok) {
     const body = [`- count: ${prs.value.length}`]
@@ -164,24 +166,35 @@ export async function deriveStatus(options = {}) {
     section('Open pull requests', 'UNKNOWN', [`- UNKNOWN: ${prs.error}`])
   }
 
-  const issueResult = await trackedRun('gh', ['issue', 'list', '--state', 'open', '--json', 'number,title,labels'])
+  const issueResult = await trackedRun('gh', ['issue', 'list', '--state', 'open', '--limit', '1000', '--json', 'number,title,labels'])
   const issues = parseJsonArray(issueResult)
   if (issues.ok) {
     let p0 = 0
     let p1 = 0
     let labeled = 0
+    let fromTitle = 0
     const body = [`- count: ${issues.value.length}`]
     const detail = []
     for (const issue of issues.value) {
       const names = labelNames(issue)
       if (names.length > 0) labeled += 1
-      if (names.some(isP0)) p0 += 1
-      if (names.some(isP1)) p1 += 1
+      const title = typeof issue.title === 'string' ? issue.title : ''
+      // Labels are the primary source. Most issues in this repo carry no labels at
+      // all, so fall back to the conventional `P0:` / `P1:` title prefix — otherwise
+      // the status reports P1: 0 while titled P1 issues exist.
+      const labelledP0 = names.some(isP0)
+      const labelledP1 = names.some(isP1)
+      const titledP0 = isP0(title)
+      const titledP1 = isP1(title)
+      if (labelledP0 || titledP0) p0 += 1
+      if (labelledP1 || titledP1) p1 += 1
+      if (!labelledP0 && !labelledP1 && (titledP0 || titledP1)) fromTitle += 1
       const labelText = names.length > 0 ? names.join(', ') : 'no labels'
       detail.push(`- #${issue.number} ${issue.title ?? 'UNKNOWN'} — ${labelText}`)
     }
     body.push(`- P0: ${p0}`)
     body.push(`- P1: ${p1}`)
+    body.push(`- priority source: labels first, then title prefix (${fromTitle} counted from title only)`)
     body.push(`- labels: ${labeled === 0 ? 'no labels' : `${labeled} of ${issues.value.length} issues labeled`}`)
     body.push(...detail)
     if (issues.value.length === 0) body.push('- no open issues')
