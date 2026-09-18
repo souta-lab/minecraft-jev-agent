@@ -14,6 +14,7 @@
     "move-failmem-test": "tsx test-move-failmem.mts",
     "pit-escape-test": "tsx test-pit-escape.mts",
     "pillar-jump-test": "tsx test-pillar-jump.mts",
+    "pillar-apex-test": "tsx test-pillar-apex.mts",
     "typecheck": "tsc --noEmit",
     "demo": "tsx demo.mts",
     "guard-test": "tsx test-guard.mts",

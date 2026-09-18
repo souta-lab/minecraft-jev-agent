@@ -8,31 +8,83 @@ movement patch under `jev-agent/patches/`.
 
 Perception loop:
 
-```
+```text
 sensor -> WorldModel(JSON) -> deterministic grounded candidates
-       -> Jev (1 batched call; CORE + trigger-specific questions)
+       -> Jev (bounded semantic policy)
        -> deterministic guard -> fresh sensor re-validation
-       -> Executor (single action) -> VERIFY -> loop
+       -> Executor / Skill -> VERIFY -> loop
 ```
 
-Only the swap point `jev-agent/src/jev.ts#createJevPolicy` differs between the Jev policy and the
-deterministic fallback policy. A batched-call scheduler (`src/scheduler.ts`) decides *when* to ask,
-and `src/gating.ts` maps `(value, certainty)` to act / ask / refuse.
+The target architecture is tracked in **Issue #11 (Grounded Options)**:
+
+```text
+Code      = CAN / TRUE / SAFE / DONE
+Jev π     = WHICH grounded local action/Skill
+Jev β     = WHETHER the current Option should end
+System 2  = WHAT intent/Option comes next
+Skill     = HOW the selected action is mechanically executed
+HOST      = durable state / lifecycle / actuation lease
+```
+
+## Autonomous-development entry point
+
+Do **not** scan every open issue and invent a priority order on every run. The repository may keep a
+large historical/research backlog while only a few items are executable.
+
+From the repository root:
+
+```bash
+npm run frontier          # small executable working set; NOW is capped at 3
+npm run frontier:check    # fails if WIP exceeds the cap or a P0/P1 issue is unrouted
+npm run current-status    # evidence-only repo/runtime snapshot
+npm run lane-guard        # avoid duplicate parallel implementation lanes
+```
+
+`ISSUE-ROUTING.json` is the machine-readable routing layer. Its categories mean:
+
+- `NOW` — the only normal source of new coding work; maximum 3 items.
+- `NEXT` — may be promoted by the orchestrator after a NOW lane lands or is genuinely blocked.
+- `WAITING_LIVE` — implementation/acceptance work; verify current main before writing more code.
+- `RESEARCH` — non-blocking experiments/hypotheses.
+- `FUTURE` — milestone work that is intentionally not on the current frontier.
+- unclassified open issues — `BACKLOG`; do not enumerate them during normal ORIENT.
+
+Before creating a new issue, search the existing backlog. Prefer updating/reopening an existing issue,
+adding evidence to the active issue, or adding a regression fixture. A new issue is justified only
+when it has a genuinely distinct acceptance boundary.
 
 ## Status
 
-- **M0** — closed loop PASS (perception -> decision -> navigation -> re-observe -> dig -> verify).
-- **M1** — **verified 4/4 on a fresh world with `llm.called == false`** (whole run Jev-only: oak_log
-  >= 3 -> crafting_table >= 1 -> wooden_pickaxe >= 1 -> cobblestone >= 16, no LLM call).
-- **M2 (iron age)** — **in progress**: furnace placed, **charcoal smelted 2026-09-18 00:13 JST**,
-  now hunting `raw_iron`. Target: iron_ingot x3 -> iron_pickaxe.
-- **M3/M4** — not started (nether -> End; Ender Dragon deprioritised).
-- **Resident mode** — implemented: one persistent Mineflayer connection, hash-stamped esbuild
-  **generation hot reload** (no reconnect), a control channel (`data/resident/control.sock`, 0600),
-  and durable `WorldMemory` (`buddy-state.json`). Verified `RELOAD ok=true` across 4 generations.
+- **M0** — closed loop PASS.
+- **M1** — verified Jev-only plan with `llm.called == false`.
+- **M2** — in progress.
+- **M3/M4** — later milestones; M4 remains the final game objective.
+- **Resident mode** — persistent Mineflayer connection, generation hot reload, control socket, durable
+  state and an actuation lease are implemented.
 
-Known open defects and their priority order are in `BUDDY-DEFECTS.md`; the as-built architecture
-with verification evidence is in `ARCHITECTURE.md`.
+Runtime position, current rung, active queue, open PR/issue counts, and other time-sensitive facts
+belong in `CURRENT-STATUS.md` / `npm run current-status`, not in this README.
+
+## Execution modes
+
+Do not rely on implicit `auto` mode when proving reproducibility. Select the planner mode explicitly
+for acceptance work:
+
+```bash
+# deterministic high-level planner: no planner network call
+BUDDY_PLANNER=deterministic node buddy-driver/agent-runner.mts
+
+# bounded Jev high-level horizon planner (requires configured Jev/Gateway credentials)
+BUDDY_PLANNER=llm node buddy-driver/agent-runner.mts
+
+# optional exception-driven Mercury System2 repair; explicit opt-in only
+BUDDY_SYSTEM2=mercury node buddy-driver/agent-runner.mts
+```
+
+`BUDDY_PLANNER=auto` exists for convenience and currently selects the Jev planner when a usable API
+key is present; **do not use `auto` as evidence for a deterministic acceptance claim**. Mercury is a
+separate sparse System2 repair path and is never enabled merely because a key exists. Action safety,
+mechanics and postcondition verification remain deterministic in every mode.
 
 ## How to run
 
@@ -44,13 +96,13 @@ via `postinstall` (idempotent).
 # jev-agent: agent, tests, M1/M2 ladders
 cd jev-agent
 npm install
-npm run movement-patch:check      # assert the local patch is applied (exit 1 otherwise)
-npm run typecheck                 # tsc --noEmit
-npm run guard-test                # 10/10 deterministic guard cases
-npm run gating-test               # 6/6 (value x certainty) gating cases
-npm run m1                        # tsx m1.mts   - M1 Jev-only plan
-npx tsx m2.mts                    # M2 iron-age ladder
-npx tsx demo.mts --help           # PoC options
+npm run movement-patch:check
+npm run typecheck
+npm run guard-test
+npm run gating-test
+npm run m1
+npx tsx m2.mts
+npx tsx demo.mts --help
 
 # resident host: persistent connection + generation hot reload
 cd ../buddy-driver
@@ -60,38 +112,42 @@ node agent-runner.mts
 node ../companion/buddy.cjs
 
 # movement patch apply / check (run inside jev-agent)
-node scripts/apply-movement-patch.mjs          # apply (idempotent)
-node scripts/apply-movement-patch.mjs --check  # verify, non-zero on failure
+node scripts/apply-movement-patch.mjs
+node scripts/apply-movement-patch.mjs --check
 ```
 
 The patch is reversible: `rm -rf node_modules && npm ci --ignore-scripts` restores stock
-`mineflayer`. It ports the two locomotion-bookkeeping hunks that stop a Leaf 1.21.11 server from
-rubber-banding the bot on terrain contact (clientbound-teleport reply writes the wrong `lastSent`;
-`updatePosition` re-sends on exact inequality instead of vanilla's `2e-4` threshold).
+`mineflayer`. The local patch contains only experimentally justified locomotion bookkeeping changes;
+keep it small so causality and rollback remain clear.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `jev-agent/` | The agent: sensors, WorldModel, candidates, Jev policy, guard, Executor, VERIFY. Source in `src/**`, runnable `*.mts` ladders, `patches/`, `scripts/`, `data/*.mts` probes. |
-| `buddy-driver/` | Resident host: one long-lived Mineflayer connection, generation hot reload, control socket, durable state, `WorldMemory`. Entry `agent-runner.mts`. |
-| `companion/` | Minimal companion bot that follows the human player (`buddy.cjs`). |
-| `launch/launch.mjs` | Launcher helper for the local play environment. |
+| `jev-agent/` | Sensor/world state, grounded candidates, Jev policy, Guard, Skills/Executor, VERIFY. |
+| `buddy-driver/` | Persistent host, generation hot reload, control socket, durable state/WorldMemory. |
+| `companion/` | Minimal companion bot. |
+| `launch/` | Local play-environment helpers. |
+| `tools/` | Repository convergence, evidence and orchestration tools. |
+| `ISSUE-ROUTING.json` | Small machine-readable execution frontier over the larger issue backlog. |
 
 ## Docs
 
 | File | Contents |
 | --- | --- |
-| `ARCHITECTURE.md` | As-built architecture, layer contracts, evidence, and open blockers (review handoff). |
-| `MILESTONES.md` | M0-M4 ladder, acceptance criteria, and per-run evidence. |
-| `M2-PROGRESS.md` | The M2 iron-age run log and failure analysis. |
-| `RESIDENT-MODE.md` | Resident-mode spec: persistence, hot reload, control channel, WorldMemory. |
-| `BUDDY-DEFECTS.md` | Measured defects in the resident agent's intelligence (movement, digging, tools). |
+| `CURRENT-STATUS.md` | Generated/derived operational evidence snapshot; may be regenerated at any time. |
+| `DEVELOPMENT-METHOD.md` | Evidence standards, authority hierarchy, autonomous development process. |
+| `ARCHITECTURE.md` | As-built/review evidence; timestamped sections may be historical. |
+| `MILESTONES.md` | M0-M4 ladder and acceptance criteria. |
+| `M2-PROGRESS.md` | Historical M2 run log / failure analysis. |
+| `M2-HEURISTIC-AUDIT.md` | Heuristic/truth authority audit and migration evidence. |
+| `PRIOR-WORK.md` | Prior-work survey and architecture implications. |
+| `RESIDENT-MODE.md` | Resident persistence/hot-reload/state-ownership specification. |
 
 ## Notes
 
-- Live runs need a **local Leaf / Minecraft Java 1.21.11 server in offline mode**; the local server
-  config (`server.properties`) is intentionally **not** part of this repo.
+- Live runs need a local Leaf / Minecraft Java 1.21.11 server in offline mode; local server config is
+  intentionally not part of this repo.
 - Runtime artifacts (logs, JSONL traces, resident bundles, world/launcher data) are git-ignored.
 - `buddy-driver` reads the same `mineflayer` install as `jev-agent` via a `node_modules` symlink;
   reinstall `jev-agent` dependencies to refresh it.

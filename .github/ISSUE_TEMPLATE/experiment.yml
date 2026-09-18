@@ -1,0 +1,50 @@
+name: Experiment / research
+about: Test a hypothesis without silently promoting it into production authority
+labels: []
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: State the falsifiable claim. Avoid presenting an unmeasured architecture preference as fact.
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline and variant
+      description: Define A/B (or control/treatment) and what must remain identical between them.
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics / decision rule
+      description: What measurements decide support, rejection, or inconclusive outcome?
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority / rollout boundary
+      description: State whether the experiment is offline, shadow, experimental-authority, or production-authority. Default to no authority change.
+      value: "Default: research/shadow only; no production authority change."
+    validations:
+      required: true
+  - type: textarea
+    id: confounders
+    attributes:
+      label: Confounders / state contract
+      description: List important state/context dependencies that could make a model or policy look better/worse for the wrong reason.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Completion criteria
+      description: Define what artifact/data closes the experiment even if the hypothesis loses.
+    validations:
+      required: true
+  - type: textarea
+    id: dependency
+    attributes:
+      label: Blocking relationship
+      description: Research is non-blocking by default. Name the implementation issue only if this experiment truly gates it.

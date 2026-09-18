@@ -1,0 +1,52 @@
+name: Live validation / acceptance
+about: Prove already-landed behavior in a resident or closed-loop Minecraft run
+labels: []
+body:
+  - type: textarea
+    id: claim
+    attributes:
+      label: Claim being validated
+      description: State the exact behavior/invariant. This issue is for evidence, not a new implementation lane unless the run exposes a new root cause.
+    validations:
+      required: true
+  - type: textarea
+    id: identity
+    attributes:
+      label: Required run identity
+      description: Record commit, dirty status, generation hash/id, runId, worldKey/worldEpoch, server/runtime versions, and non-secret effective config where available.
+      placeholder: |
+        gitCommit:
+        dirtyTree:
+        generationId/hash:
+        runId:
+        worldKey/worldEpoch:
+        server/runtime:
+        effective config:
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup / preconditions
+      description: Inventory, position/world fixture, planner mode, and any known baseline required to make the run interpretable.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: PASS / FAIL / UNKNOWN checks
+      description: List observable checks. Missing/ambiguous evidence must be UNKNOWN rather than inferred PASS.
+    validations:
+      required: true
+  - type: textarea
+    id: regression
+    attributes:
+      label: Offline regression already landed
+      description: Link the implementation issue/commit/test so live validation does not become a duplicate coding lane.
+  - type: textarea
+    id: closure
+    attributes:
+      label: Closure rule
+      description: Define the minimum bounded live evidence needed. Shared all-time counters alone must not close the issue.
+    validations:
+      required: true

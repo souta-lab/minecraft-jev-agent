@@ -1,0 +1,69 @@
+name: Architecture / refactor
+about: Change a boundary, ownership rule, schema, or reusable subsystem
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / architectural pressure
+      description: Describe the current limitation with concrete code/evidence. Avoid solution-only issues.
+    validations:
+      required: true
+  - type: dropdown
+    id: authority
+    attributes:
+      label: Authority boundary affected
+      options:
+        - mechanics / world truth
+        - safety / guard / verification
+        - Jev pi local policy
+        - Jev beta termination
+        - System2 / planning
+        - resident state / lifecycle / actuation
+        - observability / tooling
+        - multiple boundaries
+    validations:
+      required: true
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Invariants that must remain true
+      description: State what this change must not weaken (e.g. code-owned DONE, sole actuation owner, deterministic fallback).
+    validations:
+      required: true
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration / compatibility plan
+      description: Explain shadow/baseline/rollback behavior and how existing state/artifacts remain readable where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / non-goals
+      description: What nearby redesigns are intentionally not part of this issue?
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Minimum closure evidence
+      options:
+        - deterministic unit/fixture
+        - integration / structural smoke
+        - replay / offline A-B
+        - resident reload/soak
+        - live embodied A-B / acceptance
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Concrete, testable closure conditions. Architecture implementation alone is not acceptance if rollout/live evidence is required.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies / supersession
+      description: Search existing issues first; list blocked-by, supersedes, or research-only relationships.

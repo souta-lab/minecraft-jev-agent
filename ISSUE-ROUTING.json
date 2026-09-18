@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "asOf": "2026-09-18",
+  "policy": {
+    "wipLimit": 3,
+    "unclassified": "backlog",
+    "newIssueRule": "Search existing open/closed issues first. Prefer updating, reopening, or adding acceptance to an existing issue over creating a new issue. Create a new issue only when the acceptance boundary is genuinely distinct.",
+    "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, and unclassified BACKLOG are not normal coding work.",
+    "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count."
+  },
+  "now": [56, 79, 13],
+  "next": [121, 52, 41],
+  "waitingLive": [73, 78, 46, 12, 3, 4],
+  "research": [129, 130],
+  "future": [37, 80, 35],
+  "referenceOnly": [11, 102],
+  "clusters": {
+    "M2_SMELT_ACCEPTANCE": [79, 78, 73, 46, 58, 12],
+    "GROUNDED_OPTIONS": [11, 56, 52, 121, 41, 130],
+    "RESIDENT_P1": [13, 3, 4, 39],
+    "REPO_CONVERGENCE": [102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 122, 123, 124, 125, 126, 127, 128]
+  },
+  "notes": {
+    "56": "Primary architecture lane: carry CurrentOptionContext/Option instance semantics to the Jev decision boundary before judging pi/beta authority.",
+    "79": "Representative M2 closed-loop acceptance lane. Treat #73/#78/#46/#58/#12 as one smelt/prerequisite acceptance cluster, not five independent coding projects.",
+    "13": "P1 resident lifecycle acceptance. Prefer verification/soak and closure if current code already satisfies it; do not rewrite lifecycle code without a failing current-main fixture.",
+    "121": "Next architecture support: typed progress/failure semantics, useful to #11 migration after the hot data-flow is correct.",
+    "129": "Research hypothesis only; never blocks runtime work.",
+    "130": "Research/A-B experiment; blocked on #56-style state contract and not a NOW implementation target."
+  }
+}
