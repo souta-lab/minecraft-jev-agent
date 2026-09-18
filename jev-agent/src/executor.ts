@@ -26,7 +26,7 @@ import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
-import { describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
+import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -205,6 +205,8 @@ const PLACED_STOCK_BUDGET_MS = 3000
 const PLACED_NUDGE_BUDGET_MS = 1800
 const PLACED_NUDGE_TOTAL_MS = 5000
 const PLACED_MAX_STEP_CUTS = 3
+/** #79: bounded settle for the PLACE post-condition (client world is one tick behind the server). */
+const PLACE_VERIFY_SETTLE_MS = 500
 
 /** A jump is allowed only with at least two clear blocks above the feet. */
 export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): boolean {
@@ -218,6 +220,14 @@ export interface SmeltFurnaceWindow {
   putFuel(type: number, metadata: number | null, count: number): Promise<unknown>
   outputItem(): { count: number } | null
   takeOutput(): Promise<unknown>
+  /**
+   * #79: the input stack still inside the furnace, when this window exposes it.
+   * A smaller-than-placed stack is the evidence that the furnace consumed the
+   * input. Windows that cannot report the slot can only verify via `outputItem`.
+   */
+  inputItem?(): { count: number } | null
+  /** #79: the fuel stack still inside the furnace, when this window exposes it. */
+  fuelItem?(): { count: number } | null
   close(): void
 }
 
@@ -245,17 +255,42 @@ export interface SmeltExecutionParams {
   fuelCount: number
 }
 
+export interface SmeltExecutionOutcome {
+  gained: number
+  outputCount: number
+  placedInput: number
+  placedFuel: number
+  consumedInput: boolean
+  consumedFuel: boolean
+}
+
 export function formatSmeltLog(event: string, detail: Record<string, unknown>): string {
   if (event === 'SMELT_DONE') {
     return `SMELT_DONE item=${detail.item} gained=${detail.gained} input=${detail.inputItem} fuel=${detail.fuelItem} output=${detail.outputCount} delta=${detail.gained}`
   }
+  if (event === 'SMELT_UNPRODUCED') {
+    return (
+      `SMELT_UNPRODUCED item=${detail.item} gained=0 placedInput=${detail.placedInput} placedFuel=${detail.placedFuel} ` +
+      `consumedInput=${detail.consumedInput} consumedFuel=${detail.consumedFuel}`
+    )
+  }
   return `SMELT_PLACED input=${detail.inputItem}:${detail.inputCount} fuel=${detail.fuelItem}:${detail.fuelCount}`
+}
+
+/**
+ * #79: `true` only when the furnace slot proves the placed stack shrank. `null`
+ * is an empty slot (fully consumed); `undefined` means the window does not
+ * expose the slot, so nothing is proven.
+ */
+function furnaceSlotConsumed(placed: number, remaining: { count: number } | null | undefined): boolean {
+  if (placed <= 0 || remaining === undefined) return false
+  return (remaining?.count ?? 0) < placed
 }
 
 export async function executeFurnaceSmelt(
   deps: SmeltExecutionDeps,
   params: SmeltExecutionParams,
-): Promise<{ gained: number; outputCount: number; placedInput: number; placedFuel: number }> {
+): Promise<SmeltExecutionOutcome> {
   const inputCount = Math.max(1, Math.floor(params.inputCount))
   const fuelCount = Math.max(1, Math.floor(params.fuelCount))
   const before = deps.countItem(params.outputItem)
@@ -282,12 +317,19 @@ export async function executeFurnaceSmelt(
       }
       after = deps.countItem(params.outputItem)
     }
-    if (after <= before) {
-      throw new ExecutorError('smelt_timeout', `no ${params.outputItem} appeared within ${deps.timeoutMs}ms`)
-    }
+    // #79: no timeout throw. The strict post-condition is decided from evidence:
+    // an output gain OR a furnace that actually consumed the placed input+fuel.
+    // Nothing consumed and nothing gained is an UNVERIFIED outcome that
+    // applyPostcondition() downgrades to a failed ACTION_UNVERIFIED.
+    const consumedInput = furnaceSlotConsumed(placedInput, furnace.inputItem?.())
+    const consumedFuel = furnaceSlotConsumed(placedFuel, furnace.fuelItem?.())
     const gained = after - before
-    deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: params.fuelItem, outputCount: after, beforeCount: before })
-    return { gained, outputCount: after, placedInput, placedFuel }
+    if (gained > 0) {
+      deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: params.fuelItem, outputCount: after, beforeCount: before })
+    } else {
+      deps.log('SMELT_UNPRODUCED', { item: params.outputItem, placedInput, placedFuel, consumedInput, consumedFuel })
+    }
+    return { gained, outputCount: after, placedInput, placedFuel, consumedInput, consumedFuel }
   } finally {
     try {
       furnace.close()
@@ -1542,14 +1584,23 @@ export class Executor {
       { inputItem, fuelItem, outputItem, inputCount, fuelCount },
     )
     const after = outcome.outputCount
-    const result = this.buildResult(candidate, epoch, startedAt, 'done', 'smelted', `smelted ${outcome.gained}x ${outputItem}`, null, {
-      verified: true,
+    // #79: `done` is earned from evidence, never assumed. An increase in the
+    // output item count verifies the smelt; a furnace that consumed the placed
+    // input+fuel verifies it too even when the output has not landed yet. A run
+    // that moved items in and then consumed/produced nothing stays unverified,
+    // and applyPostcondition() downgrades it to ACTION_UNVERIFIED.
+    const verified = isSmeltPostconditionMet(outcome)
+    const detail = verified
+      ? `smelted ${outcome.gained}x ${outputItem}`
+      : `no ${outputItem} produced (placed input=${outcome.placedInput} fuel=${outcome.placedFuel}, consumed input=${outcome.consumedInput} fuel=${outcome.consumedFuel})`
+    const result = this.buildResult(candidate, epoch, startedAt, 'done', verified ? 'smelted' : 'unverified', detail, null, {
+      verified,
       dropObserved: false,
       blockRemoved: false,
       itemsGained: outcome.gained,
       goalItemCount: after,
     })
-    result.yieldItem = outputItem
+    if (outcome.gained > 0) result.yieldItem = outputItem
     return result
   }
 
@@ -1671,9 +1722,12 @@ export class Executor {
     await this.bot.placeBlock(reference.block, reference.face)
     this.ensureOwned(epoch, signal)
 
-    const placed = this.currentBlockAt(target)
-    if (placed === null || placed.name !== itemName) {
-      throw new ExecutorError('verify_failed', `placeBlock did not create ${itemName} at (${target.x},${target.y},${target.z})`)
+    const placedName = await this.waitForPlacedBlock(target, itemName, epoch, signal)
+    if (!isPlacePostconditionMet(placedName, itemName)) {
+      throw new ExecutorError(
+        'verify_failed',
+        `placeBlock did not create ${itemName} at (${target.x},${target.y},${target.z}) (found ${placedName ?? 'air'})`,
+      )
     }
     return this.buildResult(candidate, epoch, startedAt, 'done', 'placed', `placed ${itemName}`, null, {
       verified: true,
@@ -1682,6 +1736,28 @@ export class Executor {
       itemsGained: 0,
       goalItemCount: this.countItem(itemName),
     })
+  }
+
+  /**
+   * #79: the PLACE post-condition is "the block exists at the target", checked
+   * against the live world. The client applies the block one tick after the
+   * server accepts the placement, so poll within a short bound; a block that
+   * never appears is never verified.
+   */
+  private async waitForPlacedBlock(
+    target: Vec3Json,
+    itemName: string,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    const deadline = Date.now() + PLACE_VERIFY_SETTLE_MS
+    let placedName = this.currentBlockAt(target)?.name ?? null
+    while (!isPlacePostconditionMet(placedName, itemName) && Date.now() < deadline) {
+      await delay(50, signal)
+      this.ensureOwned(epoch, signal)
+      placedName = this.currentBlockAt(target)?.name ?? null
+    }
+    return placedName
   }
 
   // -------------------------------------------------------------------------
