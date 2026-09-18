@@ -209,3 +209,17 @@
   LADDER_PREREQ 出現（0 → 200超）／churn 9回/5分 → 2回/5分／maxTicks 121 → 202
   listenerLeak は false に（#13相当は改善）。ただし 1tick停止は残存。
 ```
+## レーン/PR 状況（2026-09-18 10:00 JST）
+```
+main = e61f5d2 / typecheck ok
+マージ済みPR: #47 #51 #53 #60 #61 #62 #64（β shadow-only）
+            #66（prereqOption + betaAuthority を実行決定経路へ配線）
+open PR:      #65（#63 方法論是正）／#2（CI: GitHub Actions 支払いで起動不可）
+稼働レーン:   #48 ledger revision guard / #38 actuation allowlist / #49 rollback lifecycle /
+            #5 durable write 排除 / #56 Options を決定層の単位に / #55 protected goal 強制 /
+            #59 fail-closed述語 / #54 minecraft-data一本化 / #63 方法論 / ホスト復旧(bg_bd527441)
+意図的保留:   #50 / #52 / #57（controller・candidates の同一領域で稼働中レーンと衝突するため、
+            それらが着地した直後に起動する＝マージ衝突の山を作らない）
+観測待ち:     PREREQ_OPTION → FURNACE_READY → SMELT_DONE → iron_ingot（M2完走）は
+            ホスト稼働が前提。ホストは現在停止中で bg_bd527441 が復旧中
+```
