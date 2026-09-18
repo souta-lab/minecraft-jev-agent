@@ -154,8 +154,17 @@ const heldDecision = planPrereqOptions(prereqInput)
 
 addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path', () => {
   const text = source('./src/controller.ts')
-  const pass = text.includes('candidates = this.applyFurnacePrereq(state, candidates)')
-  return { pass, detail: pass ? 'tick calls applyFurnacePrereq(state, candidates)' : 'call site missing' }
+  const missing = [
+    'const unreachableStations = this.unreachableStationKeys(state)',
+    'candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)',
+  ].filter((needle) => !text.includes(needle))
+  return {
+    pass: missing.length === 0,
+    detail:
+      missing.length === 0
+        ? 'tick calls applyFurnacePrereq(state, candidates, unreachableStations)'
+        : `call site missing ${missing.join(', ')}`,
+  }
 })
 
 addCase('#63: controller.ts invokes planPrereqOptions / formatPrereqSwitch / formatPrereqOptionFor', () => {

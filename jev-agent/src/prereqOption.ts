@@ -80,6 +80,15 @@ export interface KnownStationLike {
   position: Vec3Json
 }
 
+/**
+ * Canonical identity of a remembered station, used as the key of the explicit
+ * reachability blacklist (M2 blocker). `name` distinguishes a remembered
+ * `crafting_table` from a remembered `furnace` at the same cell.
+ */
+export function knownStationKey(station: KnownStationLike): string {
+  return `${station.name}@${Math.round(station.position.x)},${Math.round(station.position.y)},${Math.round(station.position.z)}`
+}
+
 export interface PrereqInput {
   /** the parent goal whose precondition is being satisfied */
   goal: PrereqGoalLike | null
@@ -95,6 +104,15 @@ export interface PrereqInput {
   placementSpot: Vec3Json | null
   /** nearest remembered station coordinate, null when none is known */
   knownStation: KnownStationLike | null
+  /**
+   * M2 blocker: `knownStationKey`s whose grounded retrieve the controller has
+   * blacklisted (move-failure memory / proven unreachable). A blacklisted known
+   * station is never a feasible `use_known_station`; the ladder must fall
+   * through to a feasible alternative instead of having every candidate
+   * filtered away and collapsing to WAIT. Passed explicitly so the planner
+   * stays pure.
+   */
+  unreachableStations?: ReadonlySet<string>
   self: Vec3Json
 }
 
@@ -308,6 +326,14 @@ function knownStationOption(input: PrereqInput): PrereqOption {
   const known = input.knownStation
   if (known === null) {
     return { path: 'use_known_station', feasible: false, cost: Number.POSITIVE_INFINITY, reason: 'no_known_station' }
+  }
+  if (input.unreachableStations?.has(knownStationKey(known)) === true) {
+    return {
+      path: 'use_known_station',
+      feasible: false,
+      cost: Number.POSITIVE_INFINITY,
+      reason: 'known_station_unreachable',
+    }
   }
   const walk = distance(input.self, known.position)
   const dy = Math.abs(known.position.y - input.self.y)

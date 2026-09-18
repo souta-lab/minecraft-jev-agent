@@ -99,6 +99,7 @@ import {
   formatPrereqOptionFor,
   formatPrereqSwitch,
   isInventorySourced,
+  knownStationKey,
   nextPrereqPath,
   planPrereqOptions,
   preferPrereqPath,
@@ -1087,8 +1088,9 @@ export class JevController {
         return
       }
 
-      let candidates = generateCandidates(state, candidateOptions(this.options, this.recipeIndex))
-      candidates = this.applyFurnacePrereq(state, candidates)
+      const unreachableStations = this.unreachableStationKeys(state)
+      let candidates = generateCandidates(state, candidateOptions(this.options, this.recipeIndex, unreachableStations))
+      candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
@@ -1200,7 +1202,7 @@ export class JevController {
         sensorOptions(this.options),
       )
       const freshCandidates = this.filterMoveCandidates(
-        generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex)),
+        generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex, this.unreachableStationKeys(freshState))),
         freshState,
         false,
       )
@@ -3115,7 +3117,29 @@ export class JevController {
    * Never abandons the parent goal: the placement guard keeps the prerequisite
    * protected and the switch only re-routes HOW it is satisfied.
    */
-  private applyFurnacePrereq(state: WorldState, candidates: readonly Candidate[]): Candidate[] {
+  /**
+   * M2 blocker: remembered stations whose grounded retrieve the move-failure
+   * memory has blacklisted (`MOVE_TARGET_SKIPPED`) are handed to the pure
+   * prerequisite planner as an explicit unreachable set. Without it the planner
+   * keeps choosing `use_known_station`, the blacklist filter removes every
+   * candidate of that path, and the resident collapses to WAIT.
+   */
+  private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
+    const keys = new Set<string>()
+    const dimension = state.self.dimension
+    for (const resource of state.signals.knownResources ?? []) {
+      if (resource.kind !== 'station') continue
+      if (!this.moveFailMemory.isBlacklisted(dimension, resource.position)) continue
+      keys.add(knownStationKey({ name: resource.name, position: resource.position }))
+    }
+    return keys
+  }
+
+  private applyFurnacePrereq(
+    state: WorldState,
+    candidates: readonly Candidate[],
+    unreachableStations: ReadonlySet<string>,
+  ): Candidate[] {
     const goal = state.goalQueue?.current ?? null
     // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
     // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
@@ -3124,7 +3148,7 @@ export class JevController {
       this.resetFurnacePrereq()
       return [...candidates]
     }
-    const input = furnacePrereqInputFromState(state, candidateOptions(this.options, this.recipeIndex))
+    const input = furnacePrereqInputFromState(state, candidateOptions(this.options, this.recipeIndex, unreachableStations))
     const decision = planPrereqOptions(input)
     const goalKey = this.currentGoalKey()
     if (this.prereqGoalKey !== goalKey) {
@@ -3624,8 +3648,12 @@ function sensorOptions(options: JevAgentOptions): SensorOptions {
   return { ...defaultSensorOptions, scanRadius: options.scanRadius, reach: options.reach }
 }
 
-function candidateOptions(options: JevAgentOptions, recipes: RecipeIndex): CandidateOptions {
-  return { ...defaultCandidateOptions, reach: options.reach, recipes }
+function candidateOptions(
+  options: JevAgentOptions,
+  recipes: RecipeIndex,
+  unreachableStations: ReadonlySet<string> = new Set<string>(),
+): CandidateOptions {
+  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations }
 }
 
 function subgoalState(goal: QueuedGoal, have: number): GoalState {

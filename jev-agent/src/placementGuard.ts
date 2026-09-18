@@ -47,20 +47,23 @@ export function prerequisiteOptionName(actionId: string): string {
   if (actionId.startsWith('PLACE:furnace')) return 'PLACE:furnace'
   if (actionId.startsWith('CRAFT:furnace')) return 'CRAFT:furnace'
   if (actionId.startsWith('RETRIEVE:known:station:furnace')) return 'RETRIEVE:known:station:furnace'
+  if (actionId.startsWith('PLACE:crafting_table')) return 'PLACE:crafting_table'
   return actionId
 }
 
 /**
  * True for the grounded options that exist solely to satisfy the smelt's
- * "placed furnace" precondition: crafting the furnace, placing a held one, or
- * returning to a remembered one.
+ * "placed furnace" precondition: crafting the furnace, placing a held one,
+ * returning to a remembered one, or placing the held crafting table the craft
+ * step needs when no table is in reach.
  */
 export function isFurnacePrerequisiteOption(actionId: string | null): boolean {
   if (actionId === null) return false
   return (
     actionId.startsWith('PLACE:furnace') ||
     actionId.startsWith('CRAFT:furnace') ||
-    actionId.startsWith('RETRIEVE:known:station:furnace')
+    actionId.startsWith('RETRIEVE:known:station:furnace') ||
+    actionId.startsWith('PLACE:crafting_table')
   )
 }
 
