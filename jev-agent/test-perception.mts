@@ -23,13 +23,15 @@ import {
   candidateStarvationLine,
   candidateStarvationMissing,
   formatCandidateStarvation,
+  goalPreconditionCause,
   MIRRORED_MARKERS,
 } from './src/controller.ts'
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { CandidateReachability } from './src/candidates.ts'
 import { createRecipeIndex } from './src/crafting.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
-import type { QueuedGoal } from './src/goalQueue.ts'
+import type { PlannedGoal, QueuedGoal } from './src/goalQueue.ts'
+import { makeOptionSnapshot } from './src/optionSpec.ts'
 import { boundedStateSnapshot, JEV_SNAPSHOT_LIMITS } from './src/jev.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, KnownResource, StationEntry, Vec3Json, WorldState } from './src/state.ts'
@@ -322,8 +324,21 @@ addCase('(3) blockedBy is the primary withheld capability; missing=[all] stays o
   return { pass, detail: `blockedBy=${blockedBy} missing=[${missing.join(',')}] line="${line}"` }
 })
 
-// --- (4) the persisted perception snapshot is bounded --------------------------
+addCase('(3) an unmet deterministic precondition is reported as blockedBy=precondition:pickaxe', () => {
+  const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
+  const noPickaxe = makeOptionSnapshot({ inventory: { cobblestone: 42, stick: 2 }, toolRank: 0 })
+  const withPickaxe = makeOptionSnapshot({ inventory: { cobblestone: 42, stick: 2, stone_pickaxe: 1 }, toolRank: 2 })
+  const cause = goalPreconditionCause(rawIron, noPickaxe)
+  const line = formatCandidateStarvation(2, 'collect:raw_iron:3', cause ?? 'verify_failed', [])
+  const cleared = goalPreconditionCause(rawIron, withPickaxe)
+  const pass =
+    cause === 'precondition:pickaxe' &&
+    line === 'CANDIDATE_STARVATION presented=2 productive=0 goal="collect:raw_iron:3" blockedBy=precondition:pickaxe' &&
+    cleared === null
+  return { pass, detail: `cause=${cause} line="${line}" cleared=${String(cleared)}` }
+})
 
+// --- (4) the persisted perception snapshot is bounded --------------------------
 addCase('(4) a pathological state snapshots under the byte bound with true totals in bounds', () => {
   const base = perceive([], { crafting_table: [], furnace: [] })
   const long = 'x'.repeat(200)
