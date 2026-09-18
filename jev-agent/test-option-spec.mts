@@ -777,6 +777,8 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
   restored.restore(queue.snapshot())
   const restoredCurrent = restored.current
   const context = currentOptionContextForQueuedGoal(restoredCurrent)
+  const success = context?.success[0]
+  const successId = success?.kind === 'custom' ? success.id : null
   const pass =
     queued !== undefined &&
     restoredCurrent !== null &&
@@ -789,7 +791,7 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
     context?.kind === spec.kind &&
     context?.target.predicate === spec.target.predicate &&
     context?.preconditions[0]?.kind === 'custom' &&
-    context?.success[0]?.id === 'landmark_ready' &&
+    successId === 'landmark_ready' &&
     context?.allowedSkills.join(',') === spec.skills.join(',') &&
     context?.abortThreshold === spec.abortThreshold &&
     context?.runtime.verifiedProgress === 0
