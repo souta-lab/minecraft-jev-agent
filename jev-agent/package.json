@@ -12,6 +12,7 @@
     "postinstall": "node scripts/apply-movement-patch.mjs",
     "movement-patch:check": "node scripts/apply-movement-patch.mjs --check",
     "move-failmem-test": "tsx test-move-failmem.mts",
+    "pit-escape-test": "tsx test-pit-escape.mts",
     "typecheck": "tsc --noEmit",
     "demo": "tsx demo.mts",
     "guard-test": "tsx test-guard.mts",

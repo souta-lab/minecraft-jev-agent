@@ -213,6 +213,44 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
   return above1Empty && above2Empty
 }
 
+/**
+ * Pit-escape recipe timings from the movement harness
+ * (`mcbot/movement-test/vertical.mjs#navigateTo`): a held pure jump rises the
+ * full 1.2522 blocks, then forward is pushed for the airborne window so the body
+ * carries onto the lip.
+ */
+const VERTICAL_HOP_RISE_MS = 180
+const VERTICAL_HOP_PUSH_MS = 260
+
+export type ClimbManeuver = 'pre-contact-jump' | 'vertical-hop' | 'continue'
+
+export interface ClimbManeuverInput {
+  climbDetected: boolean
+  onGround: boolean
+  pinned: boolean
+  faceAtFeet: boolean
+  standingStill: boolean
+}
+
+/**
+ * The 1-block pit / step decision, extracted so it is unit-testable without a
+ * live bot. The Leaf server rejects a movement packet that combines a blocked
+ * forward push with a jump (position teleport), so:
+ *
+ *  - free front (`!contact`): jump PRE-CONTACT with forward held, while the
+ *    horizontal move is still unblocked;
+ *  - terrain contact (`pinned`/`faceAtFeet`): pure vertical hop first (forward
+ *    released), then push forward while airborne.
+ *
+ * A 1-deep depression is escaped by the contact hop, never by backing off.
+ */
+export function planClimbManeuver(input: ClimbManeuverInput): ClimbManeuver {
+  const contact = input.pinned || input.faceAtFeet
+  if (input.climbDetected && input.onGround && !contact) return 'pre-contact-jump'
+  if (contact || input.standingStill) return 'vertical-hop'
+  return 'continue'
+}
+
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
 export interface SmeltFurnaceWindow {
@@ -1136,14 +1174,28 @@ export class Executor {
 
         const standingStill = this.bot.entity.onGround === true && Date.now() - lastProgressAt > 250
         const pinned = this.isPinned()
-        // Jumping while the AABB already touches the step makes the server
-        // reject the packet (teleport loop), so back off first to get a run-up.
         const climbDist =
           climb === null ? Number.POSITIVE_INFINITY : Math.hypot(climb.x + 0.5 - position.x, climb.z + 0.5 - position.z)
+        // `isCollidedHorizontally` can be stale while the body already touches the
+        // step, so contact is also read from the terrain: a solid block at the
+        // feet level directly ahead, within closing distance. A blocked forward
+        // push combined with a jump is rejected by the server (position
+        // teleport), so contact must take the forward-released hop path.
+        const faceAtFeet =
+          climb !== null &&
+          climbDist <= 1.05 &&
+          this.solidSupportAt(climb.x, Math.floor(position.y), climb.z)
+        const maneuver = planClimbManeuver({
+          climbDetected: climb !== null,
+          onGround: this.bot.entity.onGround === true,
+          pinned,
+          faceAtFeet,
+          standingStill,
+        })
         // Order matches the harness: a detected climb is attempted BEFORE any
         // recovery, because the in-loop replan alone exceeds the 250 ms
         // standing-still window and would otherwise hijack the pre-contact jump.
-        if (climb !== null && this.bot.entity.onGround === true && !pinned) {
+        if (maneuver === 'pre-contact-jump' && climb !== null) {
           if (!jumpAllowed) {
             this.logger.warn(
               'executor',
@@ -1168,14 +1220,6 @@ export class Executor {
               { target, anchor },
             )
             return false
-          }
-          if (climbDist < 1.1) {
-            this.bot.setControlState('forward', false)
-            this.bot.setControlState('jump', false)
-            this.bot.setControlState('back', true)
-            backUntil = Date.now() + 220
-            await delay(60, signal)
-            continue
           }
           // Pre-contact jump: jump WHILE the horizontal move is still free, so
           // the packet carries an unblocked forward component (the Leaf server
@@ -1206,7 +1250,7 @@ export class Executor {
           } else {
             jumpStreak = 0
           }
-        } else if (pinned || standingStill) {
+        } else if (maneuver === 'vertical-hop') {
           // A pinned bot at a genuine 2-block face can never hop it; fail fast so
           // the placed-block approach can cut a stair instead of hopping forever.
           if (
@@ -1235,14 +1279,19 @@ export class Executor {
           const beforeHop = this.bot.entity.position.clone()
           this.logger.info(
             'executor',
-            `control locomotion hop recoveries=${recoveries} (pinned=${pinned} still=${standingStill}) at y=${round2(position.y)} climb=${climb === null ? 'none' : `${climb.source}@${climb.x},${climb.top},${climb.z}`} headroom=[cur=${currentHeadroom} land=${landingHeadroom}]`,
+            `control locomotion hop recoveries=${recoveries} (pinned=${pinned} contact=${faceAtFeet} still=${standingStill}) at y=${round2(position.y)} climb=${climb === null ? 'none' : `${climb.source}@${climb.x},${climb.top},${climb.z}`} headroom=[cur=${currentHeadroom} land=${landingHeadroom}]`,
             { target, anchor },
           )
-          this.bot.setControlState('forward', true)
+          // Harness-proven pit recipe (movement-test/vertical.mjs#navigateTo): a
+          // held pure jump is accepted while pressed into terrain, then forward
+          // is pushed while airborne so the body clears the step. Never combine
+          // the blocked forward push with the jump: the server teleports back.
+          this.bot.setControlState('forward', false)
           this.bot.setControlState('jump', true)
-          await delay(500, signal)
+          await delay(VERTICAL_HOP_RISE_MS, signal)
           this.bot.setControlState('jump', false)
-          await delay(120, signal)
+          this.bot.setControlState('forward', true)
+          await delay(VERTICAL_HOP_PUSH_MS, signal)
           this.bot.setControlState('forward', false)
           const afterHop = this.bot.entity.position
           const dy = afterHop.y - beforeHop.y
@@ -1259,6 +1308,11 @@ export class Executor {
             hopAttempts = 0
             lastPosition = afterHop.clone()
             lastProgressAt = Date.now()
+            this.logger.info(
+              'executor',
+              `JUMP_ESCAPE rise=${round2(dy)} from=(${round2(beforeHop.x)},${round2(beforeHop.y)},${round2(beforeHop.z)}) to=(${round2(afterHop.x)},${round2(afterHop.y)},${round2(afterHop.z)}) target=(${node.x},${node.y},${node.z})`,
+              { target, anchor, rise: dy },
+            )
             continue
           }
           hopAttempts += 1

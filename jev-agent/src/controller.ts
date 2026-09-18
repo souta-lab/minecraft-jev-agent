@@ -408,6 +408,19 @@ function moveFailureReason(failure: string | null): MoveFailureReason {
   }
 }
 
+export type MoveOutcome = 'arrived' | 'unverified' | 'no-progress'
+
+/**
+ * A MOVE/RETREAT is an arrival only when the executor verified it. A
+ * `done/verified=false` action that wandered ≥0.5m is NOT progress: it must keep
+ * charging the coordinate failure memory, otherwise a JUMP_FAILing MOVE target
+ * resets its own blacklist and is re-selected forever (the live pit loop).
+ */
+export function classifyMoveOutcome(verified: boolean, moved: number): MoveOutcome {
+  if (!verified) return 'unverified'
+  return moved < 0.5 ? 'no-progress' : 'arrived'
+}
+
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
 }
@@ -470,6 +483,7 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DIG_PATH',
   'JUMP_ATTEMPT',
   'JUMP_FAIL',
+  'JUMP_ESCAPE',
   'DESCEND_LIMIT',
   'STAIRCASE',
   'REUSE_TUNNEL',
@@ -1960,20 +1974,28 @@ export class JevController {
           this.bot.entity.position.y - this.actionStart.y,
           this.bot.entity.position.z - this.actionStart.z,
         )
-        if (moved < 0.5) {
-          const p = this.bot.entity.position
-          const region = `${Math.floor(p.x)}_${Math.floor(p.y)}_${Math.floor(p.z)}`
-          const value = Math.round(moved * 100) / 100
-          this.logger.warn(
-            'agent',
-            `MOVE_OSCILLATE travelled=${value} net=${value} progress=0 region=${region} -> spatial_failure`,
-            { actionId: result.actionId, region },
-            this.tickCounter,
-          )
-          this.noteCandidateFailure(result.actionId)
-          this.recordMoveFailure(candidate, 'no_progress')
-        } else {
-          this.recordMoveSuccess(candidate)
+        const outcome = classifyMoveOutcome(result.verified, moved)
+        switch (outcome) {
+          case 'arrived':
+            this.recordMoveSuccess(candidate)
+            break
+          case 'unverified':
+          case 'no-progress': {
+            if (moved < 0.5) {
+              const p = this.bot.entity.position
+              const region = `${Math.floor(p.x)}_${Math.floor(p.y)}_${Math.floor(p.z)}`
+              const value = Math.round(moved * 100) / 100
+              this.logger.warn(
+                'agent',
+                `MOVE_OSCILLATE travelled=${value} net=${value} progress=0 region=${region} -> spatial_failure`,
+                { actionId: result.actionId, region },
+                this.tickCounter,
+              )
+            }
+            this.noteCandidateFailure(result.actionId)
+            this.recordMoveFailure(candidate, 'no_progress')
+            break
+          }
         }
       }
       this.actionStart = null
