@@ -72,6 +72,7 @@ import {
 import type { AbandonReason } from './placementGuard.ts'
 import {
   evaluatePrereqStall,
+  formatPrereqOptionFor,
   formatPrereqSwitch,
   nextPrereqPath,
   planPrereqOptions,
@@ -2728,7 +2729,7 @@ export class JevController {
       this.prereqLoggedKey = logKey
       this.logger.info(
         'agent',
-        decision.line,
+        formatPrereqOptionFor(decision, chosen),
         {
           chosen,
           options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
