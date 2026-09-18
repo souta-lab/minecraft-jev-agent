@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
+import { countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
@@ -66,8 +66,18 @@ import {
   PLACE_RETRY_LIMIT,
   prerequisiteOptionName,
   shouldAdoptAbandon,
+  smeltNeedsPlacedFurnace,
 } from './placementGuard.ts'
 import type { AbandonReason } from './placementGuard.ts'
+import {
+  evaluatePrereqStall,
+  formatPrereqSwitch,
+  nextPrereqPath,
+  planPrereqOptions,
+  prereqProgressSignature,
+  resolvePrereqStallTicks,
+} from './prereqOption.ts'
+import type { PrereqDecision, PrereqPath, PrereqProgress } from './prereqOption.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -504,6 +514,13 @@ export class JevController {
   private readonly placementRetries = new Map<string, number>()
   /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
   private lastPlacedFurnaceCount = 0
+  /** #58: the last scored furnace-prerequisite plan and its selected path. */
+  private prereqPlan: PrereqDecision | null = null
+  private prereqForcedPath: PrereqPath | null = null
+  private prereqGoalKey: string | null = null
+  private prereqLoggedKey: string | null = null
+  private prereqProgress: PrereqProgress | null = null
+  private readonly prereqStallTicks = resolvePrereqStallTicks()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -935,6 +952,7 @@ export class JevController {
       }
 
       let candidates = generateCandidates(state, candidateOptions(this.options, this.recipeIndex))
+      candidates = this.applyFurnacePrereq(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -2431,6 +2449,28 @@ export class JevController {
       { target: active.target, dist: Math.round(current), ticks },
       this.tickCounter,
     )
+    // Issue #58: a stalled furnace-station retrieval is not an unreachable
+    // resource to give up on - it is one prereq path losing to another. Switch
+    // to the next scored path (place held / craft) and keep the parent smelt.
+    if (active.resource === 'furnace' && this.prereqPlan !== null) {
+      const next = nextPrereqPath(this.prereqPlan, 'use_known_station')
+      if (next !== null) {
+        this.logger.warn(
+          'agent',
+          formatPrereqSwitch('use_known_station', next),
+          { from: 'use_known_station', to: next, stallTicks: ticks, goal: this.currentGoalKey() },
+          this.tickCounter,
+        )
+        this.prereqForcedPath = next
+        this.prereqProgress = null
+        this.prereqLoggedKey = null
+        this.noteCandidateFailure(active.id)
+        this.digMemory.markResourceProgress()
+        this.activeRetrieval = null
+        this.retrievalTrack = null
+        return
+      }
+    }
     this.dropUnreachableResource(active, current)
     this.noteCandidateFailure(active.id)
     this.digMemory.markResourceProgress()
@@ -2603,6 +2643,94 @@ export class JevController {
     const entity = this.bot.entity
     if (target === null || entity === undefined) return null
     return Math.round(Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z))
+  }
+
+  /**
+   * Issue #58: score every feasible furnace-prerequisite path, log the chosen
+   * one with its alternatives, suppress the losing paths so the code choice is
+   * authoritative, and switch to the next-best path when the chosen one stalls.
+   * Never abandons the parent goal: the placement guard keeps the prerequisite
+   * protected and the switch only re-routes HOW it is satisfied.
+   */
+  private applyFurnacePrereq(state: WorldState, candidates: readonly Candidate[]): Candidate[] {
+    const goal = state.goalQueue?.current ?? null
+    if (!smeltNeedsPlacedFurnace(goal, state.furnaces?.length ?? 0)) {
+      this.resetFurnacePrereq()
+      return [...candidates]
+    }
+    const input = furnacePrereqInputFromState(state, candidateOptions(this.options, this.recipeIndex))
+    const decision = planPrereqOptions(input)
+    const goalKey = this.currentGoalKey()
+    if (this.prereqGoalKey !== goalKey) {
+      this.prereqGoalKey = goalKey
+      this.prereqForcedPath = null
+      this.prereqProgress = null
+      this.prereqLoggedKey = null
+    }
+    let chosen: PrereqPath | null = decision.chosen
+    if (
+      this.prereqForcedPath !== null &&
+      decision.options.some((option) => option.feasible && option.path === this.prereqForcedPath)
+    ) {
+      chosen = this.prereqForcedPath
+    } else {
+      this.prereqForcedPath = null
+    }
+    this.prereqPlan = decision
+    const logKey = `${goalKey}|${chosen ?? 'none'}`
+    if (this.prereqLoggedKey !== logKey) {
+      this.prereqLoggedKey = logKey
+      this.logger.info(
+        'agent',
+        decision.line,
+        {
+          chosen,
+          options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
+        },
+        this.tickCounter,
+      )
+    }
+    const keep = (candidate: Candidate): boolean => {
+      const path = candidate.meta.prereqPath
+      if (path === undefined) return true
+      return chosen !== null && path === chosen
+    }
+    const kept = candidates.filter(keep)
+    if (chosen === null) return kept
+
+    const signature = prereqProgressSignature(chosen, input)
+    const evaluated = evaluatePrereqStall({
+      previous: this.prereqProgress,
+      path: chosen,
+      signature,
+      stallTicks: this.prereqStallTicks,
+    })
+    this.prereqProgress = evaluated.progress
+    if (!evaluated.stalled) return kept
+
+    const next = nextPrereqPath(decision, chosen)
+    if (next === null) return kept
+    this.prereqForcedPath = next
+    this.prereqProgress = null
+    this.prereqLoggedKey = null
+    this.logger.warn(
+      'agent',
+      formatPrereqSwitch(chosen, next),
+      { from: chosen, to: next, stallTicks: this.prereqStallTicks, goal: goalKey },
+      this.tickCounter,
+    )
+    return candidates.filter((candidate) => {
+      const path = candidate.meta.prereqPath
+      return path === undefined || path === next
+    })
+  }
+
+  private resetFurnacePrereq(): void {
+    this.prereqPlan = null
+    this.prereqForcedPath = null
+    this.prereqGoalKey = null
+    this.prereqLoggedKey = null
+    this.prereqProgress = null
   }
 
   private logStaleKnownResources(state: WorldState): void {

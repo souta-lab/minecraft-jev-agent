@@ -25,11 +25,13 @@ import type { RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, KnownResource, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance } from './state.ts'
-import { findInventoryFuel, resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { planVerticalApproach } from './verticalPlan.ts'
+import { FURNACE_STONE_COST, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
+import type { PrereqInput, PrereqPath } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
@@ -927,16 +929,96 @@ function smeltFuelFor(state: WorldState): string | null {
   return held ?? null
 }
 
-function furnaceAcquisitionCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  if ((state.inventory.counts.furnace ?? 0) > 0) {
-    return placeCandidates(state, options, 'furnace').map((candidate) => ({
-      ...candidate,
-      meta: { ...candidate.meta, furnaceSource: 'held' },
-    }))
+/**
+ * Issue #58: build the pure cost/feasibility input for the furnace precondition
+ * from the live world state. Shared by the candidate generator and the
+ * controller so both score the exact same paths.
+ */
+export function furnacePrereqInputFromState(state: WorldState, _options: CandidateOptions): PrereqInput {
+  const counts = state.inventory.counts
+  let stoneCount = 0
+  for (const [name, count] of Object.entries(counts)) {
+    if (count > 0 && matchesResourceClass(name, 'stone')) stoneCount += count
   }
-  const known = nearestKnownStation(state, 'furnace')
-  if (known !== null) return [knownStationRetrievalCandidate(state, options, known)]
-  return []
+  return {
+    goal: state.goalQueue?.current ?? null,
+    heldCount: counts.furnace ?? 0,
+    placedCount: state.furnaces?.length ?? 0,
+    stoneCount,
+    tableAvailable: state.craftingTables.length > 0,
+    placementSpot: state.placementSpots.length > 0 ? leastFailedPlacementSpot(state, 'furnace') : null,
+    knownStation: nearestKnownStation(state, 'furnace'),
+    self: state.self.position,
+  }
+}
+
+/** One grounded candidate for each feasible path (craft_and_place = the CRAFT step). */
+function candidatesForPrereqPath(
+  state: WorldState,
+  options: CandidateOptions,
+  path: PrereqPath,
+  input: PrereqInput,
+): Candidate[] {
+  switch (path) {
+    case 'place_held':
+      return placeCandidates(state, options, 'furnace')
+    case 'use_known_station': {
+      const known = input.knownStation
+      return known === null ? [] : [knownStationRetrievalCandidate(state, options, known)]
+    }
+    case 'craft_and_place':
+      return craftFurnaceCandidate(state, options)
+  }
+}
+
+/** CRAFT:furnace candidate: the first step of the craft-then-place path. */
+function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
+  const table = state.craftingTables[0] ?? null
+  return [
+    {
+      id: 'CRAFT:furnace',
+      kind: 'CRAFT',
+      label: `craft 1 x furnace from ${FURNACE_STONE_COST} cobblestone at the crafting table, then place it`,
+      targetName: 'furnace',
+      target: table,
+      targetEntityId: null,
+      itemName: 'furnace',
+      requiresTool: false,
+      toolName: null,
+      inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: { tick: state.tick, craftItem: 'furnace', craftCount: 1, requiresTable: true, furnaceSource: 'craft' },
+    },
+  ]
+}
+
+/**
+ * Issue #58: enumerate EVERY feasible way to satisfy "a usable furnace is
+ * available" (place held / use known station / craft-and-place), score them by
+ * cost, and return the candidates cheapest-path-first. Each candidate carries
+ * `meta.prereqPath` so the controller can log `PREREQ_OPTION` and suppress the
+ * paths that lost.
+ */
+function furnaceAcquisitionCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  if (prereqSubjectForGoal(state.goalQueue?.current ?? null) === null) return []
+  const input = furnacePrereqInputFromState(state, options)
+  const decision = planPrereqOptions(input)
+  const out: Candidate[] = []
+  for (const option of decision.options) {
+    if (!option.feasible) continue
+    for (const candidate of candidatesForPrereqPath(state, options, option.path, input)) {
+      out.push({
+        ...candidate,
+        meta: {
+          ...candidate.meta,
+          prereqPath: option.path,
+          prereqCost: Math.round(option.cost * 10) / 10,
+          ...(option.path === 'place_held' ? { furnaceSource: 'held' } : {}),
+        },
+      })
+    }
+  }
+  return out
 }
 
 function nearestKnownStation(state: WorldState, station: string): KnownResource | null {
@@ -950,7 +1032,7 @@ function nearestKnownStation(state: WorldState, station: string): KnownResource 
   return best
 }
 
-function knownStationRetrievalCandidate(state: WorldState, options: CandidateOptions, known: KnownResource): Candidate {
+function knownStationRetrievalCandidate(state: WorldState, options: CandidateOptions, known: { name: string; position: Vec3Json }): Candidate {
   const vertical = planVerticalApproach({
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,

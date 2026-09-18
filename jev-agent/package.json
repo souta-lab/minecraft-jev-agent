@@ -25,6 +25,7 @@
     "fuel-guard-test": "tsx test-fuel-guard.mts",
     "vertical-plan-test": "tsx test-vertical-plan.mts",
     "retrieval-stall-test": "tsx test-retrieval-stall.mts",
+    "prereq-option-test": "tsx test-prereq-option.mts",
     "predicate-goal-test": "tsx test-predicate-goal.mts",
     "descend-plan-test": "tsx test-descend-plan.mts",
     "replan-throttle-test": "tsx test-replan-throttle.mts",
