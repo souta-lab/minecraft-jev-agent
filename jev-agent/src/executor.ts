@@ -55,7 +55,7 @@ import {
   formatPillarSearch,
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
-import { formatPillarFail, pillarStepUp } from './pillarApex.ts'
+import { formatPillarFail, pillarStepUp, shouldRelocatePillarAfterFailure } from './pillarApex.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
@@ -1743,6 +1743,40 @@ export class Executor {
             endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
             forcedRepositions: forcedTracker.value - forcedBefore,
           })
+          if (shouldRelocatePillarAfterFailure(climb.fail)) {
+            refusedColumns.add(pillarColumnKey(feet))
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations, failure: climb.fail.reason })
+            const fallback = relocation.target
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+                failure: climb.fail.reason,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation after takeoff failure to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id, failure: climb.fail.reason },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
+          }
           break
         }
         climbed += 1
