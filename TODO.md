@@ -2,18 +2,22 @@
 
 > 最終目標: **M4（Ender Dragon 討伐）**。M2（鉄器時代）は通過点。
 > 運用: ユーザーの発言を待たない。やることが無ければ自分で仕事を考えて着手する（`AGENTS.md` §0）。
-> 更新: 2026-09-18 02:25 JST
+> 更新: 2026-09-18 20:58 JST（現在状態の正典は `CURRENT-STATUS.md`（派生）。本書は方針と履歴のみ）
 
 ## 現在のクリティカルパス
 ```
-1. #15 アドバイザ・キャッシュループの解消（実測: 同一cached戦略が112回連続 → 身体が動かない）
-   ★暫定回避済み: buddy-driver/system2.config.json を {"mercury": true} に変更 → 直ちに cached=false の
-     Mercury新規呼び出し（ms=4468〜6655 / cost≈$0.00028）と戦略変化を確認（2026-09-18 02:24）
-     → 恒久修正は #15（cache hit は plan を再生／同一WAIT再発でキャッシュ無効化／grounding で実行不能戦略を拒否）
-2. #12 前提チェーン差し替えの完成（現在 3/6: LADDER_PREREQ=176, churn 2回/5分, listenerLeak=false。
-   残: 1tick停止の残存 / digging_resumed / raw_iron_obtained）
-3. 掘削再開の確認 → TOOL_CHOICE / DIG_PATH / JUMP_ATTEMPT / DESCEND_LIMIT / STAIRCASE の実効確認（#7/#8/#9）
-4. M2 完走: furnace→charcoal→iron_ore→iron_ingot×3→iron_pickaxe を在庫で証明
+1. ★ライブブロッカー: 地下ポケット（x=40,z=31 の縦坑）からの脱出。pickaxe無し
+   （CURRENT-STATUS.md 実測: y=12 / action=WAIT / 在庫 raw_iron=8, cobblestone=115, pickaxe系なし）
+   天井 cobblestone@40,9,31 は needs_tool で PILLAR_REFUSED
+   → 期待順序: PILLAR_REFUSED → PILLAR_RELOCATE(40,8,31→40,8,32) → PILLAR_UP_STEP（y=8→12 まで実測上昇）
+2. M2 垂直移動の修正は main 着地済み: m2-hop-fix / m2-upward / m2-ascent / m2-pillar-jump / m2-headroom
+   （b26217f: jump grounding 修正 / 2ec6124: 壁ポケットの relocation を決定論化）
+3. 脱出後: pickaxe 再取得（#7 道具選択 / #14 既知資源）→ 掘削再開
+   （TOOL_CHOICE / DIG_PATH / JUMP_ATTEMPT / DESCEND_LIMIT / STAIRCASE の実効確認）
+4. M2 完走: furnace→charcoal→raw_iron→iron_ingot×3→iron_pickaxe を在庫で証明
+   （smelt 系 #73/#78/#79 はこの区間）
+5. #15 アドバイザ・キャッシュループは恒久修正が main で検証済み（02:44 verify-mercury PASS 5/5）。
+   close 判定は live acceptance の証拠が出てから（再発時のみクリティカルパスに戻す）
 ```
 
 ## 前倒しした設計コントラクト（Sol全体レビュー準拠）
