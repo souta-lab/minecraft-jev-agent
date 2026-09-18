@@ -99,6 +99,12 @@ export interface PlannedGoal {
   protected?: boolean
   /** Issue #55: core/rung goal; a patch/replace may not drop it. */
   core?: boolean
+  /**
+   * Set by the readiness compiler (`orderGoalsByReadiness`) when every
+   * precondition of this goal held in the snapshot it ordered against. Absent
+   * means "not proven ready", never "blocked forever".
+   */
+  ready?: boolean
 }
 
 export interface GoalQueueState {

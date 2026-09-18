@@ -1855,7 +1855,11 @@ export class PlannerBrain implements System2Brain {
 
   private applyReadinessOrder(option: PlanOption): PlanOption {
     const goals = orderPlanGoalsByReadiness(option.goals, this.currentCounts, this.world, this.log)
-    if (goalSignature(goals) === goalSignature(option.goals)) return option
+    // Reference-identical only when nothing moved and no goal was marked ready;
+    // otherwise the marks must be carried so the queue merge can honour them.
+    const unchanged =
+      goals.length === option.goals.length && goals.every((goal, index) => goal === option.goals[index])
+    if (unchanged) return option
     return { ...option, goals }
   }
 
