@@ -45,11 +45,28 @@ export type Capability =
   | { kind: 'tool'; tool: HarvestTool; tier: number }
   | { kind: 'placeable_block' }
   | { kind: 'headroom'; cell: Vec3Json | null }
-  | { kind: 'safe_column' }
+  | {
+      kind: 'safe_column'
+      /** no usable ascent geometry, or geometry whose blocker needs a tool */
+      reason: SafeColumnRefusalReason
+      /** the column cell the classification examined; null only for legacy callers */
+      cell: Vec3Json | null
+      /** required tool family when `reason === 'no_tool'` */
+      tool: HarvestTool | null
+      /** minimum rank when `tool === 'pickaxe'` */
+      tier: number | null
+    }
   | { kind: 'ascend_plan' }
   | { kind: 'descend_plan' }
   | { kind: 'open_path' }
   | { kind: 'standable_approach' }
+
+/**
+ * Why a `safe_column` is missing, named so the marker is actionable: the
+ * geometry is absent (`no_clearance`) or present without the held tool
+ * (`no_tool`). A bare `safe_column` token is forbidden.
+ */
+export type SafeColumnRefusalReason = 'no_clearance' | 'no_tool'
 
 /** A block that must be broken before the target is reachable, with its tool facts. */
 export interface ReachabilityBarrier {
@@ -204,8 +221,15 @@ export function capabilityKey(capability: Capability): string {
       return capability.cell === null
         ? 'headroom'
         : `headroom@${capability.cell.x},${capability.cell.y},${capability.cell.z}`
-    case 'safe_column':
-      return 'safe_column'
+    case 'safe_column': {
+      // A bare `safe_column` was not actionable (the live starvation carried it
+      // with no cell and no tool); the key always names the fact it refused.
+      const at = capability.cell === null ? '' : `@${capability.cell.x},${capability.cell.y},${capability.cell.z}`
+      if (capability.reason === 'no_tool') {
+        return `safe_column:no_tool${at}:${capability.tool ?? 'tool'}@${capability.tier ?? 0}`
+      }
+      return `safe_column:no_clearance${at}`
+    }
     case 'ascend_plan':
       return 'ascend_plan'
     case 'descend_plan':

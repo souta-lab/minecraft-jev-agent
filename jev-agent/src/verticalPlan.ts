@@ -14,8 +14,11 @@
 // It also carries the pure progress assertion used by the controller: while a
 // RETRIEVE is active, if the distance to the target does not decrease over N
 // ticks the caller logs `RETRIEVE_STALLED` and escalates instead of WAITing.
-import type { DescentOption, StepCut, Vec3Json } from './state.ts'
+import type { DescentOption, HarvestTool, StepCut, Vec3Json } from './state.ts'
 import { distance } from './state.ts'
+import { resolveHarvest, loadGameData } from './gameData.ts'
+import { bestToolTier, HAZARD_PROXIMITY } from './reachability.ts'
+import { selectDigTool } from './toolChoice.ts'
 import {
   decidePillarStepBudget,
   DEFAULT_PILLAR_SEARCH_POLICY,
@@ -483,6 +486,191 @@ export function formatLocalClear(
   const toolLabel = tool === null ? 'hand' : tool
   const tierLabel = tier === null ? '0' : String(tier)
   return `LOCAL_CLEAR cell=${cell.x},${cell.y},${cell.z} block=${blockName ?? 'unknown'} tool=${toolLabel} tier=${tierLabel}`
+}
+
+// --- ascent-column capability (M2: `safe_column` computed from real geometry) --
+//
+// `safe_column` was refused as a bare capability whenever the body's own column
+// could not be proven pillar-able, even when the geometry to climb existed.
+// Live starvation (main 104e689, 18:04:48, bot on a partial block at y=34.5,
+// cobblestone 130, stone+wooden pickaxe held): `CANDIDATE_STARVATION
+// presented=2 productive=0 goal="smelt:charcoal:1" blockedBy=no_productive_action
+// missing=["RETRIEVE:known:station:crafting_table:b31_63_37:safe_column",
+// "RETRIEVE:known:station:furnace:b29_61_35:safe_column"]` - no productive
+// candidate existed although the ascent geometry did. The evaluation below is
+// the FACT the gate must carry instead of a bare token: is there at least one
+// adjacent/forward cell whose 2-block body column one level up is clear (a
+// walkable step) or clearable (exactly one diggable blocker + the held tool),
+// with solid support beneath and no hazard/liquid?
+//
+// The classification reuses the audited machinery rather than adding a ladder:
+//   - clear      -> the sensor `standable` proof (feet+head passable, support
+//                   solid) one level up; the horizontal path climbs it;
+//   - clearable  -> a sensor-safe `StepCut` at feet+1, which `selectUpStep`
+//                   already turns into the grounded `staircase-up` leg (dig the
+//                   one blocker, step into the cut) and `LOCAL_CLEAR` covers
+//                   for a blocked reuse entry;
+//   - no_tool    -> the same cut geometry without the held tool, so the gate
+//                   withholds instead of offering a dig the executor cannot
+//                   finish;
+//   - no_clearance -> neither exists; the refusal names the examined cell.
+
+/** Why no usable ascent column exists at all. */
+export type AscentColumnRefusalReason = 'no_clearance' | 'no_tool'
+
+/** The one diggable blocker of a clearable ascent column, with its tool facts. */
+export interface AscentColumnBlocker {
+  cell: Vec3Json
+  name: string
+  /** the inventory holds a tool that harvests this blocker */
+  toolOk: boolean
+  requiredTool: HarvestTool | null
+  /** minimum pickaxe rank when `requiredTool === 'pickaxe'` */
+  requiredTier: number | null
+}
+
+export type AscentColumnDecision =
+  | { kind: 'clear'; cell: Vec3Json }
+  | { kind: 'clearable'; cell: Vec3Json; blocker: AscentColumnBlocker }
+  | {
+      kind: 'refuse'
+      reason: AscentColumnRefusalReason
+      /** the column cell the classification examined (never null: named refusal) */
+      cell: Vec3Json
+      blocker: AscentColumnBlocker | null
+    }
+
+export interface AscentColumnInput {
+  /** bot feet Y (fractional is fine; it is floored) */
+  selfFeetY: number
+  selfPosition: Vec3Json
+  /** destination, used only to prefer the column on the travel bearing */
+  target: Vec3Json | null
+  /** sensor step cuts: a safe cut at `cut.y === feet+1` is a grounded step-up */
+  stepCuts?: readonly StepCut[] | null
+  /** sensor standable feet cells (2-block clearance + solid support proven) */
+  standable?: readonly Vec3Json[] | null
+  /** sensor-classified hazard cells (lava/fire/...): a column touching one is unsafe */
+  hazards?: readonly Vec3Json[] | null
+  inventory: Readonly<Record<string, number>>
+}
+
+const ASCENT_COLUMN_DIRS: ReadonlyArray<{ dx: number; dz: number }> = [
+  { dx: 1, dz: 0 },
+  { dx: -1, dz: 0 },
+  { dx: 0, dz: -1 },
+  { dx: 0, dz: 1 },
+]
+
+/** 0 when the cell lies on the travel bearing, 10 otherwise (mirrors `selectUpStep`). */
+function ascentAlignmentScore(cell: Vec3Json, input: AscentColumnInput): number {
+  const target = input.target
+  if (target === null) return 0
+  const signX = Math.sign(target.x - input.selfPosition.x)
+  const signZ = Math.sign(target.z - input.selfPosition.z)
+  const dx = cell.x - Math.floor(input.selfPosition.x)
+  const dz = cell.z - Math.floor(input.selfPosition.z)
+  return dx * signX + dz * signZ > 0 ? 0 : 10
+}
+
+function hazardTouchesColumn(cell: Vec3Json, hazards: readonly Vec3Json[]): boolean {
+  return hazards.some((hazard) => distance(hazard, cell) <= HAZARD_PROXIMITY)
+}
+
+function cellMatches(spot: Vec3Json, cell: Vec3Json): boolean {
+  return Math.floor(spot.x) === cell.x && Math.floor(spot.y) === cell.y && Math.floor(spot.z) === cell.z
+}
+
+/**
+ * The deterministic `safe_column` fact: can the body ascend through at least one
+ * adjacent/forward column right now? Pure: same facts -> same decision.
+ */
+export function evaluateAscentColumn(input: AscentColumnInput): AscentColumnDecision {
+  const feet = {
+    x: Math.floor(input.selfPosition.x),
+    y: Math.floor(input.selfFeetY),
+    z: Math.floor(input.selfPosition.z),
+  }
+  const nextLevelY = feet.y + 1
+  const hazards = input.hazards ?? []
+  const standable = input.standable ?? []
+
+  // 1. Clear columns: a standable feet cell one level up on a cardinal line
+  //    (the sensor already proved body + head clearance and solid support).
+  let bestClear: { cell: Vec3Json; score: number } | null = null
+  for (const dir of ASCENT_COLUMN_DIRS) {
+    for (const dist of [1, 2, 3]) {
+      const cell = { x: feet.x + dir.dx * dist, y: nextLevelY, z: feet.z + dir.dz * dist }
+      if (!standable.some((spot) => cellMatches(spot, cell))) continue
+      if (hazardTouchesColumn(cell, hazards)) continue
+      const score = ascentAlignmentScore(cell, input) + distance(cell, input.selfPosition) * 0.1
+      if (bestClear === null || score < bestClear.score) bestClear = { cell, score }
+    }
+  }
+  if (bestClear !== null) return { kind: 'clear', cell: bestClear.cell }
+
+  // 2. Grounded 2-block faces (sensor `StepCut`): cut the top block of the face
+  //    and step into the cut. `safe` already encodes breakable + landing support
+  //    + headroom + no hazard; the held tool is the remaining gate.
+  let bestCut: { cut: StepCut; blocker: AscentColumnBlocker; score: number } | null = null
+  let bestUnsafe: { cut: StepCut; score: number } | null = null
+  for (const cut of input.stepCuts ?? []) {
+    if (cut.cut.y !== nextLevelY) continue
+    const score = ascentAlignmentScore(cut.cut, input) + distance(cut.cut, input.selfPosition) * 0.1
+    if (cut.safe !== true) {
+      if (bestUnsafe === null || score < bestUnsafe.score) bestUnsafe = { cut, score }
+      continue
+    }
+    const profile = resolveHarvest(loadGameData(), cut.name)
+    // The executor resolves the same block live through `selectDigTool`
+    // (`Executor.resolveLiveDigTool`), so the gate must use the identical rule:
+    // only a pickaxe is a hard requirement, an axe/shovel cut falls back to hand.
+    const choice = selectDigTool(
+      {
+        name: cut.name,
+        harvestTool: profile.harvestTool,
+        harvestTier: profile.harvestTier,
+        diggable: true,
+      },
+      (tool, tier) => bestToolTier(input.inventory, tool) >= (tier ?? 0),
+    )
+    const blocker: AscentColumnBlocker = {
+      cell: cut.cut,
+      name: cut.name,
+      toolOk: choice.ok,
+      requiredTool: profile.harvestTool,
+      requiredTier: profile.harvestTier,
+    }
+    if (bestCut === null || score < bestCut.score) bestCut = { cut, blocker, score }
+  }
+  if (bestCut !== null) {
+    return bestCut.blocker.toolOk
+      ? { kind: 'clearable', cell: bestCut.cut.cut, blocker: bestCut.blocker }
+      : { kind: 'refuse', reason: 'no_tool', cell: bestCut.cut.cut, blocker: bestCut.blocker }
+  }
+  if (bestUnsafe !== null) {
+    return { kind: 'refuse', reason: 'no_clearance', cell: bestUnsafe.cut.cut, blocker: null }
+  }
+
+  // 3. Nothing to climb: name the cardinal column cell the body would have had
+  //    to use, so the marker reads `safe_column:no_clearance@x,y,z` and never a
+  //    bare token.
+  let fallbackDir = ASCENT_COLUMN_DIRS[0] ?? { dx: 1, dz: 0 }
+  let fallbackScore = Number.POSITIVE_INFINITY
+  for (const dir of ASCENT_COLUMN_DIRS) {
+    const probe = { x: feet.x + dir.dx, y: nextLevelY, z: feet.z + dir.dz }
+    const score = ascentAlignmentScore(probe, input)
+    if (score < fallbackScore) {
+      fallbackScore = score
+      fallbackDir = dir
+    }
+  }
+  return {
+    kind: 'refuse',
+    reason: 'no_clearance',
+    cell: { x: feet.x + fallbackDir.dx, y: nextLevelY, z: feet.z + fallbackDir.dz },
+    blocker: null,
+  }
 }
 
 function selectUpStep(input: VerticalInput, fromY: number, targetY: number): VerticalPlan | null {
