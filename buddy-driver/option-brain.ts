@@ -6,7 +6,7 @@
 // `BUDDY_OPTION_COMPILER` is enabled, so the current behavior (and the
 // `llm.called == false` deterministic guarantee) is unchanged by default.
 import type { Bot } from 'mineflayer'
-import { applyCompiledPlan, resolveOptionCompilerEnabled, snapshotFromResident } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, emitBlockedOptionLogs, resolveOptionCompilerEnabled, snapshotFromResident } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { bestPickaxeRank, inventoryCounts } from './planner.ts'
@@ -19,6 +19,8 @@ export interface OptionBrainOptions {
   snapshot: () => OptionWorldSnapshot
   /** override the env flag (tests / explicit wiring) */
   enabled?: boolean
+  /** cap on dependency recursion (tests); defaults to MAX_DEPENDENCY_DEPTH */
+  maxDepth?: number
 }
 
 /**
@@ -29,6 +31,7 @@ export class OptionCompilingSystem2 implements System2Brain {
   private readonly inner: System2Brain
   private readonly log: (event: string, detail?: Record<string, unknown>) => void
   private readonly snapshot: () => OptionWorldSnapshot
+  private readonly maxDepth: number | undefined
   readonly enabled: boolean
 
   constructor(inner: System2Brain, options: OptionBrainOptions) {
@@ -36,6 +39,7 @@ export class OptionCompilingSystem2 implements System2Brain {
     this.log = options.log
     this.snapshot = options.snapshot
     this.enabled = options.enabled ?? resolveOptionCompilerEnabled()
+    this.maxDepth = options.maxDepth
   }
 
   get model(): string {
@@ -45,7 +49,7 @@ export class OptionCompilingSystem2 implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const plan = await this.inner.plan(request)
     if (!this.enabled || plan.goals.length === 0) return plan
-    const result = applyCompiledPlan(plan.goals, this.snapshot(), { enabled: true })
+    const result = applyCompiledPlan(plan.goals, this.snapshot(), { enabled: true, maxDepth: this.maxDepth })
     this.log('OPTION_COMPILE', {
       enabled: true,
       planned: plan.goals.map((goal) => goal.description),
@@ -53,8 +57,10 @@ export class OptionCompilingSystem2 implements System2Brain {
       specs: result.specs.map((spec) => spec.id),
       added: result.added,
       blocked: result.blocked,
+      blockedOptions: result.blockedOptions,
       rejected: result.rejected,
     })
+    emitBlockedOptionLogs(result.blockedOptions, this.log)
     if (result.rejected.length > 0) {
       this.log('OPTION_COMPILE_REJECTED', { rejected: result.rejected })
     }

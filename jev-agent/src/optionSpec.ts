@@ -43,6 +43,14 @@ import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { ResourceClass } from './resourceClass.ts'
+import {
+  PICKAXE_TIER_ORDER,
+  loadGameData,
+  recipesFor,
+  requiredPickaxeRank1,
+  requiredPickaxeRankForItem1,
+} from './gameData.ts'
+import type { RecipeView } from './gameData.ts'
 
 export type OptionKind =
   | 'collect'
@@ -532,50 +540,99 @@ const SKILLS_BY_KIND: Readonly<Record<OptionKind, readonly string[]>> = {
   custom: [],
 }
 
-const PICKAXE_BY_RANK: Readonly<Record<number, string>> = {
-  1: 'wooden_pickaxe',
-  2: 'stone_pickaxe',
-  3: 'iron_pickaxe',
-  4: 'diamond_pickaxe',
-  5: 'netherite_pickaxe',
-}
+const PICKAXE_BY_RANK: Readonly<Record<number, string>> = Object.fromEntries(
+  PICKAXE_TIER_ORDER.map((tool, index) => [index + 1, tool]),
+)
 
 function goalCount(goal: PlannedGoal): number {
   return Math.max(1, Math.floor(goal.requiredCount ?? 1))
 }
 
-function isOreItem(item: string): boolean {
-  return ORE_SOURCES[item] !== undefined
+/**
+ * Minimum pickaxe tier (1-based) required to collect `item`, derived from
+ * minecraft-data: first try the item as a block name (stone/cobblestone), then
+ * as an ore drop (raw_iron/diamond/gold/...). The old hand table returned 2 for
+ * every ore, which wrongly allowed a stone pickaxe for diamond ore.
+ */
+function pickaxeRankForCollectItem(item: string): number | null {
+  const reg = loadGameData()
+  const asBlock = requiredPickaxeRank1(reg, item)
+  return asBlock ?? requiredPickaxeRankForItem1(reg, item)
 }
 
 /**
- * Initiation predicates derived from the deterministic ladder's precondition
- * rules (#12). They mirror `rungPrecondition` in buddy-driver/planner.ts so the
- * compiled Options describe the same rungs the ladder already emits.
+ * Craft preconditions derived from the item's minecraft-data recipe variants.
+ * An ingredient is only required when EVERY variant needs it (a necessary
+ * condition), so a bamboo-or-stick variant never forces one specific substitute
+ * and a false-positive initiation predicate is impossible. Stone-class stacks
+ * collapse to a class predicate (`8 x stone` for furnace). This is what fixed
+ * `diamond_pickaxe` requiring 1 diamond instead of 3 (#54).
+ */
+function craftPreconditions(item: string): Predicate[] {
+  const variants = recipesFor(item)
+  if (variants.length === 0) return []
+  const required = new Map<string, IngredientPredicate>()
+  let seeded = false
+  for (const variant of variants) {
+    const needs = variantRequirements(variant)
+    if (!seeded) {
+      for (const [key, predicate] of needs) required.set(key, predicate)
+      seeded = true
+      continue
+    }
+    for (const [key, predicate] of [...required]) {
+      const other = needs.get(key)
+      if (other === undefined) required.delete(key)
+      else required.set(key, { ...predicate, count: Math.min(predicate.count, other.count) })
+    }
+  }
+  return [...required.values()]
+}
+
+type IngredientPredicate = Extract<Predicate, { kind: 'inventoryAtLeast' | 'inventoryClassAtLeast' }>
+
+/**
+ * Craft intermediates that are deliberately NOT initiation predicates. Sticks
+ * are trivially produced from any plank/log and are resolved by the craft skill
+ * and the executor's recipe lookup; making them an Option precondition made the
+ * compiled chain disagree with the deterministic ladder (#54 scope note).
+ */
+const CRAFT_INTERMEDIATE_ITEMS = new Set(['stick'])
+
+function variantRequirements(recipe: RecipeView): Map<string, IngredientPredicate> {
+  const needed = new Map<string, IngredientPredicate>()
+  const stoneCount = recipe.ingredients
+    .filter((ingredient) => matchesResourceClass(ingredient.item, 'stone'))
+    .reduce((total, ingredient) => total + ingredient.count, 0)
+  if (stoneCount > 0) needed.set('class:stone', { kind: 'inventoryClassAtLeast', cls: 'stone', count: stoneCount })
+  for (const ingredient of recipe.ingredients) {
+    if (matchesResourceClass(ingredient.item, 'stone')) continue
+    if (CRAFT_INTERMEDIATE_ITEMS.has(ingredient.item)) continue
+    needed.set(`item:${ingredient.item}`, { kind: 'inventoryAtLeast', item: ingredient.item, count: ingredient.count })
+  }
+  return needed
+}
+
+/**
+ * Initiation predicates derived from deterministic ladder policy (#12) plus
+ * minecraft-data mechanics (#54): harvest tiers from `blocks[].harvestTools`,
+ * ingredient counts from `recipes`. Strategic rules minecraft-data cannot
+ * express (e.g. "stone_pickaxe needs some pickaxe") stay explicit.
  */
 function preconditionsForGoal(goal: PlannedGoal): Predicate[] {
   const item = goal.targetItem ?? null
   if (item === null) return []
   const count = goalCount(goal)
   switch (goal.kind) {
-    case 'collect':
-      if (item === 'cobblestone' || item === 'stone' || item === 'cobbled_deepslate') {
-        return [{ kind: 'pickaxeRankAtLeast', rank: 1 }]
-      }
-      if (item === 'diamond') return [{ kind: 'pickaxeRankAtLeast', rank: 2 }]
-      if (isOreItem(item)) return [{ kind: 'pickaxeRankAtLeast', rank: 2 }]
-      return []
-    case 'craft':
-      if (item === 'furnace') return [{ kind: 'inventoryClassAtLeast', cls: 'stone', count: 8 }]
-      if (item === 'stone_pickaxe') {
-        return [
-          { kind: 'inventoryClassAtLeast', cls: 'stone', count: 3 },
-          { kind: 'pickaxeRankAtLeast', rank: 1 },
-        ]
-      }
-      if (item === 'iron_pickaxe') return [{ kind: 'inventoryAtLeast', item: 'iron_ingot', count: 3 }]
-      if (item === 'diamond_pickaxe') return [{ kind: 'inventoryAtLeast', item: 'diamond', count: 1 }]
-      return []
+    case 'collect': {
+      const rank = pickaxeRankForCollectItem(item)
+      return rank === null ? [] : [{ kind: 'pickaxeRankAtLeast', rank }]
+    }
+    case 'craft': {
+      const preconditions = craftPreconditions(item)
+      if (item === 'stone_pickaxe') preconditions.push({ kind: 'pickaxeRankAtLeast', rank: 1 })
+      return preconditions
+    }
     case 'smelt':
       if (item === 'iron_ingot') {
         return [
@@ -846,20 +903,60 @@ export function dependencyGoalForPredicate(
   }
 }
 
+/**
+ * A structured record for one Option that was withheld from the execution queue
+ * because it (or an ancestor) has an unmet initiation predicate with no
+ * deterministic producer (#50). `blockedBy === option` for a self-block; for a
+ * pruned descendant `blockedBy` is the blocked ancestor's id.
+ */
+export interface BlockedOptionEntry {
+  /** the Option that was NOT enqueued */
+  option: string
+  /** the Option whose block pruned it; equal to `option` for a self-block */
+  blockedBy: string
+  /** human-readable predicate / reason */
+  reason: string
+}
+
+/** Log marker emitted for every blocked Option that is withheld (#50). */
+export const BLOCKED_OPTION_NOT_ENQUEUED = 'BLOCKED_OPTION_NOT_ENQUEUED'
+
+/** One-line rendering of a blocked-Option record (host log and tests share it). */
+export function formatBlockedOptionLog(entry: BlockedOptionEntry): string {
+  return `${BLOCKED_OPTION_NOT_ENQUEUED} option=${entry.option} blockedBy=${entry.blockedBy} reason=${entry.reason}`
+}
+
+/** Emit one `BLOCKED_OPTION_NOT_ENQUEUED option/blockedBy/reason` record per entry. */
+export function emitBlockedOptionLogs(
+  entries: readonly BlockedOptionEntry[],
+  log: (event: string, detail?: Record<string, unknown>) => void,
+): void {
+  for (const entry of entries) {
+    log(BLOCKED_OPTION_NOT_ENQUEUED, { option: entry.option, blockedBy: entry.blockedBy, reason: entry.reason })
+  }
+}
+
 export interface ExpansionResult {
-  /** dependencies first (deepest first), then the option itself */
+  /**
+   * dependencies first (deepest first), then the option itself. A blocked Option
+   * and its whole dependency subtree are PRUNED from this list (#50).
+   */
   specs: OptionSpec[]
   expanded: boolean
   /** ids of the dependency Options that were added in front */
   added: string[]
   /** unmet predicates that have no deterministic dependency (surfaced, not fatal) */
   blocked: string[]
+  /** structured records for every Option withheld from the queue (#50) */
+  blockedOptions: BlockedOptionEntry[]
 }
 
 /**
- * Expand an Option into its prerequisite chain. An unmet precondition does not
- * stop anything: it becomes a prerequisite Option, recursively, unless the
- * predicate has no deterministic producer (then it is reported in `blocked`).
+ * Expand an Option into its prerequisite chain. An unmet precondition becomes a
+ * prerequisite Option, recursively, unless the predicate has no deterministic
+ * producer. In that case the Option is BLOCKED: it is not startable, so neither
+ * it nor any of its descendants may enter the execution queue (#50). Blocked
+ * entries are surfaced in `blocked` (log text) and `blockedOptions` (structured).
  */
 export function expandOptionDependencies(
   spec: OptionSpec,
@@ -873,28 +970,63 @@ export function expandOptionDependencies(
   const visiting = new Set<string>()
   const added: string[] = []
   const blocked: string[] = []
+  const blockedOptions: BlockedOptionEntry[] = []
 
-  const walk = (current: OptionSpec, depth: number): void => {
+  const recordBlock = (option: string, blockedBy: string, reason: string): void => {
+    if (blockedOptions.some((entry) => entry.option === option && entry.blockedBy === blockedBy && entry.reason === reason)) return
+    blockedOptions.push({ option, blockedBy, reason })
+  }
+
+  const walk = (current: OptionSpec, depth: number, blockedByAncestor: string | null): void => {
     if (seen.has(current.id)) return
+    if (blockedByAncestor !== null) {
+      // #50: a blocked ancestor poisons its whole dependency subtree. Surface the
+      // descendant as a pruned dependency-expansion request; never enqueue it.
+      seen.add(current.id)
+      recordBlock(current.id, blockedByAncestor, `ancestor ${blockedByAncestor} blocked`)
+      return
+    }
     if (depth > maxDepth) {
       blocked.push(`${current.id}: max dependency depth ${maxDepth} exceeded`)
+      recordBlock(current.id, current.id, `max dependency depth ${maxDepth} exceeded`)
       return
     }
     if (visiting.has(current.id)) {
       blocked.push(`${current.id}: dependency cycle`)
+      recordBlock(current.id, current.id, 'dependency cycle')
       return
     }
     visiting.add(current.id)
     const { unmet } = evaluatePredicates(current.preconditions, snapshot, custom)
+    const dependencies: OptionSpec[] = []
+    const blockedReasons: string[] = []
     for (const predicate of unmet) {
       const dependency = dependencyGoalForPredicate(predicate, current, snapshot)
       if (dependency === null) {
-        blocked.push(`${current.id}: ${describePredicate(predicate)}`)
+        blockedReasons.push(describePredicate(predicate))
         continue
       }
       const dependencySpec = compilePlannedGoal(dependency)
       if (dependencySpec.id === current.id) continue
-      walk(dependencySpec, depth + 1)
+      dependencies.push(dependencySpec)
+    }
+    if (blockedReasons.length > 0) {
+      // #50: I(o) is false and cannot be produced deterministically. The Option is
+      // not startable, so neither it nor its dependencies may be handed to the
+      // execution queue. Record the block and prune the subtree.
+      visiting.delete(current.id)
+      seen.add(current.id)
+      for (const reason of blockedReasons) {
+        blocked.push(`${current.id}: ${reason}`)
+        recordBlock(current.id, current.id, reason)
+      }
+      for (const dependencySpec of dependencies) {
+        walk(dependencySpec, depth + 1, current.id)
+      }
+      return
+    }
+    for (const dependencySpec of dependencies) {
+      walk(dependencySpec, depth + 1, null)
     }
     visiting.delete(current.id)
     if (!seen.has(current.id)) {
@@ -904,8 +1036,8 @@ export function expandOptionDependencies(
     }
   }
 
-  walk(spec, 0)
-  return { specs: ordered, expanded: added.length > 0 || blocked.length > 0, added, blocked }
+  walk(spec, 0, null)
+  return { specs: ordered, expanded: added.length > 0 || blocked.length > 0, added, blocked, blockedOptions }
 }
 
 // ---------------------------------------------------------------------------
@@ -923,6 +1055,8 @@ export interface OptionCompileResult {
   added: string[]
   /** unmet predicates with no deterministic dependency */
   blocked: string[]
+  /** structured #50 records for every Option withheld from the execution queue */
+  blockedOptions: BlockedOptionEntry[]
   /** planned goals rejected because no valid OptionSpec could be built */
   rejected: Array<{ description: string; reason: string }>
 }
@@ -944,6 +1078,7 @@ export function applyCompiledPlan(
   const seen = new Set<string>()
   const added: string[] = []
   const blocked: string[] = []
+  const blockedOptions: BlockedOptionEntry[] = []
   const rejected: Array<{ description: string; reason: string }> = []
 
   for (const goal of planned) {
@@ -961,6 +1096,10 @@ export function applyCompiledPlan(
     }
     for (const id of expansion.added) if (!added.includes(id)) added.push(id)
     for (const message of expansion.blocked) if (!blocked.includes(message)) blocked.push(message)
+    for (const entry of expansion.blockedOptions) {
+      if (blockedOptions.some((existing) => existing.option === entry.option && existing.blockedBy === entry.blockedBy && existing.reason === entry.reason)) continue
+      blockedOptions.push(entry)
+    }
   }
 
   return {
@@ -969,6 +1108,7 @@ export function applyCompiledPlan(
     goals: enabled ? optionSpecsToPlannedGoals(specs) : [...planned],
     added,
     blocked,
+    blockedOptions,
     rejected,
   }
 }

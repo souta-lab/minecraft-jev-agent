@@ -21,6 +21,8 @@
 // Pure and bot-free so the scoring and the stall/switch policy are unit-testable.
 import type { Vec3Json } from './state.ts'
 import { distance } from './state.ts'
+import { loadGameData, preferredRecipe } from './gameData.ts'
+import { matchesResourceClass } from './resourceClass.ts'
 
 export type PrereqPath = 'place_held' | 'use_known_station' | 'craft_and_place'
 
@@ -52,8 +54,21 @@ export const PREREQ_COSTS = {
   verticalPenalty: 8,
 } as const
 
-/** Furnace recipe: 8 cobblestone in a 3x3 ring (matches planner.ts stone class). */
-export const FURNACE_STONE_COST = 8
+/**
+ * Cobblestone-equivalent units the 3x3 furnace recipe needs, derived from
+ * minecraft-data (`furnace` recipe: 8 stone-class blocks in a ring). The old
+ * hard-coded 8 is only a fallback for a missing recipe entry (#54).
+ */
+export function furnaceStoneCost(): number {
+  const recipe = preferredRecipe('furnace')
+  if (recipe === null) return 8
+  const stone = recipe.ingredients
+    .filter((ingredient) => matchesResourceClass(ingredient.item, 'stone'))
+    .reduce((total, ingredient) => total + ingredient.count, 0)
+  return stone > 0 ? stone : 8
+}
+
+export const FURNACE_STONE_COST = furnaceStoneCost()
 
 export interface PrereqGoalLike {
   kind?: string
