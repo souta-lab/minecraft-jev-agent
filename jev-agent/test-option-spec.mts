@@ -397,6 +397,24 @@ addCase('round-trip PlannedGoal -> OptionSpec -> goals preserves queue semantics
   return { pass: preserved && stable, detail: `ids=[${ids(specs).join(',')}] roundTripPreserved=${preserved}` }
 })
 
+addCase('strategy metadata makes collect Options and skills distinct', () => {
+  const strategies = ['explore_cave', 'branch_mine', 'return_to_known_ore'] as const
+  const specs = strategies.map((strategy) =>
+    compilePlannedGoal({
+      kind: 'collect',
+      strategy,
+      description: 'collect 3 x raw_iron',
+      targetItem: 'raw_iron',
+      requiredCount: 3,
+    }),
+  )
+  const pass =
+    new Set(specs.map((spec) => spec.id)).size === strategies.length &&
+    new Set(specs.map((spec) => spec.skills.join('|'))).size === strategies.length &&
+    specs.every((spec, index) => spec.strategy === strategies[index])
+  return { pass, detail: specs.map((spec) => `${spec.id}:${spec.skills.join(',')}`).join(' | ') }
+})
+
 addCase('compileGoalQueue compiles the current goal then every pending goal in order', () => {
   const queue = new GoalQueue()
   queue.applyPlan(

@@ -38,7 +38,7 @@
 // `smelt iron_ingot` with no `raw_iron` expands to `collect raw_iron` first -
 // the same repair the deterministic ladder does with LADDER_PREREQ, but expressed
 // on the Option layer.
-import type { GoalKind, GoalQueueState, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import type { GoalKind, GoalQueueState, GoalStrategy, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -153,6 +153,7 @@ export interface OptionSpec {
   /** human-readable intent */
   intent: string
   kind: OptionKind
+  strategy?: GoalStrategy
   target: OptionTarget
   /** I(o): the Option may start only when every precondition holds */
   preconditions: Predicate[]
@@ -481,7 +482,7 @@ function slug(text: string): string {
 export function stableOptionId(goal: PlannedGoal): string {
   const item = goal.targetItem
   const tail = typeof item === 'string' && item.length > 0 ? item : slug(goal.description)
-  return `${goal.kind}:${tail}`
+  return `${goal.kind}:${tail}${goal.strategy === undefined ? '' : `:strategy=${goal.strategy}`}`
 }
 
 export function optionKindForGoal(kind: GoalKind): OptionKind {
@@ -538,6 +539,14 @@ const SKILLS_BY_KIND: Readonly<Record<OptionKind, readonly string[]>> = {
   descend: ['STAIRCASE', 'REUSE_TUNNEL', 'BRANCH_MINE'],
   combat: ['ENGAGE_TARGET'],
   custom: [],
+}
+
+const SKILLS_BY_STRATEGY: Readonly<Record<GoalStrategy, readonly string[]>> = {
+  descend_to_y16: ['DESCEND_TO_LEVEL', 'STAIRCASE'],
+  explore_cave: ['EXPLORE_CAVE_FRONTIER'],
+  branch_mine: ['BRANCH_MINE'],
+  return_to_known_ore: ['RETURN_TO_KNOWN_ORE'],
+  smelt_and_craft: ['SMELT_AND_CRAFT'],
 }
 
 const PICKAXE_BY_RANK: Readonly<Record<number, string>> = Object.fromEntries(
@@ -694,10 +703,11 @@ export function compilePlannedGoal(goal: PlannedGoal): OptionSpec {
     id: stableOptionId(goal),
     intent: goal.description,
     kind,
+    ...(goal.strategy === undefined ? {} : { strategy: goal.strategy }),
     target,
     preconditions: preconditionsForGoal(goal),
     success: successForGoal(goal),
-    skills: [...SKILLS_BY_KIND[kind]],
+    skills: goal.strategy === undefined ? [...SKILLS_BY_KIND[kind]] : [...SKILLS_BY_STRATEGY[goal.strategy]],
     abortThreshold: DEFAULT_ABORT_THRESHOLD,
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
@@ -714,6 +724,7 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     description: goal.description,
     targetItem: goal.targetItem,
     requiredCount: goal.requiredCount,
+    ...(goal.strategy === undefined ? {} : { strategy: goal.strategy }),
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
   }
@@ -797,6 +808,7 @@ export function orderGoalsByReadiness(
 export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
   const goal: PlannedGoal = {
     kind: goalKindForOption(spec.kind),
+    ...(spec.strategy === undefined ? {} : { strategy: spec.strategy }),
     description: spec.intent,
     requiredCount: spec.target.count ?? 1,
   }
