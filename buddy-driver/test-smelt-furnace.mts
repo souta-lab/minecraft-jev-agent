@@ -129,7 +129,9 @@ addCase('known station furnace yields a RETRIEVE toward it', () => {
   const known: KnownResource = { name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }
   const state = worldState({
     position: { x: 39, y: 11, z: 34 },
-    inventory: inventory({ raw_iron: 8, coal: 7 }),
+    // the 55-block climb needs a mechanically available ascend plan (placeable
+    // block); without one the affordance gate withholds the retrieval.
+    inventory: inventory({ raw_iron: 8, coal: 7, cobblestone: 8 }),
     signals: signals({ knownResources: [known] }),
   })
   const candidates = generateCandidates(state, defaultCandidateOptions)

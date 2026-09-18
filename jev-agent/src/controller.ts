@@ -24,8 +24,9 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
-import type { Candidate, CandidateOptions } from './candidates.ts'
+import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ReachabilityGateOptions } from './candidates.ts'
+import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
@@ -73,6 +74,7 @@ import {
   isTrackedMoveKind,
   MoveFailMemory,
   moveFailureKey,
+  StateFingerprintMemory,
 } from './moveFailMemory.ts'
 import type { MoveFailureReason } from './moveFailMemory.ts'
 import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
@@ -522,6 +524,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
+  'REACHABILITY',
+  'CANDIDATE_WITHHELD',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -662,6 +666,12 @@ export class JevController {
     cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
     maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
   })
+  /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
+  private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
+  /** candidates the affordance gate withheld in the latest generation. */
+  private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
+  /** last logged REACHABILITY signature per candidate, so markers change with facts. */
+  private readonly reachabilityLogSignatures = new Map<string, string>()
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
@@ -1120,7 +1130,13 @@ export class JevController {
       }
 
       const unreachableStations = this.unreachableStationKeys(state)
-      let candidates = generateCandidates(state, candidateOptions(this.options, this.recipeIndex, unreachableStations))
+      const grounded = generateGroundedCandidates(
+        state,
+        candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+      )
+      this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
+      this.logReachability(grounded.reachability, grounded.withheld)
+      let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
       if (this.options.singleShotPlanner) {
@@ -1233,7 +1249,10 @@ export class JevController {
         sensorOptions(this.options),
       )
       const freshCandidates = this.filterMoveCandidates(
-        generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex, this.unreachableStationKeys(freshState))),
+        generateGroundedCandidates(
+          freshState,
+          candidateOptions(this.options, this.recipeIndex, this.unreachableStationKeys(freshState), this.reachabilityGateOptions()),
+        ).candidates,
         freshState,
         false,
       )
@@ -3314,17 +3333,20 @@ export class JevController {
    */
   /**
    * M2 blocker: remembered stations whose grounded retrieve the move-failure
-   * memory has blacklisted (`MOVE_TARGET_SKIPPED`) are handed to the pure
-   * prerequisite planner as an explicit unreachable set. Without it the planner
-   * keeps choosing `use_known_station`, the blacklist filter removes every
-   * candidate of that path, and the resident collapses to WAIT.
+   * memory has blacklisted (`MOVE_TARGET_SKIPPED`) or the reachability gate has
+   * withheld (`CANDIDATE_WITHHELD`) are handed to the pure prerequisite planner
+   * as an explicit unreachable set. Without it the planner keeps choosing
+   * `use_known_station`, the blacklist filter removes every candidate of that
+   * path, and the resident collapses to WAIT.
    */
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
     const keys = new Set<string>()
     const dimension = state.self.dimension
     for (const resource of state.signals.knownResources ?? []) {
       if (resource.kind !== 'station') continue
-      if (!this.moveFailMemory.isBlacklisted(dimension, resource.position)) continue
+      const retrieveId = `RETRIEVE:known:station:${resource.name}:${blockId('b', resource.position)}`
+      const withheld = this.withheldCandidateIds.has(retrieveId)
+      if (!withheld && !this.moveFailMemory.isBlacklisted(dimension, resource.position)) continue
       keys.add(knownStationKey({ name: resource.name, position: resource.position }))
     }
     return keys
@@ -3343,7 +3365,10 @@ export class JevController {
       this.resetFurnacePrereq()
       return [...candidates]
     }
-    const input = furnacePrereqInputFromState(state, candidateOptions(this.options, this.recipeIndex, unreachableStations))
+    const input = furnacePrereqInputFromState(
+      state,
+      candidateOptions(this.options, this.recipeIndex, unreachableStations, this.reachabilityGateOptions()),
+    )
     const decision = planPrereqOptions(input)
     const goalKey = this.currentGoalKey()
     if (this.prereqGoalKey !== goalKey) {
@@ -3542,6 +3567,70 @@ export class JevController {
       { ids: candidates.map((candidate) => candidate.id), detail: candidates.map((candidate) => candidate.label) },
       this.tickCounter,
     )
+  }
+
+  /**
+   * #11 v2 affordance gate: `REACHABILITY target=<x,y,z> reachable=<bool>
+   * reason=<reason> missing=[...]` for every evaluated target whose facts
+   * changed, and `CANDIDATE_WITHHELD reason=<reason> candidate=<id>` for every
+   * withheld candidate. Deduped by (candidate, fingerprint) so an unchanged
+   * unreachable target is a stable fact, not a per-tick log flood.
+   */
+  private logReachability(
+    evaluated: readonly CandidateReachability[],
+    withheld: readonly CandidateReachability[],
+  ): void {
+    for (const entry of evaluated) {
+      const candidateId = entry.candidate.id
+      const signature = `reach:${entry.result.reachable}|${entry.result.reason}|${entry.fingerprint}`
+      this.logReachabilityOnce(candidateId, signature, !entry.result.reachable, entry)
+    }
+    for (const entry of withheld) {
+      const candidateId = entry.candidate.id
+      const signature = `withheld:${entry.result.reason}|${entry.fingerprint}|${entry.suppressed}`
+      this.logReachabilityOnce(`withheld:${candidateId}`, signature, true, entry)
+    }
+  }
+
+  private logReachabilityOnce(
+    key: string,
+    signature: string,
+    asWarning: boolean,
+    entry: CandidateReachability,
+  ): void {
+    if (this.reachabilityLogSignatures.get(key) === signature) return
+    this.reachabilityLogSignatures.set(key, signature)
+    const target = {
+      candidateId: entry.candidate.id,
+      kind: entry.candidate.kind,
+      position: entry.candidate.target,
+      barrier: null,
+    }
+    const detail = {
+      candidate: entry.candidate.id,
+      kind: entry.candidate.kind,
+      reachable: entry.result.reachable,
+      reason: entry.result.reason,
+      missing: entry.result.missingCapabilities.map(capabilityKey),
+      fingerprint: entry.fingerprint,
+      suppressed: entry.suppressed,
+    }
+    const line = formatReachability(target, entry.result)
+    if (asWarning) this.logger.warn('agent', line, detail, this.tickCounter)
+    else this.logger.info('agent', line, detail, this.tickCounter)
+    if (entry.withheld) {
+      this.logger.warn(
+        'agent',
+        formatCandidateWithheld(entry.candidate.id, entry.result.reason),
+        detail,
+        this.tickCounter,
+      )
+    }
+  }
+
+  /** Gate facts, shared by both candidate generations in one tick. */
+  private reachabilityGateOptions(): ReachabilityGateOptions {
+    return { memory: this.reachabilityProofs, pathProbe: null }
   }
 
   /**
@@ -3847,8 +3936,9 @@ function candidateOptions(
   options: JevAgentOptions,
   recipes: RecipeIndex,
   unreachableStations: ReadonlySet<string> = new Set<string>(),
+  reachability: ReachabilityGateOptions | null = null,
 ): CandidateOptions {
-  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations }
+  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations, reachability }
 }
 
 function subgoalState(goal: QueuedGoal, have: number): GoalState {

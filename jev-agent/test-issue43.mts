@@ -235,6 +235,9 @@ addCase('underground log goal emits a RETRIEVE toward the remembered coordinate'
     goal: goal({}),
     goalQueue: queueWith(queuedGoal({})),
     signals: signals({ knownResources: [known] }),
+    // a placeable block makes the 10-block climb mechanically reachable; the
+    // affordance gate withholds an un-climbable target (see test-reachability.mts).
+    inventory: inventory({ cobblestone: 4 }),
   })
   const found = retrievalCandidate(generateCandidates(state, defaultCandidateOptions))
   const pass =
@@ -252,6 +255,9 @@ addCase('surface-only log goal falls back to a surface-ward RETRIEVE when nothin
     goal: goal({}),
     goalQueue: queueWith(queuedGoal({})),
     signals: signals(),
+    // the 6-block climb needs a mechanically available ascend plan (placeable
+    // block), otherwise the affordance gate withholds the surface trip.
+    inventory: inventory({ cobblestone: 4 }),
     standable: [
       { x: 0, y: 60, z: 0 },
       { x: 2, y: 66, z: 0 },

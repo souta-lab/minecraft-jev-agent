@@ -8,7 +8,7 @@
 //  - different advisor strategies compile to different goal bodies (#29);
 //  - KNOWN_RESOURCE coordinates are recorded with the worldEpoch namespace (#14);
 //  - known-resource retrieval candidates are grounded and visible blocks win.
-import { defaultCandidateOptions, generateCandidates } from '../jev-agent/src/candidates.ts'
+import { defaultCandidateOptions, generateCandidates, generateGroundedCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
 import { PILLAR_UP_STEP_CAP } from '../jev-agent/src/verticalPlan.ts'
 import type { BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from '../jev-agent/src/state.ts'
@@ -318,6 +318,9 @@ addCase('a remembered surface log beyond reach grounds a RETRIEVE for the charco
     goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' })),
     goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
     knownResources: [known],
+    // the 8-block climb is presented only with a mechanically available ascend
+    // plan; without a placeable block the affordance gate withholds it.
+    inventory: inventory({ cobblestone: 4 }),
   })
   const retrieve = generateCandidates(state, defaultCandidateOptions).find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
   return {
@@ -405,11 +408,18 @@ addCase('a hazard in the resident column refuses the station pillar plan (#45 up
     inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
     blocks: [hazardBlock({ x: 39, y: 11, z: 33 })],
   })
-  const retrieve = generateCandidates(state, defaultCandidateOptions).find(
-    (candidate: Candidate) => candidate.kind === 'RETRIEVE',
-  )
-  const pass = retrieve !== undefined && retrieve.meta.vertical === 'none'
-  return { pass, detail: retrieve === undefined ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const retrieve = grounded.candidates.find((candidate: Candidate) => candidate.kind === 'RETRIEVE')
+  const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
+  const pass =
+    retrieve === undefined &&
+    withheld !== undefined &&
+    withheld.result.reason === 'needs_ascend' &&
+    withheld.result.missingCapabilities.some((capability) => capability.kind === 'safe_column')
+  return {
+    pass,
+    detail: `presented=${retrieve !== undefined} withheld=${withheld?.result.reason ?? 'none'} missing=${JSON.stringify(withheld?.result.missingCapabilities ?? [])}`,
+  }
 })
 
 addCase('a safe step-cut above the resident grounds an up-staircase retrieval (#45 up)', () => {
