@@ -58,7 +58,7 @@ import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
+import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
@@ -1116,13 +1116,14 @@ export class JevController {
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
+          rememberedStations: this.options.knownResources ?? [],
         },
         sensorOptions(this.options),
       )
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
-      this.lastPlacedFurnaceCount = state.furnaces?.length ?? 0
+      this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -1245,6 +1246,7 @@ export class JevController {
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
+          rememberedStations: this.options.knownResources ?? [],
         },
         sensorOptions(this.options),
       )
@@ -3361,7 +3363,7 @@ export class JevController {
     // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
     // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
     // stricter targetItem check here would let a retrieval candidate through unfiltered (#78).
-    if (prereqSubjectForGoal(goal) === null || (state.furnaces?.length ?? 0) > 0) {
+    if (prereqSubjectForGoal(goal) === null || (state.furnaces ?? []).some(isSensedStation)) {
       this.resetFurnacePrereq()
       return [...candidates]
     }
