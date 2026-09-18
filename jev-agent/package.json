@@ -24,6 +24,7 @@
     "observability-test": "tsx test-observability.mts",
     "action-verify-test": "tsx test-action-verify.mts",
     "beta-authority-test": "tsx test-beta-authority.mts",
+    "beta-hysteresis-test": "tsx test-beta-hysteresis.mts",
     "wire-prereq-beta-test": "tsx test-wire-prereq-beta.mts",
     "m1-test": "tsx test-m1.mts",
     "issue43-test": "tsx test-issue43.mts",
