@@ -51,8 +51,9 @@ const addCase = (name: string, run: Case['run']): void => {
 }
 
 const PLANKS_ONLY = makeOptionSnapshot({ inventory: { oak_log: 3, cobblestone: 5 }, toolRank: 2 })
+// fuel is a smelt precondition, so "furnace ready" must include one fuel unit
 const FURNACE_READY = makeOptionSnapshot({
-  inventory: { raw_iron: 3, furnace: 1 },
+  inventory: { raw_iron: 3, furnace: 1, coal: 1 },
   knownStations: ['furnace', 'crafting_table'],
   toolRank: 2,
 })
@@ -246,12 +247,12 @@ addCase('tri-state aggregate prefers a proven false over an unknown (#59)', () =
   })
 })
 
-addCase('I(o): smelt iron_ingot is not startable without furnace + raw_iron', () => {
+addCase('I(o): smelt iron_ingot is not startable without furnace + input + fuel', () => {
   const spec = compilePlannedGoal({ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 })
   const cold = isOptionStartable(spec, makeOptionSnapshot({ inventory: {} }))
   const warm = isOptionStartable(spec, FURNACE_READY)
   const { unmet } = evaluatePredicates(spec.preconditions, makeOptionSnapshot({ inventory: {} }))
-  return { pass: !cold && warm && unmet.length === 2, detail: `cold=${cold} warm=${warm} unmet=[${unmet.map(describePredicate).join(', ')}]` }
+  return { pass: !cold && warm && unmet.length === 3, detail: `cold=${cold} warm=${warm} unmet=[${unmet.map(describePredicate).join(', ')}]` }
 })
 
 addCase('success(s,o): completion is a code predicate, not a model answer', () => {
@@ -266,7 +267,7 @@ addCase('success(s,o): completion is a code predicate, not a model answer', () =
 
 addCase('dependency expansion: smelt iron_ingot with no raw_iron expands to collect raw_iron', () => {
   const spec = compilePlannedGoal({ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 })
-  const snapshot = makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 })
+  const snapshot = makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 })
   const expansion = expandOptionDependencies(spec, snapshot)
   const order = ids(expansion.specs)
   const collect = expansion.specs[0]
@@ -354,7 +355,7 @@ addCase('blocked propagation: satisfying the blocking predicate releases the chi
 
 addCase('blocked propagation: an unblocked plan is byte-for-byte unchanged (#50 regression)', () => {
   const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }]
-  const snapshot = makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 })
+  const snapshot = makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 })
   const expansion = expandOptionDependencies(compilePlannedGoal(planned[0] as PlannedGoal), snapshot)
   const enabled = applyCompiledPlan(planned, snapshot, { enabled: true })
   const disabled = applyCompiledPlan(planned, snapshot, { enabled: false })
@@ -434,7 +435,7 @@ addCase('compileGoalQueue compiles the current goal then every pending goal in o
 
 addCase('flag: BUDDY_OPTION_COMPILER gates replacement and stays opt-in', () => {
   const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }]
-  const snapshot = makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 })
+  const snapshot = makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 })
   const off = applyCompiledPlan(planned, snapshot, { enabled: false })
   const on = applyCompiledPlan(planned, snapshot, { enabled: true })
   const offUnchanged = off.goals.length === 1 && sameGoal(planned[0] as PlannedGoal, off.goals[0] as PlannedGoal)
@@ -483,7 +484,7 @@ addCase('dependencyGoalForPredicate is total for the supported predicate kinds',
 })
 
 addCase('readiness ordering moves a ready smelt ahead of an unmet collect (#46)', () => {
-  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3 }, knownStations: ['furnace'], toolRank: 1 })
+  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, coal: 1 }, knownStations: ['furnace'], toolRank: 1 })
   const goals: PlannedGoal[] = [
     { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
     { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
@@ -504,7 +505,7 @@ addCase('readiness ordering moves a ready smelt ahead of an unmet collect (#46)'
 addCase('readiness ordering is stable when every goal is ready (#46)', () => {
   // toolRank 3 = iron; diamond ore requires iron tier (#54), so this is the
   // smallest rank at which collect:diamond is ready.
-  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, diamond: 1 }, knownStations: ['furnace'], toolRank: 3 })
+  const snapshot = makeOptionSnapshot({ inventory: { raw_iron: 3, diamond: 1, coal: 1 }, knownStations: ['furnace'], toolRank: 3 })
   const goals: PlannedGoal[] = [
     { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
     { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
@@ -518,7 +519,7 @@ addCase('readiness ordering is stable when every goal is ready (#46)', () => {
 })
 
 addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
-  const snapshot = makeOptionSnapshot({ inventory: {}, toolRank: 0 })
+  const snapshot = makeOptionSnapshot({ inventory: { oak_log: 1 }, toolRank: 0 })
   const goals: PlannedGoal[] = [
     { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
     { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
@@ -586,10 +587,94 @@ addCase('prereq-order: once the pickaxe exists the blocked goal is the head agai
 addCase('prereq-order: an already-satisfied precondition does not reorder or insert (#prereq-order)', () => {
   const rawIron: PlannedGoal = { kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 }
   const charcoal: PlannedGoal = { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }
-  const snapshot = makeOptionSnapshot({ inventory: { stone_pickaxe: 1, log: 2 }, knownStations: ['furnace'], toolRank: 2 })
+  const snapshot = makeOptionSnapshot({ inventory: { stone_pickaxe: 1, oak_log: 2 }, knownStations: ['furnace'], toolRank: 2 })
   const result = orderGoalsByReadiness([rawIron, charcoal], snapshot)
   const unchanged = result.goals.length === 2 && result.goals[0]?.targetItem === 'raw_iron' && result.goals[1]?.targetItem === 'charcoal'
   return { pass: unchanged && result.inserted.length === 0 && result.moves.length === 0, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} moves=${result.moves.length}` }
+})
+
+addCase('prereq-order: smelt charcoal with no log inserts collect log in front (#smelt-input-prereq)', () => {
+  const charcoal: PlannedGoal = { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }
+  const snapshot = makeOptionSnapshot({
+    inventory: { birch_planks: 2, cobblestone: 158, stick: 2, dirt: 37, leaf_litter: 4, stone_pickaxe: 1, coal: 7 },
+    knownStations: ['furnace'],
+    toolRank: 2,
+  })
+  const result = orderGoalsByReadiness([charcoal], snapshot)
+  const head = result.goals[0]
+  const insertion = result.inserted[0]
+  const pass =
+    head?.kind === 'collect' &&
+    head.targetItem === 'log' &&
+    head.requiredCount === 1 &&
+    result.goals[1]?.targetItem === 'charcoal' &&
+    result.goals.length === 2 &&
+    insertion?.prerequisite.targetItem === 'log' &&
+    insertion.consumer.targetItem === 'charcoal' &&
+    result.blocked.length === 1
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} blocked=${result.blocked.map((goal) => goal.targetItem).join(',')}` }
+})
+
+addCase('prereq-order: smelt charcoal with a held log inserts nothing and keeps the smelt the head (#smelt-input-prereq)', () => {
+  const charcoal: PlannedGoal = { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }
+  const snapshot = makeOptionSnapshot({ inventory: { oak_log: 2, stone_pickaxe: 1 }, knownStations: ['furnace'], toolRank: 2 })
+  const result = orderGoalsByReadiness([charcoal], snapshot)
+  const pass =
+    result.goals.length === 1 &&
+    result.goals[0]?.kind === 'smelt' &&
+    result.goals[0]?.targetItem === 'charcoal' &&
+    result.inserted.length === 0 &&
+    result.moves.length === 0 &&
+    result.ready.length === 1
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] inserted=${result.inserted.length} ready=${result.ready.length}` }
+})
+
+addCase('prereq-order: smelt iron_ingot derives raw_iron as the input the same way (#smelt-input-prereq)', () => {
+  const iron: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
+  const missing = orderGoalsByReadiness(
+    [iron],
+    makeOptionSnapshot({ inventory: { coal: 7 }, knownStations: ['furnace'], toolRank: 2 }),
+  )
+  const held = orderGoalsByReadiness(
+    [iron],
+    makeOptionSnapshot({ inventory: { raw_iron: 3, coal: 7 }, knownStations: ['furnace'], toolRank: 2 }),
+  )
+  const head = missing.goals[0]
+  const pass =
+    head?.targetItem === 'raw_iron' &&
+    head.kind === 'collect' &&
+    head.requiredCount === 3 &&
+    missing.goals[1]?.targetItem === 'iron_ingot' &&
+    missing.inserted[0]?.prerequisite.targetItem === 'raw_iron' &&
+    held.goals.length === 1 &&
+    held.goals[0]?.targetItem === 'iron_ingot' &&
+    held.inserted.length === 0
+  return { pass, detail: `missing=[${missing.goals.map((goal) => goal.targetItem).join(',')}] held=[${held.goals.map((goal) => goal.targetItem).join(',')}]` }
+})
+
+addCase('prereq-order: missing fuel inserts its producer and dedupes with the input producer (#smelt-input-prereq)', () => {
+  const charcoal: PlannedGoal = { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }
+  const iron: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
+  const charcoalEmpty = orderGoalsByReadiness(
+    [charcoal],
+    makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 }),
+  )
+  const ironNoFuel = orderGoalsByReadiness(
+    [iron],
+    makeOptionSnapshot({ inventory: { raw_iron: 3 }, knownStations: ['furnace'], toolRank: 2 }),
+  )
+  const charcoalCollects = charcoalEmpty.inserted.filter((entry) => entry.prerequisite.targetItem === 'log')
+  const pass =
+    charcoalEmpty.goals.length === 2 &&
+    charcoalCollects.length === 1 &&
+    charcoalEmpty.goals[0]?.targetItem === 'log' &&
+    ironNoFuel.goals.length === 2 &&
+    ironNoFuel.goals[0]?.targetItem === 'log' &&
+    ironNoFuel.inserted[0]?.prerequisite.targetItem === 'log'
+  return {
+    pass,
+    detail: `charcoalInserted=${charcoalEmpty.inserted.map((entry) => entry.prerequisite.targetItem).join(',')} ironNoFuel=[${ironNoFuel.goals.map((goal) => goal.targetItem).join(',')}]`,
+  }
 })
 
 addCase('expanding levelAtMost(46) yields a descend dependency carrying targetY=46 (#57)', () => {

@@ -49,6 +49,7 @@ import {
   recipesFor,
   requiredPickaxeRank1,
   requiredPickaxeRankForItem1,
+  smeltInputFor,
 } from './gameData.ts'
 import type { RecipeView } from './gameData.ts'
 
@@ -699,6 +700,36 @@ function anyRecipeVariantCraftable(item: string, snapshot: OptionWorldSnapshot):
 }
 
 /**
+ * Smelting initiation predicates, derived from game data instead of a hand
+ * table (#smelt-input-prereq). A smelt consumes BOTH its input and a fuel unit:
+ *
+ *   charcoal   <- `smeltInputFor('charcoal')` is the class `log` (any `*_log`)
+ *   iron_ingot <- `smeltInputFor('iron_ingot')` is `raw_iron`
+ *   glass      <- `smeltInputFor('glass')` is `sand`
+ *
+ * The input becomes a semantic-class predicate when gameData resolves it to a
+ * class, so any log satisfies a charcoal smelt; otherwise it is a concrete-item
+ * predicate with the smelt count. Fuel is symmetric: one unit of the `fuel`
+ * class is the initiation condition (the exact burn count for the held fuel is
+ * computed by `fuelCountFor` when the SMELT candidate is built). These are the
+ * predicates `completeStartablePrerequisites` turns into the producer goal
+ * (`collect 1 x <log>`) ordered in front of the smelt.
+ */
+function smeltPreconditions(item: string, count: number): Predicate[] {
+  const preconditions: Predicate[] = [{ kind: 'stationKnown', station: 'furnace' }]
+  const input = smeltInputFor(item)
+  if (input !== null) {
+    preconditions.push(
+      isResourceClass(input)
+        ? { kind: 'inventoryClassAtLeast', cls: input, count }
+        : { kind: 'inventoryAtLeast', item: input, count },
+    )
+  }
+  preconditions.push({ kind: 'inventoryClassAtLeast', cls: 'fuel', count: 1 })
+  return preconditions
+}
+
+/**
  * Initiation predicates derived from deterministic ladder policy (#12) plus
  * minecraft-data mechanics (#54): harvest tiers from `blocks[].harvestTools`,
  * ingredient counts from `recipes`. Strategic rules minecraft-data cannot
@@ -725,14 +756,7 @@ function preconditionsForGoal(goal: PlannedGoal): Predicate[] {
       return preconditions
     }
     case 'smelt':
-      if (item === 'iron_ingot') {
-        return [
-          { kind: 'stationKnown', station: 'furnace' },
-          { kind: 'inventoryAtLeast', item: 'raw_iron', count },
-        ]
-      }
-      if (item === 'charcoal') return [{ kind: 'stationKnown', station: 'furnace' }]
-      return [{ kind: 'stationKnown', station: 'furnace' }]
+      return smeltPreconditions(item, count)
     case 'place':
       if (item === 'furnace') return [{ kind: 'inventoryAtLeast', item: 'furnace', count: 1 }]
       if (item === 'crafting_table') return [{ kind: 'inventoryAtLeast', item: 'crafting_table', count: 1 }]
