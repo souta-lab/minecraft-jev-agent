@@ -117,7 +117,14 @@ export async function pillarStepUp(
   }
 
   const jump = await jumpWithGroundCorrection(bot, deps)
-  if (!jump.airborne) return fail('takeoff', jump.failure ?? 'no_rise', jump.samples)
+  if (!jump.airborne) {
+    return fail(
+      'takeoff',
+      jump.failure ?? 'no_rise',
+      jump.samples,
+      `ticks=${jump.ticks} impulses=${jump.impulses} peakRise=${round2(jump.peakRise)}`,
+    )
+  }
 
   deps.ensureOwned?.()
   const apexDeadline = deps.now() + deps.apexBudgetMs
