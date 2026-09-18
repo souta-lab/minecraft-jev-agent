@@ -13,10 +13,16 @@
     "frontier:write": "node tools/frontier.mjs --write",
     "issue-state": "node tools/issue-state.mjs",
     "issue-state:check": "node tools/issue-state.mjs --check",
+    "m2-watch": "node tools/m2-watch.mjs",
+    "m2-acceptance": "node tools/m2-acceptance.mjs",
+    "m2-live-gate": "node tools/m2-live-gate.mjs",
     "lane-guard-test": "node tools/test-lane-guard.mjs",
     "issue-graph-test": "node tools/test-issue-graph.mjs",
     "current-status-test": "node tools/test-current-status.mjs",
     "frontier-test": "node tools/test-frontier.mjs",
-    "issue-state-test": "node tools/test-issue-state.mjs"
+    "issue-state-test": "node tools/test-issue-state.mjs",
+    "m2-watch-test": "node tools/test-m2-watch.mjs",
+    "m2-acceptance-test": "node tools/test-m2-acceptance.mjs",
+    "m2-live-gate-test": "node tools/test-m2-live-gate.mjs"
   }
 }
