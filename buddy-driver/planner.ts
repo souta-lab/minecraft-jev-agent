@@ -37,6 +37,7 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
+import { netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
 import {
   PICKAXE_TIER_ORDER,
@@ -381,11 +382,8 @@ export const RUNGS: readonly Rung[] = [
     id: 'nether_portal',
     future: true,
     satisfied: (c) => has(c, 'flint_and_steel') && countClass(c, 'stone') >= 0 && has(c, 'flint'),
-    goals: () => [
-      { kind: 'collect', description: 'collect 10 x obsidian', targetItem: 'obsidian', requiredCount: 10 },
-      { kind: 'craft', description: 'craft 1 x flint_and_steel', targetItem: 'flint_and_steel', requiredCount: 1 },
-      { kind: 'place', description: 'place 1 x nether_portal', targetItem: 'nether_portal', requiredCount: 1 },
-    ],
+    // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
+    goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
   {
     id: 'blaze_rods',
