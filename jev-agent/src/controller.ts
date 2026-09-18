@@ -104,6 +104,7 @@ import {
   evaluateRetrieveAbandon,
   formatPrereqOptionDetail,
   formatPrereqOptionFor,
+  formatPrereqRankShadow,
   formatPrereqSwitch,
   isInventorySourced,
   knownStationKey,
@@ -113,10 +114,11 @@ import {
   prereqOptionReason,
   prereqProgressSignature,
   prereqSubjectForGoal,
+  resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
   selectPrereqPath,
 } from './prereqOption.ts'
-import type { PrereqDecision, PrereqPath, PrereqProgress, RetrieveUnverifiedState } from './prereqOption.ts'
+import type { PrereqDecision, PrereqPath, PrereqProgress, PrereqRankPolicy, RetrieveUnverifiedState } from './prereqOption.ts'
 import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
@@ -247,6 +249,12 @@ export interface JevAgentOptions {
   replanThrottleMs: number
   /** #44: position delta in blocks that counts as new information. */
   replanPositionDelta: number
+  /**
+   * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
+   * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
+   * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
+   */
+  prereqRankPolicy: PrereqRankPolicy
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -290,6 +298,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   actuation: 'pathfinder',
   replanThrottleMs: resolveReplanThrottleMs(),
   replanPositionDelta: resolveReplanPositionDelta(),
+  prereqRankPolicy: resolvePrereqRankPolicy(),
 }
 
 export interface RunSummary {
@@ -534,6 +543,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
+  'PREREQ_RANK_SHADOW',
   'PREREQ_SWITCH',
   'FURNACE_READY',
   'SMELT_DONE',
@@ -3623,6 +3633,10 @@ export class JevController {
    * authoritative, and switch to the next-best path when the chosen one stalls.
    * Never abandons the parent goal: the placement guard keeps the prerequisite
    * protected and the switch only re-routes HOW it is satisfied.
+   *
+   * #11 v2: the feasible path is chosen by cost and the #78 rank winner is
+   * shadow-logged (`PREREQ_RANK_SHADOW`); abandonment only demotes a path, so a
+   * feasible route is never dropped to null/WAIT.
    */
   /**
    * M2 blocker: remembered stations whose grounded retrieve the move-failure
@@ -3689,6 +3703,17 @@ export class JevController {
         {
           chosen,
           options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
+        },
+        this.tickCounter,
+      )
+      this.logger.info(
+        'agent',
+        formatPrereqRankShadow(decision, chosen),
+        {
+          policy: decision.policy,
+          costChoice: chosen,
+          rankChoice: decision.rankBaseline,
+          agree: chosen === decision.rankBaseline,
         },
         this.tickCounter,
       )
@@ -4251,7 +4276,14 @@ function candidateOptions(
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
 ): CandidateOptions {
-  return { ...defaultCandidateOptions, reach: options.reach, recipes, unreachableStations, reachability }
+  return {
+    ...defaultCandidateOptions,
+    reach: options.reach,
+    recipes,
+    unreachableStations,
+    reachability,
+    prereqRankPolicy: options.prereqRankPolicy,
+  }
 }
 
 function subgoalState(goal: QueuedGoal, have: number): GoalState {
