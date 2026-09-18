@@ -531,6 +531,31 @@ addCase('readiness ordering is stable when every goal is blocked (#46)', () => {
   return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] ready=${result.ready.length} blocked=${result.blocked.length}` }
 })
 
+addCase('readiness ordering marks a startable goal ready and leaves blocked goals unmarked (#46 merge evidence)', () => {
+  const goals: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 },
+    { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 },
+  ]
+  const startable = orderGoalsByReadiness(
+    goals,
+    makeOptionSnapshot({ inventory: { raw_iron: 3, coal: 1 }, knownStations: ['furnace'], toolRank: 1 }),
+  )
+  const blocked = orderGoalsByReadiness(goals, makeOptionSnapshot({ inventory: {}, toolRank: 0 }))
+  const readySmelt = startable.goals.find((goal) => goal.kind === 'smelt')
+  const readyDiamond = startable.goals.find((goal) => goal.targetItem === 'diamond')
+  const blockedSmelt = blocked.goals.find((goal) => goal.kind === 'smelt')
+  const pass =
+    readySmelt?.ready === true &&
+    readyDiamond?.ready !== true &&
+    blockedSmelt?.ready !== true &&
+    goals[0]?.ready === undefined &&
+    goals[1]?.ready === undefined
+  return {
+    pass,
+    detail: `smeltReady=${String(readySmelt?.ready)} diamondReady=${String(readyDiamond?.ready)} blockedSmeltReady=${String(blockedSmelt?.ready)} inputUntouched=${String(goals[1]?.ready === undefined)}`,
+  }
+})
+
 addCase('expanding levelAtMost(46) yields a descend dependency carrying targetY=46 (#57)', () => {
   const owner: OptionSpec = {
     id: 'fixture:level',

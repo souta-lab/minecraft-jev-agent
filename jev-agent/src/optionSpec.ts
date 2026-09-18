@@ -806,6 +806,8 @@ export interface ReadinessOrderResult {
  * Issue #46 requirement 1: stable readiness partition. Ready goals move ahead of
  * goals with an unmet precondition. Safe because the preconditions encode the
  * dependency chain, so a producer is never blocked while its consumer is ready.
+ * Ready goals are returned carrying `ready: true` so the GoalQueue merge keeps
+ * the proven ordering when it re-inserts protected goals.
  */
 export function orderGoalsByReadiness(
   goals: readonly PlannedGoal[],
@@ -818,7 +820,7 @@ export function orderGoalsByReadiness(
   for (const goal of goals) {
     const startable = isOptionStartable(compilePlannedGoal(goal), snapshot, custom)
     isReady.push(startable)
-    if (startable) ready.push(goal)
+    if (startable) ready.push(goal.ready === true ? goal : { ...goal, ready: true })
     else blocked.push(goal)
   }
   const moves: Array<{ preferred: string; over: string }> = []
