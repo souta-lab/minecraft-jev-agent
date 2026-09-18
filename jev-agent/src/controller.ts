@@ -60,7 +60,7 @@ import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
-import { evaluateCapabilityGap, formatCapabilityGap, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
@@ -508,6 +508,7 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
   'CAPABILITY_GAP',
+  'CAPABILITY_GAP_POLICY',
   'CAPABILITY_GAP_CLEARED',
   'RETURN_TO_SURFACE',
   'PRECONDITION_PROTECTED',
@@ -2911,6 +2912,12 @@ export class JevController {
         'agent',
         marker,
         { attempts: decision.attempts, targetY: decision.targetY, reason: decision.reason },
+        this.tickCounter,
+      )
+      this.logger.warn(
+        'agent',
+        formatCapabilityGapPolicy(decision),
+        { ...decision.heuristic, attempts: decision.attempts, targetY: decision.targetY },
         this.tickCounter,
       )
     }
