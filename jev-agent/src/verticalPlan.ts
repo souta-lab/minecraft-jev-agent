@@ -265,6 +265,13 @@ export type VerticalPlan =
       tunnel: Vec3Json
       fromY: number
       toY: number
+      /**
+       * Deterministic clearance step for the entry cell, attached when the
+       * offering layer already knew the entry cell was blocked by one diggable
+       * block. The executor still re-validates live, but this carries the
+       * pre-computed cell so the plan is never a blind waypoint.
+       */
+      clear?: { cell: Vec3Json; name: string }
     }
   | {
       kind: 'staircase'
@@ -319,11 +326,163 @@ export interface VerticalInput {
    * pure callers that have no hazard scan keep the old behaviour)
    */
   columnSafe?: boolean
+  /**
+   * live enterability facts for `tunnel`; when absent the reuse plan is offered
+   * unverified and the executor validates before it walks.
+   */
+  tunnelEntry?: TunnelEntryProbe | null
+  /** next reachable entry cells of the same tunnel, in priority order */
+  tunnelAlternates?: readonly TunnelEntryProbe[] | null
 }
 
 function withinTunnelReach(tunnel: Vec3Json, targetY: number, fromY: number, dy: number): boolean {
   if (dy < 0) return tunnel.y < fromY && tunnel.y >= targetY - 1
   return tunnel.y > fromY && tunnel.y <= targetY + 1
+}
+
+// --- tunnel entry validation (M2 FURNACE_READY: reuse met a blocked entry) ----
+//
+// Live failure on main a542593: a committed RETRIEVE 1.5 blocks from its waypoint
+// failed `path_stuck` because the remembered tunnel cell the body had to occupy
+// was not enterable, and `reuse` returned that cell as a blind waypoint. The
+// checks below make the entry contract explicit: 2-block clearance plus a
+// standable support, or a single diggable blocking block, or a typed refusal.
+
+/** One blocking cell of a tunnel entry, with the live facts needed to clear it. */
+export interface TunnelEntryBlockerProbe {
+  cell: Vec3Json
+  name: string
+  diggable: boolean
+  fluidOrHazard: boolean
+  floodRisk: boolean
+  toolOk: boolean
+}
+
+/** Live enterability facts for a tunnel cell the body must occupy. */
+export interface TunnelEntryProbe {
+  /** the feet cell the body must occupy */
+  cell: Vec3Json
+  bodyClear: boolean
+  headClear: boolean
+  supportSolid: boolean
+  /** first non-passable body/head cell, when one was read */
+  blocker?: TunnelEntryBlockerProbe | null
+}
+
+export type TunnelEntryRefusalReason = 'no_clearance' | 'no_support'
+
+export type TunnelEntryDecision =
+  | { kind: 'enterable' }
+  | { kind: 'clear'; blocker: TunnelEntryBlockerProbe }
+  | { kind: 'refuse'; reason: TunnelEntryRefusalReason; cell: Vec3Json }
+
+export interface TunnelEntryRefusal {
+  reason: TunnelEntryRefusalReason
+  cell: Vec3Json
+}
+
+/**
+ * Pure enterability decision for a reused tunnel cell. A blocked body/head cell
+ * is clearable only when exactly one diggable, non-fluid, non-flooding block is
+ * identified and a usable tool is held; otherwise the entry is refused with the
+ * cause so the caller can select a different vertical plan.
+ */
+export function evaluateTunnelEntry(probe: TunnelEntryProbe): TunnelEntryDecision {
+  if (!probe.bodyClear || !probe.headClear) {
+    const blocker = probe.blocker ?? null
+    if (
+      blocker !== null &&
+      blocker.diggable &&
+      !blocker.fluidOrHazard &&
+      !blocker.floodRisk &&
+      blocker.toolOk
+    ) {
+      return { kind: 'clear', blocker }
+    }
+    return { kind: 'refuse', reason: 'no_clearance', cell: blocker?.cell ?? probe.cell }
+  }
+  if (!probe.supportSolid) return { kind: 'refuse', reason: 'no_support', cell: probe.cell }
+  return { kind: 'enterable' }
+}
+
+/** Radius (blocks) within which a blocked waypoint is a local clearance, not a path failure. */
+export const LOCAL_CLEAR_RADIUS = 3
+
+/** One cell the body would traverse on the way to the tunnel, with live facts. */
+export interface ApproachBlockage {
+  cell: Vec3Json
+  passable: boolean
+  name?: string
+  diggable?: boolean
+  fluidOrHazard?: boolean
+  floodRisk?: boolean
+  toolOk?: boolean
+}
+
+export type LocalClearDecision =
+  | { kind: 'clear'; cell: Vec3Json }
+  | { kind: 'none' }
+  | { kind: 'multiple'; cells: Vec3Json[] }
+
+/**
+ * Pick at most one approach cell to dig. A single blocked, diggable, safe cell
+ * is a local clearance; several blocked cells are not a single identified cause
+ * and are left alone so the executor never tunnels an arbitrary path.
+ */
+export function selectLocalClearCell(blockages: readonly ApproachBlockage[]): LocalClearDecision {
+  const blocked = blockages.filter((entry) => !entry.passable)
+  if (blocked.length === 0) return { kind: 'none' }
+  if (blocked.length > 1) return { kind: 'multiple', cells: blocked.map((entry) => entry.cell) }
+  const only = blocked[0]
+  if (only === undefined) return { kind: 'none' }
+  const safe =
+    only.diggable === true && only.fluidOrHazard !== true && only.floodRisk !== true && only.toolOk === true
+  return safe ? { kind: 'clear', cell: only.cell } : { kind: 'none' }
+}
+
+export type ReuseLegAction =
+  | { action: 'path' }
+  | { action: 'clear-entry'; blocker: TunnelEntryBlockerProbe }
+  | { action: 'clear-approach'; cell: Vec3Json }
+  | { action: 'refuse'; reason: TunnelEntryRefusalReason; cell: Vec3Json }
+  | { action: 'fail'; code: 'path_stuck' }
+
+/**
+ * Decide the reuse leg from the entry decision and a failed walk. A near waypoint
+ * that failed with a single identified blocking cell yields a local clearance
+ * attempt instead of a `path_stuck` escalation; an unusable entry refuses with
+ * its typed cause so the caller can fall back to another vertical plan.
+ */
+export function planReuseLeg(input: {
+  entry: TunnelEntryDecision
+  pathFailed: boolean
+  distanceToTunnel: number
+  approachBlockages?: readonly ApproachBlockage[] | null
+}): ReuseLegAction {
+  if (input.entry.kind === 'clear') return { action: 'clear-entry', blocker: input.entry.blocker }
+  if (input.entry.kind === 'refuse') return { action: 'refuse', reason: input.entry.reason, cell: input.entry.cell }
+  if (!input.pathFailed) return { action: 'path' }
+  if (!(input.distanceToTunnel <= LOCAL_CLEAR_RADIUS)) return { action: 'fail', code: 'path_stuck' }
+  const local = selectLocalClearCell(input.approachBlockages ?? [])
+  if (local.kind === 'clear') return { action: 'clear-approach', cell: local.cell }
+  return { action: 'fail', code: 'path_stuck' }
+}
+
+/** The exact log line emitted when a remembered tunnel entry cannot be used. */
+export function formatTunnelEntryRefused(refusal: TunnelEntryRefusal): string {
+  return `TUNNEL_ENTRY_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+}
+
+/** The exact log line emitted before the executor clears one blocking cell. */
+export function formatLocalClear(
+  cell: Vec3Json,
+  blockName: string | null,
+  tool: string | null,
+  tier: number | null,
+): string {
+  const toolLabel = tool === null ? 'hand' : tool
+  const tierLabel = tier === null ? '0' : String(tier)
+  return `LOCAL_CLEAR cell=${cell.x},${cell.y},${cell.z} block=${blockName ?? 'unknown'} tool=${toolLabel} tier=${tierLabel}`
 }
 
 function selectUpStep(input: VerticalInput, fromY: number, targetY: number): VerticalPlan | null {
@@ -374,38 +533,104 @@ function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: nu
   }
 }
 
+export interface VerticalApproachDecision {
+  plan: VerticalPlan | null
+  /** set when a remembered tunnel was offered but its entry was not usable */
+  tunnelRefusal: TunnelEntryRefusal | null
+}
+
+type TunnelResolution =
+  | { kind: 'skip' }
+  | { kind: 'reuse'; tunnel: Vec3Json; clear: { cell: Vec3Json; name: string } | null }
+  | { kind: 'refused'; refusal: TunnelEntryRefusal }
+
+function reusePlan(
+  tunnel: Vec3Json,
+  clear: { cell: Vec3Json; name: string } | null,
+  fromY: number,
+  targetY: number,
+): VerticalPlan {
+  return clear === null
+    ? { kind: 'reuse', tunnel, fromY, toY: targetY }
+    : { kind: 'reuse', tunnel, fromY, toY: targetY, clear }
+}
+
 /**
- * Decide the vertical leg of a retrieval. Pure: same input -> same plan.
- * Returns null when the target is level (horizontal path handles it) or when an
- * upward gap has neither a safe step cut nor a held pillar block, in which case
- * the caller falls back to explorer/climb candidates and the stall assertion.
+ * Resolve the remembered tunnel against the live entry facts. An enterable cell
+ * (primary or the first usable alternate) wins; a clearable cell yields the
+ * pre-computed clearance step; otherwise the first typed refusal is returned so
+ * the caller can fall back to a different vertical plan.
  */
-export function planVerticalApproach(input: VerticalInput): VerticalPlan | null {
+function resolveTunnelEntry(
+  input: VerticalInput,
+  tunnel: Vec3Json,
+  targetY: number,
+  fromY: number,
+  dy: number,
+): TunnelResolution {
+  if (!withinTunnelReach(tunnel, targetY, fromY, dy)) return { kind: 'skip' }
+  const primary = input.tunnelEntry ?? null
+  const probes: TunnelEntryProbe[] = primary !== null ? [primary] : []
+  for (const alternate of input.tunnelAlternates ?? []) probes.push(alternate)
+  if (probes.length === 0) return { kind: 'reuse', tunnel, clear: null }
+
+  let firstClear: { tunnel: Vec3Json; clear: { cell: Vec3Json; name: string } } | null = null
+  let firstRefusal: TunnelEntryRefusal | null = null
+  for (const probe of probes) {
+    if (probe !== primary && !withinTunnelReach(probe.cell, targetY, fromY, dy)) continue
+    const decision = evaluateTunnelEntry(probe)
+    if (decision.kind === 'enterable') return { kind: 'reuse', tunnel: probe.cell, clear: null }
+    if (decision.kind === 'clear') {
+      if (firstClear === null) {
+        firstClear = { tunnel: probe.cell, clear: { cell: decision.blocker.cell, name: decision.blocker.name } }
+      }
+      continue
+    }
+    if (firstRefusal === null) firstRefusal = { reason: decision.reason, cell: decision.cell }
+  }
+  if (firstClear !== null) return { kind: 'reuse', tunnel: firstClear.tunnel, clear: firstClear.clear }
+  return { kind: 'refused', refusal: firstRefusal ?? { reason: 'no_clearance', cell: tunnel } }
+}
+
+/**
+ * Decide the vertical leg of a retrieval, carrying any tunnel-entry refusal.
+ * Pure: same input -> same plan. Returns null when the target is level
+ * (horizontal path handles it) or when an upward gap has neither a safe step cut
+ * nor a held pillar block, in which case the caller falls back to explorer/climb
+ * candidates and the stall assertion.
+ */
+export function planVerticalApproachDetailed(input: VerticalInput): VerticalApproachDecision {
   const fromY = Math.floor(input.selfFeetY)
   const targetY = input.target.y
   const dy = targetY - fromY
-  if (dy === 0) return null
+  if (dy === 0) return { plan: null, tunnelRefusal: null }
 
   const tunnel = input.tunnel ?? null
 
   if (dy > 0) {
-    if (tunnel !== null && withinTunnelReach(tunnel, targetY, fromY, dy)) {
-      return { kind: 'reuse', tunnel, fromY, toY: targetY }
+    const resolution = tunnel !== null ? resolveTunnelEntry(input, tunnel, targetY, fromY, dy) : { kind: 'skip' as const }
+    if (resolution.kind === 'reuse') {
+      return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null }
     }
-    return planUpward(input, fromY, targetY, dy)
+    return {
+      plan: planUpward(input, fromY, targetY, dy),
+      tunnelRefusal: resolution.kind === 'refused' ? resolution.refusal : null,
+    }
   }
 
   // A one-block drop needs no vertical leg (the horizontal path steps down it).
-  if (Math.abs(dy) <= VERTICAL_GAP) return null
+  if (Math.abs(dy) <= VERTICAL_GAP) return { plan: null, tunnelRefusal: null }
 
-  if (tunnel !== null && withinTunnelReach(tunnel, targetY, fromY, dy)) {
-    return { kind: 'reuse', tunnel, fromY, toY: targetY }
+  const resolution = tunnel !== null ? resolveTunnelEntry(input, tunnel, targetY, fromY, dy) : { kind: 'skip' as const }
+  if (resolution.kind === 'reuse') {
+    return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null }
   }
+  const tunnelRefusal = resolution.kind === 'refused' ? resolution.refusal : null
 
   const steps = (input.descent ?? []).filter(
     (step) => step.mode === 'down' && step.safe && step.diggable === true,
   )
-  if (steps.length === 0) return null
+  if (steps.length === 0) return { plan: null, tunnelRefusal }
 
   const tdx = input.target.x - input.selfPosition.x
   const tdz = input.target.z - input.selfPosition.z
@@ -424,20 +649,28 @@ export function planVerticalApproach(input: VerticalInput): VerticalPlan | null 
       best = step
     }
   }
-  if (best === null) return null
+  if (best === null) return { plan: null, tunnelRefusal }
 
   const dig = best.mode === 'down' ? (best.floorSolid ? best.floor : best.wall) : best.wall
   return {
-    kind: 'staircase',
-    dir: best.dir,
-    fromY,
-    toY: targetY,
-    dig,
-    step: best.step,
-    digName: best.digName ?? null,
-    harvestTool: best.digHarvestTool ?? null,
-    harvestTier: best.digHarvestTier ?? null,
+    plan: {
+      kind: 'staircase',
+      dir: best.dir,
+      fromY,
+      toY: targetY,
+      dig,
+      step: best.step,
+      digName: best.digName ?? null,
+      harvestTool: best.digHarvestTool ?? null,
+      harvestTier: best.digHarvestTier ?? null,
+    },
+    tunnelRefusal,
   }
+}
+
+/** Back-compat wrapper: the plan only, without the tunnel-entry refusal. */
+export function planVerticalApproach(input: VerticalInput): VerticalPlan | null {
+  return planVerticalApproachDetailed(input).plan
 }
 
 export interface RetrievalProgressState {

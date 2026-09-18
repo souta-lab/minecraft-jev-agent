@@ -530,6 +530,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCEND_LIMIT',
   'STAIRCASE',
   'REUSE_TUNNEL',
+  'TUNNEL_ENTRY_REFUSED',
+  'LOCAL_CLEAR',
   'ASCEND_STEP',
   'ASCENT_PROGRESS',
   'PILLAR_UP',
