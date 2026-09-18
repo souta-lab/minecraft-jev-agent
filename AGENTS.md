@@ -14,6 +14,96 @@
 ・品質最優先: トークンを節約しても、証拠取得・テスト・マージ検証は省略しない。
 ```
 
+## 🧠 Luna / fast-model proactive execution contract
+
+Luna等の高速・字面追従型モデルでは、ユーザーの一文を「完了条件の全リスト」と解釈してはいけない。**ユーザーの指示は目的であり、必要な安全な中間作業まで列挙したチェックリストではない。**
+
+### 必須ループ
+
+各作業は必ず次のループで進め、明確な停止条件を満たすまで繰り返す。
+
+```text
+ORIENT   : root AGENTS / scoped AGENTS / TODO / issue / latest main / live evidence を読む
+PLAN     : 目的を前進させる次の1〜3手を自分で決める
+ACT      : 最優先の安全な1手を実行する
+VERIFY   : test / log / diff / inventory / commit / PR 等の一次証拠で確認する
+UPDATE   : issue / TODO / docs / run artifact に事実を反映する
+REASSESS : 元の目的とacceptanceへ戻り、次に残る blocker / evidence gap を探す
+CONTINUE : 安全で有用な次作業がある限り、ユーザーの追加発言を待たず続ける
+```
+
+### 「言われたことだけやって停止」を禁止
+
+```
+禁止:
+・依頼された1ファイルだけ直して、明らかに必要なテスト/統合/証拠取得をせず終了する
+・issue本文の最初の箇条書きだけ満たして、acceptance criteriaを読まず終了する
+・「修正しました。次はどうしますか？」と、安全な未完了作業が残っているのにユーザーへ返す
+・PR/branchを作っただけで「完了」とする（landedが必要な仕事ならmerge後の検証まで含む）
+・失敗を見つけても、ユーザーが明示していないという理由だけで放置する
+・TODO/issueに次の明確なblockerがあるのに「指示待ち」に入る
+・曖昧さを理由に即質問する。まずrepo・issue・tests・logsから解消を試みる
+```
+
+### NEXT-WORK CHECK（終了前に必ず実行）
+
+応答を終える・laneを完了扱いにする前に、最低限これを確認する。
+
+```text
+1. 元の目的は本当に満たされたか？
+2. acceptance criteriaに未達はないか？
+3. 実装はあるがtest/live evidenceが無い、というgapはないか？
+4. 今の変更が依存する前提issue / integration / migrationが残っていないか？
+5. latest mainにlandしているか？（landが要求される作業の場合）
+6. 直近の観測から新しいP0/P1 correctness defectが見えていないか？
+7. WIP上限内で、次に進められるhighest-priority workはないか？
+```
+
+**1つでも安全に実行できる次作業があるなら、原則としてその場で続ける。**
+
+### 質問して止まってよい条件
+
+ユーザー確認が必要なのは、主に以下だけ。
+
+```text
+・破壊的/不可逆な操作
+・外部公開、課金、秘密情報、credential、法的/契約的判断
+・複数の製品仕様があり、repo/issue/既存方針から選べない本当のproduct decision
+・安全な仮説検証をしてもなお解消できない情報不足
+```
+
+それ以外の曖昧さは、**最も低リスクで可逆な仮説を選び、実装/検証して証拠で修正する。**
+
+### 能動性とscope creepを区別する
+
+能動的に動くことは、無関係な機能を勝手に増やすことではない。自発的に行ってよいのは、次のどれかに直接効く作業:
+
+```text
+・現在のobjective / release blockerを前進させる
+・P0/P1 correctness / safetyを守る
+・現在の変更に必要な依存・migration・integrationを完了する
+・acceptance evidenceを取得/改善する
+・再発する失敗をtest / invariant / toolingで固定する
+・次の作業者が同じ調査を繰り返さないよう正典を更新する
+```
+
+### 完了の定義
+
+`code written` は完了ではない。仕事に応じて必要な範囲で、次まで揃って初めて完了候補:
+
+```text
+implemented
++ tests/no-new-regression
++ required live/isolated evidence
++ issue acceptance checked
++ branch pushed
++ landed to main when required
++ post-merge/reload gate checked
++ remaining gap explicitly recorded
+```
+
+「完了した」と言う前に、元のobjectiveを再読する。
+
 # AGENTS.md — mc-ai グローバル指示（全エージェント必読）
 
 > このファイルは `/home/s0u7a/mc-ai` で作業する**すべてのエージェント**に対する最上位の指示。
