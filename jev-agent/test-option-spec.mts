@@ -8,6 +8,7 @@ import {
   compileGoalQueue,
   compilePlannedGoal,
   compilePlannedGoals,
+  currentOptionContextForQueuedGoal,
   dependencyGoalForPredicate,
   describePredicate,
   emitBlockedOptionLogs,
@@ -754,6 +755,48 @@ addCase('(#52) instance identity is deterministic and discriminates count/dimens
     descendY12 === 'descend:descend_to_y_12#dminecraft_overworld~y12' &&
     new Set(first).size === first.length
   return { pass, detail: `first=[${first.join(',')}] stable=${first.join('|') === second.join('|')}` }
+})
+
+addCase('(#56) compiled Option context survives queue persistence and reaches Jev', () => {
+  const spec: OptionSpec = {
+    id: 'custom:landmark',
+    intent: 'reach the grounded landmark',
+    kind: 'custom',
+    target: { predicate: 'landmark_ready', count: 1 },
+    preconditions: [{ kind: 'custom', id: 'has_map' }],
+    success: [{ kind: 'custom', id: 'landmark_ready' }],
+    skills: ['inspect', 'goto'],
+    abortThreshold: 0.25,
+    protected: true,
+    core: true,
+  }
+  const planned = optionSpecToPlannedGoal(spec)
+  const queue = new GoalQueue()
+  const queued = queue.applyPlan([planned], 'llm')[0]
+  const restored = new GoalQueue()
+  restored.restore(queue.snapshot())
+  const restoredCurrent = restored.current
+  const context = currentOptionContextForQueuedGoal(restoredCurrent)
+  const pass =
+    queued !== undefined &&
+    restoredCurrent !== null &&
+    restoredCurrent.optionInstanceId === stableOptionInstanceId(spec) &&
+    restoredCurrent.optionTemplateId === spec.id &&
+    restoredCurrent.optionSpec?.abortThreshold === spec.abortThreshold &&
+    restoredCurrent.optionSpec?.target.predicate === spec.target.predicate &&
+    context?.instanceId === restoredCurrent.id &&
+    context?.templateId === spec.id &&
+    context?.kind === spec.kind &&
+    context?.target.predicate === spec.target.predicate &&
+    context?.preconditions[0]?.kind === 'custom' &&
+    context?.success[0]?.id === 'landmark_ready' &&
+    context?.allowedSkills.join(',') === spec.skills.join(',') &&
+    context?.abortThreshold === spec.abortThreshold &&
+    context?.runtime.verifiedProgress === 0
+  return {
+    pass,
+    detail: 'queued=' + queued?.id + ' restored=' + restoredCurrent?.id + ' instance=' + restoredCurrent?.optionInstanceId + ' template=' + restoredCurrent?.optionTemplateId + ' context=' + context?.instanceId + ' threshold=' + context?.abortThreshold,
+  }
 })
 
 let failures = 0
