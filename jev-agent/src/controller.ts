@@ -39,6 +39,18 @@ import {
   selectLadderOption,
 } from './abandonPolicy.ts'
 import type { AbandonClassification } from './abandonPolicy.ts'
+import {
+  AbandonmentLedger,
+  formatProtectionAbandonConflict,
+  PROTECTION_ABANDON_CONFLICT,
+  reconcileProtection,
+} from './protectionConflict.ts'
+import {
+  CANDIDATE_COMMIT_RELEASED,
+  CANDIDATE_FLAP,
+  evaluateCandidateFlap,
+} from './candidateCommitment.ts'
+import type { CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -57,7 +69,7 @@ import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, 
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
-import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT } from './policy.ts'
+import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
@@ -98,7 +110,7 @@ import {
   prerequisiteOptionName,
   shouldAdoptAbandon,
 } from './placementGuard.ts'
-import type { AbandonReason } from './placementGuard.ts'
+import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import {
   evaluatePrereqStall,
   evaluateRetrieveAbandon,
@@ -557,6 +569,9 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
+  PROTECTION_ABANDON_CONFLICT,
+  CANDIDATE_FLAP,
+  CANDIDATE_COMMIT_RELEASED,
 ])
 
 /**
@@ -877,14 +892,29 @@ export class JevController {
   private prereqLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
-  /** #78: options excluded for the current goal after repeated unverified failure. */
-  private readonly abandonedRetrievePaths = new Set<PrereqPath>()
+  /** #78: options excluded for the current goal after repeated unverified failure (path -> fingerprint). */
+  private readonly abandonedRetrievePaths = new Map<PrereqPath, string>()
   /** #78: consecutive `verified=false progressDelta=0` retrieve outcomes. */
   private retrieveUnverified: RetrieveUnverifiedState | null = null
   /** #78: last quantized position / swap pair / state signature. */
   private oscillationState: OscillationState | null = null
   /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
   private readonly actionUnverified = new Map<string, number>()
+  /**
+   * #11 v2 §6: abandonment is a FACT recorded under the state fingerprint that
+   * produced it, so the precondition guard cannot re-protect an option that was
+   * deterministically abandoned while the state is unchanged.
+   */
+  private readonly abandonedOptions = new AbandonmentLedger()
+  /** #11 v2 §7: anti-thrash commitment - one candidate until a fact changes. */
+  private commitmentState: CandidateFlapState | null = null
+  /** verified-outcome counter; a change clears the flap window and the commitment. */
+  private progressEpoch = 0
+  private commitmentProgressEpoch = 0
+  /** Semantic per-tick fingerprint (inventory/world/topology), never the clock. */
+  private lastStateFingerprint = ''
+  /** The fingerprint that produced each abandoned prerequisite-path fact. */
+  private readonly abandonedPrereqFingerprints = new Map<string, string>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -1329,6 +1359,7 @@ export class JevController {
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
+      this.lastStateFingerprint = this.stateFingerprint(state)
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -1460,8 +1491,9 @@ export class JevController {
       this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
+      const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(rawChosenId, dangerGate, candidates)
+      const gated = this.applyDangerGate(committedId, dangerGate, candidates)
       const chosenId = gated.chosenId
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
@@ -1611,13 +1643,22 @@ export class JevController {
    * so a β=1 cannot discard a prerequisite (#22/#55).
    */
   private betaDecision(decision: JevResult): BetaAuthorityDecision {
-    return betaAuthorityDecision({
+    const vote = betaAuthorityDecision({
       betaAuthority: this.options.betaAuthority,
       abandonRequested: abandonRequested(decision),
       actionId: decisionIdFrom(decision),
       goals: this.unfinishedGoals(),
       placedFurnaceCount: this.lastPlacedFurnaceCount,
     })
+    if (!vote.protection.protect) return vote
+    const abandonedReason = this.abandonedOptions.reasonUnder(vote.protection.option, this.lastStateFingerprint)
+    if (abandonedReason === null) return vote
+    this.logProtectionAbandonConflict(vote.protection.option, abandonedReason, 'authority')
+    return {
+      ...vote,
+      adopt: this.options.betaAuthority && !vote.shadowed,
+      protection: { ...vote.protection, protect: false },
+    }
   }
 
   private logHeads(result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void {
@@ -1750,6 +1791,7 @@ export class JevController {
       const bucket = this.abandonedPrereqPaths.get(goalKey) ?? new Map<PrereqPath, number>()
       bucket.set(current, now)
       this.abandonedPrereqPaths.set(goalKey, bucket)
+      this.abandonedPrereqFingerprints.set(`${goalKey}|${current}`, this.lastStateFingerprint)
       const next = nextPrereqPath(this.prereqPlan, current)
       this.prereqForcedPath = next
       this.prereqProgress = null
@@ -1761,6 +1803,7 @@ export class JevController {
         this.tickCounter,
       )
     }
+    this.markOptionAbandoned(this.lastDecisionId ?? optionId, 'unproductive')
     this.summonLlm('no_progress', `abandon_option=${probability} enforced: ${optionId} unproductive after ${attempts} attempts`)
   }
 
@@ -1864,18 +1907,21 @@ export class JevController {
     const vote = this.betaDecision(decision)
     const probability = decision.answers.abandon_option?.probability ?? null
     if (vote.adopt) {
+      this.markOptionAbandoned(decisionIdFrom(decision), 'authority')
       this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
       return true
     }
-    if (vote.protection.protect && !this.placeRetryExhausted()) {
+    const protection = this.reconciledProtection(vote.protection, decisionIdFrom(decision) ?? 'abandon')
+    if (protection.protect && !this.placeRetryExhausted()) {
       this.logger.warn(
         'heads',
-        vote.protection.line,
-        { option: vote.protection.option, because: vote.protection.because, actionId: decisionIdFrom(decision), abandon: probability },
+        protection.line,
+        { option: protection.option, because: protection.because, actionId: decisionIdFrom(decision), abandon: probability },
         this.tickCounter,
       )
       return false
     }
+    this.markOptionAbandoned(decisionIdFrom(decision), 'authority')
     this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
     return true
   }
@@ -1895,11 +1941,13 @@ export class JevController {
       abandonRequested: true,
     })
     if (guard.adopt) return false
+    const protection = this.reconciledProtection(guard.protection, reason)
+    if (!protection.protect) return false
     if (this.placeRetryExhausted()) return false
     this.logger.warn(
       'heads',
-      guard.protection.line,
-      { option: guard.protection.option, because: guard.protection.because, reason },
+      protection.line,
+      { option: protection.option, because: protection.because, reason },
       this.tickCounter,
     )
     return true
@@ -1920,6 +1968,144 @@ export class JevController {
   /** Unfinished goals in plan order; the protection guard spans the whole plan. */
   private unfinishedGoals(): QueuedGoal[] {
     return this.queue.state.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+  }
+
+  /**
+   * #11 v2 §6/§7 semantic fingerprint of the WORLD the controller is deciding
+   * against: rounded body position, inventory, remembered stations, sensed
+   * furnaces and the current goal row. Deliberately excludes the tick counter,
+   * wall clock and controller memory (failure counters), so a failed-but-
+   * unchanged world keeps a recorded abandonment valid while an actual
+   * world/inventory/topology change clears it.
+   */
+  private stateFingerprint(state: WorldState): string {
+    const inventory = Object.entries(state.inventory.counts)
+      .filter(([, count]) => count > 0)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, count]) => `${name}=${count}`)
+      .join(',')
+    const position = `${Math.round(state.self.position.x)},${Math.round(state.self.position.y)},${Math.round(state.self.position.z)}`
+    const stations = (state.signals.knownResources ?? [])
+      .filter((resource) => resource.kind === 'station')
+      .map((resource) => `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`)
+      .sort()
+      .join(';')
+    const furnaces = (state.furnaces ?? [])
+      .filter(isSensedStation)
+      .map((station) => `${station.x},${station.y},${station.z}`)
+      .sort()
+      .join(';')
+    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}`
+    return `fp1|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
+  }
+
+  /**
+   * #11 v2 §6: protection and abandonment are mutually exclusive under one
+   * fingerprint. When the guard still claims a protected option that the
+   * abandonment ledger retired for the same fingerprint, the fact wins, the
+   * contradiction is surfaced with the mirrored marker, and protection is off.
+   */
+  private reconciledProtection(protection: PrerequisiteProtection, reason: string): PrerequisiteProtection {
+    const abandonedReason = protection.protect
+      ? this.abandonedOptions.reasonUnder(protection.option, this.lastStateFingerprint)
+      : null
+    const reconciliation = reconcileProtection({ protection, abandonedReason })
+    if (reconciliation.conflictLine !== null && abandonedReason !== null) {
+      this.logProtectionAbandonConflict(protection.option, abandonedReason, reason)
+    }
+    return reconciliation.protect === protection.protect
+      ? protection
+      : { ...protection, protect: reconciliation.protect }
+  }
+
+  private logProtectionAbandonConflict(option: string, abandonedReason: string, reason: string): void {
+    if (!this.abandonedOptions.claimConflict(option, this.lastStateFingerprint)) return
+    this.logger.warn(
+      'heads',
+      formatProtectionAbandonConflict(option, 'abandoned', abandonedReason),
+      { option, action: 'abandoned', abandonedReason, reason, fingerprint: this.lastStateFingerprint },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Record a deterministic abandonment under the current fingerprint. If the
+   * precondition guard would still protect the same option right now, the
+   * contradiction is emitted once (the live defect A sequence).
+   */
+  private markOptionAbandoned(optionId: string | null, reason: string): void {
+    if (optionId === null) return
+    const option = prerequisiteOptionName(optionId)
+    const guard = shouldAdoptAbandon({
+      actionId: optionId,
+      goals: this.unfinishedGoals(),
+      placedFurnaceCount: this.lastPlacedFurnaceCount,
+      abandonRequested: true,
+    })
+    if (guard.protection.protect) this.logProtectionAbandonConflict(option, reason, 'abandoned')
+    this.abandonedOptions.markAbandoned(option, this.lastStateFingerprint, reason)
+  }
+
+  /**
+   * #11 v2 §7: one candidate until a fact changes. While a flap window is
+   * active the policy's raw choice is replaced by the cheap-feasible commitment;
+   * a deterministic rejection releases it to the next cheapest feasible.
+   */
+  private applyCandidateCommitment(
+    chosenId: string,
+    candidates: readonly Candidate[],
+    state: WorldState,
+  ): string {
+    const progressed = this.progressEpoch !== this.commitmentProgressEpoch
+    this.commitmentProgressEpoch = this.progressEpoch
+    const offered: readonly FlapCandidate[] = candidates.map((candidate, index) => ({
+      id: candidate.id,
+      cost: this.candidateCommitCost(candidate, index),
+    }))
+    const decision = evaluateCandidateFlap({
+      previous: this.commitmentState,
+      chosenId,
+      fingerprint: this.lastStateFingerprint,
+      progressed,
+      candidates: offered,
+      invalid: this.deterministicInvalid(candidates, state),
+    })
+    this.commitmentState = decision.state
+    if (decision.line !== null) {
+      this.logger.warn(
+        'policy',
+        decision.line,
+        { chosenId, committedId: decision.state.committedId, fingerprint: this.lastStateFingerprint },
+        this.tickCounter,
+      )
+    }
+    if (decision.releaseLine !== null) {
+      this.logger.warn(
+        'policy',
+        decision.releaseLine,
+        { chosenId, committedId: decision.state.committedId },
+        this.tickCounter,
+      )
+    }
+    return decision.chosenId
+  }
+
+  /** The caller's existing cost policy: a declared cost, else the generator order. */
+  private candidateCommitCost(candidate: Candidate, index: number): number {
+    const cost = candidate.meta.cost
+    if (typeof cost === 'number') return cost
+    const prereqCost = candidate.meta.prereqCost
+    if (typeof prereqCost === 'number') return prereqCost
+    return index
+  }
+
+  /** Candidate ids deterministic feasibility has already rejected. */
+  private deterministicInvalid(candidates: readonly Candidate[], state: WorldState): ReadonlySet<string> {
+    const invalid = new Set<string>(this.withheldCandidateIds)
+    for (const candidate of candidates) {
+      if (unreachableMove(candidate, state) !== null) invalid.add(candidate.id)
+    }
+    return invalid
   }
 
   /**
@@ -2097,6 +2283,7 @@ export class JevController {
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+    if (result.itemsGained > 0 || result.blockRemoved) this.progressEpoch += 1
     this.recentOutcomes.push({
       actionId: result.actionId,
       status: result.status,
@@ -2336,6 +2523,7 @@ export class JevController {
     const switched = this.advancePrereqAfterUnverified()
     const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
     if (budget.abandon) {
+      this.markOptionAbandoned(result.actionId, 'action_unverified')
       this.logger.warn(
         'agent',
         budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
@@ -2449,7 +2637,7 @@ export class JevController {
 
   private escapeOscillation(state: OscillationState): void {
     this.oscillationState = null
-    this.abandonedRetrievePaths.add('use_known_station')
+    this.abandonedRetrievePaths.set('use_known_station', this.lastStateFingerprint)
     if (this.activeRetrieval !== null) {
       this.unreachableResources.add(this.retrievalKey(this.activeRetrieval))
       this.noteCandidateFailure(this.activeRetrieval.id)
@@ -3698,7 +3886,9 @@ export class JevController {
       this.retrieveUnverified = null
     }
     const abandoned = this.abandonedPrereqSet(goalKey, Date.now())
-    for (const path of this.abandonedRetrievePaths) abandoned.add(path)
+    for (const [path, fingerprint] of this.abandonedRetrievePaths) {
+      if (fingerprint === this.lastStateFingerprint) abandoned.add(path)
+    }
     const base = selectPrereqPath(decision, abandoned)
     const forced = this.prereqForcedPath !== null && !abandoned.has(this.prereqForcedPath) ? this.prereqForcedPath : null
     const chosen = preferPrereqPath(base, forced, decision)
@@ -3795,7 +3985,9 @@ export class JevController {
     const abandoned = new Set<PrereqPath>()
     if (bucket === undefined) return abandoned
     for (const [path, at] of bucket) {
-      if (now - at < this.options.abandonCooldownMs) abandoned.add(path)
+      if (now - at >= this.options.abandonCooldownMs) continue
+      if (this.abandonedPrereqFingerprints.get(`${goalKey}|${path}`) !== this.lastStateFingerprint) continue
+      abandoned.add(path)
     }
     return abandoned
   }
@@ -3808,6 +4000,7 @@ export class JevController {
     this.prereqProgress = null
     this.prereqChosenPath = null
     this.abandonedRetrievePaths.clear()
+    this.abandonedPrereqFingerprints.clear()
     this.retrieveUnverified = null
   }
 
@@ -3824,13 +4017,14 @@ export class JevController {
       { option: candidate.id, unverified, goal: this.currentGoalKey() },
       this.tickCounter,
     )
-    this.abandonedRetrievePaths.add('use_known_station')
+    this.abandonedRetrievePaths.set('use_known_station', this.lastStateFingerprint)
     if (candidate.target !== null) {
       const knownName =
         typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'station'
       this.unreachableResources.add(this.retrievalKey({ knownName, target: candidate.target }))
     }
     this.noteCandidateFailure(candidate.id)
+    this.markOptionAbandoned(candidate.id, 'retrieve_unverified')
     this.activeRetrieval = null
     this.retrievalTrack = null
     this.retrieveUnverified = null
