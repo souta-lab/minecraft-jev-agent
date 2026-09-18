@@ -8,10 +8,12 @@
 //   (b) a failed placement retries at a nearby spot up to the bound;
 //   (c) the abandon reason is logged in one line.
 // Plus a fixture that drives held-furnace -> PLACE -> SMELT -> SMELT_DONE.
-import { defaultCandidateOptions, generateCandidates } from '../jev-agent/src/candidates.ts'
+import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
 import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
+import { planPrereqOptions } from '../jev-agent/src/prereqOption.ts'
+import type { KnownResource } from '../jev-agent/src/state.ts'
 import {
   classifyAbandonReason,
   evaluatePlaceRetry,
@@ -202,6 +204,28 @@ addCase('(a) an unrelated plan with no smelt is not protected', () => {
     abandonRequested: true,
   })
   return { pass: decision.adopt === true, detail: `adopt=${decision.adopt}` }
+})
+
+// --- #58: cheapest feasible path is chosen and logged ------------------------
+
+addCase('(#58) held furnace + far known station logs PREREQ_OPTION chosen=place_held', () => {
+  const known: KnownResource = { name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }
+  const state = worldState({
+    inventory: heldFurnaceInventory,
+    signals: signals({ knownResources: [known] }),
+    placementSpots: [{ x: 30, y: 61, z: 35 }],
+  })
+  const decision = planPrereqOptions(furnacePrereqInputFromState(state, defaultCandidateOptions))
+  const expected = 'PREREQ_OPTION chosen=place_held over=[use_known_station,craft_and_place] reason=place_held cost=2'
+  const candidate = generateCandidates(state, defaultCandidateOptions).find((entry) => entry.meta.prereqPath !== undefined)
+  const pass =
+    decision.chosen === 'place_held' &&
+    decision.line === expected &&
+    candidate !== undefined &&
+    candidate.kind === 'PLACE' &&
+    candidate.id.startsWith('PLACE:furnace') &&
+    candidate.meta.prereqPath === 'place_held'
+  return { pass, detail: `${decision.line} first=${candidate?.id ?? 'none'} path=${String(candidate?.meta.prereqPath)}` }
 })
 
 // --- (b) bounded placement retry --------------------------------------------
