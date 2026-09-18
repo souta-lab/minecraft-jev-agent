@@ -302,6 +302,7 @@ export interface GenerationStatus {
   /** true once start() has run and no irreversible action can happen before the lease */
   ready: boolean
   contractVersion: number
+  worldKey: WorldKey
 }
 
 /**

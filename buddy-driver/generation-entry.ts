@@ -62,6 +62,7 @@ import type {
   Vec3Json,
   WorldMemoryDelta,
 } from './resident-types.ts'
+import { worldCacheNamespace } from './world-epoch.ts'
 import {
   applyStationFailure,
   isStationSelectable,
@@ -721,8 +722,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const plannerMode = resolvePlannerMode()
 
   // Durable caches (survive hot reloads; keyed by world-state hash).
-  const cachePath = fileURLToPath(new URL('./planner-cache.json', import.meta.url))
-  const advisorCachePath = fileURLToPath(new URL('./advisor-cache.json', import.meta.url))
+  const cacheNamespace = worldCacheNamespace(ctx.worldKey)
+  const cachePath = fileURLToPath(new URL(`./planner-cache-${cacheNamespace}.json`, import.meta.url))
+  const advisorCachePath = fileURLToPath(new URL(`./advisor-cache-${cacheNamespace}.json`, import.meta.url))
   const advisor = new Advisor({
     log: (event, detail) => ctx.log(event, detail),
     cachePath: advisorCachePath,
@@ -737,7 +739,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const postDeathRecovery = ctx.resetReason === 'death'
   const mercuryConfigPath = process.env.BUDDY_SYSTEM2_CONFIG ?? join(process.cwd(), 'system2.config.json')
   const mercuryEnablement = resolveMercuryEnablement(plannerMode, mercuryConfigPath)
-  const mercuryCachePath = fileURLToPath(new URL('./mercury-cache.json', import.meta.url))
+  const mercuryCachePath = fileURLToPath(new URL(`./mercury-cache-${cacheNamespace}.json`, import.meta.url))
   const mercury = mercuryEnablement.enabled
     ? new MercurySystem2({
         summarize: (request, trigger) => buildMercurySummary(bot, world, request, trigger),
@@ -951,6 +953,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       rungId: frontier.rungId,
       ready,
       contractVersion: CONTRACT_VERSION,
+      worldKey: ctx.worldKey,
     }
   }
 
