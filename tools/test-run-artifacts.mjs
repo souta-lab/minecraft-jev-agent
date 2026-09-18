@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { newestRunIdFromLog } from './run-artifacts.mjs'
+import { buildChecks, newestRunIdFromLog } from './run-artifacts.mjs'
 
 const dir = mkdtempSync(join(tmpdir(), 'run-artifacts-'))
 let checks = 0
@@ -31,6 +31,21 @@ try {
   const noBoot = join(dir, 'no-boot.log')
   writeFileSync(noBoot, '[2026-09-19T00:02:00.000Z] EVENT runId=run-only-event\n', 'utf8')
   assert.equal(await newestRunIdFromLog(noBoot), null)
+  checks++
+
+  const currentRecord = {
+    runId: 'run-current',
+    listenerBaseline: {},
+    listenerCurrent: {},
+    listenerLeak: false,
+    reconnects: 0,
+    reloadsChangedHash: 5,
+    wedge: false,
+    goalComplete: false,
+  }
+  const metadata = buildChecks(currentRecord).find((check) => check.id === 'run_metadata_completeness')
+  assert.equal(metadata?.compliance, 'UNKNOWN')
+  assert.match(metadata?.observed ?? '', /serverVersion/)
   checks++
 
   console.log(`run-artifacts: ${checks}/${checks} checks passed`)

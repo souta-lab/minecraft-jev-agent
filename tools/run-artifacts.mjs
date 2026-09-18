@@ -411,6 +411,23 @@ export function buildChecks(record) {
     return checks
   }
 
+  const jevModel = record.jevModel ?? record.policyModel ?? null
+  const missingMetadata = [
+    ['serverVersion', record.serverVersion],
+    ['difficulty', record.difficulty],
+    ['jevModel', jevModel],
+  ]
+    .filter(([, value]) => value === null || value === undefined || value === '')
+    .map(([name]) => name)
+  push(
+    'run_metadata_completeness',
+    'Issue #63 §4: a run manifest should identify the server version, difficulty, and Jev model; missing metadata cannot support a strong acceptance claim.',
+    'tools/run-artifacts.mjs forwards these fields from AcceptanceRecord when present; the current host record schema does not expose them yet.',
+    `missing=[${missingMetadata.join(',')}]`,
+    missingMetadata.length === 0 ? 'PASS' : 'UNKNOWN',
+    `node tools/run-artifacts.mjs capture ${record.runId}`,
+  )
+
   const baseline = record.listenerBaseline ?? {}
   const current = record.listenerCurrent ?? {}
   const grew = Object.keys(baseline).filter((e) => (current[e] ?? 0) > (baseline[e] ?? 0))
@@ -453,6 +470,7 @@ export function buildChecks(record) {
 export function buildManifest({ record, window, logLineCount, mercuryModel = null }) {
   const commit = record?.gitCommit ?? sh('git', ['rev-parse', 'HEAD'])
   const status = sh('git', ['status', '--porcelain'])
+  const jevModel = record?.jevModel ?? record?.policyModel ?? null
   return {
     schemaVersion: SCHEMA_VERSION,
     runId: record?.runId ?? null,
@@ -468,8 +486,8 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
     serverId: record?.serverId ?? null,
     dimension: record?.dimension ?? null,
     levelName: record?.levelName ?? null,
-    serverVersion: null,
-    difficulty: null,
+    serverVersion: record?.serverVersion ?? null,
+    difficulty: record?.difficulty ?? null,
     dependencies: record?.dependencies ?? null,
     contractVersion: record?.contractVersion ?? null,
     stateSchemaVersion: record?.stateSchemaVersion ?? null,
@@ -478,7 +496,7 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
     botUsername: record?.botUsername ?? null,
     startPosition: record?.startPosition ?? null,
     config: configFromEnv(),
-    models: { jev: null, mercury: mercuryModel },
+    models: { jev: jevModel, mercury: mercuryModel },
     window: window ?? null,
     logLineCount: logLineCount ?? null,
     sources: {
