@@ -946,6 +946,21 @@ export interface PlanOption {
   skills?: SkillCandidate[]
   /** #20: strategy id that produced this option, when one did. */
   strategy?: string
+  strategyOption?: GroundedStrategyOption
+}
+
+export interface GroundedStrategyOption {
+  readonly strategy: AdvisorStrategy
+  readonly objective: {
+    readonly targetItem: string | null
+    readonly requiredCount: number | null
+  }
+  readonly goals: readonly PlannedGoal[]
+  readonly skills: readonly SkillCandidate[]
+}
+
+function isAdvisorStrategy(value: string): value is AdvisorStrategy {
+  return value === 'descend_to_y16' || value === 'explore_cave' || value === 'branch_mine' || value === 'return_to_known_ore' || value === 'smelt_and_craft'
 }
 
 /** Stable signature of a compiled goal list, for STRATEGY_BODY_DELTA (#29). */
@@ -1013,7 +1028,8 @@ export function skillsForStrategy(
   world: ResidentWorldMemory,
   opts?: SkillAdapterOptions,
 ): SkillCandidate[] {
-  return generateSkillPlan(buildSkillGenerationInput(strategy, counts, world, opts)).skills
+  if (!isAdvisorStrategy(strategy)) return generateSkillPlan(buildSkillGenerationInput(strategy, counts, world, opts)).skills
+  return [...compileStrategyOption(strategy, counts, world, opts === undefined ? undefined : { skill: opts }).skills]
 }
 
 function dedupeOptions(options: PlanOption[]): PlanOption[] {
@@ -1200,6 +1216,15 @@ export function goalsForStrategy(
   world: ResidentWorldMemory,
   opts?: { placedFurnacesNear?: number; knownFurnaces?: number },
 ): PlannedGoal[] {
+  return compileStrategyGoals(strategy, counts, world, opts)
+}
+
+function compileStrategyGoals(
+  strategy: AdvisorStrategy,
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: { placedFurnacesNear?: number; knownFurnaces?: number },
+): PlannedGoal[] {
   const rank = bestPickaxeRank(counts)
   const ladderFront = buildLadder(counts, world, undefined, opts).goals
   const stone = (n: number): PlannedGoal => ({ kind: 'collect', description: `collect ${n} x cobblestone`, targetItem: 'cobblestone', requiredCount: n })
@@ -1221,6 +1246,37 @@ export function goalsForStrategy(
       return rank < 2 ? (rank < 1 ? ladder(ladderFront) : chosen([stone(16)])) : chosen([iron(3)])
     case 'smelt_and_craft':
       return chosen(ladderFront)
+  }
+}
+
+function strategyObjective(goals: readonly PlannedGoal[]): GroundedStrategyOption['objective'] {
+  const target = [...goals].reverse().find((goal) => typeof goal.targetItem === 'string')
+  return {
+    targetItem: target?.targetItem ?? null,
+    requiredCount: target?.requiredCount ?? null,
+  }
+}
+
+export function compileStrategyOption(
+  strategy: AdvisorStrategy,
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: {
+    placedFurnacesNear?: number
+    knownFurnaces?: number
+    skill?: SkillAdapterOptions
+  },
+): GroundedStrategyOption {
+  const goals = compileStrategyGoals(strategy, counts, world, opts)
+  const skillInput = buildSkillGenerationInput(strategy, counts, world, {
+    ...(opts?.skill ?? {}),
+    goal: opts?.skill?.goal ?? plannedGoalToSkillGoal(goals[0]),
+  })
+  return {
+    strategy,
+    objective: strategyObjective(goals),
+    goals,
+    skills: generateSkillPlan(skillInput).skills,
   }
 }
 
@@ -1841,6 +1897,16 @@ export class PlannerBrain implements System2Brain {
       typeof option.strategy === 'string' && option.strategy.length > 0 && option.strategy !== 'deterministic'
         ? option.strategy
         : null
+    if (strategy !== null && isAdvisorStrategy(strategy)) {
+      const compiled = compileStrategyOption(strategy, this.currentCounts, this.world, {
+        skill: { ...this.botSkillOptions(), goal: plannedGoalToSkillGoal(option.goals[0]) },
+        placedFurnacesNear: this.placedFurnacesNear(),
+        knownFurnaces: this.world.furnaces.length,
+      })
+      option.strategyOption = compiled
+      option.skills = [...compiled.skills]
+      return option
+    }
     const input = buildSkillGenerationInput(strategy, this.currentCounts, this.world, {
       ...this.botSkillOptions(),
       goal: plannedGoalToSkillGoal(option.goals[0]),
