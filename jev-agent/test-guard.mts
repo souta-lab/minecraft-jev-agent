@@ -325,6 +325,38 @@ addCase('accepts a log-anchored MOVE to its walk-up spot', () => {
   return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
 })
 
+// A vertical-plan MOVE deliberately reaches its walk-up spot through the
+// guarded pillar/staircase leg; a horizontal canDig=false path probe is not its
+// complete execution contract and must not reject it before Executor.runMove.
+addCase('accepts a vertical-plan MOVE when the horizontal path probe refuses', () => {
+  const fixture = state({ self: { x: 0, y: 52, z: 0 }, blocks: [logBlock(FAR_LOG, 40, false, true)] })
+  const chunk = candidate({
+    id: 'MOVE:b1_64_40',
+    kind: 'MOVE',
+    targetName: 'oak_log',
+    target: { x: 2, y: 64, z: 40 },
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: 5,
+      targetBlockX: 1,
+      targetBlockY: 64,
+      targetBlockZ: 40,
+      targetBlockName: 'oak_log',
+      vertical: 'pillar',
+      pillarToY: 64,
+      pillarSteps: 12,
+      pillarPlaceName: 'cobblestone',
+    },
+  })
+  const result = guardCandidate(
+    chunk,
+    fixture,
+    context({ candidateIds: new Set([chunk.id]), canComputePath: () => false }),
+  )
+  return result.ok ? { code: null, reason: 'accepted vertical plan' } : { code: result.code, reason: result.reason }
+})
+
 // --- MOVE to a vanished log is rejected, so the executor never walks into nothing
 addCase('rejects a log-anchored MOVE when the log is gone', () => {
   const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [] })
@@ -360,6 +392,7 @@ const expected: Record<string, GuardCode | null> = {
   'rejects LAVA_RISK when lava is adjacent': 'LAVA_RISK',
   'rejects CONFLICT_IN_FLIGHT while another mine is running': 'CONFLICT_IN_FLIGHT',
   'accepts a log-anchored MOVE to its walk-up spot': null,
+  'accepts a vertical-plan MOVE when the horizontal path probe refuses': null,
   'rejects a log-anchored MOVE when the log is gone': 'TARGET_GONE',
   'rejects EAT when the food left the inventory': 'EMPTY_HAND',
 }

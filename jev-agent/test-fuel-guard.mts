@@ -249,6 +249,27 @@ addCase('the surface MOVE is unreachable with a 16-block vertical gap', () => {
   return { pass, detail: reason === null ? 'reachable' : formatMoveUnreachable(reason.target, reason.dy) }
 })
 
+addCase('a vertical-plan surface MOVE is not retired by the horizontal gap guard', () => {
+  const state = worldState({
+    position: { x: 25, y: 52, z: 36 },
+    goal: goal({}),
+    current: queuedGoal({}),
+    inventory: inventory({ cobblestone: 12 }),
+  })
+  const candidate = {
+    ...moveCandidate('MOVE:b33_68_27', { x: 33, y: 68, z: 27 }),
+    meta: {
+      ...moveCandidate('MOVE:b33_68_27', { x: 33, y: 68, z: 27 }).meta,
+      vertical: 'pillar',
+      pillarToY: 68,
+      pillarSteps: 16,
+      pillarPlaceName: 'cobblestone',
+    },
+  }
+  const reason = unreachableMove(candidate, state, () => false)
+  return { pass: reason === null, detail: reason === null ? 'vertical plan preserved' : formatMoveUnreachable(reason.target, reason.dy) }
+})
+
 addCase('a one-block step is reachable and an explicit no-path is rejected', () => {
   const state = worldState({
     position: { x: 0, y: 64, z: 0 },
