@@ -1,0 +1,148 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-09-18",
+  "dimensions": {
+    "policy": ["missing", "defined"],
+    "implementation": ["none", "partial", "landed"],
+    "verification": ["none", "offline", "integration", "live"],
+    "observation": ["not-run", "pass", "fail", "unknown"],
+    "compliance": ["pass", "fail", "unknown"]
+  },
+  "issues": {
+    "4": {
+      "acceptanceClass": "resident-reproducibility",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "fail",
+      "note": "Current planner code still defaults to auto and enables Jev when a key exists; static POLICY vs IMPLEMENTED mismatch is enough for FAIL."
+    },
+    "56": {
+      "acceptanceClass": "architecture-dataflow",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Option compiler/identity exists, but exact CurrentOptionContext still does not reach the Jev hot decision boundary."
+    },
+    "79": {
+      "acceptanceClass": "closed-loop-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Strict postconditions and ACTION_UNVERIFIED regression are landed; end-to-end FURNACE_READY -> SMELT_DONE -> inventory evidence remains live-gated."
+    },
+    "13": {
+      "acceptanceClass": "resident-soak",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Lifecycle/resource cleanup fixtures exist; issue explicitly requires >=20 changed-hash reloads plus recovery cycles."
+    },
+    "3": {
+      "acceptanceClass": "resident-restart-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Host-owned AgentSnapshot/ledger restore paths are landed; repeated resident restart acceptance remains to be attributed on current main."
+    },
+    "12": {
+      "acceptanceClass": "resident-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Prerequisite repair/churn fixes exist; stated generation/recovery-rate live evidence remains pending."
+    },
+    "46": {
+      "acceptanceClass": "closed-loop-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Readiness-first ordering is regression-covered; live iron smelt/pickaxe progression remains part of M2 acceptance."
+    },
+    "73": {
+      "acceptanceClass": "closed-loop-live",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Queue/horizon repairs have landed across several commits; current-main live proof that the iron rung cannot persist empty is still required."
+    },
+    "78": {
+      "acceptanceClass": "closed-loop-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "integration",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Prereq selection, station invalidation, failure memory and oscillation regressions landed; live smelt path remains pending."
+    },
+    "58": {
+      "acceptanceClass": "architecture-plus-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Flexible prereq paths are implemented; live behavior is covered by the representative #79 M2 acceptance cluster."
+    },
+    "41": {
+      "acceptanceClass": "architecture-capability-graph",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Predicate goals/descend and dependency work exist, but the generalized capability graph acceptance is not complete."
+    },
+    "52": {
+      "acceptanceClass": "architecture-option-identity",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Stable semantic instance-kind identity exists; exact runtime occurrence identity/history across decision boundaries remains incomplete."
+    },
+    "121": {
+      "acceptanceClass": "architecture-observability",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "NEXT item; do not opportunistically implement before the current frontier advances."
+    },
+    "129": {
+      "acceptanceClass": "research",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Research-only hypothesis; never blocks runtime work."
+    },
+    "130": {
+      "acceptanceClass": "research",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Research/A-B; blocked on #56-style state contract and carries no current authority."
+    }
+  }
+}
