@@ -36,6 +36,13 @@ export type GoalStatus = 'pending' | 'active' | 'done' | 'impossible'
 
 export type PlanOp = 'continue' | 'patch' | 'replace' | 'abort'
 
+export type GoalStrategy =
+  | 'descend_to_y16'
+  | 'explore_cave'
+  | 'branch_mine'
+  | 'return_to_known_ore'
+  | 'smelt_and_craft'
+
 export interface ApplyPlanOptions {
   /** Replan reason, surfaced in the PROTECTED_GOAL_* / ABANDON_REASON audit lines. */
   reason?: string
@@ -54,6 +61,7 @@ export interface QueuedGoal {
   /** Issue #55: a core/rung goal that advances the current milestone. */
   core?: boolean
   kind: GoalKind
+  strategy?: GoalStrategy
   description: string
   /** item this goal targets, when the kind is `collect` */
   targetItem: string | null
@@ -79,6 +87,7 @@ export interface QueuedGoal {
 /** A goal as proposed by the LLM. The queue assigns ids and bookkeeping. */
 export interface PlannedGoal {
   kind: GoalKind
+  strategy?: GoalStrategy
   description: string
   targetItem?: string | null
   requiredCount?: number
@@ -259,6 +268,7 @@ export class GoalQueue {
       const goal: QueuedGoal = {
         id: `g${this.counter}:${plan.kind}${plan.targetItem != null ? `:${plan.targetItem}` : ''}`,
         kind: plan.kind,
+        ...(plan.strategy === undefined ? {} : { strategy: plan.strategy }),
         description: plan.description,
         targetItem: plan.targetItem ?? null,
         requiredCount: Math.max(1, Math.floor(plan.requiredCount ?? 1)),
