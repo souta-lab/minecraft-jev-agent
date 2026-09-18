@@ -184,10 +184,11 @@ export function generateCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
 ): Candidate[] {
-  const candidates: Candidate[] = []
+  let candidates: Candidate[] = []
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
+  const strategy = current?.strategy ?? null
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
 
   switch (goalKind) {
@@ -203,6 +204,37 @@ export function generateCandidates(
     default:
       candidates.push(...mineCandidates(state, options, focusItem, descendTargetY))
       break
+  }
+
+  if (strategy === 'explore_cave') {
+    const explore = pickExplore(state, state.terrain.standable, focusItem)
+    if (explore !== null) {
+      candidates.unshift({
+        id: `EXPLORE_CAVE:${blockId('p', explore)}`,
+        kind: 'MOVE',
+        label: moveLabel(explore, 'explore a cave frontier', state.self.position),
+        targetName: null,
+        target: explore,
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: distance(explore, state.self.position) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: { tick: state.tick, x: explore.x, y: explore.y, z: explore.z, strategy },
+      })
+    }
+  }
+  if (strategy === 'branch_mine') {
+    candidates = candidates.map((candidate) =>
+      candidate.kind === 'MINE' || candidate.kind === 'MOVE' || candidate.kind === 'DESCEND'
+        ? { ...candidate, id: `BRANCH_MINE:${candidate.id}`, meta: { ...candidate.meta, strategy } }
+        : candidate,
+    )
+  } else if (strategy === 'return_to_known_ore') {
+    candidates = candidates.map((candidate) =>
+      candidate.kind === 'RETRIEVE' ? { ...candidate, id: `RETURN_TO_KNOWN_ORE:${candidate.id}`, meta: { ...candidate.meta, strategy } } : candidate,
+    )
   }
 
   const hostiles = state.entities.filter((entity) => entity.hostile)
