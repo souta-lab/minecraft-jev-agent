@@ -197,6 +197,22 @@ the `MoveFailMemory` cooldown and the `PrereqResolver` stay where they are: they
 are already deterministic predicates or policy objects with structured logs
 (justifications in the table).
 
+## Implementation status (task/heuristic-audit)
+
+| Item | Commit | New marker | Regression |
+|---|---|---|---|
+| Audit table (this document) | `4481dbd` | — | — |
+| V1 registry breakability, obsidian truth | `39591a2` | — | `test-minecraft-truth.mts` 4/4 |
+| V2 explicit climb progress evidence | `c335877` | — | `test-action-verify.mts` 11/11 (+2) |
+| PillarSearchPolicy | `95503b9`, `56b381b` | `PILLAR_SEARCH` | `test-pillar-search.mts` 10/10 |
+| HopPolicy | `edb61fc` | `HOP_PLAN` | `test-hop-policy.mts` 6/6 |
+| CandidateOptions retry budgets | `37470d6` | — | `test-candidate-policy.mts` 3/3 |
+
+`PILLAR_SEARCH` and `HOP_PLAN` are in `MIRRORED_MARKERS` (controller.ts), so
+each policy decision reaches buddy.log. `alternatives=[...]` lists only the
+losing options (the chosen one carries its own `chosen=`/`score=` fields),
+matching the `PREREQ_OPTION over=[...]` convention.
+
 ## Non-goals
 
 - No behaviour changes beyond V1/V2 and the policy extraction defaults (which
