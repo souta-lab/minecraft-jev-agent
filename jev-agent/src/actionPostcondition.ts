@@ -35,6 +35,42 @@ export interface ActionOutcomeInput {
   actionId?: string | null
   /** high-level strategy label (`llm:smelt`, ...), when known */
   strategy?: string | null
+  /** unverified attempts recorded for this planId INCLUDING this one, when known */
+  attempts?: number | null
+}
+
+/** Everything a strict SMELT post-condition needs to know about one run. */
+export interface SmeltPostconditionEvidence {
+  /** output items the run added to the inventory (0 when nothing landed) */
+  gained: number
+  /** input items the run moved out of the inventory into the furnace */
+  placedInput: number
+  /** fuel items the run moved out of the inventory into the furnace */
+  placedFuel: number
+  /** the furnace input slot no longer holds the full placed stack */
+  consumedInput: boolean
+  /** the furnace fuel slot no longer holds the full placed stack */
+  consumedFuel: boolean
+}
+
+/**
+ * #79 STRICT smelt post-condition. A smelt is verified only with world evidence:
+ * the output item count increased, OR the furnace actually consumed the placed
+ * input+fuel (the burn progressed even though no output landed in the inventory
+ * yet). Placing items into the furnace is not enough - a run that moved items in
+ * and then produced/consumed nothing is unverified, never `done`.
+ */
+export function isSmeltPostconditionMet(evidence: SmeltPostconditionEvidence): boolean {
+  if (evidence.gained > 0) return true
+  return evidence.placedInput > 0 && evidence.consumedInput && evidence.placedFuel > 0 && evidence.consumedFuel
+}
+
+/**
+ * #79 STRICT place post-condition. A placement is verified only when the wanted
+ * block exists at the target right now; a null/different block is unverified.
+ */
+export function isPlacePostconditionMet(blockNameAtTarget: string | null, itemName: string): boolean {
+  return blockNameAtTarget === itemName
 }
 
 /**
@@ -83,14 +119,18 @@ export interface ActionUnverifiedFields {
   planId: string | null
   actionId: string | null
   strategy: string | null
+  /** per-plan unverified attempt count INCLUDING this one, when the caller knows it */
+  attempts?: number | null
   postcondition: string
 }
 
-/** Exact log line: `ACTION_UNVERIFIED planId=... actionId=... strategy=... postcondition=...`. */
+/** Exact log line: `ACTION_UNVERIFIED planId=... actionId=... strategy=... [attempts=N] postcondition=...`. */
 export function formatActionUnverified(fields: ActionUnverifiedFields): string {
+  const attempts =
+    fields.attempts === undefined || fields.attempts === null ? '' : ` attempts=${fields.attempts}`
   return (
     `ACTION_UNVERIFIED planId=${fields.planId ?? 'null'} actionId=${fields.actionId ?? 'null'} ` +
-    `strategy=${fields.strategy ?? 'null'} postcondition=${fields.postcondition}`
+    `strategy=${fields.strategy ?? 'null'}${attempts} postcondition=${fields.postcondition}`
   )
 }
 
@@ -130,6 +170,7 @@ export function decideActionOutcome(input: ActionOutcomeInput): ActionOutcomeDec
         planId: input.planId ?? null,
         actionId: input.actionId ?? null,
         strategy: input.strategy ?? null,
+        attempts: input.attempts ?? null,
         postcondition,
       }),
     }
