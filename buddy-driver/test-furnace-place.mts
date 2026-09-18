@@ -8,8 +8,11 @@
 //   (b) a failed placement retries at a nearby spot up to the bound;
 //   (c) the abandon reason is logged in one line.
 // Plus a fixture that drives held-furnace -> PLACE -> SMELT -> SMELT_DONE.
+import { createRequire } from 'node:module'
 import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate, CandidateOptions } from '../jev-agent/src/candidates.ts'
+import { createRecipeIndex } from '../jev-agent/src/crafting.ts'
+import type { QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'
 import type { SmeltFurnaceWindow } from '../jev-agent/src/executor.ts'
 import { knownStationKey, planPrereqOptions } from '../jev-agent/src/prereqOption.ts'
@@ -92,7 +95,26 @@ function worldState(overrides: {
   placementSpots?: Vec3Json[]
   position?: Vec3Json
   craftingTables?: Vec3Json[]
+  /**
+   * M2 craft-table regression: override the active subgoal so the same fixture
+   * drives a `craft` goal instead of the default smelt.
+   */
+  current?: QueuedGoal
 }): WorldState {
+  const smelt: QueuedGoal = {
+    id: 'g6',
+    kind: 'smelt',
+    description: 'smelt 3 x iron_ingot',
+    targetItem: 'iron_ingot',
+    requiredCount: 3,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
   return {
     schemaVersion: 1,
     tick: 7,
@@ -108,20 +130,7 @@ function worldState(overrides: {
     goal: smeltGoal(),
     goalQueue: {
       depth: 2,
-      current: {
-        id: 'g6',
-        kind: 'smelt',
-        description: 'smelt 3 x iron_ingot',
-        targetItem: 'iron_ingot',
-        requiredCount: 3,
-        startCount: 0,
-        haveCount: 0,
-        status: 'active',
-        origin: 'llm',
-        createdAt: 0,
-        updatedAt: 0,
-        detail: null,
-      },
+      current: overrides.current ?? smelt,
       empty: false,
       hasImpossible: false,
       done: 0,
@@ -133,6 +142,35 @@ function worldState(overrides: {
 }
 
 const heldFurnaceInventory = inventory({ furnace: 1, raw_iron: 8, coal: 7, cobblestone: 112 })
+
+// --- M2 craft-table deadlock: a `craft` goal must acquire a usable table -----
+//
+// Live shape (measured): `craft 1 x furnace` with cobblestone=119, no sensed
+// table, and every remembered table 21+ blocks away collapsed to WAIT because
+// craftCandidates() required a station inside the sensor radius. The smelt
+// prerequisite ladder already knew how to reach a remembered station; the craft
+// goal now reuses that ladder for its table.
+
+const recipeIndex = createRecipeIndex(createRequire(import.meta.url)('minecraft-data')('1.21.11'))
+
+function craftCurrent(item: string): QueuedGoal {
+  return {
+    id: `g-craft-${item}`,
+    kind: 'craft',
+    description: `craft 1 x ${item}`,
+    targetItem: item,
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
+const craftOptions: CandidateOptions = { ...defaultCandidateOptions, recipes: recipeIndex }
 
 // --- (a) required precondition is protected ---------------------------------
 
@@ -305,6 +343,104 @@ addCase('(live) blacklisted furnace + a reachable remembered table walks to it u
     retrieve.meta.prereqPath === 'craft_and_place' &&
     retrieveFurnace === undefined
   return { pass, detail: `${decision.line} | retrieve=${retrieve?.id ?? 'none'}` }
+})
+
+// --- M2 craft-table deadlock: `craft 1 x furnace` must not collapse to WAIT ---
+
+const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 39, y: 31, z: 34 } }
+
+addCase('(live) craft 1 x furnace + remembered table 21m away yields RETRIEVE, never only WAIT', () => {
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ cobblestone: 119 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    current: craftCurrent('furnace'),
+  })
+
+  const candidates = generateCandidates(state, craftOptions)
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const pass =
+    retrieve !== undefined &&
+    retrieve.kind === 'RETRIEVE' &&
+    retrieve.meta.tableSource === 'remembered' &&
+    retrieve.target?.x === rememberedTable.position.x &&
+    retrieve.target?.y === rememberedTable.position.y &&
+    retrieve.target?.z === rememberedTable.position.z &&
+    productive.length > 0
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(live) craft 1 x furnace + a held table places it instead of walking to a remembered one', () => {
+  const spot: Vec3Json = { x: 38, y: 10, z: 34 }
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ cobblestone: 119, crafting_table: 1 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    placementSpots: [spot],
+    current: craftCurrent('furnace'),
+  })
+
+  const candidates = generateCandidates(state, craftOptions)
+  const place = candidates.find((candidate) => candidate.id.startsWith('PLACE:crafting_table'))
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const pass =
+    place !== undefined &&
+    place.kind === 'PLACE' &&
+    place.target?.x === spot.x &&
+    place.target?.y === spot.y &&
+    place.target?.z === spot.z &&
+    retrieve === undefined
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(live) craft 1 x furnace + blacklisted remembered table emits no doomed RETRIEVE', () => {
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ cobblestone: 119 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    current: craftCurrent('furnace'),
+  })
+  const options: CandidateOptions = {
+    ...craftOptions,
+    unreachableStations: new Set([knownStationKey({ name: 'crafting_table', position: rememberedTable.position })]),
+  }
+
+  const candidates = generateCandidates(state, options)
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const pass = retrieve === undefined && productive.length === 0
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('(live) craft 1 x furnace + no table held or remembered still crafts one from logs', () => {
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ cobblestone: 119, oak_log: 3 }),
+    signals: signals(),
+    current: craftCurrent('furnace'),
+  })
+
+  const candidates = generateCandidates(state, craftOptions)
+  const craft = candidates.find((candidate) => candidate.kind === 'CRAFT')
+  const productive = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const pass = craft !== undefined && productive.length > 0
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
+addCase('a 2x2 craft goal never acquires a table', () => {
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ oak_log: 1 }),
+    signals: signals({ knownResources: [rememberedTable] }),
+    current: craftCurrent('oak_planks'),
+  })
+
+  const candidates = generateCandidates(state, craftOptions)
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station'))
+  const craft = candidates.find((candidate) => candidate.id === 'CRAFT:oak_planks')
+  const pass = retrieve === undefined && craft !== undefined
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
 // --- (b) bounded placement retry --------------------------------------------
