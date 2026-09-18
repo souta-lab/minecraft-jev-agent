@@ -38,7 +38,7 @@ import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, 
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { GoalQueueSnapshot, GoalQueueState, QueuedGoal } from './goalQueue.ts'
-import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaShadow, writeOutcome } from './jev.ts'
+import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision } from './policy.ts'
@@ -79,6 +79,8 @@ import {
   resolvePrereqStallTicks,
 } from './prereqOption.ts'
 import type { PrereqDecision, PrereqPath, PrereqProgress } from './prereqOption.ts'
+import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
+import type { BetaAuthorityDecision } from './betaAuthority.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -159,11 +161,12 @@ export interface JevAgentOptions {
   logDir: string
   forceFallbackPolicy: boolean
   /**
-   * #22: when true, `abandon_option` only votes (BETA_SHADOW logging) and the
-   * ladder/advisor/controller keeps driving; when false (default) beta keeps its
-   * current replan authority, so resident behavior is unchanged.
+   * #22: `false` (default) keeps `abandon_option` shadow-only: it is recorded
+   * as a `BETA_SHADOW` vote and can never, by itself, cause a replan/abandon.
+   * `true` is the explicit #24 opt-in that lets a threshold-crossing beta drive
+   * a replan, still subject to the deterministic prerequisite guard.
    */
-  betaShadow: boolean
+  betaAuthority: boolean
   verbose: boolean
   scanRadius: number
   reach: number
@@ -218,7 +221,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   jevRateLimitBaseDelayMs: 7000,
   logDir: 'logs',
   forceFallbackPolicy: false,
-  betaShadow: resolveBetaShadow(),
+  betaAuthority: resolveBetaAuthority(),
   verbose: true,
   scanRadius: 48,
   reach: 4.5,
@@ -1167,18 +1170,43 @@ export class JevController {
     }
   }
 
-  /** The two authoritative heads, logged every decision (issue #11). */
+  /**
+   * The one gate between the beta vote and a replan. `adopt` is the controller's
+   * ACTUAL decision: with `betaAuthority: false` (default) it is always false,
+   * so a β=1 cannot discard a prerequisite (#22/#55).
+   */
+  private betaDecision(decision: JevResult): BetaAuthorityDecision {
+    return betaAuthorityDecision({
+      betaAuthority: this.options.betaAuthority,
+      abandonRequested: abandonRequested(decision),
+      actionId: decisionIdFrom(decision),
+      goals: this.unfinishedGoals(),
+      placedFurnaceCount: this.lastPlacedFurnaceCount,
+    })
+  }
+
   private logHeads(result: JevResult, chainId: string | null = null): void {
     const action = decisionIdFrom(result) ?? 'WAIT'
     const abandon = result.answers.abandon_option?.probability ?? null
-    const replan = abandonRequested(result)
+    const vote = this.betaDecision(result)
+    // JEV_HEADS reports what the controller ACTUALLY did, never beta's raw vote.
+    // In the default shadow mode a β=1 logs `-> continue` and ABANDON_REASON is
+    // not emitted; the vote survives only in the BETA_SHADOW record.
     this.logger.info(
       'heads',
-      `JEV_HEADS action=${action} abandon=${abandon ?? 'null'} -> ${replan ? 'replan' : 'continue'}`,
-      { action, abandon, decision: replan ? 'replan' : 'continue', chainId },
+      formatJevHeads(action, abandon, vote.adopt),
+      {
+        action,
+        abandon,
+        decision: vote.adopt ? 'replan' : 'continue',
+        abandonRequested: abandonRequested(result),
+        betaAuthority: this.options.betaAuthority,
+        betaShadowed: vote.shadowed,
+        chainId,
+      },
       this.tickCounter,
     )
-    if (replan) {
+    if (vote.adopt) {
       const reason = this.abandonReason(action, abandon)
       const option = action === 'WAIT' ? 'none' : prerequisiteOptionName(action)
       this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
@@ -1196,18 +1224,25 @@ export class JevController {
   }
 
   /**
-   * #22: log what beta WOULD have decided next to the controller's actual replan
-   * behavior. Pure logging: when `betaShadow` is off, beta keeps its authority and
-   * `actual` includes it; when on, beta only votes and the ladder/advisor drives.
+   * #22: record what beta WOULD have decided next to the controller's actual
+   * replan behavior. `actual` is the controller's own decision: it includes
+   * beta only when `betaAuthority` is on and the guard cleared it; otherwise it
+   * reflects the deterministic reasons (queue_empty, semantic escalation, ...).
    */
   private logBetaShadow(optionId: string | null, decision: JevResult, actualReplanAdopted: boolean): void {
     const beta = decision.answers.abandon_option?.probability ?? null
+    const vote = this.betaDecision(decision)
     const actualReplan = actualReplanAdopted || this.queue.isEmpty || this.lastAbandonAdopted
     const shadow = betaShadowDecision({ optionId, beta, actualReplan })
     this.logger.info(
       'beta-shadow',
       formatBetaShadow(shadow),
-      { ...shadow, mode: this.options.betaShadow ? 'shadow' : 'authority' },
+      {
+        ...shadow,
+        mode: this.options.betaAuthority ? 'authority' : 'shadow',
+        betaAuthority: this.options.betaAuthority,
+        shadowed: vote.shadowed,
+      },
       this.tickCounter,
     )
   }
@@ -1269,25 +1304,23 @@ export class JevController {
   }
 
   /**
-   * `abandon_option` above the threshold is the ONLY semantic replan trigger
-   * (#11): it hands control to System 2 (Mercury when enabled, else the
-   * deterministic ladder). Code still owns preconditions and completion.
+   * The only semantic replan trigger: an `abandon_option` vote that has explicit
+   * `betaAuthority` and clears the deterministic prerequisite guard (#22/#46).
+   * In the default shadow mode the controller never reaches here.
    */
   private adoptAbandon(decision: JevResult): boolean {
     if (!abandonRequested(decision)) return false
+    const vote = this.betaDecision(decision)
     const probability = decision.answers.abandon_option?.probability ?? null
-    const actionId = decisionIdFrom(decision)
-    const guard = shouldAdoptAbandon({
-      actionId,
-      goals: this.unfinishedGoals(),
-      placedFurnaceCount: this.lastPlacedFurnaceCount,
-      abandonRequested: true,
-    })
-    if (!guard.adopt && !this.placeRetryExhausted()) {
+    if (vote.adopt) {
+      this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
+      return true
+    }
+    if (vote.protection.protect && !this.placeRetryExhausted()) {
       this.logger.warn(
         'heads',
-        guard.protection.line,
-        { option: guard.protection.option, because: guard.protection.because, actionId, abandon: probability },
+        vote.protection.line,
+        { option: vote.protection.option, because: vote.protection.because, actionId: decisionIdFrom(decision), abandon: probability },
         this.tickCounter,
       )
       return false
@@ -1444,7 +1477,7 @@ export class JevController {
       )
       this.logHeads(result, chainId)
       this.logShadowMetrics(state)
-      if (!this.options.betaShadow) this.lastAbandonAdopted = this.adoptAbandon(result)
+      if (this.options.betaAuthority) this.lastAbandonAdopted = this.adoptAbandon(result)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {

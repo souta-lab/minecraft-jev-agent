@@ -561,16 +561,21 @@ export function booleanEstimates(
 // #22: beta (`abandon_option`) SHADOW comparison
 // ---------------------------------------------------------------------------
 
-/** `BUDDY_BETA_SHADOW=1` turns the beta shadow comparison on and strips beta's authority. */
-export const BETA_SHADOW_ENV = 'BUDDY_BETA_SHADOW'
+/**
+ * `BUDDY_BETA_AUTHORITY=1` is the explicit, auditable opt-in that promotes the
+ * `abandon_option` beta vote to replan authority (#24). It is intentionally
+ * NOT the default: in normal resident mode beta is shadow-only.
+ */
+export const BETA_AUTHORITY_ENV = 'BUDDY_BETA_AUTHORITY'
 
 /**
- * Resolve the shadow mode. Default OFF so resident behavior is byte-identical:
- * when off, beta keeps its current replan authority; when on, beta only votes
- * and the ladder/advisor/controller keeps driving.
+ * Resolve beta authority. Default **off** (#22): beta is always recorded as a
+ * `BETA_SHADOW` vote, but by itself it never causes a replan/abandon. Only the
+ * explicit `betaAuthority: true` option (or `BUDDY_BETA_AUTHORITY=1`) grants it
+ * authority, and even then the deterministic prerequisite guard still applies.
  */
-export function resolveBetaShadow(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
-  const raw = (env[BETA_SHADOW_ENV] ?? '').trim().toLowerCase()
+export function resolveBetaAuthority(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  const raw = (env[BETA_AUTHORITY_ENV] ?? '').trim().toLowerCase()
   return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes'
 }
 
