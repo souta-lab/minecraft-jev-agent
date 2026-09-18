@@ -846,7 +846,7 @@ function placeStationCandidate(
 function craftCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   const recipes = options.recipes ?? null
   if (recipes === null || focusItem === null) return []
-  const tableAvailable = state.craftingTables.some(isSensedStation)
+  const tableAvailable = sensedCraftingTableAvailable(state, options, focusItem)
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
   const op = plan.op
 
@@ -953,10 +953,33 @@ export function selfContainedCraftCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   if (recipes === null || focusItem === null || (current?.kind ?? 'collect') !== 'craft') return []
-  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, state.craftingTables.some(isSensedStation))
+  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, sensedCraftingTableAvailable(state, options, focusItem))
   if (plan.op === null) return []
   const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
   return step === null ? [] : [step]
+}
+
+/**
+ * A sensed station is not automatically a usable station.  A craft action can
+ * fail after the sensor sees a table when the table is above a disconnected
+ * ledge or otherwise has no path from the current position.  Once the exact
+ * craft candidate has a path failure, re-plan as if the table were absent so
+ * the recipe ladder can craft/place a local table or retrieve another one.
+ *
+ * The explicit blacklist remains authoritative when the controller has already
+ * proved the coordinate unreachable.  The path-failure check is deliberately
+ * scoped to the same CRAFT:<item> candidate; unrelated movement failures must
+ * not make every nearby table disappear.
+ */
+function sensedCraftingTableAvailable(state: WorldState, options: CandidateOptions, focusItem: string): boolean {
+  const sensed = state.craftingTables.find(isSensedStation)
+  if (sensed === undefined) return false
+  const key = knownStationKey({ name: 'crafting_table', position: sensed })
+  if (options.unreachableStations?.has(key) === true) return false
+  const craftFailures = state.signals.failedCandidates[`CRAFT:${focusItem}`] ?? 0
+  const lastFailure = state.signals.lastFailureCode
+  const pathFailure = lastFailure === 'path_no_path' || lastFailure === 'path_stuck'
+  return !(craftFailures > 0 && pathFailure)
 }
 
 /**
