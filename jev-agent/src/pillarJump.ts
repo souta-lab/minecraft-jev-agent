@@ -46,6 +46,8 @@ export interface JumpBotLike {
   entity: JumpEntityLike
   physicsEnabled: boolean
   setControlState(control: 'jump', state: boolean): void
+  /** Clear a stale horizontal/pathfinder push before a pure vertical hop. */
+  clearControlStates?: () => void
   on(event: 'physicsTick', listener: () => void): unknown
   removeListener(event: 'physicsTick', listener: () => void): unknown
 }
@@ -166,6 +168,10 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
   let ticks = 0
   let impulses = 0
   let lastImpulseAt = Number.NEGATIVE_INFINITY
+  // Leaf rejects a jump packet that still carries a blocked horizontal push.
+  // PILLAR_UP is a pure vertical actuator; a prior pathfinder/control-walk
+  // action must not leak `forward`/`back`/strafe into its takeoff.
+  bot.clearControlStates?.()
   // Same correction as the control walk, kept for the whole attempt so a
   // clientbound position packet cannot reset onGround between two ticks.
   const uninstall = installGroundCorrection(bot, deps.isSolid, (grounded) => {
