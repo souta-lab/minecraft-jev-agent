@@ -6,9 +6,11 @@
 // expected while active; an untracked listener still exceeds this count.
 // Usage: node tools/verify-issue13.mjs [--json] [--samples 3] [--gap 8000]
 import net from 'node:net'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { inspectGenerationCallbackLog } from './issue13-evidence.mjs'
 
 const SOCK = '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
+const LOG_PATH = process.env.BUDDY_LOG_PATH || 'buddy-driver/buddy.log'
 const args = process.argv.slice(2)
 const num = (flag, d) => {
   const i = args.indexOf(flag)
@@ -58,10 +60,26 @@ for (const [index, sample] of samples.entries()) {
 }
 const leakFlags = samples.map((s) => s.listenerLeak)
 const genGrowth = samples.length > 1 ? samples[samples.length - 1].generations - samples[0].generations : 0
+const callbackEvidence = inspectGenerationCallbackLog(existsSync(LOG_PATH) ? readFileSync(LOG_PATH, 'utf8') : '')
 
 const checks = [
   { id: 'no_event_over_expected', pass: violations.length === 0, detail: JSON.stringify(violations) },
   { id: 'leak_flag_false_in_all_samples', pass: leakFlags.every((f) => f === false), detail: JSON.stringify(leakFlags) },
+  {
+    id: 'generation_callback_observability_ready',
+    pass: callbackEvidence.observabilityReady,
+    detail: JSON.stringify({
+      actionLogs: callbackEvidence.actionLogs,
+      taggedActions: callbackEvidence.taggedActions,
+      pathCallbacks: callbackEvidence.pathCallbacks,
+      untaggedPathCallbacks: callbackEvidence.untaggedPathCallbacks,
+    }),
+  },
+  {
+    id: 'no_disposed_generation_callbacks',
+    pass: callbackEvidence.noDisposedGenerationCallbacks,
+    detail: JSON.stringify(callbackEvidence.staleCallbackViolations),
+  },
 ]
 const passCount = checks.filter((c) => c.pass).length
 const out = {
@@ -72,6 +90,7 @@ const out = {
   samples,
   generationGrowth: genGrowth,
   checks,
+  callbackEvidence,
 }
 
 if (JSON_OUT) console.log(JSON.stringify(out, null, 2))

@@ -4546,6 +4546,7 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
     actuationPort: options.actuationPort,
     hooks: {
       onPathCompleted: (event) => {
+        options.eventSink?.('PATH_CALLBACK', { phase: 'completed', ...event })
         scheduler.notify('path_completed', {
           actionId: event.actionId,
           target: event.target,
@@ -4553,6 +4554,7 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
         })
       },
       onPathFailed: (event) => {
+        options.eventSink?.('PATH_CALLBACK', { phase: 'failed', ...event })
         const trigger: DecisionTrigger =
           event.outcome === 'noPath' ? 'path_no_path' : event.outcome === 'timeout' ? 'action_timeout' : 'path_stuck'
         scheduler.notify(trigger, {
