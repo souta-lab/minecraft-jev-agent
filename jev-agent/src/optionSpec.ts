@@ -97,6 +97,48 @@ export type Predicate =
   | { readonly kind: 'healthAtLeast'; readonly health: number }
   | { readonly kind: 'custom'; readonly id: string }
 
+/**
+ * Issue #59: tri-state predicate truth. A safety predicate must distinguish
+ * "the world says this is false" from "the world did not say anything". Both
+ * make an Option non-startable, but only the second is an unknown fact that
+ * must be re-observed rather than reported as a proven below-threshold value.
+ */
+export type PredicateTruth = 'true' | 'false' | 'unknown'
+
+export interface PredicateTruthResult {
+  truth: PredicateTruth
+  /** snapshot fields that were unreadable; non-empty only when truth is 'unknown' */
+  unknownInputs: string[]
+}
+
+/** Receives one `PREDICATE_UNKNOWN ...` line. Injectable for tests / host logs. */
+export type PredicateUnknownSink = (line: string) => void
+
+/** Exact audit line for an unknown predicate (issue #59). */
+export function formatPredicateUnknown(predicate: Predicate, unknownInputs: readonly string[]): string {
+  const input = unknownInputs.length > 0 ? unknownInputs.map((name) => `${name}=null`).join(',') : 'null'
+  return `PREDICATE_UNKNOWN name=${predicate.kind} input=${input} -> false`
+}
+
+let predicateUnknownSink: PredicateUnknownSink = (line) => {
+  process.stderr.write(`[predicate] ${line}\n`)
+}
+
+/**
+ * Route `PREDICATE_UNKNOWN` lines to a host logger. Pass null to restore the
+ * default stderr sink, or a capturing sink in tests.
+ */
+export function setPredicateUnknownSink(sink: PredicateUnknownSink | null): void {
+  predicateUnknownSink =
+    sink ?? ((line) => {
+      process.stderr.write(`[predicate] ${line}\n`)
+    })
+}
+
+function emitPredicateUnknown(predicate: Predicate, unknownInputs: readonly string[]): void {
+  predicateUnknownSink(formatPredicateUnknown(predicate, unknownInputs))
+}
+
 export interface OptionSpec {
   /** stable id, e.g. "collect:raw_iron", "smelt:iron_ingot" */
   id: string
@@ -177,34 +219,102 @@ function oreKnown(snapshot: OptionWorldSnapshot, item: string): boolean {
   )
 }
 
-/** Evaluate one predicate against a snapshot. Unknown custom ids fail closed. */
+/**
+ * Evaluate one predicate into tri-state truth. Pure: it never logs and never
+ * throws. `unknown` means the snapshot field the predicate reads was null; it is
+ * NEVER treated as satisfaction by the boolean `evaluatePredicate` wrapper.
+ */
+export function evaluatePredicateTruth(
+  predicate: Predicate,
+  snapshot: OptionWorldSnapshot,
+  custom?: CustomPredicateRegistry,
+): PredicateTruthResult {
+  switch (predicate.kind) {
+    case 'inventoryAtLeast':
+      return { truth: inventoryCount(snapshot.inventory, predicate.item) >= predicate.count ? 'true' : 'false', unknownInputs: [] }
+    case 'inventoryClassAtLeast':
+      return { truth: inventoryClassCount(snapshot.inventory, predicate.cls) >= predicate.count ? 'true' : 'false', unknownInputs: [] }
+    case 'pickaxeRankAtLeast':
+      return { truth: snapshot.toolRank >= predicate.rank ? 'true' : 'false', unknownInputs: [] }
+    case 'stationKnown':
+      return { truth: snapshot.knownStations.includes(predicate.station) ? 'true' : 'false', unknownInputs: [] }
+    case 'oreKnown':
+      return { truth: oreKnown(snapshot, predicate.item) ? 'true' : 'false', unknownInputs: [] }
+    case 'dimensionIs':
+      if (snapshot.dimension === null) return { truth: 'unknown', unknownInputs: ['dimension'] }
+      return {
+        truth: normalizeDimension(snapshot.dimension) === normalizeDimension(predicate.dimension) ? 'true' : 'false',
+        unknownInputs: [],
+      }
+    case 'levelAtMost':
+      if (snapshot.position === null) return { truth: 'unknown', unknownInputs: ['position'] }
+      return { truth: snapshot.position.y <= predicate.y ? 'true' : 'false', unknownInputs: [] }
+    case 'healthAtLeast':
+      if (snapshot.health === null) return { truth: 'unknown', unknownInputs: ['health'] }
+      return { truth: snapshot.health >= predicate.health ? 'true' : 'false', unknownInputs: [] }
+    case 'custom': {
+      const evaluator = custom?.[predicate.id]
+      return { truth: evaluator !== undefined && evaluator(snapshot) ? 'true' : 'false', unknownInputs: [] }
+    }
+  }
+}
+
+/**
+ * Evaluate one predicate against a snapshot. Fail-closed: `true` is returned
+ * only for proven truth, so an unknown input (null dimension/position/health or
+ * an unregistered custom id) yields `false`. Unknowns are emitted as
+ * `PREDICATE_UNKNOWN name=<kind> input=<field>=null -> false`.
+ */
 export function evaluatePredicate(
   predicate: Predicate,
   snapshot: OptionWorldSnapshot,
   custom?: CustomPredicateRegistry,
 ): boolean {
-  switch (predicate.kind) {
-    case 'inventoryAtLeast':
-      return inventoryCount(snapshot.inventory, predicate.item) >= predicate.count
-    case 'inventoryClassAtLeast':
-      return inventoryClassCount(snapshot.inventory, predicate.cls) >= predicate.count
-    case 'pickaxeRankAtLeast':
-      return snapshot.toolRank >= predicate.rank
-    case 'stationKnown':
-      return snapshot.knownStations.includes(predicate.station)
-    case 'oreKnown':
-      return oreKnown(snapshot, predicate.item)
-    case 'dimensionIs':
-      return snapshot.dimension !== null && normalizeDimension(snapshot.dimension) === normalizeDimension(predicate.dimension)
-    case 'levelAtMost':
-      return snapshot.position !== null && snapshot.position.y <= predicate.y
-    case 'healthAtLeast':
-      return snapshot.health === null ? true : snapshot.health >= predicate.health
-    case 'custom': {
-      const evaluator = custom?.[predicate.id]
-      return evaluator === undefined ? false : evaluator(snapshot)
+  const result = evaluatePredicateTruth(predicate, snapshot, custom)
+  if (result.truth === 'unknown') emitPredicateUnknown(predicate, result.unknownInputs)
+  return result.truth === 'true'
+}
+
+export interface PredicateSetTruthResult {
+  /** 'false' if any predicate is proven false, else 'unknown' if any is unknown, else 'true' */
+  truth: PredicateTruth
+  /** predicates that did not hold; unknown predicates are included (unknown is not true) */
+  unmet: Predicate[]
+  /** subset of `unmet` whose snapshot input was unreadable */
+  unknown: Predicate[]
+}
+
+/** Evaluate an AND of predicates while preserving the unknown/false distinction. */
+export function evaluatePredicatesTruth(
+  predicates: readonly Predicate[],
+  snapshot: OptionWorldSnapshot,
+  custom?: CustomPredicateRegistry,
+): PredicateSetTruthResult {
+  const unmet: Predicate[] = []
+  const unknown: Predicate[] = []
+  let hasFalse = false
+  for (const predicate of predicates) {
+    const result = evaluatePredicateTruth(predicate, snapshot, custom)
+    if (result.truth === 'true') continue
+    unmet.push(predicate)
+    if (result.truth === 'unknown') {
+      unknown.push(predicate)
+      emitPredicateUnknown(predicate, result.unknownInputs)
+    } else {
+      hasFalse = true
     }
   }
+  const truth: PredicateTruth = hasFalse ? 'false' : unknown.length > 0 ? 'unknown' : 'true'
+  return { truth, unmet, unknown }
+}
+
+/** Tri-state version of `isOptionStartable`: only 'true' permits a start. */
+export function optionStartabilityTruth(
+  spec: OptionSpec,
+  snapshot: OptionWorldSnapshot,
+  custom?: CustomPredicateRegistry,
+): PredicateTruth {
+  return evaluatePredicatesTruth(spec.preconditions, snapshot, custom).truth
 }
 
 export interface PredicateSetResult {
