@@ -30,8 +30,8 @@ import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { planVerticalApproach } from './verticalPlan.ts'
-import { FURNACE_STONE_COST, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
-import type { PrereqInput, PrereqPath } from './prereqOption.ts'
+import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
+import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
@@ -87,6 +87,12 @@ export interface CandidateOptions {
   maxMoveCandidates?: number
   /** recipe lookup used to surface grounded CRAFT/PLACE steps (null disables) */
   recipes?: RecipeIndex | null
+  /**
+   * M2 blocker: `knownStationKey`s blacklisted by the controller's move-failure
+   * memory. Passed explicitly (never read from a global) so the pure
+   * prerequisite planner stops choosing an unreachable remembered station.
+   */
+  unreachableStations?: ReadonlySet<string>
 }
 
 const DEFAULT_MOVE_MIN_DISTANCE = 0
@@ -945,25 +951,68 @@ function smeltFuelFor(state: WorldState): string | null {
   return findInventoryFuel(state.inventory.counts)?.item ?? null
 }
 
+const EMPTY_STATIONS: ReadonlySet<string> = new Set<string>()
+
+/** Remembered stations of one kind, nearest first. */
+function knownStations(state: WorldState, station: string): KnownStationLike[] {
+  const found: KnownStationLike[] = []
+  for (const resource of state.signals.knownResources ?? []) {
+    if (resource.kind !== 'station' || !resource.name.includes(station)) continue
+    found.push({ name: resource.name, position: resource.position })
+  }
+  found.sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
+  return found
+}
+
+/**
+ * Where the furnace craft step gets its 3x3 station. A sensed table is used in
+ * place; a remembered reachable table is walked to; a held table is placed
+ * first. Blacklisted stations are skipped, so the M2 blocker cannot re-select a
+ * station the move-failure memory already proved unreachable.
+ */
+function craftingTableSource(
+  state: WorldState,
+  unreachableStations: ReadonlySet<string>,
+): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
+  const sensed = state.craftingTables[0]
+  if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
+  const remembered = knownStations(state, 'crafting_table').find(
+    (station) => !unreachableStations.has(knownStationKey(station)),
+  )
+  if (remembered !== undefined) return { kind: 'remembered', station: remembered }
+  if ((state.inventory.counts.crafting_table ?? 0) <= 0) return null
+  const spot =
+    state.placementSpots.find(
+      (candidate) => (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) < 2,
+    ) ?? state.placementSpots[0]
+  return spot === undefined ? null : { kind: 'held-place', spot }
+}
+
 /**
  * Issue #58: build the pure cost/feasibility input for the furnace precondition
- * from the live world state. Shared by the candidate generator and the
- * controller so both score the exact same paths.
+ * from the live world state and the explicit station blacklist. `tableAvailable`
+ * is true for any table the bot can actually reach (`craftingTableSource`), so
+ * an unreachable remembered furnace no longer leaves `craft_and_place`
+ * infeasible and the whole prerequisite collapsing to WAIT.
  */
-export function furnacePrereqInputFromState(state: WorldState, _options: CandidateOptions): PrereqInput {
+export function furnacePrereqInputFromState(state: WorldState, options: CandidateOptions): PrereqInput {
   const counts = state.inventory.counts
   let stoneCount = 0
   for (const [name, count] of Object.entries(counts)) {
     if (count > 0 && matchesResourceClass(name, 'stone')) stoneCount += count
   }
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const furnaces = knownStations(state, 'furnace')
+  const reachableFurnace = furnaces.find((station) => !unreachableStations.has(knownStationKey(station))) ?? null
   return {
     goal: state.goalQueue?.current ?? null,
     heldCount: counts.furnace ?? 0,
     placedCount: state.furnaces?.length ?? 0,
     stoneCount,
-    tableAvailable: state.craftingTables.length > 0,
+    tableAvailable: craftingTableSource(state, unreachableStations) !== null,
     placementSpot: state.placementSpots.length > 0 ? leastFailedPlacementSpot(state, 'furnace') : null,
-    knownStation: nearestKnownStation(state, 'furnace'),
+    knownStation: reachableFurnace ?? furnaces[0] ?? null,
+    unreachableStations,
     self: state.self.position,
   }
 }
@@ -987,9 +1036,17 @@ function candidatesForPrereqPath(
   }
 }
 
-/** CRAFT:furnace candidate: the first step of the craft-then-place path. */
+/** CRAFT/PLACE step toward a furnace: use a table in reach, walk to a remembered one, or place a held one. */
 function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
-  const table = state.craftingTables[0] ?? null
+  const source = craftingTableSource(state, options.unreachableStations ?? EMPTY_STATIONS)
+  if (source === null) return []
+  if (source.kind === 'held-place') {
+    return [placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)]
+  }
+  if (source.kind === 'remembered') {
+    return [knownStationRetrievalCandidate(state, options, source.station)]
+  }
+  const table = source.station.position
   return [
     {
       id: 'CRAFT:furnace',
@@ -1001,9 +1058,9 @@ function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Ca
       itemName: 'furnace',
       requiresTool: false,
       toolName: null,
-      inReach: table === null || distance(table, state.self.eyePosition) <= options.reach,
+      inReach: distance(table, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
-      meta: { tick: state.tick, craftItem: 'furnace', craftCount: 1, requiresTable: true, furnaceSource: 'craft' },
+      meta: { tick: state.tick, craftItem: 'furnace', craftCount: 1, requiresTable: true, furnaceSource: 'craft', tableSource: 'sensed' },
     },
   ]
 }
@@ -1037,18 +1094,13 @@ function furnaceAcquisitionCandidates(state: WorldState, options: CandidateOptio
   return out
 }
 
-function nearestKnownStation(state: WorldState, station: string): KnownResource | null {
-  let best: KnownResource | null = null
-  for (const resource of state.signals.knownResources ?? []) {
-    if (resource.kind !== 'station' || !resource.name.includes(station)) continue
-    if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
-      best = resource
-    }
-  }
-  return best
-}
-
-function knownStationRetrievalCandidate(state: WorldState, options: CandidateOptions, known: { name: string; position: Vec3Json }): Candidate {
+function knownStationRetrievalCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  known: KnownStationLike,
+): Candidate {
+  const isFurnace = known.name.includes('furnace')
+  const purpose = isFurnace ? 'smelt' : 'craft a furnace'
   const vertical = planVerticalApproach({
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,
@@ -1064,7 +1116,7 @@ function knownStationRetrievalCandidate(state: WorldState, options: CandidateOpt
   return {
     id: `RETRIEVE:known:station:${known.name}:${blockId('b', known.position)}`,
     kind: 'RETRIEVE',
-    label: `return to the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) to smelt, ${distance(known.position, state.self.position)}m away`,
+    label: `return to the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) to ${purpose}, ${distance(known.position, state.self.position)}m away`,
     targetName: known.name,
     target: known.position,
     targetEntityId: null,
@@ -1076,10 +1128,10 @@ function knownStationRetrievalCandidate(state: WorldState, options: CandidateOpt
     meta: {
       tick: state.tick,
       retrieval: 'known',
-      resource: 'furnace',
+      resource: isFurnace ? 'furnace' : 'crafting_table',
       resourceKind: 'station',
       knownName: known.name,
-      furnaceSource: 'known',
+      ...(isFurnace ? { furnaceSource: 'known' } : { tableSource: 'remembered' }),
       x: known.position.x,
       y: known.position.y,
       z: known.position.z,

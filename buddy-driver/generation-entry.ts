@@ -849,6 +849,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
             kind: 'station' as const,
             position: { x: furnace.x, y: furnace.y, z: furnace.z },
           }))),
+      ...(heldStationItems.has('crafting_table')
+        ? []
+        : world.craftingTables.map((table) => ({
+            name: 'crafting_table',
+            kind: 'station' as const,
+            position: { x: table.x, y: table.y, z: table.z },
+          }))),
     ],
   }
 
