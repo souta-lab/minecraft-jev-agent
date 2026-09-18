@@ -55,8 +55,9 @@ import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, typ
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
+import { commitLedgerProposal } from './ledger-guard.ts'
 
-const CONTRACT_VERSION = 2
+const CONTRACT_VERSION = 3
 const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
 const LISTENER_EVENTS = [
   'physicsTick',
@@ -213,6 +214,13 @@ function loadState(): AgentSnapshot {
 let state = loadState()
 
 /**
+ * Issue #48: revision at which the authoritative ledger was last committed by an
+ * accepted generation proposal. A generation is seeded with `state.revision` and
+ * the guard rejects any proposal based on a ledger lineage older than this.
+ */
+let ledgerRevision = state.revision
+
+/**
  * Issue #40: the HOST is the only writer of class-A state. Every commit bumps the
  * revision and writes tmp -> rename atomically. A stale/foreign schema is coerced
  * (and logged) rather than silently accepted.
@@ -232,17 +240,41 @@ function saveState(event = 'save'): void {
 }
 
 /**
- * A generation proposes its ledger; the HOST validates and commits it into the
- * single class-A snapshot. A proposal from a superseded generation carries a stale
- * revision and is rejected so split-brain is impossible.
+ * A ledger proposal is only allowed from the generation the HOST currently owns:
+ * the leased action owner, falling back to the committed snapshot owner when the
+ * lease has already been revoked (a stopped generation's final flush). #49 tracks
+ * making the two fields identical at every stable point.
  */
-function commitLedgerProposal(ledger: GoalQueueSnapshot, proposedRevision: number | null, source: string): void {
-  if (proposedRevision !== null && proposedRevision < state.revision) {
-    log('STATE_PROPOSAL_REJECTED', { kind: 'ledger', source, reason: 'stale-revision', proposedRevision, revision: state.revision })
-    return
-  }
+function allowedGenerationId(): string | null {
+  if (leaseManager.activeId.length > 0) return leaseManager.activeId
+  return state.generationId
+}
+
+/**
+ * Issue #48: a generation PROPOSES its authoritative ledger; the HOST validates
+ * identity + lineage revision and is the only writer. A stale/foreign/future
+ * proposal is rejected and logged; the store is left untouched.
+ */
+function onGenerationLedgerProposal(proposal: unknown, source: string): void {
+  const decision = commitLedgerProposal(
+    state,
+    proposal,
+    { revision: state.revision, ledgerRevision, generationId: allowedGenerationId() },
+    log,
+    (event) => saveState(event),
+    source,
+  )
+  if (decision.ok) ledgerRevision = state.revision
+}
+
+/**
+ * HOST-initiated ledger sample (heartbeat). The HOST is the sole writer, so this
+ * is not subject to the generation proposal guard and does not advance the
+ * generation lineage revision - it must never invalidate a live generation.
+ */
+function commitHostLedger(ledger: GoalQueueSnapshot, source: string): void {
   state.ledger = ledger
-  saveState('ledger-proposal')
+  saveState(`ledger-host:${source}`)
 }
 
 function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
@@ -587,7 +619,17 @@ function runMissionPreflight(gen: ResidentGeneration): { ok: boolean; reason: st
   }
 }
 
-function makeGenerationContext(b: Bot): GenerationContext {
+/**
+ * Per-generation seed for `snapshotRevision`. Captured when the context is built
+ * and refreshed by the host right before start(), so a generation that replaces a
+ * quiescing one is seeded from the post-flush revision while the quiescing
+ * generation keeps its own older lineage (and is rejected if it proposes later).
+ */
+interface GenerationSeed {
+  revision: number
+}
+
+function makeGenerationContext(b: Bot, seed: GenerationSeed = { revision: state.revision }): GenerationContext {
   return {
     bot: b,
     log,
@@ -596,7 +638,10 @@ function makeGenerationContext(b: Bot): GenerationContext {
     worldMemory: cloneMemory(keyedMemory()),
     worldKey: currentWorldKey(),
     proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
-    proposeLedger: (ledger, proposedRevision) => commitLedgerProposal(ledger, proposedRevision ?? null, 'generation'),
+    proposeLedger: (proposal) => onGenerationLedgerProposal(proposal, 'generation'),
+    get snapshotRevision(): number {
+      return seed.revision
+    },
     ledgerSnapshot: state.ledger,
     ledgerPath: LEDGER,
     logDir: JEV_LOGS,
@@ -1140,7 +1185,7 @@ setInterval(() => {
       action: status.currentAction?.kind ?? 'idle',
       inv: shortInv(truth.inventory),
     })
-    commitLedgerProposal(goalQueueSnapshotFromState(status.queue), null, 'heartbeat')
+    commitHostLedger(goalQueueSnapshotFromState(status.queue), 'heartbeat')
   }
 }, OBSERVE_MS)
 
@@ -1311,7 +1356,8 @@ async function performReload(trigger: string): Promise<void> {
       throw new Error(`CONTRACT_VERSION mismatch: generation=${mod.CONTRACT_VERSION} host=${CONTRACT_VERSION}`)
     }
     const previousModule = generationModule
-    const ctx = makeGenerationContext(bot)
+    const nextSeed: GenerationSeed = { revision: state.revision }
+    const ctx = makeGenerationContext(bot, nextSeed)
     candidate = mod.createGeneration(ctx)
     registerGenerationResources(candidate, ctx)
     candidate.attach()
@@ -1335,6 +1381,12 @@ async function performReload(trigger: string): Promise<void> {
     saveState('reload-attempt')
     const preflight = runMissionPreflight(candidate)
     log('MISSION_PREFLIGHT', { id: candidate.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason, trigger })
+    // #49 + main: refresh the candidate's snapshotRevision to the host's current
+    // revision right before the atomic commit, so a stale proposal is rejected.
+    // `swapGeneration` is the single owner of live generation + lease + snapshot
+    // generationId (and of rollback/disposal); `state.lastGenerationId` is set by
+    // `commitOwner` to the superseded id, which test-reload-lifecycle pins.
+    nextSeed.revision = state.revision
     const outcome = await swapGeneration(makeSwapPorts(previousModule), candidate)
     candidate = null
     if (outcome.status !== 'committed') {

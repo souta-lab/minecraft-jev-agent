@@ -18,7 +18,7 @@ import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot, GoalQueueState } from '../jev-agent/src/goalQueue.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
-export const CONTRACT_VERSION = 2
+export const CONTRACT_VERSION = 3
 
 export interface Vec3Json {
   x: number
@@ -379,6 +379,19 @@ export interface ResidentGeneration {
   hasStopped(): boolean
 }
 
+/**
+ * Issue #48: the mandatory envelope for a generation ledger proposal. The HOST
+ * validates `generationId` (still the committed/allowed generation) and
+ * `baseRevision` (the committed snapshot revision the generation was seeded from)
+ * before it writes. A proposal can never omit identity/revision and bypass the
+ * stale check.
+ */
+export interface LedgerProposal {
+  generationId: string
+  baseRevision: number
+  ledger: GoalQueueSnapshot
+}
+
 export interface GenerationContext {
   bot: Bot
   /** structured log line: host prefixes the ISO timestamp; detail is JSON. */
@@ -394,11 +407,15 @@ export interface GenerationContext {
   /** the generation proposes memory deltas; the HOST commits them. */
   proposeWorldMemory(delta: WorldMemoryDelta): void
   /**
-   * Issue #40: the generation PROPOSES its authoritative ledger (class A); the
-   * HOST is the only writer and commits it atomically. `proposedRevision` lets the
-   * host reject a stale proposal from a superseded generation.
+   * Issue #40/#48: the generation PROPOSES its authoritative ledger (class A); the
+   * HOST is the only writer and commits it atomically. The proposal MUST carry the
+   * generation id and the committed lineage revision it was seeded from - the HOST
+   * rejects a stale/foreign/future proposal rather than letting it overwrite newer
+   * class-A state. There is no revision-optional overload.
    */
-  proposeLedger(ledger: GoalQueueSnapshot, proposedRevision?: number): void
+  proposeLedger(proposal: LedgerProposal): void
+  /** HOST commit revision this generation was created from (`state.revision`). */
+  snapshotRevision: number
   /** class-A ledger the HOST committed; the generation restores from THIS, not cache/logs. */
   ledgerSnapshot: GoalQueueSnapshot | null
   /** goal-queue ledger path handed to the controller (derived compatibility mirror). */

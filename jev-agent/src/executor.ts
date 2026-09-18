@@ -17,6 +17,7 @@ import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
 import type { Candidate, CandidateKind } from './candidates.ts'
+import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
 import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, UNBREAKABLE } from './state.ts'
@@ -24,6 +25,7 @@ import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
+import { describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -78,6 +80,13 @@ export interface ExecutionResult {
   goalItemCount: number
   /** item the action actually produced (MINE drop or crafted item), when known */
   yieldItem?: string | null
+  /**
+   * #79: set when the action finished `done` but its post-condition was unmet
+   * with zero observable change (verified=false, progressDelta=0, no block
+   * removed). The result is downgraded to `failed`; the controller logs
+   * ACTION_UNVERIFIED and charges the unverified budget against the plan.
+   */
+  unverifiedPostcondition?: string
   ms: number
 }
 
@@ -157,6 +166,13 @@ export interface ExecutorOptions {
    * `position_look` actuator for the same fallback position.
    */
   actuation: ActuationMode
+  /**
+   * #38: allowlist actuation capability from the resident. When present, the
+   * raw movement packet, the packet-step entity pose write and the stock
+   * collectblock call go through it (each asserts the actuation lease) instead
+   * of `bot._client`/`bot.entity`/`bot.collectBlock`. Absent standalone.
+   */
+  actuationPort?: ActuationPort
   packetStepMs: number
   maxStepsPerWaypoint: number
   hooks?: ExecutorHooks
@@ -486,11 +502,12 @@ export class Executor {
 
     void this.runAction(candidate, epoch, controller.signal, startedAt)
       .then((result) => {
-        action.status = result.status
-        action.detail = result.detail
-        this.lastResultValue = result
+        const finalResult = this.applyPostcondition(candidate, result)
+        action.status = finalResult.status
+        action.detail = finalResult.detail
+        this.lastResultValue = finalResult
         this.release(epoch)
-        resolveCompletion(result)
+        resolveCompletion(finalResult)
       })
       // runAction never rejects (it converts every failure into a result), so
       // this only fires on a programming error - never as a silent swallow.
@@ -2104,15 +2121,20 @@ export class Executor {
         if (next === null) return false
         const moveX = next.x - position.x
         const moveZ = next.z - position.z
+        const yaw = Math.atan2(-moveX, moveZ)
 
-        this.bot.entity.yaw = Math.atan2(-moveX, moveZ)
-        this.bot.entity.onGround = true
-        this.bot.entity.position.set(next.x, next.y, next.z)
+        if (this.options.actuationPort !== undefined) {
+          this.options.actuationPort.setPose({ x: next.x, y: next.y, z: next.z, yaw, onGround: true })
+        } else {
+          this.bot.entity.yaw = yaw
+          this.bot.entity.onGround = true
+          this.bot.entity.position.set(next.x, next.y, next.z)
+        }
         this.writePacket('position_look', {
           x: next.x,
           y: next.y,
           z: next.z,
-          yaw: this.bot.entity.yaw,
+          yaw,
           pitch: this.bot.entity.pitch,
           flags: { onGround: true, hasHorizontalCollision: false },
         })
@@ -2207,6 +2229,10 @@ export class Executor {
   }
 
   private writePacket(name: string, data: Record<string, unknown>): void {
+    if (this.options.actuationPort !== undefined) {
+      this.options.actuationPort.writeMovementPacket(name, data)
+      return
+    }
     const client = this.bot._client as unknown as {
       write: (packetName: string, payload: Record<string, unknown>) => boolean
     }
@@ -2303,9 +2329,13 @@ export class Executor {
     // putting it through the stock collectblock walk just burns its budget.
     if (stockDrop !== null && this.bot.collectBlock !== undefined && initialProximity > 2.0) {
       const stockBudgetMs = Math.min(STOCK_COLLECT_BUDGET_MS, Math.max(1000, Math.floor(this.options.verifyTimeoutMs / 3)))
+      const collectRun =
+        this.options.actuationPort !== undefined
+          ? this.options.actuationPort.collect(stockDrop, { ignoreNoPath: true })
+          : this.bot.collectBlock.collect(stockDrop, { ignoreNoPath: true })
       try {
         await Promise.race([
-          this.bot.collectBlock.collect(stockDrop, { ignoreNoPath: true }),
+          collectRun,
           delay(stockBudgetMs, signal).then(() => {
             throw new Error(`collectblock budget exhausted (${stockBudgetMs}ms)`)
           }),
@@ -2460,6 +2490,36 @@ export class Executor {
       failure,
       ms: Date.now() - startedAt,
       ...extra,
+    }
+  }
+
+  /**
+   * #79: `done` is not success. When a runner returns `done` with an unmet
+   * post-condition (`verified=false`) and zero observable change, the action is
+   * downgraded to `failed` and tagged so the controller can log ACTION_UNVERIFIED
+   * and charge the plan's unverified budget.
+   */
+  private applyPostcondition(candidate: Candidate, result: ExecutionResult): ExecutionResult {
+    const unverified = isUnverifiedOutcome({
+      kind: result.kind,
+      status: result.status,
+      verified: result.verified,
+      itemsGained: result.itemsGained,
+      blockRemoved: result.blockRemoved,
+    })
+    if (!unverified) return result
+    const postcondition = describeActionPostcondition(result.kind)
+    this.logger.warn(
+      'executor',
+      `ACTION_POSTCONDITION_UNMET actionId=${result.actionId} postcondition=${postcondition} detail=${result.detail}`,
+      { actionId: result.actionId, kind: result.kind, postcondition, progressDelta: result.itemsGained },
+    )
+    return {
+      ...result,
+      status: 'failed',
+      phase: 'unverified',
+      failure: 'verify_failed',
+      unverifiedPostcondition: postcondition,
     }
   }
 

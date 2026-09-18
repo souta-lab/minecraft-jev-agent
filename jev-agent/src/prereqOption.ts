@@ -21,6 +21,8 @@
 // Pure and bot-free so the scoring and the stall/switch policy are unit-testable.
 import type { Vec3Json } from './state.ts'
 import { distance } from './state.ts'
+import { loadGameData, preferredRecipe } from './gameData.ts'
+import { matchesResourceClass } from './resourceClass.ts'
 
 export type PrereqPath = 'place_held' | 'use_known_station' | 'craft_and_place'
 
@@ -52,8 +54,21 @@ export const PREREQ_COSTS = {
   verticalPenalty: 8,
 } as const
 
-/** Furnace recipe: 8 cobblestone in a 3x3 ring (matches planner.ts stone class). */
-export const FURNACE_STONE_COST = 8
+/**
+ * Cobblestone-equivalent units the 3x3 furnace recipe needs, derived from
+ * minecraft-data (`furnace` recipe: 8 stone-class blocks in a ring). The old
+ * hard-coded 8 is only a fallback for a missing recipe entry (#54).
+ */
+export function furnaceStoneCost(): number {
+  const recipe = preferredRecipe('furnace')
+  if (recipe === null) return 8
+  const stone = recipe.ingredients
+    .filter((ingredient) => matchesResourceClass(ingredient.item, 'stone'))
+    .reduce((total, ingredient) => total + ingredient.count, 0)
+  return stone > 0 ? stone : 8
+}
+
+export const FURNACE_STONE_COST = furnaceStoneCost()
 
 export interface PrereqGoalLike {
   kind?: string
@@ -124,6 +139,25 @@ export function formatPrereqOption(
 
 export function formatPrereqSwitch(from: PrereqPath, to: PrereqPath): string {
   return `PREREQ_SWITCH from=${from} to=${to} reason=no_progress`
+}
+
+/**
+ * The ready-to-log `PREREQ_OPTION ...` line for a SPECIFIC chosen path.
+ *
+ * After a `PREREQ_SWITCH` the controller overrides the cost-optimal path with
+ * the next-best one (`prereqForcedPath`). Logging `decision.line` then would
+ * name the path the controller did NOT take, so the marker would disagree with
+ * the actual decision (#63: a marker name is not evidence of semantics). This
+ * renders the line for the path that is actually followed; when `chosen` is the
+ * cost-optimal path it is exactly `decision.line`.
+ */
+export function formatPrereqOptionFor(decision: PrereqDecision, chosen: PrereqPath | null): string {
+  if (chosen !== null && chosen === decision.chosen) return decision.line
+  const over = decision.options.filter((option) => option.path !== chosen).map((option) => option.path)
+  if (chosen === null) return formatPrereqOption('none', [], 'no_feasible_path')
+  const option = decision.options.find((entry) => entry.path === chosen && entry.feasible)
+  if (option === undefined) return formatPrereqOption(chosen, over, `${chosen} forced`)
+  return formatPrereqOption(chosen, over, `${chosen} cost=${round1(option.cost)}`)
 }
 
 function placeHeldOption(input: PrereqInput): PrereqOption {

@@ -3,6 +3,8 @@
 // The planner must not be assumed to know world-specific item ids. It asks for a
 // class ("log", "stone", ...) and the resolver maps it to the concrete items that
 // exist in the world / inventory.
+import { isFuelItem } from './gameData.ts'
+
 export type ResourceClass = 'log' | 'planks' | 'stone' | 'fuel' | 'food' | 'pickaxe'
 
 export const RESOURCE_CLASSES: readonly ResourceClass[] = ['log', 'planks', 'stone', 'fuel', 'food', 'pickaxe']
@@ -38,8 +40,6 @@ const FOOD_ITEMS = new Set([
   'melon_slice',
   'sweet_berries',
 ])
-
-const FUEL_ITEMS = new Set(['coal', 'charcoal', 'blaze_rod', 'oak_planks', 'birch_planks', 'spruce_planks', 'stick', 'lava_bucket'])
 
 const PICKAXE_SUFFIX = '_pickaxe'
 
@@ -87,7 +87,7 @@ export function matchesResourceClass(itemName: string | null | undefined, cls: R
     case 'food':
       return FOOD_ITEMS.has(itemName)
     case 'fuel':
-      return FUEL_ITEMS.has(itemName) || itemName.endsWith(LOG_SUFFIX) || itemName.endsWith(PLANK_SUFFIX)
+      return isFuelItem(itemName)
     case 'pickaxe':
       return itemName.endsWith(PICKAXE_SUFFIX)
   }

@@ -34,6 +34,7 @@ import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
 import { ActionCancelled, defaultExecutorOptions, Executor } from './executor.ts'
 import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
+import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
@@ -72,6 +73,7 @@ import {
 import type { AbandonReason } from './placementGuard.ts'
 import {
   evaluatePrereqStall,
+  formatPrereqOptionFor,
   formatPrereqSwitch,
   nextPrereqPath,
   planPrereqOptions,
@@ -81,6 +83,7 @@ import {
 import type { PrereqDecision, PrereqPath, PrereqProgress } from './prereqOption.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
+import { evaluateUnverifiedBudget, formatActionUnverified, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -174,6 +177,14 @@ export interface JevAgentOptions {
   pathTimeoutMs: number
   digTimeoutMs: number
   actuation: ActuationMode
+  /**
+   * #38: the resident's allowlist actuation capability. When provided, the
+   * executor routes raw movement packets, entity-pose writes and stock
+   * collectblock through it (each asserts the actuation lease) instead of
+   * touching `bot._client`/`bot.collectBlock`/`bot.entity` directly. Absent in
+   * standalone runs and unit tests, where the stock actuator is used.
+   */
+  actuationPort?: ActuationPort
   /**
    * Mirror of the movement markers (DIG_PATH/STAIRCASE/DESCEND_LIMIT/...) into an
    * external sink (the resident log). The controller's own logger writes to the
@@ -394,6 +405,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PRECONDITION_PROTECTED',
   'PLACE_RETRY',
   'ABANDON_REASON',
+  'ABANDON_REASON=action_unverified',
+  'ACTION_UNVERIFIED',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -527,6 +540,8 @@ export class JevController {
   private prereqLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
+  /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
+  private readonly actionUnverified = new Map<string, number>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -735,7 +750,10 @@ export class JevController {
     }
     const plan = await this.system2.plan(request)
     this.planCalls += 1
-    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+      reason: plan.note,
+      onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
+    })
     this.subgoalCount = added.length
     this.planSupplied = true
     const restored = this.loadLedger()
@@ -1603,7 +1621,11 @@ export class JevController {
       return
     }
 
-    if (result.status === 'done') {
+    if (result.unverifiedPostcondition !== undefined) {
+      this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
+    } else if (result.status === 'done' && result.verified) {
+      const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
+      if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.delete(candidate.itemName)
       }
@@ -1693,6 +1715,70 @@ export class JevController {
         ? deferred.detail
         : { actionId: result.actionId, status: result.status, failure: result.failure }
     this.requestDecision(trigger, detail)
+  }
+
+  /**
+   * #79: a `done`/`verified=false`/`progressDelta=0` action is a FAILURE. Log
+   * ACTION_UNVERIFIED with the plan/strategy/post-condition, charge the failure,
+   * advance the furnace prerequisite path so the plan is never re-queued
+   * unchanged, and after UNVERIFIED_ACTION_LIMIT attempts for one planId emit
+   * `ABANDON_REASON=action_unverified` and wake System 2 for a different option.
+   */
+  private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
+    const planId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
+    const strategy = pending?.record.strategy ?? null
+    const key = planId ?? result.actionId
+    const attempts = (this.actionUnverified.get(key) ?? 0) + 1
+    this.actionUnverified.set(key, attempts)
+    this.logger.warn(
+      'agent',
+      formatActionUnverified({ planId, actionId: result.actionId, strategy, postcondition }),
+      { planId, actionId: result.actionId, strategy, attempts, postcondition, progressDelta: result.itemsGained, detail: result.detail },
+      this.tickCounter,
+    )
+    this.noteCandidateFailure(result.actionId)
+    this.recordFailure('verify_failed', `${result.actionId} unverified: ${result.detail}`)
+
+    const switched = this.advancePrereqAfterUnverified()
+    const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
+    if (budget.abandon) {
+      this.logger.warn(
+        'agent',
+        budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+        { planId: key, attempts, strategy, switched, postcondition },
+        this.tickCounter,
+      )
+    }
+    if (!switched) {
+      this.summonLlm(
+        budget.abandon ? 'action_impossible' : 'no_progress',
+        `action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+      )
+    }
+  }
+
+  /**
+   * #79/#58: an unverified prerequisite attempt must not repeat the same path.
+   * Advance the scored furnace-prerequisite plan to the next feasible option
+   * (place_held -> use_known_station -> craft_and_place). The parent goal is
+   * never abandoned here.
+   */
+  private advancePrereqAfterUnverified(): boolean {
+    if (this.prereqPlan === null) return false
+    const current = this.prereqForcedPath ?? this.prereqPlan.chosen
+    if (current === null) return false
+    const next = nextPrereqPath(this.prereqPlan, current)
+    if (next === null) return false
+    this.prereqForcedPath = next
+    this.prereqProgress = null
+    this.prereqLoggedKey = null
+    this.logger.warn(
+      'agent',
+      `PREREQ_SWITCH from=${current} to=${next} reason=action_unverified`,
+      { from: current, to: next, reason: 'action_unverified', goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+    return true
   }
 
   private syncTerrainSignals(state: WorldState): void {
@@ -2184,7 +2270,10 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
-        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace')
+        const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+          reason: plan.note,
+          onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+        })
         this.waitReplans = 0
         if (added.length > 0) {
           this.chosenCounts.clear()
@@ -2728,7 +2817,7 @@ export class JevController {
       this.prereqLoggedKey = logKey
       this.logger.info(
         'agent',
-        decision.line,
+        formatPrereqOptionFor(decision, chosen),
         {
           chosen,
           options: decision.options.map((option) => ({ path: option.path, feasible: option.feasible, cost: option.cost, reason: option.reason })),
@@ -3073,6 +3162,7 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
     digTimeoutMs: options.digTimeoutMs,
     goalItem: options.goalItem,
     actuation: options.actuation,
+    actuationPort: options.actuationPort,
     hooks: {
       onPathCompleted: (event) => {
         scheduler.notify('path_completed', {
