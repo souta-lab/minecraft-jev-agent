@@ -12,7 +12,7 @@
 // controller consumes the goal queue exactly as before, so the ledger and the
 // reload path are untouched.
 import type { Bot } from 'mineflayer'
-import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
@@ -276,19 +276,34 @@ function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Record<string, numbe
   return true
 }
 
-function resolveLedgerPath(ctx: GenerationContext, counts: Record<string, number>, world: ResidentWorldMemory): string | null {
+interface LedgerReconciliationDecision {
+  usablePath: string | null
+  reason: string | null
+}
+
+/**
+ * Issue #5: the generation only READS the host-owned ledger mirror. When the
+ * recorded progress is inconsistent with live inventory it reports a proposal and
+ * returns null; the HOST archives the file at the commit point. It never renames.
+ */
+function resolveLedgerPath(
+  ctx: GenerationContext,
+  counts: Record<string, number>,
+  world: ResidentWorldMemory,
+  generationId: string,
+): LedgerReconciliationDecision {
   const path = ctx.ledgerPath
-  if (!existsSync(path)) return path
+  if (!existsSync(path)) return { usablePath: path, reason: null }
   try {
     const ledger = JSON.parse(readFileSync(path, 'utf8')) as LedgerSnapshot
-    if (ledgerIsConsistent(ledger, counts, world)) return path
-    const stale = path.replace(/\.json$/, `-stale-${Date.now()}.json`)
-    renameSync(path, stale)
-    ctx.log('LEDGER_STALE', { reason: 'live inventory regressed below recorded goals', movedTo: stale })
-    return null
+    if (ledgerIsConsistent(ledger, counts, world)) return { usablePath: path, reason: null }
+    const reason = 'live inventory regressed below recorded goals'
+    ctx.proposeLedgerReconciliation({ generationId, reason })
+    ctx.log('LEDGER_STALE_PROPOSED', { reason, action: 'host-archive-at-commit' })
+    return { usablePath: null, reason }
   } catch (error) {
     ctx.log('ERROR', { where: 'resolveLedgerPath', message: error instanceof Error ? error.message : String(error) })
-    return path
+    return { usablePath: path, reason: null }
   }
 }
 
@@ -485,7 +500,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
 
   const counts = inventoryCounts(ctx.bot)
   const resume = deriveResumeRung(counts, world, (event, detail) => ctx.log(event, detail))
-  const ledgerPath = resolveLedgerPath(ctx, counts, world)
+  const ledger = resolveLedgerPath(ctx, counts, world, id)
+  const ledgerPath = ledger.usablePath
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
     dimension: ctx.bot.game?.dimension ?? null,
     placedFurnacesNear: furnaces.length,
@@ -578,7 +594,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // Bounded replan frequency: the planner also throttles LLM calls itself, but
     // keep the controller from re-summoning every tick while a goal is blocked.
     llmCooldownMs: 15000,
-    ledgerPath,
+    ledgerPath: null,
     stopAfterSubgoals: 0,
     logDir: ctx.logDir,
     // Deterministic local policy: no LLM on the hot path, `llm.called === false`
@@ -708,7 +724,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function proposeLedger(): void {
     try {
       const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
-      ctx.proposeLedger(holder.queue.snapshot())
+      ctx.proposeLedger({ ledger: holder.queue.snapshot(), baseRevision: ctx.snapshotRevision, generationId: id })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'proposeLedger', message })

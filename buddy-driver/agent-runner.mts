@@ -32,24 +32,33 @@ import type {
   GenerationModule,
   GenerationStatus,
   HazardSource,
-  KnownResourceJson,
   ResidentGeneration,
   ResidentWorldMemory,
   StructuralSmokeResult,
   Vec3Json,
   WorldKey,
-  WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import {
   capturePreLossInventory,
   parseRehearsalMode,
-  partitionHazardsBySource,
   recordRehearsalHazard,
   shouldRegisterHazard,
   type DeathTelemetry,
   type RehearsalMode,
 } from './simdeath.ts'
+import {
+  commitPendingProposals,
+  mergeHazard,
+  mergeWorldMemoryDelta,
+  newPendingProposals,
+  stageLedgerProposal,
+  stageLedgerReconciliation,
+  stageWorldMemory,
+  validateLedgerProposal,
+  writeSnapshotAtomic,
+} from './proposal-staging.ts'
+import type { PendingProposals } from './proposal-staging.ts'
 import { ActuationLeaseManager, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
@@ -221,139 +230,127 @@ function saveState(event = 'save'): void {
   }
   const revision = bumpRevision(state)
   try {
-    const tmp = `${STATE_PATH}.${process.pid}.tmp`
-    writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
-    renameSync(tmp, STATE_PATH)
+    writeSnapshotAtomic(STATE_PATH, state, `.${process.pid}.tmp`)
   } catch (error) {
     log('ERROR', { where: 'saveState', event, revision, message: error instanceof Error ? error.message : String(error) })
   }
 }
 
+const pendingByGeneration = new Map<string, PendingProposals>()
+
+/** Host-only rewrite of the derived ledger mirror (class C) from the committed
+ * class-A snapshot. The generation never writes this file (#5). */
+function writeLedgerMirror(): void {
+  if (state.ledger === null) return
+  try {
+    const tmp = `${LEDGER}.${process.pid}.tmp`
+    writeFileSync(tmp, `${JSON.stringify(state.ledger, null, 2)}\n`)
+    renameSync(tmp, LEDGER)
+  } catch (error) {
+    log('ERROR', { where: 'writeLedgerMirror', message: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+/** Host-only archive of an inconsistent derived ledger (#5 reconcile proposal). */
+function archiveReconciledLedger(reason: string): void {
+  archiveLedger(`reconcile:${reason}`)
+}
+
 /**
- * A generation proposes its ledger; the HOST validates and commits it into the
- * single class-A snapshot. A proposal from a superseded generation carries a stale
- * revision and is rejected so split-brain is impossible.
+ * Issue #40/#48 host observation: commit the ACTIVE generation's live queue. The
+ * proposal carries the active generation id so no bare write can bypass the guard.
  */
-function commitLedgerProposal(ledger: GoalQueueSnapshot, proposedRevision: number | null, source: string): void {
-  if (proposedRevision !== null && proposedRevision < state.revision) {
-    log('STATE_PROPOSAL_REJECTED', { kind: 'ledger', source, reason: 'stale-revision', proposedRevision, revision: state.revision })
+function commitHostLedger(ledger: GoalQueueSnapshot, source: string): void {
+  const generationId = leaseManager.activeId
+  const verdict = validateLedgerProposal(
+    { ledger, baseRevision: state.revision, generationId },
+    { revision: state.revision, committedGenerationId: state.generationId, activeGenerationId: generationId },
+  )
+  if (!verdict.ok) {
+    log('STATE_PROPOSAL_REJECTED', { kind: 'ledger', source, generationId, reason: verdict.reason })
     return
   }
   state.ledger = ledger
+  writeLedgerMirror()
   saveState('ledger-proposal')
 }
 
-function applyWorldMemoryDelta(delta: WorldMemoryDelta): void {
-  const memory = keyedMemory()
-  if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables)
-  if (delta.furnaces !== undefined) mergeStationDtos(memory.furnaces, delta.furnaces)
-  if (delta.discoveredOres !== undefined) {
-    for (const ore of delta.discoveredOres) {
-      if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
-    }
+/**
+ * Issue #5 commit point: apply one generation's staged proposals and commit them
+ * with exactly ONE atomic saveState. A generation that failed before this point
+ * has its proposals discarded, so durable state is externally unchanged.
+ */
+function commitStagedProposals(generationId: string, event: string): void {
+  const pending = pendingByGeneration.get(generationId)
+  if (pending === undefined) {
+    saveState(event)
+    return
   }
-  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
-  if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
-  if (delta.mined !== undefined) {
-    for (const [key, count] of Object.entries(delta.mined)) {
-      memory.mined[key] = (memory.mined[key] ?? 0) + count
-    }
-  }
-  if (delta.traversalFailures !== undefined) {
-    memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
-  }
-  if (delta.hazards !== undefined) {
-    const { production, simulation } = partitionHazardsBySource(delta.hazards)
-    for (const hazard of production) mergeHazard(memory.hazards, hazard)
-    for (const hazard of simulation) {
-      log('HAZARD_SKIPPED', { source: 'simulation', reason: hazard.reason, pos: `${hazard.x},${hazard.y},${hazard.z}`, where: 'world-memory-delta' })
-    }
-  }
+  const result = commitPendingProposals(
+    {
+      pending,
+      memory: keyedMemory(),
+      state,
+      guard: {
+        revision: state.revision,
+        committedGenerationId: state.generationId,
+        activeGenerationId: leaseManager.activeId,
+      },
+      log,
+      save: (evt) => saveState(evt),
+      reconcileLedger: archiveReconciledLedger,
+      writeLedgerMirror,
+    },
+    event,
+  )
+  log('PROPOSALS_COMMITTED', {
+    generationId,
+    event,
+    worldMemoryDeltas: result.worldMemoryDeltasApplied,
+    ledgerApplied: result.ledgerApplied,
+    ledgerRejected: result.ledgerRejected,
+    reconciliationRequested: result.reconciliationRequested,
+    writes: result.writes,
+  })
+  pendingByGeneration.delete(generationId)
+}
+
+/** A committed (non-speculative) generation's memory observation: host writes now. */
+function commitLiveWorldMemory(delta: Parameters<GenerationContext['proposeWorldMemory']>[0], source: string): void {
+  mergeWorldMemoryDelta(keyedMemory(), delta, log)
+  log('WORLDMEMORY_COMMITTED', { source })
   saveState('world-memory')
 }
 
-function hazardKey(h: { x: number; y: number; z: number }): string {
-  return `${Math.round(h.x)},${Math.round(h.y)},${Math.round(h.z)}`
+/** A committed generation's ledger proposal: host validates lineage, then writes. */
+function commitLiveLedgerProposal(proposal: Parameters<GenerationContext['proposeLedger']>[0]): void {
+  const generationId = proposal.generationId
+  const verdict = validateLedgerProposal(proposal, {
+    revision: state.revision,
+    committedGenerationId: state.generationId,
+    activeGenerationId: leaseManager.activeId,
+  })
+  if (!verdict.ok) {
+    log('STATE_PROPOSAL_REJECTED', { kind: 'ledger', source: 'generation-live', generationId, reason: verdict.reason })
+    return
+  }
+  state.ledger = proposal.ledger
+  writeLedgerMirror()
+  saveState('ledger-proposal')
 }
 
-/** Merge a death coordinate. The HOST is the only writer; two deaths at the same
- * rounded coordinate make the hazard permanent (`count >= 2`). */
-function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHazard {
-  if (found.source === 'simulation') {
-    // Defense in depth for #26: even if a caller bypasses the source gate, a
-    // rehearsal hazard is returned detached and never merged into the durable set.
-    return { ...found, count: Math.max(1, found.count) }
-  }
-  const key = hazardKey(found)
-  const existing = target.find((h) => hazardKey(h) === key)
-  if (existing === undefined) {
-    const created: DeathHazard = {
-      x: Math.round(found.x),
-      y: Math.round(found.y),
-      z: Math.round(found.z),
-      reason: found.reason,
-      count: Math.max(1, found.count),
-      firstSeenAt: found.firstSeenAt || Date.now(),
-      lastSeenAt: found.lastSeenAt || Date.now(),
-    }
-    target.push(created)
-    if (target.length > 128) target.splice(0, target.length - 128)
-    return created
-  }
-  existing.count += Math.max(1, found.count)
-  existing.reason = found.reason
-  existing.lastSeenAt = found.lastSeenAt || Date.now()
-  return existing
-}
-
-function mergeStationDtos(target: Vec3Json[], found: Vec3Json[]): number {
-  const seen = new Set(target.map((p) => `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`))
-  let added = 0
-  for (const pos of found) {
-    const key = `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    target.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) })
-    added += 1
-  }
-  return added
-}
-
-function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[]): number {
-  const seen = new Set(target.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
-  let added = 0
-  for (const resource of found) {
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (seen.has(key)) continue
-    if (target.length >= 256) break
-    seen.add(key)
-    target.push({
-      name: resource.name,
-      kind: resource.kind,
-      x: Math.round(resource.x),
-      y: Math.round(resource.y),
-      z: Math.round(resource.z),
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    })
-    added += 1
-  }
-  return added
-}
-
-function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourceJson[]): number {
-  const keys = new Set(gone.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
-  let removed = 0
-  for (let index = target.length - 1; index >= 0; index -= 1) {
-    const resource = target[index]
-    if (resource === undefined) continue
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (!keys.has(key)) continue
-    target.splice(index, 1)
-    removed += 1
-  }
-  return removed
+/** Drop a rejected/superseded generation's staged proposals without writing. */
+function discardStagedProposals(generationId: string, reason: string): void {
+  const pending = pendingByGeneration.get(generationId)
+  pendingByGeneration.delete(generationId)
+  if (pending === undefined) return
+  log('PROPOSALS_DISCARDED', {
+    generationId,
+    reason,
+    worldMemoryDeltas: pending.worldMemory.length,
+    ledger: pending.ledger !== null,
+    reconciliation: pending.ledgerReconcile !== null,
+  })
 }
 
 function archiveLedger(reason: string): void {
@@ -583,15 +580,36 @@ function runMissionPreflight(gen: ResidentGeneration): { ok: boolean; reason: st
   }
 }
 
-function makeGenerationContext(b: Bot): GenerationContext {
+function makeGenerationContext(b: Bot, pending: PendingProposals): GenerationContext {
   return {
     bot: b,
     log,
     lease,
     worldMemory: cloneMemory(keyedMemory()),
     worldKey: currentWorldKey(),
-    proposeWorldMemory: (delta) => applyWorldMemoryDelta(delta),
-    proposeLedger: (ledger, proposedRevision) => commitLedgerProposal(ledger, proposedRevision ?? null, 'generation'),
+    snapshotRevision: state.revision,
+    proposeWorldMemory: (delta) => {
+      if (pending.speculative) {
+        stageWorldMemory(pending, delta)
+        return
+      }
+      commitLiveWorldMemory(delta, 'generation')
+    },
+    proposeLedger: (proposal) => {
+      if (pending.speculative) {
+        stageLedgerProposal(pending, proposal)
+        return
+      }
+      commitLiveLedgerProposal(proposal)
+    },
+    proposeLedgerReconciliation: (proposal) => {
+      if (pending.speculative) {
+        stageLedgerReconciliation(pending, proposal)
+        return
+      }
+      archiveReconciledLedger(proposal.reason)
+      saveState('ledger-reconcile')
+    },
     ledgerSnapshot: state.ledger,
     ledgerPath: LEDGER,
     logDir: JEV_LOGS,
@@ -647,10 +665,18 @@ async function startGeneration(trigger: string): Promise<boolean> {
     scheduleGenerationRestart('module-unavailable')
     return false
   }
-  const gen = mod.createGeneration(makeGenerationContext(bot))
+  const pending = newPendingProposals()
+  const gen = mod.createGeneration(makeGenerationContext(bot, pending))
+  pending.generationId = gen.id
+  pendingByGeneration.set(gen.id, pending)
   pendingResetReason = null
   gen.attach()
-  runStructuralSmoke(gen)
+  try {
+    runStructuralSmoke(gen)
+  } catch (error) {
+    discardStagedProposals(gen.id, 'structural-smoke-failed')
+    throw error
+  }
   const preflight = runMissionPreflight(gen)
   log('MISSION_PREFLIGHT', { id: gen.id, ok: preflight.ok, goals: preflight.goalCount, reason: preflight.reason })
   acquireLease(gen.id)
@@ -658,6 +684,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
     gen.start()
   } catch (error) {
     revokeLease('start-failed')
+    discardStagedProposals(gen.id, 'start-failed')
     throw error
   }
   generation = gen
@@ -670,7 +697,7 @@ async function startGeneration(trigger: string): Promise<boolean> {
   state.generations += 1
   state.lastGenerationId = gen.id
   state.generationId = gen.id
-  saveState('generation-start')
+  commitStagedProposals(gen.id, 'generation-start')
   log('GENERATION_START', { id: gen.id, trigger, rung: gen.rungId, rungIndex: gen.rungIndex, generations: state.generations })
   watchGenerationStop(gen)
   return true
@@ -1066,7 +1093,7 @@ setInterval(() => {
       action: status.currentAction?.kind ?? 'idle',
       inv: shortInv(truth.inventory),
     })
-    commitLedgerProposal(goalQueueSnapshotFromState(status.queue), null, 'heartbeat')
+    commitHostLedger(goalQueueSnapshotFromState(status.queue), 'heartbeat')
   }
 }, OBSERVE_MS)
 
@@ -1223,6 +1250,7 @@ async function performReload(trigger: string): Promise<void> {
     log('RELOAD', { ok: false, trigger, reason: 'no live bot' })
     return
   }
+  let candidateId: string | null = null
   try {
     const built = await buildGeneration()
     if (built.outfile === currentBundle && generationModule !== null) {
@@ -1236,13 +1264,24 @@ async function performReload(trigger: string): Promise<void> {
     }
     const previous = generation
     const previousModule = generationModule
-    const next = mod.createGeneration(makeGenerationContext(bot))
+    const nextPending = newPendingProposals()
+    const next = mod.createGeneration(makeGenerationContext(bot, nextPending))
+    nextPending.generationId = next.id
+    pendingByGeneration.set(next.id, nextPending)
+    candidateId = next.id
     next.attach()
-    const smoke = runStructuralSmoke(next)
+    let smoke: StructuralSmokeResult
+    try {
+      smoke = runStructuralSmoke(next)
+    } catch (smokeError) {
+      discardStagedProposals(next.id, 'structural-smoke-failed')
+      throw smokeError
+    }
     log('SMOKE', { id: next.id, ok: smoke.ok, checks: smoke.checks.length, failures: smoke.failures })
     if (frozen) {
       // Frozen: validate and remember the new module, but do NOT swap/start it.
       // `resume` commits and starts exactly this module.
+      discardStagedProposals(next.id, 'frozen-deferred')
       generationModule = mod
       currentBundle = built.outfile
       generationHash = built.hash
@@ -1264,12 +1303,23 @@ async function performReload(trigger: string): Promise<void> {
     } catch (startError) {
       generation = null
       revokeLease('reload-start-failed')
+      discardStagedProposals(next.id, 'reload-start-failed')
       if (previous !== null && previousModule !== null) {
-        const resumed = previousModule.createGeneration(makeGenerationContext(bot))
+        const resumedPending = newPendingProposals()
+        const resumed = previousModule.createGeneration(makeGenerationContext(bot, resumedPending))
+        resumedPending.generationId = resumed.id
+        pendingByGeneration.set(resumed.id, resumedPending)
         resumed.attach()
         acquireLease(resumed.id)
         generation = resumed
-        resumed.start()
+        state.generationId = resumed.id
+        try {
+          resumed.start()
+        } catch (resumeError) {
+          discardStagedProposals(resumed.id, 'rollback-start-failed')
+          throw resumeError
+        }
+        commitStagedProposals(resumed.id, 'reload-rollback')
         log('RELOAD_ROLLBACK', { from: next.id, resumed: resumed.id })
       }
       throw startError
@@ -1281,7 +1331,7 @@ async function performReload(trigger: string): Promise<void> {
     lastActionId = null
     if (previous !== null) previous.dispose()
     stats.reloadsChangedHash += 1
-    saveState('reload-commit')
+    commitStagedProposals(next.id, 'reload-commit')
     const counts = listenerCounts()
     log('RELOAD', {
       ok: true,
@@ -1297,6 +1347,7 @@ async function performReload(trigger: string): Promise<void> {
     watchGenerationStop(next)
   } catch (error) {
     stats.reloadsFailed += 1
+    if (candidateId !== null) discardStagedProposals(candidateId, 'reload-failed')
     const message = error instanceof Error ? error.message : String(error)
     log('ERROR', { where: 'performReload', trigger, message })
     log('RELOAD_REJECTED', { trigger, message, action: 'keep-previous-generation' })

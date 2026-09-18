@@ -143,6 +143,28 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   return memory
 }
 
+/**
+ * Issue #48: a class-A mutation proposal is never bare data. It carries the
+ * revision it was based on AND the generation that produced it, so the host can
+ * reject a stale/superseded proposal and no caller can silently bypass the guard.
+ */
+export interface LedgerProposalEnvelope {
+  ledger: GoalQueueSnapshot
+  /** class-A snapshot revision the generating generation was constructed from */
+  baseRevision: number
+  /** generation id that produced the proposal */
+  generationId: string
+}
+
+/**
+ * Issue #5: the generation may not archive/rename the host-owned ledger. It
+ * reports the inconsistency and the HOST archives it at the commit point.
+ */
+export interface LedgerReconciliationProposal {
+  generationId: string
+  reason: string
+}
+
 /** What the generation proposes; the HOST is the only writer that commits it. */
 export interface WorldMemoryDelta {
   craftingTables?: Vec3Json[]
@@ -356,14 +378,20 @@ export interface GenerationContext {
   worldMemory: ResidentWorldMemory
   /** the world key this generation runs under. */
   worldKey: WorldKey
-  /** the generation proposes memory deltas; the HOST commits them. */
+  /** the class-A revision this generation was constructed from (#48 lineage). */
+  snapshotRevision: number
+  /** the generation stages memory deltas; the HOST commits them at the commit point. */
   proposeWorldMemory(delta: WorldMemoryDelta): void
   /**
-   * Issue #40: the generation PROPOSES its authoritative ledger (class A); the
-   * HOST is the only writer and commits it atomically. `proposedRevision` lets the
-   * host reject a stale proposal from a superseded generation.
+   * Issue #40/#48: the generation PROPOSES its authoritative ledger (class A); the
+   * HOST validates lineage/revision and commits it atomically. Never a bare write.
    */
-  proposeLedger(ledger: GoalQueueSnapshot, proposedRevision?: number): void
+  proposeLedger(proposal: LedgerProposalEnvelope): void
+  /**
+   * Issue #5: report that the derived ledger mirror is inconsistent; the HOST
+   * archives it at the commit point. The generation must never rename it.
+   */
+  proposeLedgerReconciliation(proposal: LedgerReconciliationProposal): void
   /** class-A ledger the HOST committed; the generation restores from THIS, not cache/logs. */
   ledgerSnapshot: GoalQueueSnapshot | null
   /** goal-queue ledger path handed to the controller (derived compatibility mirror). */
