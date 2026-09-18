@@ -26,6 +26,7 @@ import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
+import { describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -80,6 +81,13 @@ export interface ExecutionResult {
   goalItemCount: number
   /** item the action actually produced (MINE drop or crafted item), when known */
   yieldItem?: string | null
+  /**
+   * #79: set when the action finished `done` but its post-condition was unmet
+   * with zero observable change (verified=false, progressDelta=0, no block
+   * removed). The result is downgraded to `failed`; the controller logs
+   * ACTION_UNVERIFIED and charges the unverified budget against the plan.
+   */
+  unverifiedPostcondition?: string
   ms: number
 }
 
@@ -495,11 +503,12 @@ export class Executor {
 
     void this.runAction(candidate, epoch, controller.signal, startedAt)
       .then((result) => {
-        action.status = result.status
-        action.detail = result.detail
-        this.lastResultValue = result
+        const finalResult = this.applyPostcondition(candidate, result)
+        action.status = finalResult.status
+        action.detail = finalResult.detail
+        this.lastResultValue = finalResult
         this.release(epoch)
-        resolveCompletion(result)
+        resolveCompletion(finalResult)
       })
       // runAction never rejects (it converts every failure into a result), so
       // this only fires on a programming error - never as a silent swallow.
@@ -2482,6 +2491,36 @@ export class Executor {
       failure,
       ms: Date.now() - startedAt,
       ...extra,
+    }
+  }
+
+  /**
+   * #79: `done` is not success. When a runner returns `done` with an unmet
+   * post-condition (`verified=false`) and zero observable change, the action is
+   * downgraded to `failed` and tagged so the controller can log ACTION_UNVERIFIED
+   * and charge the plan's unverified budget.
+   */
+  private applyPostcondition(candidate: Candidate, result: ExecutionResult): ExecutionResult {
+    const unverified = isUnverifiedOutcome({
+      kind: result.kind,
+      status: result.status,
+      verified: result.verified,
+      itemsGained: result.itemsGained,
+      blockRemoved: result.blockRemoved,
+    })
+    if (!unverified) return result
+    const postcondition = describeActionPostcondition(result.kind)
+    this.logger.warn(
+      'executor',
+      `ACTION_POSTCONDITION_UNMET actionId=${result.actionId} postcondition=${postcondition} detail=${result.detail}`,
+      { actionId: result.actionId, kind: result.kind, postcondition, progressDelta: result.itemsGained },
+    )
+    return {
+      ...result,
+      status: 'failed',
+      phase: 'unverified',
+      failure: 'verify_failed',
+      unverifiedPostcondition: postcondition,
     }
   }
 

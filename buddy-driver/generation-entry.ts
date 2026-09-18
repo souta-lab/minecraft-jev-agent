@@ -49,16 +49,32 @@ import {
 } from './planner.ts'
 import type {
   GenerationContext,
+  GenerationResources,
   GenerationStatus,
   KnownResourceJson,
+  KnownStation,
   MissionPreflightResult,
   ResidentGeneration,
   ResidentWorldMemory,
   ServerTruth,
+  StationKind,
   StructuralSmokeResult,
   Vec3Json,
   WorldMemoryDelta,
 } from './resident-types.ts'
+import {
+  applyStationFailure,
+  isStationSelectable,
+  normalizeStation,
+  registerStation,
+  stationAgeTicks,
+  stationBlockMatches,
+  stationInvalidatedDetail,
+  stationKey,
+  stationRegisteredDetail,
+  stationVerifiedDetail,
+  validateStationProbe,
+} from './station-memory.ts'
 
 export const CONTRACT_VERSION = 3
 
@@ -81,18 +97,103 @@ function assertCraftCapability(bot: Bot, log: (event: string, detail?: Record<st
 
 export { debugFrontier }
 
-function roundPos(p: Vec3Json): string {
-  return `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`
+const STATION_VALIDATION_RADIUS = 48
+
+type StationLog = (event: string, detail?: Record<string, unknown>) => void
+
+function liveBlockNameAt(bot: Bot, position: Vec3Json): string | null {
+  try {
+    return bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null
+  } catch {
+    return null
+  }
 }
 
-function mergeStations(target: Vec3Json[], found: Vec3Json[]): number {
-  const seen = new Set(target.map(roundPos))
+function asVec3Json(value: unknown): Vec3Json | null {
+  if (value === null || typeof value !== 'object') return null
+  const candidate = value as { x?: unknown; y?: unknown; z?: unknown }
+  if (typeof candidate.x !== 'number' || typeof candidate.y !== 'number' || typeof candidate.z !== 'number') return null
+  return { x: candidate.x, y: candidate.y, z: candidate.z }
+}
+
+function removeStation(stations: KnownStation[], station: KnownStation): void {
+  const key = stationKey(station)
+  for (let index = stations.length - 1; index >= 0; index -= 1) {
+    const current = stations[index]
+    if (current !== undefined && stationKey(current) === key) stations.splice(index, 1)
+  }
+}
+
+/**
+ * Issue #31: validate every remembered station against live world truth. A
+ * loaded cell with the wrong block (or air) fails `missing`; an unloaded cell
+ * older than the staleness budget fails `stale`; a loaded matching block is
+ * re-verified. Failures accumulate on the durable record and invalidate it at
+ * STATION_MAX_FAILURES, at which point it is returned in `removed`.
+ */
+function validateRememberedStations(
+  bot: Bot,
+  kind: StationKind,
+  stations: KnownStation[],
+  liveFound: readonly Vec3Json[],
+  now: number,
+  log: StationLog,
+): { kept: KnownStation[]; removed: KnownStation[] } {
+  const liveNames = new Map<string, string>()
+  for (const position of liveFound) {
+    const name = liveBlockNameAt(bot, position)
+    if (name !== null) liveNames.set(stationKey(position), name)
+  }
+  const entity = bot.entity
+  const kept: KnownStation[] = []
+  const removed: KnownStation[] = []
+  for (const station of stations) {
+    const key = stationKey(station)
+    let liveBlockName = liveNames.get(key) ?? null
+    if (liveBlockName === null && entity !== undefined) {
+      const distance = Math.hypot(entity.position.x - station.x, entity.position.y - station.y, entity.position.z - station.z)
+      if (distance <= STATION_VALIDATION_RADIUS) liveBlockName = liveBlockNameAt(bot, station)
+    }
+    const result = validateStationProbe({ station, kind, liveBlockName, reachable: null, now })
+    if (result.outcome === 'verified') {
+      log('STATION_VERIFIED', stationVerifiedDetail(kind, station))
+      kept.push(station)
+      continue
+    }
+    if (result.outcome === 'stale') {
+      log('STATION_INVALIDATED', stationInvalidatedDetail(kind, station, 'stale', stationAgeTicks(station, now)))
+      removed.push(station)
+      continue
+    }
+    if (result.outcome === 'missing' || result.outcome === 'unreachable') {
+      log('STATION_INVALIDATED', stationInvalidatedDetail(kind, station, result.outcome))
+      if (result.invalidated) removed.push(station)
+      else kept.push(station)
+      continue
+    }
+    kept.push(station)
+  }
+  return { kept, removed }
+}
+
+function registerLiveStations(
+  bot: Bot,
+  kind: StationKind,
+  stations: KnownStation[],
+  liveFound: readonly Vec3Json[],
+  now: number,
+  log: StationLog,
+): number {
+  const known = new Set(stations.map((station) => stationKey(station)))
   let added = 0
-  for (const pos of found) {
-    const key = roundPos(pos)
-    if (seen.has(key)) continue
-    seen.add(key)
-    target.push({ x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z) })
+  for (const position of liveFound) {
+    const key = stationKey(position)
+    if (known.has(key)) continue
+    const liveBlockName = liveBlockNameAt(bot, position)
+    if (liveBlockName === null || !stationBlockMatches(kind, liveBlockName)) continue
+    registerStation(stations, kind, position, now)
+    log('STATION_REGISTERED', stationRegisteredDetail(kind, position))
+    known.add(key)
     added += 1
   }
   return added
@@ -236,8 +337,14 @@ function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function delay(ms: number, resources?: GenerationResources): Promise<void> {
+  return new Promise((resolve) => {
+    const handle = setTimeout(() => {
+      resources?.untrackTimer(handle)
+      resolve()
+    }, ms)
+    resources?.trackTimer(handle)
+  })
 }
 
 interface LedgerGoal {
@@ -401,10 +508,12 @@ function buildMercurySummary(
 
 export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const startedAt = Date.now()
+  const now = startedAt
+  const counts = inventoryCounts(ctx.bot)
   assertCraftCapability(ctx.bot, ctx.log)
   const world: ResidentWorldMemory = {
-    craftingTables: ctx.worldMemory.craftingTables.map((p) => ({ ...p })),
-    furnaces: ctx.worldMemory.furnaces.map((p) => ({ ...p })),
+    craftingTables: ctx.worldMemory.craftingTables.map((station) => normalizeStation(station, 'crafting_table', now)),
+    furnaces: ctx.worldMemory.furnaces.map((station) => normalizeStation(station, 'furnace', now)),
     mined: { ...ctx.worldMemory.mined },
     discoveredOres: [...ctx.worldMemory.discoveredOres],
     knownResources: (ctx.worldMemory.knownResources ?? []).map((resource) => ({ ...resource })),
@@ -412,7 +521,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.log)
+  const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
   // surface check proves the nested capabilities are guarded, not raw.
@@ -434,8 +543,79 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     64,
   )
   const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64)
-  const newTables = mergeStations(world.craftingTables, tables)
-  const newFurnaces = mergeStations(world.furnaces, furnaces)
+  const stationRuntimeLog = (event: string, detail?: Record<string, unknown>): void => ctx.log(event, detail)
+  const tableValidation = validateRememberedStations(bot, 'crafting_table', world.craftingTables, tables, now, stationRuntimeLog)
+  const furnaceValidation = validateRememberedStations(bot, 'furnace', world.furnaces, furnaces, now, stationRuntimeLog)
+  const newTables = registerLiveStations(bot, 'crafting_table', tableValidation.kept, tables, now, stationRuntimeLog)
+  const newFurnaces = registerLiveStations(bot, 'furnace', furnaceValidation.kept, furnaces, now, stationRuntimeLog)
+  const durableTables = tableValidation.kept
+  const durableFurnaces = furnaceValidation.kept
+  const removedStations: KnownStation[] = [...tableValidation.removed, ...furnaceValidation.removed]
+  world.craftingTables = durableTables.filter((station) => isStationSelectable(station, now))
+  world.furnaces = durableFurnaces.filter((station) => isStationSelectable(station, now))
+
+  const runtimeFailedStations = new Set<string>()
+
+  function durableStations(kind: StationKind): KnownStation[] {
+    return kind === 'furnace' ? durableFurnaces : durableTables
+  }
+
+  function stationRuntimeFailure(kind: StationKind, position: Vec3Json): void {
+    const dedupeKey = `${kind}:${stationKey(position)}`
+    if (runtimeFailedStations.has(dedupeKey)) return
+    runtimeFailedStations.add(dedupeKey)
+    const durable = durableStations(kind)
+    let station = durable.find((current) => (current.kind ?? kind) === kind && stationKey(current) === stationKey(position))
+    if (station === undefined) {
+      station = normalizeStation(position, kind, now)
+      durable.push(station)
+    }
+    const result = applyStationFailure(station, 'unreachable', Date.now())
+    stationRuntimeLog('STATION_INVALIDATED', stationInvalidatedDetail(kind, station, 'unreachable'))
+    if (result.invalidated) removeStation(durable, station)
+    removeStation(kind === 'furnace' ? world.furnaces : world.craftingTables, station)
+    ctx.proposeWorldMemory({
+      ...(kind === 'furnace' ? { furnaces: [...durable] } : { craftingTables: [...durable] }),
+      ...(result.invalidated ? { removeStations: [station] } : {}),
+    })
+  }
+
+  function stationRuntimeUse(kind: StationKind, position: Vec3Json): void {
+    const durable = durableStations(kind)
+    const registered = registerStation(durable, kind, position, Date.now())
+    const selectable = kind === 'furnace' ? world.furnaces : world.craftingTables
+    if (!selectable.some((current) => stationKey(current) === stationKey(registered))) selectable.push(registered)
+    stationRuntimeLog('STATION_REGISTERED', stationRegisteredDetail(kind, position))
+    ctx.proposeWorldMemory(kind === 'furnace' ? { furnaces: [...durable] } : { craftingTables: [...durable] })
+  }
+
+  function handleStationEvent(event: string, detail: Record<string, unknown> | undefined): void {
+    if (event === 'KNOWN_RESOURCE_UNREACHABLE') {
+      const item = typeof detail?.item === 'string' ? detail.item : null
+      const at = asVec3Json(detail?.at)
+      if (at !== null && (item === 'furnace' || item === 'crafting_table')) stationRuntimeFailure(item, at)
+      return
+    }
+    if (event === 'RETRIEVE_STALLED') {
+      const at = asVec3Json(detail?.target)
+      if (at === null) return
+      for (const kind of ['furnace', 'crafting_table'] as const) {
+        if (durableStations(kind).some((current) => stationKey(current) === stationKey(at))) stationRuntimeFailure(kind, at)
+      }
+      return
+    }
+    if (event === 'FURNACE_READY') {
+      const at = asVec3Json(detail?.target)
+      if (at !== null) stationRuntimeUse('furnace', at)
+    }
+  }
+
+  const heldStationItems = new Set(['furnace', 'crafting_table'].filter((item) => (counts[item] ?? 0) > 0))
+  const unusableStationKeys = new Set<string>()
+  for (const station of [...durableFurnaces, ...durableTables]) {
+    if (isStationSelectable(station, now)) continue
+    unusableStationKeys.add(`${station.kind ?? 'furnace'}:${stationKey(station)}`)
+  }
   const discoveredOres: string[] = []
   const foundResources: KnownResourceJson[] = []
   const seenAt = Date.now()
@@ -475,8 +655,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     ctx.worldKey.worldEpoch,
   )
   const proposal: WorldMemoryDelta = {
-    craftingTables: tables,
-    furnaces,
+    craftingTables: durableTables,
+    furnaces: durableFurnaces,
+    removeStations: removedStations,
     discoveredOres,
     knownResources: foundResources,
     removeKnownResources: staleRemovals,
@@ -493,9 +674,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: world.discoveredOres,
     knownResources: world.knownResources.length,
     newKnownResources,
+    removedStations: removedStations.length,
   })
 
-  const counts = inventoryCounts(ctx.bot)
   const resume = deriveResumeRung(counts, world, (event, detail) => ctx.log(event, detail))
   const ledgerPath = resolveLedgerPath(ctx, counts, world)
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
@@ -602,20 +783,31 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     reach: 5,
     scanRadius: 48,
     verbose: true,
-    eventSink: (event, detail) => ctx.log(event, detail),
+    eventSink: (event, detail) => {
+      ctx.log(event, detail)
+      handleStationEvent(event, detail)
+    },
     knownResources: [
-      ...world.knownResources.map((resource) => ({
-        name: resource.name,
-        kind: resource.kind,
-        position: { x: resource.x, y: resource.y, z: resource.z },
-        ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-        ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      })),
-      ...world.furnaces.map((furnace) => ({
-        name: 'furnace',
-        kind: 'station' as const,
-        position: { x: furnace.x, y: furnace.y, z: furnace.z },
-      })),
+      ...world.knownResources
+        .filter((resource) => {
+          if (resource.kind !== 'station') return true
+          if (heldStationItems.has(resource.name)) return false
+          return !unusableStationKeys.has(`${resource.name}:${stationKey(resource)}`)
+        })
+        .map((resource) => ({
+          name: resource.name,
+          kind: resource.kind,
+          position: { x: resource.x, y: resource.y, z: resource.z },
+          ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+          ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+        })),
+      ...(heldStationItems.has('furnace')
+        ? []
+        : world.furnaces.map((furnace) => ({
+            name: 'furnace',
+            kind: 'station' as const,
+            position: { x: furnace.x, y: furnace.y, z: furnace.z },
+          }))),
     ],
   }
 
@@ -715,7 +907,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     }
     proposeLedger()
     // Bounded settle: the executor cancels the in-flight action on stop.
-    await Promise.race([runPromise ?? Promise.resolve(), delay(3000)])
+    await Promise.race([runPromise ?? Promise.resolve(), delay(3000, ctx.resources)])
   }
 
   function proposeLedger(): void {

@@ -11,6 +11,8 @@
 import type { Bot } from 'mineflayer'
 import type { GoalQueueState } from './goalQueue.ts'
 import { resourceMatches } from './resourceClass.ts'
+import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
+import type { GameDataRegistry } from './gameData.ts'
 
 export type Vec3Json = {
   x: number
@@ -88,16 +90,12 @@ export type BlockKind = 'log' | 'stone' | 'ore' | 'hazard'
 
 export type HarvestTool = 'pickaxe' | 'axe' | 'shovel'
 
-/** Rank of a pickaxe family: index 0 is the weakest that can harvest anything. */
-export const PICKAXE_RANKS: Readonly<Record<string, number>> = {
-  wooden_pickaxe: 0,
-  golden_pickaxe: 1,
-  copper_pickaxe: 1,
-  stone_pickaxe: 2,
-  iron_pickaxe: 3,
-  diamond_pickaxe: 4,
-  netherite_pickaxe: 5,
-}
+/**
+ * Rank of a pickaxe family: index 0 is the weakest that can harvest anything.
+ * Owned by `gameData.ts` (#54); re-exported here so existing callers do not
+ * change.
+ */
+export const PICKAXE_RANKS: Readonly<Record<string, number>> = PICKAXE_TIER0
 
 export type BlockState = {
   kind: BlockKind
@@ -362,46 +360,12 @@ export const ORE_SOURCES: Readonly<Record<string, readonly string[]>> = {
 /** Every block name that can be an ore target, regardless of the focus item. */
 export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_SOURCES).flat())]
 
-interface RegistryShape {
-  blocksByName?: Record<string, { drops?: number[]; harvestTools?: Record<string, boolean> }>
-  items?: Record<number, { name?: string }>
-  itemsByName?: Record<string, { id?: number }>
-}
-
-function registryShape(bot: Bot): RegistryShape {
-  return (bot.registry ?? {}) as RegistryShape
-}
-
 /** Resolve a block's primary drop, required tool class and required pickaxe rank. */
 export function resolveBlockHarvest(
   bot: Bot,
   blockName: string,
 ): { yield: string | null; harvestTool: HarvestTool | null; harvestTier: number | null } {
-  const reg = registryShape(bot)
-  const info = reg.blocksByName?.[blockName]
-  if (info === undefined) return { yield: null, harvestTool: null, harvestTier: null }
-  const dropId = info.drops?.[0]
-  let yieldName: string | null = null
-  if (typeof dropId === 'number') {
-    yieldName = reg.items?.[dropId]?.name ?? null
-  }
-  let harvestTool: HarvestTool | null = null
-  let harvestTier: number | null = null
-  const tools = info.harvestTools
-  if (tools !== null && typeof tools === 'object') {
-    for (const toolId of Object.keys(tools)) {
-      const toolName = reg.items?.[Number(toolId)]?.name ?? ''
-      if (toolName.endsWith('_pickaxe')) {
-        harvestTool = 'pickaxe'
-        const rank = PICKAXE_RANKS[toolName]
-        if (rank !== undefined && (harvestTier === null || rank < harvestTier)) harvestTier = rank
-        continue
-      }
-      if (toolName.endsWith('_axe')) harvestTool = harvestTool ?? 'axe'
-      if (toolName.endsWith('_shovel')) harvestTool = harvestTool ?? 'shovel'
-    }
-  }
-  return { yield: yieldName ?? blockName, harvestTool, harvestTier }
+  return resolveHarvest((bot.registry ?? {}) as GameDataRegistry, blockName)
 }
 
 function blockVisible(bot: Bot, block: { position: { x: number; y: number; z: number } }, inReach: boolean): boolean {

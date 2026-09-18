@@ -6,6 +6,7 @@
 //   plugin capability   (bot.collectBlock.collect)
 //   direct state change (bot.entity.position.set / entity.yaw =)
 import type { Bot } from 'mineflayer'
+import type { Entity } from 'prismarine-entity'
 import { Vec3 } from 'vec3'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import {
@@ -125,7 +126,7 @@ addCase('#38 denied lease: collectBlock.collect is refused and never invoked', (
   manager.revoke('end')
   let rejected = false
   try {
-    const run = port.collect({ id: 7 })
+    const run = port.collect({ id: 7 } as unknown as Entity)
     run.catch(() => undefined)
   } catch (error) {
     rejected = error instanceof Error && error.message.includes('ACTUATION_LEASE_DENIED')

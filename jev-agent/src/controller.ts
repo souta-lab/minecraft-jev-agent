@@ -26,8 +26,18 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { blockId, countBlockedLogs, defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, furnacePrereqInputFromState, generateCandidates, goalCollectsFuel, goalWantsFuel, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions } from './candidates.ts'
-import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId } from './causal.ts'
+import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
+import {
+  classifyAbandonRequest,
+  formatAbandonEnforced,
+  formatAbandonSuppressed,
+  OptionAttemptTracker,
+  resolveAbandonCooldownMs,
+  resolveUnproductiveAttemptLimit,
+  selectLadderOption,
+} from './abandonPolicy.ts'
+import type { AbandonClassification } from './abandonPolicy.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -53,6 +63,18 @@ import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
 import { formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
+import {
+  detectOscillation,
+  filterBlacklistedMoves,
+  formatMoveFailMem,
+  formatMoveFailMemReset,
+  formatMoveTargetSkipped,
+  formatOscillationDetected,
+  isTrackedMoveKind,
+  MoveFailMemory,
+  moveFailureKey,
+} from './moveFailMemory.ts'
+import type { MoveFailureReason } from './moveFailMemory.ts'
 import { evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
@@ -91,6 +113,7 @@ import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
+import { evaluateUnverifiedBudget, formatActionUnverified, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -177,6 +200,14 @@ export interface JevAgentOptions {
    * a replan, still subject to the deterministic prerequisite guard.
    */
   betaAuthority: boolean
+  /**
+   * #79: after this many settled attempts with `verified=false && progress=0`,
+   * an abandon request is enforced even while `betaAuthority=false` (shadow).
+   * A never-attempted option stays protected (speculative suppression).
+   */
+  unproductiveAttemptLimit: number
+  /** #79: how long an enforced option stays retired before it may be retried. */
+  abandonCooldownMs: number
   verbose: boolean
   scanRadius: number
   reach: number
@@ -240,6 +271,8 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   logDir: 'logs',
   forceFallbackPolicy: false,
   betaAuthority: resolveBetaAuthority(),
+  unproductiveAttemptLimit: resolveUnproductiveAttemptLimit(),
+  abandonCooldownMs: resolveAbandonCooldownMs(),
   verbose: true,
   scanRadius: 48,
   reach: 4.5,
@@ -344,6 +377,35 @@ const DESCEND_STALL_TICKS = resolveDescendStallTicks()
 const DESCEND_NO_CANDIDATE_TICKS = resolveDescendNoCandidateTicks()
 /** Distance decrease (m) that counts as real retrieval progress. */
 const RETRIEVAL_PROGRESS_EPSILON = 0.5
+/** Issue #8: failed attempts at one coordinate before it is blacklisted. */
+const MOVE_FAILMEM_LIMIT = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_LIMIT', 3)
+/** Issue #8: how long a blacklisted coordinate stays skipped. */
+const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLDOWN_MS', 30_000)
+/** Issue #8: bound on tracked coordinates (least-failed/oldest evicted first). */
+const MOVE_FAILMEM_MAX_ENTRIES = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_MAX_ENTRIES', 256)
+/** Issue #8: do not re-log the same oscillating pair more often than this. */
+const OSCILLATION_REPEAT_LOG_MS = 5_000
+
+function resolveEnvPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+/** Map an executor failure code onto a movement-failure reason. */
+function moveFailureReason(failure: string | null): MoveFailureReason {
+  switch (failure) {
+    case 'path_no_path':
+      return 'no_path'
+    case 'path_stuck':
+    case 'path_timeout':
+    case 'action_timeout':
+      return 'stuck'
+    default:
+      return 'unreachable'
+  }
+}
 
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
@@ -387,6 +449,17 @@ interface PendingDecision {
   healthAtDecision: number
 }
 
+/** #79: the controller's actual abandon decision for one Jev result. */
+interface AbandonVerdict {
+  adopt: boolean
+  enforced: boolean
+  suppressed: boolean
+  classification: AbandonClassification
+  vote: BetaAuthorityDecision
+  optionId: string
+  planId: string | null
+}
+
 const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'JEV_HEADS',
   'BETA_SHADOW',
@@ -403,6 +476,10 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCEND_PROGRESS',
   'DIG_OSCILLATE',
   'MOVE_OSCILLATE',
+  'MOVE_FAILMEM',
+  'MOVE_FAILMEM_RESET',
+  'MOVE_TARGET_SKIPPED',
+  'OSCILLATION_DETECTED',
   'RETURN_TO_KNOWN_RESOURCE',
   'RETRIEVE_STALLED',
   'KNOWN_RESOURCE_STALE',
@@ -418,6 +495,8 @@ const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'FURNACE_READY',
   'SMELT_DONE',
   'OSCILLATION_DETECTED',
+  'ABANDON_REASON=action_unverified',
+  'ACTION_UNVERIFIED',
 ])
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -517,6 +596,12 @@ export class JevController {
   private lastDecisionId: string | null = null
   /** whether the last beta abandon vote actually led to a replan (#46 guard). */
   private lastAbandonAdopted = false
+  /** #79: per-option unproductive-attempt counter (reset on verified progress). */
+  private readonly optionAttempts = new OptionAttemptTracker()
+  /** #79: prereq paths retired by enforcement, keyed by goal then path. */
+  private readonly abandonedPrereqPaths = new Map<string, Map<PrereqPath, number>>()
+  /** #79: the prereq path chosen on the last tick, retired on enforcement. */
+  private prereqChosenPath: PrereqPath | null = null
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastProgress = 0
@@ -540,6 +625,16 @@ export class JevController {
   private readonly unreachableResources = new Set<string>()
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
+  /** #8: exact coordinate failure memory (count, cooldown, dimension). */
+  private readonly moveFailMemory = new MoveFailMemory({
+    failureLimit: MOVE_FAILMEM_LIMIT,
+    cooldownMs: MOVE_FAILMEM_COOLDOWN_MS,
+    maxEntries: MOVE_FAILMEM_MAX_ENTRIES,
+  })
+  /** #8: the movement target currently owning the body, blacklisted on oscillation. */
+  private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
+  private lastOscillationPair: string | null = null
+  private lastOscillationAt = 0
   /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
   private readonly placementRetries = new Map<string, number>()
   /** #46: sensor-visible placed furnaces, kept for the replan protection guard. */
@@ -552,11 +647,13 @@ export class JevController {
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
   /** #78: options excluded for the current goal after repeated unverified failure. */
-  private readonly abandonedPrereqPaths = new Set<PrereqPath>()
+  private readonly abandonedRetrievePaths = new Set<PrereqPath>()
   /** #78: consecutive `verified=false progressDelta=0` retrieve outcomes. */
   private retrieveUnverified: RetrieveUnverifiedState | null = null
   /** #78: last quantized position / swap pair / state signature. */
   private oscillationState: OscillationState | null = null
+  /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
+  private readonly actionUnverified = new Map<string, number>()
 
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
@@ -992,6 +1089,7 @@ export class JevController {
 
       let candidates = generateCandidates(state, candidateOptions(this.options, this.recipeIndex))
       candidates = this.applyFurnacePrereq(state, candidates)
+      candidates = this.filterMoveCandidates(candidates, state)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -1101,7 +1199,11 @@ export class JevController {
         },
         sensorOptions(this.options),
       )
-      const freshCandidates = generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex))
+      const freshCandidates = this.filterMoveCandidates(
+        generateCandidates(freshState, candidateOptions(this.options, this.recipeIndex)),
+        freshState,
+        false,
+      )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
         this.guardRejections += 1
@@ -1153,6 +1255,7 @@ export class JevController {
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
+      this.rememberMoveTarget(guarded.candidate)
 
       const claim = this.executor.claim(guarded.candidate)
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
@@ -1218,32 +1321,148 @@ export class JevController {
     })
   }
 
-  private logHeads(result: JevResult, chainId: string | null = null): void {
+  private logHeads(result: JevResult, verdict: AbandonVerdict, chainId: string | null = null): void {
     const action = decisionIdFrom(result) ?? 'WAIT'
     const abandon = result.answers.abandon_option?.probability ?? null
-    const vote = this.betaDecision(result)
-    // JEV_HEADS reports what the controller ACTUALLY did, never beta's raw vote.
-    // In the default shadow mode a β=1 logs `-> continue` and ABANDON_REASON is
-    // not emitted; the vote survives only in the BETA_SHADOW record.
+    const vote = verdict.vote
     this.logger.info(
       'heads',
-      formatJevHeads(action, abandon, vote.adopt),
+      formatJevHeads(action, abandon, verdict.adopt),
       {
         action,
         abandon,
-        decision: vote.adopt ? 'replan' : 'continue',
+        decision: verdict.adopt ? 'replan' : 'continue',
         abandonRequested: abandonRequested(result),
         betaAuthority: this.options.betaAuthority,
         betaShadowed: vote.shadowed,
+        abandonEnforced: verdict.enforced,
+        abandonSuppressed: verdict.suppressed,
+        attempts: verdict.classification.attempts,
         chainId,
       },
       this.tickCounter,
     )
-    if (vote.adopt) {
+    if (verdict.adopt) {
       const reason = this.abandonReason(action, abandon)
       const option = action === 'WAIT' ? 'none' : prerequisiteOptionName(action)
       this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
     }
+  }
+
+  /**
+   * #79: decide what to do with one abandon request. Uses the per-option
+   * attempt counter, so a SPECULATIVE request (attempts < limit) is suppressible
+   * in shadow mode while a DEMONSTRABLY UNPRODUCTIVE one (attempts >= limit with
+   * verified=false && progress=0) is enforced regardless of `betaAuthority`.
+   */
+  private abandonVerdict(decision: JevResult, optionId: string, planId: string | null): AbandonVerdict {
+    const requested = abandonRequested(decision)
+    const now = Date.now()
+    const state = this.optionAttempts.stateFor(optionId, planId)
+    const classification = classifyAbandonRequest({
+      abandonRequested: requested,
+      betaAuthority: this.options.betaAuthority,
+      attempts: state.attempts,
+      lastVerified: state.verified,
+      lastProgressDelta: state.progressDelta,
+      attemptLimit: this.options.unproductiveAttemptLimit,
+      alreadyAbandoned: this.optionAttempts.isAbandoned(optionId, planId, now, this.options.abandonCooldownMs),
+    })
+    const vote = this.betaDecision(decision)
+    if (!requested) return { adopt: false, enforced: false, suppressed: false, classification, vote, optionId, planId }
+    if (classification.reason === 'unproductive') {
+      return { adopt: true, enforced: true, suppressed: false, classification, vote, optionId, planId }
+    }
+    if (classification.reason === 'authority') {
+      return { adopt: vote.adopt, enforced: false, suppressed: vote.shadowed, classification, vote, optionId, planId }
+    }
+    return { adopt: false, enforced: false, suppressed: classification.suppressed, classification, vote, optionId, planId }
+  }
+
+  private applyAbandon(result: JevResult, verdict: AbandonVerdict): boolean {
+    if (verdict.enforced) {
+      const probability = result.answers.abandon_option?.probability ?? null
+      this.logger.warn(
+        'heads',
+        formatAbandonEnforced({
+          optionId: verdict.optionId,
+          attempts: verdict.classification.attempts,
+          verified: verdict.classification.verified,
+          progressDelta: verdict.classification.progressDelta,
+          betaAuthority: this.options.betaAuthority,
+          betaShadowed: verdict.vote.shadowed,
+          abandonRequested: true,
+        }),
+        {
+          optionId: verdict.optionId,
+          planId: verdict.planId,
+          attempts: verdict.classification.attempts,
+          betaAuthority: this.options.betaAuthority,
+          betaShadowed: verdict.vote.shadowed,
+          abandonRequested: true,
+          action: 'abandon',
+        },
+        this.tickCounter,
+      )
+      this.enforceUnproductiveAbandon(verdict.optionId, verdict.planId, verdict.classification.attempts, probability)
+      return true
+    }
+    if (this.options.betaAuthority) return this.adoptAbandon(result)
+    if (verdict.suppressed && abandonRequested(result)) {
+      this.logger.info(
+        'heads',
+        formatAbandonSuppressed({
+          optionId: verdict.optionId,
+          reason: verdict.classification.reason === 'cooldown' ? 'cooldown' : 'speculative',
+          attempts: verdict.classification.attempts,
+        }),
+        {
+          optionId: verdict.optionId,
+          planId: verdict.planId,
+          reason: verdict.classification.reason,
+          attempts: verdict.classification.attempts,
+          mode: 'shadow',
+          action: 'continue',
+        },
+        this.tickCounter,
+      )
+    }
+    return false
+  }
+
+  /**
+   * #79: retire the unproductive option and advance the ladder. A smelt
+   * prerequisite retires its current path so `applyFurnacePrereq` selects the
+   * next feasible rung (place_held -> use_known_station -> craft_and_place ->
+   * escalate) instead of re-selecting the abandoned one. Otherwise the existing
+   * exception-driven replan is the abandon action.
+   */
+  private enforceUnproductiveAbandon(
+    optionId: string,
+    planId: string | null,
+    attempts: number,
+    probability: number | null,
+  ): void {
+    const now = Date.now()
+    this.optionAttempts.markAbandoned(optionId, planId, now)
+    if (this.prereqPlan !== null && this.prereqChosenPath !== null) {
+      const current = this.prereqChosenPath
+      const goalKey = this.prereqGoalKey ?? this.currentGoalKey()
+      const bucket = this.abandonedPrereqPaths.get(goalKey) ?? new Map<PrereqPath, number>()
+      bucket.set(current, now)
+      this.abandonedPrereqPaths.set(goalKey, bucket)
+      const next = nextPrereqPath(this.prereqPlan, current)
+      this.prereqForcedPath = next
+      this.prereqProgress = null
+      this.prereqLoggedKey = null
+      this.logger.warn(
+        'agent',
+        `PREREQ_ABANDON from=${current} to=${next ?? 'none'} reason=unproductive attempts=${attempts}`,
+        { from: current, to: next, reason: 'unproductive', attempts, goal: goalKey },
+        this.tickCounter,
+      )
+    }
+    this.summonLlm('no_progress', `abandon_option=${probability} enforced: ${optionId} unproductive after ${attempts} attempts`)
   }
 
   /** Why beta/controller chose abandon, from the deterministic failure signals. */
@@ -1508,9 +1727,13 @@ export class JevController {
         },
         this.tickCounter,
       )
-      this.logHeads(result, chainId)
+      const planGoal = state.goalQueue.current
+      const optionId = optionIdForGoal(planGoal) ?? this.currentGoalKey()
+      const planId = planRevisionForGoal(planGoal)
+      const verdict = this.abandonVerdict(result, optionId, planId)
+      this.logHeads(result, verdict, chainId)
       this.logShadowMetrics(state)
-      if (this.options.betaAuthority) this.lastAbandonAdopted = this.adoptAbandon(result)
+      this.lastAbandonAdopted = this.applyAbandon(result, verdict)
 
       const confidence = result.answers.action?.confidence
       if (typeof confidence === 'number' && confidence < this.options.lowConfidenceThreshold) {
@@ -1592,8 +1815,12 @@ export class JevController {
     })
 
     const pending = this.pendingDecisions.get(result.epoch)
+    let completedOptionId: string | null = null
+    let completedPlanId: string | null = null
     if (pending !== undefined) {
       this.pendingDecisions.delete(result.epoch)
+      completedOptionId = pending.record.optionId
+      completedPlanId = pending.record.goalQueueState.current?.id ?? null
       attachResult(pending.record, {
         actionId: result.actionId,
         success: result.status === 'done' && result.verified,
@@ -1634,6 +1861,25 @@ export class JevController {
         this.tickCounter,
       )
       return
+    }
+
+    if (result.unverifiedPostcondition !== undefined) {
+      this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
+    } else if (result.status === 'done' && result.verified) {
+      const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
+      if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
+    }
+
+    if (completedOptionId !== null) {
+      this.optionAttempts.noteOutcome(
+        {
+          optionId: completedOptionId,
+          planId: completedPlanId,
+          verified: result.verified,
+          progressDelta: result.itemsGained,
+        },
+        Date.now(),
+      )
     }
 
     if (result.status === 'done') {
@@ -1686,6 +1932,12 @@ export class JevController {
           this.activeRetrieval = null
           this.retrievalTrack = null
           this.noteCandidateSuccess(result.actionId)
+          this.recordMoveSuccess(candidate)
+        } else {
+          // `status=done verified=false progressDelta=0` is the live #78 loop: a
+          // retrieval that reports completion while producing nothing must charge
+          // the coordinate failure memory so it is eventually skipped.
+          this.recordMoveFailure(candidate, 'no_progress')
         }
         if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
           const outcome = evaluateRetrieveAbandon({
@@ -1717,6 +1969,9 @@ export class JevController {
             this.tickCounter,
           )
           this.noteCandidateFailure(result.actionId)
+          this.recordMoveFailure(candidate, 'no_progress')
+        } else {
+          this.recordMoveSuccess(candidate)
         }
       }
       this.actionStart = null
@@ -1726,6 +1981,7 @@ export class JevController {
       this.noteCandidateFailure(result.actionId)
     } else {
       this.noteCandidateFailure(result.actionId)
+      this.recordMoveFailure(candidate, moveFailureReason(result.failure))
       this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
     }
 
@@ -1741,6 +1997,70 @@ export class JevController {
         ? deferred.detail
         : { actionId: result.actionId, status: result.status, failure: result.failure }
     this.requestDecision(trigger, detail)
+  }
+
+  /**
+   * #79: a `done`/`verified=false`/`progressDelta=0` action is a FAILURE. Log
+   * ACTION_UNVERIFIED with the plan/strategy/post-condition, charge the failure,
+   * advance the furnace prerequisite path so the plan is never re-queued
+   * unchanged, and after UNVERIFIED_ACTION_LIMIT attempts for one planId emit
+   * `ABANDON_REASON=action_unverified` and wake System 2 for a different option.
+   */
+  private onUnverifiedAction(result: ExecutionResult, postcondition: string, pending: PendingDecision | undefined): void {
+    const planId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
+    const strategy = pending?.record.strategy ?? null
+    const key = planId ?? result.actionId
+    const attempts = (this.actionUnverified.get(key) ?? 0) + 1
+    this.actionUnverified.set(key, attempts)
+    this.logger.warn(
+      'agent',
+      formatActionUnverified({ planId, actionId: result.actionId, strategy, postcondition }),
+      { planId, actionId: result.actionId, strategy, attempts, postcondition, progressDelta: result.itemsGained, detail: result.detail },
+      this.tickCounter,
+    )
+    this.noteCandidateFailure(result.actionId)
+    this.recordFailure('verify_failed', `${result.actionId} unverified: ${result.detail}`)
+
+    const switched = this.advancePrereqAfterUnverified()
+    const budget = evaluateUnverifiedBudget({ attempts, limit: UNVERIFIED_ACTION_LIMIT, planId: key, strategy })
+    if (budget.abandon) {
+      this.logger.warn(
+        'agent',
+        budget.line ?? `ABANDON_REASON=action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+        { planId: key, attempts, strategy, switched, postcondition },
+        this.tickCounter,
+      )
+    }
+    if (!switched) {
+      this.summonLlm(
+        budget.abandon ? 'action_impossible' : 'no_progress',
+        `action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+      )
+    }
+  }
+
+  /**
+   * #79/#58: an unverified prerequisite attempt must not repeat the same path.
+   * Advance the scored furnace-prerequisite plan to the next feasible option
+   * (place_held -> use_known_station -> craft_and_place). The parent goal is
+   * never abandoned here.
+   */
+  private advancePrereqAfterUnverified(): boolean {
+    if (this.prereqPlan === null) return false
+    const current = this.prereqForcedPath ?? this.prereqPlan.chosen
+    if (current === null) return false
+    const next = nextPrereqPath(this.prereqPlan, current)
+    if (next === null) return false
+    this.prereqForcedPath = next
+    this.prereqProgress = null
+    this.prereqLoggedKey = null
+    this.logger.warn(
+      'agent',
+      `PREREQ_SWITCH from=${current} to=${next} reason=action_unverified`,
+      { from: current, to: next, reason: 'action_unverified', goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+    return true
   }
 
   private syncTerrainSignals(state: WorldState): void {
@@ -1786,6 +2106,7 @@ export class JevController {
       { traveled, net, efficiency, windowStart: first, windowEnd: last },
       this.tickCounter,
     )
+    this.detectMoveOscillation()
   }
 
   private oscillationSignature(): string {
@@ -1816,7 +2137,7 @@ export class JevController {
 
   private escapeOscillation(state: OscillationState): void {
     this.oscillationState = null
-    this.abandonedPrereqPaths.add('use_known_station')
+    this.abandonedRetrievePaths.add('use_known_station')
     if (this.activeRetrieval !== null) {
       this.unreachableResources.add(this.retrievalKey(this.activeRetrieval))
       this.noteCandidateFailure(this.activeRetrieval.id)
@@ -2811,14 +3132,17 @@ export class JevController {
       this.prereqForcedPath = null
       this.prereqProgress = null
       this.prereqLoggedKey = null
-      this.abandonedPrereqPaths.clear()
+      this.abandonedRetrievePaths.clear()
       this.retrieveUnverified = null
     }
-    const base = selectPrereqPath(decision, this.abandonedPrereqPaths)
-    const forced = this.prereqForcedPath !== null && !this.abandonedPrereqPaths.has(this.prereqForcedPath) ? this.prereqForcedPath : null
+    const abandoned = this.abandonedPrereqSet(goalKey, Date.now())
+    for (const path of this.abandonedRetrievePaths) abandoned.add(path)
+    const base = selectPrereqPath(decision, abandoned)
+    const forced = this.prereqForcedPath !== null && !abandoned.has(this.prereqForcedPath) ? this.prereqForcedPath : null
     const chosen = preferPrereqPath(base, forced, decision)
     if (this.prereqForcedPath !== null && this.prereqForcedPath !== chosen) this.prereqForcedPath = null
     this.prereqPlan = decision
+    this.prereqChosenPath = chosen
     const logKey = `${goalKey}|${chosen ?? 'none'}`
     if (this.prereqLoggedKey !== logKey) {
       this.prereqLoggedKey = logKey
@@ -2835,7 +3159,7 @@ export class JevController {
         this.logger.info(
           'agent',
           formatPrereqOptionDetail('furnace', chosen, prereqOptionReason(chosen), input.heldCount),
-          { chosen, heldCount: input.heldCount, abandoned: [...this.abandonedPrereqPaths] },
+        { chosen, heldCount: input.heldCount, abandoned: [...abandoned] },
           this.tickCounter,
         )
       }
@@ -2858,9 +3182,10 @@ export class JevController {
     this.prereqProgress = evaluated.progress
     if (!evaluated.stalled) return kept
 
-    const next = this.nextUsablePrereqPath(decision, chosen)
+    const next = this.nextUsablePrereqPath(decision, chosen, abandoned)
     if (next === null) return kept
     this.prereqForcedPath = next
+    this.prereqChosenPath = next
     this.prereqProgress = null
     this.prereqLoggedKey = null
     this.logger.warn(
@@ -2876,16 +3201,30 @@ export class JevController {
   }
 
   /** The next feasible prereq path that has not been abandoned for this goal. */
-  private nextUsablePrereqPath(decision: PrereqDecision, current: PrereqPath): PrereqPath | null {
+  private nextUsablePrereqPath(
+    decision: PrereqDecision,
+    current: PrereqPath,
+    abandoned: ReadonlySet<PrereqPath>,
+  ): PrereqPath | null {
     const seen = new Set<PrereqPath>([current])
     for (;;) {
       const next = nextPrereqPath(decision, current)
       if (next === null || seen.has(next)) break
-      if (!this.abandonedPrereqPaths.has(next)) return next
+      if (!abandoned.has(next)) return next
       seen.add(next)
       current = next
     }
     return null
+  }
+
+  private abandonedPrereqSet(goalKey: string, now: number): Set<PrereqPath> {
+    const bucket = this.abandonedPrereqPaths.get(goalKey)
+    const abandoned = new Set<PrereqPath>()
+    if (bucket === undefined) return abandoned
+    for (const [path, at] of bucket) {
+      if (now - at < this.options.abandonCooldownMs) abandoned.add(path)
+    }
+    return abandoned
   }
 
   private resetFurnacePrereq(): void {
@@ -2894,7 +3233,8 @@ export class JevController {
     this.prereqGoalKey = null
     this.prereqLoggedKey = null
     this.prereqProgress = null
-    this.abandonedPrereqPaths.clear()
+    this.prereqChosenPath = null
+    this.abandonedRetrievePaths.clear()
     this.retrieveUnverified = null
   }
 
@@ -2911,7 +3251,7 @@ export class JevController {
       { option: candidate.id, unverified, goal: this.currentGoalKey() },
       this.tickCounter,
     )
-    this.abandonedPrereqPaths.add('use_known_station')
+    this.abandonedRetrievePaths.add('use_known_station')
     if (candidate.target !== null) {
       const knownName =
         typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'station'
@@ -3028,6 +3368,109 @@ export class JevController {
       )
     }
     this.noteCandidateFailure(candidate.id)
+    this.recordMoveFailure(candidate, 'unreachable')
+  }
+
+  /** #8: drop movement targets still inside their blacklist cooldown. */
+  private filterMoveCandidates(candidates: readonly Candidate[], state: WorldState, log = true): Candidate[] {
+    const dimension = state.self.dimension
+    const { kept, skipped } = filterBlacklistedMoves(candidates, this.moveFailMemory, dimension)
+    if (!log) return kept
+    for (const entry of skipped) {
+      this.logger.warn(
+        'agent',
+        formatMoveTargetSkipped(entry.key, entry.attempts, entry.cooldownSeconds),
+        {
+          actionId: entry.candidate.id,
+          key: entry.key,
+          attempts: entry.attempts,
+          cooldown: entry.cooldownSeconds,
+          reason: entry.reason,
+        },
+        this.tickCounter,
+      )
+    }
+    return kept
+  }
+
+  private rememberMoveTarget(candidate: Candidate): void {
+    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    this.lastMoveTarget = { dimension: this.currentDimension(), position: { ...candidate.target } }
+  }
+
+  private recordMoveFailure(candidate: Candidate, reason: MoveFailureReason): void {
+    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    const dimension = this.currentDimension()
+    const result = this.moveFailMemory.record(dimension, candidate.target, reason)
+    const key = moveFailureKey(dimension, candidate.target)
+    this.logger.warn(
+      'agent',
+      formatMoveFailMem(key, result.entry.attempts, reason),
+      { actionId: candidate.id, key, attempts: result.entry.attempts, reason, kind: candidate.kind },
+      this.tickCounter,
+    )
+    if (!result.newlyBlacklisted) return
+    this.logger.warn(
+      'agent',
+      formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
+      { actionId: candidate.id, key, attempts: result.entry.attempts, reason },
+      this.tickCounter,
+    )
+  }
+
+  private recordMoveSuccess(candidate: Candidate): void {
+    if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    const dimension = this.currentDimension()
+    const key = moveFailureKey(dimension, candidate.target)
+    if (!this.moveFailMemory.reset(dimension, candidate.target)) return
+    if (this.lastMoveTarget !== null && this.lastMoveTarget.position.x === candidate.target.x && this.lastMoveTarget.position.z === candidate.target.z) {
+      this.lastMoveTarget = null
+    }
+    this.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, this.tickCounter)
+  }
+
+  private currentDimension(): string {
+    const game = this.bot.game
+    return game === undefined ? 'overworld' : game.dimension
+  }
+
+  /**
+   * #8: an A/B position pair repeating without progress is an oscillation, not a
+   * path. Log it, blacklist the target that caused it, and clear the window so the
+   * detector cannot fire on the same stale samples again.
+   */
+  private detectMoveOscillation(): void {
+    const detection = detectOscillation(this.positionWindow)
+    if (!detection.detected || detection.from === null || detection.to === null) return
+    const fromKey = `${detection.from.x},${detection.from.y},${detection.from.z}`
+    const toKey = `${detection.to.x},${detection.to.y},${detection.to.z}`
+    const pair = `${fromKey}|${toKey}`
+    const now = Date.now()
+    this.positionWindow.length = 0
+    if (pair === this.lastOscillationPair && now - this.lastOscillationAt < OSCILLATION_REPEAT_LOG_MS) return
+    this.lastOscillationPair = pair
+    this.lastOscillationAt = now
+    this.logger.warn(
+      'agent',
+      formatOscillationDetected(detection.from, detection.to, detection.cycles, 'blacklist'),
+      { from: fromKey, to: toKey, cycles: detection.cycles, action: 'blacklist' },
+      this.tickCounter,
+    )
+    const target = this.lastMoveTarget
+    if (target !== null) {
+      const result = this.moveFailMemory.blacklist(target.dimension, target.position, 'no_progress')
+      const key = moveFailureKey(target.dimension, target.position)
+      this.logger.warn(
+        'agent',
+        formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
+        { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
+        this.tickCounter,
+      )
+    }
+    this.escalate(
+      'progress_stall',
+      `OSCILLATION_DETECTED from=${fromKey} to=${toKey} cycles=${detection.cycles}; blacklisting the movement target`,
+    )
   }
 
   private syntheticWait(): JevResult {

@@ -99,11 +99,42 @@ export interface KnownResourceJson {
   lastSeenAt?: number
 }
 
+/** The two station kinds the resident remembers coordinates for. */
+export type StationKind = 'crafting_table' | 'furnace'
+
+/**
+ * Issue #31: a station coordinate is a mutable RECORD, not an immortal point.
+ *
+ * `status` is the health/reachability state:
+ *   known       - remembered but not yet re-verified this/last generation
+ *   verified    - the block was observed present (and not proven unreachable)
+ *   missing     - validation failed: the block is gone / a different block
+ *   unreachable - validation failed: the pathfinder could not reach it
+ *   invalidated - terminal: N failures or stale age; never selected again
+ *
+ * The metadata fields are optional so legacy/durable JSON and pure test
+ * fixtures keep parsing; `normalizeStation()` in `station-memory.ts` fills the
+ * defaults on every read and the runtime writer always populates them.
+ */
+export interface KnownStation extends Vec3Json {
+  kind?: StationKind
+  /** epoch ms the coordinate was first recorded */
+  firstSeenAt?: number
+  /** epoch ms the block was last observed present */
+  lastVerifiedAt?: number
+  /** health/reachability state (issue #31) */
+  status?: StationStatus
+  /** consecutive failed validations; at STATION_MAX_FAILURES the record is invalidated */
+  failures?: number
+}
+
+export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | 'invalidated'
+
 export interface ResidentWorldMemory {
-  /** placed crafting_table stations discovered by scanning the loaded world */
-  craftingTables: Vec3Json[]
-  /** placed furnace stations discovered by scanning the loaded world */
-  furnaces: Vec3Json[]
+  /** placed crafting_table stations discovered by scanning the loaded world (#31: validated records) */
+  craftingTables: KnownStation[]
+  /** placed furnace stations discovered by scanning the loaded world (#31: validated records) */
+  furnaces: KnownStation[]
   /** "x,y,z:block" -> times mined (depletion model, best-effort) */
   mined: Record<string, number>
   /** ore block names seen at least once in the world state */
@@ -145,8 +176,11 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
 
 /** What the generation proposes; the HOST is the only writer that commits it. */
 export interface WorldMemoryDelta {
-  craftingTables?: Vec3Json[]
-  furnaces?: Vec3Json[]
+  craftingTables?: KnownStation[]
+  furnaces?: KnownStation[]
+  /** station records proven gone/invalidated; the host drops them from the durable
+   * store so a stale coordinate is never served to a later generation (#31) */
+  removeStations?: KnownStation[]
   discoveredOres?: string[]
   knownResources?: KnownResourceJson[]
   /** cells proven gone (mined/replaced); the host drops them from the durable store (#14) */
@@ -217,6 +251,7 @@ export interface AgentSnapshot {
   reloads: number
   /** how many times the host recovered after the controller stopped */
   recoveries: number
+  /** the owner active immediately before `generationId` (previous owner) */
   lastGenerationId: string | null
   /** monotonic action counter for ACTION log lines */
   actions: number
@@ -267,6 +302,38 @@ export interface GenerationStatus {
   /** true once start() has run and no irreversible action can happen before the lease */
   ready: boolean
   contractVersion: number
+}
+
+/**
+ * Issue #13/#49: a generation-owned resource ledger. The HOST creates exactly one
+ * `GenerationResources` per generation and the generation registers every bot
+ * listener / timer it owns. On teardown the host calls `dispose()`, which removes
+ * exactly those resources, and then asserts the host listener counts returned to
+ * baseline. This makes "old generation fully disposed" mechanically checkable
+ * instead of assumed from `controller.stop()`.
+ */
+export interface GenerationResourceCounts {
+  /** tracked listeners still registered after the last dispose (must be 0) */
+  listeners: number
+  /** tracked timers still active after the last dispose (must be 0) */
+  timers: number
+}
+
+/** Minimal emitter surface a tracked target must expose (bot, bot.inventory, ...). */
+export interface GenerationResourceTarget {
+  on?(event: string, fn: (...args: unknown[]) => void): unknown
+  removeListener?(event: string, fn: (...args: unknown[]) => void): unknown
+}
+
+export interface GenerationResources {
+  trackListener(target: GenerationResourceTarget, event: string, fn: (...args: unknown[]) => void): void
+  untrackListener(target: GenerationResourceTarget, event: string, fn: (...args: unknown[]) => void): void
+  untrackAll(target: GenerationResourceTarget, event?: string): void
+  trackTimer(handle: unknown): void
+  untrackTimer(handle: unknown): void
+  counts(): GenerationResourceCounts
+  /** remove every tracked resource; returns the counts that could NOT be removed */
+  dispose(): GenerationResourceCounts
 }
 
 /** Structural smoke result: must PASS with an EMPTY plan and no completed goals. */
@@ -365,6 +432,8 @@ export interface GenerationContext {
   log: (event: string, detail?: Record<string, unknown>) => void
   /** the actuation lease; the generation asserts it before side effects. */
   lease: ActuationLease
+  /** host-owned resource ledger; the generation registers every listener/timer it owns. */
+  resources?: GenerationResources
   /** read-only durable semantic memory for the current world key (a COPY). */
   worldMemory: ResidentWorldMemory
   /** the world key this generation runs under. */

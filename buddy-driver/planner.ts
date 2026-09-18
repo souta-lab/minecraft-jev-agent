@@ -37,7 +37,14 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
+import { netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
+import {
+  PICKAXE_TIER_ORDER,
+  loadGameData,
+  requiredPickaxeRank1,
+  requiredPickaxeRankForItem1,
+} from '../jev-agent/src/gameData.ts'
 import { formatSkillSelected, formatStrategyBodyDelta, generateSkillPlan, skillSignature } from '../jev-agent/src/skillCandidate.ts'
 import type { SkillCandidate, SkillGenerationInput, SkillGoal } from '../jev-agent/src/skillCandidate.ts'
 import {
@@ -91,12 +98,11 @@ export function has(counts: Counts, name: string): boolean {
   return (counts[name] ?? 0) > 0
 }
 
-/** 0 none, 1 wooden, 2 stone, 3 iron, 4 diamond+ */
+/** 0 none, 1 wooden, 2 stone, 3 iron, 4 diamond+ (order from gameData.ts #54). */
 export function bestPickaxeRank(counts: Counts): number {
-  const order = ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe']
   let rank = 0
-  for (let i = 0; i < order.length; i += 1) {
-    const name = order[i]
+  for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
+    const name = PICKAXE_TIER_ORDER[i]
     if (name !== undefined && has(counts, name)) rank = Math.max(rank, i + 1)
   }
   return rank
@@ -376,11 +382,8 @@ export const RUNGS: readonly Rung[] = [
     id: 'nether_portal',
     future: true,
     satisfied: (c) => has(c, 'flint_and_steel') && countClass(c, 'stone') >= 0 && has(c, 'flint'),
-    goals: () => [
-      { kind: 'collect', description: 'collect 10 x obsidian', targetItem: 'obsidian', requiredCount: 10 },
-      { kind: 'craft', description: 'craft 1 x flint_and_steel', targetItem: 'flint_and_steel', requiredCount: 1 },
-      { kind: 'place', description: 'place 1 x nether_portal', targetItem: 'nether_portal', requiredCount: 1 },
-    ],
+    // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
+    goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
   {
     id: 'blaze_rods',
@@ -449,9 +452,10 @@ export interface PreconditionResult {
  * tool/material prerequisite is missing must never enter the queue: that is what
  * wedged the resident on `collect raw_iron` with an empty inventory. */
 export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory): PreconditionResult {
+  const ranks = loadGameData()
   switch (rung.id) {
     case 'cobblestone':
-      return { ok: bestPickaxeRank(c) >= 1, need: 'wooden_pickaxe' }
+      return { ok: bestPickaxeRank(c) >= (requiredPickaxeRank1(ranks, 'cobblestone') ?? 1), need: 'wooden_pickaxe' }
     case 'furnace':
       return { ok: countClass(c, 'stone') >= 8 || has(c, 'furnace') || w.furnaces.length > 0, need: '8 x stone' }
     case 'stone_pickaxe':
@@ -459,7 +463,7 @@ export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory):
     case 'charcoal':
       return { ok: has(c, 'furnace') || w.furnaces.length > 0, need: 'placed furnace' }
     case 'raw_iron':
-      return { ok: bestPickaxeRank(c) >= 2, need: 'stone_pickaxe' }
+      return { ok: bestPickaxeRank(c) >= (requiredPickaxeRankForItem1(ranks, 'raw_iron') ?? 2), need: 'stone_pickaxe' }
     case 'iron_ingot':
       return {
         ok: (has(c, 'furnace') || w.furnaces.length > 0) && (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 1,
@@ -470,7 +474,7 @@ export function rungPrecondition(rung: Rung, c: Counts, w: ResidentWorldMemory):
     case 'iron_gear':
       return { ok: (c['iron_ingot'] ?? 0) >= 3, need: 'iron_ingot' }
     case 'diamond':
-      return { ok: bestPickaxeRank(c) >= 2, need: 'stone_pickaxe' }
+      return { ok: bestPickaxeRank(c) >= (requiredPickaxeRankForItem1(ranks, 'diamond') ?? 3), need: 'iron_pickaxe' }
     case 'diamond_pickaxe':
       return { ok: has(c, 'diamond'), need: 'diamond' }
     default:
@@ -736,7 +740,14 @@ export function buildLadder(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
-  opts?: { dimension?: string | null; placedFurnacesNear?: number; knownFurnaces?: number; resumeRungIndex?: number },
+  opts?: {
+    dimension?: string | null
+    placedFurnacesNear?: number
+    knownFurnaces?: number
+    resumeRungIndex?: number
+    /** false = a floor query (#73): never invent the synthetic upkeep goal. */
+    allowUpkeep?: boolean
+  },
 ): Ladder {
   const goals: PlannedGoal[] = []
   let rungIndex = RUNGS.length
@@ -798,7 +809,7 @@ export function buildLadder(
     }
     for (const goal of rungGoals) goals.push(goal)
   }
-  if (goals.length === 0) {
+  if (goals.length === 0 && opts?.allowUpkeep !== false) {
     // Everything reachable is satisfied: keep the resident meaningfully busy.
     goals.push({ kind: 'collect', description: 'collect 16 x raw_iron (resident upkeep)', targetItem: 'raw_iron', requiredCount: 16 })
   }
@@ -824,6 +835,103 @@ export function computeFrontier(counts: Counts, world: ResidentWorldMemory): { r
 
 export function debugFrontier(counts: Counts, world: ResidentWorldMemory): { rungIndex: number; rungId: string } {
   return computeFrontier(counts, world)
+}
+
+export function rungIndexById(id: string): number {
+  return RUNGS.findIndex((rung) => rung.id === id)
+}
+
+export interface RungSourceOfTruth {
+  plannerRungId: string
+  plannerRungIndex: number
+  ledgerRungId: string
+  ledgerRungIndex: number
+  adoptedRungId: string
+  adoptedRungIndex: number
+  mismatch: boolean
+  source: 'ledger' | 'planner'
+}
+
+/**
+ * Issue #73: the ladder ledger (`deriveResumeRung`) and the planner's naive
+ * `computeFrontier` can disagree because `rung.satisfied` is not monotone: the
+ * planner re-plans `wooden_pickaxe` while the ledger already put wood behind the
+ * resident from higher-tier inventory. Adopt one deterministic rung here and log
+ * `RUNG_MISMATCH` / `RUNG_ADOPT`, preferring the ledger whenever it names a real
+ * rung (the inventory-backed source of truth the live HEARTBEAT reports).
+ */
+export function resolveRungSourceOfTruth(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  log?: (event: string, detail?: Record<string, unknown>) => void,
+): RungSourceOfTruth {
+  const planner = computeFrontier(counts, world)
+  const ledger = deriveResumeRung(counts, world, log)
+  const mismatch = planner.rungId !== ledger.rungId
+  const adoptLedger = mismatch && ledger.rungId !== 'complete'
+  const source: 'ledger' | 'planner' = adoptLedger ? 'ledger' : 'planner'
+  const adoptedRungId = adoptLedger ? ledger.rungId : planner.rungId
+  const adoptedRungIndex = adoptLedger ? ledger.rungIndex : planner.rungIndex
+  if (mismatch) {
+    log?.('RUNG_MISMATCH', { planner: planner.rungId, ledger: ledger.rungId, adopt: adoptedRungId })
+    log?.('RUNG_ADOPT', { rung: adoptedRungId, source })
+  }
+  return {
+    plannerRungId: planner.rungId,
+    plannerRungIndex: planner.rungIndex,
+    ledgerRungId: ledger.rungId,
+    ledgerRungIndex: ledger.rungIndex,
+    adoptedRungId,
+    adoptedRungIndex,
+    mismatch,
+    source,
+  }
+}
+
+export interface LadderFloor {
+  rungId: string
+  rungIndex: number
+  goals: PlannedGoal[]
+  supplied: boolean
+}
+
+/**
+ * Issue #73: the deterministic ladder floor. From the adopted ledger rung it
+ * returns the remaining executable steps with their prerequisite chain, without
+ * any LLM call. When the rung is not `complete` but no step can be emitted it
+ * logs `QUEUE_EMPTY_UNSUPPLIED`, so an empty queue supply is never silent.
+ */
+export function ladderFloorGoals(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  opts?: {
+    resumeRungIndex?: number
+    dimension?: string | null
+    placedFurnacesNear?: number
+    knownFurnaces?: number
+    log?: (event: string, detail?: Record<string, unknown>) => void
+  },
+): LadderFloor {
+  const resume =
+    opts?.resumeRungIndex === undefined
+      ? deriveResumeRung(counts, world, opts?.log)
+      : {
+          rungIndex: opts.resumeRungIndex,
+          rungId: RUNGS[opts.resumeRungIndex]?.id ?? 'complete',
+          invEmpty: false,
+          fallbackFrom: null,
+          fallbackNeed: null,
+        }
+  const ladder = buildLadder(counts, world, opts?.log, {
+    dimension: opts?.dimension,
+    placedFurnacesNear: opts?.placedFurnacesNear,
+    knownFurnaces: opts?.knownFurnaces,
+    resumeRungIndex: resume.rungIndex,
+    allowUpkeep: false,
+  })
+  const supplied = ladder.goals.length > 0
+  if (!supplied && resume.rungId !== 'complete') opts?.log?.('QUEUE_EMPTY_UNSUPPLIED', { rung: resume.rungId })
+  return { rungId: resume.rungId, rungIndex: resume.rungIndex, goals: ladder.goals, supplied }
 }
 
 // ---------------------------------------------------------------------------
@@ -924,11 +1032,18 @@ function dedupeOptions(options: PlanOption[]): PlanOption[] {
 export function buildPlanOptions(
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number; knownFurnaces?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
+  opts?: {
+    placedFurnacesNear?: number
+    knownFurnaces?: number
+    resumeRungIndex?: number
+    log?: (event: string, detail?: Record<string, unknown>) => void
+  },
 ): PlanOption[] {
   const planGoals = (rung: Rung): PlannedGoal[] =>
     filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
-  const unsat = reachableUnsatisfiedRungs(counts, world)
+  const unsat = reachableUnsatisfiedRungs(counts, world).filter(
+    (rung) => opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex,
+  )
   if (unsat.length === 0) {
     return [
       {
@@ -1047,9 +1162,16 @@ export function normalizePlanTail(
 export function buildBodyChangeOption(
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number; knownFurnaces?: number; log?: (event: string, detail?: Record<string, unknown>) => void },
+  opts?: {
+    placedFurnacesNear?: number
+    knownFurnaces?: number
+    resumeRungIndex?: number
+    log?: (event: string, detail?: Record<string, unknown>) => void
+  },
 ): PlanOption {
-  const unsat = reachableUnsatisfiedRungs(counts, world)
+  const unsat = reachableUnsatisfiedRungs(counts, world).filter(
+    (rung) => opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex,
+  )
   const planGoals = (rung: Rung): PlannedGoal[] =>
     filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
   const goals: PlannedGoal[] = []
@@ -1373,6 +1495,7 @@ export class PlannerBrain implements System2Brain {
   private lastBodySignature: string | null = null
   private lastBodyGoals: PlannedGoal[] = []
   private currentCounts: Counts = {}
+  private adoptedRungId = 'wood'
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -1405,9 +1528,12 @@ export class PlannerBrain implements System2Brain {
     const started = Date.now()
     const counts = inventoryCounts(this.bot)
     this.currentCounts = counts
+    const rung = resolveRungSourceOfTruth(counts, this.world, this.log)
+    this.adoptedRungId = rung.adoptedRungId
     const options = buildPlanOptions(counts, this.world, {
       placedFurnacesNear: this.placedFurnacesNear(),
       knownFurnaces: this.world.furnaces.length,
+      resumeRungIndex: rung.adoptedRungIndex,
       log: this.log,
     })
     const reason = mapReason(request, this.firstCall)
@@ -1423,6 +1549,7 @@ export class PlannerBrain implements System2Brain {
       ? buildBodyChangeOption(counts, this.world, {
           placedFurnacesNear: this.placedFurnacesNear(),
           knownFurnaces: this.world.furnaces.length,
+          resumeRungIndex: rung.adoptedRungIndex,
           log: this.log,
         })
       : null
@@ -1448,6 +1575,26 @@ export class PlannerBrain implements System2Brain {
       // Mercury already logged ADVISOR source=fallback; never use the Jev advisor here.
       this.logPlan('fallback', deterministicOption, reason, started, 0, 'mercury unavailable -> deterministic ladder')
       return this.finishPlan(deterministicOption, request, 'mercury unavailable', stalled)
+    }
+
+    if (reason === 'queue_empty') {
+      const floor = ladderFloorGoals(counts, this.world, {
+        resumeRungIndex: rung.adoptedRungIndex,
+        dimension: this.bot.game?.dimension ?? null,
+        placedFurnacesNear: this.placedFurnacesNear(),
+        knownFurnaces: this.world.furnaces.length,
+        log: this.log,
+      })
+      const floorOption: PlanOption = {
+        id: `ladder_${floor.rungId}`,
+        title: `deterministic ladder floor (${floor.rungId})`,
+        goals: floor.goals,
+      }
+      this.logPlan('ladder', floorOption, reason, started, 0, `queue_empty -> ladder floor rung=${floor.rungId} supplied=${floor.supplied}`)
+      if (floor.goals.length === 0) {
+        return { goals: [], note: `ladder floor empty (${floor.rungId})`, op: 'continue' as PlanOp }
+      }
+      return this.finishPlan(floorOption, request, `ladder floor (${floor.rungId})`, true)
     }
 
     if (this.advisor !== undefined && adviseReason !== null) {
@@ -1735,7 +1882,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   private logPlan(
-    source: 'llm' | 'fallback',
+    source: 'llm' | 'fallback' | 'ladder',
     option: PlanOption,
     reason: PlannerReason,
     started: number,
@@ -1751,7 +1898,8 @@ export class PlannerBrain implements System2Brain {
       cost: Number(costUsd.toFixed(6)),
       ms: Date.now() - started,
       reason,
-      rung: option.id,
+      rung: this.adoptedRungId,
+      plan: option.id,
       cached,
       ...(llmMs > 0 ? { llmMs } : {}),
       ...(detail !== undefined && detail.planFit !== null ? { fit: detail.planFit } : {}),

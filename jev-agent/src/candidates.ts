@@ -35,6 +35,7 @@ import type { PrereqInput, PrereqPath } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
+import { fuelCountFor, smeltInputFor as smeltInputName } from './gameData.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -127,15 +128,6 @@ const FOOD_ITEMS = new Set([
   'melon_slice',
   'sweet_berries',
 ])
-
-const SMELT_INPUTS: Readonly<Record<string, string>> = {
-  charcoal: 'oak_log',
-  iron_ingot: 'raw_iron',
-  gold_ingot: 'raw_gold',
-  copper_ingot: 'raw_copper',
-}
-
-const SMELT_FUELS = ['charcoal', 'coal', 'oak_planks', 'oak_log'] as const
 
 const HAZARD_DANGER_RADIUS = 3
 
@@ -873,8 +865,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   const available = state.inventory.counts[inputItem] ?? 0
   if (available <= 0) return []
   const count = Math.min(needed, available)
-  const fuelPerItem = fuelItem === 'charcoal' || fuelItem === 'coal' ? 0.125 : 0.7
-  const fuelCount = Math.max(1, Math.ceil(count * fuelPerItem))
+  const fuelCount = fuelCountFor(count, fuelItem)
 
   return [
     {
@@ -913,21 +904,13 @@ function smeltInputFor(state: WorldState, focusItem: string): string | null {
     )
     return log ?? null
   }
-  const mapped = SMELT_INPUTS[focusItem]
-  if (mapped === undefined) return null
+  const mapped = smeltInputName(focusItem)
+  if (mapped === null) return null
   return (state.inventory.counts[mapped] ?? 0) > 0 ? mapped : null
 }
 
 function smeltFuelFor(state: WorldState): string | null {
-  for (const fuel of SMELT_FUELS) {
-    if ((state.inventory.counts[fuel] ?? 0) > 0) return fuel
-  }
-  const held = Object.keys(state.inventory.counts).find(
-    (name) =>
-      (state.inventory.counts[name] ?? 0) > 0 &&
-      (name.endsWith('_log') || name.endsWith('_planks') || name.endsWith('_wood')),
-  )
-  return held ?? null
+  return findInventoryFuel(state.inventory.counts)?.item ?? null
 }
 
 /**

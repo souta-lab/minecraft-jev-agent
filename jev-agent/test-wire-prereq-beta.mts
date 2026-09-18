@@ -172,12 +172,14 @@ addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.
   return { pass, detail: pass ? 'candidates.ts wires planPrereqOptions + prereqPath' : 'candidates wiring missing' }
 })
 
-addCase('#63: controller.ts gates beta adoption behind options.betaAuthority', () => {
+addCase('#63: controller.ts gates beta adoption behind the verdict + betaAuthority', () => {
   const text = source('./src/controller.ts')
   const pass =
     text.includes('betaAuthorityDecision({') &&
-    text.includes('if (this.options.betaAuthority) this.lastAbandonAdopted = this.adoptAbandon(result)')
-  return { pass, detail: pass ? 'betaAuthorityDecision + betaAuthority gate present' : 'beta gate missing' }
+    text.includes('classifyAbandonRequest({') &&
+    text.includes('this.abandonVerdict(result, optionId, planId)') &&
+    text.includes('return this.adoptAbandon(result)')
+  return { pass, detail: pass ? 'betaAuthorityDecision + abandonVerdict + authority path present' : 'beta gate missing' }
 })
 
 // --- 2. #58 prereq path ------------------------------------------------------

@@ -238,7 +238,10 @@ actuation lease はあるが nested capability bypass が残る (#38)。
 ・制御ソケット:          data/resident/control.sock（0600, JSON Lines）
    照会のみ: report / status / goal / milestone / acceptance
    実行可:   freeze / resume / reload / gc / leakcheck / simdeath / quit
-   注意:     goal/milestone は注入不可（照会だけ）。worldreset は破壊的なので使わない
+   注意:     goal/milestone は注入不可（照会だけ）。worldreset は実装にあるが破壊的なので使わない
+   契約:     HOST↔generation の契約バージョンは RESIDENT-MODE.md §4-A が正典（数値を再掲しない）。
+            doc/code の不一致は buddy-driver の `npm run contract-docs-check` が FAIL で検出する。
+            不一致は hot reload では解消せず、ホスト再起動が必要（`RELOAD_REJECTED ... mismatch` が観測される）。
 ・Bot名:                 AI_Buddy は常駐が占有。検証は AI_M1* / AI_M2* 等を使う。s0u7a は人間用
 ・秘密:                  /home/s0u7a/.config/kimaki-secrets/ 配下は絶対に出力しない
 ```
