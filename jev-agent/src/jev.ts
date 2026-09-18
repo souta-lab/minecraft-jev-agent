@@ -137,7 +137,7 @@ export interface JevCallRecord {
   rateLimitRetries: number
   /** cumulative backoff slept before this attempt (excluded from latencyMs) */
   rateLimitWaitMs: number
-  /** exact request payload sent (or that would have been sent) */
+  /** bounded perception snapshot persisted for evidence (the model receives `toEvaluationState`) */
   state: unknown
   questions: unknown
   response: { model: string; usage: unknown; answers: Record<string, JevAnswer> } | null
@@ -817,6 +817,113 @@ function toEvaluationState(state: WorldState): EvaluationState {
   return JSON.parse(JSON.stringify(compact)) as EvaluationState
 }
 
+/**
+ * Bounds on the perception snapshot persisted in jev-calls.jsonl. Every call
+ * used to embed the full WorldState (one measured record: 45 KB, 31 KB of it
+ * `signals.knownResources` with 269 entries), which grew the evidence log to
+ * ~4.7 GB and made it unreadable. The model payload (`toEvaluationState`) is
+ * NOT derived from this: these limits only bound what is written to disk.
+ */
+export const JEV_SNAPSHOT_LIMITS = {
+  /** hard ceiling on one serialised snapshot (bytes); over-budget states take the lean path */
+  maxBytes: 32 * 1024,
+  entities: 8,
+  blocks: 32,
+  terrain: 8,
+  stations: 32,
+  placementSpots: 8,
+  descent: 6,
+  cuts: 8,
+  recentEvents: 8,
+  failedCandidates: 48,
+  knownResources: 48,
+  goalQueueGoals: 8,
+} as const
+
+export type JevSnapshotLimits = typeof JEV_SNAPSHOT_LIMITS
+
+function snapshotBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value))
+}
+
+function capRecord(record: Readonly<Record<string, number>>, limit: number): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(record).slice(0, limit)) out[key] = value
+  return out
+}
+
+function snapshotBounds(state: WorldState): Record<string, number> {
+  return {
+    entities: state.entities.length,
+    blocks: state.blocks.length,
+    terrain: state.terrain.standable.length,
+    craftingTables: state.craftingTables.length,
+    furnaces: state.furnaces?.length ?? 0,
+    placementSpots: state.placementSpots.length,
+    knownResources: state.signals.knownResources?.length ?? 0,
+    failedCandidates: Object.keys(state.signals.failedCandidates).length,
+    goalQueueGoals: state.goalQueue.goals.length,
+  }
+}
+
+/**
+ * Project the full WorldState down to a size-bounded evidence snapshot: long
+ * arrays are capped (their true lengths survive in `bounds`) while the
+ * decision-critical fields - self, inventory counts, goal, current queue entry,
+ * stations with their `sensed`/`remembered` source, failed-candidate memory -
+ * are kept. Falls back to a scalars-and-counts frame when even the capped form
+ * exceeds the byte budget, so one record can never be unbounded.
+ */
+export function boundedStateSnapshot(
+  state: WorldState,
+  limits: JevSnapshotLimits = JEV_SNAPSHOT_LIMITS,
+): unknown {
+  const bounded = {
+    schemaVersion: state.schemaVersion,
+    tick: state.tick,
+    timestampMs: state.timestampMs,
+    self: state.self,
+    inventory: { counts: state.inventory.counts, totalItems: state.inventory.totalItems },
+    entities: state.entities.slice(0, limits.entities),
+    blocks: state.blocks.slice(0, limits.blocks),
+    terrain: { standable: state.terrain.standable.slice(0, limits.terrain) },
+    craftingTables: state.craftingTables.slice(0, limits.stations),
+    furnaces: (state.furnaces ?? []).slice(0, limits.stations),
+    placementSpots: state.placementSpots.slice(0, limits.placementSpots),
+    descent: (state.descent ?? []).slice(0, limits.descent),
+    stepCuts: (state.stepCuts ?? []).slice(0, limits.cuts),
+    headroomCuts: (state.headroomCuts ?? []).slice(0, limits.cuts),
+    goal: state.goal,
+    goalQueue: { ...state.goalQueue, goals: state.goalQueue.goals.slice(0, limits.goalQueueGoals) },
+    recentEvents: state.recentEvents.slice(-limits.recentEvents),
+    signals: {
+      ...state.signals,
+      knownResources: (state.signals.knownResources ?? []).slice(0, limits.knownResources),
+      failedCandidates: capRecord(state.signals.failedCandidates, limits.failedCandidates),
+    },
+    bounds: snapshotBounds(state),
+  }
+  if (snapshotBytes(bounded) <= limits.maxBytes) return bounded
+  const { description: _description, ...goal } = state.goal
+  const lean = {
+    schemaVersion: state.schemaVersion,
+    tick: state.tick,
+    timestampMs: state.timestampMs,
+    self: state.self,
+    inventory: { counts: state.inventory.counts, totalItems: state.inventory.totalItems },
+    goal,
+    signals: {
+      consecutiveFailures: state.signals.consecutiveFailures,
+      lastFailureCode: state.signals.lastFailureCode,
+      lastPathStatus: state.signals.lastPathStatus,
+      escalationRecommended: state.signals.escalationRecommended,
+    },
+    bounds: snapshotBounds(state),
+    note: 'snapshot_over_budget',
+  }
+  return snapshotBytes(lean) <= limits.maxBytes ? lean : { note: 'snapshot_over_budget', tick: state.tick }
+}
+
 class TypeSafeJevPolicy implements JevPolicy {
   readonly kind = 'typesafe' as const
   readonly model: string
@@ -874,7 +981,7 @@ class TypeSafeJevPolicy implements JevPolicy {
           latencyMs,
           rateLimitRetries: attempt,
           rateLimitWaitMs,
-          state: request.state,
+          state: boundedStateSnapshot(request.state),
           questions,
           response: { model: this.model, usage, answers },
           error: null,
@@ -909,7 +1016,7 @@ class TypeSafeJevPolicy implements JevPolicy {
           latencyMs: Date.now() - attemptStart,
           rateLimitRetries: attempt,
           rateLimitWaitMs,
-          state: request.state,
+          state: boundedStateSnapshot(request.state),
           questions,
           response: null,
           error: message,
@@ -1063,7 +1170,7 @@ class FallbackJevPolicy implements JevPolicy {
       latencyMs,
       rateLimitRetries: 0,
       rateLimitWaitMs: 0,
-      state: request.state,
+      state: boundedStateSnapshot(request.state),
       questions,
       response: { model: this.model, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, answers },
       error: null,
