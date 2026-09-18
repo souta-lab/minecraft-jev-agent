@@ -36,7 +36,10 @@ import type { KnownStationLike, PrereqInput, PrereqPath } from './prereqOption.t
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
-import { fuelCountFor, smeltInputFor as smeltInputName } from './gameData.ts'
+import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER } from './gameData.ts'
+import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, reachabilityFingerprint } from './reachability.ts'
+import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
+import { StateFingerprintMemory } from './moveFailMemory.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -52,6 +55,12 @@ export type CandidateKind =
   | 'RETREAT'
   | 'WAIT'
   | 'ESCALATE'
+
+export interface CandidateAffordance {
+  feasible: boolean
+  reason: ReachabilityResult['reason']
+  missingCapabilities: readonly Capability[]
+}
 
 export interface Candidate {
   id: string
@@ -69,6 +78,8 @@ export interface Candidate {
   /** target was within reach when the sensor ran */
   inReach: boolean
   hasStandableAdjacent: boolean
+  /** deterministic affordance facts: infeasible candidates are never presented */
+  affordance?: CandidateAffordance
   meta: Record<string, string | number | boolean>
 }
 
@@ -100,6 +111,31 @@ export interface CandidateOptions {
   descendFailureLimit?: number
   /** failures at one placement spot before a fallback spot is used (default 2) */
   placeSpotRetryLimit?: number
+  /** affordance gate facts: pathfinder probe + state-fingerprint suppression memory */
+  reachability?: ReachabilityGateOptions | null
+}
+
+export interface ReachabilityGateOptions {
+  /** pathfinder fact for a destination; absent = unknown (no probe) */
+  pathProbe?: ((position: Vec3Json) => PathProbeResult) | null
+  /** proven-unreachable (candidateId -> fingerprint) suppression memory */
+  memory?: StateFingerprintMemory | null
+}
+
+export interface CandidateReachability {
+  candidate: Candidate
+  result: ReachabilityResult
+  fingerprint: string
+  withheld: boolean
+  suppressed: boolean
+}
+
+export interface GroundedCandidatesResult {
+  candidates: Candidate[]
+  /** every affordance evaluation this cycle (facts for observability) */
+  reachability: CandidateReachability[]
+  /** the subset whose target is not mechanically reachable */
+  withheld: CandidateReachability[]
 }
 
 const DEFAULT_MOVE_MIN_DISTANCE = 0
@@ -196,8 +232,25 @@ function hasTool(state: WorldState, toolName: Candidate['toolName'], tier: numbe
 /**
  * Pure, deterministic. Same state in -> same candidate list out (ordering
  * included), which is what makes the guard and the calibration log meaningful.
+ * The affordance gate (#11 v2) runs inside: only mechanically reachable targets
+ * are presented, and withheld targets carry a typed reason + missing
+ * capabilities instead of being silently retried.
  */
 export function generateCandidates(
+  state: WorldState,
+  options: CandidateOptions = defaultCandidateOptions,
+): Candidate[] {
+  return generateGroundedCandidates(state, options).candidates
+}
+
+export function generateGroundedCandidates(
+  state: WorldState,
+  options: CandidateOptions = defaultCandidateOptions,
+): GroundedCandidatesResult {
+  return applyReachabilityGate(generateRawCandidates(state, options), state, options)
+}
+
+function generateRawCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
 ): Candidate[] {
@@ -1670,4 +1723,330 @@ function pickExplore(
     }
   }
   return best
+}
+
+// --- affordance gate (#11 v2): only mechanically reachable targets are presented
+//
+// Candidates are FACTS provided to Jev, so a locomotion target the body cannot
+// physically reach with its current inventory/abilities must not be offered at
+// all. The gate evaluates each MOVE/RETRIEVE/RETREAT target through the pure
+// reachability module, withholds the infeasible ones with a typed reason and
+// missing-capability list, offers the grounded capability-acquisition candidates
+// that would fix them, and suppresses a proven-unreachable target while its
+// semantic state fingerprint is unchanged.
+
+const REACHABILITY_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'RETRIEVE',
+  'RETREAT',
+])
+
+export interface ColumnFacts {
+  placeable: ReturnType<typeof selectPlaceableBlock>
+  columnSafe: boolean
+  footingSolid: boolean
+  headroomClear: boolean
+  headroomCell: Vec3Json | null
+}
+
+interface ReachabilityGateContext {
+  state: WorldState
+  options: CandidateOptions
+  memory: StateFingerprintMemory | null
+  column: ColumnFacts
+}
+
+export function applyReachabilityGate(
+  raw: readonly Candidate[],
+  state: WorldState,
+  options: CandidateOptions = defaultCandidateOptions,
+): GroundedCandidatesResult {
+  const context: ReachabilityGateContext = {
+    state,
+    options,
+    memory: options.reachability?.memory ?? null,
+    column: columnFacts(state),
+  }
+  const presented: Candidate[] = []
+  const reachability: CandidateReachability[] = []
+  const withheld: CandidateReachability[] = []
+
+  const run = (candidates: readonly Candidate[]): void => {
+    for (const candidate of candidates) {
+      const record = evaluateCandidate(candidate, context)
+      if (record === null) {
+        presented.push(withAffordance(candidate, null))
+        continue
+      }
+      reachability.push(record)
+      if (record.result.reachable) {
+        context.memory?.forget(candidate.id)
+        presented.push(record.candidate)
+        continue
+      }
+      record.withheld = true
+      record.suppressed = context.memory?.isSuppressed(candidate.id, record.fingerprint) ?? false
+      context.memory?.record(candidate.id, record.fingerprint, record.result.reason)
+      withheld.push(record)
+    }
+  }
+
+  run(raw)
+  const acquisitions = capabilityAcquisitionCandidates(
+    state,
+    options,
+    withheld,
+    new Set(presented.map((candidate) => candidate.id)),
+  )
+  run(acquisitions)
+
+  const waite = presented.filter((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')
+  const productive = presented.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const candidates = [...productive, ...waite]
+  if (
+    withheld.length > 0 &&
+    productive.length === 0 &&
+    !waite.some((candidate) => candidate.kind === 'ESCALATE')
+  ) {
+    candidates.push(escalateRefusal(state, withheld))
+  }
+  return { candidates, reachability, withheld }
+}
+
+/** null when the candidate carries no locomotion destination to gate. */
+function evaluateCandidate(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+): CandidateReachability | null {
+  const position = candidate.target
+  if (position === null || !REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  const target = reachabilityTargetFor(context.state, candidate)
+  const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+  const abilities = deriveReachabilityAbilities(context.state, position, context.column)
+  const probe = context.options.reachability?.pathProbe?.(position) ?? 'unknown'
+  const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, probe)
+  return {
+    candidate: withAffordance(candidate, result),
+    result,
+    fingerprint: reachabilityFingerprint({
+      target,
+      result,
+      inventory: context.state.inventory.counts,
+      world,
+      placeableBlock: context.column.placeable !== null,
+    }),
+    withheld: false,
+    suppressed: false,
+  }
+}
+
+function withAffordance(candidate: Candidate, result: ReachabilityResult | null): Candidate {
+  const affordance: CandidateAffordance =
+    result === null
+      ? { feasible: true, reason: 'reachable', missingCapabilities: [] }
+      : {
+          feasible: result.reachable,
+          reason: result.reason,
+          missingCapabilities: result.missingCapabilities,
+        }
+  return { ...candidate, affordance }
+}
+
+function reachabilityTargetFor(state: WorldState, candidate: Candidate): ReachabilityTarget {
+  const x = candidate.meta.targetBlockX
+  const y = candidate.meta.targetBlockY
+  const z = candidate.meta.targetBlockZ
+  if (typeof x === 'number' && typeof y === 'number' && typeof z === 'number') {
+    const block = state.blocks.find(
+      (entry) => entry.position.x === x && entry.position.y === y && entry.position.z === z,
+    )
+    if (block !== undefined && block.harvestTool != null) {
+      return {
+        candidateId: candidate.id,
+        kind: candidate.kind,
+        position: candidate.target,
+        barrier: {
+          position: block.position,
+          name: block.name,
+          requiredTool: block.harvestTool,
+          requiredTier: block.harvestTier ?? null,
+        },
+      }
+    }
+  }
+  return { candidateId: candidate.id, kind: candidate.kind, position: candidate.target, barrier: null }
+}
+
+function columnFacts(state: WorldState): ColumnFacts {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const ownCut = (state.headroomCuts ?? []).find(
+    (cut) => cut.pos.x === feet.x && cut.pos.z === feet.z && (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
+  )
+  return {
+    placeable: selectPlaceableBlock(state.inventory.counts),
+    columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
+    footingSolid: state.terrain.standable.some((spot) => {
+      const cell = { x: Math.floor(spot.x), y: Math.floor(spot.y), z: Math.floor(spot.z) }
+      return cell.x === feet.x && cell.z === feet.z && (cell.y === feet.y || cell.y === feet.y - 1)
+    }),
+    headroomClear: ownCut === undefined,
+    headroomCell: ownCut?.pos ?? null,
+  }
+}
+
+function reachabilityWorldFor(
+  state: WorldState,
+  candidate: Candidate,
+  reach: number,
+  column: ColumnFacts,
+): ReachabilityWorld {
+  const position = candidate.target
+  return {
+    self: state.self.position,
+    approach: candidate.hasStandableAdjacent ? position : null,
+    reach,
+    hazardAtTarget:
+      position !== null &&
+      state.blocks.some((block) => block.kind === 'hazard' && distance(block.position, position) <= HAZARD_PROXIMITY),
+    footingSolid: column.footingSolid,
+    headroomClear: column.headroomClear,
+  }
+}
+
+export function deriveReachabilityAbilities(
+  state: WorldState,
+  target: Vec3Json,
+  column: ColumnFacts = columnFacts(state),
+): ReachabilityAbilities {
+  const counts = state.inventory.counts
+  const dy = Math.round(target.y - state.self.position.y)
+  const plan = planVerticalApproach({
+    selfFeetY: state.self.position.y,
+    selfPosition: state.self.position,
+    target,
+    tunnel: state.signals.lastTunnel,
+    descent: state.descent,
+    stepCuts: state.stepCuts,
+    placeable: column.placeable,
+    columnSafe: column.columnSafe,
+  })
+
+  // A pillar plan is only mechanically executable from a supported, safe column
+  // with jump headroom. Live evidence: PILLAR_UP was planned 1647x but refused
+  // with `reason=no_footing` / `reason=no_headroom cause=needs_tool`, so a plan
+  // alone must not count as an available ascend ability.
+  const ascendPlanAvailable =
+    plan !== null &&
+    (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear))
+
+  const ascendMissing: Capability[] = []
+  if (dy > ASCEND_GAP_LIMIT && !ascendPlanAvailable) {
+    if (column.placeable === null) ascendMissing.push({ kind: 'placeable_block' })
+    if (!column.columnSafe) ascendMissing.push({ kind: 'safe_column' })
+    else if (!column.footingSolid) ascendMissing.push({ kind: 'safe_column' })
+    if (!column.headroomClear) {
+      ascendMissing.push({ kind: 'headroom', cell: column.headroomCell })
+      const cell = column.headroomCell
+      const blocker =
+        cell === null
+          ? undefined
+          : state.blocks.find(
+              (block) =>
+                block.position.x === cell.x && block.position.y === cell.y && block.position.z === cell.z,
+            )
+      if (blocker?.harvestTool != null) {
+        const tier = blocker.harvestTier ?? 0
+        if (bestToolTier(counts, blocker.harvestTool) < tier) {
+          ascendMissing.push({ kind: 'tool', tool: blocker.harvestTool, tier })
+        }
+      }
+    }
+    if (ascendMissing.length === 0) ascendMissing.push({ kind: 'ascend_plan' })
+  }
+
+  const descendMissing: Capability[] = []
+  if (dy < -DESCEND_GAP_LIMIT) {
+    if (plan === null) {
+      descendMissing.push({ kind: 'descend_plan' })
+    } else if (plan.kind === 'staircase' && typeof plan.harvestTool === 'string') {
+      const tier = plan.harvestTier ?? 0
+      if (bestToolTier(counts, plan.harvestTool) < tier) {
+        descendMissing.push({ kind: 'tool', tool: plan.harvestTool, tier })
+      }
+    }
+  }
+
+  return {
+    ascend: { available: ascendMissing.length === 0, missing: ascendMissing },
+    descend: { available: descendMissing.length === 0, missing: descendMissing },
+  }
+}
+
+/** Grounded candidates that would acquire a withheld target's missing capability. */
+function capabilityAcquisitionCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  withheld: readonly CandidateReachability[],
+  existingIds: ReadonlySet<string>,
+): Candidate[] {
+  const out: Candidate[] = []
+  const seen = new Set<string>(existingIds)
+  for (const entry of withheld) {
+    for (const capability of entry.result.missingCapabilities) {
+      let source: Candidate[] = []
+      if (capability.kind === 'headroom') {
+        source = headroomCandidates(state, options)
+      } else if (capability.kind === 'tool') {
+        const item = toolItemForCapability(capability)
+        if (item !== null) source = craftCandidates(state, options, item)
+      }
+      for (const candidate of source) {
+        if (seen.has(candidate.id)) continue
+        seen.add(candidate.id)
+        out.push({
+          ...withAffordance(candidate, null),
+          meta: {
+            ...candidate.meta,
+            capabilityAcquisition: true,
+            missingCapability: capabilityKey(capability),
+          },
+        })
+      }
+    }
+  }
+  return out
+}
+
+function toolItemForCapability(capability: Capability): string | null {
+  if (capability.kind !== 'tool' || capability.tool !== 'pickaxe') return null
+  for (const name of PICKAXE_TIER_ORDER) {
+    const rank = PICKAXE_RANKS[name]
+    if (rank !== undefined && rank >= capability.tier) return name
+  }
+  return null
+}
+
+function escalateRefusal(state: WorldState, withheld: readonly CandidateReachability[]): Candidate {
+  const missing = [
+    ...new Set(withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey))),
+  ]
+  return {
+    id: 'ESCALATE',
+    kind: 'ESCALATE',
+    label: `hand control to System 2: no reachable candidate (missing: ${missing.join(',') || 'unknown'})`,
+    targetName: null,
+    target: null,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    affordance: { feasible: true, reason: 'reachable', missingCapabilities: [] },
+    meta: { tick: state.tick, reason: 'reachability_refused', capabilities: missing.join('|') },
+  }
 }
