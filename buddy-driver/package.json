@@ -20,6 +20,7 @@
     "observability-test": "node ../jev-agent/node_modules/.bin/tsx test-observability.mts",
     "simdeath-test": "node ../jev-agent/node_modules/.bin/tsx test-simdeath.mts",
     "reconnect-lease-test": "node ../jev-agent/node_modules/.bin/tsx test-reconnect-lease.mts",
+    "actuation-port-test": "node ../jev-agent/node_modules/.bin/tsx test-actuation-port.mts",
     "mercury-test": "node test-mercury.mts",
     "advisor-cache-test": "node test-advisor-cache.mts",
     "plan-tail-test": "node ../jev-agent/node_modules/.bin/tsx test-plan-tail.mts",
