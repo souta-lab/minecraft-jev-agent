@@ -764,7 +764,8 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
   }
 })
 
-let failures = 0process.stdout.write('OptionSpec / deterministic predicate / dependency expansion (#21)\n')
+let failures = 0
+process.stdout.write('OptionSpec / deterministic predicate / dependency expansion (#21)\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()
