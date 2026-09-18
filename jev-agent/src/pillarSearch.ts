@@ -108,15 +108,15 @@ export function decidePillarPlaceBlock(
   counts: Readonly<Record<string, number>>,
   policy: PillarSearchPolicy = DEFAULT_PILLAR_SEARCH_POLICY,
 ): PillarSearchDecision {
-  const alternatives: PillarSearchAlternative[] = []
+  const considered: PillarSearchAlternative[] = []
   for (let index = 0; index < policy.placePriority.length; index += 1) {
     const name = policy.placePriority[index]
     if (name === undefined) continue
     const count = counts[name] ?? 0
     if (count < 1) continue
-    alternatives.push({ option: name, score: index, reason: 'priority_order' })
+    considered.push({ option: name, score: index, reason: 'priority_order' })
   }
-  const best = alternatives[0] ?? null
+  const best = considered[0] ?? null
   if (best === null) {
     return {
       kind: 'place-block',
@@ -132,7 +132,7 @@ export function decidePillarPlaceBlock(
     chosen: best.option,
     target: null,
     score: best.score,
-    alternatives,
+    alternatives: considered.slice(1),
     reason: 'priority_order',
   }
 }
@@ -149,7 +149,7 @@ export function decidePillarStepBudget(
     target: null,
     steps,
     score: steps,
-    alternatives: [{ option: String(policy.stepCap), score: policy.stepCap, reason: 'step_cap' }],
+    alternatives: steps >= policy.stepCap ? [] : [{ option: String(policy.stepCap), score: policy.stepCap, reason: 'step_cap' }],
     reason: steps >= policy.stepCap ? 'bounded_by_step_cap' : 'gap_below_step_cap',
   }
 }
@@ -199,7 +199,8 @@ export function decidePillarRelocation(input: PillarRelocationInput): PillarSear
   const policy = input.policy ?? DEFAULT_PILLAR_SEARCH_POLICY
   const ranked = rankPillarFallbackColumns(input.probes, input.self)
   const rankedKeys = new Set(ranked.map((entry) => cellKey(entry.cell)))
-  const alternatives: PillarSearchAlternative[] = ranked.map((entry) => ({
+  const losers = input.relocations >= policy.maxRelocations ? ranked : ranked.slice(1)
+  const alternatives: PillarSearchAlternative[] = losers.map((entry) => ({
     option: cellKey(entry.cell),
     score: entry.score,
     reason: 'grounded_open_column',

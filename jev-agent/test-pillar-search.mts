@@ -63,7 +63,7 @@ addCase('place-block decision reports chosen, score, alternatives and reason; ma
     decision.score === 0 &&
     decision.kind === 'place-block' &&
     decision.reason === 'priority_order' &&
-    decision.alternatives.map((entry) => entry.option).join(',') === 'cobblestone,dirt,oak_planks' &&
+    decision.alternatives.map((entry) => entry.option).join(',') === 'dirt,oak_planks' &&
     legacy?.name === decision.chosen &&
     legacy.count === 2
   return { pass, detail: formatPillarSearch(decision) }
@@ -83,9 +83,10 @@ addCase('step-budget chunks a 56-block gap to the cap and keeps a small gap exac
     capped.chosen === '24' &&
     capped.score === 24 &&
     capped.reason === 'bounded_by_step_cap' &&
-    capped.alternatives.some((entry) => entry.option === '24' && entry.reason === 'step_cap') &&
+    capped.alternatives.length === 0 &&
     small.steps === 5 &&
-    small.reason === 'gap_below_step_cap'
+    small.reason === 'gap_below_step_cap' &&
+    small.alternatives.some((entry) => entry.option === '24' && entry.reason === 'step_cap')
   return { pass, detail: `${formatPillarSearch(capped)} | ${formatPillarSearch(small)}` }
 })
 
@@ -120,7 +121,7 @@ addCase('relocation decision ranks open grounded columns and matches selectPilla
     decision.reason === 'nearest_open_grounded_column' &&
     legacy?.x === 41 &&
     legacy?.z === 31 &&
-    decision.alternatives.length === 3
+    decision.alternatives.length === 2
   return { pass, detail: formatPillarSearch(decision) }
 })
 
@@ -152,6 +153,7 @@ addCase('relocation reports the filter that rejected each candidate, never hidin
     { ...open({ x: 40, y: 8, z: 30 }), feetClear: false },
     { ...open({ x: 40, y: 8, z: 32 }), headClear: false, aboveHeadClear: false },
     open({ x: 41, y: 8, z: 32 }),
+    open({ x: 41, y: 8, z: 33 }),
   ]
   const decision = decidePillarRelocation({ relocations: 0, probes, self: feet })
   const reasons = decision.alternatives.map((entry) => entry.reason).join(',')
@@ -172,7 +174,7 @@ addCase('the PILLAR_SEARCH line is one marker line with chosen, score, alternati
     line.includes('kind=place-block') &&
     line.includes('chosen=stone') &&
     line.includes('score=1') &&
-    line.includes('alternatives=[stone@1:priority_order]') &&
+    line.includes('alternatives=[]') &&
     line.includes('reason=priority_order')
   return { pass, detail: line }
 })
