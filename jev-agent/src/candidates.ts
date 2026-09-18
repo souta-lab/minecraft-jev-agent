@@ -1199,10 +1199,14 @@ export function selfContainedCraftCandidates(
  * not make every nearby table disappear.
  */
 function sensedCraftingTableAvailable(state: WorldState, options: CandidateOptions, focusItem: string): boolean {
-  const sensed = state.craftingTables.find(isSensedStation)
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  // Sensed stations use the same explicit reachability blacklist as remembered
+  // stations. A stale sensor result must not bypass MOVE_FAILMEM and re-enter
+  // the same CRAFT:furnace -> JUMP_FAIL loop on every prerequisite decision.
+  const sensed = state.craftingTables.find(
+    (position) => isSensedStation(position) && !unreachableStations.has(knownStationKey({ name: 'crafting_table', position })),
+  )
   if (sensed === undefined) return false
-  const key = knownStationKey({ name: 'crafting_table', position: sensed })
-  if (options.unreachableStations?.has(key) === true) return false
   const craftFailures = state.signals.failedCandidates[`CRAFT:${focusItem}`] ?? 0
   const lastFailure = state.signals.lastFailureCode
   const pathFailure = lastFailure === 'path_no_path' || lastFailure === 'path_stuck'
@@ -1346,7 +1350,12 @@ function craftingTableSource(
   unreachableStations: ReadonlySet<string>,
   placeSpotRetryLimit: number,
 ): { kind: 'sensed' | 'remembered'; station: KnownStationLike } | { kind: 'held-place'; spot: Vec3Json } | null {
-  const sensed = state.craftingTables.find(isSensedStation)
+  // Sensed stations use the same explicit reachability blacklist as remembered
+  // stations. A stale sensor result must not bypass MOVE_FAILMEM and re-enter
+  // the same CRAFT:furnace -> JUMP_FAIL loop on every prerequisite decision.
+  const sensed = state.craftingTables.find(
+    (position) => isSensedStation(position) && !unreachableStations.has(knownStationKey({ name: 'crafting_table', position })),
+  )
   if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
   const remembered = knownStations(state, 'crafting_table').find(
     (station) => !unreachableStations.has(knownStationKey(station)),

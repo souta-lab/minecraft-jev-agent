@@ -454,6 +454,39 @@ addCase('(live) an explicitly unreachable sensed table is not treated as availab
   return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
+addCase('(live) furnace prerequisite skips a blacklisted sensed table and uses a remembered fallback', () => {
+  const sensedTable: StationEntry = { x: 40, y: 29, z: 35, source: 'sensed' }
+  const rememberedTable: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 39, y: 10, z: 40 } }
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ raw_iron: 3, coal: 2, cobblestone: 119 }),
+    craftingTables: [sensedTable],
+    signals: signals({ knownResources: [rememberedTable] }),
+  })
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    unreachableStations: new Set([knownStationKey({ name: 'crafting_table', position: sensedTable })]),
+  }
+
+  const candidates = generateCandidates(state, options)
+  const craftAtSensed = candidates.find(
+    (candidate) =>
+      candidate.id === 'CRAFT:furnace' &&
+      candidate.target?.x === sensedTable.x &&
+      candidate.target?.y === sensedTable.y &&
+      candidate.target?.z === sensedTable.z,
+  )
+  const retrieveFallback = candidates.find(
+    (candidate) =>
+      candidate.id.startsWith('RETRIEVE:known:station:crafting_table') &&
+      candidate.target?.x === rememberedTable.position.x &&
+      candidate.target?.y === rememberedTable.position.y &&
+      candidate.target?.z === rememberedTable.position.z,
+  )
+  const pass = craftAtSensed === undefined && retrieveFallback !== undefined && retrieveFallback.meta.prereqPath === 'craft_and_place'
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 addCase('(live) craft 1 x furnace + no table held or remembered still crafts one from logs', () => {
   const state = worldState({
     position: { x: 39, y: 10, z: 34 },
