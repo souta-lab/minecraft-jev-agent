@@ -1302,12 +1302,19 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
  */
 function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
+  const inputSpec = smeltInputName(focusItem)
+  if (inputSpec === null) return []
   const furnace = (state.furnaces ?? []).find(isSensedStation) ?? null
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
-  if (inputItem === null) return []
   const fuelItem = smeltFuelFor(state)
-  if (fuelItem === null) return []
+  if (inputItem === null || fuelItem === null) {
+    // Not executable yet: the input/fuel is a code-owned precondition
+    // (optionSpec#smeltPreconditions), so offer the deterministic collect route
+    // for the missing producer instead of starving to WAIT. `fuel` is the
+    // data-driven class route (a log or coal), symmetric with the input route.
+    return mineCandidates(state, options, inputItem === null ? inputSpec : 'fuel', null)
+  }
 
   const haveOutput = state.inventory.counts[focusItem] ?? 0
   const required = state.goalQueue?.current?.requiredCount ?? state.goal.requiredCount
@@ -1362,6 +1369,58 @@ function smeltInputFor(state: WorldState, focusItem: string): string | null {
 
 function smeltFuelFor(state: WorldState): string | null {
   return findInventoryFuel(state.inventory.counts)?.item ?? null
+}
+
+/** The one-line `SMELT_INPUT_PREREQ` record for a smelt goal's input producer. */
+export interface SmeltInputPrereqLine {
+  /** the smelt output the goal wants, e.g. `charcoal` */
+  item: string
+  /** concrete input item: held when present, else the nearest world producer */
+  input: string
+  present: boolean
+  /** `insert_collect` when the missing input offers a collect route */
+  action: 'insert_collect' | 'none' | 'no_collect_route'
+}
+
+/**
+ * The code-owned input-prerequisite view of the current smelt goal, for the
+ * mirrored `SMELT_INPUT_PREREQ` marker. Data-driven: the input comes from
+ * gameData.smeltInputFor, so charcoal reports a `*_log` and iron_ingot reports
+ * raw_iron. The route is the same `mineCandidates` set the generator offers for
+ * a missing input, so the logged action always matches the presented candidates.
+ */
+export function smeltInputPrereq(state: WorldState, options: CandidateOptions): SmeltInputPrereqLine | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'smelt') return null
+  const item = current.targetItem
+  if (item === null) return null
+  const inputSpec = smeltInputName(item)
+  if (inputSpec === null) return null
+  if ((state.furnaces ?? []).find(isSensedStation) === undefined) return null
+  const held = smeltInputFor(state, item)
+  if (held !== null) return { item, input: held, present: true, action: 'none' }
+  const route = mineCandidates(state, options, inputSpec, null)
+  return {
+    item,
+    input: nearestProducerYield(state, inputSpec) ?? inputSpec,
+    present: false,
+    action: route.length > 0 ? 'insert_collect' : 'no_collect_route',
+  }
+}
+
+export function formatSmeltInputPrereq(entry: SmeltInputPrereqLine): string {
+  return `SMELT_INPUT_PREREQ item=${entry.item} input=${entry.input} present=${entry.present} action=${entry.action}`
+}
+
+/** Nearest mineable block whose yield satisfies `spec` (`oak_log` for `log`). */
+function nearestProducerYield(state: WorldState, spec: string): string | null {
+  let best: BlockState | null = null
+  for (const block of state.blocks) {
+    if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
+    if (!resourceMatches(block.yield ?? block.name, spec)) continue
+    if (best === null || block.distance < best.distance) best = block
+  }
+  return best === null ? null : (best.yield ?? best.name)
 }
 
 const EMPTY_STATIONS: ReadonlySet<string> = new Set<string>()
