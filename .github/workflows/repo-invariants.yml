@@ -33,7 +33,7 @@ jobs:
       - name: Lane-guard fixtures
         run: npm run lane-guard-test
       - name: M2 evidence tooling fixtures
-        run: npm run m2-watch-test && npm run m2-acceptance-test
+        run: npm run m2-watch-test && npm run m2-acceptance-test && npm run m2-live-gate-test
       - name: Live issue-routing invariant
         run: npm run frontier:check
       - name: Live issue-evidence invariant
