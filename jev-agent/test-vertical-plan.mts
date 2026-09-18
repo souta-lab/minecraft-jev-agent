@@ -9,6 +9,7 @@ import type { GuardContext } from './src/policy.ts'
 import {
   ASCENT_PROGRESS_EPSILON,
   classifyHeadroomBlocker,
+  evaluateAscentColumn,
   evaluatePillarStep,
   evaluateRetrievalProgress,
   evaluateTunnelEntry,
@@ -1204,6 +1205,176 @@ addCase('a reuse retrieval candidate carries the no-tunnel fallback vertical pla
     retrieve.meta.fallbackStairDigY === 56 &&
     retrieve.meta.tunnelClearX === undefined
   return { pass, detail: retrieve === null ? 'no RETRIEVE' : JSON.stringify(retrieve.meta) }
+})
+
+addCase('the safe_column fact: a clearable column with the held tool is satisfied', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'cobblestone',
+    safe: true,
+    reason: 'safe',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({ stone_pickaxe: 1 }).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'clearable' &&
+      decision.cell.x === 32 &&
+      decision.cell.y === 35 &&
+      decision.blocker.name === 'cobblestone' &&
+      decision.blocker.toolOk &&
+      decision.blocker.requiredTool === 'pickaxe',
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: clearable geometry without the tool refuses as no_tool', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'cobblestone',
+    safe: true,
+    reason: 'safe',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'no_tool' &&
+      decision.cell.x === 32 &&
+      decision.blocker?.requiredTool === 'pickaxe' &&
+      decision.blocker?.requiredTier === 0,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: an unsafe cut names no_clearance at the cut cell', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'N',
+    dx: 0,
+    dz: -1,
+    cut: { x: 31, y: 35, z: 36 },
+    step: { x: 31, y: 35, z: 36 },
+    name: 'cobblestone',
+    safe: false,
+    reason: 'no solid landing under the cut',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 30 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({ stone_pickaxe: 1 }).counts,
+  })
+  return {
+    pass: decision.kind === 'refuse' && decision.reason === 'no_clearance' && decision.cell.z === 36,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: a standable cell one level up is a clear column', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 40, y: 63, z: 37 },
+    stepCuts: [],
+    standable: [feet, { x: 32, y: 35, z: 37 }],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'clear' && decision.cell.x === 32 && decision.cell.y === 35,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: no geometry names the target-aligned cardinal cell', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 31, y: 63, z: 30 },
+    stepCuts: [],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass:
+      decision.kind === 'refuse' &&
+      decision.reason === 'no_clearance' &&
+      decision.cell.x === 31 &&
+      decision.cell.y === 35 &&
+      decision.cell.z === 36 &&
+      decision.blocker === null,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: a hazard next to a clear cell disqualifies the column', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [],
+    standable: [feet, { x: 32, y: 35, z: 37 }],
+    hazards: [{ x: 32, y: 36, z: 37 }],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'refuse' && decision.reason === 'no_clearance' && decision.cell.x === 32,
+    detail: JSON.stringify(decision),
+  }
+})
+
+addCase('the safe_column fact: a shovel/axe cut still clears by hand (no false no_tool)', () => {
+  const feet = { x: 31, y: 34, z: 37 }
+  const cut: StepCut = {
+    dir: 'E',
+    dx: 1,
+    dz: 0,
+    cut: { x: 32, y: 35, z: 37 },
+    step: { x: 32, y: 35, z: 37 },
+    name: 'dirt',
+    safe: true,
+    reason: 'safe',
+  }
+  const decision = evaluateAscentColumn({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 32, y: 63, z: 37 },
+    stepCuts: [cut],
+    standable: [feet],
+    inventory: inventory({}).counts,
+  })
+  return {
+    pass: decision.kind === 'clearable' && decision.blocker.toolOk,
+    detail: JSON.stringify(decision),
+  }
 })
 
 let failures = 0
