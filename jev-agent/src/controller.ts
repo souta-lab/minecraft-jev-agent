@@ -61,7 +61,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
-import type { GoalQueueSnapshot, GoalQueueState, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
@@ -610,6 +610,28 @@ export function shouldClearActiveRetrieval(input: {
   if (!input.hasObservableProgress) return false
   if (input.retrieval !== 'known') return true
   return input.arrived
+}
+
+/**
+ * The queue op the single-shot bootstrap plan is actually applied with.
+ *
+ * buddy-driver restores the durable host ledger into the controller queue
+ * BEFORE `controller.start()` (`generation-entry.ts` -> `restoreLedgerIntoController`)
+ * and resident mode passes `ledgerPath: null`, so the controller's own
+ * post-plan `loadLedger()` cannot re-read it. When a plan with `op=replace`
+ * arrived a non-empty queue was wiped anyway: live run-mu8kgmjm-ujwg restored
+ * `current=smelt 3 x iron_ingot` and 74 ms later logged `QUEUE_DEPTH op=replace
+ * reason=bootstrap`; the ladder's `craft 1 x iron_pickaxe` took the head and no
+ * SMELT/FURNACE marker was ever emitted. A restored, not-yet-done goal is work
+ * the bot already committed to, so bootstrap merges the ladder BEHIND it
+ * (`continue`) instead of replacing it. Not smelt-specific: any restored head is
+ * preserved. An empty queue (fresh bootstrap) keeps the requested op unchanged,
+ * and an explicit `abort` is never overridden.
+ */
+export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | undefined): PlanOp {
+  const op = requested ?? 'replace'
+  if (op === 'replace' && queue.current !== null) return 'continue'
+  return op
 }
 
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
@@ -1518,13 +1540,24 @@ export class JevController {
     const plan = await this.system2.plan(request)
     this.planCalls += 1
     const depthBefore = this.queue.state.depth
-    const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
+    const restoredHead = this.queue.current !== null
+    const requestedOp = plan.op ?? 'replace'
+    const op = resolveBootstrapPlanOp(this.queue, plan.op)
+    const added = this.queue.applyPlan(plan.goals, 'llm', op, {
       reason: plan.note,
-      onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
-      onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', phase: 'bootstrap' }, this.tickCounter),
+      onProtection: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
+      onDuplicate: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
     })
-    this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `bootstrap`)
-    this.subgoalCount = added.length
+    this.logQueueDepthDelta(depthBefore, op, `bootstrap`)
+    this.subgoalCount = Math.max(added.length, this.queue.size)
+    if (restoredHead && op !== requestedOp) {
+      this.logger.warn(
+        'system2',
+        `BOOTSTRAP_HEAD_PRESERVED current=${this.queue.current?.description ?? 'none'} op=${op} requested=${requestedOp} depth=${this.queue.state.depth}`,
+        { op, requested: requestedOp, depth: this.queue.state.depth, current: this.queue.current?.description ?? null },
+        0,
+      )
+    }
     this.planSupplied = true
     const restored = this.loadLedger()
     if (restored !== null) {
