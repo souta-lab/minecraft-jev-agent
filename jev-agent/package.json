@@ -38,6 +38,7 @@
     "skill-candidate-test": "tsx test-skill-candidate.mts",
     "observability-test": "tsx test-observability.mts",
     "action-verify-test": "tsx test-action-verify.mts",
+    "truth-causal-test": "tsx test-truth-causal.mts",
     "minecraft-truth-test": "tsx test-minecraft-truth.mts",
     "pillar-search-test": "tsx test-pillar-search.mts",
     "hop-policy-test": "tsx test-hop-policy.mts",
