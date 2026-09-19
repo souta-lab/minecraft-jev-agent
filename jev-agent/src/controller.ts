@@ -5171,6 +5171,16 @@ export class JevController {
 
   private recordMoveSuccess(candidate: Candidate): void {
     if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    const dig = this.digMemory.snapshot()
+    if (dig.descendLimitReached) {
+      this.digMemory.resetDescendBudget()
+      this.logger.info(
+        'agent',
+        `DESCEND_BUDGET_RESET actionId=${candidate.id} reason=verified_move`,
+        { actionId: candidate.id, previousNoProgress: dig.descendNoProgress },
+        this.tickCounter,
+      )
+    }
     const dimension = this.currentDimension()
     const key = moveFailureKey(dimension, candidate.target)
     if (!this.moveFailMemory.reset(dimension, candidate.target)) return

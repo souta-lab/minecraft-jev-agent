@@ -137,6 +137,15 @@ export class DigMemory {
     this.recent = []
   }
 
+  /**
+   * A successful lateral move starts a new search column. Clear only the
+   * no-progress budget; the caller already resets the path when the cap fires,
+   * and the known stone level remains useful evidence for the next column.
+   */
+  resetDescendBudget(): void {
+    this.descendNoProgress = 0
+  }
+
   markDescend(resourceProgressed: boolean): { noProgress: number; limitReached: boolean } {
     const budget = descendBudget(this.descendNoProgress, resourceProgressed)
     this.descendNoProgress = budget.noProgress
