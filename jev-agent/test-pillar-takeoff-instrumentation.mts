@@ -22,12 +22,14 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   HORIZONTAL_VELOCITY_EPSILON,
+  MAX_TRACE_COMPACT_CHARS,
   buildPillarTakeoffTelemetry,
   formatPillarTakeoffTelemetry,
   makePillarAttemptId,
   readControlState,
   type PillarTakeoffTelemetryInput,
 } from './src/pillarTakeoffTelemetry.ts'
+import type { PillarJumpTraceSample } from './src/pillarJump.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
 
 let checks = 0
@@ -230,6 +232,182 @@ assert.ok(leakyLine.includes('horizontalLeak=true'), 'leaky formatted record mus
 assert.ok(cleanLine.includes('horizontalLeak=false'), 'clean formatted record must print horizontalLeak=false')
 assert.ok(leakyLine.includes(`attemptId=${leaky.attemptId}`), 'formatted record must carry the attemptId')
 ok('formatPillarTakeoffTelemetry emits a single mirrorable line with horizontalLeak')
+
+// The pre-existing prefix must be byte-for-byte unchanged when the additive
+// trace summary is appended; only the tail may grow.
+const leakyPrefix =
+  `PILLAR_TAKEOFF attemptId=${leaky.attemptId} launchVel=0.18,0.42,-0.14 endVel=0,-0.155,0` +
+  ` forward=true jump=true forcedRepositions=0 peakRise=0 horizontalLeak=true`
+assert.ok(
+  leakyLine.startsWith(leakyPrefix),
+  `existing field order/meaning must be preserved (got: ${leakyLine})`,
+)
+ok('the pre-existing PILLAR_TAKEOFF prefix is unchanged; trace summary is append-only')
+
+// ---------------------------------------------------------------- trace summary + discriminator
+
+const traceSample = (overrides: Partial<PillarJumpTraceSample>): PillarJumpTraceSample => ({
+  atMs: 0,
+  event: 'poll',
+  onGroundBefore: true,
+  onGroundAfter: true,
+  grounded: true,
+  positionY: 11,
+  velocityY: 0,
+  rise: 0,
+  airborne: false,
+  ticks: 0,
+  impulses: 0,
+  ...overrides,
+})
+
+// (c) missing trace -> no_trace (the existing leaky/clean attempts supply none).
+assert.equal(leaky.takeoffDiscriminator, 'no_trace', 'an absent trace must classify as no_trace')
+assert.equal(leaky.traceTicks, null, 'an absent trace must not report a tick count')
+assert.equal(leaky.traceGateFires, null, 'an absent trace must not report gate fires')
+assert.equal(leaky.traceMaxRise, null, 'an absent trace must not report a max rise')
+assert.equal(leaky.traceTruncated, false, 'an absent trace is not truncated')
+assert.equal(leaky.traceCompact, 'none', 'an absent trace must print the none marker')
+assert.equal(clean.takeoffDiscriminator, 'no_trace', 'a clean attempt without a trace is still no_trace')
+ok('missing trace -> no_trace with null measurements and a bounded `none` string')
+
+// (a) the gate fired (positive velocity / explicit impulse) yet the body never
+// rose: rise stays <= 0 and no sample is airborne -> move clamped.
+const gateFiredNoRise = buildPillarTakeoffTelemetry(
+  attempt({
+    attemptId: makePillarAttemptId(candidateId, epoch, 5),
+    jumpTrace: {
+      truncated: false,
+      samples: [
+        traceSample({ atMs: 0, event: 'initial', velocityY: 0 }),
+        traceSample({ atMs: 5, event: 'control', velocityY: 0 }),
+        traceSample({ atMs: 10, event: 'physicsTick', velocityY: 0.34, ticks: 1 }),
+        traceSample({
+          atMs: 120,
+          event: 'impulse',
+          velocityY: 0.42,
+          velocityYBefore: -0.0784,
+          ticks: 2,
+          impulses: 1,
+        }),
+        traceSample({ atMs: 135, event: 'forcedMove', velocityY: -0.0784, ticks: 2, impulses: 1 }),
+        traceSample({ atMs: 150, event: 'poll', velocityY: -0.0784, ticks: 2, impulses: 1 }),
+      ],
+    },
+  }),
+)
+assert.equal(
+  gateFiredNoRise.takeoffDiscriminator,
+  'gate_fired_move_clamped',
+  'a gate fire with no rise must classify as gate_fired_move_clamped',
+)
+assert.equal(gateFiredNoRise.traceGateFires, 2, 'the physicsTick rise and the impulse must both count as gate fires')
+assert.equal(gateFiredNoRise.traceTicks, 1, 'exactly one physicsTick sample must be counted')
+assert.equal(gateFiredNoRise.traceMaxRise, 0, 'no sample rose above the launch point')
+assert.equal(gateFiredNoRise.traceTruncated, false, 'a short trace is not truncated')
+ok('gate fired + zero rise -> gate_fired_move_clamped (gate fires and ticks summarised)')
+
+// (b) no sample shows any launch actuation: all velocities are <= 0 and there is
+// no impulse observation -> the gate never fired.
+const gateNeverFired = buildPillarTakeoffTelemetry(
+  attempt({
+    attemptId: makePillarAttemptId(candidateId, epoch, 6),
+    jumpTrace: {
+      truncated: false,
+      samples: [
+        traceSample({ atMs: 0, event: 'initial', velocityY: -0.0784 }),
+        traceSample({ atMs: 10, event: 'control', velocityY: -0.0784 }),
+        traceSample({ atMs: 20, event: 'physicsTick', velocityY: -0.0784, ticks: 1 }),
+        traceSample({ atMs: 40, event: 'poll', velocityY: -0.155, ticks: 1 }),
+        traceSample({ atMs: 60, event: 'forcedMove', velocityY: -0.155, ticks: 1 }),
+      ],
+    },
+  }),
+)
+assert.equal(
+  gateNeverFired.takeoffDiscriminator,
+  'gate_never_fired',
+  'no observed launch actuation must classify as gate_never_fired',
+)
+assert.equal(gateNeverFired.traceGateFires, 0, 'no sample may count as a gate fire')
+assert.equal(gateNeverFired.traceTicks, 1, 'the single physicsTick sample must still be counted')
+assert.equal(typeof gateNeverFired.traceMaxRise, 'number', 'a present trace must report a numeric max rise')
+assert.ok((gateNeverFired.traceMaxRise ?? 1) <= 0, 'the body never rose')
+ok('no observed gate fire -> gate_never_fired')
+
+// The remaining state: a launch that did rise is not a no_rise case.
+const gateFiredAndRose = buildPillarTakeoffTelemetry(
+  attempt({
+    attemptId: makePillarAttemptId(candidateId, epoch, 7),
+    jumpTrace: {
+      truncated: false,
+      samples: [
+        traceSample({ atMs: 5, event: 'physicsTick', velocityY: 0.34, rise: 0.005, positionY: 11.005, ticks: 1 }),
+        traceSample({
+          atMs: 20,
+          event: 'physicsTick',
+          velocityY: 0.26,
+          rise: 0.34,
+          positionY: 11.34,
+          airborne: true,
+          ticks: 2,
+        }),
+      ],
+    },
+  }),
+)
+assert.equal(
+  gateFiredAndRose.takeoffDiscriminator,
+  'gate_fired_and_rose',
+  'a launch with real rise must not be classified as a no_rise cause',
+)
+ok('gate fired + a real rise -> gate_fired_and_rose (closed union, no implicit undefined)')
+
+// (d) the compact string is single-line and hard-capped, with truncation marked.
+const manySamples: PillarJumpTraceSample[] = Array.from({ length: 400 }, (_, i) =>
+  traceSample({
+    atMs: i * 7,
+    event: i % 3 === 0 ? 'physicsTick' : i % 3 === 1 ? 'poll' : 'forcedMove',
+    velocityY: i % 2 === 0 ? 0.34 : -0.0784,
+    rise: i * 0.00123,
+    positionY: 11 + i * 0.00123,
+    airborne: i * 0.00123 > 0.02,
+    ticks: i,
+    onGroundBefore: i % 2 === 0,
+    onGroundAfter: i % 3 !== 0,
+  }),
+)
+const huge = buildPillarTakeoffTelemetry(
+  attempt({ attemptId: makePillarAttemptId(candidateId, epoch, 8), jumpTrace: { truncated: false, samples: manySamples } }),
+)
+assert.ok(huge.traceCompact.length <= MAX_TRACE_COMPACT_CHARS, `compact trace must be capped at ${MAX_TRACE_COMPACT_CHARS} chars`)
+assert.equal(huge.traceCompact.split('\n').length, 1, 'compact trace must be a single line')
+assert.notEqual(huge.traceCompact, 'none', 'a present trace must not print the none marker')
+assert.ok(huge.traceCompact.endsWith('~'), 'a capped compact trace must mark its truncation in-band')
+assert.equal(huge.traceTruncated, true, 'a capped compact trace must set traceTruncated')
+ok(`compact trace is single-line, <= ${MAX_TRACE_COMPACT_CHARS} chars, and marks truncation`)
+
+// A source trace that already dropped samples must also report truncation.
+const sourceTruncated = buildPillarTakeoffTelemetry(
+  attempt({
+    attemptId: makePillarAttemptId(candidateId, epoch, 9),
+    jumpTrace: { truncated: true, samples: [traceSample({ event: 'physicsTick', velocityY: 0.34, ticks: 1 })] },
+  }),
+)
+assert.equal(sourceTruncated.traceTruncated, true, 'a truncated source trace must propagate traceTruncated')
+assert.ok(sourceTruncated.traceCompact.endsWith('~'), 'a truncated source trace must mark truncation in-band')
+ok('source-trace truncation propagates to the record and the compact string')
+
+// The appended summary must be present on the formatted line.
+assert.ok(leakyLine.includes('takeoffDiscriminator=no_trace'), 'formatted record must carry the discriminator')
+assert.ok(leakyLine.includes('traceTicks=null'), 'formatted record must carry the null trace ticks')
+assert.ok(leakyLine.includes('trace=none'), 'formatted record must carry the none trace string')
+const gateFiredLine = formatPillarTakeoffTelemetry(gateFiredNoRise)
+assert.ok(gateFiredLine.includes('takeoffDiscriminator=gate_fired_move_clamped'), 'formatted record must show the clamped discriminator')
+assert.ok(gateFiredLine.includes('traceGateFires=2'), 'formatted record must show the gate-fire count')
+assert.ok(gateFiredLine.includes('traceMaxRise=0'), 'formatted record must show the max rise')
+assert.ok(gateFiredLine.includes('trace=') && !gateFiredLine.includes('\n'), 'formatted trace tail must be single-line')
+ok('formatPillarTakeoffTelemetry appends the discriminator, summary and bounded trace string')
 
 // ---------------------------------------------------------------- wiring guard (source scan)
 
