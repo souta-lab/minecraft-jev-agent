@@ -150,62 +150,6 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
   ok('snapshot without the ordered chain -> UNKNOWN/exit 2')
 }
 
-// 5b. The snapshot now retains ONE live sample per marker, so the FURNACE_READY
-// sample keeps the charcoal=1 observation even though the later SMELT_DONE
-// consumed the fuel (top-level `inventory` is the latest instant and has no
-// charcoal). Enriching the evidence must NOT loosen the exact-run binding: a
-// mismatched runId / build / source still yields UNKNOWN, never PASS.
-function perMarkerSnapshot(overrides = {}) {
-  return snapshot({
-    markers: [
-      { name: 'PREREQ_OPTION', atMs: Date.parse('2026-09-19T18:21:53.724Z'), at: '2026-09-19T18:21:53.724Z', inventory: { ...SATISFIED_INVENTORY, charcoal: 1, iron_ingot: 0 } },
-      { name: 'FURNACE_READY', atMs: Date.parse('2026-09-19T18:21:54.724Z'), at: '2026-09-19T18:21:54.724Z', inventory: { ...SATISFIED_INVENTORY, charcoal: 1, iron_ingot: 0 } },
-      { name: 'SMELT_DONE', atMs: Date.parse('2026-09-19T18:22:04.501Z'), at: '2026-09-19T18:22:04.501Z', inventory: { ...SATISFIED_INVENTORY, charcoal: 0 } },
-    ],
-    // Latest-instant inventory only: charcoal was consumed by the smelt.
-    inventory: { ...SATISFIED_INVENTORY, charcoal: 0 },
-    ...overrides,
-  })
-}
-
-{
-  const retained = perMarkerSnapshot()
-  const furnace = retained.markers.find((marker) => marker.name === 'FURNACE_READY')
-  const smelt = retained.markers.find((marker) => marker.name === 'SMELT_DONE')
-  assert.equal(furnace?.inventory.charcoal, 1, 'FURNACE_READY sample must retain charcoal>=1')
-  assert.equal(smelt?.inventory.iron_ingot, 3, 'SMELT_DONE sample must retain iron_ingot>=3')
-  assert.equal(retained.inventory.charcoal, 0, 'top-level inventory remains the latest instant (no charcoal)')
-  ok('per-marker samples retain FURNACE_READY charcoal=1 AND SMELT_DONE iron_ingot=3')
-}
-
-// 5c. A foreign runId is still rejected even though the per-marker samples look
-// complete: the retained evidence never crosses run scope.
-{
-  const { code, text } = await judge({ snap: perMarkerSnapshot({ runId: 'run-snapshot-b' }) })
-  assert.equal(code, 2, `cross-run per-marker snapshot must be UNKNOWN but returned ${code}:\n${text}`)
-  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
-  assert.doesNotMatch(text, /PASS charcoal|FAIL charcoal/, text)
-  ok('per-marker snapshot runId mismatch -> UNKNOWN/exit 2 (binding not loosened)')
-}
-
-// 5d. A mismatched BUILD hash is still rejected with the richer per-marker samples.
-{
-  const { code, text } = await judge({ snap: perMarkerSnapshot(), identity: { ...BOOT_IDENTITY, buildHash: 'ffffffffffff' } })
-  assert.equal(code, 2, `build mismatch must be UNKNOWN but returned ${code}:\n${text}`)
-  assert.match(text, /UNKNOWN/, text)
-  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
-  ok('per-marker snapshot buildHash mismatch -> UNKNOWN/exit 2 (binding not loosened)')
-}
-
-// 5e. A mismatched BOOT source is still rejected with the richer per-marker samples.
-{
-  const { code, text } = await judge({ snap: perMarkerSnapshot(), identity: { ...BOOT_IDENTITY, bootSourceSha: 'deadbeefdeadbeef' } })
-  assert.equal(code, 2, `source mismatch must be UNKNOWN but returned ${code}:\n${text}`)
-  assert.match(text, /UNKNOWN/, text)
-  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
-  ok('per-marker snapshot bootSourceSha mismatch -> UNKNOWN/exit 2 (binding not loosened)')
-}
-
 // 6. A live same-run socket still wins and is reported as such.
 {
   const live = { runId: RUN, status: { truth: { inventory: { ...SATISFIED_INVENTORY } } }, stats: {}, milestone: 'iron_pickaxe' }

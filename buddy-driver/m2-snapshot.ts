@@ -253,28 +253,11 @@ export class M2SnapshotRecorder {
       at: new Date(atMs).toISOString(),
       inventory: this.readInventory(),
     }
-    // Exactly ONE retained sample per marker, pinned to the occurrence that
-    // ADVANCES the ordered chain: the first PREREQ_OPTION, the first
-    // FURNACE_READY after it, then the first SMELT_DONE after that. Those are
-    // the observations the causal chain is about, so they are the samples kept.
-    //
-    // A repeat of an already-retained marker (e.g. a second FURNACE_READY once
-    // the furnace has burnt its fuel) must NOT overwrite the earlier live
-    // inventory. Overwriting is what lost the FURNACE_READY-time `charcoal>=1`
-    // observation, leaving only the later fuel-consumed state.
-    const cursor = orderedM2Chain(this.snapshot.sequence).observed.length
-    const advancesChain = M2_REQUIRED_MARKERS[cursor] === event
+    // First occurrence per marker captures the chain position; a repeat only
+    // refreshes the timestamp/inventory on that same position.
     const index = this.snapshot.markers.findIndex((entry) => entry.name === event)
-    if (advancesChain) {
-      // The chain-participating occurrence is authoritative for this marker: it
-      // replaces an out-of-order earlier sample of the same name when present.
-      if (index === -1) this.snapshot.markers.push(marker)
-      else this.snapshot.markers[index] = marker
-    } else if (index === -1) {
-      // No chain sample for this name yet: retain the occurrence as evidence,
-      // but never let a later repeat overwrite it (first observation wins).
-      this.snapshot.markers.push(marker)
-    }
+    if (index === -1) this.snapshot.markers.push(marker)
+    else this.snapshot.markers[index] = marker
     if (this.snapshot.sequence.length < M2_SNAPSHOT_MAX_SEQUENCE) this.snapshot.sequence.push(event)
     this.snapshot.chain = orderedM2Chain(this.snapshot.sequence)
     this.snapshot.atMs = atMs
