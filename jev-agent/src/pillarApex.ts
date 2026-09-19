@@ -12,20 +12,58 @@
 // `pillarStepUp` verifies all four sub-steps - takeoff, apex, place, landing -
 // and reports the failed one as `PILLAR_FAIL step=...`, so a consumed item can
 // never again read as an unattributed no-progress action.
-import { jumpWithGroundCorrection } from './pillarJump.ts'
+import { jumpWithGroundCorrection, TAKEOFF_RISE } from './pillarJump.ts'
 import type { JumpBotLike, PillarJumpDeps, PillarJumpTrace, Vec3Like } from './pillarJump.ts'
 
 /**
- * The apex window. A verified vertex needs all three: a rise of at least
- * `PILLAR_APEX_MIN_RISE` from the launch point (a 0.42 jump peaks ~1.25 blocks),
- * a velocity at or below `PILLAR_APEX_VY_MAX` (positive -> non-positive
- * crossing), and a velocity not below `PILLAR_APEX_FALL_VY` (the vertex, not
- * the fall). `velocity.y <= 0.01` alone is also true while standing and while
- * plummeting, which is how the old wait placed at the bottom of the arc.
+ * The apex window. A verified vertex needs all three: the body must have risen
+ * clear of the cell the block will occupy, a velocity at or below
+ * `PILLAR_APEX_VY_MAX` (positive -> non-positive crossing), and a velocity not
+ * below `PILLAR_APEX_FALL_VY` (the vertex, not the fall). `velocity.y <= 0.01`
+ * alone is also true while standing and while plummeting, which is how the old
+ * wait placed at the bottom of the arc.
+ *
+ * `PILLAR_APEX_MIN_RISE` is the rise of an UNOBSTRUCTED jump (a 0.42 jump peaks
+ * ~1.25 blocks). It must not be a hard floor: live `run-mu84l153-qry3` proved a
+ * ceiling clamps the arc to ~0.46 while the feet still clear the place cell,
+ * and the fixed 0.5 marked that real apex as `falling_before_place`. The
+ * runtime demand is therefore derived from the geometry by
+ * `requiredApexRise(...)` and only capped at this reference.
  */
 export const PILLAR_APEX_MIN_RISE = 0.5
 export const PILLAR_APEX_VY_MAX = 0.01
 export const PILLAR_APEX_FALL_VY = -0.25
+
+/**
+ * The rise (from the launch position) the feet must reach so the placed block
+ * does not intersect them: the feet have to clear the top face of the place
+ * cell (`placeCell.y + 1`). `launchY` is the live feet position, so a body that
+ * already floats high in its cell needs less rise. The demand never drops below
+ * the takeoff jitter floor and never exceeds the reference apex.
+ */
+export function requiredApexRise(launchY: number, placeCellY: number): number {
+  return Math.min(PILLAR_APEX_MIN_RISE, Math.max(TAKEOFF_RISE, placeCellY + 1 - launchY))
+}
+
+/**
+ * The highest rise the takeoff observer already recorded AFTER the last server
+ * position reset. prismarine-physics catches up to four ticks per frame, so the
+ * whole ascending arc can complete between two takeoff polls; the trace sees
+ * the apex even when the apex loop's first sample is already on the descent
+ * (live: trace peak 0.464 while the first apex sample read 0.231). A
+ * `forcedMove` teleport resets the flight, so the segment before it is void.
+ */
+export function takeoffObservedRise(trace: PillarJumpTrace): number {
+  let peak = 0
+  for (const sample of trace.samples) {
+    if (sample.event === 'forcedMove') {
+      peak = 0
+      continue
+    }
+    if (sample.rise > peak) peak = sample.rise
+  }
+  return peak
+}
 
 /** Landing tolerance around `placeCell.y + 1` (server sync offsets are <= 1/8). */
 export const PILLAR_LANDING_Y_TOLERANCE = 0.2
@@ -147,10 +185,15 @@ export async function pillarStepUp(
   }
 
   deps.ensureOwned?.()
+  // The takeoff verifier can return after the apex when prismarine-physics
+  // catches up several ticks in one frame, so the rise it already observed must
+  // seed the apex window rather than be discarded. The demand is the geometric
+  // clearance to the place cell, not a fixed half-block.
+  const requiredRise = requiredApexRise(launchY, plan.placeCell.y)
   const apexDeadline = deps.now() + deps.apexBudgetMs
   let apexSamples = 0
-  let apexRise = 0
-  let sawRise = false
+  let apexRise = takeoffObservedRise(jump.trace)
+  let sawRise = apexRise >= requiredRise
   let atApex = false
   while (deps.now() < apexDeadline) {
     deps.ensureOwned?.()
@@ -158,7 +201,7 @@ export async function pillarStepUp(
     const vy = bot.entity.velocity.y
     const rise = bot.entity.position.y - launchY
     if (rise > apexRise) apexRise = rise
-    if (rise >= PILLAR_APEX_MIN_RISE) sawRise = true
+    if (rise >= requiredRise) sawRise = true
     if (sawRise && vy <= PILLAR_APEX_VY_MAX && vy >= PILLAR_APEX_FALL_VY) {
       atApex = true
       break
