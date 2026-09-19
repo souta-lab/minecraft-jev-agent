@@ -3034,9 +3034,27 @@ function evaluateCandidate(
   const target = reachabilityTargetFor(context.state, candidate)
   const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
   const abilities = deriveReachabilityAbilities(context.state, position, context.column)
-  const probe = context.options.reachability?.pathProbe?.(position) ?? 'unknown'
+  // A generated vertical plan owns its own route (staircase/pillar/reuse); the
+  // ordinary horizontal GoalBlock probe would reject it before the executor can
+  // run that plan. Every other locomotion candidate must have a current path
+  // fact when the host provides one. A standable destination alone is not a
+  // route: the live M2 wedge showed MOVE candidates whose destination was
+  // grounded but whose pathfinder timed out and whose control-walk had no jump
+  // headroom.
+  const probe = hasVerticalPlan(candidate)
+    ? 'unknown'
+    : context.options.reachability?.pathProbe?.(position) ?? 'unknown'
   const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, probe)
   return reachabilityRecord(candidate, target, world, result, context)
+}
+
+function hasVerticalPlan(candidate: Candidate): boolean {
+  return (
+    candidate.meta.vertical === 'reuse' ||
+    candidate.meta.vertical === 'staircase' ||
+    candidate.meta.vertical === 'staircase-up' ||
+    candidate.meta.vertical === 'pillar'
+  )
 }
 
 /**

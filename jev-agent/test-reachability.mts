@@ -345,6 +345,44 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       gated.withheld[0]?.result.reason === 'missing_tool',
     `withheld=${gated.withheld.map((entry) => entry.result.reason).join(',') || 'none'}`,
   )
+
+  const openPathMove: Candidate = {
+    ...move,
+    id: 'MOVE:p0_60_2',
+    targetName: null,
+    target: { x: 0, y: 60, z: 2 },
+    requiresTool: false,
+    toolName: null,
+    toolTier: null,
+    meta: { tick: state.tick },
+  }
+  const noPath = applyReachabilityGate([openPathMove], state, {
+    ...defaultCandidateOptions,
+    reachability: { memory: null, pathProbe: () => 'no_path' },
+  })
+  check(
+    'a standable MOVE is withheld when the live path probe says no_path',
+    noPath.candidates.every((candidate) => candidate.id !== openPathMove.id) &&
+      noPath.withheld[0]?.result.reason === 'no_path',
+    `presented=${noPath.candidates.map((candidate) => candidate.id).join(',') || 'none'} withheld=${noPath.withheld[0]?.result.reason ?? 'none'}`,
+  )
+
+  const verticalPlanMove: Candidate = {
+    ...openPathMove,
+    id: 'MOVE:p0_64_2',
+    target: { x: 0, y: 64, z: 2 },
+    meta: { tick: state.tick, vertical: 'pillar' },
+  }
+  const verticalPlan = applyReachabilityGate([verticalPlanMove], state, {
+    ...defaultCandidateOptions,
+    reachability: { memory: null, pathProbe: () => 'no_path' },
+  })
+  check(
+    'an explicit vertical-plan MOVE bypasses the horizontal path probe',
+    verticalPlan.candidates.some((candidate) => candidate.id === verticalPlanMove.id) &&
+      verticalPlan.candidates.find((candidate) => candidate.id === verticalPlanMove.id)?.affordance?.feasible === true,
+    `presented=${verticalPlan.candidates.map((candidate) => candidate.id).join(',') || 'none'} withheld=${verticalPlan.withheld.map((entry) => entry.candidate.id).join(',') || 'none'}`,
+  )
 }
 
 // (4) a plainly reachable target is unaffected ------------------------------------

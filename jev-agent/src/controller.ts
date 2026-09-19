@@ -4928,7 +4928,10 @@ export class JevController {
     try {
       const goal = new goals.GoalBlock(position.x, position.y, position.z)
       const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
-      return plan.status !== 'noPath'
+      // `timeout` is not a usable route fact. The exact M2 wedge was a
+      // GoalBlock timeout followed by a control-walk with no jump headroom;
+      // treating a partial search as reachable re-admitted the same MOVE.
+      return plan.status === 'success'
     } catch {
       return false
     }
@@ -5085,9 +5088,17 @@ export class JevController {
   /** Gate facts, shared by both candidate generations in one tick. */
   private reachabilityGateOptions(): ReachabilityGateOptions {
     if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
+    const pathCache = new Map<string, 'reachable' | 'no_path'>()
     this.gateOptions = {
       memory: this.reachabilityProofs,
-      pathProbe: null,
+      pathProbe: (position) => {
+        const key = `${position.x},${position.y},${position.z}`
+        const cached = pathCache.get(key)
+        if (cached !== undefined) return cached
+        const result = this.canComputePath(position) ? 'reachable' : 'no_path'
+        pathCache.set(key, result)
+        return result
+      },
       stationApproach: this.stationApproachProbe(),
       digApproach: this.digApproachProbe(),
     }
