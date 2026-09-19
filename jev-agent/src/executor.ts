@@ -432,6 +432,77 @@ export function classifyMoveArrival(input: MoveArrivalInput): {
   return { atTarget, anchorNowInReach, verified: atTarget || anchorNowInReach }
 }
 
+/** The feet-distance slack that counts as "arrived" for a remembered retrieve. */
+export const RETRIEVE_ARRIVAL_RADIUS = 2
+
+/**
+ * A retrieve must close at least this much feet distance to count as forward
+ * progress. It mirrors `classifyMoveOutcome`'s 0.5 m "moved" threshold so the
+ * controller's move-failure memory and this classifier agree on what progress
+ * is: a sub-threshold creep is a stall, not an arrival.
+ */
+export const RETRIEVE_CLOSE_EPSILON = 0.5
+
+export type RetrieveApproachOutcome = 'arrived' | 'progressed' | 'stalled'
+
+export interface RetrieveApproachInput {
+  /** feet→target distance before the horizontal approach leg (metres) */
+  distanceBefore: number
+  /** feet→target distance after the horizontal approach leg (metres) */
+  distanceAfter: number
+  /** feet Y before the action began */
+  startY: number
+  /** feet Y now */
+  endY: number
+  /** the remembered target Y */
+  targetY: number
+  /** a bounded vertical leg produced a durable body change (Y moved toward target) */
+  verticalStep: boolean
+  /** the approach leg raised a typed movement error (GoalNear stuck / packet locomotion blocked) */
+  approachFailed: boolean
+}
+
+export interface RetrieveApproachDecision {
+  outcome: RetrieveApproachOutcome
+  arrived: boolean
+  /** feet closed at least `RETRIEVE_CLOSE_EPSILON` toward the target */
+  closed: boolean
+  /** |endY-targetY| shrank by more than 0.01 */
+  verticalProgress: boolean
+  /** the result may be recorded as done/verified */
+  verified: boolean
+}
+
+/**
+ * Honest retrieval-approach outcome, the RETRIEVE analogue of
+ * `classifyMoveArrival`. A remembered station/resource retrieve is only
+ * `arrived` when the feet are within `RETRIEVE_ARRIVAL_RADIUS`; a bounded
+ * vertical leg that gained altitude is `progressed`; everything else is
+ * `stalled`.
+ *
+ * The live M2 defect: `runRetrieve` swallowed the typed `pathToNear` error
+ * (`GoalNear -> stuck` / no jump headroom / `packet locomotion blocked`) and
+ * still returned a soft `done`. The route never closed, `FURNACE_READY` never
+ * fired, and the same blocked retrieve kept being re-selected because no typed
+ * failure reached the controller's retirement machinery. A raised approach
+ * error is therefore only survivable with durable vertical progress; otherwise
+ * the caller must fail loudly with the original typed code.
+ */
+export function classifyRetrieveApproach(input: RetrieveApproachInput): RetrieveApproachDecision {
+  const arrived = input.distanceAfter <= RETRIEVE_ARRIVAL_RADIUS
+  const closed = input.distanceAfter <= input.distanceBefore - RETRIEVE_CLOSE_EPSILON
+  const verticalProgress = Math.abs(input.endY - input.targetY) < Math.abs(input.startY - input.targetY) - 0.01
+  const progressed = input.verticalStep || verticalProgress || (!input.approachFailed && closed)
+  const outcome: RetrieveApproachOutcome = arrived ? 'arrived' : progressed ? 'progressed' : 'stalled'
+  return {
+    outcome,
+    arrived,
+    closed,
+    verticalProgress,
+    verified: arrived || verticalProgress || input.verticalStep,
+  }
+}
+
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
 export interface SmeltFurnaceSlot {
@@ -1421,28 +1492,57 @@ export class Executor {
       )
     }
     this.setPhase(candidate, epoch, 'approaching')
+    let approachError: ExecutorError | null = null
     try {
-      await this.pathToNear(target, 2, epoch, signal)
+      await this.pathToNear(target, RETRIEVE_ARRIVAL_RADIUS, epoch, signal)
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
+      approachError =
+        error instanceof ExecutorError
+          ? error
+          : new ExecutorError(
+              'path_stuck',
+              `retrieve approach failed: ${error instanceof Error ? error.message : String(error)}`,
+            )
       this.logger.warn(
         'executor',
-        `RETRIEVE horizontal approach failed after the vertical leg: ${error instanceof Error ? error.message : String(error)}`,
-        { target, actionId: candidate.id },
+        `RETRIEVE ${candidate.id} horizontal approach blocked (${approachError.code}): ${approachError.message}`,
+        { target, actionId: candidate.id, failure: approachError.code },
       )
     }
     this.ensureOwned(epoch, signal)
     const after = this.distanceToFeet(target)
     const endY = this.bot.entity.position.y
-    const closed = after < before - 0.01
-    const verticalProgress = Math.abs(endY - target.y) < Math.abs(startY - target.y) - 0.01
+    const approach = classifyRetrieveApproach({
+      distanceBefore: before,
+      distanceAfter: after,
+      startY,
+      endY,
+      targetY: target.y,
+      verticalStep,
+      approachFailed: approachError !== null,
+    })
+    if (approach.outcome === 'stalled') {
+      const failure =
+        approachError ??
+        new ExecutorError(
+          'path_stuck',
+          `retrieve made no progress toward (${target.x},${target.y},${target.z}) (${round2(before)}m->${round2(after)}m)`,
+        )
+      this.logger.error(
+        'executor',
+        `RETRIEVE ${candidate.id} STALLED failure=${failure.code}: ${failure.message}`,
+        { target, actionId: candidate.id, failure: failure.code, before: round2(before), after: round2(after) },
+      )
+      throw failure
+    }
     this.logger.info(
       'executor',
-      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${activeVertical}`,
+      `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${activeVertical} outcome=${approach.outcome}`,
       { target, actionId: candidate.id },
     )
-    return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m`, null, {
-      verified: closed || verticalProgress || verticalStep,
+    return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m (${approach.outcome})`, null, {
+      verified: approach.verified,
       blockRemoved: dugVertical && verticalStep,
       dropObserved: false,
       itemsGained: 0,
