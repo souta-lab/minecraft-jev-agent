@@ -14,6 +14,7 @@
     "move-failmem-test": "tsx test-move-failmem.mts",
     "move-stuck-stale-test": "tsx test-move-stuck-stale.mts",
     "iron-ore-retire-test": "tsx test-iron-ore-retire.mts",
+    "smelt-priority-test": "tsx test-smelt-priority.mts",
     "reachability-test": "tsx test-reachability.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
