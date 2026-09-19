@@ -32,7 +32,7 @@ import type { Counts } from '../buddy-driver/planner.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import { shouldClearActiveRetrieval } from './src/controller.ts'
 import type { QueuedGoal } from './src/goalQueue.ts'
-import type { AgentSignals, GoalState, InventoryState, KnownResource, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, Vec3Json, WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -203,9 +203,106 @@ addCase('B2: oak_log:2 still satisfies the head fuel goal (historical behaviour 
   return { pass, detail: `retrieves=${JSON.stringify(found.map((c) => ({ id: c.id, resource: c.meta.resource })))}` }
 })
 
-// --- C. a stuck known retrieve keeps the stall track alive ----------------------
+// --- C. an active raw-iron Option must not admit a queued future log route ---
 
-addCase('C1: a known retrieve that progressed but did NOT arrive keeps the stall track', () => {
+function rawIronEnvelopeWorld(withRoute: boolean): WorldState {
+  const rawIronGoal = queued({
+    id: 'g-raw-iron',
+    description: 'collect 3 x raw_iron',
+    targetItem: 'raw_iron',
+    requiredCount: 3,
+  })
+  const futureLogGoal = queued({
+    id: 'g-future-log',
+    description: 'collect 1 x log',
+    targetItem: 'log',
+    requiredCount: 1,
+    status: 'pending',
+  })
+  const ore: BlockState = {
+    kind: 'ore',
+    name: 'iron_ore',
+    position: { x: 4, y: 60, z: 0 },
+    distance: 4,
+    diggable: true,
+    inReach: false,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 3, y: 60, z: 0 },
+    yield: 'raw_iron',
+    harvestTool: 'pickaxe',
+    harvestTier: 0,
+    visible: true,
+  }
+  const knownLog: KnownResource = {
+    name: 'birch_log',
+    kind: 'log',
+    position: { x: 12, y: 60, z: 0 },
+  }
+  const goal: GoalState = {
+    id: 'g-raw-iron',
+    description: 'collect 3 x raw_iron',
+    targetItem: 'raw_iron',
+    requiredCount: 3,
+    startCount: 0,
+    haveCount: 0,
+    progress: 0,
+    complete: false,
+    startedAtMs: 0,
+  }
+  return {
+    schemaVersion: 1,
+    tick: 12,
+    timestampMs: 1_700_000_000_000,
+    self: self({ x: 0.5, y: 60, z: 0.5 }),
+    inventory: inventory({ stone_pickaxe: 1 }),
+    entities: [],
+    blocks: withRoute ? [ore] : [],
+    terrain: { standable: [{ x: 0.5, y: 60, z: 0.5 }, { x: 3, y: 60, z: 0 }] },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    goal,
+    goalQueue: {
+      depth: 2,
+      current: rawIronGoal,
+      empty: false,
+      hasImpossible: false,
+      done: 0,
+      goals: [rawIronGoal, futureLogGoal],
+    },
+    recentEvents: [],
+    signals: signals([knownLog]),
+  }
+}
+
+function rawIronCandidates(withRoute: boolean) {
+  return generateGroundedCandidates(rawIronEnvelopeWorld(withRoute), defaultCandidateOptions).candidates
+}
+
+addCase('C1: active raw_iron route does not admit an unrelated queued log retrieve', () => {
+  const found = rawIronCandidates(true)
+  const rawRoute = found.find((candidate) => candidate.id === 'MOVE:b4_60_0')
+  const leakedLog = found.find((candidate) => candidate.id.startsWith('RETRIEVE:known:log:'))
+  const pass = rawRoute !== undefined && leakedLog === undefined
+  return {
+    pass,
+    detail: `candidates=${JSON.stringify(found.map((candidate) => ({ id: candidate.id, kind: candidate.kind, resource: candidate.meta.resource ?? null })))}`,
+  }
+})
+
+addCase('C2: queued log retrieval remains available when the active raw_iron route has no candidate', () => {
+  const found = rawIronCandidates(false)
+  const logRoute = found.find((candidate) => candidate.id.startsWith('RETRIEVE:known:log:'))
+  const pass = logRoute !== undefined
+  return {
+    pass,
+    detail: `candidates=${JSON.stringify(found.map((candidate) => ({ id: candidate.id, kind: candidate.kind, resource: candidate.meta.resource ?? null })))}`,
+  }
+})
+
+// --- D. a stuck known retrieve keeps the stall track alive ----------------------
+
+addCase('D1: a known retrieve that progressed but did NOT arrive keeps the stall track', () => {
   const held = shouldClearActiveRetrieval({ retrieval: 'known', hasObservableProgress: true, arrived: false })
   const arrived = shouldClearActiveRetrieval({ retrieval: 'known', hasObservableProgress: true, arrived: true })
   const noProgress = shouldClearActiveRetrieval({ retrieval: 'known', hasObservableProgress: false, arrived: false })
