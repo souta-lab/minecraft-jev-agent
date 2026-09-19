@@ -53,6 +53,7 @@
     "craft-log-route-test": "tsx test-craft-log-route.mts",
     "wedge-guard-test": "tsx test-wedge-guard.mts",
     "retrieval-stall-test": "tsx test-retrieval-stall.mts",
+    "vertical-chunk-replan-test": "tsx test-vertical-chunk-replan.mts",
     "prereq-option-test": "tsx test-prereq-option.mts",
     "prereq-oscillation-test": "tsx test-prereq-oscillation.mts",
     "anti-flap-test": "tsx test-anti-flap.mts",

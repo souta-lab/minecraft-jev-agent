@@ -60,6 +60,27 @@ export const PILLAR_UP_STEP_CAP = DEFAULT_PILLAR_SEARCH_POLICY.stepCap
  */
 export const ASCENT_PROGRESS_EPSILON = 0.9
 
+/**
+ * A completed vertical leg is a bounded action, not permission to immediately
+ * walk to a far-away target at the old horizontal bearing. This applies in
+ * both directions: ascent used to have this guard, while a downward staircase
+ * step could still fall through to the long horizontal path and get stuck.
+ * Pure so the direction/boundary contract is testable without a bot.
+ */
+export function shouldReplanAfterVerticalChunk(input: {
+  verticalStep: boolean
+  startY: number
+  currentY: number
+  targetY: number
+}): boolean {
+  if (!input.verticalStep) return false
+  if (![input.startY, input.currentY, input.targetY].every(Number.isFinite)) return false
+  const startFloorY = Math.floor(input.startY)
+  const currentFloorY = Math.floor(input.currentY)
+  if (currentFloorY === startFloorY) return false
+  return Math.abs(input.targetY - currentFloorY) > 1
+}
+
 /** Why a PILLAR_UP step is refused; `reached` is the normal loop end. */
 export type PillarStepRefusal = 'reached' | 'no_placeable' | 'unsafe_column' | 'no_footing' | 'no_headroom'
 
