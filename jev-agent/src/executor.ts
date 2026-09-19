@@ -40,6 +40,7 @@ import {
   planReuseLeg,
   resolvePillarStep,
   shouldReplanAfterVerticalChunk,
+  verticalStepTowardTarget,
 } from './verticalPlan.ts'
 import type {
   ApproachBlockage,
@@ -1477,6 +1478,7 @@ export class Executor {
 
     this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id, target })
     this.setPhase(candidate, epoch, 'reuse-tunnel')
+    const startY = this.bot.entity.position.y
     let pathFailed = false
     try {
       await this.pathToNear(tunnel, 1, epoch, signal)
@@ -1488,7 +1490,7 @@ export class Executor {
     }
     if (!pathFailed) {
       this.ensureOwned(epoch, signal)
-      return { step: false, refused: false }
+      return { step: verticalStepTowardTarget({ startY, currentY: this.bot.entity.position.y, targetY: target.y }), refused: false }
     }
 
     const leg = planReuseLeg({
@@ -1504,7 +1506,7 @@ export class Executor {
         try {
           await this.pathToNear(tunnel, 1, epoch, signal)
           this.ensureOwned(epoch, signal)
-          return { step: false, refused: false }
+          return { step: verticalStepTowardTarget({ startY, currentY: this.bot.entity.position.y, targetY: target.y }), refused: false }
         } catch (retry) {
           if (retry instanceof ActionCancelled) throw retry
         }

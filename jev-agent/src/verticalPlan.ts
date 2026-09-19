@@ -61,6 +61,20 @@ export const PILLAR_UP_STEP_CAP = DEFAULT_PILLAR_SEARCH_POLICY.stepCap
 export const ASCENT_PROGRESS_EPSILON = 0.9
 
 /**
+ * Whether a completed vertical move changed floor in the direction of the
+ * target.  Reused tunnel legs report their own movement, so the executor must
+ * distinguish a real vertical step from a horizontal arrival at the tunnel
+ * entry (and from an accidental fall away from the target).
+ */
+export function verticalStepTowardTarget(input: { startY: number; currentY: number; targetY: number }): boolean {
+  if (![input.startY, input.currentY, input.targetY].every(Number.isFinite)) return false
+  const startFloorY = Math.floor(input.startY)
+  const currentFloorY = Math.floor(input.currentY)
+  if (currentFloorY === startFloorY) return false
+  return Math.abs(input.targetY - currentFloorY) < Math.abs(input.targetY - startFloorY)
+}
+
+/**
  * A completed vertical leg is a bounded action, not permission to immediately
  * walk to a far-away target at the old horizontal bearing. This applies in
  * both directions: ascent used to have this guard, while a downward staircase
@@ -74,10 +88,8 @@ export function shouldReplanAfterVerticalChunk(input: {
   targetY: number
 }): boolean {
   if (!input.verticalStep) return false
-  if (![input.startY, input.currentY, input.targetY].every(Number.isFinite)) return false
-  const startFloorY = Math.floor(input.startY)
+  if (!verticalStepTowardTarget(input)) return false
   const currentFloorY = Math.floor(input.currentY)
-  if (currentFloorY === startFloorY) return false
   return Math.abs(input.targetY - currentFloorY) > 1
 }
 
