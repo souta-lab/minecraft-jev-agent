@@ -126,11 +126,33 @@ addCase('a horizontal close without arrival is progress but not a verified succe
 addCase('runRetrieve routes the approach through the classifier and throws a typed failure on stall', () => {
   const source = readFileSync(fileURLToPath(new URL('./src/executor.ts', import.meta.url)), 'utf8')
   const usesClassifier = source.includes('classifyRetrieveApproach({')
+  const preservesApproachFailure = source.includes('if (approachError !== null && !approach.arrived)')
   const throwsStall =
     source.includes("if (approach.outcome === 'stalled')") && source.includes('throw failure')
   const stillSwallows = source.includes('RETRIEVE horizontal approach failed after the vertical leg')
-  const pass = usesClassifier && throwsStall && !stillSwallows
-  return { pass, detail: `usesClassifier=${usesClassifier} throwsStall=${throwsStall} oldSwallowGone=${!stillSwallows}` }
+  const pass = usesClassifier && preservesApproachFailure && throwsStall && !stillSwallows
+  return {
+    pass,
+    detail: `usesClassifier=${usesClassifier} preservesApproachFailure=${preservesApproachFailure} throwsStall=${throwsStall} oldSwallowGone=${!stillSwallows}`,
+  }
+})
+
+addCase('a path failure after a partial vertical leg is still a typed failure until arrival', () => {
+  const input: RetrieveApproachInput = {
+    distanceBefore: 21,
+    distanceAfter: 21.4,
+    startY: 71,
+    endY: 70,
+    targetY: 68,
+    verticalStep: true,
+    approachFailed: true,
+  }
+  const fixed = classifyRetrieveApproach(input)
+  const pass = fixed.outcome === 'progressed' && fixed.arrived === false && fixed.verified === true
+  return {
+    pass,
+    detail: `classifier=${fixed.outcome} arrived=${fixed.arrived} verified=${fixed.verified}; runRetrieve must throw approachFailed before accepting this partial classifier result`,
+  }
 })
 
 addCase('the typed stall carries the original path_stuck code, not a generic error', () => {
