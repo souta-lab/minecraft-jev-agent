@@ -493,6 +493,14 @@ export interface GenerationContext {
   goalCount: number
   /** why this generation was created fresh (e.g. "death"); drives LADDER_RESET. */
   resetReason: string | null
+  /** resident runId (host-lifetime identity); scopes the run-scoped M2 snapshot. */
+  runId?: string
+  /** git commit the resident booted from (BOOT `source`). */
+  bootSourceSha?: string | null
+  /** generation bundle hash (BUILD `hash`) the running generation was loaded from. */
+  buildHash?: string | null
+  /** directory the resident writes run-scoped M2 evidence snapshots into. */
+  m2SnapshotDir?: string
 }
 
 export interface GenerationModule {

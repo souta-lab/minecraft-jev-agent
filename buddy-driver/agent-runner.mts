@@ -572,6 +572,7 @@ const generationRegistries = new Map<string, GenerationResourceRegistry>()
 const generationStopWatch = new Map<string, NodeJS.Timeout>()
 
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
+const bootSourceSha = gitCommit()
 const stats = {
   reconnects: 0,
   reconnectsLastHour: 0,
@@ -769,6 +770,7 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
       }
       generationModule = mod
       currentBundle = built.outfile
+      generationHash = built.hash
       log('BUILD', { hash: built.hash, bytes: built.bytes, ms: built.ms, outfile: built.outfile })
       return mod
     } catch (error) {
@@ -828,10 +830,15 @@ function makeGenerationContext(
   b: Bot,
   pending: PendingProposals,
   seed: GenerationSeed = { revision: state.revision },
+  buildHash: string | null = generationHash,
 ): GenerationContext {
   const generationWorldKey = currentWorldKey()
   pending.worldKey = generationWorldKey
   return {
+    runId,
+    bootSourceSha,
+    buildHash,
+    m2SnapshotDir: DATA,
     bot: b,
     log,
     lease,
@@ -1621,7 +1628,7 @@ async function performReload(trigger: string): Promise<void> {
     const previousModule = generationModule
     const nextSeed: GenerationSeed = { revision: state.revision }
     const nextPending = newPendingProposals()
-    const ctx = makeGenerationContext(bot, nextPending, nextSeed)
+    const ctx = makeGenerationContext(bot, nextPending, nextSeed, built.hash)
     candidate = mod.createGeneration(ctx)
     nextPending.generationId = candidate.id
     pendingByGeneration.set(candidate.id, nextPending)
@@ -2081,6 +2088,7 @@ saveState('boot')
 log('BOOT', {
   pid: process.pid,
   runId,
+  source: bootSourceSha,
   runtime: process.release.name,
   node: process.version,
   bundle: currentBundle ?? 'none',
