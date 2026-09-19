@@ -1,22 +1,19 @@
 #!/usr/bin/env node
-// m2-watch: read-only scan of the buddy-driver log for M2 milestone markers.
-// Usage: node tools/m2-watch.mjs [--log <path>] [--since <ISO timestamp|epoch-ms>] [--run <runId>]
-// Default log: /home/s0u7a/mc-ai/buddy-driver/buddy.log
-// Exit: 0 = ordered required M2 chain complete, 1 = incomplete/invalid chain,
-//       2 = log/scope unreadable. Prints UNKNOWN and never fabricates data.
-//
-// `--since` is deliberately explicit: an all-time marker count can make a fresh
-// live run look green because FURNACE_READY/SMELT_DONE happened hours ago. A
-// worker should capture the run start timestamp, then watch only evidence at or
-// after that timestamp. When a timestamp scope is used, BOOT boundaries are
-// resolved as well so markers from two resident runs cannot be combined into a
-// false causal chain. Use --run to pin an exact resident run explicitly.
+// m2-watch: read-only exact-run scan of the buddy-driver log for historical M2
+// evidence. Final durable state (diamond_pickaxe) is checked separately by
+// m2-acceptance. This tool owns the consumable causal history.
+// Usage: node tools/m2-watch.mjs [--log <path>] [--since <ISO|epoch-ms>] [--run <runId>]
+// Exit: 0 = ordered history complete, 1 = incomplete/invalid, 2 = unreadable.
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 const DEFAULT_LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
 const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 
+// The two item-specific SMELT markers are virtual markers derived from the
+// structured SMELT_DONE line. Keeping the generic marker as well preserves
+// diagnostics while preventing `SMELT_DONE item=charcoal` from masquerading as
+// the iron-smelt boundary.
 const MARKERS = [
   'PREREQ_OPTION',
   'PREREQ_SWITCH',
@@ -33,10 +30,18 @@ const MARKERS = [
   'ASCENT_PROGRESS',
   'FURNACE_READY',
   'SMELT_DONE',
+  'SMELT_DONE_CHARCOAL',
+  'SMELT_DONE_IRON_INGOT',
   'RUNG_MISMATCH',
   'RELOAD_REJECTED',
 ]
-const REQUIRED = ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE']
+const REQUIRED = ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE_CHARCOAL', 'SMELT_DONE_IRON_INGOT']
+
+function markerMatches(marker, line) {
+  if (marker === 'SMELT_DONE_CHARCOAL') return /\bSMELT_DONE\b.*\bitem=charcoal\b/.test(line)
+  if (marker === 'SMELT_DONE_IRON_INGOT') return /\bSMELT_DONE\b.*\bitem=iron_ingot\b/.test(line)
+  return line.includes(marker)
+}
 
 function parseSince(raw) {
   if (raw === null) return { sinceMs: null, sinceLabel: 'all-time' }
@@ -77,28 +82,23 @@ function parseArgs(argv) {
 }
 
 const TS_RE = /^\[([^\]]+)\]/
-
 function extractTimestamp(line) {
   const match = TS_RE.exec(line)
   return match ? match[1] : null
 }
-
 function extractTimestampMs(line) {
   const text = extractTimestamp(line)
   if (text === null) return null
   const value = Date.parse(text)
   return Number.isFinite(value) ? value : null
 }
-
 function extractRunId(line) {
   const match = typeof line === 'string' ? line.match(/\brunId=(run-[A-Za-z0-9-]+)/) : null
   return match?.[1] ?? null
 }
-
 function isBootLine(line) {
   return /\bBOOT\b(?!_)/.test(line)
 }
-
 function emptyStats() {
   return {
     counts: new Map(MARKERS.map((marker) => [marker, 0])),
@@ -128,9 +128,7 @@ async function collectBoots(logPath) {
 function resolveRunScope(boots, sinceMs, explicitRunId) {
   if (explicitRunId !== null) {
     const exists = boots.some((boot) => boot.runId === explicitRunId)
-    return exists
-      ? { runId: explicitRunId, error: null }
-      : { runId: null, error: 'explicit_run_boundary_missing' }
+    return exists ? { runId: explicitRunId, error: null } : { runId: null, error: 'explicit_run_boundary_missing' }
   }
   if (sinceMs === null) return { runId: null, error: null }
   const after = boots.filter((boot) => boot.tsMs >= sinceMs)
@@ -157,13 +155,11 @@ async function scan(logPath, sinceMs, runId) {
     if (runId !== null && owningRunId !== runId) continue
     if (sinceMs !== null) {
       const tsMs = extractTimestampMs(line)
-      // A scoped proof may only use attributable timestamped evidence. Untimed
-      // lines are ignored rather than guessed into the current run.
       if (tsMs === null || tsMs < sinceMs) continue
     }
     stats.scopedLines += 1
     for (const marker of MARKERS) {
-      if (!line.includes(marker)) continue
+      if (!markerMatches(marker, line)) continue
       stats.counts.set(marker, stats.counts.get(marker) + 1)
       const ts = extractTimestamp(line)
       if (!stats.first.has(marker)) stats.first.set(marker, ts)
@@ -182,18 +178,14 @@ function firstAfter(values, afterLine) {
 
 function deriveFrontier(stats) {
   const prereqLine = firstAfter(stats.occurrences.get('PREREQ_OPTION'), -1)
-  if (prereqLine === null) {
-    return { stage: 'START', next: 'PREREQ_OPTION', complete: false, orderedLines: [] }
-  }
+  if (prereqLine === null) return { stage: 'START', next: 'PREREQ_OPTION', complete: false }
   const furnaceLine = firstAfter(stats.occurrences.get('FURNACE_READY'), prereqLine)
-  if (furnaceLine === null) {
-    return { stage: 'PREREQ_OPTION', next: 'FURNACE_READY', complete: false, orderedLines: [prereqLine] }
-  }
-  const smeltLine = firstAfter(stats.occurrences.get('SMELT_DONE'), furnaceLine)
-  if (smeltLine === null) {
-    return { stage: 'FURNACE_READY', next: 'SMELT_DONE', complete: false, orderedLines: [prereqLine, furnaceLine] }
-  }
-  return { stage: 'SMELT_DONE', next: 'none', complete: true, orderedLines: [prereqLine, furnaceLine, smeltLine] }
+  if (furnaceLine === null) return { stage: 'PREREQ_OPTION', next: 'FURNACE_READY', complete: false }
+  const charcoalLine = firstAfter(stats.occurrences.get('SMELT_DONE_CHARCOAL'), furnaceLine)
+  if (charcoalLine === null) return { stage: 'FURNACE_READY', next: 'SMELT_DONE_CHARCOAL', complete: false }
+  const ironLine = firstAfter(stats.occurrences.get('SMELT_DONE_IRON_INGOT'), charcoalLine)
+  if (ironLine === null) return { stage: 'SMELT_DONE_CHARCOAL', next: 'SMELT_DONE_IRON_INGOT', complete: false }
+  return { stage: 'SMELT_DONE_IRON_INGOT', next: 'terminal_inventory', complete: true }
 }
 
 let args
@@ -229,7 +221,6 @@ try {
   console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
   process.exit(2)
 }
-
 if (scope.error !== null) {
   console.log('UNKNOWN')
   console.error(`M2_SCOPE status=UNKNOWN reason=${scope.error} since=${sinceLabel} requestedRunId=${requestedRunId ?? 'none'}`)
@@ -249,35 +240,25 @@ console.log(`M2_WATCH log=${logPath}`)
 console.log(`M2_SCOPE since=${sinceLabel} runId=${scope.runId ?? 'all'} scopedLines=${stats.scopedLines} totalLines=${stats.totalLines}`)
 for (const marker of MARKERS) {
   const count = stats.counts.get(marker)
-  if (count === 0) {
-    console.log(`${marker} MISSING`)
-  } else {
-    console.log(`${marker} count=${count} first=${stats.first.get(marker) ?? 'null'} last=${stats.last.get(marker) ?? 'null'}`)
-  }
+  if (count === 0) console.log(`${marker} MISSING`)
+  else console.log(`${marker} count=${count} first=${stats.first.get(marker) ?? 'null'} last=${stats.last.get(marker) ?? 'null'}`)
 }
-
 if (stats.heartbeat) console.log(`HEARTBEAT ${stats.heartbeat}`)
 else console.log('HEARTBEAT MISSING')
 
 const frontier = deriveFrontier(stats)
 console.log(`M2_FRONTIER stage=${frontier.stage} next=${frontier.next}`)
-
 const missingRequired = REQUIRED.filter((marker) => stats.counts.get(marker) === 0)
 if (frontier.complete) {
-  console.log('M2_SEQUENCE status=VALID chain=PREREQ_OPTION->FURNACE_READY->SMELT_DONE')
-  console.log('M2_REQUIRED status=COMPLETE')
+  console.log('M2_SEQUENCE status=VALID chain=PREREQ_OPTION->FURNACE_READY->SMELT_DONE(charcoal)->SMELT_DONE(iron_ingot)')
+  console.log('M2_REQUIRED status=COMPLETE history=true terminal=delegated_to_m2_acceptance')
   process.exit(0)
 }
-
-// If every marker exists but no ordered chain does, the all-important causal
-// proof is invalid (for example SMELT_DONE from an earlier attempt followed by a
-// fresh PREREQ_OPTION). Counts alone must never promote that to COMPLETE.
 if (missingRequired.length === 0) {
-  console.log('M2_SEQUENCE status=INVALID reason=no_ordered_PREREQ_OPTION->FURNACE_READY->SMELT_DONE_chain')
+  console.log('M2_SEQUENCE status=INVALID reason=no_ordered_full_M2_history_chain')
   console.log(`M2_REQUIRED status=INCOMPLETE next=${frontier.next}`)
   process.exit(1)
 }
-
 console.log(`M2_SEQUENCE status=INCOMPLETE next=${frontier.next}`)
 console.log(`M2_REQUIRED status=INCOMPLETE missing=${missingRequired.join(',')} next=${frontier.next}`)
 process.exit(1)
