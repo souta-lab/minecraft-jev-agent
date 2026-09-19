@@ -830,10 +830,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     finishOnObjectiveComplete: false,
     // Dynamic planner: the controller wakes System 2 on queue_empty /
     // action_impossible / no_progress / need_llm and consumes whatever bounded
-    // goal list it returns. System One (forceFallbackPolicy) stays the sole
-    // action authority, so `llm.called === false` for the Jev action policy.
-    // deterministic keeps the single-shot contract (bootstrap once) so the
-    // `llm.called == false` gate stays provable.
+    // goal list it returns.
+    // OWNER DIRECTIVE (#11): LLM and Jev invocation are MANDATORY. The Jev action
+    // policy uses the real TypeSafeJevPolicy whenever a gateway key resolves;
+    // deterministic is opt-in only via BUDDY_POLICY=fallback (offline/CI).
     singleShotPlanner: plannerMode === 'deterministic',
     // Bounded replan frequency: the planner also throttles LLM calls itself, but
     // keep the controller from re-summoning every tick while a goal is blocked.
@@ -841,10 +841,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     ledgerPath: null,
     stopAfterSubgoals: 0,
     logDir: ctx.logDir,
-    // Deterministic local policy: no LLM on the hot path, `llm.called === false`
-    // by construction. The LLM is used ONLY by the high-level planner and only
-    // returns bounded planning data, never actions.
-    forceFallbackPolicy: true,
+    // Real Jev policy by default (key from the gateway key file or
+    // AI_GATEWAY_API_KEY); deterministic fallback only when explicitly requested.
+    forceFallbackPolicy: (process.env.BUDDY_POLICY ?? '').trim().toLowerCase() === 'fallback',
     actuation: 'pathfinder',
     actuationPort,
     reach: 5,
