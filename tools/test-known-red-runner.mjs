@@ -7,7 +7,7 @@ import { RESULT_SCHEMA_VERSION, SUITES, classifyOutcome, runSuite } from './know
 const allEntries = Object.values(SUITES).flat()
 const ids = allEntries.map((entry) => entry.id)
 assert.equal(new Set(ids).size, ids.length)
-assert.equal(ids.length, 30)
+assert.equal(ids.length, 31)
 assert.deepEqual(SUITES['core-deterministic'][0].args, ['ci'])
 assert.deepEqual(SUITES['core-deterministic'][1].args, ['-sfn', '../jev-agent/node_modules', 'buddy-driver/node_modules'])
 assert.equal(classifyOutcome({ status: 0, signal: null }).status, 'PASS')

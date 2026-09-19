@@ -56,6 +56,7 @@ export const SUITES = Object.freeze({
     npmRun('core.minecraft-truth-test', 'minecraft-truth-test', 'jev-agent'),
     npmRun('core.option-spec-test', 'option-spec-test', 'jev-agent'),
     npmRun('core.action-verify-test', 'action-verify-test', 'jev-agent'),
+    npmRun('core.progress-taxonomy-test', 'progress-taxonomy-test', 'jev-agent'),
     npmRun('core.protected-goals-test', 'protected-goals-test', 'jev-agent'),
     npmRun('core.reachability-test', 'reachability-test', 'jev-agent'),
     npmRun('core.candidate-policy-test', 'candidate-policy-test', 'jev-agent'),
