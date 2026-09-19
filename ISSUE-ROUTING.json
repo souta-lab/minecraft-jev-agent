@@ -1,33 +1,35 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-19",
+  "asOf": "2026-09-20",
   "policy": {
     "wipLimit": 3,
     "unclassified": "backlog",
     "newIssueRule": "Search existing open/closed issues first. Prefer updating, reopening, or adding acceptance to an existing issue over creating a new issue. Create a new issue only when the acceptance boundary is genuinely distinct.",
     "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, and unclassified BACKLOG are not normal coding work.",
-    "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count."
+    "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
+    "authorityResetRule": "Until #221 is resolved, do not add deterministic semantic-ranking/retry/goal-ordering policy to advance M2. Preserve deterministic truth, safety, mechanics and verification; semantic WHICH belongs to Jev and strategic WHAT NEXT belongs to System2. Deterministic semantic policy is an explicit baseline only."
   },
-  "now": [56, 79],
-  "next": [121, 52, 41],
-  "waitingLive": [136, 73, 78, 46, 12, 3, 13],
-  "research": [129, 130],
-  "future": [37, 80, 35],
-  "referenceOnly": [11, 102],
+  "now": [221, 11, 128],
+  "next": [107, 121, 56],
+  "waitingLive": [3, 13, 136],
+  "research": [130],
+  "future": [37, 80, 35, 41, 52],
+  "referenceOnly": [],
   "clusters": {
-    "M2_SMELT_ACCEPTANCE": [79, 78, 73, 46, 58, 12],
-    "GROUNDED_OPTIONS": [11, 56, 136, 52, 121, 41, 130],
-    "RESIDENT_P1": [4, 3, 13, 39],
-    "REPO_CONVERGENCE": [102, 103, 104, 107, 108, 109, 110, 111, 112, 113, 114, 115, 119, 120, 122, 123, 124, 125, 126, 128]
+    "AUTHORITY_RESET": [221, 11, 128, 107, 121, 56, 130],
+    "RESIDENT_CORRECTNESS": [3, 13, 136],
+    "FUTURE_CAPABILITIES": [37, 80, 35, 41, 52]
   },
   "notes": {
-    "56": "Primary architecture lane: CurrentOptionContext reaches the Jev boundary; candidate allowedSkills/Option-to-Skill enforcement remains partial and draft PR #173 is blocked on prerequisite-acquisition regressions. Keep NOW until the repair is landed or explicitly deferred.",
-    "79": "Representative M2 closed-loop acceptance lane. Treat #73/#78/#46/#58/#12 as one smelt/prerequisite acceptance cluster, not five independent coding projects. Stop adding incident-specific fixes until the exact current RC is exercised live and the first failed boundary is classified.",
-    "4": "Resolved by merged PR #139: planner mode is deterministic by default and Jev requires explicit opt-in; retain this entry only as historical P1 provenance.",
-    "136": "Implementation is landed and offline-verified: planner/controller/OptionSpec now share a code-owned levelAtLeast + log-inventory recovery predicate. WAITING_LIVE only; do not reimplement unless a fresh live return-recovery run shows a current-main failure.",
-    "13": "Implementation/lifecycle fixtures exist, but the issue explicitly requires a current run-scoped changed-hash reload soak and closure artifact; keep WAITING_LIVE rather than starting another refactor without a current failing fixture.",
-    "121": "NEXT architecture support: draft #176 provides a low-conflict typed progress/failure taxonomy foundation. Keep separate from P0 evidence and runtime lanes; do not bundle into integration rehearsals.",
-    "129": "Research hypothesis only; never blocks runtime work.",
-    "130": "Research/A-B experiment; blocked on #56-style state contract and not a NOW implementation target."
+    "221": "Primary blocker. The measured iron-pickaxe run used deterministic fallback only. PR/commit #222 removed the hardcoded forceFallbackPolicy=true, but production acceptance still needs fail-closed Jev configuration, real invocation evidence, and proof that deterministic code does not silently substitute semantic choices.",
+    "11": "Primary architecture cleanup lane. Inventory the deterministic semantic policy accumulated during M2. KEEP truth/safety/mechanics/verification; QUARANTINE fallback rankings as explicit baseline; MIGRATE WHICH to Jev pi and WHAT NEXT to sparse System2. Do not mass-revert mechanics.",
+    "128": "Immediate recurrence prevention: one typed effective authority config must make requested vs resolved policy/planner modes explicit and reject silent production fallback before action authority starts.",
+    "107": "NEXT after the runtime authority contract is real: document the single surviving authority map from code, not aspirational prose.",
+    "121": "Truth/progress taxonomy remains useful because it defines observed mechanics and verification; it must not become a semantic ranking policy. Old PR #176 is closed; any implementation restarts from fresh main.",
+    "56": "CurrentOptionContext data flow remains relevant only after real Jev is demonstrably on the action path. Old PR #173 is superseded/closed; do not revive it. Rebuild any remaining Option-to-Skill work from fresh main after #221.",
+    "3": "WAITING_LIVE only: durable queue restore has landed follow-up fixes; do not start another planner refactor without a fresh current-authority failure.",
+    "13": "WAITING_LIVE only: lifecycle/resource cleanup fixtures exist; changed-hash soak evidence remains the only reason to reopen implementation.",
+    "136": "WAITING_LIVE only: surface/vertical recovery truth fix is landed/offline-verified; do not reimplement unless a fresh Jev-authoritative run reproduces a current failure.",
+    "130": "Research only. Multi-head Jev experiments are non-blocking until the simple real-Jev authority path is proven first."
   }
 }
