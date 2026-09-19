@@ -356,9 +356,23 @@ node tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh
 
 ## 4.3 Baseline waiver model (issue #63 §9)
 
-"Full suite green" is not unconditional. When a lane merges with e.g. 32/33 tests, the only valid
-form is: the new failures are a subset of a pinned known baseline, and there are no new
-regressions. Record the baseline in the lane report; never silently drop a failing test.
+"Full suite green" is not unconditional. The pinned baseline artifact is
+`tools/known-red-baseline.json`; a lane result artifact must use the same schema and be checked
+with:
+
+```bash
+node tools/known-red.mjs \
+  --baseline tools/known-red-baseline.json \
+  --current <run-result.json>
+```
+
+The comparator emits `PASS`, `PASS_WITH_WAIVER`, `FAIL`, or `UNKNOWN`. A failure is waivable only
+when the exact test id is already present in the baseline with a reason and introducing commit;
+new failures are `FAIL`, and missing/ambiguous results are `UNKNOWN`. An expected baseline item
+that is absent from the current result is also `UNKNOWN`, so a lane cannot evade the check by
+omitting a test. Runner allocation failures with no executed assertion step are infrastructure
+`UNKNOWN`, not a known-red test. Never silently edit the baseline to make a lane pass; baseline
+changes require an explicit review and a new pinned `baselineId`/commit.
 
 ---
 
@@ -638,6 +652,30 @@ the mitigation is verified.
 | M1 milestone | 4/4 subgoals, `llm.called==false`, wedge 0 | `README.md`; `jev-agent/logs/m1-fresh2-console.log`; `ARCHITECTURE.md` §5.1 | `planned=4 done=4`, `with_llm_called_true=0`, `verifiedDigs=22` |
 | M2 milestone evidence | iron obtained, proven by inventory | `buddy.log` `LADDER_RESUME ... inventory={...,"raw_iron":8,...}` and `HEARTBEAT ... inv={...,"raw_iron":8,...}` | `raw_iron:8`, charcoal smelted 2026-09-18 00:13 JST (`README.md`); `FURNACE_READY=0`, `SMELT_DONE=0` |
 | Stuck heuristics | movement < 5 blocks, action repeats >= 8, no inventory change >= 10 min, abandons >= 3 in a 30-min window | `tools/agent-report.mjs` lines 34-41 | tool exists; VERDICT output is its gate |
+
+### 9.1 Primary outcome metrics for M2 and later
+
+The table above mixes health/process signals with mission outcomes. Health signals are useful for
+diagnosis, but they do not prove that the agent achieved the objective. Every M2+ evaluation run
+must declare a `runId`, commit, dirty-tree flag, world/seed identity when known, and start/end
+timestamps, then report these primary outcomes separately:
+
+| Primary metric | Definition | Required evidence |
+|---|---|---|
+| Milestone success rate | verified milestone predicates reached / eligible runs, reported per seed/world and aggregated only after the run set is fixed | inventory/predicate acceptance record, never a marker count alone |
+| Time-to-milestone | elapsed time from the run start to the first verified M2/M3/M4 predicate; report median and P90, with censored unsuccessful runs visible | run manifest timestamps plus the first code-owned success record |
+| Verified progress rate | code-owned predicate transitions or verified subgoals per minute | run-scoped causal chain joined to inventory/world truth |
+| Human interventions per run | operator actions that change the run or its authority, excluding read-only queries | control-socket audit and run manifest |
+| Deaths and objective | deaths per successful milestone, with the objective/run denominator explicit | run-scoped death records and acceptance outcome |
+| Recovery success rate | recoveries that return to verified progress / recoveries attempted | generation/recovery records joined to the next verified predicate |
+| Cost per successful milestone | Jev/Mercury token and monetary cost divided by successful verified milestones; unsuccessful-run cost remains reported | bounded model call artifacts plus acceptance records |
+| System 2 calls per recovery | Mercury/System2 calls per recovery and per successful milestone | run-scoped call records joined by runId/decision provenance |
+| Resource and movement efficiency | required resource units, verified digs, and movement distance per completed milestone where the sensor truth supports them | inventory/world snapshots and deterministic action outcomes |
+
+For multi-seed claims, predeclare the seed/world set and report every run plus aggregate median/P90;
+a single successful seed is a milestone observation, not a general performance claim. Missing or
+ambiguous primary evidence is `UNKNOWN`, while process metrics such as churn or listener counts
+remain diagnostic and cannot substitute for a failed milestone predicate.
 
 Honest reading of the metrics: the improvement signals (churn down, ticks up, digging markers
 nonzero) are real, but the milestone signal for M2 is still negative (`FURNACE_READY=0`,

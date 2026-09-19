@@ -29,6 +29,12 @@ Commands/results:
 
 Known-red baseline / no-new-regression:
 
+- Baseline artifact: `tools/known-red-baseline.json` (record its `baselineId` and `baseCommit`)
+- Current result artifact: `<path>` with `schemaVersion=1`, `commit`, and per-test `PASS|FAIL|UNKNOWN`
+- Comparator: `node tools/known-red.mjs --baseline tools/known-red-baseline.json --current <path>`
+- Result must be `PASS` or `PASS_WITH_WAIVER`; `FAIL` is a new regression and `UNKNOWN` is not a pass.
+- Runner allocation/startup failures (`steps=[]`, no assertion executed) are `UNKNOWN`, not known-red tests.
+
 Live acceptance required by the linked issue? **yes / no**
 
 - [ ] completed in this PR/run artifact
