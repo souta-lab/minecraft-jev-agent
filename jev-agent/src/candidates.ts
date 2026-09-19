@@ -1707,23 +1707,22 @@ function knownStations(state: WorldState, station: string): KnownStationLike[] {
 }
 
 /**
- * Furnace coordinates the smelt prerequisite can walk to. Durable known
- * resources are the primary source; the sensor's REMEMBERED station entries are
- * merged in too, because a furnace this bot placed and the controller registered
- * is a usable station even after the bot leaves the near-field scan radius - it
- * must yield the walk-to-then-smelt RETRIEVE instead of collapsing to WAIT.
+ * Furnace coordinates the smelt prerequisite can walk to.
+ *
+ * `signals.knownResources` is the controller's canonical, filtered durable
+ * resource set. `state.furnaces` also contains a presentation projection of
+ * remembered stations, but that projection intentionally survives transient
+ * unreachable-resource filtering so Jev can still see the world fact. It must
+ * not become a second candidate source: doing so re-inserts a station that the
+ * controller has already retired and makes candidate generation disagree with
+ * `guardRetrieve` (which validates against the filtered signal set).
+ *
+ * Sensed furnaces are handled separately by `reachableSensedFurnace`; a
+ * registered/remembered furnace reaches this list through the canonical signal
+ * set, including a station placed by this generation.
  */
 function knownFurnaces(state: WorldState): KnownStationLike[] {
   const found = knownStations(state, 'furnace')
-  const seen = new Set(found.map((station) => knownStationKey(station)))
-  for (const entry of state.furnaces ?? []) {
-    if (isSensedStation(entry)) continue
-    const station: KnownStationLike = { name: 'furnace', position: { x: entry.x, y: entry.y, z: entry.z } }
-    const key = knownStationKey(station)
-    if (seen.has(key)) continue
-    seen.add(key)
-    found.push(station)
-  }
   found.sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
   return found
 }
