@@ -8,8 +8,9 @@
 //   2. the live resident inventory criteria from tools/m2-acceptance.mjs.
 //
 // The combined close/no-close gate MUST have an explicit run scope. Without
-// --since (or M2_SINCE), m2-watch falls back to all-time buddy.log evidence and
-// an old successful attempt could falsely green a fresh run.
+// --since/--run (or M2_SINCE/M2_RUN_ID), m2-watch refuses unbounded causal
+// evidence. --run is preferred when the resident runId is known; --since also
+// resolves BOOT boundaries and rejects ambiguous multi-run windows.
 //
 // Exit: 0 = PASS, 1 = FAIL (at least one known criterion failed),
 //       2 = UNKNOWN (no known failure, but evidence is unavailable/unreadable).
@@ -71,7 +72,7 @@ function watchArgs(argv) {
   const out = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if ((arg === '--log' || arg === '--since') && argv[i + 1]) {
+    if ((arg === '--log' || arg === '--since' || arg === '--run') && argv[i + 1]) {
       out.push(arg, argv[i + 1])
       i += 1
     }
@@ -82,9 +83,11 @@ function watchArgs(argv) {
 /** True only when the causal proof is explicitly scoped to this live attempt. */
 export function hasRunScope(argv, env = process.env) {
   const args = watchArgs(argv)
+  const runIndex = args.indexOf('--run')
+  if (runIndex !== -1 && typeof args[runIndex + 1] === 'string' && args[runIndex + 1].trim() !== '') return true
   const sinceIndex = args.indexOf('--since')
   if (sinceIndex !== -1 && typeof args[sinceIndex + 1] === 'string' && args[sinceIndex + 1].trim() !== '') return true
-  return typeof env.M2_SINCE === 'string' && env.M2_SINCE.trim() !== ''
+  return (typeof env.M2_SINCE === 'string' && env.M2_SINCE.trim() !== '') || (typeof env.M2_RUN_ID === 'string' && env.M2_RUN_ID.trim() !== '')
 }
 
 export async function runGate({

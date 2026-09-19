@@ -131,6 +131,11 @@ export async function newestRunIdFromLog(log = BUDDY_LOG) {
   const text = await fsp.readFile(log, 'utf8')
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
+    // Only BOOT establishes a new run boundary. A late asynchronous event can
+    // carry an older runId after a newer host has booted; treating any trailing
+    // runId-bearing line as the current run would make acceptance gates read
+    // the wrong evidence window.
+    if (!/\bBOOT\b/.test(lines[i])) continue
     const id = runIdOfLine(lines[i])
     if (id) return id
   }
@@ -152,17 +157,19 @@ export async function windowOfRun(runId, { log = BUDDY_LOG, collect = false } = 
   let from = null
   let to = null
   let matched = false
+  let closed = false
   for await (const raw of readLines(log)) {
     index += 1
     const boot = /\bBOOT\b/.test(raw) ? runIdOfLine(raw) : null
     if (boot) {
-      if (current === runId && start >= 0 && end < 0) {
+      if (boot === runId && current === runId && start >= 0 && end < 0) {
         // same run booted again (relaunch/reconnect); keep the window open
       } else if (boot === runId) {
         start = start < 0 ? index : start
         end = -1
       } else if (current === runId && end < 0) {
         end = index
+        closed = true
       }
       current = boot
     }
@@ -177,13 +184,43 @@ export async function windowOfRun(runId, { log = BUDDY_LOG, collect = false } = 
     }
   }
   if (end < 0) end = index + 1
-  return { runId, from, to, startLine: start < 0 ? null : start, endLine: start < 0 ? null : end, lines, matched }
+  return { runId, from, to, startLine: start < 0 ? null : start, endLine: start < 0 ? null : end, lines, matched, closed }
 }
 
 /** Slice a buddy.log by runId (run-scoped), returning the lines and window. */
 export async function sliceLogByRun(runId, { log = BUDDY_LOG } = {}) {
   const w = await windowOfRun(runId, { log, collect: true })
   return { runId, lines: w.lines ?? [], from: w.from, to: w.to, startLine: w.startLine, endLine: w.endLine, matched: w.matched }
+}
+
+/**
+ * An artifact captured while its resident run is still active is only
+ * authoritative while its recorded window reaches the current log frontier.
+ * Once a later BOOT closes the run, the artifact is historical and must remain
+ * stable even if the append-only log contains a longer window than the capture.
+ */
+export async function artifactFreshness(runId, { log = BUDDY_LOG, manifest = null, liveWindow = null } = {}) {
+  const current = liveWindow ?? (await windowOfRun(runId, { log, collect: false }))
+  if (current.startLine === null || current.closed) {
+    return { usable: true, reason: current.startLine === null ? 'run-not-in-current-log' : 'run-closed', window: current }
+  }
+  const recorded = manifest?.window
+  const recordedTo = typeof recorded?.toMs === 'number' ? recorded.toMs : null
+  const recordedEndLine = typeof recorded?.endLine === 'number' ? recorded.endLine : null
+  const currentTo = current.to
+  const currentEndLine = current.endLine
+  const usable =
+    recordedTo !== null &&
+    recordedEndLine !== null &&
+    currentTo !== null &&
+    currentEndLine !== null &&
+    recordedTo >= currentTo &&
+    recordedEndLine >= currentEndLine
+  return {
+    usable,
+    reason: usable ? 'active-window-current' : 'active-window-stale-or-unverifiable',
+    window: current,
+  }
 }
 
 /** Slice any timestamped buddy.log-style file by [fromMs, toMs]. */
@@ -286,21 +323,25 @@ export async function resolveRunEvidence({ runId = null, log = BUDDY_LOG } = {})
 
   for (const chosen of candidates) {
     const artifact = path.join(runDir(chosen), 'evidence.log')
+    const w = await windowOfRun(chosen, { log, collect: true })
     if (fs.existsSync(artifact)) {
-      const text = await fsp.readFile(artifact, 'utf8')
-      return {
-        runId: chosen,
-        source: 'run-artifact',
-        fallback: false,
-        reason: `runs/${chosen}/evidence.log`,
-        evidenceLogPath: artifact,
-        artifactDir: runDir(chosen),
-        lines: text.trim() ? text.trim().split('\n') : [],
-        text,
-        window: null,
+      const manifest = await readJson(path.join(runDir(chosen), 'manifest.json'))
+      const freshness = await artifactFreshness(chosen, { log, manifest, liveWindow: w })
+      if (freshness.usable) {
+        const text = await fsp.readFile(artifact, 'utf8')
+        return {
+          runId: chosen,
+          source: 'run-artifact',
+          fallback: false,
+          reason: `runs/${chosen}/evidence.log`,
+          evidenceLogPath: artifact,
+          artifactDir: runDir(chosen),
+          lines: text.trim() ? text.trim().split('\n') : [],
+          text,
+          window: null,
+        }
       }
     }
-    const w = await windowOfRun(chosen, { log, collect: true })
     if (w.startLine !== null) {
       const text = (w.lines ?? []).join('\n')
       return {
@@ -361,17 +402,21 @@ export async function resolveMercuryRecords({ runId = null, log = BUDDY_LOG, fil
 
   for (const chosen of candidates) {
     const artifact = path.join(runDir(chosen), 'mercury-calls.jsonl')
-    if (fs.existsSync(artifact)) {
-      const recs = (await readLinesArray(artifact)).filter(Boolean).flatMap((l) => {
-        try {
-          return [JSON.parse(l)]
-        } catch {
-          return []
-        }
-      })
-      return { runId: chosen, source: 'run-artifact', fallback: false, reason: `runs/${chosen}/mercury-calls.jsonl`, records: recs }
-    }
     const w = await windowOfRun(chosen, { log, collect: false })
+    if (fs.existsSync(artifact)) {
+      const manifest = await readJson(path.join(runDir(chosen), 'manifest.json'))
+      const freshness = await artifactFreshness(chosen, { log, manifest, liveWindow: w })
+      if (freshness.usable) {
+        const recs = (await readLinesArray(artifact)).filter(Boolean).flatMap((l) => {
+          try {
+            return [JSON.parse(l)]
+          } catch {
+            return []
+          }
+        })
+        return { runId: chosen, source: 'run-artifact', fallback: false, reason: `runs/${chosen}/mercury-calls.jsonl`, records: recs }
+      }
+    }
     if (w.from !== null) {
       // Runs are identified by proximity: the record timestamp must fall inside
       // the run's buddy.log window.
@@ -389,7 +434,7 @@ export async function resolveMercuryRecords({ runId = null, log = BUDDY_LOG, fil
 // acceptance checks: POLICY / IMPLEMENTED / OBSERVED / COMPLIANCE
 // ---------------------------------------------------------------------------
 
-export function buildChecks(record) {
+export function buildChecks(record, mercuryModel = null) {
   const checks = []
   const push = (id, policy, implemented, observed, compliance, command) =>
     checks.push({ id, policy, implemented, observed, compliance, command })
@@ -405,6 +450,29 @@ export function buildChecks(record) {
     )
     return checks
   }
+
+  const jevModel = record.jevModel ?? record.policyModel ?? null
+  // System2/Mercury can be emitted by the resident record or recovered from
+  // the run-scoped Mercury call slice. A Jev-only manifest is not complete:
+  // the policy and planner model identities answer different provenance
+  // questions and must not silently collapse into one field.
+  const resolvedMercuryModel = record.mercuryModel ?? record.system2Model ?? mercuryModel ?? null
+  const missingMetadata = [
+    ['serverVersion', record.serverVersion],
+    ['difficulty', record.difficulty],
+    ['jevModel', jevModel],
+    ['mercuryModel', resolvedMercuryModel],
+  ]
+    .filter(([, value]) => value === null || value === undefined || value === '')
+    .map(([name]) => name)
+  push(
+    'run_metadata_completeness',
+    'Issue #63 §4 / #110: a run manifest should identify server version, difficulty, Jev, and System2/Mercury models; missing metadata cannot support a strong acceptance claim.',
+    'tools/run-artifacts.mjs forwards these fields from AcceptanceRecord when present; the current host record schema does not expose them yet.',
+    `missing=[${missingMetadata.join(',')}]`,
+    missingMetadata.length === 0 ? 'PASS' : 'UNKNOWN',
+    `node tools/run-artifacts.mjs capture ${record.runId}`,
+  )
 
   const baseline = record.listenerBaseline ?? {}
   const current = record.listenerCurrent ?? {}
@@ -448,6 +516,8 @@ export function buildChecks(record) {
 export function buildManifest({ record, window, logLineCount, mercuryModel = null }) {
   const commit = record?.gitCommit ?? sh('git', ['rev-parse', 'HEAD'])
   const status = sh('git', ['status', '--porcelain'])
+  const jevModel = record?.jevModel ?? record?.policyModel ?? null
+  const resolvedMercuryModel = record?.mercuryModel ?? record?.system2Model ?? mercuryModel ?? null
   return {
     schemaVersion: SCHEMA_VERSION,
     runId: record?.runId ?? null,
@@ -463,8 +533,8 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
     serverId: record?.serverId ?? null,
     dimension: record?.dimension ?? null,
     levelName: record?.levelName ?? null,
-    serverVersion: null,
-    difficulty: null,
+    serverVersion: record?.serverVersion ?? null,
+    difficulty: record?.difficulty ?? null,
     dependencies: record?.dependencies ?? null,
     contractVersion: record?.contractVersion ?? null,
     stateSchemaVersion: record?.stateSchemaVersion ?? null,
@@ -473,7 +543,7 @@ export function buildManifest({ record, window, logLineCount, mercuryModel = nul
     botUsername: record?.botUsername ?? null,
     startPosition: record?.startPosition ?? null,
     config: configFromEnv(),
-    models: { jev: null, mercury: mercuryModel },
+    models: { jev: jevModel, mercury: resolvedMercuryModel },
     window: window ?? null,
     logLineCount: logLineCount ?? null,
     sources: {
@@ -533,7 +603,7 @@ export async function captureRun(runId, { log = BUDDY_LOG, force = false, withMe
       'root AGENTS.md §2',
     ],
     window,
-    checks: buildChecks(record),
+    checks: buildChecks(record, mercuryModel),
     record,
   }
   await writeJsonAtomic(path.join(dir, 'manifest.json'), manifest)
