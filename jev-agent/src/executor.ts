@@ -1762,11 +1762,19 @@ export class Executor {
         }
         const jumpTrace: PillarJumpTrace | null = climb.ok ? climb.jumpTrace : (climb.fail.jumpTrace ?? null)
         const emitPillarTakeoff = (peakRise: number, failureStep: string | null, failureReason: string | null) => {
-          const takeoff = buildPillarTakeoffTelemetry({ ...takeoffBase, peakRise, failureStep, failureReason })
+          // The bounded trace rides into the record (and therefore into the
+          // formatted line AND the PILLAR_FAIL detail, which spreads `takeoff`).
+          // Additive only: it never selects a control or changes a value.
+          const takeoff = buildPillarTakeoffTelemetry({ ...takeoffBase, peakRise, failureStep, failureReason, jumpTrace })
           this.logger.info('agent', formatPillarTakeoffTelemetry(takeoff), {
             actionId: candidate.id,
             attemptId: takeoff.attemptId,
             horizontalLeak: takeoff.horizontalLeak,
+            takeoffDiscriminator: takeoff.takeoffDiscriminator,
+            traceTicks: takeoff.traceTicks,
+            traceGateFires: takeoff.traceGateFires,
+            traceMaxRise: takeoff.traceMaxRise,
+            traceTruncated: takeoff.traceTruncated,
             jumpTrace,
           })
           return takeoff
