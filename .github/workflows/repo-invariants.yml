@@ -22,26 +22,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Frontier fixtures
-        run: npm run frontier-test
-      - name: Issue-state fixtures
-        run: npm run issue-state-test
-      - name: Issue graph fixtures
-        run: npm run issue-graph-test
-      - name: Current-status fixtures
-        run: npm run current-status-test
-      - name: Lane-guard fixtures
-        run: npm run lane-guard-test
-      - name: Milestone contract fixtures
-        run: npm run milestone-status:check && npm run milestone-status-test
-      - name: M2 evidence tooling fixtures
-        run: npm run m2-watch-test && npm run m2-acceptance-test && npm run m2-live-gate-test
-      - name: Known-red baseline comparator fixtures
-        run: npm run known-red-test
-      - name: Live issue-routing invariant
-        run: npm run frontier:check
-      - name: Live issue-evidence invariant
-        run: npm run issue-state:check
+      - name: Known-red runner contract
+        run: npm run known-red-runner-test
+      - name: Deterministic convergence suite
+        run: node tools/known-red-runner.mjs --suite convergence --out artifacts/convergence-results.json
+      - name: Compare convergence result against pinned baseline
+        if: always()
+        run: node tools/known-red.mjs --baseline tools/known-red-baseline.json --current artifacts/convergence-results.json --json
+      - name: Upload convergence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: convergence-known-red
+          path: artifacts/convergence-results.json
+          if-no-files-found: error
 
   core-deterministic:
     runs-on: ubuntu-latest
@@ -56,15 +50,15 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: jev-agent/package-lock.json
-      - name: Install
-        run: npm ci
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Mechanics truth
-        run: npm run game-data-test && npm run minecraft-truth-test
-      - name: Option and verification semantics
-        run: npm run option-spec-test && npm run action-verify-test && npm run protected-goals-test
-      - name: Grounded reachability
-        run: npm run reachability-test
-      - name: Recovery policy regressions
-        run: npm run candidate-policy-test && npm run move-failmem-test && npm run pit-escape-test && npm run pillar-search-test && npm run hop-policy-test && npm run pillar-jump-test && npm run pillar-apex-test
+      - name: Deterministic core suite
+        run: node ../tools/known-red-runner.mjs --suite core-deterministic --out ../artifacts/core-results.json
+      - name: Compare core result against pinned baseline
+        if: always()
+        run: node ../tools/known-red.mjs --baseline ../tools/known-red-baseline.json --current ../artifacts/core-results.json --json
+      - name: Upload core evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-known-red
+          path: artifacts/core-results.json
+          if-no-files-found: error

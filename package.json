@@ -28,6 +28,7 @@
     "m2-acceptance-test": "node tools/test-m2-acceptance.mjs",
     "m2-live-gate-test": "node tools/test-m2-live-gate.mjs",
     "run-artifacts-test": "node tools/test-run-artifacts.mjs",
-    "known-red-test": "node tools/test-known-red.mjs"
+    "known-red-test": "node tools/test-known-red.mjs",
+    "known-red-runner-test": "node tools/test-known-red-runner.mjs"
   }
 }

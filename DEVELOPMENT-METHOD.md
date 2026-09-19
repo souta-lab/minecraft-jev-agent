@@ -370,9 +370,12 @@ The comparator emits `PASS`, `PASS_WITH_WAIVER`, `FAIL`, or `UNKNOWN`. A failure
 when the exact test id is already present in the baseline with a reason and introducing commit;
 new failures are `FAIL`, and missing/ambiguous results are `UNKNOWN`. An expected baseline item
 that is absent from the current result is also `UNKNOWN`, so a lane cannot evade the check by
-omitting a test. Runner allocation failures with no executed assertion step are infrastructure
-`UNKNOWN`, not a known-red test. Never silently edit the baseline to make a lane pass; baseline
-changes require an explicit review and a new pinned `baselineId`/commit.
+omitting a test. CI uses `tools/known-red-runner.mjs` to execute the declared convergence and
+core-deterministic command inventories, emit one result for every command, and compare the
+result artifact even when an earlier command fails. Runner allocation failures with no executed
+assertion step are infrastructure `UNKNOWN`, not a known-red test. Never silently edit the
+baseline to make a lane pass; baseline changes require an explicit review and a new pinned
+`baselineId`/commit.
 
 ---
 
