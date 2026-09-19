@@ -8,7 +8,7 @@ import type { AgentSignals, WorldState } from './src/index.ts'
 import type { DescentOption } from './src/state.ts'
 import { selectDigTool } from './src/toolChoice.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './src/failureMemory.ts'
-import { descendBudget, isOscillatingSteps } from './src/worldMemory.ts'
+import { descendBudget, DigMemory, isOscillatingSteps } from './src/worldMemory.ts'
 import type { DigStep } from './src/worldMemory.ts'
 
 let failures = 0
@@ -170,6 +170,10 @@ check('failure decay reduces stale counts', decayedFailureCount(5, 90_000) < 5, 
 
 // worldMemory pure helpers ----------------------------------------------------
 check('descendBudget fires at 4 no-progress descends', descendBudget(3, false).limitReached && descendBudget(0, true).noProgress === 0, `b3=${JSON.stringify(descendBudget(3, false))} b0=${JSON.stringify(descendBudget(0, true))}`)
+const cappedDig = new DigMemory()
+for (let index = 0; index < 4; index += 1) cappedDig.markDescend(false)
+cappedDig.resetDescendBudget()
+check('a verified lateral move reopens descent in a new column', !cappedDig.snapshot().descendLimitReached && cappedDig.snapshot().descendNoProgress === 0, JSON.stringify(cappedDig.snapshot()))
 const zig: DigStep[] = [
   { x: 22, y: 64, z: 27, dir: 'S', mode: 'level', target: 'cobblestone', atMs: 1 },
   { x: 23, y: 64, z: 27, dir: 'E', mode: 'level', target: 'cobblestone', atMs: 2 },
@@ -182,5 +186,5 @@ const straight: DigStep[] = zig.map((step, index) => ({ ...step, x: 22 + index, 
 check('DIG_OSCILLATE detects the constant-y zigzag', isOscillatingSteps(zig), `zig=${isOscillatingSteps(zig)}`)
 check('a straight tunnel is not flagged as oscillation', !isOscillatingSteps(straight), `straight=${isOscillatingSteps(straight)}`)
 
-process.stdout.write(`\n${17 - failures}/17 movement-fix cases passed\n`)
+process.stdout.write(`\n${18 - failures}/18 movement-fix cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)
