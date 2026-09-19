@@ -462,8 +462,51 @@ export function guardMoveFailureReason(
   return code === 'NO_PATH' ? 'unreachable' : null
 }
 
+/**
+ * Zero-progress known-resource retrieves before the resource is retired.
+ * Bounded like UNVERIFIED_ACTION_LIMIT: the retrieve already proved it closed no
+ * distance, gained no altitude and dug no step.
+ */
+export const KNOWN_RETRIEVE_RETIRE_LIMIT = 2
+
+export interface KnownRetrieveRetireInput {
+  /** `candidate.meta.retrieval` (`known` for a durable remembered resource) */
+  retrieval: unknown
+  /** the remembered resource cell */
+  target: Vec3Json | null
+  /** the retrieve finished `done`/`verified` (a real arrival / climb chunk) */
+  verified: boolean
+  /** consecutive zero-progress retrieves for this resource INCLUDING this one */
+  attempts: number
+  limit?: number
+}
+
+/**
+ * A remembered resource can be PRESENT yet unreachable (a y=68 log from y=59
+ * with `canDig=false`), so the durable staleness proof never retires it - that
+ * proof only drops ABSENT/replaced cells. The retrieval-stall timer is keyed on
+ * the candidate id, which carries the resource coordinate, so every time the
+ * nearest known resource changes the timer resets and the plan loops through the
+ * same unreachable list. Retire the resource after a bounded number of
+ * zero-progress retrieves so the generator moves to the next resource / branch.
+ */
+export function shouldRetireKnownRetrieve(input: KnownRetrieveRetireInput): boolean {
+  if (input.retrieval !== 'known') return false
+  if (input.target === null) return false
+  if (input.verified) return false
+  return input.attempts >= Math.max(1, Math.floor(input.limit ?? KNOWN_RETRIEVE_RETIRE_LIMIT))
+}
+
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
+}
+
+/** Drop resources the controller has proven unreachable for the current plan. */
+export function filterKnownResources(
+  resources: readonly KnownResource[],
+  unreachable: ReadonlySet<string>,
+): KnownResource[] {
+  return resources.filter((resource) => !unreachable.has(resourceKey(resource)))
 }
 
 /** Item names whose VERIFIED placement registers a usable smelt station. */
@@ -1018,6 +1061,11 @@ export class JevController {
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
+  /**
+   * Consecutive zero-progress retrieves per remembered resource (`name@x,y,z`).
+   * Retires a present-but-unreachable resource after KNOWN_RETRIEVE_RETIRE_LIMIT.
+   */
+  private readonly knownRetrieveFailures = new Map<string, number>()
   /** M2 ascent trap: bounded-window tracker owned by evaluateCapabilityGap. */
   private capabilityGapState: CapabilityGapState | null = null
   private capabilityGapActive = false
@@ -1466,9 +1514,7 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
-      this.signals.knownResources = this.knownResourcesForSensor().filter(
-        (resource) => !this.unreachableResources.has(resourceKey(resource)),
-      )
+      this.signals.knownResources = filterKnownResources(this.knownResourcesForSensor(), this.unreachableResources)
       this.updateStallSignal()
       this.observeRetrievalStall()
       this.observeCapabilityGap()
@@ -2535,6 +2581,7 @@ export class JevController {
       return
     }
 
+    this.retireFailedKnownRetrieve(candidate, result)
     if (result.unverifiedPostcondition !== undefined) {
       this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
     } else if (result.status === 'done' && result.verified) {
@@ -3890,6 +3937,46 @@ export class JevController {
       { escalation },
       this.tickCounter,
     )
+  }
+
+  /**
+   * A known-resource RETRIEVE that finished without verifying (no distance
+   * closed, no altitude gained, no step dug) charges a per-resource counter.
+   * After KNOWN_RETRIEVE_RETIRE_LIMIT the resource is dropped as unreachable and
+   * removed from `signals.knownResources`, so the generator stops re-offering the
+   * same present-but-unreachable cell and the plan advances to the next resource
+   * or the branch-mine route instead of looping on the same y=68 log forever.
+   */
+  private retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void {
+    if (candidate.meta.retrieval !== 'known' || candidate.target === null) return
+    const knownName =
+      typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'resource'
+    const key = resourceKey({ name: knownName, position: candidate.target })
+    if (result.status === 'done' && result.verified) {
+      this.knownRetrieveFailures.delete(key)
+      return
+    }
+    const attempts = (this.knownRetrieveFailures.get(key) ?? 0) + 1
+    this.knownRetrieveFailures.set(key, attempts)
+    if (
+      !shouldRetireKnownRetrieve({
+        retrieval: candidate.meta.retrieval,
+        target: candidate.target,
+        verified: false,
+        attempts,
+      })
+    )
+      return
+    this.dropUnreachableResource(
+      {
+        resource: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
+        knownName,
+        target: candidate.target,
+      },
+      this.retrievalDistance(candidate.target) ?? 0,
+    )
+    this.activeRetrieval = null
+    this.retrievalTrack = null
   }
 
   private checkWedge(actionId: string): void {

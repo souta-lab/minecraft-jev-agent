@@ -378,6 +378,57 @@ export function evaluateHop(before: Vec3Json, after: Vec3Json, node: Vec3Json): 
   }
 }
 
+export interface MoveArrivalInput {
+  /** feet position after the action */
+  end: Vec3Json
+  /** the standable spot the MOVE was for (a block cell) */
+  target: Vec3Json
+  /** the anchored resource block, or null for a pure-spot MOVE (explore/retreat) */
+  anchor: Vec3Json | null
+  /** eyes->anchor distance before the action; null when there is no anchor */
+  anchorBefore: number | null
+  /** eyes->anchor distance after the action (or feet->target when there is no anchor) */
+  anchorDistance: number
+  reach: number
+  /** the body is still pinned against terrain the actuator could not climb */
+  pinned: boolean
+}
+
+/** `true` when `end` occupies the same integer block cell as `b`. */
+export function sameBlockCell(end: Vec3Json, b: Vec3Json): boolean {
+  const cell = (value: number): number => Math.floor(value + 1e-3)
+  return cell(end.x) === b.x && cell(end.y) === b.y && cell(end.z) === b.z
+}
+
+/**
+ * Honest MOVE arrival. `atTarget` requires the FEET to occupy the target's block
+ * cell, never merely to be within ~1 m of it.
+ *
+ * Live `MOVE:p29_58_35` evidence (2026-09-19T10:06:41Z): the packet stepper
+ * wrote a transient client pose `end=(28.9,58,35.96)` for `target=(29,58,35)`
+ * (cell x=28, one block off) and the server snapped the bot back to
+ * `(28.7,59,36.11)`; the old `after <= 1.0` check plus the anchor-null recovery
+ * (`after <= 1.5`) reported `verified=true`, so the controller reset the
+ * move-failure memory and the exact same MOVE retried forever.
+ *
+ * The anchored-block recovery is only meaningful when an anchor exists, so it
+ * can never degenerate into a bare feet-distance tolerance. A partial step that
+ * leaves the spot unreached and the anchor already in reach is NOT success
+ * (MOVE:b36_75_-44, a 4-block tree the bot could not climb).
+ */
+export function classifyMoveArrival(input: MoveArrivalInput): {
+  atTarget: boolean
+  anchorNowInReach: boolean
+  verified: boolean
+} {
+  const atTarget = !input.pinned && sameBlockCell(input.end, input.target)
+  const anchorNowInReach =
+    input.anchor !== null &&
+    input.anchorDistance <= input.reach &&
+    !(input.anchorBefore !== null && input.anchorBefore <= input.reach)
+  return { atTarget, anchorNowInReach, verified: atTarget || anchorNowInReach }
+}
+
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
 export interface SmeltFurnaceWindow {
@@ -1056,19 +1107,26 @@ export class Executor {
     }
     const after = this.distanceToFeet(target)
     const endPosition = this.bot.entity.position.clone()
-    // Navigation succeeded when the standable spot is reached, OR the anchored
-    // block crossed from out-of-reach into reach. A partial step that leaves the
-    // spot unreached and the block already in reach is NOT success: that made the
-    // agent loop forever on MOVE:b36_75_-44 (a 4-block tree it could not climb).
     const anchorDistance = anchor === null ? after : this.distanceToEyes(anchor)
-    const anchorNowInReach = anchor === null ? after <= 1.5 : anchorDistance <= this.options.reach
-    const anchorWasInReach = anchorBefore !== null && anchorBefore <= this.options.reach
     // A MOVE that ended still pinned against terrain the actuator could not
     // climb is NOT an arrival, even when the standable spot is within the loose
     // horizontal tolerance (the 2-block-face case stopped 0.93m short forever).
     const stuck = pathError !== null && this.isPinned()
-    const atTarget = !stuck && after <= 1.0 && Math.abs(endPosition.y - target.y) <= 0.75
-    const verified = atTarget || (anchorNowInReach && !anchorWasInReach)
+    // Navigation succeeds only when the standable spot's block cell is actually
+    // occupied, OR (with a real anchor) the anchored block crossed from
+    // out-of-reach into reach. The packet stepper's transient client pose is not
+    // proof the server accepted the move (see classifyMoveArrival).
+    const arrival = classifyMoveArrival({
+      end: { x: endPosition.x, y: endPosition.y, z: endPosition.z },
+      target,
+      anchor,
+      anchorBefore,
+      anchorDistance,
+      reach: this.options.reach,
+      pinned: stuck,
+    })
+    const verified = arrival.verified
+
     this.logger.info(
       'executor',
       `${candidate.kind} ${candidate.id} arrival start=(${round2(startPosition.x)},${round2(startPosition.y)},${round2(startPosition.z)}) ` +
