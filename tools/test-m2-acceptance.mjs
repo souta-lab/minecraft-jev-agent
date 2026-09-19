@@ -14,12 +14,14 @@ function capture() {
 }
 
 const fullM2 = {
+  runId: 'run-fixture',
   status: { truth: { inventory: { charcoal: 2, iron_ingot: 3, iron_pickaxe: 1, oak_log: 7 } } },
   stats: { wedge: false, goalComplete: true },
   milestone: 'iron_pickaxe',
 }
 
 const missingIngot = {
+  runId: 'run-fixture',
   status: { truth: { inventory: { charcoal: 1, iron_pickaxe: 1 } } },
   stats: { wedge: false, goalComplete: false },
   milestone: 'iron_ingot',
@@ -34,6 +36,7 @@ const missingIngot = {
     sockPath: '/tmp/fixture.sock',
   })
   assert.equal(code, 0)
+  assert.match(out.text(), /runId: run-fixture/)
   assert.match(out.text(), /PASS charcoal >= 1 \(observed 2\)/)
   assert.match(out.text(), /PASS iron_ingot >= 3 \(observed 3\)/)
   assert.match(out.text(), /PASS iron_pickaxe >= 1 \(observed 1\)/)
@@ -50,19 +53,37 @@ const missingIngot = {
   const enveloped = { id: 'm2', ok: true, data: fullM2 }
   const code = await runAcceptance({
     request: async () => enveloped,
+    expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
   })
   assert.equal(code, 0)
+  assert.match(out.text(), /expectedRunId: run-fixture/)
+  assert.match(out.text(), /runId: run-fixture/)
   assert.match(out.text(), /PASS iron_pickaxe >= 1 \(observed 1\)/)
   assert.match(out.text(), /RESULT: PASS/)
-  ok('socket envelope {id,ok,data} is unwrapped')
+  ok('matching explicit runId is accepted and envelope is unwrapped')
+}
+
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => fullM2,
+    expectedRunId: 'run-other',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+  })
+  assert.equal(code, 2)
+  assert.match(out.text(), /RESULT: UNKNOWN \(run scope mismatch expected=run-other observed=run-fixture\)/)
+  assert.doesNotMatch(out.text(), /PASS charcoal|FAIL charcoal/)
+  ok('mismatched resident runId -> UNKNOWN/exit 2 before inventory can pass')
 }
 
 {
   const out = capture()
   const code = await runAcceptance({
     request: async () => missingIngot,
+    expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
   })
@@ -71,13 +92,14 @@ const missingIngot = {
   assert.match(out.text(), /FAIL iron_ingot >= 3 \(observed 0\)/)
   assert.match(out.text(), /PASS iron_pickaxe >= 1 \(observed 1\)/)
   assert.match(out.text(), /RESULT: FAIL/)
-  ok('missing iron_ingot -> FAIL/exit 1')
+  ok('matching run with missing iron_ingot -> FAIL/exit 1')
 }
 
 {
   const out = capture()
   const code = await runAcceptance({
     request: async () => null,
+    expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/does-not-exist.sock',
   })
