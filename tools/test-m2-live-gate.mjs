@@ -197,4 +197,4 @@ function ok(label) {
   ok('M2_RUN_ID env scope is inherited by both child processes')
 }
 
-console.log(`m2-live-gate: ${checks}/13 checks passed`)
+console.log(`m2-live-gate: ${checks}/${checks} checks passed`)
