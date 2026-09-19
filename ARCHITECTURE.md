@@ -6,7 +6,11 @@
 - 本ドキュメントは 2026-09-18 00:03 JST 時点のスナップショット。この時点で **リポジトリは赤い**（typecheck が通らない、2 つのテストがロード不能）。同時に **常駐ホストが生きたプロセスとして走っている**（`node agent-runner.mts`, PID 150528）。つまり「実装中」の状態を写している。
 - 検証できなかった主張は `UNVERIFIED: ...` と明記した。プロンプト側の主張でも、実ファイルと食い違うものは実測を優先し、差分を本文に書いた。
 - ファイルパスは `/home/s0u7a/mc-ai/` 起点。ログは `jev-agent/logs/` 起点。
-- **優先順位は `RESIDENT-MODE.md` §13-0（P0 green build → P1 atomic swap → P2 freeze/resume → P3 M1 golden → P4 2-block fixture → P5 Jev shadow→authority → P6 M2 ladder）が正典であり、本文書 §7 の順序に優先する。**
+- **Authority note:** the root `AGENTS.md` defines the canonical document hierarchy and the
+  current project priority. `RESIDENT-MODE.md` §13-0 is a resident design/evidence ladder
+  (and supersedes §13 only within that file); it does not outrank root policy. Where its
+  P0-P6 ordering differs from `AGENTS.md` §2, the root policy wins. This architecture handoff
+  is an as-built snapshot, not a higher-order policy document.
 
 ---
 
