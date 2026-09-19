@@ -2747,27 +2747,6 @@ export class JevController {
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
     if (result.itemsGained > 0 || result.blockRemoved) this.progressEpoch += 1
-    this.recentOutcomes.push({
-      actionId: result.actionId,
-      status: result.status,
-      failure: result.failure,
-      verified: result.verified,
-      detail: result.detail,
-    })
-    if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
-    this.noteAscendOutcome(result, candidate)
-
-    writeOutcome(this.jevWriter, {
-      callId: decision.callId,
-      policy: decision.policy,
-      actionId: result.actionId,
-      executed: result.status !== 'cancelled',
-      verified: result.verified,
-      failureCode: result.failure,
-      goalProgress: result.goalItemCount,
-      note: `${result.status}/${result.phase}: ${result.detail}`,
-    })
-
     const moved =
       this.actionStart === null
         ? 0
@@ -2787,6 +2766,26 @@ export class JevController {
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
       arrived: moveArrived,
+    })
+    this.recentOutcomes.push({
+      actionId: result.actionId,
+      status: result.status,
+      failure: result.failure,
+      verified: truth.verified,
+      detail: result.detail,
+    })
+    if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
+    this.noteAscendOutcome(result, candidate)
+
+    writeOutcome(this.jevWriter, {
+      callId: decision.callId,
+      policy: decision.policy,
+      actionId: result.actionId,
+      executed: result.status !== 'cancelled',
+      verified: truth.verified,
+      failureCode: result.failure,
+      goalProgress: result.goalItemCount,
+      note: `${result.status}/${result.phase}: ${result.detail}`,
     })
 
     const pending = this.pendingDecisions.get(result.epoch)
@@ -2850,7 +2849,7 @@ export class JevController {
     this.retireFailedKnownRetrieve(candidate, result)
     if (result.unverifiedPostcondition !== undefined) {
       this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
-    } else if (result.status === 'done' && result.verified) {
+    } else if (truth.status === 'done' && truth.verified) {
       const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
       if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
     }
@@ -2860,7 +2859,7 @@ export class JevController {
         {
           optionId: completedOptionId,
           planId: completedPlanId,
-          verified: result.verified,
+          verified: truth.verified,
           progressDelta: result.itemsGained,
         },
         Date.now(),
@@ -2954,7 +2953,7 @@ export class JevController {
         if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
           const outcome = evaluateRetrieveAbandon({
             actionId: result.actionId,
-            verified: result.verified,
+            verified: truth.verified,
             progressDelta: result.itemsGained,
             previous: this.retrieveUnverified,
           })

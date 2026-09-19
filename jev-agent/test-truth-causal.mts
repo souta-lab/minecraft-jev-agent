@@ -31,6 +31,7 @@ import type { TruthfulOutcomeInput } from './src/actionPostcondition.ts'
 import { completeCausalChain, formatCausalLine } from './src/causal.ts'
 import { moveFailureReason } from './src/controller.ts'
 import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
+import { OptionAttemptTracker } from './src/abandonPolicy.ts'
 
 interface Case {
   name: string
@@ -199,6 +200,18 @@ addCase('B. a real MOVE arrival DOES reset the memory so the coordinate stays se
   const check = memory.check(OVERWORLD, target)
   const pass = truth.observableProgress === true && !check.known
   return { pass, detail: `observable=${truth.observableProgress} known=${check.known}` }
+})
+
+addCase('B. a downgraded zero-progress outcome charges the per-option unproductive counter', () => {
+  const tracker = new OptionAttemptTracker()
+  tracker.noteOutcome({ optionId: 'collect:raw_iron', planId: 'g3:collect:raw_iron', verified: true, progressDelta: 0 }, 1_000)
+  const truth = truthfulActionOutcome(LIVE_NUDGE)
+  const state = tracker.noteOutcome(
+    { optionId: 'collect:raw_iron', planId: 'g3:collect:raw_iron', verified: truth.verified, progressDelta: 0 },
+    2_000,
+  )
+  const pass = truth.verified === false && state.attempts === 1
+  return { pass, detail: `attempts=${state.attempts} verified=${state.verified} progressDelta=${state.progressDelta}` }
 })
 
 addCase('C. moveFailureReason maps timeouts to stuck, never the durable unreachable claim', () => {
