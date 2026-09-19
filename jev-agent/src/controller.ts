@@ -497,6 +497,68 @@ export function shouldRetireKnownRetrieve(input: KnownRetrieveRetireInput): bool
   return input.attempts >= Math.max(1, Math.floor(input.limit ?? KNOWN_RETRIEVE_RETIRE_LIMIT))
 }
 
+/**
+ * Live iron-ore loop (run-mu8a7phm-rfm0): the executor reports
+ * `verified=true status=done` for a sub-metre reuse-tunnel nudge -
+ * `RETRIEVE:known:raw_iron:b25_49_37` arrived `12.63m->11.63m ... y=59.89->59.64`
+ * 28 times, always `progressDelta=0`. Trusting `verified` alone cleared
+ * `knownRetrieveFailures` on every attempt, so the present-but-unreachable ore was
+ * never dropped from `signals.knownResources` and the generator kept re-offering
+ * its RETRIEVE. The deterministic policy ranks RETRIEVE above DESCEND, so the
+ * descend goal never got a body change (`DESCEND_STALLED ... hasDescendCandidate=false`).
+ *
+ * A known-resource retrieve only counts as progress when the controller can
+ * OBSERVE a change - an item gained, a staircase block removed, or a verified
+ * body change - never on the executor's lenient `verified` flag. The controller
+ * already uses the exact same criterion for the move-failure memory; the
+ * retirement counter must agree with it.
+ */
+export function knownRetrieveMadeProgress(
+  result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>,
+): boolean {
+  return result.status === 'done' && result.verified && hasObservableProgress(result)
+}
+
+/** What `retireFailedKnownRetrieve` must do with one finished known-resource retrieve. */
+export type KnownRetrieveDecision =
+  | { kind: 'ignore' }
+  | { kind: 'clear' }
+  | { kind: 'charge'; attempts: number }
+  | { kind: 'retire'; attempts: number }
+
+export interface KnownRetrieveDecisionInput {
+  /** `candidate.meta.retrieval` (`known` for a durable remembered resource) */
+  retrieval: unknown
+  /** the remembered resource cell */
+  target: Vec3Json | null
+  /** the finished executor result */
+  result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>
+  /** consecutive zero-progress retrieves for this resource BEFORE this one */
+  previousAttempts: number
+  limit?: number
+}
+
+/**
+ * Pure decision the controller applies to every finished known-resource
+ * retrieve. Observable progress clears the per-resource counter; anything else
+ * charges it and retires the resource at the bounded limit. This is the exact
+ * boundary the live iron-ore loop got wrong: the old rule cleared on
+ * `result.verified`, which a sub-metre nudge satisfies.
+ */
+export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRetrieveDecision {
+  if (input.retrieval !== 'known' || input.target === null) return { kind: 'ignore' }
+  if (knownRetrieveMadeProgress(input.result)) return { kind: 'clear' }
+  const attempts = input.previousAttempts + 1
+  const retire = shouldRetireKnownRetrieve({
+    retrieval: input.retrieval,
+    target: input.target,
+    verified: false,
+    attempts,
+    limit: input.limit,
+  })
+  return retire ? { kind: 'retire', attempts } : { kind: 'charge', attempts }
+}
+
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
 }
@@ -3965,33 +4027,33 @@ export class JevController {
   }
 
   /**
-   * A known-resource RETRIEVE that finished without verifying (no distance
-   * closed, no altitude gained, no step dug) charges a per-resource counter.
-   * After KNOWN_RETRIEVE_RETIRE_LIMIT the resource is dropped as unreachable and
-   * removed from `signals.knownResources`, so the generator stops re-offering the
-   * same present-but-unreachable cell and the plan advances to the next resource
-   * or the branch-mine route instead of looping on the same y=68 log forever.
+   * A known-resource RETRIEVE that produced no OBSERVABLE progress charges a
+   * per-resource counter. After KNOWN_RETRIEVE_RETIRE_LIMIT the resource is
+   * dropped as unreachable and removed from `signals.knownResources`, so the
+   * generator stops re-offering the same present-but-unreachable cell and the
+   * plan advances to the next resource or the branch-mine route instead of
+   * looping forever. `decideKnownRetrieve` owns the boundary; the executor's
+   * lenient `verified` flag is deliberately not trusted (a sub-metre nudge
+   * satisfies it - the live iron-ore loop).
    */
   private retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void {
     if (candidate.meta.retrieval !== 'known' || candidate.target === null) return
     const knownName =
       typeof candidate.meta.knownName === 'string' ? candidate.meta.knownName : candidate.targetName ?? 'resource'
     const key = resourceKey({ name: knownName, position: candidate.target })
-    if (result.status === 'done' && result.verified) {
+    const decision = decideKnownRetrieve({
+      retrieval: candidate.meta.retrieval,
+      target: candidate.target,
+      result,
+      previousAttempts: this.knownRetrieveFailures.get(key) ?? 0,
+    })
+    if (decision.kind === 'ignore') return
+    if (decision.kind === 'clear') {
       this.knownRetrieveFailures.delete(key)
       return
     }
-    const attempts = (this.knownRetrieveFailures.get(key) ?? 0) + 1
-    this.knownRetrieveFailures.set(key, attempts)
-    if (
-      !shouldRetireKnownRetrieve({
-        retrieval: candidate.meta.retrieval,
-        target: candidate.target,
-        verified: false,
-        attempts,
-      })
-    )
-      return
+    this.knownRetrieveFailures.set(key, decision.attempts)
+    if (decision.kind === 'charge') return
     this.dropUnreachableResource(
       {
         resource: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
