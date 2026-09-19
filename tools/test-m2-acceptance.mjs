@@ -31,6 +31,51 @@ function capture() {
 
 const M2_CHAIN_LINE = 'chain: charcoal -> iron_ingot -> iron_pickaxe'
 
+// Real-policy evidence fixtures. The socket fixture below carries the inventory;
+// these carry the run-bound proof that typesafe-ai/jev actually ran. They are
+// injected so the offline suite never touches the live decisions.jsonl.
+const VERIFIED_POLICY = {
+  decisions: {
+    runId: 'run-fixture',
+    source: '/tmp/decisions.jsonl',
+    jevCount: 15,
+    fallbackCount: 0,
+    otherCount: 0,
+    firstJevTs: '2026-09-18T00:00:00.000Z',
+    lastJevTs: '2026-09-18T00:00:05.000Z',
+  },
+  generation: {
+    runId: 'run-fixture',
+    source: 'socket_report',
+    policyKind: 'typesafe',
+    policyModel: 'typesafe-ai/jev',
+  },
+}
+
+// (a) inventory is green but every decision in R came from the deterministic
+// fallback: the hiding pattern the owner forbade.
+const FALLBACK_DECISIONS_POLICY = {
+  decisions: { runId: 'run-fixture', source: '/tmp/decisions.jsonl', jevCount: 0, fallbackCount: 4, otherCount: 0 },
+  generation: { runId: 'run-fixture', source: 'socket_report', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+}
+
+// (b) source=jev decisions exist but the generation reports the fallback policy.
+const FALLBACK_GENERATION_POLICY = {
+  decisions: { runId: 'run-fixture', source: '/tmp/decisions.jsonl', jevCount: 2, fallbackCount: 0, otherCount: 0 },
+  generation: {
+    runId: 'run-fixture',
+    source: 'runner.out',
+    policyKind: 'fallback',
+    policyModel: 'deterministic-local-fallback+descend-aware',
+  },
+}
+
+// (d) the evidence is real but belongs to a different run; it must not satisfy R.
+const FOREIGN_RUN_POLICY = {
+  decisions: { runId: 'run-other', source: '/tmp/decisions.jsonl', jevCount: 9, fallbackCount: 0, otherCount: 0 },
+  generation: { runId: 'run-other', source: 'socket_report', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+}
+
 // The three contracted M2 conditions are met and the diamond pickaxe was never
 // crafted (diamond_pickaxe = 0). Under the fixed contract this is a PASS; it
 // FAILed while the drifted diamond terminal still gated M2.
@@ -89,6 +134,7 @@ const missingIngot = {
     now: () => new Date('2026-09-18T00:00:00.000Z'),
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
   assert.equal(
     code,
@@ -111,6 +157,7 @@ const missingIngot = {
     now: () => new Date('2026-09-18T00:00:00.000Z'),
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
   assert.equal(code, 0, `diamond-complete inventory must also PASS M2 but returned ${code}:\n${out.text()}`)
   assert.match(out.text(), new RegExp(M2_CHAIN_LINE))
@@ -132,6 +179,7 @@ const missingIngot = {
     now: () => new Date('2026-09-18T00:00:00.000Z'),
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
   assert.equal(code, 0, `raw diamonds must not gate M2; iron tier already passes but got ${code}:\n${out.text()}`)
   assert.doesNotMatch(out.text(), /diamond_pickaxe/)
@@ -147,6 +195,7 @@ const missingIngot = {
     expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
   assert.equal(code, 0, `matching explicit runId must PASS but returned ${code}:\n${out.text()}`)
   assert.match(out.text(), /expectedRunId: run-fixture/)
@@ -177,6 +226,7 @@ const missingIngot = {
     expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
   assert.equal(code, 1)
   assert.match(out.text(), /PASS charcoal >= 1 \(observed 1\)/)
@@ -185,6 +235,119 @@ const missingIngot = {
   assert.doesNotMatch(out.text(), /diamond_pickaxe/)
   assert.match(out.text(), /RESULT: FAIL/)
   ok('matching run with missing iron_ingot -> FAIL/exit 1')
+}
+
+// --- REAL-POLICY GATE (gate strengthening, NOT a substitute marker) ---------
+// The M2 inventory can be green while the real policy never ran. These cases
+// pin the mandated behaviour: fallback evidence, or evidence bound to a
+// different run, is UNKNOWN and never PASS.
+
+// (a) markers + inventory satisfied, but decisions for R are source=fallback.
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+    policyEvidence: FALLBACK_DECISIONS_POLICY,
+  })
+  assert.equal(code, 2, `fallback-only decisions must not PASS M2 but returned ${code}:\n${out.text()}`)
+  assert.match(out.text(), /POLICY: UNKNOWN reason=decisions_fallback_only/)
+  assert.match(out.text(), /source=jev count=0/)
+  assert.match(out.text(), /source=fallback count=4/)
+  assert.doesNotMatch(out.text(), /RESULT: PASS/)
+  assert.match(out.text(), /RESULT: UNKNOWN/)
+  ok('(a) inventory green but decisions source=fallback for R -> UNKNOWN/exit 2, never PASS')
+}
+
+// (b) source=jev decisions exist, but the generation reports policyKind=fallback.
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+    policyEvidence: FALLBACK_GENERATION_POLICY,
+  })
+  assert.equal(code, 2, `fallback generation must not PASS M2 but returned ${code}:\n${out.text()}`)
+  assert.match(out.text(), /POLICY: UNKNOWN reason=policy_kind_not_typesafe/)
+  assert.match(out.text(), /source=jev count=2/)
+  assert.match(out.text(), /policyKind=fallback/)
+  assert.match(out.text(), /policyModel=deterministic-local-fallback\+descend-aware/)
+  assert.doesNotMatch(out.text(), /RESULT: PASS/)
+  ok('(b) source=jev present but policyKind=fallback -> UNKNOWN/exit 2')
+}
+
+// (c) full run-bound evidence: source=jev + typesafe generation -> accepted.
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
+  })
+  assert.equal(code, 0, `verified real policy must PASS M2 but returned ${code}:\n${out.text()}`)
+  assert.match(out.text(), /POLICY: VERIFIED reason=real_policy_evidence_verified/)
+  assert.match(out.text(), /policy decisions: source=\/tmp\/decisions\.jsonl runId=run-fixture source=jev count=15/)
+  assert.match(out.text(), /policy generation: source=socket_report runId=run-fixture policyKind=typesafe policyModel=typesafe-ai\/jev/)
+  assert.match(out.text(), /RESULT: PASS/)
+  ok('(c) inventory + source=jev + policyKind=typesafe/policyModel=typesafe-ai/jev -> PASS/exit 0')
+}
+
+// (d) real evidence that is bound to a different run must not satisfy R.
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+    policyEvidence: FOREIGN_RUN_POLICY,
+  })
+  assert.equal(code, 2, `foreign-run evidence must not PASS M2 but returned ${code}:\n${out.text()}`)
+  assert.match(out.text(), /POLICY: UNKNOWN reason=decisions_evidence_run_mismatch expected=run-fixture observed=run-other/)
+  assert.doesNotMatch(out.text(), /RESULT: PASS/)
+  ok('(d) real policy evidence bound to a DIFFERENT run -> UNKNOWN/exit 2')
+}
+
+// (d2) even with decisions correct, generation evidence bound to another run is refused.
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+    policyEvidence: {
+      decisions: VERIFIED_POLICY.decisions,
+      generation: { ...VERIFIED_POLICY.generation, runId: 'run-other' },
+    },
+  })
+  assert.equal(code, 2)
+  assert.match(out.text(), /POLICY: UNKNOWN reason=generation_run_mismatch expected=run-fixture observed=run-other/)
+  assert.doesNotMatch(out.text(), /RESULT: PASS/)
+  ok('(d2) generation evidence bound to a DIFFERENT run -> UNKNOWN/exit 2')
+}
+
+// Evidence absent entirely (no decisions / no generation) is UNKNOWN, never PASS.
+{
+  const out = capture()
+  const code = await runAcceptance({
+    request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
+    write: out.write,
+    sockPath: '/tmp/fixture.sock',
+    policyEvidence: { decisions: null, generation: null },
+  })
+  assert.equal(code, 2)
+  assert.match(out.text(), /POLICY: UNKNOWN reason=decisions_evidence_unavailable/)
+  assert.match(out.text(), /source=unavailable/)
+  assert.doesNotMatch(out.text(), /RESULT: PASS/)
+  ok('missing real-policy evidence -> UNKNOWN/exit 2 (never PASS)')
 }
 
 {

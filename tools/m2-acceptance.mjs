@@ -26,6 +26,16 @@
 //     and BOOT `source` (read from the log; `--log` overrides the default);
 //   - the recorded ordered chain PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE
 //     is VALID (the same chain m2-watch enforces).
+// REAL-POLICY REQUIREMENT (gate strengthening, NOT a substitute marker):
+//   the same run R must ALSO show that the real policy actually ran, otherwise
+//   RESULT is UNKNOWN and M2 can never PASS. Two run-bound facts are required:
+//     - >= 1 decision in R's window with source=jev
+//       (buddy-driver/logs/jev/decisions.jsonl), and
+//     - R's generation reports policyKind=typesafe / policyModel=typesafe-ai/jev
+//       (socket `report.status`, or the GENERATION_READY line in runner.out).
+//   See tools/m2-policy-evidence.mjs. A deterministic fallback run (source=
+//   fallback / policyKind=fallback) is UNKNOWN, never PASS. A known inventory
+//   failure still returns FAIL, matching the live gate's FAIL>UNKNOWN rule.
 //
 // MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
 // HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
@@ -35,6 +45,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
+import { evaluatePolicyEvidence, loadPolicyEvidence } from './m2-policy-evidence.mjs'
 
 export const SOCK_PATH =
   process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
@@ -268,6 +279,11 @@ export async function runAcceptance({
   logPath = M2_LOG_PATH,
   readSnapshot,
   readRunIdentity,
+  requireRealPolicy = true,
+  policyEvidence = null,
+  loadPolicy = loadPolicyEvidence,
+  decisionsPath,
+  runnerOutPath,
 } = {}) {
   const ts = now().toISOString()
   write(`${label} acceptance check — ${ts}`)
@@ -278,7 +294,7 @@ export async function runAcceptance({
   const resolveSnapshot = readSnapshot ?? ((runId) => readSnapshotFile(runId, snapshotDir))
   const resolveIdentity = readRunIdentity ?? ((runId) => readRunIdentityFromLog(runId, logPath))
 
-  const emit = (data, reportData, inventory) => {
+  const emit = async (data, reportData, inventory, boundRunId) => {
     // Printed only after a readable evidence source with a validated run scope:
     // the chain claim is never made for unavailable or out-of-scope evidence.
     write(`chain: ${chain.join(' -> ')}`)
@@ -293,8 +309,49 @@ export async function runAcceptance({
     write(`wedge: ${wedge === null ? 'unknown' : wedge}`)
     write(`goalComplete: ${goalComplete === null ? 'unknown' : goalComplete}`)
     write(`inventory: ${JSON.stringify(observed)}`)
-    write(`RESULT: ${allPass ? 'PASS' : 'FAIL'}`)
-    return allPass ? 0 : 1
+
+    // Real-policy evidence is evaluated for every readable in-scope snapshot
+    // so the audit trail names the sources and facts. It can only turn a
+    // would-be PASS into UNKNOWN; a known inventory failure remains FAIL.
+    let policyResult = null
+    if (requireRealPolicy) {
+      const socket = {
+        runId: boundRunId,
+        policyKind: data?.status?.policyKind ?? reportData?.status?.policyKind ?? null,
+        policyModel: data?.status?.policyModel ?? reportData?.status?.policyModel ?? null,
+      }
+      let evidence = policyEvidence
+      if (evidence === null || evidence === undefined) {
+        evidence = await loadPolicy({ runId: boundRunId, socket, decisionsPath, runnerOutPath })
+      }
+      policyResult = evaluatePolicyEvidence({
+        expectedRunId: boundRunId,
+        decisions: evidence?.decisions ?? null,
+        generation: evidence?.generation ?? null,
+      })
+      const f = policyResult.facts
+      write(`policy: required policyKind=${f.requiredPolicyKind} policyModel=${f.requiredPolicyModel}`)
+      write(
+        `policy decisions: source=${f.decisionsSource ?? 'unavailable'} runId=${f.decisionsRunId ?? 'unknown'} ` +
+          `source=jev count=${f.jevDecisions ?? 'unknown'} source=fallback count=${f.fallbackDecisions ?? 'unknown'}`,
+      )
+      write(
+        `policy generation: source=${f.generationSource ?? 'unavailable'} runId=${f.generationRunId ?? 'unknown'} ` +
+          `policyKind=${f.policyKind ?? 'unknown'} policyModel=${f.policyModel ?? 'unknown'}`,
+      )
+      write(`POLICY: ${policyResult.status} reason=${policyResult.reason}`)
+    }
+
+    if (!allPass) {
+      write('RESULT: FAIL')
+      return 1
+    }
+    if (policyResult !== null && policyResult.code !== 0) {
+      write(`RESULT: UNKNOWN (real policy evidence not verified: ${policyResult.reason})`)
+      return 2
+    }
+    write('RESULT: PASS')
+    return 0
   }
 
   const reportReply = await request(REPORT_COMMAND.cmd)
@@ -316,7 +373,7 @@ export async function runAcceptance({
   if (inventory !== null && (expectedRunId === null || observedRunId === expectedRunId)) {
     write('evidence: live-socket')
     write(`runId: ${observedRunId ?? 'unknown'}`)
-    return emit(data, reportData, inventory)
+    return emit(data, reportData, inventory, observedRunId)
   }
 
   if (inventory !== null) {
@@ -379,7 +436,7 @@ export async function runAcceptance({
   write(`snapshotGenerationId: ${typeof snapshot.generationId === 'string' ? snapshot.generationId : 'unknown'}`)
   write(`snapshotBuildHash: ${snapshot.buildHash}`)
   write(`snapshotBootSourceSha: ${snapshot.bootSourceSha}`)
-  return emit(snapshot, null, snapshotInv)
+  return emit(snapshot, null, snapshotInv, expectedRunId)
 }
 
 /**
@@ -388,7 +445,7 @@ export async function runAcceptance({
  * path above never references it.
  */
 export function runM3Acceptance(options = {}) {
-  return runAcceptance({ ...options, label: 'M3', criteria: M3_CRITERIA, chain: M3_CAUSAL_CHAIN })
+  return runAcceptance({ ...options, label: 'M3', criteria: M3_CRITERIA, chain: M3_CAUSAL_CHAIN, requireRealPolicy: false })
 }
 
 function requestedArg(name, argv = process.argv.slice(2), env = process.env, envName = null) {

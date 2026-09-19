@@ -72,6 +72,14 @@ function snapshot(overrides = {}) {
 
 const BOOT_IDENTITY = { runId: RUN, bootSourceSha: BOOT_SHA, buildHash: BUILD_HASH }
 
+// Snapshot tests focus on run-scoped inventory/chain provenance. The M2 gate
+// also requires independent proof that the real Jev policy ran, so provide a
+// run-bound policy fixture rather than allowing the snapshot to bypass D2.
+const POLICY_EVIDENCE = {
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 1, fallbackCount: 0 },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+}
+
 async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
   const out = capture()
   const code = await runAcceptance({
@@ -82,6 +90,7 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
     now: () => new Date('2026-09-19T18:32:00.000Z'),
     write: out.write,
     sockPath: '/tmp/no-resident.sock',
+    policyEvidence: POLICY_EVIDENCE,
   })
   return { code, text: out.text() }
 }
@@ -189,6 +198,7 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
     now: () => new Date('2026-09-19T18:32:00.000Z'),
     write: out.write,
     sockPath: '/tmp/no-resident.sock',
+    policyEvidence: POLICY_EVIDENCE,
   })
   assert.equal(code, 0, `file-backed snapshot must PASS but returned ${code}:\n${out.text()}`)
   assert.match(out.text(), /evidence: run-scoped-snapshot/, out.text())

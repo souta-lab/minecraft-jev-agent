@@ -43,10 +43,37 @@ function ok(label) {
 }
 
 {
+  const result = combineEvidence(0, 2)
+  assert.equal(result.code, 2)
+  assert.equal(result.reason, 'inventory_unavailable')
+  ok('markers complete but inventory/real-policy unverified -> UNKNOWN, never PASS')
+}
+
+{
   const result = combineEvidence(99, 0)
   assert.equal(result.code, 2)
   assert.equal(result.reason, 'causal_chain_unavailable')
   ok('unexpected child exit codes are UNKNOWN, never fabricated PASS')
+}
+
+{
+  // M2 gate strengthening: markers PASS but the acceptance child is UNKNOWN
+  // (e.g. decisions show source=fallback or the real policy never ran). The
+  // close/no-close gate must stay UNKNOWN, not upgrade the run to PASS.
+  const lines = []
+  const code = await runGate({
+    argv: ['--run', 'run-fallback'],
+    env: {},
+    runner: async (script) =>
+      script === WATCH
+        ? { code: 0, stdout: 'M2_REQUIRED status=COMPLETE\n', stderr: '' }
+        : { code: 2, stdout: 'POLICY: UNKNOWN reason=decisions_fallback_only\nRESULT: UNKNOWN\n', stderr: '' },
+    write: (l) => lines.push(l),
+  })
+  assert.equal(code, 2)
+  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=UNKNOWN reason=inventory_unavailable runId=run-fallback watch=0 acceptance=2/)
+  assert.doesNotMatch(lines.join('\n'), /status=PASS/)
+  ok('complete markers with unverified real policy -> gate UNKNOWN, never PASS')
 }
 
 {
@@ -170,4 +197,4 @@ function ok(label) {
   ok('M2_RUN_ID env scope is inherited by both child processes')
 }
 
-console.log(`m2-live-gate: ${checks}/13 checks passed`)
+console.log(`m2-live-gate: ${checks}/${checks} checks passed`)
