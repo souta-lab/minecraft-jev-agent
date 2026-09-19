@@ -379,6 +379,50 @@ addCase('executeFurnaceSmelt places input+fuel, waits, collects, and logs SMELT_
   })
 })
 
+addCase('executeFurnaceSmelt reuses a different valid fuel already in the furnace', () => {
+  const stash: Record<string, number> = { raw_iron: 1, charcoal: 1, iron_ingot: 0 }
+  let pendingInput = 0
+  let fuelPuts = 0
+  let currentInput: { count: number; name: string } | null = null
+  const window: SmeltFurnaceWindow = {
+    putInput: async (_type, _meta, count) => {
+      pendingInput = count
+      currentInput = { count, name: 'raw_iron' }
+      stash.raw_iron = (stash.raw_iron ?? 0) - count
+    },
+    putFuel: async () => {
+      fuelPuts += 1
+      throw new Error('the existing coal slot must be reused')
+    },
+    inputItem: () => currentInput,
+    fuelItem: () => ({ count: 1, name: 'coal' }),
+    outputItem: () => (pendingInput > 0 ? { count: 1 } : null),
+    takeOutput: async () => {
+      pendingInput = 0
+      currentInput = null
+      stash.iron_ingot = (stash.iron_ingot ?? 0) + 1
+    },
+    close: () => undefined,
+  }
+  const lines: string[] = []
+  return executeFurnaceSmelt(
+    {
+      openFurnace: async () => window,
+      inventoryItems: () => Object.entries(stash).map(([name, count], index) => ({ name, type: index, count })),
+      countItem: (name) => stash[name] ?? 0,
+      wait: async () => undefined,
+      ensureOwned: () => undefined,
+      timeoutMs: 5000,
+      log: (event, detail) => lines.push(formatSmeltLog(event, detail)),
+    },
+    { inputItem: 'raw_iron', fuelItem: 'charcoal', outputItem: 'iron_ingot', inputCount: 1, fuelCount: 1 },
+  ).then((outcome) => {
+    const done = lines.find((line) => line.startsWith('SMELT_DONE'))
+    const pass = outcome.gained === 1 && fuelPuts === 0 && done?.includes('fuel=coal') === true
+    return { pass, detail: `gained=${outcome.gained} fuelPuts=${fuelPuts} log=${done ?? 'none'}` }
+  })
+})
+
 let failures = 0
 process.stdout.write('smelt furnace acquisition + execution\n')
 process.stdout.write('-'.repeat(72) + '\n')

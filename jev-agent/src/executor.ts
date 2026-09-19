@@ -25,6 +25,7 @@ import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
+import { isFuelItem } from './gameData.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 import {
@@ -599,14 +600,33 @@ export async function executeFurnaceSmelt(
         throw new ExecutorError('smelt_error', `furnace input contains ${existingInput.name}, expected ${params.inputItem}`)
       }
     }
-    if (!furnaceSlotNameMatches(existingFuel, params.fuelItem)) {
-      if (existingFuelCount > 0 && existingFuel?.name !== undefined) {
-        throw new ExecutorError('smelt_error', `furnace fuel contains ${existingFuel.name}, expected ${params.fuelItem}`)
-      }
+    // A furnace fuel slot is a mechanical resource class, not a recipe item:
+    // coal and charcoal (and every other valid furnace fuel) are equivalent
+    // for an iron smelt. Reusing a valid fuel already in the furnace is also
+    // necessary because Mineflayer exposes the slot contents from a prior
+    // action. Only a known non-fuel is a hard refusal. If a different valid
+    // fuel is present but insufficient for this batch, the slot cannot mix
+    // item types, so fail loudly instead of pretending the requested fuel was
+    // placed.
+    const existingFuelIsValid = existingFuel?.name === undefined || isFuelItem(existingFuel.name)
+    if (existingFuelCount > 0 && !existingFuelIsValid) {
+      throw new ExecutorError('smelt_error', `furnace fuel contains ${existingFuel?.name ?? 'unknown'}, not a valid fuel`)
+    }
+    if (
+      existingFuelCount > 0 &&
+      existingFuel?.name !== undefined &&
+      existingFuel.name !== params.fuelItem &&
+      existingFuelCount < fuelCount
+    ) {
+      throw new ExecutorError(
+        'smelt_error',
+        `furnace fuel ${existingFuel.name}:${existingFuelCount} cannot mix with ${params.fuelItem}:${fuelCount}`,
+      )
     }
 
     const inputToPlace = Math.max(0, inputCount - existingInputCount)
     const fuelToPlace = Math.max(0, fuelCount - existingFuelCount)
+    const effectiveFuelItem = existingFuelCount > 0 && existingFuel?.name !== undefined ? existingFuel.name : params.fuelItem
     const items = deps.inventoryItems()
     if (!inventoryCanSupply(items, params.inputItem, inputToPlace, params.fuelItem, fuelToPlace)) {
       const counts = inventoryCounts(items)
@@ -654,7 +674,7 @@ export async function executeFurnaceSmelt(
       const message = error instanceof Error ? error.message : String(error)
       throw new ExecutorError('smelt_error', `furnace transfer failed: ${message}`)
     }
-    deps.log('SMELT_PLACED', { inputItem: params.inputItem, inputCount: placedInput, fuelItem: params.fuelItem, fuelCount: placedFuel })
+    deps.log('SMELT_PLACED', { inputItem: params.inputItem, inputCount: placedInput, fuelItem: effectiveFuelItem, fuelCount: placedFuel })
     deps.ensureOwned()
     const deadline = Date.now() + deps.timeoutMs
     // Harvest the WHOLE placed batch, not just the first output. Before this the
@@ -719,7 +739,7 @@ export async function executeFurnaceSmelt(
     // (isSmeltPostconditionMet). A no-op that gained and consumed nothing stays
     // SMELT_UNPRODUCED, so the marker can never fire on a no-op.
     if (isSmeltPostconditionMet({ gained, placedInput, placedFuel, consumedInput, consumedFuel })) {
-      deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: params.fuelItem, outputCount, beforeCount: before })
+      deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: effectiveFuelItem, outputCount, beforeCount: before })
     } else {
       deps.log('SMELT_UNPRODUCED', { item: params.outputItem, placedInput, placedFuel, consumedInput, consumedFuel })
     }
