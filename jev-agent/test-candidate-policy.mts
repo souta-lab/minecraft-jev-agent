@@ -212,6 +212,20 @@ addCase('#56/#170: a craft prerequisite log route survives the final Option skil
   return { pass, detail: scoped.map((entry) => `${entry.id}:${String(entry.meta.optionSkill)}`).join(',') }
 })
 
+addCase('#56/#170: a smelt prerequisite log route survives the final Option skill gate', () => {
+  const state = stateWithOption('smelt')
+  const scoped = applyOptionSkillGate(
+    [candidate('MOVE:p42_11_32', 'MOVE', { logRoute: 'explore' }), candidate('WAIT', 'WAIT')],
+    state,
+    ['SMELT_AT_FURNACE'],
+  )
+  const pass =
+    scoped.map((entry) => entry.id).join('|') === 'MOVE:p42_11_32|WAIT' &&
+    scoped[0]?.meta.optionSkill === 'PREREQUISITE' &&
+    scoped[1]?.meta.optionSkill === 'CONTROL'
+  return { pass, detail: scoped.map((entry) => `${entry.id}:${String(entry.meta.optionSkill)}`).join(',') }
+})
+
 addCase('#56: the collect Option keeps only its grounded skills plus control', () => {
   const state = stateWithOption('collect')
   const source = [
