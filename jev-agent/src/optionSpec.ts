@@ -1161,6 +1161,13 @@ export function completeStartablePrerequisites(
  * Ready goals are returned carrying `ready: true` so the GoalQueue merge keeps
  * the proven ordering when it re-inserts protected goals.
  *
+ * A plan containing `core` goals is an already ordered milestone sequence owned
+ * by the System2/compiler boundary. Readiness is still evaluated and attached
+ * to each goal, but a ready unrelated milestone must not cross a blocked core
+ * milestone. Without this guard, a ready future portal prerequisite (for
+ * example flint) can leapfrog the M2 stone/iron chain and starve the frontier.
+ * Non-core plans retain the original #46 partition semantics.
+ *
  * #prereq-order: before partitioning, any missing DIRECT prerequisite that is
  * startable now is inserted in front of its blocked consumer, so a goal whose
  * precondition is unmet never stays the executing head while its satisfiable
@@ -1175,6 +1182,7 @@ export function orderGoalsByReadiness(
   const ready: PlannedGoal[] = []
   const blocked: PlannedGoal[] = []
   const isReady: boolean[] = []
+  const preserveCoreOrder = completed.goals.some((goal) => goal.core === true)
   for (const goal of completed.goals) {
     const startable = isOptionStartable(compilePlannedGoal(goal, snapshot), snapshot, custom)
     isReady.push(startable)
@@ -1182,17 +1190,22 @@ export function orderGoalsByReadiness(
     else blocked.push(goal)
   }
   const moves: Array<{ preferred: string; over: string }> = []
-  for (let j = 0; j < completed.goals.length; j += 1) {
-    if (isReady[j] === true) continue
-    const overGoal = completed.goals[j]
-    if (overGoal === undefined) continue
-    for (let i = j + 1; i < completed.goals.length; i += 1) {
-      const candidate = completed.goals[i]
-      if (candidate === undefined || isReady[i] !== true) continue
-      moves.push({ preferred: goalReadinessLabel(candidate), over: overGoal.description })
+  if (!preserveCoreOrder) {
+    for (let j = 0; j < completed.goals.length; j += 1) {
+      if (isReady[j] === true) continue
+      const overGoal = completed.goals[j]
+      if (overGoal === undefined) continue
+      for (let i = j + 1; i < completed.goals.length; i += 1) {
+        const candidate = completed.goals[i]
+        if (candidate === undefined || isReady[i] !== true) continue
+        moves.push({ preferred: goalReadinessLabel(candidate), over: overGoal.description })
+      }
     }
   }
-  return { goals: [...ready, ...blocked], ready, blocked, inserted: completed.inserted, moves, unresolved: completed.unresolved }
+  const orderedGoals = preserveCoreOrder
+    ? completed.goals.map((goal, index) => (isReady[index] === true && goal.ready !== true ? { ...goal, ready: true } : goal))
+    : [...ready, ...blocked]
+  return { goals: orderedGoals, ready, blocked, inserted: completed.inserted, moves, unresolved: completed.unresolved }
 }
 
 /** OptionSpec -> PlannedGoal, so compiled Options seed the existing GoalQueue. */
