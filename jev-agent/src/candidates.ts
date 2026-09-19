@@ -513,7 +513,11 @@ function generateRawCandidates(
   // A known-resource retrieval is grounded even when other (non-progressing)
   // candidates exist: if the wanted block is not visible but its coordinate is
   // remembered, going there is strictly better than re-issuing the front goal.
-  candidates.push(...retrievalCandidates(state, options, focusItem))
+  // Once the active goal already has a grounded route, however, do not admit a
+  // retrieval for a later queue row into this Option. That is a different
+  // semantic action, not an alternative mechanical route for the active goal;
+  // it was observed live as raw_iron -> unrelated future log retrieval.
+  candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0))
   if (candidates.length === 0) {
     const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
     const explore = pickExplore(
@@ -2335,7 +2339,7 @@ function fuelGoalCountReached(state: WorldState, goal: { requiredCount?: number 
  * queue retrievals must not steal the body while its furnace/input path is
  * unresolved (#73). Pure.
  */
-function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalWant[] {
+function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueued = true): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
   // A fuel need may only be dropped when the goal that owns it is actually
   // satisfied. `fuelNeedSatisfiedByInventory` answers "is ANY fuel held", which
@@ -2358,7 +2362,9 @@ function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalW
   push(focusItem, goalWantsFuel(current), current)
   if (current?.kind !== 'smelt') {
     push(state.goal.targetItem, goalWantsFuel(current), current)
-    for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued), queued)
+    if (includeQueued) {
+      for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued), queued)
+    }
   }
   const wants: RetrievalWant[] = []
   for (const need of needs) {
@@ -2541,8 +2547,13 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
  * in the queue that has a remembered coordinate but no visible block. Returns
  * only the first satisfiable need so the probe stays bounded.
  */
-function retrievalCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
-  for (const want of retrievalNeeds(state, focusItem)) {
+function retrievalCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+  includeQueued = true,
+): Candidate[] {
+  for (const want of retrievalNeeds(state, focusItem, includeQueued)) {
     const candidates = retrievalCandidatesForWant(state, options, want)
     if (candidates.length > 0) return candidates
   }
