@@ -323,10 +323,12 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'cobblestone',
-    // Stone is legitimately spent on the furnace and stone_pickaxe; a stone
-    // pickaxe proves enough cobblestone was mined even when the count is low.
+    // Cobblestone is legitimately spent on the furnace and stone_pickaxe; a
+    // stone pickaxe proves enough cobblestone was mined even when the count is
+    // low. Keep the goal concrete: the sensor and candidate generator use the
+    // cobblestone drop, while `stone` is only the semantic resource class.
     satisfied: (c) => countClass(c, 'stone') >= 12 || bestPickaxeRank(c) >= 2,
-    goals: () => [{ kind: 'collect', description: 'collect 12 x stone', targetItem: 'stone', requiredCount: 12 }],
+    goals: () => [{ kind: 'collect', description: 'collect 12 x cobblestone', targetItem: 'cobblestone', requiredCount: 12 }],
   },
   {
     id: 'furnace',
