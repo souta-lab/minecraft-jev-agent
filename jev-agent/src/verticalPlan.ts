@@ -383,6 +383,13 @@ export interface VerticalInput {
   /** held pillar block; when absent an upward gap has no grounded plan */
   placeable?: PlaceableBlock | null
   /**
+   * live inventory counts. When provided, an upward stair cut is only chosen
+   * when `canDigBlock(cut.name, inventory)` proves the held tools can finish the
+   * dig, so a stone cut without a pickaxe never shadows the pillar fallback.
+   * Tool-agnostic callers omit it and keep the geometry-only choice.
+   */
+  inventory?: Readonly<Record<string, number>>
+  /**
    * sensor-side column safety; false refuses the pillar plan (default true so
    * pure callers that have no hazard scan keep the old behaviour)
    */
@@ -587,6 +594,22 @@ export interface AscentColumnBlocker {
   requiredTier: number | null
 }
 
+/**
+ * The executor's live dig rule, pure: does the inventory hold a usable tool for
+ * `blockName`? Identical to `Executor.resolveLiveDigTool` (`selectDigTool` over
+ * the block's own harvest profile), so any plan/dig the gate offers is one the
+ * executor can finish. Soft classes (dirt/gravel/sand/grass/...) answer true
+ * without a pickaxe - `selectDigTool` falls back to the bare hand - while only
+ * stone-family/ore blocks require a pickaxe.
+ */
+export function canDigBlock(blockName: string, inventory: Readonly<Record<string, number>>): boolean {
+  const profile = resolveHarvest(loadGameData(), blockName)
+  return selectDigTool(
+    { name: blockName, harvestTool: profile.harvestTool, harvestTier: profile.harvestTier, diggable: true },
+    (tool, tier) => bestToolTier(inventory, tool) >= (tier ?? 0),
+  ).ok
+}
+
 export type AscentColumnDecision =
   | { kind: 'clear'; cell: Vec3Json }
   | { kind: 'clearable'; cell: Vec3Json; blocker: AscentColumnBlocker }
@@ -683,19 +706,10 @@ export function evaluateAscentColumn(input: AscentColumnInput): AscentColumnDeci
     // The executor resolves the same block live through `selectDigTool`
     // (`Executor.resolveLiveDigTool`), so the gate must use the identical rule:
     // only a pickaxe is a hard requirement, an axe/shovel cut falls back to hand.
-    const choice = selectDigTool(
-      {
-        name: cut.name,
-        harvestTool: profile.harvestTool,
-        harvestTier: profile.harvestTier,
-        diggable: true,
-      },
-      (tool, tier) => bestToolTier(input.inventory, tool) >= (tier ?? 0),
-    )
     const blocker: AscentColumnBlocker = {
       cell: cut.cut,
       name: cut.name,
-      toolOk: choice.ok,
+      toolOk: canDigBlock(cut.name, input.inventory),
       requiredTool: profile.harvestTool,
       requiredTier: profile.harvestTier,
     }
@@ -741,6 +755,12 @@ function selectUpStep(input: VerticalInput, fromY: number, targetY: number): Ver
     // The up mirror of the down staircase cuts the block directly above the
     // landing step; a higher cut is a 2-block jump and is not grounded.
     if (cut.cut.y !== fromY + 1) continue
+    // A plan is only offered when its dig is mechanically executable NOW: the
+    // executor re-resolves the same `selectDigTool` rule live, so a staircase-up
+    // through stone without a pickaxe must fall through to the pillar fallback
+    // (or to a truthful refusal) instead of shadowing it. Soft classes answer
+    // true by hand, so only stone-family/ore cuts need the pickaxe here.
+    if (input.inventory !== undefined && !canDigBlock(cut.name, input.inventory)) continue
     const alignment = cut.dx * targetSignX + cut.dz * targetSignZ
     const score = (alignment > 0 ? 0 : 10) + distance(cut.step, input.selfPosition) * 0.1
     if (score < bestScore) {
