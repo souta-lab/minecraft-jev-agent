@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
-import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
@@ -36,17 +36,21 @@ import { assertActuationSurfaceCovered, createActuationPort, withActuationLease 
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import {
   PlannerBrain,
+  RUNGS,
   bestPickaxeRank,
   buildLadder,
   buildPlanOptions,
   computeFrontier,
+  countResource,
   debugFrontier,
   deriveResumeRung,
+  goalAlreadyMet,
   goalsForStrategy,
   has,
   inventoryCounts,
   resolvePlannerMode,
 } from './planner.ts'
+import type { Counts, Rung } from './planner.ts'
 import type {
   GenerationContext,
   GenerationResources,
@@ -404,17 +408,77 @@ export function ledgerIsConsistent(ledger: LedgerSnapshot, counts: Record<string
   return true
 }
 
+export interface LedgerGoalReopening {
+  id: string
+  description: string
+  rungIds: string[]
+  liveHave: number
+  requiredCount: number
+}
+
+export interface LedgerGoalReconciliation {
+  snapshot: GoalQueueSnapshot
+  reopened: LedgerGoalReopening[]
+}
+
+function rungOwnsGoal(rung: Rung, goal: QueuedGoal, counts: Counts, world: ResidentWorldMemory): boolean {
+  const target = goal.targetItem ?? null
+  return rung.goals(counts, world).some((planned) => planned.kind === goal.kind && (planned.targetItem ?? null) === target)
+}
+
+/**
+ * Reconcile a restored ledger against the LIVE bot. A `done` goal is trusted
+ * only when either its own item requirement is already held, or a capability
+ * rung that contains it is satisfied by the live inventory/world (a consumable
+ * that was legitimately spent, e.g. raw_iron smelted into iron_ingot). A `done`
+ * goal no live rung predicate covers is reopened as `pending`, so it is
+ * re-activated ahead of any later-milestone goal. Pure: never mutates the input.
+ */
+export function reconcileLedgerGoals(
+  snapshot: GoalQueueSnapshot,
+  counts: Record<string, number>,
+  world: ResidentWorldMemory,
+): LedgerGoalReconciliation {
+  const reopened: LedgerGoalReopening[] = []
+  const goals = (snapshot.goals ?? []).map((goal) => {
+    if (goal.status !== 'done') return { ...goal }
+    const target = goal.targetItem
+    if (typeof target !== 'string' || target.length === 0) return { ...goal }
+    const rungs = RUNGS.filter((rung) => rung.future !== true && rungOwnsGoal(rung, goal, counts, world))
+    if (rungs.length === 0) return { ...goal }
+    const planned: PlannedGoal = {
+      kind: goal.kind,
+      description: goal.description,
+      targetItem: goal.targetItem,
+      requiredCount: goal.requiredCount,
+    }
+    if (goalAlreadyMet(planned, counts)) return { ...goal }
+    if (rungs.some((rung) => rung.satisfied(counts, world))) return { ...goal }
+    const liveHave = Math.max(0, countResource(counts, target))
+    reopened.push({
+      id: goal.id,
+      description: goal.description,
+      rungIds: rungs.map((rung) => rung.id),
+      liveHave,
+      requiredCount: goal.requiredCount,
+    })
+    return { ...goal, status: 'pending' as const, haveCount: Math.min(goal.haveCount, liveHave) }
+  })
+  return { snapshot: { ...snapshot, goals }, reopened }
+}
+
 export function selectLedgerSnapshot(
   hostSnapshot: GoalQueueSnapshot | null,
   derivedSnapshot: GoalQueueSnapshot | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
-): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot } | null {
+): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot; reopened: LedgerGoalReopening[] } | null {
   if (hostSnapshot !== null) {
-    return ledgerIsConsistent(hostSnapshot, counts, world) ? { source: 'host-snapshot', snapshot: hostSnapshot } : null
+    if (!ledgerIsConsistent(hostSnapshot, counts, world)) return null
+    return { source: 'host-snapshot', ...reconcileLedgerGoals(hostSnapshot, counts, world) }
   }
   if (derivedSnapshot !== null && ledgerIsConsistent(derivedSnapshot, counts, world)) {
-    return { source: 'derived-file', snapshot: derivedSnapshot }
+    return { source: 'derived-file', ...reconcileLedgerGoals(derivedSnapshot, counts, world) }
   }
   return null
 }
@@ -497,7 +561,10 @@ function restoreLedgerIntoController(
     const goals = snapshotGoals(chosen.snapshot)
     const done = goals.filter((goal) => goal.status === 'done').length
     const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
-    log('LEDGER_RESTORED', { source: chosen.source, done, total: goals.length, current: current?.description ?? null })
+    log('LEDGER_RESTORED', { source: chosen.source, done, total: goals.length, current: current?.description ?? null, reopened: chosen.reopened.length })
+    if (chosen.reopened.length > 0) {
+      log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
+    }
   } catch (error) {
     log('ERROR', { where: 'restoreLedgerIntoController', message: error instanceof Error ? error.message : String(error) })
   }
