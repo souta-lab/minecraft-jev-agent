@@ -439,6 +439,33 @@ const missingIngot = {
   ok('M3 acceptance requires the crafted pickaxe, not raw diamonds')
 }
 
+// Per-marker observation instants. The SAME three conditions are judged from
+// the retained per-marker samples: charcoal is read from the chain-advancing
+// FURNACE_READY sample and iron_ingot from the SMELT_DONE sample even though the
+// latest inventory has already consumed both (pickaxe crafted after the chain).
+// This adds NO marker and does NOT change the required item set or thresholds.
+{
+  const snapshot = {
+    runId: 'run-fixture',
+    markers: [
+      { name: 'PREREQ_OPTION', atMs: 1, at: 't1', inventory: { charcoal: 1, iron_ingot: 0, iron_pickaxe: 0 } },
+      { name: 'FURNACE_READY', atMs: 2, at: 't2', inventory: { charcoal: 1, iron_ingot: 0, iron_pickaxe: 0 } },
+      { name: 'SMELT_DONE', atMs: 3, at: 't3', inventory: { charcoal: 0, iron_ingot: 3, iron_pickaxe: 0 } },
+    ],
+    inventory: { charcoal: 0, iron_ingot: 0, iron_pickaxe: 1 },
+  }
+  const { allPass, observed, sources } = acceptance.evaluateSnapshotCriteria(M2_CRITERIA, snapshot)
+  assert.equal(allPass, true)
+  assert.equal(observed.charcoal, 1)
+  assert.equal(sources.charcoal, 'FURNACE_READY')
+  assert.equal(observed.iron_ingot, 3)
+  assert.equal(sources.iron_ingot, 'SMELT_DONE')
+  assert.equal(observed.iron_pickaxe, 1)
+  assert.equal(sources.iron_pickaxe, 'latest')
+  assert.deepEqual(acceptance.M2_CONDITION_MARKER, { charcoal: 'FURNACE_READY', iron_ingot: 'SMELT_DONE', iron_pickaxe: null })
+  ok('per-marker samples feed the SAME conditions: charcoal<-FURNACE_READY, iron_ingot<-SMELT_DONE, iron_pickaxe<-latest')
+}
+
 assert.equal(M2_CONTROL_TIMEOUT_MS, 10_000)
 ok('resident report timeout is 10s so a queued report is not mislabeled UNKNOWN')
 

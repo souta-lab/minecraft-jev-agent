@@ -80,7 +80,7 @@ const POLICY_EVIDENCE = {
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
 }
 
-async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
+async function judge({ snap, identity = BOOT_IDENTITY, live = null, policy = POLICY_EVIDENCE } = {}) {
   const out = capture()
   const code = await runAcceptance({
     request: async () => live,
@@ -90,7 +90,7 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
     now: () => new Date('2026-09-19T18:32:00.000Z'),
     write: out.write,
     sockPath: '/tmp/no-resident.sock',
-    policyEvidence: POLICY_EVIDENCE,
+    policyEvidence: policy,
   })
   return { code, text: out.text() }
 }
@@ -148,6 +148,114 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
   assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
   assert.doesNotMatch(text, /PASS charcoal|FAIL charcoal/, text)
   ok('snapshot without the ordered chain -> UNKNOWN/exit 2')
+}
+
+// 5b. THE MISSING PIECE. The run truly reached every M2 rung, but the LATEST
+// inventory has already consumed the rungs: the fuel charcoal was burnt by the
+// smelt (charcoal=0) and all three ingots were consumed by the pickaxe craft
+// (iron_ingot=0). Only the per-marker samples retain charcoal>=1 at
+// FURNACE_READY time and iron_ingot>=3 at SMELT_DONE time, so acceptance must
+// read the conditions from those samples. This uses the REAL runAcceptance entry
+// point (not a helper): if acceptance still only read snapshot.inventory it would
+// return FAIL here.
+function perMarkerCraftSnapshot(overrides = {}) {
+  const at = Date.parse('2026-09-19T18:21:53.724Z')
+  return snapshot({
+    markers: [
+      {
+        name: 'PREREQ_OPTION',
+        atMs: at,
+        at: new Date(at).toISOString(),
+        inventory: { ...SATISFIED_INVENTORY, charcoal: 1, iron_ingot: 0, iron_pickaxe: 0, raw_iron: 3 },
+      },
+      {
+        name: 'FURNACE_READY',
+        atMs: at + 1000,
+        at: new Date(at + 1000).toISOString(),
+        inventory: { ...SATISFIED_INVENTORY, charcoal: 1, iron_ingot: 0, iron_pickaxe: 0, raw_iron: 3 },
+      },
+      {
+        name: 'SMELT_DONE',
+        atMs: at + 10_777,
+        at: new Date(at + 10_777).toISOString(),
+        inventory: { ...SATISFIED_INVENTORY, charcoal: 0, iron_ingot: 3, iron_pickaxe: 0, raw_iron: 0 },
+      },
+    ],
+    // Latest instant: CRAFT:iron_pickaxe consumed the fuel and all three ingots.
+    inventory: { ...SATISFIED_INVENTORY, charcoal: 0, iron_ingot: 0, iron_pickaxe: 1, raw_iron: 0 },
+    ...overrides,
+  })
+}
+
+{
+  const { code, text } = await judge({ snap: perMarkerCraftSnapshot() })
+  assert.equal(code, 0, `per-marker samples must let the run PASS but returned ${code}:\n${text}`)
+  assert.match(text, /PASS charcoal >= 1 \(observed 1\)/, text)
+  assert.match(text, /PASS iron_ingot >= 3 \(observed 3\)/, text)
+  assert.match(text, /PASS iron_pickaxe >= 1 \(observed 1\)/, text)
+  // The condition-to-sample mapping is explicit in the output.
+  assert.match(text, /observation: charcoal<-FURNACE_READY iron_ingot<-SMELT_DONE iron_pickaxe<-latest/, text)
+  assert.match(text, /RESULT: PASS/, text)
+  ok('runAcceptance PASSes from per-marker samples (charcoal<-FURNACE_READY, iron_ingot<-SMELT_DONE, iron_pickaxe<-latest)')
+}
+
+// 5c. A foreign runId is still rejected even though the per-marker samples look
+// complete: enriched observation never crosses run scope.
+{
+  const { code, text } = await judge({ snap: perMarkerCraftSnapshot({ runId: 'run-snapshot-b' }) })
+  assert.equal(code, 2, `cross-run per-marker snapshot must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
+  assert.doesNotMatch(text, /PASS charcoal|FAIL charcoal/, text)
+  ok('per-marker snapshot runId mismatch -> UNKNOWN/exit 2 (binding not loosened)')
+}
+
+// 5d. A mismatched BUILD hash is still rejected with the richer per-marker samples.
+{
+  const { code, text } = await judge({ snap: perMarkerCraftSnapshot(), identity: { ...BOOT_IDENTITY, buildHash: 'ffffffffffff' } })
+  assert.equal(code, 2, `build mismatch must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.match(text, /UNKNOWN/, text)
+  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
+  ok('per-marker snapshot buildHash mismatch -> UNKNOWN/exit 2 (binding not loosened)')
+}
+
+// 5e. A mismatched BOOT source is still rejected with the richer per-marker samples.
+{
+  const { code, text } = await judge({ snap: perMarkerCraftSnapshot(), identity: { ...BOOT_IDENTITY, bootSourceSha: 'deadbeefdeadbeef' } })
+  assert.equal(code, 2, `source mismatch must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.match(text, /UNKNOWN/, text)
+  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
+  ok('per-marker snapshot bootSourceSha mismatch -> UNKNOWN/exit 2 (binding not loosened)')
+}
+
+// 5f. Even with complete per-marker samples, a run whose decisions were only the
+// deterministic fallback (and whose generation reports the fallback policy) is
+// UNKNOWN, never PASS: per-marker evidence does not substitute for D2 real Jev.
+{
+  const fallbackPolicy = {
+    decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 4 },
+    generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback' },
+  }
+  const { code, text } = await judge({ snap: perMarkerCraftSnapshot(), policy: fallbackPolicy })
+  assert.equal(code, 2, `fallback-only run must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.match(text, /RESULT: UNKNOWN/, text)
+  assert.doesNotMatch(text, /RESULT: PASS/, text)
+  assert.match(text, /POLICY: UNKNOWN/, text)
+  ok('fallback-only run with complete per-marker samples -> UNKNOWN/exit 2 (never PASS)')
+}
+
+// 5g. An incomplete per-marker chain is still UNKNOWN: the exact ordered chain
+// PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE is unchanged.
+{
+  const partial = perMarkerCraftSnapshot({
+    markers: perMarkerCraftSnapshot().markers.slice(0, 2),
+    sequence: ['PREREQ_OPTION', 'FURNACE_READY'],
+    chain: { status: 'INCOMPLETE', required: ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'], observed: ['PREREQ_OPTION', 'FURNACE_READY'] },
+  })
+  const { code, text } = await judge({ snap: partial })
+  assert.equal(code, 2, `incomplete per-marker chain must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
+  assert.doesNotMatch(text, /PASS charcoal|FAIL charcoal/, text)
+  ok('per-marker snapshot without the ordered chain -> UNKNOWN/exit 2')
 }
 
 // 6. A live same-run socket still wins and is reported as such.
