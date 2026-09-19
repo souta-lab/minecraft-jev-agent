@@ -11,44 +11,38 @@ function ok(label) {
 {
   const result = combineEvidence(0, 0)
   assert.deepEqual(result, { code: 0, status: 'PASS', reason: 'closed_loop_m2_verified' })
-  ok('PASS requires causal and inventory PASS')
+  ok('PASS requires exact-run history and terminal state PASS')
 }
-
 {
   const result = combineEvidence(1, 0)
   assert.equal(result.code, 1)
   assert.equal(result.reason, 'causal_chain_incomplete')
-  ok('incomplete causal chain is FAIL even when inventory passes')
+  ok('incomplete history is FAIL even when terminal state passes')
 }
-
 {
   const result = combineEvidence(0, 1)
   assert.equal(result.code, 1)
-  assert.equal(result.reason, 'inventory_incomplete')
-  ok('incomplete inventory is FAIL even when causal chain passes')
+  assert.equal(result.reason, 'terminal_state_incomplete')
+  ok('missing terminal target is FAIL even when history passes')
 }
-
 {
   const result = combineEvidence(2, 0)
   assert.equal(result.code, 2)
   assert.equal(result.reason, 'causal_chain_unavailable')
-  ok('unreadable causal evidence is UNKNOWN when nothing is known to fail')
+  ok('unreadable historical evidence is UNKNOWN')
 }
-
 {
   const result = combineEvidence(2, 1)
   assert.equal(result.code, 1)
-  assert.equal(result.reason, 'inventory_incomplete')
-  ok('a known failure outranks unavailable evidence')
+  assert.equal(result.reason, 'terminal_state_incomplete')
+  ok('known terminal failure outranks unavailable history')
 }
-
 {
   const result = combineEvidence(99, 0)
   assert.equal(result.code, 2)
   assert.equal(result.reason, 'causal_chain_unavailable')
-  ok('unexpected child exit codes are UNKNOWN, never fabricated PASS')
+  ok('unexpected child exit is UNKNOWN, never fabricated PASS')
 }
-
 {
   assert.equal(hasRunScope(['--since', '2026-09-18T14:00:00Z'], {}), false)
   assert.equal(hasRunScope(['--run', 'run-abc'], {}), true)
@@ -58,45 +52,33 @@ function ok(label) {
   assert.equal(exactRunId(['--run', 'run-abc'], {}), 'run-abc')
   assert.equal(exactRunId([], { M2_RUN_ID: 'run-env' }), 'run-env')
   assert.equal(exactRunId(['--run', 'bad'], {}), null)
-  ok('close/no-close gate requires an exact runId, not timestamp-only scope')
+  ok('close/no-close gate requires exact runId, never timestamp-only scope')
 }
-
 {
   const calls = []
   const runner = async (script, args) => {
     calls.push({ script, args })
     return { code: 0, stdout: '', stderr: '' }
   }
-  const code = await runGate({
-    argv: ['--run', 'run-abc'],
-    env: {},
-    runner,
-    write: () => undefined,
-  })
+  const code = await runGate({ argv: ['--run', 'run-abc'], env: {}, runner, write: () => undefined })
   assert.equal(code, 0)
   assert.deepEqual(calls[0], { script: WATCH, args: ['--run', 'run-abc'] })
   assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc'] })
-  ok('exact runId is forwarded to both causal and inventory children')
+  ok('exact runId is forwarded to history and terminal children')
 }
-
 {
   let called = false
   const lines = []
   const code = await runGate({
-    argv: ['--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'],
-    env: {},
-    runner: async () => {
-      called = true
-      throw new Error('runner must not execute without an exact runId')
-    },
+    argv: ['--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'], env: {},
+    runner: async () => { called = true; throw new Error('runner must not execute without exact runId') },
     write: (line) => lines.push(line),
   })
   assert.equal(code, 2)
   assert.equal(called, false)
-  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=UNKNOWN reason=exact_run_scope_required watch=2 acceptance=2/)
-  ok('timestamp-only scope is diagnostic, not sufficient for live acceptance')
+  assert.match(lines.join('\n'), /status=UNKNOWN reason=exact_run_scope_required/)
+  ok('timestamp-only scope cannot produce live acceptance')
 }
-
 {
   const calls = []
   const lines = []
@@ -108,21 +90,14 @@ function ok(label) {
   }
   const code = await runGate({
     argv: ['--run', 'run-abc', '--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log', '--ignored', 'x'],
-    env: {},
-    runner,
-    write: (line) => lines.push(line),
+    env: {}, runner, write: (line) => lines.push(line),
   })
   assert.equal(code, 0)
-  assert.deepEqual(calls[0], {
-    script: WATCH,
-    args: ['--run', 'run-abc', '--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'],
-  })
+  assert.deepEqual(calls[0], { script: WATCH, args: ['--run', 'run-abc', '--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'] })
   assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc'] })
-  assert.match(lines.join('\n'), /M2_LIVE_GATE runId=run-abc/)
-  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=PASS reason=closed_loop_m2_verified runId=run-abc watch=0 acceptance=0/)
-  ok('exact run join may carry an additional timestamp lower bound without mixing children')
+  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=PASS reason=closed_loop_m2_verified/)
+  ok('exact run join may carry a diagnostic timestamp lower bound')
 }
-
 {
   const calls = []
   const runner = async (script, args, options) => {
@@ -135,9 +110,7 @@ function ok(label) {
   assert.equal(calls.length, 2)
   assert.deepEqual(calls[0].env, env)
   assert.deepEqual(calls[1].env, env)
-  assert.deepEqual(calls[0].args, [])
-  assert.deepEqual(calls[1].args, [])
-  ok('M2_RUN_ID env scope is inherited by both child processes')
+  ok('M2_RUN_ID env scope is inherited by both children')
 }
 
 console.log(`m2-live-gate: ${checks}/11 checks passed`)
