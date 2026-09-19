@@ -245,6 +245,48 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
   return { ok: true, plan }
 }
 
+/** A rejected plan that is retryable WHEN the exact rejection is fed back to the model. */
+export class MercuryPlanValidationError extends Error {
+  readonly validationError: string
+  readonly rawPlan: unknown
+
+  constructor(validationError: string, rawPlan: unknown) {
+    super(`invalid plan: ${validationError}`)
+    this.name = 'MercuryPlanValidationError'
+    this.validationError = validationError
+    this.rawPlan = rawPlan
+  }
+}
+
+/** The exact corrective text for the next attempt, or null for non-validation errors. */
+export function mercuryRetryFeedback(error: unknown): string | null {
+  return error instanceof MercuryPlanValidationError ? error.validationError : null
+}
+
+/**
+ * A validation error is retryable with feedback; transport errors keep their own
+ * retryability. Budget/config failures never reach this predicate (reserveAttempt
+ * throws them before the call), so a schema slip cannot become an infinite loop.
+ */
+export function isRetryableMercuryAttempt(error: unknown): boolean {
+  return error instanceof MercuryPlanValidationError || isRetryableModelError(error)
+}
+
+export const MERCURY_SCHEMA_CORRECTIVE_HINT =
+  "Every collect/craft/smelt goal MUST name a real allowed item AND include an integer count in [1,64]; a legacy item goal must be exactly { item, count }."
+
+/** Append the exact validation rejection + a repair instruction to the next attempt's prompt. */
+export function buildCorrectivePrompt(basePrompt: string, validationError: string): string {
+  return [
+    basePrompt,
+    '',
+    'CORRECTION REQUIRED: your previous emitPlan call was rejected by local validation:',
+    `  ${validationError}`,
+    `Fix exactly that problem and re-emit the emitPlan tool call. ${MERCURY_SCHEMA_CORRECTIVE_HINT}`,
+    'Do not repeat the rejected goal unchanged.',
+  ].join('\n')
+}
+
 /**
  * Compile ONE validated goal onto the existing executable machinery:
  *   place/craft/collect/smelt -> matching PlannedGoal kind (PLACE / CRAFT / ...)
@@ -605,6 +647,8 @@ export interface MercuryCallRecord {
   attempts: number
   failures: number
   retries: number
+  /** 1-based index of the attempt this record describes (retry audit trail). */
+  attempt?: number
   outcome: 'success' | 'plan_rejected' | 'fallback'
   state: unknown
   prompt: { system: string; user: string }
@@ -630,6 +674,20 @@ export interface MercuryRepairResult {
   cached: boolean
 }
 
+interface MercuryRejectedAttempt {
+  attempt: number
+  prompt: string
+  response: unknown
+  usage: unknown
+  error: string
+}
+
+interface MercuryAttemptSuccess {
+  plan: MercuryPlanJson
+  usage: unknown
+  prompt: string
+}
+
 export interface MercurySystem2Options {
   /** compressed-summary builder; injected so this module never imports planner.ts. */
   summarize: (request: System2PlanRequest, trigger: MercuryTriggerReason) => MercuryStateSummary
@@ -652,6 +710,47 @@ export interface MercurySystem2Options {
   resolveKey?: () => KeyResolution | null
   /** true when this generation was created fresh because the bot died. */
   postDeathRecovery?: boolean
+  /** transport seam for tests; defaults to the AI SDK `generateText` tool call. */
+  transport?: MercuryTransport
+}
+
+export interface MercuryTransportRequest {
+  readonly system: string
+  readonly prompt: string
+  readonly maxOutputTokens: number
+  readonly timeoutMs: number
+}
+
+export interface MercuryTransportToolCall {
+  readonly input: unknown
+}
+
+export interface MercuryTransportResult {
+  readonly toolCalls: readonly MercuryTransportToolCall[]
+  readonly usage: unknown
+}
+
+export type MercuryTransport = (request: MercuryTransportRequest) => Promise<MercuryTransportResult>
+
+function defaultMercuryTransport(model: string): MercuryTransport {
+  return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+    const result = await generateText({
+      model,
+      system,
+      prompt,
+      tools: {
+        emitPlan: tool({
+          description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
+          inputSchema: MERCURY_PLAN_SCHEMA,
+        }),
+      },
+      toolChoice: { type: 'tool', toolName: 'emitPlan' },
+      maxOutputTokens,
+      maxRetries: 0,
+      abortSignal: AbortSignal.timeout(timeoutMs),
+    })
+    return { toolCalls: result.toolCalls, usage: result.usage }
+  }
 }
 
 const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
@@ -754,20 +853,43 @@ export type MercuryAttemptRun<T> =
   | { readonly ok: true; readonly result: T; readonly attempts: number; readonly failures: number }
   | { readonly ok: false; readonly error: unknown; readonly attempts: number; readonly failures: number }
 
+/**
+ * Per-attempt context. `feedback` is the corrective text derived from the PREVIOUS
+ * failed attempt (null on the first attempt and on retries with no corrective
+ * content), so the caller can repair its own prompt instead of repeating a
+ * deterministic schema slip until the bound is exhausted.
+ */
+export interface MercuryAttemptContext {
+  readonly attempt: number
+  readonly feedback: string | null
+  readonly previousError: unknown | null
+}
+
+export interface MercuryRetryDetail {
+  readonly attempt: number
+  readonly nextAttempt: number
+  readonly error: unknown
+  /** Corrective text the next attempt will receive, or null when none applies. */
+  readonly feedback: string | null
+}
+
 export interface MercuryAttemptOptions<T> {
   readonly maxAttempts: number
   readonly reserveAttempt: (attempt: number) => void
-  readonly call: () => Promise<T>
+  readonly call: (context: MercuryAttemptContext) => Promise<T>
   readonly isRetryable: (error: unknown) => boolean
-  readonly onRetry: (detail: { attempt: number; nextAttempt: number; error: unknown }) => void
+  readonly onRetry: (detail: MercuryRetryDetail) => void
+  /** Turn a failed attempt into corrective feedback for the next attempt; null when none applies. */
+  readonly feedbackFor?: (error: unknown) => string | null
 }
 
 /** Run attempts with accounting at the boundary immediately before each provider call. */
 export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): Promise<MercuryAttemptRun<T>> {
   let attempts = 0
   let failures = 0
-  let previousError: unknown
+  let previousError: unknown = null
   let hasPreviousError = false
+  let feedback: string | null = null
   for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
     try {
       options.reserveAttempt(attempt)
@@ -776,10 +898,10 @@ export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): 
     }
     attempts += 1
     if (hasPreviousError) {
-      options.onRetry({ attempt: attempt - 1, nextAttempt: attempt, error: previousError })
+      options.onRetry({ attempt: attempt - 1, nextAttempt: attempt, error: previousError, feedback })
     }
     try {
-      const result = await options.call()
+      const result = await options.call({ attempt, feedback, previousError: hasPreviousError ? previousError : null })
       return { ok: true, result, attempts, failures }
     } catch (error) {
       failures += 1
@@ -788,6 +910,7 @@ export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): 
       }
       previousError = error
       hasPreviousError = true
+      feedback = options.feedbackFor?.(error) ?? null
     }
   }
   return { ok: false, error: new Error('mercury: retry loop produced no result'), attempts, failures }
@@ -831,6 +954,7 @@ export class MercurySystem2 implements System2Brain {
   private readonly timeoutMs: number
   private readonly maxAttempts: number
   private readonly maxOutputTokens: number
+  private readonly transport: MercuryTransport
   private readonly terminate: (() => never) | undefined
   private readonly resolveKey: () => KeyResolution | null
   private cache: MercuryCacheFile
@@ -852,6 +976,7 @@ export class MercurySystem2 implements System2Brain {
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 25000)
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
+    this.transport = options.transport ?? defaultMercuryTransport(this.model)
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.postDeathPending = options.postDeathRecovery === true
@@ -975,30 +1100,47 @@ export class MercurySystem2 implements System2Brain {
 
     const userPrompt = JSON.stringify(state)
     const callId = `mercury-${++this.callCounter}-${started.toString(36)}`
+    const rejectedAttempts: MercuryRejectedAttempt[] = []
 
     // A generation swap / lease event does NOT own this promise and must not abort
     // it: the only abort signal is the per-attempt timeout below. On a timeout the
     // call is re-issued with a fresh signal instead of being abandoned.
-    const callOnce = () =>
-      generateText({
-        model: this.model,
+    const callOnce = async (context: MercuryAttemptContext): Promise<MercuryAttemptSuccess> => {
+      const prompt = context.feedback === null ? userPrompt : buildCorrectivePrompt(userPrompt, context.feedback)
+      const result = await this.transport({
         system: SYSTEM_PROMPT,
-        prompt: userPrompt,
-        tools: {
-          emitPlan: tool({
-            description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
-            inputSchema: MERCURY_PLAN_SCHEMA,
-          }),
-        },
-        toolChoice: { type: 'tool', toolName: 'emitPlan' },
+        prompt,
         maxOutputTokens: this.maxOutputTokens,
-        maxRetries: 0,
-        abortSignal: AbortSignal.timeout(this.timeoutMs),
+        timeoutMs: this.timeoutMs,
       })
+      const toolCall = result.toolCalls[0]
+      const raw = toolCall === undefined ? undefined : toolCall.input
+      const validated = validateMercuryPlan(raw)
+      if (!validated.ok) {
+        rejectedAttempts.push({
+          attempt: context.attempt,
+          prompt,
+          response: raw ?? null,
+          usage: result.usage,
+          error: `invalid plan: ${validated.error}`,
+        })
+        this.log('PLAN_REJECTED', {
+          source: 'mercury',
+          reason: validated.error,
+          stage: trigger,
+          callId,
+          attempt: context.attempt,
+          corrective: context.feedback !== null,
+        })
+        throw new MercuryPlanValidationError(validated.error, raw ?? null)
+      }
+      return { plan: validated.plan, usage: result.usage, prompt }
+    }
 
     let attempts = 0
     let failures = 0
     let retriesUsed = 0
+    let rejectionsFlushed = false
     try {
       const attemptRun = await runMercuryAttempts({
         maxAttempts: this.maxAttempts,
@@ -1020,8 +1162,9 @@ export class MercurySystem2 implements System2Brain {
           })
         },
         call: callOnce,
-        isRetryable: isRetryableModelError,
-        onRetry: ({ attempt, nextAttempt, error }) => {
+        isRetryable: isRetryableMercuryAttempt,
+        feedbackFor: mercuryRetryFeedback,
+        onRetry: ({ attempt, nextAttempt, error, feedback }) => {
           this.log('MERCURY_RETRY', {
             callId,
             attempt,
@@ -1029,74 +1172,51 @@ export class MercurySystem2 implements System2Brain {
             maxAttempts: this.maxAttempts,
             trigger,
             error: describeError(error),
+            corrective: feedback !== null,
           })
         },
       })
       attempts = attemptRun.attempts
       failures = attemptRun.failures
       retriesUsed = attempts - 1
+      this.flushRejectedAttempts(callId, trigger, started, state, rejectedAttempts, attempts, failures, retriesUsed)
+      rejectionsFlushed = true
       if (!attemptRun.ok) {
-        const message = `llm_error: ${describeError(attemptRun.error)}`
-        this.writeCall({
-          record: 'mercury-call',
-          callId,
-          ts: new Date().toISOString(),
-          model: this.model,
-          stage: trigger,
-          latencyMs: Date.now() - started,
-          attempts,
-          failures,
-          retries: retriesUsed,
-          outcome: 'fallback',
-          state,
-          prompt: { system: SYSTEM_PROMPT, user: userPrompt },
-          response: null,
-          usage: null,
-          cost: 0,
-          error: message,
-          errorDetail: describeErrorFull(attemptRun.error),
-        })
+        const error = attemptRun.error
+        const isValidation = error instanceof MercuryPlanValidationError
+        const message = isValidation ? error.message : `llm_error: ${describeError(error)}`
+        if (rejectedAttempts.length === 0) {
+          this.writeCall({
+            record: 'mercury-call',
+            callId,
+            ts: new Date().toISOString(),
+            model: this.model,
+            stage: trigger,
+            latencyMs: Date.now() - started,
+            attempts,
+            failures,
+            retries: retriesUsed,
+            attempt: attempts,
+            outcome: isValidation ? 'plan_rejected' : 'fallback',
+            state,
+            prompt: { system: SYSTEM_PROMPT, user: userPrompt },
+            response: null,
+            usage: null,
+            cost: 0,
+            error: message,
+            errorDetail: isValidation ? undefined : describeErrorFull(error),
+          })
+        }
         return this.modelFailure(trigger, started, state, message, Date.now() - started)
       }
-      const result = attemptRun.result
+      const success = attemptRun.result
       this.calls += 1
       const latencyMs = Date.now() - started
-      const toolCall = result.toolCalls[0]
-      const raw = toolCall === undefined ? undefined : (toolCall.input as unknown)
-      const validated = validateMercuryPlan(raw)
-      const usage = result.usage as MercuryUsageLike
+      const validatedPlan = success.plan
+      const usage = success.usage as MercuryUsageLike
       const costUsd = mercuryCostUsd(this.model, usage)
 
-      if (!validated.ok) {
-        const error = `invalid plan: ${validated.error}`
-        this.log('PLAN_REJECTED', {
-          source: 'mercury',
-          reason: validated.error,
-          stage: trigger,
-          callId,
-        })
-        this.writeCall({
-          record: 'mercury-call',
-          callId,
-          ts: new Date().toISOString(),
-          model: this.model,
-          stage: trigger,
-          latencyMs,
-          attempts,
-          failures,
-          retries: retriesUsed,
-          outcome: 'plan_rejected',
-          state,
-          prompt: { system: SYSTEM_PROMPT, user: userPrompt },
-          response: raw ?? null,
-          usage: result.usage,
-          cost: Number(costUsd.toFixed(8)),
-          error,
-        })
-        return this.modelFailure(trigger, started, state, error, latencyMs)
-      }
-
-      const grounded = groundMercuryPlan(validated.plan, state)
+      const grounded = groundMercuryPlan(validatedPlan, state)
       const plan = grounded.plan
       if (grounded.refused !== null) {
         this.log('STRATEGY_REFUSED', {
@@ -1133,11 +1253,12 @@ export class MercurySystem2 implements System2Brain {
         attempts,
         failures,
         retries: retriesUsed,
+        attempt: attempts,
         outcome: 'success',
         state,
-        prompt: { system: SYSTEM_PROMPT, user: userPrompt },
+        prompt: { system: SYSTEM_PROMPT, user: success.prompt },
         response: plan,
-        usage: result.usage,
+        usage: success.usage,
         cost: Number(costUsd.toFixed(8)),
         error: null,
       })
@@ -1165,6 +1286,9 @@ export class MercurySystem2 implements System2Brain {
       const latencyMs = Date.now() - started
       const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
       const message = `${kind}: ${describeError(error)}`
+      if (!rejectionsFlushed) {
+        this.flushRejectedAttempts(callId, trigger, started, state, rejectedAttempts, attempts, failures, retriesUsed)
+      }
       this.writeCall({
         record: 'mercury-call',
         callId,
@@ -1175,6 +1299,7 @@ export class MercurySystem2 implements System2Brain {
         attempts,
         failures,
         retries: retriesUsed,
+        attempt: attempts,
         outcome: 'fallback',
         state,
         prompt: { system: SYSTEM_PROMPT, user: userPrompt },
@@ -1185,6 +1310,40 @@ export class MercurySystem2 implements System2Brain {
         errorDetail: describeErrorFull(error),
       })
       return this.modelFailure(trigger, started, state, message, latencyMs)
+    }
+  }
+
+  private flushRejectedAttempts(
+    callId: string,
+    trigger: MercuryTriggerReason,
+    started: number,
+    state: MercuryStateSummary,
+    rejected: readonly MercuryRejectedAttempt[],
+    attempts: number,
+    failures: number,
+    retriesUsed: number,
+  ): void {
+    for (const entry of rejected) {
+      const costUsd = mercuryCostUsd(this.model, entry.usage as MercuryUsageLike)
+      this.writeCall({
+        record: 'mercury-call',
+        callId,
+        ts: new Date().toISOString(),
+        model: this.model,
+        stage: trigger,
+        latencyMs: Date.now() - started,
+        attempts,
+        failures,
+        retries: retriesUsed,
+        attempt: entry.attempt,
+        outcome: 'plan_rejected',
+        state,
+        prompt: { system: SYSTEM_PROMPT, user: entry.prompt },
+        response: entry.response,
+        usage: entry.usage,
+        cost: Number(costUsd.toFixed(8)),
+        error: entry.error,
+      })
     }
   }
 
