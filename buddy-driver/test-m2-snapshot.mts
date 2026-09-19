@@ -222,6 +222,34 @@ addCase('the snapshot records run/build/world provenance fields', () =>
   }),
 )
 
+addCase('one retained sample per marker is pinned to the chain-advancing occurrence', () =>
+  withTempDir((dir) => {
+    const live: Counts = { raw_iron: 3, cobblestone: 28 }
+    const recorder = recorders(dir, RUN_A, () => ({ ...live }))
+    recorder.recordMarker('PREREQ_OPTION')
+    // Charcoal (fuel) is live at FURNACE_READY time and is burnt by SMELT_DONE.
+    live.charcoal = 1
+    recorder.recordMarker('FURNACE_READY')
+    // A repeat FURNACE_READY once the fuel is gone must NOT overwrite the
+    // chain-advancing sample: that is exactly how charcoal>=1 evidence was lost.
+    live.charcoal = 0
+    recorder.recordMarker('FURNACE_READY')
+    live.iron_ingot = 3
+    recorder.recordMarker('SMELT_DONE')
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    const furnace = snapshot?.markers.find((marker) => marker.name === 'FURNACE_READY')
+    const smelt = snapshot?.markers.find((marker) => marker.name === 'SMELT_DONE')
+    return {
+      pass:
+        snapshot?.chain.status === 'VALID' &&
+        snapshot?.markers.length === 3 &&
+        furnace?.inventory.charcoal === 1 &&
+        smelt?.inventory.iron_ingot === 3,
+      detail: `chain=${snapshot?.chain.status} samples=${snapshot?.markers.length} furnaceCharcoal=${furnace?.inventory.charcoal} smeltIngot=${smelt?.inventory.iron_ingot}`,
+    }
+  }),
+)
+
 let failures = 0
 process.stdout.write('run-scoped M2 snapshot recorder\n')
 process.stdout.write('-'.repeat(72) + '\n')

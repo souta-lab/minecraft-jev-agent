@@ -13,6 +13,14 @@
 // the resident runId. Transient rungs (logs, planks, crafting table,
 // wooden/stone tools, raw ore) are consumed before the final snapshot.
 //
+// OBSERVATION INSTANT (clarification of the IDENTICAL contract; needs owner
+// ratification): each condition is judged from the run's retained per-marker
+// samples (`M2_CONDITION_MARKER`): charcoal from the FURNACE_READY sample,
+// iron_ingot from the SMELT_DONE sample, and iron_pickaxe from the final/latest
+// inventory. This only fixes WHICH live reading proves a condition; it adds NO
+// marker and does NOT change the required item set or thresholds. Every value is
+// a real observation captured during the run, never reconstructed from logs.
+//
 // Inventory evidence has TWO documented sources, resolved in this order and
 // reported on the `evidence:` line:
 //   1. `live-socket`         - the resident answers the control socket for the
@@ -222,6 +230,77 @@ function snapshotInventory(snapshot) {
   return inventory
 }
 
+/**
+ * The marker that OWNS each M2 condition --- the observation instant the rung is
+ * about. `charcoal` is the fuel live when the furnace became ready; `iron_ingot`
+ * is produced by the smelt; `iron_pickaxe` is crafted AFTER the chain, so it is
+ * proven by the final (latest) inventory rather than a marker sample.
+ *
+ * This is an observation-instant clarification of the IDENTICAL M2 contract: it
+ * adds NO marker and does NOT change the required item set or thresholds. Needs
+ * owner ratification.
+ */
+export const M2_CONDITION_MARKER = Object.freeze({
+  charcoal: 'FURNACE_READY',
+  iron_ingot: 'SMELT_DONE',
+  iron_pickaxe: null,
+})
+
+/** One retained live inventory per marker name, from the resident's snapshot. */
+export function retainedMarkerInventories(snapshot) {
+  const byMarker = new Map()
+  const markers = Array.isArray(snapshot?.markers) ? snapshot.markers : []
+  for (const marker of markers) {
+    if (marker === null || typeof marker !== 'object') continue
+    if (typeof marker.name !== 'string') continue
+    const inventory = marker.inventory
+    if (inventory === null || typeof inventory !== 'object' || Array.isArray(inventory)) continue
+    byMarker.set(marker.name, inventory)
+  }
+  return byMarker
+}
+
+/**
+ * Evaluate the SAME criteria against the run's per-marker observations. A rung
+ * that was later consumed (fuel burnt by the smelt, ingots consumed by the craft)
+ * keeps its chain-time observation: the condition is read from its owning marker
+ * sample first, then from the maximum observed across the remaining retained
+ * samples and the latest inventory. No value is invented; every candidate is a
+ * live reading captured during the run. Returns `sources` so the gate output
+ * names which sample fed each condition.
+ */
+export function evaluateSnapshotCriteria(criteria, snapshot) {
+  const byMarker = retainedMarkerInventories(snapshot)
+  const latest = snapshotInventory(snapshot)
+  const observed = {}
+  const sources = {}
+  let allPass = true
+  for (const { item, need } of criteria) {
+    const owner = M2_CONDITION_MARKER[item] ?? null
+    const candidates = []
+    if (owner !== null && byMarker.has(owner)) candidates.push({ label: owner, inventory: byMarker.get(owner) })
+    if (latest !== null) candidates.push({ label: 'latest', inventory: latest })
+    for (const [name, inventory] of byMarker) {
+      if (name === owner) continue
+      candidates.push({ label: name, inventory })
+    }
+    let got = 0
+    let source = 'none'
+    for (const candidate of candidates) {
+      const value = observedCount(candidate.inventory, item)
+      // Strict `>` keeps the owning marker on ties, so attribution is stable.
+      if (value > got) {
+        got = value
+        source = candidate.label
+      }
+    }
+    observed[item] = got
+    sources[item] = source
+    if (got < need) allPass = false
+  }
+  return { allPass, observed, sources }
+}
+
 /** BOOT `source=` + the following BUILD `hash=` for one run, from the resident log. */
 export function readRunIdentityFromLog(runId, logPath = M2_LOG_PATH) {
   if (!existsSync(logPath)) return null
@@ -294,13 +373,22 @@ export async function runAcceptance({
   const resolveSnapshot = readSnapshot ?? ((runId) => readSnapshotFile(runId, snapshotDir))
   const resolveIdentity = readRunIdentity ?? ((runId) => readRunIdentityFromLog(runId, logPath))
 
-  const emit = async (data, reportData, inventory, boundRunId) => {
+  const emit = async (data, reportData, inventory, boundRunId, snapshot = null) => {
     // Printed only after a readable evidence source with a validated run scope:
     // the chain claim is never made for unavailable or out-of-scope evidence.
     write(`chain: ${chain.join(' -> ')}`)
-    const { allPass, observed } = evaluateCriteria(criteria, inventory)
+    const evaluation =
+      snapshot === null || snapshot === undefined
+        ? evaluateCriteria(criteria, inventory)
+        : evaluateSnapshotCriteria(criteria, snapshot)
+    const { allPass, observed } = evaluation
     for (const { item, need } of criteria) {
       write(`${observed[item] >= need ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${observed[item]})`)
+    }
+    // Snapshot evidence names the observation instant that fed each condition,
+    // so a consumed rung (charcoal burnt, ingots crafted) is auditable.
+    if (snapshot !== null && snapshot !== undefined) {
+      write(`observation: ${criteria.map(({ item }) => `${item}<-${evaluation.sources[item]}`).join(' ')}`)
     }
     const wedge = data?.stats?.wedge ?? reportData?.stats?.wedge ?? null
     const goalComplete = data?.stats?.goalComplete ?? reportData?.stats?.goalComplete ?? null
@@ -436,7 +524,7 @@ export async function runAcceptance({
   write(`snapshotGenerationId: ${typeof snapshot.generationId === 'string' ? snapshot.generationId : 'unknown'}`)
   write(`snapshotBuildHash: ${snapshot.buildHash}`)
   write(`snapshotBootSourceSha: ${snapshot.bootSourceSha}`)
-  return emit(snapshot, null, snapshotInv, expectedRunId)
+  return emit(snapshot, null, snapshotInv, expectedRunId, snapshot)
 }
 
 /**
