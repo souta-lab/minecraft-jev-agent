@@ -118,6 +118,46 @@ export interface ReachabilityAbilities {
 
 export type PathProbeResult = 'reachable' | 'no_path' | 'unknown'
 
+/**
+ * The station family a sensed block belongs to. A station target is not an
+ * ordinary locomotion cell: it is usable only from a real interaction stand, so
+ * the approach facts below are collected per family.
+ */
+export type StationKindName = 'furnace' | 'crafting_table'
+
+/**
+ * The station-approach facts the sensor JSON cannot carry. The executor already
+ * knows how to *open* a station (`interactionStandCandidates`, #244); the
+ * controller exposes the same geometry here, before candidate selection, so an
+ * unreachable sensed station is never committed to and path_stuck'd.
+ *
+ * `approach` is a passable, supported stand whose interaction face is within
+ * reach, or null when no such stand exists. `path` is the `canDig=false`
+ * pathfinder verdict for walking to that stand; null means "not probed".
+ */
+export interface StationApproachFact {
+  approach: Vec3Json | null
+  path: PathProbeResult | null
+}
+
+export type StationApproachProbe = (station: Vec3Json, kind: StationKindName) => StationApproachFact
+
+/** The exact reason a sensed station's approach was refused. */
+export type StationApproachRefusal = 'no_interaction_stand' | 'no_path_to_stand'
+
+/**
+ * The observability marker for a sensed station whose approach was refused
+ * before it could be selected. Never silent: the coordinate, family and the
+ * mechanical fact that refused it are all named.
+ */
+export function formatStationUnreachable(
+  kind: StationKindName,
+  station: Vec3Json,
+  reason: StationApproachRefusal,
+): string {
+  return `STATION_UNREACHABLE kind=${kind} id=b${Math.round(station.x)}_${Math.round(station.y)}_${Math.round(station.z)} reason=${reason}`
+}
+
 export interface ReachabilityResult {
   reachable: boolean
   reason: ReachabilityReason
