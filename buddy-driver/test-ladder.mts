@@ -1,6 +1,6 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
-import { buildLadder, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { buildLadder, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungBehindInventory, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { selectLedgerSnapshot, snapshotGoals } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
@@ -92,6 +92,36 @@ addCase('held furnace with none placed becomes a place-furnace prerequisite', ()
   }
 })
 
+addCase('coal alone does NOT satisfy the charcoal rung (M2 requires charcoal >= 1)', () => {
+  const counts = { coal: 7, furnace: 1, cobblestone: 112, crafting_table: 1, stone_pickaxe: 1 }
+  const charcoalRung = rung('charcoal')
+  const satisfied = charcoalRung.satisfied(counts, world())
+  const behind = rungBehindInventory(charcoalRung, counts, world())
+  return {
+    pass: !satisfied && !behind,
+    detail: `satisfied=${satisfied} behindInventory=${behind}`,
+  }
+})
+
+addCase('charcoal alone satisfies the charcoal rung', () => {
+  const counts = { charcoal: 1 }
+  return {
+    pass: rung('charcoal').satisfied(counts, world()) === true,
+    detail: `satisfied=${rung('charcoal').satisfied(counts, world())}`,
+  }
+})
+
+addCase('with coal held and no charcoal the ladder targets the charcoal rung, never skips it', () => {
+  const counts = { coal: 7, furnace: 1, cobblestone: 112, crafting_table: 1, stone_pickaxe: 1 }
+  const ladder = buildLadder(counts, world(), undefined, { placedFurnacesNear: 1 })
+  const smeltCharcoal = ladder.goals.some((goal) => goal.kind === 'smelt' && goal.targetItem === 'charcoal')
+  const satisfied = rung('charcoal').satisfied(counts, world())
+  return {
+    pass: ladder.rungId === 'charcoal' && smeltCharcoal && !satisfied,
+    detail: `rung=${ladder.rungId} smeltCharcoal=${smeltCharcoal} satisfied=${satisfied} goals=[${ladder.goals.map((g) => g.targetItem).join(',')}]`,
+  }
+})
+
 addCase('a known iron ore coordinate grounds the descent target below it (#14 + #41)', () => {
   const known = world({
     knownResources: [{ name: 'iron_ore', kind: 'ore', x: 25, y: 49, z: 36, dimension: 'minecraft:overworld', worldEpoch: 1 }],
@@ -105,7 +135,9 @@ addCase('a known iron ore coordinate grounds the descent target below it (#14 + 
 })
 
 addCase('a reset with raw_iron resumes at the iron_ingot rung, not wood (#reset-inventory)', () => {
-  const counts = { raw_iron: 8, coal: 7, cobblestone: 112, crafting_table: 1, furnace: 1 }
+  // coal is fuel, not charcoal: the fixture holds the charcoal the resident has
+  // already produced so the frontier really is iron_ingot (M2 charcoal gate).
+  const counts = { raw_iron: 8, coal: 7, charcoal: 1, cobblestone: 112, crafting_table: 1, furnace: 1 }
   const resume = deriveResumeRung(counts, world())
   const ladder = buildLadder(counts, world(), undefined, { resumeRungIndex: resume.rungIndex })
   const expectIndex = RUNGS.findIndex((candidate) => candidate.id === 'iron_ingot')
@@ -185,7 +217,9 @@ addCase('a missing ledger snapshot degrades to an empty goal list, never throws 
 })
 
 addCase('the resume path logs LADDER_RESUME_NO_SNAPSHOT and still resumes from live inventory (#resume-guard)', () => {
-  const counts = { raw_iron: 8, coal: 7, cobblestone: 112, crafting_table: 1, furnace: 1 }
+  // coal is fuel, not charcoal: hold the produced charcoal so the resume rung is
+  // iron_ingot, matching the real post-charcoal M2 inventory.
+  const counts = { raw_iron: 8, coal: 7, charcoal: 1, cobblestone: 112, crafting_table: 1, furnace: 1 }
   const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
   const emit = (event: string, detail?: Record<string, unknown>): void => {
     log.push({ event, detail })
