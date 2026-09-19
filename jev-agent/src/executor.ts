@@ -55,7 +55,17 @@ import {
   formatPillarSearch,
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
-import { formatPillarFail, pillarStepUp, shouldRelocatePillarAfterFailure } from './pillarApex.ts'
+import {
+  formatPillarFail,
+  formatPillarRetire,
+  isPillarRefusalUnsatisfiable,
+  pillarArcComplete,
+  pillarStepUp,
+  requiredColumnClearance,
+  shouldRelocatePillarAfterFailure,
+  takeoffObservedRise,
+} from './pillarApex.ts'
+import type { PillarRefusalEvidence } from './pillarApex.ts'
 import {
   buildPillarTakeoffTelemetry,
   formatPillarTakeoffTelemetry,
@@ -1739,6 +1749,10 @@ export class Executor {
           { feetCell: feet, placeCell, support: footing.position },
         )
         this.ensureOwned(epoch, signal)
+        // Read the forced-reposition count once for the whole attempt: it is
+        // both the takeoff telemetry field and the evidence that a position
+        // reset may have voided the trace segment.
+        const forcedRepositions = forcedTracker.value - forcedBefore
         // Instrumentation only: one deterministic takeoff record per attempt,
         // emitted on the mirrored PILLAR_TAKEOFF marker so it reaches the
         // run-scoped host log. Read-only; no behaviour change.
@@ -1758,7 +1772,7 @@ export class Executor {
           },
           launchControls: launchControlState,
           endControls: readControlState(this.bot),
-          forcedRepositions: forcedTracker.value - forcedBefore,
+          forcedRepositions,
         }
         const jumpTrace: PillarJumpTrace | null = climb.ok ? climb.jumpTrace : (climb.fail.jumpTrace ?? null)
         const emitPillarTakeoff = (peakRise: number, failureStep: string | null, failureReason: string | null) => {
@@ -1813,10 +1827,30 @@ export class Executor {
             endCollidedHorizontally: endEntity.isCollidedHorizontally ?? null,
             endCollidedVertically: endEntity.isCollidedVertically ?? null,
             endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
-            forcedRepositions: forcedTracker.value - forcedBefore,
+            forcedRepositions,
             jumpTrace,
           })
-          if (shouldRelocatePillarAfterFailure(climb.fail)) {
+          // Evidence for the unsatisfiable-column retire. A `place refused`
+          // failure alone stays terminal; it becomes relocatable only when the
+          // trace proves the column's arc cannot produce the clearance the
+          // server refused against (see `isPillarRefusalUnsatisfiable`).
+          const refusalEvidence: PillarRefusalEvidence = {
+            feetCellY: feet.y,
+            placeCellY: pose.placeY,
+            achievableRise: jumpTrace === null ? 0 : takeoffObservedRise(jumpTrace),
+            arcComplete: jumpTrace !== null && pillarArcComplete(jumpTrace),
+            forcedRepositions,
+          }
+          if (isPillarRefusalUnsatisfiable(climb.fail, refusalEvidence)) {
+            this.logger.warn('executor', formatPillarRetire(feet, refusalEvidence), {
+              actionId: candidate.id,
+              step: climb.fail.step,
+              reason: climb.fail.reason,
+              required: requiredColumnClearance(feet.y, pose.placeY),
+              achievable: refusalEvidence.achievableRise,
+            })
+          }
+          if (shouldRelocatePillarAfterFailure(climb.fail, refusalEvidence)) {
             refusedColumns.add(pillarColumnKey(feet))
             const relocation = decidePillarRelocation({
               relocations,
@@ -1840,7 +1874,7 @@ export class Executor {
                 if (error instanceof ActionCancelled) throw error
                 this.logger.warn(
                   'executor',
-                  `PILLAR_UP relocation after takeoff failure to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  `PILLAR_UP relocation after pillar failure to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
                   { actionId: candidate.id, failure: climb.fail.reason },
                 )
                 break

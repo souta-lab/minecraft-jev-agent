@@ -14,10 +14,20 @@
 // impulse (its own regression is in test-pillar-jump.mts). No live server.
 //
 //   npm run pillar-apex-test
-import { formatPillarFail, pillarStepUp, PILLAR_APEX_MIN_RISE, shouldRelocatePillarAfterFailure } from './src/pillarApex.ts'
-import type { PillarStepUpDeps } from './src/pillarApex.ts'
+import {
+  formatPillarFail,
+  formatPillarRetire,
+  isPillarRefusalUnsatisfiable,
+  pillarArcComplete,
+  pillarStepUp,
+  PILLAR_APEX_MIN_RISE,
+  requiredColumnClearance,
+  shouldRelocatePillarAfterFailure,
+  takeoffObservedRise,
+} from './src/pillarApex.ts'
+import type { PillarRefusalEvidence, PillarStepUpDeps } from './src/pillarApex.ts'
 import { formatPillarUpStep } from './src/pillarJump.ts'
-import type { SolidAt, Vec3Like } from './src/pillarJump.ts'
+import type { PillarJumpTrace, SolidAt, Vec3Like } from './src/pillarJump.ts'
 
 interface CaseResult {
   pass: boolean
@@ -431,6 +441,117 @@ addCase('only pre-placement takeoff failures are eligible for bounded pillar rel
   const pass = takeoff.every(Boolean) && terminal.every((value) => !value)
   return { pass, detail: `takeoff=${takeoff.join(',')} terminal=${terminal.join(',')}` }
 })
+
+/** One synthetic takeoff-trace sample; `event` lets a forced reset be injected. */
+function jumpSample(
+  rise: number,
+  velocityY: number,
+  event: 'physicsTick' | 'forcedMove' = 'physicsTick',
+): PillarJumpTrace['samples'][number] {
+  return {
+    atMs: 0,
+    event,
+    onGroundBefore: false,
+    onGroundAfter: false,
+    grounded: false,
+    positionY: rise,
+    velocityY,
+    rise,
+    airborne: rise > 0.02,
+    ticks: 0,
+    impulses: 0,
+  }
+}
+
+function evidenceFor(trace: PillarJumpTrace, feetCellY: number, placeCellY: number, forcedRepositions = 0): PillarRefusalEvidence {
+  return {
+    feetCellY,
+    placeCellY,
+    achievableRise: takeoffObservedRise(trace),
+    arcComplete: pillarArcComplete(trace),
+    forcedRepositions,
+  }
+}
+
+addCase('an unsatisfiable place refusal retires the column and names the cause', () => {
+  // Live run-mu85r15x-qvje: feet cell 58, place cell 58, so the column must
+  // produce a 1.0 rise; the ceiling-clamped arc peaks below that and the server
+  // answers `step=place reason=refused ... the block is still air`. A complete
+  // trace (post-vertex descent observed) is what proves the ceiling.
+  const trace: PillarJumpTrace = {
+    truncated: false,
+    samples: [jumpSample(0.42, 0.333), jumpSample(0.753, 0.248), jumpSample(0.768, -0.078), jumpSample(0.69, -0.155)],
+  }
+  const fail = { step: 'place' as const, reason: 'refused' }
+  const evidence = evidenceFor(trace, 58, 58)
+  // The pre-fix predicate (no evidence) swallows the refusal: this is the red.
+  const oldPredicate = shouldRelocatePillarAfterFailure(fail)
+  const newPredicate = shouldRelocatePillarAfterFailure(fail, evidence)
+  const marker = formatPillarRetire({ x: 28, y: 58, z: 35 }, evidence)
+  const pass =
+    oldPredicate === false &&
+    newPredicate === true &&
+    isPillarRefusalUnsatisfiable(fail, evidence) &&
+    requiredColumnClearance(58, 58) === 1 &&
+    marker.startsWith('PILLAR_RETIRE cell=28,58,35 reason=unsatisfiable_clearance ') &&
+    marker.includes('required=1 ') &&
+    marker.includes('achievable=0.77')
+  return { pass, detail: `${marker} old=${oldPredicate} new=${newPredicate}` }
+})
+
+addCase('a satisfiable column places and is never retired', async () => {
+  // (1) End to end: a healthy arc clears the one-block demand and the place
+  // lands. (2) Predicate: even a hypothetical refusal on a column whose arc DID
+  // produce the required clearance is never retired (timing/sync, not ceiling).
+  const world = createStepWorld({ startY: 10.75, footingY: 9 })
+  const deps = makeDeps(world, 10)
+  const outcome = await pillarStepUp(world.bot, deps, planFor(world, 9, 10))
+  const healthyTrace: PillarJumpTrace = {
+    truncated: false,
+    samples: [jumpSample(0.42, 0.333), jumpSample(1.0, 0.165), jumpSample(1.166, 0.083), jumpSample(1.09, -0.078)],
+  }
+  const evidence = evidenceFor(healthyTrace, 10, 10)
+  const wouldRetire = shouldRelocatePillarAfterFailure({ step: 'place', reason: 'refused' }, evidence)
+  const pass =
+    outcome.ok === true &&
+    world.stats.placeCalls === 1 &&
+    world.blockPlacedAt(FEET_X, 10, FEET_Z) &&
+    requiredColumnClearance(10, 10) <= evidence.achievableRise &&
+    wouldRetire === false
+  return {
+    pass,
+    detail: `ok=${outcome.ok} placeCalls=${world.stats.placeCalls} placed=${world.blockPlacedAt(FEET_X, 10, FEET_Z)} wouldRetire=${wouldRetire} achievable=${evidence.achievableRise}`,
+  }
+})
+
+addCase('a single unlucky refusal never retires a column without a trustworthy arc', () => {
+  // A fast single-tick takeoff records only the ascent: its peak understates the
+  // real arc, so it must not condemn the column. A forced reposition voids the
+  // trace segment for the same reason.
+  const incomplete: PillarJumpTrace = { truncated: false, samples: [jumpSample(0.42, 0.333)] }
+  const forced: PillarJumpTrace = {
+    truncated: false,
+    samples: [
+      jumpSample(0.42, 0.333),
+      jumpSample(0.768, -0.078),
+      jumpSample(0.2, -0.1, 'forcedMove'),
+      jumpSample(0.1, 0.2),
+    ],
+  }
+  const fail = { step: 'place' as const, reason: 'refused' }
+  const incompleteEvidence = evidenceFor(incomplete, 58, 58)
+  const forcedEvidence = evidenceFor(forced, 58, 58, 1)
+  const pass =
+    incompleteEvidence.arcComplete === false &&
+    isPillarRefusalUnsatisfiable(fail, incompleteEvidence) === false &&
+    pillarArcComplete(forced) === false &&
+    isPillarRefusalUnsatisfiable(fail, forcedEvidence) === false
+  return {
+    pass,
+    detail: `incompleteArc=${incompleteEvidence.arcComplete} forcedArc=${pillarArcComplete(forced)} incompleteRetire=${isPillarRefusalUnsatisfiable(fail, incompleteEvidence)} forcedRetire=${isPillarRefusalUnsatisfiable(fail, forcedEvidence)}`,
+  }
+})
+
 
 let failures = 0
 process.stdout.write('M2 pillar apex - verified apex window, place and landing\n')
