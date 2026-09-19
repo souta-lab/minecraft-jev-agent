@@ -335,7 +335,12 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'charcoal',
-    satisfied: (c) => has(c, 'charcoal') || has(c, 'coal'),
+    // M2 acceptance requires `charcoal >= 1` specifically. Coal is a valid
+    // smelting FUEL (findInventoryFuel) but it is not charcoal, so holding coal
+    // must not mark this rung satisfied or the ladder would skip charcoal
+    // production and M2's charcoal gate could never pass (measured 2026-09-18:
+    // raw_iron:8 + coal:7 without charcoal).
+    satisfied: (c) => has(c, 'charcoal'),
     goals: () => [
       { kind: 'collect', description: 'collect 2 x log (fuel)', targetItem: 'log', requiredCount: 2 },
       { kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 },

@@ -25,7 +25,11 @@ const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
 
-const ISSUE_INVENTORY: Record<string, number> = { furnace: 1, raw_iron: 8, coal: 7, cobblestone: 112, crafting_table: 1 }
+// M2 alignment: coal is a smelting fuel but not charcoal, so a coal-only
+// inventory is NOT past the charcoal rung. This fixture represents the real
+// post-charcoal iron stage, so it holds `charcoal: 1` explicitly; without it the
+// ladder would (correctly) resume at the charcoal rung instead of iron_ingot.
+const ISSUE_INVENTORY: Record<string, number> = { furnace: 1, raw_iron: 8, coal: 7, charcoal: 1, cobblestone: 112, crafting_table: 1 }
 const MISMATCH_INVENTORY: Record<string, number> = { ...ISSUE_INVENTORY, oak_log: 3 }
 
 function hostLog(sink: Array<{ event: string; detail: Record<string, unknown> | undefined }>) {
