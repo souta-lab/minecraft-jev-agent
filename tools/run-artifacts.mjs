@@ -157,17 +157,19 @@ export async function windowOfRun(runId, { log = BUDDY_LOG, collect = false } = 
   let from = null
   let to = null
   let matched = false
+  let closed = false
   for await (const raw of readLines(log)) {
     index += 1
     const boot = /\bBOOT\b/.test(raw) ? runIdOfLine(raw) : null
     if (boot) {
-      if (current === runId && start >= 0 && end < 0) {
+      if (boot === runId && current === runId && start >= 0 && end < 0) {
         // same run booted again (relaunch/reconnect); keep the window open
       } else if (boot === runId) {
         start = start < 0 ? index : start
         end = -1
       } else if (current === runId && end < 0) {
         end = index
+        closed = true
       }
       current = boot
     }
@@ -182,13 +184,43 @@ export async function windowOfRun(runId, { log = BUDDY_LOG, collect = false } = 
     }
   }
   if (end < 0) end = index + 1
-  return { runId, from, to, startLine: start < 0 ? null : start, endLine: start < 0 ? null : end, lines, matched }
+  return { runId, from, to, startLine: start < 0 ? null : start, endLine: start < 0 ? null : end, lines, matched, closed }
 }
 
 /** Slice a buddy.log by runId (run-scoped), returning the lines and window. */
 export async function sliceLogByRun(runId, { log = BUDDY_LOG } = {}) {
   const w = await windowOfRun(runId, { log, collect: true })
   return { runId, lines: w.lines ?? [], from: w.from, to: w.to, startLine: w.startLine, endLine: w.endLine, matched: w.matched }
+}
+
+/**
+ * An artifact captured while its resident run is still active is only
+ * authoritative while its recorded window reaches the current log frontier.
+ * Once a later BOOT closes the run, the artifact is historical and must remain
+ * stable even if the append-only log contains a longer window than the capture.
+ */
+export async function artifactFreshness(runId, { log = BUDDY_LOG, manifest = null, liveWindow = null } = {}) {
+  const current = liveWindow ?? (await windowOfRun(runId, { log, collect: false }))
+  if (current.startLine === null || current.closed) {
+    return { usable: true, reason: current.startLine === null ? 'run-not-in-current-log' : 'run-closed', window: current }
+  }
+  const recorded = manifest?.window
+  const recordedTo = typeof recorded?.toMs === 'number' ? recorded.toMs : null
+  const recordedEndLine = typeof recorded?.endLine === 'number' ? recorded.endLine : null
+  const currentTo = current.to
+  const currentEndLine = current.endLine
+  const usable =
+    recordedTo !== null &&
+    recordedEndLine !== null &&
+    currentTo !== null &&
+    currentEndLine !== null &&
+    recordedTo >= currentTo &&
+    recordedEndLine >= currentEndLine
+  return {
+    usable,
+    reason: usable ? 'active-window-current' : 'active-window-stale-or-unverifiable',
+    window: current,
+  }
 }
 
 /** Slice any timestamped buddy.log-style file by [fromMs, toMs]. */
@@ -291,21 +323,25 @@ export async function resolveRunEvidence({ runId = null, log = BUDDY_LOG } = {})
 
   for (const chosen of candidates) {
     const artifact = path.join(runDir(chosen), 'evidence.log')
+    const w = await windowOfRun(chosen, { log, collect: true })
     if (fs.existsSync(artifact)) {
-      const text = await fsp.readFile(artifact, 'utf8')
-      return {
-        runId: chosen,
-        source: 'run-artifact',
-        fallback: false,
-        reason: `runs/${chosen}/evidence.log`,
-        evidenceLogPath: artifact,
-        artifactDir: runDir(chosen),
-        lines: text.trim() ? text.trim().split('\n') : [],
-        text,
-        window: null,
+      const manifest = await readJson(path.join(runDir(chosen), 'manifest.json'))
+      const freshness = await artifactFreshness(chosen, { log, manifest, liveWindow: w })
+      if (freshness.usable) {
+        const text = await fsp.readFile(artifact, 'utf8')
+        return {
+          runId: chosen,
+          source: 'run-artifact',
+          fallback: false,
+          reason: `runs/${chosen}/evidence.log`,
+          evidenceLogPath: artifact,
+          artifactDir: runDir(chosen),
+          lines: text.trim() ? text.trim().split('\n') : [],
+          text,
+          window: null,
+        }
       }
     }
-    const w = await windowOfRun(chosen, { log, collect: true })
     if (w.startLine !== null) {
       const text = (w.lines ?? []).join('\n')
       return {
@@ -366,17 +402,21 @@ export async function resolveMercuryRecords({ runId = null, log = BUDDY_LOG, fil
 
   for (const chosen of candidates) {
     const artifact = path.join(runDir(chosen), 'mercury-calls.jsonl')
-    if (fs.existsSync(artifact)) {
-      const recs = (await readLinesArray(artifact)).filter(Boolean).flatMap((l) => {
-        try {
-          return [JSON.parse(l)]
-        } catch {
-          return []
-        }
-      })
-      return { runId: chosen, source: 'run-artifact', fallback: false, reason: `runs/${chosen}/mercury-calls.jsonl`, records: recs }
-    }
     const w = await windowOfRun(chosen, { log, collect: false })
+    if (fs.existsSync(artifact)) {
+      const manifest = await readJson(path.join(runDir(chosen), 'manifest.json'))
+      const freshness = await artifactFreshness(chosen, { log, manifest, liveWindow: w })
+      if (freshness.usable) {
+        const recs = (await readLinesArray(artifact)).filter(Boolean).flatMap((l) => {
+          try {
+            return [JSON.parse(l)]
+          } catch {
+            return []
+          }
+        })
+        return { runId: chosen, source: 'run-artifact', fallback: false, reason: `runs/${chosen}/mercury-calls.jsonl`, records: recs }
+      }
+    }
     if (w.from !== null) {
       // Runs are identified by proximity: the record timestamp must fall inside
       // the run's buddy.log window.
