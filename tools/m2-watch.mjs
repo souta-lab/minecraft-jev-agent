@@ -3,37 +3,19 @@
 // evidence. Final durable state (diamond_pickaxe) is checked separately by
 // m2-acceptance. This tool owns the consumable causal history.
 // Usage: node tools/m2-watch.mjs [--log <path>] [--since <ISO|epoch-ms>] [--run <runId>]
-// Exit: 0 = ordered history complete, 1 = incomplete/invalid, 2 = unreadable.
+// Exit: 0 = ordered history complete, 1 = incomplete/invalid, 2 = unreadable/contaminated.
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 const DEFAULT_LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
 const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 
-// The two item-specific SMELT markers are virtual markers derived from the
-// structured SMELT_DONE line. Keeping the generic marker as well preserves
-// diagnostics while preventing `SMELT_DONE item=charcoal` from masquerading as
-// the iron-smelt boundary.
 const MARKERS = [
-  'PREREQ_OPTION',
-  'PREREQ_SWITCH',
-  'ABANDON_ENFORCED',
-  'ABANDON_SUPPRESSED',
-  'ACTION_UNVERIFIED',
-  'MOVE_TARGET_SKIPPED',
-  'OSCILLATION_DETECTED',
-  'CAPABILITY_GAP',
-  'PILLAR_REFUSED',
-  'PILLAR_RELOCATE',
-  'PILLAR_UP_STEP',
-  'PILLAR_FAIL',
-  'ASCENT_PROGRESS',
-  'FURNACE_READY',
-  'SMELT_DONE',
-  'SMELT_DONE_CHARCOAL',
-  'SMELT_DONE_IRON_INGOT',
-  'RUNG_MISMATCH',
-  'RELOAD_REJECTED',
+  'PREREQ_OPTION', 'PREREQ_SWITCH', 'ABANDON_ENFORCED', 'ABANDON_SUPPRESSED',
+  'ACTION_UNVERIFIED', 'MOVE_TARGET_SKIPPED', 'OSCILLATION_DETECTED', 'CAPABILITY_GAP',
+  'PILLAR_REFUSED', 'PILLAR_RELOCATE', 'PILLAR_UP_STEP', 'PILLAR_FAIL', 'ASCENT_PROGRESS',
+  'FURNACE_READY', 'SMELT_DONE', 'SMELT_DONE_CHARCOAL', 'SMELT_DONE_IRON_INGOT',
+  'RUNG_MISMATCH', 'RELOAD_REJECTED',
 ]
 const REQUIRED = ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE_CHARCOAL', 'SMELT_DONE_IRON_INGOT']
 
@@ -41,6 +23,17 @@ function markerMatches(marker, line) {
   if (marker === 'SMELT_DONE_CHARCOAL') return /\bSMELT_DONE\b.*\bitem=charcoal\b/.test(line)
   if (marker === 'SMELT_DONE_IRON_INGOT') return /\bSMELT_DONE\b.*\bitem=iron_ingot\b/.test(line)
   return line.includes(marker)
+}
+
+function generationHashFromLine(line) {
+  // Initial BUILD and changed-hash RELOAD lines both carry hash=<12 hex>.
+  // Other events may also carry hashes, but only these source-boundary events
+  // should participate in the acceptance contamination check.
+  if (!/\bBUILD\b/.test(line) && !/\bRELOAD\b/.test(line)) return null
+  if (/\bRELOAD_REJECTED\b/.test(line)) return null
+  if (/\bRELOAD\b/.test(line) && !/\bok=true\b/.test(line)) return null
+  const match = line.match(/\bhash=([0-9a-f]{12})\b/i)
+  return match?.[1]?.toLowerCase() ?? null
 }
 
 function parseSince(raw) {
@@ -61,53 +54,31 @@ function parseArgs(argv) {
   let runId = process.env.M2_RUN_ID ?? null
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if (arg === '--log' && argv[i + 1]) {
-      logPath = argv[i + 1]
-      i += 1
-      continue
-    }
-    if (arg === '--since' && argv[i + 1]) {
-      sinceRaw = argv[i + 1]
-      i += 1
-      continue
-    }
-    if (arg === '--run' && argv[i + 1]) {
-      runId = argv[i + 1]
-      i += 1
-      continue
-    }
+    if (arg === '--log' && argv[i + 1]) { logPath = argv[++i]; continue }
+    if (arg === '--since' && argv[i + 1]) { sinceRaw = argv[++i]; continue }
+    if (arg === '--run' && argv[i + 1]) { runId = argv[++i]; continue }
   }
   if (runId !== null && !RUN_ID_RE.test(runId.trim())) throw new Error(`invalid --run value: ${runId}`)
   return { logPath, runId: runId?.trim() ?? null, ...parseSince(sinceRaw) }
 }
 
 const TS_RE = /^\[([^\]]+)\]/
-function extractTimestamp(line) {
-  const match = TS_RE.exec(line)
-  return match ? match[1] : null
-}
+function extractTimestamp(line) { return TS_RE.exec(line)?.[1] ?? null }
 function extractTimestampMs(line) {
   const text = extractTimestamp(line)
   if (text === null) return null
   const value = Date.parse(text)
   return Number.isFinite(value) ? value : null
 }
-function extractRunId(line) {
-  const match = typeof line === 'string' ? line.match(/\brunId=(run-[A-Za-z0-9-]+)/) : null
-  return match?.[1] ?? null
-}
-function isBootLine(line) {
-  return /\bBOOT\b(?!_)/.test(line)
-}
+function extractRunId(line) { return line.match(/\brunId=(run-[A-Za-z0-9-]+)/)?.[1] ?? null }
+function isBootLine(line) { return /\bBOOT\b(?!_)/.test(line) }
 function emptyStats() {
   return {
     counts: new Map(MARKERS.map((marker) => [marker, 0])),
-    first: new Map(),
-    last: new Map(),
+    first: new Map(), last: new Map(),
     occurrences: new Map(MARKERS.map((marker) => [marker, []])),
-    heartbeat: null,
-    totalLines: 0,
-    scopedLines: 0,
+    generationHashes: new Set(),
+    heartbeat: null, totalLines: 0, scopedLines: 0,
   }
 }
 
@@ -127,17 +98,16 @@ async function collectBoots(logPath) {
 
 function resolveRunScope(boots, sinceMs, explicitRunId) {
   if (explicitRunId !== null) {
-    const exists = boots.some((boot) => boot.runId === explicitRunId)
-    return exists ? { runId: explicitRunId, error: null } : { runId: null, error: 'explicit_run_boundary_missing' }
+    return boots.some((boot) => boot.runId === explicitRunId)
+      ? { runId: explicitRunId, error: null }
+      : { runId: null, error: 'explicit_run_boundary_missing' }
   }
   if (sinceMs === null) return { runId: null, error: null }
   const after = boots.filter((boot) => boot.tsMs >= sinceMs)
   if (after.length > 1) return { runId: null, error: 'multiple_run_boundaries_after_since' }
   if (after.length === 1) return { runId: after[0].runId, error: null }
-  const before = boots.filter((boot) => boot.tsMs < sinceMs)
-  const current = before.at(-1)
-  if (current === undefined) return { runId: null, error: 'run_boundary_missing' }
-  return { runId: current.runId, error: null }
+  const current = boots.filter((boot) => boot.tsMs < sinceMs).at(-1)
+  return current === undefined ? { runId: null, error: 'run_boundary_missing' } : { runId: current.runId, error: null }
 }
 
 async function scan(logPath, sinceMs, runId) {
@@ -150,14 +120,15 @@ async function scan(logPath, sinceMs, runId) {
       const bootRunId = extractRunId(line)
       if (bootRunId !== null) activeRunId = bootRunId
     }
-    const lineRunId = extractRunId(line)
-    const owningRunId = lineRunId ?? activeRunId
+    const owningRunId = extractRunId(line) ?? activeRunId
     if (runId !== null && owningRunId !== runId) continue
     if (sinceMs !== null) {
       const tsMs = extractTimestampMs(line)
       if (tsMs === null || tsMs < sinceMs) continue
     }
     stats.scopedLines += 1
+    const generationHash = generationHashFromLine(line)
+    if (generationHash !== null) stats.generationHashes.add(generationHash)
     for (const marker of MARKERS) {
       if (!markerMatches(marker, line)) continue
       stats.counts.set(marker, stats.counts.get(marker) + 1)
@@ -175,7 +146,6 @@ function firstAfter(values, afterLine) {
   for (const value of values ?? []) if (value > afterLine) return value
   return null
 }
-
 function deriveFrontier(stats) {
   const prereqLine = firstAfter(stats.occurrences.get('PREREQ_OPTION'), -1)
   if (prereqLine === null) return { stage: 'START', next: 'PREREQ_OPTION', complete: false }
@@ -189,37 +159,25 @@ function deriveFrontier(stats) {
 }
 
 let args
-try {
-  args = parseArgs(process.argv.slice(2))
-} catch (error) {
+try { args = parseArgs(process.argv.slice(2)) }
+catch (error) {
   console.log('UNKNOWN')
   console.error(`M2_WATCH status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
   process.exit(2)
 }
-
 const { logPath, sinceMs, sinceLabel, runId: requestedRunId } = args
 if (!existsSync(logPath)) {
-  console.log('UNKNOWN')
-  console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=missing`)
-  process.exit(2)
+  console.log('UNKNOWN'); console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=missing`); process.exit(2)
 }
-try {
-  const st = statSync(logPath)
-  if (!st.isFile()) throw new Error('not a file')
-} catch (error) {
-  console.log('UNKNOWN')
-  console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
-  process.exit(2)
+try { if (!statSync(logPath).isFile()) throw new Error('not a file') }
+catch (error) {
+  console.log('UNKNOWN'); console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`); process.exit(2)
 }
 
 let scope
-try {
-  const boots = await collectBoots(logPath)
-  scope = resolveRunScope(boots, sinceMs, requestedRunId)
-} catch (error) {
-  console.log('UNKNOWN')
-  console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
-  process.exit(2)
+try { scope = resolveRunScope(await collectBoots(logPath), sinceMs, requestedRunId) }
+catch (error) {
+  console.log('UNKNOWN'); console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`); process.exit(2)
 }
 if (scope.error !== null) {
   console.log('UNKNOWN')
@@ -228,16 +186,20 @@ if (scope.error !== null) {
 }
 
 let stats
-try {
-  stats = await scan(logPath, sinceMs, scope.runId)
-} catch (error) {
-  console.log('UNKNOWN')
-  console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
-  process.exit(2)
+try { stats = await scan(logPath, sinceMs, scope.runId) }
+catch (error) {
+  console.log('UNKNOWN'); console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`); process.exit(2)
 }
 
+const hashes = [...stats.generationHashes]
 console.log(`M2_WATCH log=${logPath}`)
 console.log(`M2_SCOPE since=${sinceLabel} runId=${scope.runId ?? 'all'} scopedLines=${stats.scopedLines} totalLines=${stats.totalLines}`)
+console.log(`M2_SOURCE generationHashes=${hashes.length === 0 ? 'unknown' : hashes.join(',')}`)
+if (scope.runId !== null && hashes.length > 1) {
+  console.log('UNKNOWN')
+  console.error(`M2_SOURCE status=UNKNOWN reason=mixed_generation_hashes runId=${scope.runId} hashes=${hashes.join(',')}`)
+  process.exit(2)
+}
 for (const marker of MARKERS) {
   const count = stats.counts.get(marker)
   if (count === 0) console.log(`${marker} MISSING`)
