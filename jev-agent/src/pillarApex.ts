@@ -24,11 +24,15 @@ import type { JumpBotLike, PillarJumpDeps, PillarJumpTrace, Vec3Like } from './p
  * wait placed at the bottom of the arc.
  *
  * `PILLAR_APEX_MIN_RISE` is the rise of an UNOBSTRUCTED jump (a 0.42 jump peaks
- * ~1.25 blocks). It must not be a hard floor: live `run-mu84l153-qry3` proved a
- * ceiling clamps the arc to ~0.46 while the feet still clear the place cell,
- * and the fixed 0.5 marked that real apex as `falling_before_place`. The
- * runtime demand is therefore derived from the geometry by
- * `requiredApexRise(...)` and only capped at this reference.
+ * ~1.25 blocks); it is only a reference. It must not cap the demand: live
+ * `run-mu84l153-qry3` proved a ceiling clamps the arc to ~0.46 while the feet
+ * still clear the place cell, so a fixed 0.5 marked that real apex as
+ * `falling_before_place`. The runtime demand is derived from the geometry by
+ * `requiredApexRise(...)`. Capping that demand at 0.5 is also wrong in the
+ * other direction (live `run-mu85r15x-qvje`): a launch from the true stance
+ * (launchY 58, placeCell 58) needs a 1.0 rise to clear the cell top at 59, and a
+ * 0.5 cap would accept a place at feet 58.5 - still inside [58,59] - which the
+ * server refuses.
  */
 export const PILLAR_APEX_MIN_RISE = 0.5
 export const PILLAR_APEX_VY_MAX = 0.01
@@ -38,11 +42,13 @@ export const PILLAR_APEX_FALL_VY = -0.25
  * The rise (from the launch position) the feet must reach so the placed block
  * does not intersect them: the feet have to clear the top face of the place
  * cell (`placeCell.y + 1`). `launchY` is the live feet position, so a body that
- * already floats high in its cell needs less rise. The demand never drops below
- * the takeoff jitter floor and never exceeds the reference apex.
+ * already floats high in its cell needs less rise. The demand is the exact
+ * geometric clearance (floored at the takeoff jitter threshold) - it is never
+ * capped below that clearance, because a smaller demand would accept a place
+ * while the feet are still inside the cell the server must fill.
  */
 export function requiredApexRise(launchY: number, placeCellY: number): number {
-  return Math.min(PILLAR_APEX_MIN_RISE, Math.max(TAKEOFF_RISE, placeCellY + 1 - launchY))
+  return Math.max(TAKEOFF_RISE, placeCellY + 1 - launchY)
 }
 
 /**
@@ -186,14 +192,16 @@ export async function pillarStepUp(
 
   deps.ensureOwned?.()
   // The takeoff verifier can return after the apex when prismarine-physics
-  // catches up several ticks in one frame, so the rise it already observed must
-  // seed the apex window rather than be discarded. The demand is the geometric
-  // clearance to the place cell, not a fixed half-block.
+  // catches up several ticks in one frame, so the peak it already observed seeds
+  // the reported apexRise rather than being discarded. It must NOT satisfy the
+  // place gate: the peak is history, while the server validates the placement
+  // against the feet position at the moment the packet arrives. Requiring the
+  // CURRENT rise to clear `placeCell.y + 1` is what makes the gate and the
+  // server agree. The demand is the exact geometric clearance to the cell top.
   const requiredRise = requiredApexRise(launchY, plan.placeCell.y)
   const apexDeadline = deps.now() + deps.apexBudgetMs
   let apexSamples = 0
   let apexRise = takeoffObservedRise(jump.trace)
-  let sawRise = apexRise >= requiredRise
   let atApex = false
   while (deps.now() < apexDeadline) {
     deps.ensureOwned?.()
@@ -201,19 +209,20 @@ export async function pillarStepUp(
     const vy = bot.entity.velocity.y
     const rise = bot.entity.position.y - launchY
     if (rise > apexRise) apexRise = rise
-    if (rise >= requiredRise) sawRise = true
-    if (sawRise && vy <= PILLAR_APEX_VY_MAX && vy >= PILLAR_APEX_FALL_VY) {
+    if (rise >= requiredRise && vy <= PILLAR_APEX_VY_MAX && vy >= PILLAR_APEX_FALL_VY) {
       atApex = true
       break
     }
     if (vy < PILLAR_APEX_FALL_VY) {
       // Already past the vertex: placing now puts the block wherever the body
       // happens to be, which is exactly the "no level gained" live failure.
-      return fail('apex', sawRise ? 'apex_missed' : 'falling_before_place', apexSamples, undefined, jump.trace)
+      // `apexRise` (including the takeoff-observed peak) only names whether the
+      // arc ever cleared the cell; it never authorises a below-clearance place.
+      return fail('apex', apexRise >= requiredRise ? 'apex_missed' : 'falling_before_place', apexSamples, undefined, jump.trace)
     }
     await deps.sleep(deps.pollMs)
   }
-  if (!atApex) return fail('apex', sawRise ? 'apex_timeout' : 'no_rise', apexSamples, undefined, jump.trace)
+  if (!atApex) return fail('apex', apexRise >= requiredRise ? 'apex_timeout' : 'no_rise', apexSamples, undefined, jump.trace)
 
   let placeSamples = 0
   try {
