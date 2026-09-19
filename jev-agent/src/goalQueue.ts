@@ -388,6 +388,7 @@ export class GoalQueue {
       detail: plan.detail ?? null,
       protected: plan.protected === true,
       core: plan.core === true,
+      ...(plan.optionInstanceId === undefined ? {} : { optionInstanceId: plan.optionInstanceId }),
     }
     this.goals.push(goal)
     return goal

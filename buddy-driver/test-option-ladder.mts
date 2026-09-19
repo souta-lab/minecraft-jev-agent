@@ -1,9 +1,12 @@
 // test-option-ladder.mts - Issue #21 dry-run demonstration: the compiled Options
 // reproduce the current deterministic ladder for the M2 rungs, and the compiler
 // is a no-op while BUDDY_OPTION_COMPILER is off. Pure: no bot, no server.
-import { applyCompiledPlan, compilePlannedGoals, evaluatePredicates, optionSpecsToPlannedGoals, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, compilePlannedGoals, evaluatePredicates, isOptionSpecSource, optionSpecsToPlannedGoals, makeOptionSnapshot, queuedToPlanned, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import { bestPickaxeRank, buildPlanOptions, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { OptionCompilingSystem2 } from './option-brain.ts'
 import { M2_PLAN_JSON, planFromJson } from '../jev-agent/src/system2.ts'
+import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
@@ -11,7 +14,7 @@ import { readFileSync } from 'node:fs'
 
 interface Case {
   name: string
-  run: () => { pass: boolean; detail: string }
+  run: () => { pass: boolean; detail: string } | Promise<{ pass: boolean; detail: string }>
 }
 
 const cases: Case[] = []
@@ -41,6 +44,18 @@ const M2_SNAPSHOT = makeOptionSnapshot({
   toolRank: bestPickaxeRank(M2_LIVE),
   knownStations: ['furnace'],
 })
+
+function stubPlanRequest(): System2PlanRequest {
+  return {
+    reason: 'queue_empty',
+    detail: 'option-context test',
+    tick: 1,
+    goalQueueState: { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [] },
+    objective: { targetItem: 'iron_ingot', requiredCount: 1, haveCount: 0, complete: false },
+    recentEvents: [],
+    recentOutcomes: [],
+  }
+}
 
 function sameGoal(a: PlannedGoal, b: PlannedGoal): boolean {
   return (
@@ -196,11 +211,34 @@ addCase('the host wrapper emits the blocked-Option log and never silently drops 
   return { pass: emitsSharedMarker && carriesStructured && goalsFromCompiled, detail: `emit=${emitsSharedMarker} structured=${carriesStructured} goalsFromCompiled=${goalsFromCompiled}` }
 })
 
+addCase('(#56) compiled Option identity reaches the queue rows and stays readable for the controller', async () => {
+  const goals = planFromJson(M2_PLAN_JSON)
+  const inner: System2Brain = { model: 'test-inner-planner', plan: async () => ({ goals, note: 'test plan' }) }
+  const brain = new OptionCompilingSystem2(inner, { log: () => {}, snapshot: () => M2_SNAPSHOT, enabled: true })
+  const plan = await brain.plan(stubPlanRequest())
+  const specs = brain.compiledOptionSpecs()
+  const ids = specs.map((spec) => stableOptionInstanceId(spec))
+  const rowsCarry = plan.goals.length === ids.length && plan.goals.every((goal, index) => goal.optionInstanceId === ids[index])
+  const queue = new GoalQueue()
+  const queued = queue.applyPlan(plan.goals, 'llm')
+  const head = queued[0]
+  const headCarries = head !== undefined && head.optionInstanceId === ids[0]
+  const restores = head !== undefined && queuedToPlanned(head).optionInstanceId === ids[0]
+  const exposed = isOptionSpecSource(brain) && specs.length === plan.goals.length && specs.every((spec) => spec.id.includes(':'))
+  const disabled = new OptionCompilingSystem2(inner, { log: () => {}, snapshot: () => M2_SNAPSHOT, enabled: false })
+  const disabledPlan = await disabled.plan(stubPlanRequest())
+  const disabledInert = disabled.compiledOptionSpecs().length === 0 && disabledPlan.goals.every((goal) => goal.optionInstanceId === undefined)
+  return {
+    pass: rowsCarry && headCarries && restores && exposed && disabledInert,
+    detail: `rows=${rowsCarry} head=${headCarries} restore=${restores} specs=${specs.length} disabledInert=${disabledInert} first=${ids[0] ?? 'none'}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('compiled Options vs the deterministic ladder (#21 dry run)\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
-  const observed = testCase.run()
+  const observed = await testCase.run()
   if (!observed.pass) failures += 1
   process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
   process.stdout.write(`      ${observed.detail}\n`)

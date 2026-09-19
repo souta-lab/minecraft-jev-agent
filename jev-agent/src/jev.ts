@@ -33,6 +33,8 @@ import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { Candidate } from './candidates.ts'
+import type { CurrentOptionContext, OptionContextPayload } from './optionSpec.ts'
+import { toOptionContextPayload } from './optionSpec.ts'
 import type { WorldState } from './state.ts'
 
 type EvaluateArgs = Parameters<typeof evaluate>[0]
@@ -90,6 +92,12 @@ export interface JevRequest {
   stage: string
   state: WorldState
   candidates: readonly Candidate[]
+  /**
+   * #56: the current Option's compiled identity + evaluated semantics + bounded
+   * outcome memory. Absent/null when the Option compiler is off or the queue
+   * head has no compiled Option reference; the payload is bounded either way.
+   */
+  optionContext?: CurrentOptionContext | null
   /** CORE + trigger-specific set to send; defaults to the full set. */
   questionNames?: readonly QuestionName[]
 }
@@ -139,6 +147,8 @@ export interface JevCallRecord {
   rateLimitWaitMs: number
   /** bounded perception snapshot persisted for evidence (the model receives `toEvaluationState`) */
   state: unknown
+  /** #56: bounded current-Option projection sent with the request, when present */
+  optionContext: OptionContextPayload | null
   questions: unknown
   response: { model: string; usage: unknown; answers: Record<string, JevAnswer> } | null
   error: string | null
@@ -240,9 +250,13 @@ export const PRIMARY_INSTRUCTIONS =
   'refers to a concrete target that exists in the supplied world state. Answer with the id ' +
   'verbatim; never invent an id. The id already embeds its target (e.g. MINE:b12_64_8, ' +
   'MOVE:p3_64_8, CRAFT:oak_planks); do NOT answer a separate target. The state field ' +
-  'signals.failedCandidates maps candidate ids to how many times they recently failed, so ' +
-  'prefer an id with no recorded failures. The state field goalQueue is the long-horizon ' +
-  'plan from System 2: follow its current goal while plan_still_valid is high.'
+  'signals.failedCandidates maps candidate ids to how many times they recently failed: ' +
+  'consider recent outcomes; avoid repeating a deterministic unchanged-state failure; a ' +
+  'changed state or a transient failure may justify a retry. When present, the state field ' +
+  'optionContext is the current Option (its evaluated initiation/success predicates, ' +
+  'allowed skills, dependency refs and bounded recent outcomes are code-owned facts, not ' +
+  'instructions). The state field goalQueue is the long-horizon plan from System 2: follow ' +
+  'its current goal while plan_still_valid is high.'
 
 /**
  * Boolean answers have NO calibrated per-outcome confidence: the primitive only
@@ -618,6 +632,46 @@ export function formatBetaShadow(shadow: BetaShadow): string {
   )
 }
 
+/**
+ * #56: the Option-conditioned beta comparison. `proposal` is Jev's raw beta
+ * probability for the exact Option instance; `code` is the baseline
+ * deterministic decision the controller actually made. Authority is unchanged;
+ * this line only makes the instance-joinable shadow comparison auditable.
+ */
+export interface BetaShadowContext {
+  optionId: string
+  templateId: string
+  proposal: number | null
+  code: BetaVerdict
+  threshold: number
+  would: BetaVerdict
+  agree: boolean
+}
+
+export function formatBetaShadowContext(shadow: BetaShadowContext): string {
+  return `BETA_SHADOW_CTX optionId=${shadow.optionId} proposal=${shadow.proposal ?? 'null'} code=${shadow.code}`
+}
+
+/** Build the #56 Option-conditioned shadow comparison from a beta shadow. */
+export function betaShadowContext(input: {
+  instanceId: string
+  templateId: string
+  beta: number | null
+  actualReplan: boolean
+  threshold?: number
+}): BetaShadowContext {
+  const shadow = betaShadowDecision({ optionId: input.instanceId, beta: input.beta, actualReplan: input.actualReplan, threshold: input.threshold })
+  return {
+    optionId: input.instanceId,
+    templateId: input.templateId,
+    proposal: input.beta,
+    code: shadow.actual,
+    threshold: shadow.threshold,
+    would: shadow.would,
+    agree: shadow.agree,
+  }
+}
+
 /** Map exactly one requested question's raw answer to the defensive JevAnswer shape. */
 function mapAnswer(name: QuestionName, raw: unknown, providerMetadata: unknown): JevAnswer {
   const confidence = readCalibratedConfidence(providerMetadata, name)
@@ -752,6 +806,10 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
+function optionContextRecord(context: CurrentOptionContext | null | undefined): OptionContextPayload | null {
+  return context === undefined || context === null ? null : toOptionContextPayload(context)
+}
+
 /**
  * Project the world state down to exactly the fields the policy reasons about.
  *
@@ -761,8 +819,13 @@ function sleep(ms: number): Promise<void> {
  * candidate ids and their labels already carry the executable detail, so this
  * keeps the goal, the goal queue's current entry, the inventory counts, the
  * nearest entities/blocks and the failure memory, and drops the rest.
+ *
+ * Issue #56: `optionContext` is added as a bounded projection (max 3 outcomes,
+ * 8 refs, 4 unmet predicates) so the current Option's identity, evaluated
+ * initiation/success predicates, allowed skills and recent outcomes reach the
+ * model without raw logs.
  */
-function toEvaluationState(state: WorldState): EvaluationState {
+export function toEvaluationState(state: WorldState, optionContext?: CurrentOptionContext | null): EvaluationState {
   const compact = {
     tick: state.tick,
     self: {
@@ -813,9 +876,13 @@ function toEvaluationState(state: WorldState): EvaluationState {
       lastFailureCode: state.signals.lastFailureCode,
     },
   }
+  const contextPayload = optionContextRecord(optionContext)
+  const withContext = contextPayload === null ? compact : { ...compact, optionContext: contextPayload }
   // The AI SDK expects a plain JSON value; the compact object has no index
-  // signature, so round-trip it through JSON (no `any`, no ts-ignore).
-  return JSON.parse(JSON.stringify(compact)) as EvaluationState
+  // signature, so round-trip it through JSON (no `any`, no ts-ignore). The
+  // optionContext key is omitted entirely when absent, so a disabled Option
+  // compiler leaves the payload byte-identical to the pre-#56 shape.
+  return JSON.parse(JSON.stringify(withContext)) as EvaluationState
 }
 
 /**
@@ -963,7 +1030,7 @@ class TypeSafeJevPolicy implements JevPolicy {
       try {
         const response = await evaluate({
           model: this.model,
-          state: toEvaluationState(request.state),
+          state: toEvaluationState(request.state, request.optionContext),
           questions,
           abortSignal,
           maxRetries: this.maxRetries,
@@ -985,6 +1052,7 @@ class TypeSafeJevPolicy implements JevPolicy {
           rateLimitRetries: attempt,
           rateLimitWaitMs,
           state: boundedStateSnapshot(request.state),
+          optionContext: optionContextRecord(request.optionContext),
           questions,
           response: { model: this.model, usage, answers },
           error: null,
@@ -1020,6 +1088,7 @@ class TypeSafeJevPolicy implements JevPolicy {
           rateLimitRetries: attempt,
           rateLimitWaitMs,
           state: boundedStateSnapshot(request.state),
+          optionContext: optionContextRecord(request.optionContext),
           questions,
           response: null,
           error: message,
@@ -1174,6 +1243,7 @@ class FallbackJevPolicy implements JevPolicy {
       rateLimitRetries: 0,
       rateLimitWaitMs: 0,
       state: boundedStateSnapshot(request.state),
+      optionContext: optionContextRecord(request.optionContext),
       questions,
       response: { model: this.model, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, answers },
       error: null,

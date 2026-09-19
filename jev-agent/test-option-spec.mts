@@ -5,6 +5,7 @@
 import {
   BLOCKED_OPTION_NOT_ENQUEUED,
   applyCompiledPlan,
+  buildCurrentOptionContext,
   compileGoalQueue,
   compilePlannedGoal,
   compilePlannedGoals,
@@ -20,6 +21,7 @@ import {
   expandOptionDependencies,
   formatBlockedOptionLog,
   formatPredicateUnknown,
+  formatOptionContextLog,
   formatOptionDedupeLine,
   isOptionComplete,
   isOptionStartable,
@@ -34,12 +36,17 @@ import {
   setPredicateUnknownSink,
   snapshotFromResident,
   stableOptionInstanceId,
+  OPTION_CONTEXT_MAX_OUTCOMES,
+  OPTION_CONTEXT_MAX_REFS,
   validateOptionSpec,
   validatePredicate,
 } from './src/optionSpec.ts'
-import type { OptionSpec, OptionWorldSnapshot, Predicate } from './src/optionSpec.ts'
-import { GoalQueue } from './src/goalQueue.ts'
+import type { CurrentOptionContext, OptionSpec, OptionWorldSnapshot, Predicate } from './src/optionSpec.ts'
+import { emptyGoalQueueState, GoalQueue } from './src/goalQueue.ts'
 import type { PlannedGoal } from './src/goalQueue.ts'
+import { betaShadowContext, buildQuestions, formatBetaShadowContext, PRIMARY_INSTRUCTIONS, toEvaluationState } from './src/jev.ts'
+import { makeGoal } from './src/state.ts'
+import type { AgentSignals, WorldState } from './src/state.ts'
 import { readFileSync } from 'node:fs'
 
 interface Case {
@@ -82,6 +89,62 @@ function withPredicateUnknownCapture<T>(run: (lines: string[]) => T): T {
     return run(lines)
   } finally {
     setPredicateUnknownSink(null)
+  }
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
+function arrayOf(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function emptyTestSignals(over: Partial<AgentSignals> = {}): AgentSignals {
+  return {
+    consecutiveFailures: 0,
+    lastFailureCode: null,
+    lastPathStatus: 'idle',
+    stalledMs: 0,
+    lastPolicyConfidence: null,
+    maxConcurrentActions: 0,
+    escalationRecommended: false,
+    failedCandidates: {},
+    ...over,
+  }
+}
+
+function worldState(over: { inventory?: Record<string, number>; signals?: Partial<AgentSignals> } = {}): WorldState {
+  return {
+    schemaVersion: 1,
+    tick: 7,
+    timestampMs: 0,
+    self: {
+      username: 'AI_Test',
+      position: { x: 0.5, y: 64, z: 0.5 },
+      eyePosition: { x: 0.5, y: 65.62, z: 0.5 },
+      yaw: 0,
+      pitch: 0,
+      onGround: true,
+      health: 20,
+      food: 20,
+      gameMode: 'survival',
+      dimension: 'minecraft:overworld',
+      isDay: true,
+      heldItem: null,
+    },
+    inventory: { slots: [], counts: over.inventory ?? {}, totalItems: 0 },
+    entities: [],
+    blocks: [],
+    terrain: { standable: [] },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    goal: makeGoal('iron_ingot', 3),
+    goalQueue: emptyGoalQueueState(),
+    recentEvents: [],
+    signals: emptyTestSignals(over.signals),
   }
 }
 
@@ -959,7 +1022,7 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
   restored.restore(queue.snapshot())
   const restoredCurrent = restored.current
   const context = currentOptionContextForQueuedGoal(restoredCurrent)
-  const success = context?.success[0]
+  const success = context?.success.unmet[0]
   const successId = success?.kind === 'custom' ? success.id : null
   const pass =
     queued !== undefined &&
@@ -976,13 +1039,129 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
     successId === 'landmark_ready' &&
     context?.allowedSkills.join(',') === spec.skills.join(',') &&
     context?.abortThreshold === spec.abortThreshold &&
-    context?.runtime.verifiedProgress === 0
+    context?.runtime.lastProgressDelta === 0
   return {
     pass,
     detail: 'queued=' + queued?.id + ' restored=' + restoredCurrent?.id + ' instance=' + restoredCurrent?.optionInstanceId + ' template=' + restoredCurrent?.optionTemplateId + ' context=' + context?.instanceId + ' threshold=' + context?.abortThreshold,
   }
 })
 
+addCase('(#56) CurrentOptionContext round-trips the compiled Option identity and edges', () => {
+  const planned: PlannedGoal = { kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }
+  const snapshot = makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 })
+  const compiled = applyCompiledPlan([planned], snapshot, { enabled: true })
+  const smelt = compiled.specs.find((spec) => spec.id === 'smelt:iron_ingot')
+  const collect = compiled.specs.find((spec) => spec.id === 'collect:raw_iron')
+  if (smelt === undefined || collect === undefined) {
+    return { pass: false, detail: `specs=[${compiled.specs.map((spec) => spec.id).join(',')}]` }
+  }
+  const outcomes = [
+    { actionId: 'MINE:b1_64_0', status: 'failed', verified: false, progressDelta: 0, failureCode: 'path_stuck', atMs: 1 },
+    { actionId: 'MINE:b2_64_0', status: 'failed', verified: false, progressDelta: 0, failureCode: 'path_stuck', atMs: 2 },
+    { actionId: 'MINE:b3_64_0', status: 'done', verified: true, progressDelta: 1, failureCode: null, atMs: 3 },
+  ]
+  const context = buildCurrentOptionContext(smelt, snapshot, {
+    plan: compiled.specs,
+    runtime: { attempts: 2, totalAttempts: 3, lastVerified: true, lastProgressDelta: 1, abandoned: false, startedAtMs: 1234 },
+    recentOutcomes: outcomes,
+  })
+  const collectContext = buildCurrentOptionContext(collect, snapshot, { plan: compiled.specs })
+  const line = formatOptionContextLog(context)
+  const expected = 'OPTION_CONTEXT optionId=smelt:iron_ingot#c3 template=smelt:iron_ingot init=false success=false skills=[SMELT_AT_FURNACE] outcomes=3'
+  const pass =
+    context.instanceId === stableOptionInstanceId(smelt) &&
+    context.instanceId === 'smelt:iron_ingot#c3' &&
+    context.templateId === smelt.id &&
+    context.kind === 'smelt' &&
+    context.target.item === 'iron_ingot' &&
+    context.initiation.truth === 'false' &&
+    context.initiation.unmet.some((predicate) => predicate.kind === 'inventoryAtLeast') &&
+    context.success.truth === 'false' &&
+    context.allowedSkills.join(',') === smelt.skills.join(',') &&
+    context.dependencyRefs.includes(stableOptionInstanceId(collect)) &&
+    collectContext.parentRefs.includes(context.instanceId) &&
+    collectContext.dependencyRefs.length === 0 &&
+    context.runtime.attempts === 2 &&
+    context.runtime.lastVerified === true &&
+    context.recentOutcomes.length === 3 &&
+    line === expected
+  return { pass, detail: `${line} deps=[${context.dependencyRefs.join(',')}] parents=[${collectContext.parentRefs.join(',')}]` }
+})
+
+addCase('(#56) the Jev payload carries a bounded optionContext and null when absent', () => {
+  const planned: PlannedGoal = { kind: 'collect', description: 'collect 3 x diamond', targetItem: 'diamond', requiredCount: 3 }
+  const snapshot = makeOptionSnapshot({ inventory: {}, toolRank: 1 })
+  const spec = compilePlannedGoal(planned)
+  const base = buildCurrentOptionContext(spec, snapshot)
+  const oversized: CurrentOptionContext = {
+    ...base,
+    allowedSkills: Array.from({ length: 20 }, (_, index) => `SKILL_${index}`),
+    dependencyRefs: Array.from({ length: 20 }, (_, index) => `dep:${index}`),
+    parentRefs: Array.from({ length: 20 }, (_, index) => `parent:${index}`),
+    recentOutcomes: Array.from({ length: 10 }, (_, index) => ({
+      actionId: `a${index}`,
+      status: 'failed',
+      verified: false,
+      progressDelta: 0,
+      failureCode: 'deterministic',
+      atMs: index,
+    })),
+  }
+  const state = worldState()
+  const payload = recordOf(toEvaluationState(state, oversized))
+  const context = recordOf(payload['optionContext'])
+  const outcomes = arrayOf(context['outcomes'])
+  const dependencies = arrayOf(context['dependencies'])
+  const parents = arrayOf(context['parents'])
+  const skills = arrayOf(context['skills'])
+  const withoutContext = recordOf(toEvaluationState(state))
+  const absent = withoutContext['optionContext'] === undefined && !('optionContext' in withoutContext)
+  const goalsIntact = recordOf(payload['goalQueue'])['empty'] === true
+  const pass =
+    context['instanceId'] === stableOptionInstanceId(spec) &&
+    context['templateId'] === spec.id &&
+    context['init'] === 'false' &&
+    context['success'] === 'false' &&
+    outcomes.length === OPTION_CONTEXT_MAX_OUTCOMES &&
+    dependencies.length === OPTION_CONTEXT_MAX_REFS &&
+    parents.length === OPTION_CONTEXT_MAX_REFS &&
+    skills.length === OPTION_CONTEXT_MAX_REFS &&
+    absent &&
+    goalsIntact
+  return {
+    pass,
+    detail: `instance=${String(context['instanceId'])} outcomes=${outcomes.length} deps=${dependencies.length} skills=${skills.length} absent=${absent}`,
+  }
+})
+
+addCase('(#11/#56) primary instructions drop the failure-preference policy sentence', () => {
+  const policySentence = 'prefer an id with no recorded failures'
+  const actionQuestion = buildQuestions([]).action
+  const pass =
+    !PRIMARY_INSTRUCTIONS.includes(policySentence) &&
+    !String(actionQuestion?.instructions).includes(policySentence) &&
+    PRIMARY_INSTRUCTIONS.includes('consider recent outcomes') &&
+    PRIMARY_INSTRUCTIONS.includes('unchanged-state failure') &&
+    PRIMARY_INSTRUCTIONS.includes('transient failure') &&
+    PRIMARY_INSTRUCTIONS.includes('optionContext')
+  return {
+    pass,
+    detail: `policySentenceAbsent=${!PRIMARY_INSTRUCTIONS.includes(policySentence)} factualFraming=${PRIMARY_INSTRUCTIONS.includes('consider recent outcomes')}`,
+  }
+})
+
+addCase('(#56) Option-conditioned beta shadow line is exactly auditable', () => {
+  const shadow = betaShadowContext({
+    instanceId: 'smelt:iron_ingot#c3',
+    templateId: 'smelt:iron_ingot',
+    beta: 1,
+    actualReplan: false,
+  })
+  const line = formatBetaShadowContext(shadow)
+  const expected = 'BETA_SHADOW_CTX optionId=smelt:iron_ingot#c3 proposal=1 code=continue'
+  const pass = line === expected && shadow.would === 'abandon' && shadow.agree === false && shadow.templateId === 'smelt:iron_ingot'
+  return { pass, detail: line }
+})
 let failures = 0
 process.stdout.write('OptionSpec / deterministic predicate / dependency expansion (#21)\n')
 process.stdout.write('-'.repeat(72) + '\n')
