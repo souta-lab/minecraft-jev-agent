@@ -8,6 +8,12 @@ import { pathToFileURL } from 'node:url'
 
 export const SOCK_PATH =
   process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
+/**
+ * Resident report can briefly queue behind a generation boundary.  Three
+ * seconds produced false UNKNOWN results during an otherwise healthy socket
+ * session, which weakened the M2 FAIL-vs-UNKNOWN evidence distinction.
+ */
+export const M2_CONTROL_TIMEOUT_MS = 10_000
 
 export const M2_CRITERIA = [
   { item: 'charcoal', need: 1 },
@@ -17,7 +23,7 @@ export const M2_CRITERIA = [
 
 export const REPORT_COMMAND = { id: 'm2', cmd: 'report' }
 
-export function makeControl(sockPath, { timeoutMs = 3000 } = {}) {
+export function makeControl(sockPath, { timeoutMs = M2_CONTROL_TIMEOUT_MS } = {}) {
   return function request(cmd) {
     return new Promise((resolve) => {
       if (!existsSync(sockPath)) return resolve(null)

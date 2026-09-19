@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { runAcceptance } from './m2-acceptance.mjs'
+import { M2_CONTROL_TIMEOUT_MS, runAcceptance } from './m2-acceptance.mjs'
 
 let checks = 0
 const ok = (label) => {
@@ -88,5 +88,8 @@ const missingIngot = {
   assert.doesNotMatch(out.text(), /RESULT: (PASS|FAIL)/)
   ok('unreachable socket -> exit 2 with no fabricated numbers')
 }
+
+assert.equal(M2_CONTROL_TIMEOUT_MS, 10_000)
+ok('resident report timeout is 10s so a queued report is not mislabeled UNKNOWN')
 
 console.log(`m2-acceptance: ${checks}/${checks} checks passed`)
