@@ -64,6 +64,8 @@ jobs:
         run: npm run option-spec-test && npm run action-verify-test && npm run truth-causal-test && npm run protected-goals-test
       - name: Truthful retrieve outcome
         run: npm run retrieve-truthful-outcome-test
+      - name: Retrieve failure memory
+        run: npm run retrieve-failure-memory-test
       - name: Grounded reachability
         run: npm run reachability-test
       - name: Recovery policy regressions

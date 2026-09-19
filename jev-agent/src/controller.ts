@@ -587,18 +587,33 @@ export interface KnownRetrieveDecisionInput {
   /** consecutive zero-progress retrieves for this resource BEFORE this one */
   previousAttempts: number
   limit?: number
+  /**
+   * Whether this retrieve actually COMPLETED: the target arrived or the item
+   * was acquired (`retrieveCompleted`). A measured distance closure or a
+   * bounded vertical chunk (`progressed`) is durable body evidence, never
+   * completion - the counter must be CHARGED for it (RC8: `21.69m->20.42m`
+   * repeatedly, no station arrival). When omitted, the observable-progress
+   * proxy `knownRetrieveMadeProgress` is used for direct pure callers.
+   */
+  completed?: boolean
 }
 
 /**
  * Pure decision the controller applies to every finished known-resource
- * retrieve. Observable progress clears the per-resource counter; anything else
- * charges it and retires the resource at the bounded limit. This is the exact
- * boundary the live iron-ore loop got wrong: the old rule cleared on
- * `result.verified`, which a sub-metre nudge satisfies.
+ * retrieve. A COMPLETED retrieve clears the per-resource counter; anything else
+ * charges it and retires the resource at the bounded limit.
+ *
+ * The boundary is completion (`completed`), not lenient observable progress:
+ * the RC8 loop closed ~1 m of a 20 m approach and reported a vertical body
+ * change, so `knownRetrieveMadeProgress(result.progressed === true)` cleared the
+ * counter every attempt and the same unreachable station was re-offered forever.
+ * `completed` is supplied by `retrieveCompleted` (arrival or acquisition); the
+ * `knownRetrieveMadeProgress` fallback keeps the direct pure callers' contract.
  */
 export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRetrieveDecision {
   if (input.retrieval !== 'known' || input.target === null) return { kind: 'ignore' }
-  if (knownRetrieveMadeProgress(input.result)) return { kind: 'clear' }
+  const completed = input.completed ?? knownRetrieveMadeProgress(input.result)
+  if (completed) return { kind: 'clear' }
   const attempts = input.previousAttempts + 1
   const retire = shouldRetireKnownRetrieve({
     retrieval: input.retrieval,
@@ -637,26 +652,31 @@ export function shouldClearActiveRetrieval(input: {
  * The one boundary between a finished RETRIEVE and the movement failure memory.
  *
  * A retrieve may reset the coordinate failure memory (`MOVE_FAILMEM_RESET`) only
- * when it COMPLETED: the executor's `verified` for a RETRIEVE means the
- * remaining distance to the target actually decreased. A vertical chunk or a
- * dug staircase step is durable `progressed`/`blockRemoved` evidence, never
- * completion - it must not reset the coordinate, and it must not be charged as
- * zero progress either.
+ * when it COMPLETED. The executor's `verified` for a RETRIEVE means only that
+ * the remaining distance decreased (or the target was entered); it is NOT
+ * completion. The caller supplies `retrieveCompleted` - the target actually
+ * arrived or the item was acquired (`retrieveCompleted` on the controller). A
+ * partial distance closure, a vertical chunk or a dug staircase step is durable
+ * `progressed`/`blockRemoved` evidence, never completion - it must not reset the
+ * coordinate, and it must not be charged as zero progress either.
  *
  * Live M2 boundary (RC 42cb46e, target 36,56,41): the old gate was
  * `hasObservableProgress` alone, so
  * `arrival targetDistance=11.26m->11.25m y=59.5->58 vertical=reuse`
  * reset the coordinate while PATH_CALLBACK stayed `outcome=stuck`, the
  * inventory never gained raw_iron and HOP_PLAN / JUMP_ATTEMPT looped forever.
+ * RC8 (run-mu8ue5dg-10amk) showed the same reset on a ~1 m closure of a 20 m
+ * approach (`21.69m->20.42m`, no station arrival).
  * A `done`/`verified=false`/`progressDelta=0` retrieve with no observable change
  * is the #78 loop and charges the coordinate so it is eventually skipped.
  */
 export function decideRetrieveMemory(
   result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>,
+  retrieveCompleted?: boolean,
 ): { reset: boolean; charge: boolean } {
   const completed = result.status === 'done' && result.verified
-  if (completed) return { reset: true, charge: false }
-  return { reset: false, charge: !hasObservableProgress(result) }
+  if (completed && (retrieveCompleted === undefined || retrieveCompleted)) return { reset: true, charge: false }
+  return { reset: false, charge: !completed && !hasObservableProgress(result) }
 }
 
 /**
@@ -2962,23 +2982,16 @@ export class JevController {
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
-        // Only a COMPLETED retrieval (arrival, a measured distance closure, or an
-        // obtained item / removed block) retires the active target and resets the
-        // coordinate failure memory. A vertical chunk or a staircase step is
-        // `progressed` evidence, NOT completion: clearing or resetting on it
-        // re-armed the live horizontal dead end (`outcome=stuck` +
-        // `MOVE_FAILMEM_RESET` forever).
-        if (truth.resetsFailureMemory) {
-          if (
-            shouldClearActiveRetrieval({
-              retrieval: candidate.meta.retrieval,
-              hasObservableProgress: hasObservableProgress(result),
-              arrived: retrieveArrived,
-            })
-          ) {
-            this.activeRetrieval = null
-            this.retrievalTrack = null
-          }
+        // Only a COMPLETED retrieval - the target actually arrived or the item
+        // was acquired - retires the active target and resets the coordinate
+        // failure memory. A measured distance closure or a vertical chunk is
+        // `progressed` evidence, NOT completion: RC8 (run-mu8ue5dg-10amk) closed
+        // ~1 m of a 20 m approach and still reset `MOVE_FAILMEM`, re-arming the
+        // live horizontal dead end (`outcome=stuck` + `MOVE_FAILMEM_RESET`).
+        const retrieveMemory = decideRetrieveMemory(result, this.retrieveCompleted(candidate, result))
+        if (truth.resetsFailureMemory && retrieveMemory.reset) {
+          this.activeRetrieval = null
+          this.retrievalTrack = null
           this.noteCandidateSuccess(result.actionId)
           this.recordMoveSuccess(candidate)
         } else if (!truth.replanProgress && !truth.observableProgress) {
@@ -4323,14 +4336,14 @@ export class JevController {
   }
 
   /**
-   * A known-resource RETRIEVE that produced no OBSERVABLE progress charges a
-   * per-resource counter. After KNOWN_RETRIEVE_RETIRE_LIMIT the resource is
-   * dropped as unreachable and removed from `signals.knownResources`, so the
-   * generator stops re-offering the same present-but-unreachable cell and the
-   * plan advances to the next resource or the branch-mine route instead of
+   * A known-resource RETRIEVE that did NOT complete (no arrival, no acquired
+   * item) charges a per-resource counter. After KNOWN_RETRIEVE_RETIRE_LIMIT the
+   * resource is dropped as unreachable and removed from `signals.knownResources`,
+   * so the generator stops re-offering the same present-but-unreachable cell and
+   * the plan advances to the next resource or the branch-mine route instead of
    * looping forever. `decideKnownRetrieve` owns the boundary; the executor's
-   * lenient `verified` flag is deliberately not trusted (a sub-metre nudge
-   * satisfies it - the live iron-ore loop).
+   * lenient `verified` flag is deliberately not trusted (a sub-metre nudge and a
+   * partial 20 m approach both satisfy it - the live iron-ore and RC8 loops).
    */
   private retireFailedKnownRetrieve(candidate: Candidate, result: ExecutionResult): void {
     if (candidate.meta.retrieval !== 'known' || candidate.target === null) return
@@ -4342,6 +4355,7 @@ export class JevController {
       target: candidate.target,
       result,
       previousAttempts: this.knownRetrieveFailures.get(key) ?? 0,
+      completed: this.retrieveCompleted(candidate, result),
     })
     if (decision.kind === 'ignore') return
     if (decision.kind === 'clear') {
@@ -4566,6 +4580,27 @@ export class JevController {
     if (candidate.target === null) return true
     const distance = this.retrievalDistance(candidate.target)
     return distance !== null && distance <= 2
+  }
+
+  /**
+   * Did a finished RETRIEVE actually COMPLETE: the target arrived or the item
+   * was acquired? This is the one gate for resetting failure memory and for
+   * retiring the per-resource counter. A measured distance closure or a bounded
+   * vertical chunk is durable `progressed` evidence, never completion - RC8
+   * (`run-mu8ue5dg-10amk`) closed ~1 m of a 20 m approach with a vertical body
+   * change and no arrival, which must not count. `shouldClearActiveRetrieval`
+   * already owns the known+progress+not-arrived boundary; the acquisition case
+   * is added here.
+   */
+  private retrieveCompleted(candidate: Candidate, result: ExecutionResult): boolean {
+    if (result.itemsGained > 0) return true
+    const arrived = this.retrievalArrived(candidate)
+    if (arrived) return true
+    return shouldClearActiveRetrieval({
+      retrieval: candidate.meta.retrieval,
+      hasObservableProgress: hasObservableProgress(result),
+      arrived,
+    })
   }
 
   /**
