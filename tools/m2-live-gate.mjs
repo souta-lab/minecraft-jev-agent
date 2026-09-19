@@ -1,25 +1,21 @@
 #!/usr/bin/env node
-// m2-live-gate: combine exact-run causal evidence with the resident inventory
-// acceptance for the SAME run. This is the close/no-close gate for the M2 path.
+// m2-live-gate: join exact-run historical M2 evidence with the terminal resident
+// inventory predicate for the SAME run.
 //
 // PASS requires BOTH:
-//   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
-//      the explicit resident runId; and
-//   2. the live resident M2 inventory contract observed while the resident still
-//      reports that same runId: charcoal >= 1 / iron_ingot >= 3 / iron_pickaxe >= 1.
+//   1. m2-watch proves, in order and under the explicit resident runId:
+//      PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE(charcoal)
+//      -> SMELT_DONE(iron_ingot); and
+//   2. m2-acceptance observes iron_pickaxe >= 1 while the resident still reports
+//      that same runId.
 //
-// The diamond-pickaxe terminal in MILESTONES.md is historical spec drift and is
-// deliberately NOT part of M2. It is owned by the SEPARATE M3 acceptance
-// (tools/m2-acceptance.mjs `M3_CRITERIA` / `runM3Acceptance`, CLI `--m3`),
-// which this gate never consults, so M2 and M3 cannot drift back into each
-// other.
+// Charcoal and iron ingots are consumable history, not terminal inventory facts.
+// Requiring them to coexist with the crafted pickaxe makes correct progression
+// erase its own evidence.
 //
-// `--since` remains useful for diagnosis in m2-watch, but is not a sufficient
-// join key for this close/no-close gate. An explicit --run (or M2_RUN_ID) is
-// required so causal and inventory evidence can never come from two lifetimes.
-//
-// Exit: 0 = PASS, 1 = FAIL (at least one known criterion failed),
-//       2 = UNKNOWN (no known failure, but evidence is unavailable/unreadable).
+// `--since` is diagnostic only. Exact --run (or M2_RUN_ID) is required for this
+// close/no-close join.
+// Exit: 0 PASS, 1 FAIL, 2 UNKNOWN.
 import { execFile } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -101,7 +97,6 @@ export function exactRunId(argv, env = process.env) {
   return RUN_ID_RE.test(runId) ? runId : null
 }
 
-/** Close/no-close acceptance requires an exact resident lifetime, not timestamp only. */
 export function hasRunScope(argv, env = process.env) {
   return exactRunId(argv, env) !== null
 }
@@ -132,17 +127,15 @@ export async function runGate({
   ])
 
   write(`M2_LIVE_GATE runId=${runId}`)
-  write('--- causal evidence (m2-watch) ---')
+  write('--- historical causal evidence (m2-watch) ---')
   if (watch.stdout.trim()) write(watch.stdout.trimEnd())
   if (watch.stderr.trim()) write(watch.stderr.trimEnd())
-  write('--- live inventory (m2-acceptance) ---')
+  write('--- terminal live inventory (m2-acceptance) ---')
   if (acceptance.stdout.trim()) write(acceptance.stdout.trimEnd())
   if (acceptance.stderr.trim()) write(acceptance.stderr.trimEnd())
 
   const result = combineEvidence(watch.code, acceptance.code)
-  write(
-    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code}`,
-  )
+  write(`M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code}`)
   return result.code
 }
 
