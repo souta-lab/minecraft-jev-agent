@@ -68,7 +68,7 @@ import {
   PILLAR_TAKEOFF_BUDGET_MS,
   PILLAR_TAKEOFF_POLL_MS,
 } from './pillarJump.ts'
-import type { SolidAt } from './pillarJump.ts'
+import type { PillarVerticalTrace, SolidAt } from './pillarJump.ts'
 import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 
 const { Movements, goals } = pathfinderModule
@@ -1760,12 +1760,19 @@ export class Executor {
           endControls: readControlState(this.bot),
           forcedRepositions: forcedTracker.value - forcedBefore,
         }
-        const emitPillarTakeoff = (peakRise: number, failureStep: string | null, failureReason: string | null) => {
-          const takeoff = buildPillarTakeoffTelemetry({ ...takeoffBase, peakRise, failureStep, failureReason })
+        const emitPillarTakeoff = (
+          peakRise: number,
+          failureStep: string | null,
+          failureReason: string | null,
+          verticalTrace?: PillarVerticalTrace,
+        ) => {
+          const takeoff = buildPillarTakeoffTelemetry({ ...takeoffBase, peakRise, failureStep, failureReason, verticalTrace })
           this.logger.info('agent', formatPillarTakeoffTelemetry(takeoff), {
             actionId: candidate.id,
             attemptId: takeoff.attemptId,
             horizontalLeak: takeoff.horizontalLeak,
+            takeoffDiscriminator: takeoff.takeoffDiscriminator,
+            traceGateFires: takeoff.traceGateFires,
           })
           return takeoff
         }
@@ -1778,6 +1785,7 @@ export class Executor {
             Math.max(0, endEntity.position.y - beforeY),
             climb.fail.step,
             climb.fail.reason,
+            climb.fail.trace,
           )
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
@@ -1842,7 +1850,7 @@ export class Executor {
           break
         }
         climbed += 1
-        emitPillarTakeoff(climb.apexRise, null, null)
+        emitPillarTakeoff(climb.apexRise, null, null, climb.trace)
         this.logger.info(
           'agent',
           formatPillarUpStep(climbed, Math.floor(beforeY), Math.floor(this.bot.entity.position.y), placeName),

@@ -12,7 +12,14 @@
 // `onGround=false` rubber-band - no live server.
 //
 //   npm run pillar-jump-test
-import { correctStandingOnGround, formatPillarUpStep, jumpWithGroundCorrection, TAKEOFF_RISE } from './src/pillarJump.ts'
+import {
+  correctStandingOnGround,
+  formatPillarUpStep,
+  jumpWithGroundCorrection,
+  PILLAR_TRACE_MAX_IMPULSES,
+  PILLAR_TRACE_MAX_TICKS,
+  TAKEOFF_RISE,
+} from './src/pillarJump.ts'
 import type { SolidAt } from './src/pillarJump.ts'
 
 interface CaseResult {
@@ -225,6 +232,105 @@ function heldPositionDeps(bot: ReturnType<typeof createHeldPositionBot>, isSolid
   }
 }
 
+/**
+ * Fake bot that reproduces the exact LIVE `no_rise` signature while modelling
+ * no clientbound `position` packet at all (the live run had forcedMove NEVER
+ * observed). The block-grid correction grounds the body every tick, the poll
+ * writes explicit impulses after 100 ms, and the move is blocked vertically by
+ * the support block, so `peakRise` stays 0 and `isCollidedVertically` stays
+ * true. The ONLY variable between the two modes is the jump gate:
+ *
+ *   - `gate_never_fired`        (A): `jumpTicks` is stuck above 0, so the
+ *                                    prismarine gate branch can never fire.
+ *   - `gate_fired_move_clamped` (B): the gate fires (0 -> 10) but the same
+ *                                    tick's move clamps the impulse to 0.
+ */
+function createClampedPillarBot(input: { mode: 'gate_never_fired' | 'gate_fired_move_clamped'; y?: number }) {
+  const startY = input.y ?? 10.5
+  const entity = {
+    position: { x: FEET_X + 0.5, y: startY, z: FEET_Z + 0.5 },
+    velocity: { x: 0, y: 0, z: 0 },
+    onGround: false,
+    isCollidedVertically: false,
+  }
+  const listeners = new Map<string, Set<() => void>>()
+  const emit = (event: string): void => {
+    for (const listener of listeners.get(event) ?? []) listener()
+  }
+  const controls: boolean[] = []
+  const stats = { ticks: 0, gateFires: 0, forcedMoves: 0 }
+  const bot = {
+    entity,
+    physicsEnabled: false,
+    // (A) pins the autojump cooldown above zero so the gate's `jumpTicks === 0`
+    // branch is unreachable even though the correction grounded the body.
+    jumpTicks: input.mode === 'gate_never_fired' ? 5 : 0,
+    setControlState(_control: 'jump', state: boolean): void {
+      controls.push(state)
+    },
+    clearControlStates(): void {},
+    on(event: string, listener: () => void): void {
+      const set = listeners.get(event) ?? new Set<() => void>()
+      set.add(listener)
+      listeners.set(event, set)
+    },
+    removeListener(event: string, listener: () => void): void {
+      listeners.get(event)?.delete(listener)
+    },
+    listenerCount(event: string): number {
+      return listeners.get(event)?.size ?? 0
+    },
+    stats,
+    jumpTransitions(): readonly boolean[] {
+      return controls
+    },
+    /**
+     * One prismarine-physics tick: gate (index.js:721-727), then the blocked
+     * move. The support block overlaps the body, so the vertical move is
+     * clamped every tick (`dy !== oldVelY` -> `vel.y = 0`,
+     * `isCollidedVertically = true`) regardless of the impulse.
+     */
+    tick(): void {
+      stats.ticks += 1
+      const jumpHeld = controls.length > 0 && controls[controls.length - 1] === true
+      if (jumpHeld && entity.onGround && bot.jumpTicks === 0) {
+        entity.velocity.y = Math.fround(0.42) // prismarine-physics index.js:726
+        bot.jumpTicks = 10
+        stats.gateFires += 1
+      } else if (jumpHeld && bot.jumpTicks > 0 && input.mode !== 'gate_never_fired') {
+        bot.jumpTicks -= 1
+      }
+      // moveEntity: gravity, then the overlap blocks the vertical move.
+      entity.velocity.y = (entity.velocity.y - 0.08) * 0.98
+      entity.position.y = startY
+      if (entity.velocity.y > 0) entity.velocity.y = 0
+      entity.isCollidedVertically = true
+      entity.onGround = false
+      emit('physicsTick')
+    },
+  }
+  return bot
+}
+
+/** Drives the clamped fake: a physics tick every 50 ms, NO position packet. */
+function clampedPillarDeps(bot: ReturnType<typeof createClampedPillarBot>, isSolid: SolidAt) {
+  let clock = 0
+  let lastTickAt = 0
+  return {
+    isSolid,
+    budgetMs: 600,
+    pollMs: 15,
+    sleep: async (ms: number): Promise<void> => {
+      clock += ms
+      while (clock - lastTickAt >= 50) {
+        lastTickAt += 50
+        bot.tick()
+      }
+    },
+    now: () => clock,
+  }
+}
+
 function runCase(testCase: Case): Promise<CaseResult> {
   return Promise.resolve(testCase.run())
 }
@@ -347,6 +453,65 @@ addCase('a real step emits the live marker sequence (PILLAR_UP_STEP step=1 ...)'
   const step = formatPillarUpStep(1, 10, 11, 'cobblestone')
   const pass = step === 'PILLAR_UP_STEP step=1 from_y=10 to_y=11 placed=cobblestone'
   return { pass, detail: step }
+})
+
+addCase('the live no_rise signature is discriminated: (A) gate never fired vs (B) gate fired then clamped', async () => {
+  // Both variants reproduce the exact live signature: physics ticks and explicit
+  // impulses, yet peakRise stays 0 and the move reports isCollidedVertically,
+  // with NO forcedMove. Only the vertical trace may tell them apart.
+  const gateNever = createClampedPillarBot({ mode: 'gate_never_fired' })
+  const gateClamped = createClampedPillarBot({ mode: 'gate_fired_move_clamped' })
+  const a = await jumpWithGroundCorrection(gateNever, clampedPillarDeps(gateNever, footingAt(9)))
+  const b = await jumpWithGroundCorrection(gateClamped, clampedPillarDeps(gateClamped, footingAt(9)))
+
+  const liveA =
+    !a.airborne &&
+    a.failure === 'no_rise' &&
+    a.impulses > 0 &&
+    a.ticks > 0 &&
+    a.peakRise === 0 &&
+    gateNever.entity.isCollidedVertically === true &&
+    gateNever.stats.forcedMoves === 0
+  const liveB =
+    !b.airborne &&
+    b.failure === 'no_rise' &&
+    b.impulses > 0 &&
+    b.ticks > 0 &&
+    b.peakRise === 0 &&
+    gateClamped.entity.isCollidedVertically === true &&
+    gateClamped.stats.forcedMoves === 0
+
+  const bGateSample = b.trace.tickSamples.find((s) => s.gateFired)
+  const aGateSample = a.trace.tickSamples.find((s) => s.gateFired)
+  const pass =
+    liveA &&
+    liveB &&
+    // (A): the gate was never observed to fire, and no tick shows a jumpTicks rise.
+    a.trace.discriminator === 'gate_never_fired' &&
+    a.trace.gateFires === 0 &&
+    aGateSample === undefined &&
+    a.trace.tickSamples.every((s) => !s.gateFired) &&
+    a.trace.impulseWrites === a.impulses &&
+    // (B): the gate fired (jumpTicks 0 -> 10) but the same tick's move clamped it.
+    b.trace.discriminator === 'gate_fired_move_clamped' &&
+    b.trace.gateFires >= 1 &&
+    b.trace.collidedVerticallyTicks > 0 &&
+    bGateSample !== undefined &&
+    bGateSample.jumpTicksBefore === 0 &&
+    bGateSample.jumpTicksAfter === 10 &&
+    bGateSample.collidedVerticallyAfter === true &&
+    bGateSample.positionYAfter === bGateSample.positionYBefore &&
+    b.trace.impulseWrites === b.impulses &&
+    b.trace.impulseSamples.every((s) => s.velocityY === Math.fround(0.42)) &&
+    // Both traces stay bounded.
+    a.trace.tickSamples.length <= PILLAR_TRACE_MAX_TICKS &&
+    b.trace.impulseSamples.length <= PILLAR_TRACE_MAX_IMPULSES
+  return {
+    pass,
+    detail:
+      `A(airborne=${a.airborne} reason=${a.failure} rise=${a.peakRise} ticks=${a.ticks} impulses=${a.impulses} disc=${a.trace.discriminator} gate=${a.trace.gateFires}) ` +
+      `B(airborne=${b.airborne} reason=${b.failure} rise=${b.peakRise} ticks=${b.ticks} impulses=${b.impulses} disc=${b.trace.discriminator} gate=${b.trace.gateFires} clamp=${b.trace.collidedVerticallyTicks} gateTick=${bGateSample === undefined ? 'none' : `${bGateSample.jumpTicksBefore}->${bGateSample.jumpTicksAfter}`})`,
+  }
 })
 
 let failures = 0

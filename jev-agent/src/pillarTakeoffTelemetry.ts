@@ -9,6 +9,13 @@
 //   `ControlStateLike` is the minimal shape this module needs. Mineflayer's
 //   `bot.controlState` satisfies it, and a fixture can satisfy it with a plain
 //   object literal, which is what makes the type boundary testable.
+//
+// Vertical trace (additive, m2-vertical-trace): an optional bounded per-tick
+// trace from `pillarJump.ts` is summarised here and encoded compactly, so the
+// PILLAR_TAKEOFF / PILLAR_FAIL records can name whether the jump gate never
+// fired or fired but the move was clamped. Absent trace => null/0 defaults.
+import { formatVerticalTraceCompact } from './pillarJump.ts'
+import type { PillarVerticalTrace } from './pillarJump.ts'
 
 /** Read-only, optional control state. Mineflayer's `controlState` satisfies this. */
 export interface ControlStateLike {
@@ -60,6 +67,8 @@ export interface PillarTakeoffTelemetryInput {
   endPosition: Position3
   forcedRepositions: number
   peakRise: number
+  /** bounded within-attempt vertical trace (observation only; optional) */
+  verticalTrace?: PillarVerticalTrace
   failureStep: string | null
   failureReason: string | null
 }
@@ -86,6 +95,20 @@ export interface PillarTakeoffTelemetry {
   endHorizontalSpeed: number
   /** true when horizontal velocity or forward control leaks during the attempt */
   horizontalLeak: boolean
+  /**
+   * Which mutually-exclusive takeoff cause the vertical trace supports:
+   * `gate_never_fired`, `gate_fired_move_clamped`, `rise_observed`,
+   * `no_physics_tick`, `inconclusive`; null when no trace was supplied.
+   */
+  takeoffDiscriminator: string | null
+  traceTicks: number
+  traceGateFires: number
+  traceCollidedVerticallyTicks: number
+  traceImpulseWrites: number
+  traceMaxVelocityYAfterTick: number
+  traceMaxRise: number
+  /** compact bounded one-line trace; null when no trace was supplied */
+  verticalTrace: string | null
 }
 
 /**
@@ -137,6 +160,14 @@ export function buildPillarTakeoffTelemetry(input: PillarTakeoffTelemetryInput):
     launchHorizontalSpeed,
     endHorizontalSpeed,
     horizontalLeak,
+    takeoffDiscriminator: input.verticalTrace?.discriminator ?? null,
+    traceTicks: input.verticalTrace?.ticksObserved ?? 0,
+    traceGateFires: input.verticalTrace?.gateFires ?? 0,
+    traceCollidedVerticallyTicks: input.verticalTrace?.collidedVerticallyTicks ?? 0,
+    traceImpulseWrites: input.verticalTrace?.impulseWrites ?? 0,
+    traceMaxVelocityYAfterTick: input.verticalTrace?.maxVelocityYAfterTick ?? 0,
+    traceMaxRise: input.verticalTrace?.maxRise ?? 0,
+    verticalTrace: input.verticalTrace === undefined ? null : formatVerticalTraceCompact(input.verticalTrace),
   }
 }
 
@@ -148,6 +179,8 @@ export function formatPillarTakeoffTelemetry(t: PillarTakeoffTelemetry): string 
     ` endVel=${t.endVelocityX},${t.endVelocityY},${t.endVelocityZ}` +
     ` forward=${String(t.forwardState)} jump=${String(t.jumpState)}` +
     ` forcedRepositions=${t.forcedRepositions} peakRise=${t.peakRise}` +
-    ` horizontalLeak=${String(t.horizontalLeak)}`
+    ` horizontalLeak=${String(t.horizontalLeak)}` +
+    ` discriminator=${t.takeoffDiscriminator ?? 'none'}` +
+    (t.verticalTrace === null ? '' : ` trace=${t.verticalTrace}`)
   )
 }

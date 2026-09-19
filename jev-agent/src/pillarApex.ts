@@ -13,7 +13,7 @@
 // and reports the failed one as `PILLAR_FAIL step=...`, so a consumed item can
 // never again read as an unattributed no-progress action.
 import { jumpWithGroundCorrection } from './pillarJump.ts'
-import type { JumpBotLike, PillarJumpDeps, Vec3Like } from './pillarJump.ts'
+import type { JumpBotLike, PillarJumpDeps, PillarVerticalTrace, Vec3Like } from './pillarJump.ts'
 
 /**
  * The apex window. A verified vertex needs all three: a rise of at least
@@ -40,6 +40,12 @@ export interface PillarFail {
   rise: number
   samples: number
   detail?: string
+  /**
+   * Bounded within-attempt vertical trace, present on a takeoff failure so the
+   * two mutually-exclusive live causes (gate never fired vs gate fired but the
+   * move clamped) can be discriminated. Observation only.
+   */
+  trace?: PillarVerticalTrace
 }
 
 /**
@@ -89,7 +95,7 @@ export interface PillarStepUpDeps extends PillarJumpDeps {
 }
 
 export type PillarStepOutcome =
-  | { ok: true; fromY: number; toY: number; apexRise: number; samples: number }
+  | { ok: true; fromY: number; toY: number; apexRise: number; samples: number; trace?: PillarVerticalTrace }
   | { ok: false; fail: PillarFail }
 
 /**
@@ -128,12 +134,18 @@ export async function pillarStepUp(
 
   const jump = await jumpWithGroundCorrection(bot, deps)
   if (!jump.airborne) {
-    return fail(
-      'takeoff',
-      jump.failure ?? 'no_rise',
-      jump.samples,
-      `ticks=${jump.ticks} impulses=${jump.impulses} peakRise=${round2(jump.peakRise)}`,
-    )
+    return {
+      ok: false,
+      fail: {
+        step: 'takeoff',
+        reason: jump.failure ?? 'no_rise',
+        y: bot.entity.position.y,
+        rise: bot.entity.position.y - launchY,
+        samples: jump.samples,
+        detail: `ticks=${jump.ticks} impulses=${jump.impulses} peakRise=${round2(jump.peakRise)}`,
+        trace: jump.trace,
+      },
+    }
   }
 
   deps.ensureOwned?.()
@@ -199,6 +211,7 @@ export async function pillarStepUp(
         toY: y,
         apexRise,
         samples: jump.samples + apexSamples + placeSamples + landingSamples,
+        trace: jump.trace,
       }
     }
     await deps.sleep(deps.pollMs)

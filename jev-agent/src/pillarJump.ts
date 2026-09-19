@@ -39,6 +39,8 @@ export interface JumpEntityLike {
   position: { x: number; y: number; z: number }
   velocity: { y: number }
   onGround: boolean
+  /** prismarine-physics sets this when the tick's move was blocked vertically. */
+  isCollidedVertically?: boolean
 }
 
 /** The bot slice a jump needs: physics toggle, jump control, physicsTick. */
@@ -48,6 +50,14 @@ export interface JumpBotLike {
   setControlState(control: 'jump', state: boolean): void
   /** Clear a stale horizontal/pathfinder push before a pure vertical hop. */
   clearControlStates?: () => void
+  /**
+   * prismarine-physics autojump cooldown (mineflayer `bot.jumpTicks`). The ONLY
+   * code that INCREASES it is the jump-fire branch (`entity.jumpTicks =
+   * physics.autojumpCooldown`), so a per-tick increase is a sound, purely
+   * observable signal that the jump gate fired. Optional so structural fakes
+   * that do not model the cooldown stay assignable.
+   */
+  jumpTicks?: number
   /**
    * `physicsTick` observes the physics loop. `forcedMove` is emitted by
    * mineflayer's clientbound `position` handler AFTER it resets
@@ -88,6 +98,17 @@ export const PILLAR_TAKEOFF_IMPULSE_INTERVAL_MS = 50
 export const JUMP_IMPULSE_VY = Math.fround(0.42)
 
 /**
+ * Bounds on the observation-only vertical trace. The bounded takeoff window is
+ * ~12 physics ticks (600 ms at 20 Hz), so 24 keeps the whole live attempt while
+ * capping a pathological loop. The impulse interval is 50 ms, so 12 is a full
+ * window. Caps mean the trace can never bloat the run log.
+ */
+export const PILLAR_TRACE_MAX_TICKS = 24
+export const PILLAR_TRACE_MAX_IMPULSES = 12
+/** Hard cap on the compact one-line encoding so a single record stays small. */
+export const PILLAR_TRACE_MAX_LINE = 1600
+
+/**
  * Patch mineflayer's stale `onGround` flag from the block grid. The feet cell
  * (a partial mount such as a slab or snow layer lives in it) or the cell below
  * must be a full solid block - the same contiguous scan `resolvePillarStep`
@@ -108,16 +129,21 @@ export function correctStandingOnGround(bot: { entity: JumpEntityLike }, isSolid
  * Install the correction on every physicsTick; the returned function removes
  * it. `onTick` observes the physics loop itself (`grounded` is the correction
  * verdict), so a caller can tell "the loop never ran" from "the loop ran but
- * the body never left the ground".
+ * the body never left the ground". `afterMoveOnGround` is `entity.onGround` as
+ * the completed `simulatePlayer` left it, captured BEFORE this callback's
+ * correction overwrites it (observation only). `onForcedMoveGround` observes
+ * the correction that follows a clientbound position reset.
  */
 export function installGroundCorrection(
   bot: JumpBotLike,
   isSolid: SolidAt,
-  onTick?: (grounded: boolean) => void,
+  onTick?: (grounded: boolean, afterMoveOnGround: boolean) => void,
+  onForcedMoveGround?: (grounded: boolean) => void,
 ): () => void {
   const onPhysicsTick = (): void => {
+    const afterMoveOnGround = bot.entity.onGround
     const grounded = correctStandingOnGround(bot, isSolid)
-    onTick?.(grounded)
+    onTick?.(grounded, afterMoveOnGround)
   }
   // A clientbound `position` packet resets `onGround = false` and zeroes the
   // velocity, then emits `forcedMove` (physics.js position handler). It can
@@ -126,7 +152,8 @@ export function installGroundCorrection(
   // `setControlState('jump')` stays a silent no-op. Re-ground on the packet
   // event too; this does not count as a physics tick.
   const onForcedMove = (): void => {
-    correctStandingOnGround(bot, isSolid)
+    const grounded = correctStandingOnGround(bot, isSolid)
+    onForcedMoveGround?.(grounded)
   }
   bot.on('physicsTick', onPhysicsTick)
   bot.on('forcedMove', onForcedMove)
@@ -149,6 +176,91 @@ export interface PillarJumpDeps {
 /** Why the takeoff could not be verified. */
 export type TakeoffFailure = 'no_physics_tick' | 'no_support' | 'no_rise'
 
+/**
+ * One physics tick of the vertical takeoff trace. Every field is read from
+ * observable client state; nothing here is written to the bot.
+ */
+export interface PillarVerticalTickSample {
+  /** 1-based physicsTick index within the attempt */
+  tick: number
+  /**
+   * `entity.onGround` as presented to the jump gate at the start of this tick.
+   * The gate reads the flag BEFORE the tick's move, so this is the value
+   * left by the previous tick's correction / packet observer (or by the pre-jump
+   * correction for tick 1).
+   */
+  onGroundAtGate: boolean
+  /** `entity.onGround` right after the completed move, before re-grounding */
+  onGroundAfterMove: boolean
+  jumpTicksBefore: number
+  jumpTicksAfter: number
+  /**
+   * True when `jumpTicks` increased across this tick. The only code that
+   * increases it is the prismarine-physics jump-fire branch (0 -> autojumpCooldown),
+   * so this is the sound, observable proof that the gate fired - even when the
+   * move that follows immediately clamps the impulse back to 0.
+   */
+  gateFired: boolean
+  velocityYBefore: number
+  velocityYAfter: number
+  positionYBefore: number
+  positionYAfter: number
+  /** `entity.isCollidedVertically` after the tick's move */
+  collidedVerticallyAfter: boolean
+}
+
+/** One explicit post-race vanilla impulse written by the polling loop. */
+export interface PillarImpulseSample {
+  /** physicsTick index the impulse was written after */
+  tick: number
+  /** the exact `velocity.y` written */
+  velocityY: number
+}
+
+/**
+ * The mutually-exclusive cause the traced attempt supports.
+ *  - `no_physics_tick`: the loop never ran, so nothing can be discriminated.
+ *  - `gate_never_fired`: no tick shows a `jumpTicks` increase.
+ *  - `gate_fired_move_clamped`: the gate fired, but the same tick's move blocked
+ *    the rise (collision/overlap with the support block).
+ *  - `rise_observed`: a tick shows the gate fired AND the body rose.
+ *  - `inconclusive`: the gate fired but neither clamp nor rise was observed.
+ */
+export type PillarVerticalDiscriminator =
+  | 'no_physics_tick'
+  | 'gate_never_fired'
+  | 'gate_fired_move_clamped'
+  | 'rise_observed'
+  | 'inconclusive'
+
+/**
+ * Bounded, observation-only per-tick vertical trace of one takeoff attempt.
+ * Sized so a PILLAR_FAIL record stays small: at most `PILLAR_TRACE_MAX_TICKS`
+ * tick samples and `PILLAR_TRACE_MAX_IMPULSES` impulse samples.
+ */
+export interface PillarVerticalTrace {
+  tickSamples: PillarVerticalTickSample[]
+  impulseSamples: PillarImpulseSample[]
+  /** physicsTick events observed during the attempt */
+  ticksObserved: number
+  /** ticks whose `jumpTicks` increased (gate fires) */
+  gateFires: number
+  /** ticks whose move reported `isCollidedVertically` */
+  collidedVerticallyTicks: number
+  /** explicit vanilla impulses written by the polling loop */
+  impulseWrites: number
+  /** highest `velocity.y` seen after a tick (0 when the loop never ran) */
+  maxVelocityYAfterTick: number
+  /** highest rise after a tick, in blocks */
+  maxRise: number
+  /** tick samples dropped once the cap was reached */
+  tickSamplesDropped: number
+  /** impulse samples dropped once the cap was reached */
+  impulseSamplesDropped: number
+  /** which of the two mutually-exclusive live causes the trace supports */
+  discriminator: PillarVerticalDiscriminator
+}
+
 export interface PillarJumpOutcome {
   /** true only when a POSITION rise proves the body left the ground */
   airborne: boolean
@@ -162,6 +274,8 @@ export interface PillarJumpOutcome {
   impulses: number
   /** why takeoff failed; null once airborne */
   failure: TakeoffFailure | null
+  /** bounded within-attempt vertical trace (observation only, additive) */
+  trace: PillarVerticalTrace
 }
 
 /**
@@ -187,27 +301,90 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
   let ticks = 0
   let impulses = 0
   let lastImpulseAt = Number.NEGATIVE_INFINITY
+  // Observation-only vertical trace state. `gateOnGround` tracks the flag value
+  // the NEXT jump-gate read will see: it is refreshed at every correction point,
+  // including the `forcedMove` observer that re-grounds after a clientbound
+  // reset. The `prev*` values are the last observed pre-tick state.
+  const tickSamples: PillarVerticalTickSample[] = []
+  const impulseSamples: PillarImpulseSample[] = []
+  let tickSamplesDropped = 0
+  let impulseSamplesDropped = 0
+  let gateFires = 0
+  let collidedVerticallyTicks = 0
+  let impulseWrites = 0
+  let clampedAfterGateTicks = 0
+  let maxVelocityYAfterTick = Number.NEGATIVE_INFINITY
+  let maxRise = 0
+  let gateOnGround = bot.entity.onGround
+  let prevVelocityY = bot.entity.velocity.y
+  let prevPositionY = bot.entity.position.y
+  let prevJumpTicks = bot.jumpTicks ?? 0
+  const recordTick = (grounded: boolean, afterMoveOnGround: boolean): void => {
+    ticks += 1
+    groundedOnce = groundedOnce || grounded
+    const jumpTicksAfter = bot.jumpTicks ?? prevJumpTicks
+    const gateFired = jumpTicksAfter > prevJumpTicks
+    const velocityYAfter = bot.entity.velocity.y
+    const positionYAfter = bot.entity.position.y
+    const collidedVerticallyAfter = bot.entity.isCollidedVertically === true
+    if (gateFired) gateFires += 1
+    if (collidedVerticallyAfter) collidedVerticallyTicks += 1
+    if (gateFired && collidedVerticallyAfter) clampedAfterGateTicks += 1
+    if (velocityYAfter > maxVelocityYAfterTick) maxVelocityYAfterTick = velocityYAfter
+    const rise = positionYAfter - startY
+    if (rise > maxRise) maxRise = rise
+    const sample: PillarVerticalTickSample = {
+      tick: ticks,
+      onGroundAtGate: gateOnGround,
+      onGroundAfterMove: afterMoveOnGround,
+      jumpTicksBefore: prevJumpTicks,
+      jumpTicksAfter,
+      gateFired,
+      velocityYBefore: prevVelocityY,
+      velocityYAfter,
+      positionYBefore: prevPositionY,
+      positionYAfter,
+      collidedVerticallyAfter,
+    }
+    if (tickSamples.length < PILLAR_TRACE_MAX_TICKS) tickSamples.push(sample)
+    else tickSamplesDropped += 1
+    gateOnGround = bot.entity.onGround
+    prevVelocityY = velocityYAfter
+    prevPositionY = positionYAfter
+    prevJumpTicks = jumpTicksAfter
+  }
   // Leaf rejects a jump packet that still carries a blocked horizontal push.
   // PILLAR_UP is a pure vertical actuator; a prior pathfinder/control-walk
   // action must not leak `forward`/`back`/strafe into its takeoff.
   bot.clearControlStates?.()
   // Same correction as the control walk, kept for the whole attempt so a
   // clientbound position packet cannot reset onGround between two ticks.
-  const uninstall = installGroundCorrection(bot, deps.isSolid, (grounded) => {
-    ticks += 1
-    groundedOnce = groundedOnce || grounded
-  })
+  const uninstall = installGroundCorrection(
+    bot,
+    deps.isSolid,
+    (grounded, afterMoveOnGround) => recordTick(grounded, afterMoveOnGround),
+    () => {
+      // The packet zeroed velocity and reset onGround; the forcedMove correction
+      // has just re-ground the body, so refresh what the next gate/move reads.
+      gateOnGround = bot.entity.onGround
+      prevVelocityY = bot.entity.velocity.y
+      prevPositionY = bot.entity.position.y
+      prevJumpTicks = bot.jumpTicks ?? 0
+    },
+  )
   bot.physicsEnabled = true
   try {
     // Ground the body before the jump control is set: the next physics tick
     // reads `entity.onGround` and applies `velocity.y = 0.42`.
     groundedNow = correctStandingOnGround(bot, deps.isSolid)
     groundedOnce = groundedOnce || groundedNow
+    gateOnGround = bot.entity.onGround
     bot.setControlState('jump', true)
     const deadline = startedAt + deps.budgetMs
     while (deps.now() < deadline) {
       groundedNow = correctStandingOnGround(bot, deps.isSolid)
       groundedOnce = groundedOnce || groundedNow
+      gateOnGround = bot.entity.onGround
       samples += 1
       const rise = bot.entity.position.y - startY
       if (rise > peakRise) peakRise = rise
@@ -225,7 +402,12 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
       ) {
         bot.entity.velocity.y = JUMP_IMPULSE_VY
         impulses += 1
+        impulseWrites += 1
+        const impulseSample: PillarImpulseSample = { tick: ticks, velocityY: JUMP_IMPULSE_VY }
+        if (impulseSamples.length < PILLAR_TRACE_MAX_IMPULSES) impulseSamples.push(impulseSample)
+        else impulseSamplesDropped += 1
         lastImpulseAt = now
+        prevVelocityY = JUMP_IMPULSE_VY
       }
       await deps.sleep(deps.pollMs)
     }
@@ -241,7 +423,62 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
       : !groundedOnce
         ? 'no_support'
         : 'no_rise'
-  return { airborne, peakRise, samples, ticks, impulses, failure }
+  const discriminator: PillarVerticalDiscriminator =
+    ticks === 0
+      ? 'no_physics_tick'
+      : gateFires === 0
+        ? 'gate_never_fired'
+        : airborne
+          ? 'rise_observed'
+          : clampedAfterGateTicks > 0
+            ? 'gate_fired_move_clamped'
+            : 'inconclusive'
+  const trace: PillarVerticalTrace = {
+    tickSamples,
+    impulseSamples,
+    ticksObserved: ticks,
+    gateFires,
+    collidedVerticallyTicks,
+    impulseWrites,
+    maxVelocityYAfterTick: ticks === 0 ? 0 : maxVelocityYAfterTick,
+    maxRise,
+    tickSamplesDropped,
+    impulseSamplesDropped,
+    discriminator,
+  }
+  return { airborne, peakRise, samples, ticks, impulses, failure, trace }
+}
+
+/** Three-decimal rounding for the compact trace line. */
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000
+}
+
+/**
+ * Compact, bounded one-line encoding of a vertical trace for the mirrored
+ * markers. The per-tick body is capped by `PILLAR_TRACE_MAX_LINE` so even a
+ * pathological loop cannot bloat a single log record.
+ */
+export function formatVerticalTraceCompact(trace: PillarVerticalTrace): string {
+  const head =
+    `disc=${trace.discriminator} ticks=${trace.ticksObserved} gate=${trace.gateFires}` +
+    ` clamp=${trace.collidedVerticallyTicks} imp=${trace.impulseWrites}` +
+    ` maxVy=${round3(trace.maxVelocityYAfterTick)} maxRise=${round3(trace.maxRise)}`
+  let body = ''
+  for (const s of trace.tickSamples) {
+    const part =
+      `${s.tick}:og${s.onGroundAtGate ? 1 : 0}${s.onGroundAfterMove ? 1 : 0}` +
+      ` jt${s.jumpTicksBefore}>${s.jumpTicksAfter} g${s.gateFired ? 1 : 0}` +
+      ` vy${round3(s.velocityYBefore)}>${round3(s.velocityYAfter)}` +
+      ` py${round3(s.positionYBefore)}>${round3(s.positionYAfter)}` +
+      ` cv${s.collidedVerticallyAfter ? 1 : 0}`
+    if (body.length + part.length + 1 > PILLAR_TRACE_MAX_LINE) {
+      body += ' +more'
+      break
+    }
+    body += (body.length === 0 ? '' : ' ') + part
+  }
+  return `${head} | ${body}`
 }
 
 /** One line per real PILLAR_UP step: the live proof the climb started. */
