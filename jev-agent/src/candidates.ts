@@ -2214,6 +2214,36 @@ function hasLogInInventory(state: WorldState): boolean {
 }
 
 /**
+ * Total held furnace-fuel units, mirroring `planner.ts#goalHave` for a
+ * `log`/`planks`/`fuel` goal (`countClass(counts, 'fuel') - stick`). A single
+ * held log is NOT enough for a `collect 2 x log (fuel)` goal, so the fuel guard
+ * must compare against the goal's required count instead of merely "any fuel
+ * present" - the live stall held `oak_log:1`, the head goal was skipped, and the
+ * generator leaked the queued `collect 3 x raw_iron` need into
+ * `RETRIEVE:known:raw_iron` from the very first action.
+ */
+function heldFuelUnits(state: WorldState): number {
+  let total = 0
+  for (const [name, count] of Object.entries(state.inventory.counts)) {
+    if (count <= 0 || name === 'stick') continue
+    if (matchesResourceClass(name, 'fuel')) total += count
+  }
+  return total
+}
+
+/**
+ * Does a fuel goal's own required count already hold? For a `collect N x log
+ * (fuel)` goal the requirement is N fuel units. A smelt goal's fuel predicate is
+ * not a count on the goal itself, so callers keep the historical "any held fuel
+ * satisfies the trip" rule for those (see `retrievalNeeds`).
+ */
+function fuelGoalCountReached(state: WorldState, goal: { requiredCount?: number | null } | null): boolean {
+  if (goal === null) return false
+  const required = Math.max(1, Math.floor(goal.requiredCount ?? 1))
+  return heldFuelUnits(state) >= required
+}
+
+/**
  * Issue #14: the ordered list of items the body actually needs next - the
  * current subgoal first, then the queued goals. A `collect cobblestone (descend
  * toward ore levels)` proxy must not hide the real need (raw_iron) when a
@@ -2224,19 +2254,32 @@ function hasLogInInventory(state: WorldState): boolean {
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
-  const needs: Array<{ item: string; fuel: boolean }> = []
-  const push = (item: string | null | undefined, fuel: boolean): void => {
+  // A fuel need may only be dropped when the goal that owns it is actually
+  // satisfied. `fuelNeedSatisfiedByInventory` answers "is ANY fuel held", which
+  // is correct for a smelt's fuel predicate but WRONG for a `collect N x log
+  // (fuel)` goal carrying its own required count: `oak_log:1` satisfied a
+  // `collect 2 x log (fuel)` head and the generator skipped straight to a
+  // queued `collect 3 x raw_iron` need, emitting `RETRIEVE:known:raw_iron` from
+  // the first action of the live run. For a fuel-collect goal compare the held
+  // fuel units against requiredCount; smelt goals keep the historical rule.
+  const needs: Array<{ item: string; fuel: boolean; countReached: boolean }> = []
+  const push = (
+    item: string | null | undefined,
+    fuel: boolean,
+    owner: { kind?: string; description?: string; targetItem?: string | null; requiredCount?: number | null } | null,
+  ): void => {
     if (typeof item !== 'string' || item.length === 0 || needs.some((need) => need.item === item)) return
-    needs.push({ item, fuel })
+    const countReached = goalCollectsFuel(owner) ? fuelGoalCountReached(state, owner) : true
+    needs.push({ item, fuel, countReached })
   }
-  push(focusItem, goalWantsFuel(current))
+  push(focusItem, goalWantsFuel(current), current)
   if (current?.kind !== 'smelt') {
-    push(state.goal.targetItem, goalWantsFuel(current))
-    for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued))
+    push(state.goal.targetItem, goalWantsFuel(current), current)
+    for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued), queued)
   }
   const wants: RetrievalWant[] = []
   for (const need of needs) {
-    if (need.fuel && fuelNeedSatisfiedByInventory(state, need.item)) continue
+    if (need.fuel && need.countReached && fuelNeedSatisfiedByInventory(state, need.item)) continue
     const want = retrievalWant(need.item)
     if (want !== null) wants.push(want)
     if (wants.length >= RETRIEVAL_NEED_CAP) break

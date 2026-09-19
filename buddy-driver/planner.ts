@@ -168,11 +168,17 @@ export function smeltPriorityGoal(counts: Counts): PlannedGoal | null {
   if (missing <= 0) return null
   if ((counts['raw_iron'] ?? 0) < missing) return null
   if (findInventoryFuel(counts) === null) return null
+  // `requiredCount` is the TOTAL target, never the shortfall. Every consumer of
+  // a smelt goal treats it as the total: `goalAlreadyMet` compares the held
+  // count against it, `smeltPreconditions`/`successForGoal` compile it into
+  // `inventoryAtLeast iron_ingot count`, and `smeltCandidates` derives the batch
+  // as `requiredCount - haveOutput`. Encoding the shortfall here made a bot with
+  // 2 ingots read as "already met" and the third ingot was never smelted.
   return {
     kind: 'smelt',
-    description: `smelt ${missing} x iron_ingot`,
+    description: 'smelt 3 x iron_ingot',
     targetItem: 'iron_ingot',
-    requiredCount: missing,
+    requiredCount: 3,
   }
 }
 
@@ -349,19 +355,25 @@ export const RUNGS: readonly Rung[] = [
   {
     id: 'raw_iron',
     satisfied: (c) => (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 3,
-    goals: (c) => [
+    // `requiredCount` is the TOTAL target (3), matching the description and
+    // `goalHave`/`successForGoal`. The old `3 - held` shortfall made
+    // `goalAlreadyMet` read 2 held against required 1 and skip the goal while the
+    // rung was still UNSATISFIED: the third ore was never collected.
+    goals: () => [
       {
         kind: 'collect',
         description: 'collect 3 x raw_iron',
         targetItem: 'raw_iron',
-        requiredCount: Math.max(1, 3 - ((c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0))),
+        requiredCount: 3,
       },
     ],
   },
   {
     id: 'iron_ingot',
     satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3,
-    goals: (c) => [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: Math.max(1, 3 - (c['iron_ingot'] ?? 0)) }],
+    // Same total-vs-shortfall bug as the raw_iron rung: with 2 ingots held this
+    // compiled a required count of 1, so the third smelt was skipped entirely.
+    goals: () => [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }],
   },
   {
     id: 'iron_pickaxe',

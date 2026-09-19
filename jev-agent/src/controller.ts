@@ -589,6 +589,29 @@ export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRet
   return retire ? { kind: 'retire', attempts } : { kind: 'charge', attempts }
 }
 
+/**
+ * May a finished RETRIEVE clear the controller's active-retrieval stall track?
+ *
+ * A known remembered resource that reported a body change but did NOT arrive
+ * must keep the track alive: the existing distance/altitude stall assertion
+ * (`observeRetrievalStall`, RETRIEVAL_STALL_TICKS) is the only thing that
+ * retires a horizontal dead end once `hasObservableProgress` is true from a
+ * vertical chunk. Clearing on that chunk re-armed the live
+ * `RETRIEVE:known:raw_iron` loop: `PATH_CALLBACK ... outcome=stuck` followed by
+ * `verified=true status=done` and `MOVE_FAILMEM_RESET`, forever. Surface
+ * (explore) retrieves and known retrieves that actually arrived keep the old
+ * clear behaviour.
+ */
+export function shouldClearActiveRetrieval(input: {
+  retrieval: unknown
+  hasObservableProgress: boolean
+  arrived: boolean
+}): boolean {
+  if (!input.hasObservableProgress) return false
+  if (input.retrieval !== 'known') return true
+  return input.arrived
+}
+
 function resourceKey(resource: { name: string; position: Vec3Json }): string {
   return `${resource.name}@${resource.position.x},${resource.position.y},${resource.position.z}`
 }
@@ -2820,8 +2843,20 @@ export class JevController {
         // The executor reports `verified=true` for a sub-metre nudge, so clearing
         // on that would disarm the stall assertion before it can ever fire.
         if (hasObservableProgress(result)) {
-          this.activeRetrieval = null
-          this.retrievalTrack = null
+          // A known resource that reported a body change but did NOT arrive keeps
+          // the stall track alive (`shouldClearActiveRetrieval`): a vertical or
+          // pillar chunk is not arrival, and clearing on it re-armed the live
+          // horizontal dead end (`outcome=stuck` + `MOVE_FAILMEM_RESET` forever).
+          if (
+            shouldClearActiveRetrieval({
+              retrieval: candidate.meta.retrieval,
+              hasObservableProgress: true,
+              arrived: this.retrievalArrived(candidate),
+            })
+          ) {
+            this.activeRetrieval = null
+            this.retrievalTrack = null
+          }
           this.noteCandidateSuccess(result.actionId)
           this.recordMoveSuccess(candidate)
         } else {
@@ -4390,6 +4425,18 @@ export class JevController {
     const entity = this.bot.entity
     if (target === null || entity === undefined) return null
     return Math.round(Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z))
+  }
+
+  /**
+   * Did a known-resource RETRIEVE actually reach its target? `pathToNear` aims
+   * for 2 blocks, so a coordinate still further than that is a miss even when the
+   * executor reported `verified=true` from a vertical chunk. Pure callers use
+   * `shouldClearActiveRetrieval`; this only measures the live body.
+   */
+  private retrievalArrived(candidate: Candidate): boolean {
+    if (candidate.target === null) return true
+    const distance = this.retrievalDistance(candidate.target)
+    return distance !== null && distance <= 2
   }
 
   /**

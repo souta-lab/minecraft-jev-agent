@@ -17,6 +17,7 @@
     "smelt-priority-test": "tsx test-smelt-priority.mts",
     "m2-fuel-pickaxe-test": "tsx test-m2-fuel-and-pickaxe.mts",
     "furnace-prereq-gate-test": "tsx test-furnace-prereq-gate.mts",
+    "m2-in-run-completion-test": "tsx test-m2-in-run-completion.mts",
     "reachability-test": "tsx test-reachability.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
