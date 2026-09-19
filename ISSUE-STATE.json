@@ -48,11 +48,11 @@
     "136": {
       "acceptanceClass": "architecture-surface-contract",
       "policy": "defined",
-      "implementation": "none",
+      "implementation": "landed",
       "verification": "offline",
       "observation": "not-run",
-      "compliance": "fail",
-      "note": "Static inspection of current main confirms planner, controller, and OptionSpec disagree: a vertical targetY is treated as surface success, while the planner description also requires a log. No live acceptance is claimed."
+      "compliance": "unknown",
+      "note": "The landed fix uses a code-owned levelAtLeast predicate plus explicit log inventory for recovery; planner/controller/OptionSpec agree and offline fixtures pass. No live return-recovery run has been exercised, so compliance remains UNKNOWN."
     },
     "3": {
       "acceptanceClass": "resident-restart-live",
