@@ -84,10 +84,22 @@ const endOnlyLeak = buildPillarTakeoffTelemetry(
     endVelocity: { x: 0.05, y: -0.155, z: 0 },
   }),
 )
+// Control leakage that only appears at the END of the attempt must also be
+// classified, otherwise the flag would contradict the emitted endForwardState.
+const endForwardLeak = buildPillarTakeoffTelemetry(
+  attempt({
+    attemptId: makePillarAttemptId(candidateId, epoch, 4),
+    launchVelocity: { x: 0, y: 0.42, z: 0 },
+    launchControls: { forward: false, jump: true },
+    endVelocity: { x: 0, y: -0.155, z: 0 },
+    endControls: { forward: true, jump: false },
+  }),
+)
 
 console.log(`  leaky  horizontalLeak=${leaky.horizontalLeak} launchHorizontalSpeed=${leaky.launchHorizontalSpeed}`)
 console.log(`  clean  horizontalLeak=${clean.horizontalLeak} launchHorizontalSpeed=${clean.launchHorizontalSpeed}`)
 console.log(`  endOnly horizontalLeak=${endOnlyLeak.horizontalLeak} endHorizontalSpeed=${endOnlyLeak.endHorizontalSpeed}`)
+console.log(`  endForward horizontalLeak=${endForwardLeak.horizontalLeak} endForwardState=${endForwardLeak.endForwardState}`)
 
 assert.equal(leaky.horizontalLeak, true, 'horizontal velocity + forward control at launch must classify as a leak')
 ok('horizontalLeak=true for the leaky simulated takeoff attempt')
@@ -105,6 +117,9 @@ assert.equal(clean.endHorizontalSpeed, 0, 'clean end speed must be exactly zero'
 
 assert.equal(endOnlyLeak.horizontalLeak, true, 'residual end horizontal velocity must classify as a leak')
 ok('horizontalLeak=true when only the END velocity leaks horizontally')
+assert.equal(endForwardLeak.horizontalLeak, true, 'an active forward control at the end must classify as a leak')
+assert.equal(endForwardLeak.endForwardState, true, 'endForwardState must be reported alongside the flag')
+ok('horizontalLeak=true when the forward control only leaks at the END of the attempt')
 
 // ---------------------------------------------------------------- every output field
 

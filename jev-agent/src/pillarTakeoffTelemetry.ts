@@ -84,7 +84,7 @@ export interface PillarTakeoffTelemetry {
   launchHorizontalSpeed: number
   /** horizontal speed at the end of the attempt (hypothesis variable) */
   endHorizontalSpeed: number
-  /** true when horizontal velocity/control leakage exists at takeoff */
+  /** true when horizontal velocity or forward control leaks during the attempt */
   horizontalLeak: boolean
 }
 
@@ -109,10 +109,15 @@ export function readControlState(bot: ControlStateLike): ControlSnapshot {
 export function buildPillarTakeoffTelemetry(input: PillarTakeoffTelemetryInput): PillarTakeoffTelemetry {
   const launchHorizontalSpeed = Math.hypot(input.launchVelocity.x, input.launchVelocity.z)
   const endHorizontalSpeed = Math.hypot(input.endVelocity.x, input.endVelocity.z)
+  // Leakage is taken at ANY observed point of the attempt: residual horizontal
+  // velocity at launch or end, or an active forward control at launch or end.
+  // The launch/end components stay separate in the record, so the flag is the
+  // aggregate "was any horizontal/control leak observed?" answer.
   const horizontalLeak =
     launchHorizontalSpeed > HORIZONTAL_VELOCITY_EPSILON ||
     endHorizontalSpeed > HORIZONTAL_VELOCITY_EPSILON ||
-    input.launchControls.forward === true
+    input.launchControls.forward === true ||
+    input.endControls.forward === true
   return {
     attemptId: input.attemptId,
     launchVelocityX: input.launchVelocity.x,
