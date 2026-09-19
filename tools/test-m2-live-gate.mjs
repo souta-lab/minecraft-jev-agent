@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { combineEvidence, hasRunScope, runGate, WATCH, ACCEPTANCE } from './m2-live-gate.mjs'
+import { combineEvidence, exactRunId, hasRunScope, runGate, WATCH, ACCEPTANCE } from './m2-live-gate.mjs'
 
 let checks = 0
 function ok(label) {
@@ -50,13 +50,15 @@ function ok(label) {
 }
 
 {
-  assert.equal(hasRunScope(['--since', '2026-09-18T14:00:00Z'], {}), true)
+  assert.equal(hasRunScope(['--since', '2026-09-18T14:00:00Z'], {}), false)
   assert.equal(hasRunScope(['--run', 'run-abc'], {}), true)
   assert.equal(hasRunScope([], { M2_RUN_ID: 'run-abc' }), true)
-  assert.equal(hasRunScope([], { M2_SINCE: '2026-09-18T14:00:00Z' }), true)
+  assert.equal(hasRunScope([], { M2_SINCE: '2026-09-18T14:00:00Z' }), false)
   assert.equal(hasRunScope([], {}), false)
-  assert.equal(hasRunScope(['--log', '/tmp/run.log'], {}), false)
-  ok('run scope must come from --since or M2_SINCE')
+  assert.equal(exactRunId(['--run', 'run-abc'], {}), 'run-abc')
+  assert.equal(exactRunId([], { M2_RUN_ID: 'run-env' }), 'run-env')
+  assert.equal(exactRunId(['--run', 'bad'], {}), null)
+  ok('close/no-close gate requires an exact runId, not timestamp-only scope')
 }
 
 {
@@ -73,25 +75,26 @@ function ok(label) {
   })
   assert.equal(code, 0)
   assert.deepEqual(calls[0], { script: WATCH, args: ['--run', 'run-abc'] })
-  ok('exact runId scope is forwarded to m2-watch')
+  assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc'] })
+  ok('exact runId is forwarded to both causal and inventory children')
 }
 
 {
   let called = false
   const lines = []
   const code = await runGate({
-    argv: ['--log', '/tmp/run.log'],
+    argv: ['--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'],
     env: {},
     runner: async () => {
       called = true
-      throw new Error('runner must not execute without a run scope')
+      throw new Error('runner must not execute without an exact runId')
     },
     write: (line) => lines.push(line),
   })
   assert.equal(code, 2)
   assert.equal(called, false)
-  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=UNKNOWN reason=run_scope_required watch=2 acceptance=2/)
-  ok('gate refuses all-time evidence before reading either child')
+  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=UNKNOWN reason=exact_run_scope_required watch=2 acceptance=2/)
+  ok('timestamp-only scope is diagnostic, not sufficient for live acceptance')
 }
 
 {
@@ -99,16 +102,12 @@ function ok(label) {
   const lines = []
   const runner = async (script, args) => {
     calls.push({ script, args })
-    if (script === WATCH) {
-      return { code: 0, stdout: 'M2_REQUIRED status=COMPLETE\n', stderr: '' }
-    }
-    if (script === ACCEPTANCE) {
-      return { code: 0, stdout: 'RESULT: PASS\n', stderr: '' }
-    }
+    if (script === WATCH) return { code: 0, stdout: 'M2_REQUIRED status=COMPLETE\n', stderr: '' }
+    if (script === ACCEPTANCE) return { code: 0, stdout: 'runId: run-abc\nRESULT: PASS\n', stderr: '' }
     throw new Error(`unexpected script ${script}`)
   }
   const code = await runGate({
-    argv: ['--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log', '--ignored', 'x'],
+    argv: ['--run', 'run-abc', '--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log', '--ignored', 'x'],
     env: {},
     runner,
     write: (line) => lines.push(line),
@@ -116,11 +115,12 @@ function ok(label) {
   assert.equal(code, 0)
   assert.deepEqual(calls[0], {
     script: WATCH,
-    args: ['--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'],
+    args: ['--run', 'run-abc', '--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'],
   })
-  assert.deepEqual(calls[1], { script: ACCEPTANCE, args: [] })
-  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=PASS reason=closed_loop_m2_verified watch=0 acceptance=0/)
-  ok('CLI forwards only run-scope watch args and combines both child results')
+  assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc'] })
+  assert.match(lines.join('\n'), /M2_LIVE_GATE runId=run-abc/)
+  assert.match(lines.join('\n'), /M2_LIVE_RESULT status=PASS reason=closed_loop_m2_verified runId=run-abc watch=0 acceptance=0/)
+  ok('exact run join may carry an additional timestamp lower bound without mixing children')
 }
 
 {
@@ -129,13 +129,15 @@ function ok(label) {
     calls.push({ script, args, env: options?.env })
     return { code: 0, stdout: '', stderr: '' }
   }
-  const env = { M2_SINCE: '2026-09-18T14:00:00Z' }
+  const env = { M2_RUN_ID: 'run-env' }
   const code = await runGate({ argv: [], env, runner, write: () => undefined })
   assert.equal(code, 0)
   assert.equal(calls.length, 2)
   assert.deepEqual(calls[0].env, env)
   assert.deepEqual(calls[1].env, env)
-  ok('M2_SINCE scope is inherited by both child processes')
+  assert.deepEqual(calls[0].args, [])
+  assert.deepEqual(calls[1].args, [])
+  ok('M2_RUN_ID env scope is inherited by both child processes')
 }
 
 console.log(`m2-live-gate: ${checks}/11 checks passed`)
