@@ -425,6 +425,26 @@ export function fuelCountFor(count: number, fuelItem: string): number {
   return Math.max(1, Math.ceil(Math.max(1, count) * perItem))
 }
 
+/**
+ * True when the live inventory can supply one complete smelt transfer.
+ * Input and fuel are separate furnace slots, so the same concrete item must
+ * be counted twice instead of being reused from one inventory stack. This is a
+ * mechanical precondition, not a policy preference.
+ */
+export function smeltInventorySufficient(
+  counts: Readonly<Record<string, number>>,
+  inputItem: string,
+  inputCount: number,
+  fuelItem: string,
+  fuelCount: number,
+): boolean {
+  const inputNeed = Math.max(0, Math.floor(inputCount))
+  const fuelNeed = Math.max(0, Math.floor(fuelCount))
+  const inputHave = Math.max(0, Math.floor(counts[inputItem] ?? 0))
+  if (inputItem === fuelItem) return inputHave >= inputNeed + fuelNeed
+  return inputHave >= inputNeed && Math.max(0, Math.floor(counts[fuelItem] ?? 0)) >= fuelNeed
+}
+
 /** True when an item name is a furnace fuel (log/planks/wood or the table). */
 export function isFuelItem(itemNameWanted: string): boolean {
   if (FUEL_BURN_TICKS[itemNameWanted] !== undefined) return true

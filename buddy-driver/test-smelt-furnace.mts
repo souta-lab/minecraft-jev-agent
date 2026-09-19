@@ -78,6 +78,7 @@ function worldState(overrides: {
   inventory?: InventoryState
   signals?: AgentSignals
   goal?: GoalState
+  goalQueue?: WorldState['goalQueue']
   furnaces?: StationEntry[]
   placementSpots?: Vec3Json[]
 }): WorldState {
@@ -94,7 +95,7 @@ function worldState(overrides: {
     furnaces: overrides.furnaces ?? [],
     placementSpots: overrides.placementSpots ?? [],
     goal: overrides.goal ?? goal({}),
-    goalQueue: {
+    goalQueue: overrides.goalQueue ?? {
       depth: 1,
       current: {
         id: 'g1',
@@ -191,6 +192,51 @@ addCase('any held fuel is accepted: logs/planks satisfy the fuel need', () => {
   const candidate = smeltCandidate(generateCandidates(state, defaultCandidateOptions))
   const pass = candidate !== undefined && (candidate.meta.fuelItem === 'oak_planks' || candidate.meta.fuelItem === 'oak_log')
   return { pass, detail: candidate === undefined ? 'no SMELT' : `fuel=${String(candidate.meta.fuelItem)}` }
+})
+
+addCase('a single log is not reused as both charcoal input and furnace fuel', () => {
+  const state = worldState({
+    position: { x: 39, y: 65, z: 34 },
+    inventory: inventory({ birch_log: 1 }),
+    goal: goal({ id: 'smelt:charcoal', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }),
+    furnaces: [{ x: 40, y: 65, z: 34, source: 'sensed' }],
+  })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const pass = candidates.every((candidate) => candidate.kind !== 'SMELT')
+  return { pass, detail: `candidates=${candidates.map((candidate) => candidate.id).join(',') || 'none'}` }
+})
+
+addCase('two logs satisfy the separate charcoal input and fuel slots', () => {
+  const state = worldState({
+    position: { x: 39, y: 65, z: 34 },
+    inventory: inventory({ birch_log: 2 }),
+    goal: goal({ id: 'smelt:charcoal', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 }),
+    goalQueue: {
+      depth: 1,
+      current: {
+        id: 'g-charcoal',
+        kind: 'smelt',
+        description: 'smelt 1 x charcoal',
+        targetItem: 'charcoal',
+        requiredCount: 1,
+        startCount: 0,
+        haveCount: 0,
+        status: 'active',
+        origin: 'llm',
+        createdAt: 0,
+        updatedAt: 0,
+        detail: null,
+      },
+      empty: false,
+      hasImpossible: false,
+      done: 0,
+      goals: [],
+    },
+    furnaces: [{ x: 40, y: 65, z: 34, source: 'sensed' }],
+  })
+  const candidate = smeltCandidate(generateCandidates(state, defaultCandidateOptions))
+  const pass = candidate !== undefined && candidate.meta.inputItem === 'birch_log' && candidate.meta.fuelItem === 'birch_log' && candidate.meta.inputCount === 1 && candidate.meta.fuelCount === 1
+  return { pass, detail: candidate === undefined ? 'no SMELT' : `input=${String(candidate.meta.inputItem)} fuel=${String(candidate.meta.fuelItem)} in=${String(candidate.meta.inputCount)} fuelN=${String(candidate.meta.fuelCount)}` }
 })
 
 // --- deterministic plan ordering --------------------------------------------
@@ -325,10 +371,10 @@ addCase('executeFurnaceSmelt places input+fuel, waits, collects, and logs SMELT_
   ).then((outcome) => {
     const done = lines.find((line) => line.startsWith('SMELT_DONE'))
     const pass =
-      outcome.gained === 1 &&
-      outcome.outputCount === 1 &&
-      (stash.iron_ingot ?? 0) === 1 &&
-      done === 'SMELT_DONE item=iron_ingot gained=1 input=raw_iron fuel=coal output=1 delta=1'
+      outcome.gained === 3 &&
+      outcome.outputCount === 3 &&
+      (stash.iron_ingot ?? 0) === 3 &&
+      done === 'SMELT_DONE item=iron_ingot gained=3 input=raw_iron fuel=coal output=3 delta=3'
     return { pass, detail: `gained=${outcome.gained} output=${outcome.outputCount} inv=${stash.iron_ingot} log=${done ?? 'none'}` }
   })
 })

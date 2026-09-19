@@ -12,6 +12,7 @@
 import type { Candidate, CandidateKind } from './candidates.ts'
 import type { Vec3Json, WorldState } from './state.ts'
 import { distance } from './state.ts'
+import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 
 export type GuardPhase = 'decision' | 'dig'
 
@@ -495,6 +496,15 @@ function guardSmelt(candidate: Candidate, state: WorldState, context: GuardConte
   }
   if ((state.inventory.counts[fuelItem] ?? 0) <= 0) {
     return deny(candidate.id, 'EMPTY_HAND', `${fuelItem} is not in the inventory`)
+  }
+  const inputCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'inputCount', 1)))
+  const fuelCount = Math.max(1, Math.floor(readMetaNumber(candidate, 'fuelCount', fuelCountFor(inputCount, fuelItem))))
+  if (!smeltInventorySufficient(state.inventory.counts, inputItem, inputCount, fuelItem, fuelCount)) {
+    return deny(
+      candidate.id,
+      'EMPTY_HAND',
+      `insufficient smelt inventory input=${inputItem}:${state.inventory.counts[inputItem] ?? 0}/${inputCount} fuel=${fuelItem}:${state.inventory.counts[fuelItem] ?? 0}/${fuelCount}`,
+    )
   }
   const hazard = nearestHazardTo(state, target)
   if (hazard !== null) {
