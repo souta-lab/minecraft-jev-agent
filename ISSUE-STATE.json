@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-18",
+  "updatedAt": "2026-09-20",
   "dimensions": {
     "policy": ["missing", "defined"],
     "implementation": ["none", "partial", "landed"],
@@ -9,14 +9,50 @@
     "compliance": ["pass", "fail", "unknown"]
   },
   "issues": {
-    "4": {
-      "acceptanceClass": "offline-reproducibility",
+    "221": {
+      "acceptanceClass": "architecture-authority-live",
       "policy": "defined",
-      "implementation": "landed",
+      "implementation": "partial",
+      "verification": "live",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "A current run proved 31k+ decisions were deterministic fallback with no real Jev/LLM/Mercury invocation. #222 removed the hardcoded forceFallbackPolicy=true, but fail-closed key/config resolution and a fresh real-Jev acceptance run remain required."
+    },
+    "11": {
+      "acceptanceClass": "architecture-authority",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "live",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "Live evidence showed deterministic code had accumulated semantic WHICH/WHAT authority. Keep deterministic truth/safety/mechanics/verification; quarantine semantic fallback as explicit baseline and migrate semantic choice back to Jev/System2."
+    },
+    "128": {
+      "acceptanceClass": "runtime-config-authority",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "The authority incident was enabled by implicit/default configuration and silent fallback. A typed effective config with requested/resolved policy modes and fail-closed production semantics is not yet landed."
+    },
+    "107": {
+      "acceptanceClass": "architecture-authority-map",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Rebuild the authority map from the corrected runtime after #221 rather than documenting the old deterministic takeover as intended architecture."
+    },
+    "121": {
+      "acceptanceClass": "architecture-observability",
+      "policy": "defined",
+      "implementation": "partial",
       "verification": "offline",
-      "observation": "pass",
-      "compliance": "pass",
-      "note": "PR #139 merged as 6a5248d. The resolver defaults to deterministic and requires explicit BUDDY_PLANNER=llm|jev|on; the branch fixture covered the 13-case mode matrix. No live planner authority claim is made."
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "Truth/progress classification remains useful and #220 strengthens the verified-success boundary. Any remaining taxonomy work must stay descriptive and must not choose semantic actions."
     },
     "56": {
       "acceptanceClass": "architecture-dataflow",
@@ -25,34 +61,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "CurrentOptionContext now persists and reaches WorldState/Jev payloads on main; candidate/Skill lists still do not consume or constrain by allowedSkills, and live/replay evidence remains unverified."
-    },
-    "79": {
-      "acceptanceClass": "closed-loop-live",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Strict postconditions and ACTION_UNVERIFIED regression are landed; end-to-end FURNACE_READY -> SMELT_DONE -> inventory evidence remains live-gated."
-    },
-    "13": {
-      "acceptanceClass": "resident-soak",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Lifecycle/resource cleanup fixtures exist; issue explicitly requires >=20 changed-hash reloads plus recovery cycles."
-    },
-    "136": {
-      "acceptanceClass": "architecture-surface-contract",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "offline",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "The landed fix uses a code-owned levelAtLeast predicate plus explicit log inventory for recovery; planner/controller/OptionSpec agree and offline fixtures pass. No live return-recovery run has been exercised, so compliance remains UNKNOWN."
+      "note": "CurrentOptionContext reaches the Jev payload, but remaining Option-to-Skill authority work is deferred until real Jev is proven on-path. Old PR #173 is closed and must not be revived."
     },
     "3": {
       "acceptanceClass": "resident-restart-live",
@@ -61,88 +70,25 @@
       "verification": "integration",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Host-owned AgentSnapshot/ledger restore paths are landed; repeated resident restart acceptance remains to be attributed on current main."
+      "note": "Ledger/bootstrap fixes have landed; only fresh current-authority restart evidence should trigger more implementation."
     },
-    "12": {
-      "acceptanceClass": "resident-live",
+    "13": {
+      "acceptanceClass": "resident-soak",
       "policy": "defined",
       "implementation": "landed",
       "verification": "integration",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Prerequisite repair/churn fixes exist; stated generation/recovery-rate live evidence remains pending."
+      "note": "Lifecycle/resource cleanup fixtures exist; changed-hash soak evidence remains pending."
     },
-    "46": {
-      "acceptanceClass": "closed-loop-live",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Readiness-first ordering is regression-covered; live iron smelt/pickaxe progression remains part of M2 acceptance."
-    },
-    "73": {
-      "acceptanceClass": "closed-loop-live",
-      "policy": "defined",
-      "implementation": "partial",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Queue/horizon repairs have landed across several commits; current-main live proof that the iron rung cannot persist empty is still required."
-    },
-    "78": {
-      "acceptanceClass": "closed-loop-live",
-      "policy": "defined",
-      "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Prereq selection, station invalidation, failure memory and oscillation regressions landed; live smelt path remains pending."
-    },
-    "58": {
-      "acceptanceClass": "architecture-plus-live",
+    "136": {
+      "acceptanceClass": "architecture-surface-contract",
       "policy": "defined",
       "implementation": "landed",
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Flexible prereq paths are implemented; live behavior is covered by the representative #79 M2 acceptance cluster."
-    },
-    "41": {
-      "acceptanceClass": "architecture-capability-graph",
-      "policy": "defined",
-      "implementation": "partial",
-      "verification": "offline",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Predicate goals/descend and dependency work exist, but the generalized capability graph acceptance is not complete."
-    },
-    "52": {
-      "acceptanceClass": "architecture-option-identity",
-      "policy": "defined",
-      "implementation": "partial",
-      "verification": "offline",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Stable semantic instance-kind identity exists; exact runtime occurrence identity/history across decision boundaries remains incomplete."
-    },
-    "121": {
-      "acceptanceClass": "architecture-observability",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "NEXT item; do not opportunistically implement before the current frontier advances."
-    },
-    "129": {
-      "acceptanceClass": "research",
-      "policy": "defined",
-      "implementation": "none",
-      "verification": "none",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Research-only hypothesis; never blocks runtime work."
+      "note": "Code-owned vertical recovery truth fix is landed/offline-verified; live revalidation waits for the corrected Jev-authoritative runtime."
     },
     "130": {
       "acceptanceClass": "research",
@@ -151,7 +97,7 @@
       "verification": "none",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Research/A-B; blocked on #56-style state contract and carries no current authority."
+      "note": "Research only. Do not start factorized/multi-head policy work before the simple real-Jev authority path is proven."
     }
   }
 }
