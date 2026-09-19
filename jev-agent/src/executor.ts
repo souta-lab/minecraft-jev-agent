@@ -57,6 +57,12 @@ import {
 import type { PillarColumnProbe } from './pillarSearch.ts'
 import { formatPillarFail, pillarStepUp, shouldRelocatePillarAfterFailure } from './pillarApex.ts'
 import {
+  buildPillarTakeoffTelemetry,
+  formatPillarTakeoffTelemetry,
+  makePillarAttemptId,
+  readControlState,
+} from './pillarTakeoffTelemetry.ts'
+import {
   formatPillarUpStep,
   installGroundCorrection,
   PILLAR_TAKEOFF_BUDGET_MS,
@@ -1547,6 +1553,7 @@ export class Executor {
     try {
       let climbed = 0
       let relocations = 0
+      let attemptSequence = 0
       const refusedColumns = new Set<string>()
       while (climbed < maxSteps) {
         this.ensureOwned(epoch, signal)
@@ -1688,6 +1695,26 @@ export class Executor {
         // only and are captured before the jump mutates the entity position.
         const launchFeetBlock = this.currentBlockAt(feet)
         const launchHeadBlock = this.currentBlockAt({ x: feet.x, y: feet.y + 1, z: feet.z })
+
+        // Instrumentation only (m2-pillar-takeoff-evidence): one attemptId per
+        // climb attempt ties the launch/end telemetry of a single pillar takeoff
+        // together. `attemptSequence` is attempt-local and monotonic, so a
+        // relocation/retry loop under the same candidate.id + epoch still gets
+        // distinct ids. LAUNCH velocity + control state are captured before the
+        // jump mutates the entity. No behaviour change.
+        attemptSequence += 1
+        const attemptId = makePillarAttemptId(candidate.id, epoch, attemptSequence)
+        const launchVelocity = {
+          x: this.bot.entity.velocity.x,
+          y: this.bot.entity.velocity.y,
+          z: this.bot.entity.velocity.z,
+        }
+        const launchPosition = {
+          x: this.bot.entity.position.x,
+          y: this.bot.entity.position.y,
+          z: this.bot.entity.position.z,
+        }
+        const launchControlState = readControlState(this.bot)
         const forcedTracker = forcedMoveTracker(this.bot)
         const forcedBefore = forcedTracker.value
         // The jump -> apex -> place -> landing timing lives in pillarApex.ts so
@@ -1712,11 +1739,46 @@ export class Executor {
           { feetCell: feet, placeCell, support: footing.position },
         )
         this.ensureOwned(epoch, signal)
+        // Instrumentation only: one deterministic takeoff record per attempt,
+        // emitted on the mirrored PILLAR_TAKEOFF marker so it reaches the
+        // run-scoped host log. Read-only; no behaviour change.
+        const takeoffBase = {
+          attemptId,
+          launchVelocity,
+          launchPosition,
+          endVelocity: {
+            x: this.bot.entity.velocity.x,
+            y: this.bot.entity.velocity.y,
+            z: this.bot.entity.velocity.z,
+          },
+          endPosition: {
+            x: this.bot.entity.position.x,
+            y: this.bot.entity.position.y,
+            z: this.bot.entity.position.z,
+          },
+          launchControls: launchControlState,
+          endControls: readControlState(this.bot),
+          forcedRepositions: forcedTracker.value - forcedBefore,
+        }
+        const emitPillarTakeoff = (peakRise: number, failureStep: string | null, failureReason: string | null) => {
+          const takeoff = buildPillarTakeoffTelemetry({ ...takeoffBase, peakRise, failureStep, failureReason })
+          this.logger.info('agent', formatPillarTakeoffTelemetry(takeoff), {
+            actionId: candidate.id,
+            attemptId: takeoff.attemptId,
+            horizontalLeak: takeoff.horizontalLeak,
+          })
+          return takeoff
+        }
         if (!climb.ok) {
           const endEntity = this.bot.entity as typeof this.bot.entity & {
             isCollidedHorizontally?: boolean
             isCollidedVertically?: boolean
           }
+          const takeoff = emitPillarTakeoff(
+            Math.max(0, endEntity.position.y - beforeY),
+            climb.fail.step,
+            climb.fail.reason,
+          )
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
@@ -1737,7 +1799,7 @@ export class Executor {
               z: endEntity.position.z,
             },
             endOnGround: endEntity.onGround,
-            endVelocityY: endEntity.velocity.y,
+            ...takeoff,
             endCollidedHorizontally: endEntity.isCollidedHorizontally ?? null,
             endCollidedVertically: endEntity.isCollidedVertically ?? null,
             endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
@@ -1780,6 +1842,7 @@ export class Executor {
           break
         }
         climbed += 1
+        emitPillarTakeoff(climb.apexRise, null, null)
         this.logger.info(
           'agent',
           formatPillarUpStep(climbed, Math.floor(beforeY), Math.floor(this.bot.entity.position.y), placeName),

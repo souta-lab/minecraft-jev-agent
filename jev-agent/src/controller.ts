@@ -629,6 +629,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ASCENT_PROGRESS',
   'PILLAR_UP',
   'PILLAR_UP_STEP',
+  'PILLAR_FAIL',
+  'PILLAR_TAKEOFF',
   'PILLAR_SEARCH',
   'HOP_PLAN',
   'DESCEND_STALLED',
