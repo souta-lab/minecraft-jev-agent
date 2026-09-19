@@ -23,7 +23,7 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentOption, KnownResource, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentOption, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
 import { findInventoryFuel, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
@@ -1522,6 +1522,25 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
 }
 
 /**
+ * The first sensed furnace the controller has NOT proven unreachable. A station
+ * the `canDig=false` pathfinder cannot path to does not satisfy the smelt
+ * precondition (nor belong in a direct SMELT candidate): offering it produced
+ * the live loop where `SMELT:charcoal` was guard-rejected `NO_PATH` every tick
+ * while the acquisition ladder (`craft_and_place` -> a reachable/placed furnace)
+ * was never generated, so `SMELT_DONE` never fired.
+ */
+function reachableSensedFurnace(state: WorldState, options: CandidateOptions): StationEntry | null {
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  return (
+    (state.furnaces ?? []).find(
+      (entry) =>
+        isSensedStation(entry) &&
+        !unreachableStations.has(knownStationKey({ name: 'furnace', position: { x: entry.x, y: entry.y, z: entry.z } })),
+    ) ?? null
+  )
+}
+
+/**
  * SMELT candidate for a `smelt` subgoal: a placed furnace is in sensor range,
  * the input and a fuel item are in the inventory, and the output is still short.
  * With no sensed furnace the goal is still satisfiable: the acquisition ladder
@@ -1533,7 +1552,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (focusItem === null) return []
   const inputSpec = smeltInputName(focusItem)
   if (inputSpec === null) return []
-  const furnace = (state.furnaces ?? []).find(isSensedStation) ?? null
+  const furnace = reachableSensedFurnace(state, options)
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
   const fuelItem = smeltFuelFor(state)
@@ -1625,7 +1644,7 @@ export function smeltInputPrereq(state: WorldState, options: CandidateOptions): 
   if (item === null) return null
   const inputSpec = smeltInputName(item)
   if (inputSpec === null) return null
-  if ((state.furnaces ?? []).find(isSensedStation) === undefined) return null
+  if (reachableSensedFurnace(state, options) === null) return null
   const held = smeltInputFor(state, item)
   if (held !== null) return { item, input: held, present: true, action: 'none' }
   const route = mineCandidates(state, options, inputSpec, null)

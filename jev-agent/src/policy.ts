@@ -281,6 +281,32 @@ function guardPathComputable(candidate: Candidate, context: GuardContext, target
   return { ok: true, candidate }
 }
 
+/**
+ * #79: guard rejections that prove the chosen action cannot execute in this
+ * state are charged to the option's unproductive streak, so a permanently
+ * rejected option reaches the bounded attempt limit and is retired instead of
+ * requesting an abandon every tick that shadow mode keeps suppressing as
+ * "speculative". Deferrals (`CONFLICT_IN_FLIGHT`) and transient rejections
+ * (`STALE_COORDS`, `UNKNOWN_CANDIDATE`) never count; `ALREADY_DONE` must not
+ * retire an option the world already satisfied.
+ */
+export function guardRejectionChargesOption(code: GuardCode): boolean {
+  switch (code) {
+    case 'NO_PATH':
+    case 'NO_SUPPORT':
+    case 'LAVA_RISK':
+      return true
+    case 'OUT_OF_REACH':
+    case 'TARGET_GONE':
+    case 'EMPTY_HAND':
+    case 'CONFLICT_IN_FLIGHT':
+    case 'STALE_COORDS':
+    case 'UNKNOWN_CANDIDATE':
+    case 'ALREADY_DONE':
+      return false
+  }
+}
+
 /** A target more than this many blocks above the bot cannot be walked to. */
 export const MOVE_VERTICAL_GAP_LIMIT = 4
 

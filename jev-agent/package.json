@@ -37,6 +37,7 @@
     "beta-authority-test": "tsx test-beta-authority.mts",
     "beta-hysteresis-test": "tsx test-beta-hysteresis.mts",
     "abandon-enforce-test": "tsx test-abandon-enforce.mts",
+    "smelt-charcoal-abandon-test": "tsx test-smelt-charcoal-abandon.mts",
     "wire-prereq-beta-test": "tsx test-wire-prereq-beta.mts",
     "m1-test": "tsx test-m1.mts",
     "issue43-test": "tsx test-issue43.mts",

@@ -75,8 +75,14 @@ export const DEFAULT_MOVE_FAILURE_LIMIT = 3
 export const DEFAULT_MOVE_COOLDOWN_MS = 30_000
 export const DEFAULT_MOVE_MAX_ENTRIES = 256
 
-/** Candidate kinds whose target is a movement destination worth remembering. */
-const TRACKED_MOVE_KINDS = new Set(['MOVE', 'RETRIEVE', 'RETREAT', 'DESCEND', 'STEP'])
+/**
+ * Candidate kinds whose target is a destination worth remembering. SMELT is
+ * included because its target is the FURNACE the bot must path to: a guard
+ * NO_PATH on the smelt is a real unreachability fact, and recording it lets the
+ * station be retired so the acquisition ladder runs instead of the same
+ * unreachable furnace being re-offered every tick.
+ */
+const TRACKED_MOVE_KINDS = new Set(['MOVE', 'RETRIEVE', 'RETREAT', 'DESCEND', 'STEP', 'SMELT'])
 
 export function isTrackedMoveKind(kind: string): boolean {
   return TRACKED_MOVE_KINDS.has(kind)
