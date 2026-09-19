@@ -10,6 +10,7 @@ runner*.out
 # Resident runtime state / generated bundles
 buddy-state.json
 buddy-ledger.json
+buddy-driver/buddy-ledger-stale-*.json
 buddy-driver/data/
 
 # Run-scoped acceptance artifacts (tools/run-artifacts.mjs); local evidence only
