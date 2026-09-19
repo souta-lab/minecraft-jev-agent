@@ -68,7 +68,7 @@ import { PICKAXE_TIER_ORDER } from './gameData.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
-import { guardDecision } from './policy.ts'
+import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
@@ -2506,7 +2506,32 @@ export class JevController {
     this.noteCandidateFailure(guarded.candidateId)
     const movementFailure = guardMoveFailureReason(candidate, guarded.code)
     if (candidate !== undefined && movementFailure !== null) this.recordMoveFailure(candidate, movementFailure)
+    this.chargeGuardRejection(record, guarded.code)
     this.recordFailure(guarded.code, guarded.reason)
+  }
+
+  /**
+   * #79: a mechanical guard rejection is a settled zero-progress outcome for the
+   * option that was just chosen. A rejected candidate never reaches
+   * `onActionComplete`, which is the only other place the unproductive counter
+   * is fed, so without this a permanently rejected option stays at `attempts=0`
+   * and its abandon request is suppressed as "speculative" forever
+   * (`abandonEnforced=false`). Charging it here lets the bounded attempt limit
+   * retire the option with `reason=unproductive`.
+   */
+  private chargeGuardRejection(record: DecisionRecord, code: GuardCode): void {
+    if (!guardRejectionChargesOption(code)) return
+    const optionId = record.optionId
+    if (optionId === null || optionId.length === 0) return
+    this.optionAttempts.noteOutcome(
+      {
+        optionId,
+        planId: record.goalQueueState.current?.id ?? null,
+        verified: false,
+        progressDelta: 0,
+      },
+      Date.now(),
+    )
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
@@ -4214,6 +4239,12 @@ export class JevController {
    * furnace is evicted from `signals.knownResources` once the move-failure
    * memory blacklists its cell, yet it is still offered by `knownFurnaces`; an
    * unblacklisted copy would re-issue the failing RETRIEVE forever.
+   *
+   * SENSED furnaces are considered too: a furnace the bot placed and then cannot
+   * path back to is blacklisted by a SMELT guard NO_PATH (SMELT is a tracked
+   * target kind). Skipping sensed entries here would leave `smeltCandidates`
+   * re-offering the unreachable furnace while the acquisition ladder it needs
+   * never runs (the live charcoal-starve loop).
    */
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
     const keys = new Set<string>()
@@ -4228,7 +4259,6 @@ export class JevController {
       if (resource.kind === 'station') consider(resource.name, resource.position)
     }
     for (const station of state.furnaces ?? []) {
-      if (isSensedStation(station)) continue
       consider('furnace', station)
     }
     return keys
