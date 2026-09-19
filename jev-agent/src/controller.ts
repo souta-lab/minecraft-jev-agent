@@ -113,6 +113,7 @@ import {
 } from './placementGuard.ts'
 import type { AbandonReason, PrerequisiteProtection } from './placementGuard.ts'
 import {
+  decideFurnacePrereqObservation,
   evaluatePrereqStall,
   evaluateRetrieveAbandon,
   formatPrereqOptionDetail,
@@ -1315,6 +1316,8 @@ export class JevController {
   private prereqForcedPath: PrereqPath | null = null
   private prereqGoalKey: string | null = null
   private prereqLoggedKey: string | null = null
+  /** goal|line key of the last `FURNACE_PREREQ_ALREADY_SATISFIED` observation logged */
+  private prereqSatisfiedLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
   /** #78: options excluded for the current goal after repeated unverified failure (path -> fingerprint). */
@@ -4621,8 +4624,31 @@ export class JevController {
     // Same predicate the candidate generator uses (candidates.ts#furnaceAcquisitionCandidates):
     // a furnace prerequisite exists only for a smelt goal with no placed furnace. Using the
     // stricter targetItem check here would let a retrieval candidate through unfiltered (#78).
-    if (prereqSubjectForGoal(goal) === null || (state.furnaces ?? []).some(isSensedStation)) {
+    const subject = prereqSubjectForGoal(goal)
+    if (subject === null) {
       this.resetFurnacePrereq()
+      return [...candidates]
+    }
+    const sensedStationCount = (state.furnaces ?? []).filter(isSensedStation).length
+    const observation = decideFurnacePrereqObservation({
+      subject,
+      sensedStationCount,
+      goalKey: this.currentGoalKey(),
+      previousKey: this.prereqSatisfiedLoggedKey,
+    })
+    if (observation.key !== null) {
+      // A satisfied prerequisite is not a path choice: emit the distinct typed
+      // observation at most once per goal instead of a false PREREQ_OPTION.
+      this.resetFurnacePrereq()
+      if (observation.line !== null) {
+        this.prereqSatisfiedLoggedKey = observation.key
+        this.logger.info(
+          'agent',
+          observation.line,
+          { subject, source: 'sensed', sensedStationCount },
+          this.tickCounter,
+        )
+      }
       return [...candidates]
     }
     const input = furnacePrereqInputFromState(

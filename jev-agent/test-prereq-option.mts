@@ -5,15 +5,19 @@
 //
 // Run: npx tsx test-prereq-option.mts
 import {
+  decideFurnacePrereqObservation,
   evaluatePrereqStall,
+  formatFurnacePrereqSatisfied,
   formatPrereqOption,
   formatPrereqRankShadow,
   formatPrereqSwitch,
+  furnacePrereqSatisfiedObservation,
   nextPrereqPath,
   planPrereqOptions,
   preferPrereqPath,
   PREREQ_RANK_POLICY_DEFAULT,
   prereqProgressSignature,
+  prereqSubjectForGoal,
   resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
   selectPrereqPath,
@@ -261,6 +265,60 @@ addCase('the formatters emit the exact acceptance lines', () => {
     option === 'PREREQ_OPTION chosen=place_held over=[use_known_station,craft_and_place] reason=place_held cost=1' &&
     switchLine === 'PREREQ_SWITCH from=use_known_station to=craft_and_place reason=no_progress'
   return { pass, detail: `${option} | ${switchLine}` }
+})
+
+addCase('an ALREADY-satisfied furnace is its own typed observation, never a PREREQ_OPTION', () => {
+  const subject = prereqSubjectForGoal(smeltGoal)
+  const satisfied = furnacePrereqSatisfiedObservation({ subject, sensedStationCount: 1 })
+  const notSatisfied = furnacePrereqSatisfiedObservation({ subject, sensedStationCount: 0 })
+  const notApplicable = furnacePrereqSatisfiedObservation({ subject: null, sensedStationCount: 3 })
+  const exact = formatFurnacePrereqSatisfied('sensed')
+  const pass =
+    satisfied === 'FURNACE_PREREQ_ALREADY_SATISFIED resource=furnace source=sensed' &&
+    exact === satisfied &&
+    !satisfied.includes('PREREQ_OPTION ') &&
+    notSatisfied === null &&
+    notApplicable === null
+  return { pass, detail: `satisfied=${satisfied ?? 'null'} notSatisfied=${notSatisfied ?? 'null'} notApplicable=${notApplicable ?? 'null'}` }
+})
+
+addCase('the already-satisfied observation is emitted once per goal, never as a PREREQ_OPTION', () => {
+  const subject = prereqSubjectForGoal(smeltGoal)
+  const line = formatFurnacePrereqSatisfied('sensed')
+  const first = decideFurnacePrereqObservation({ subject, sensedStationCount: 1, goalKey: 'g2:smelt', previousKey: null })
+  const repeat = decideFurnacePrereqObservation({
+    subject,
+    sensedStationCount: 1,
+    goalKey: 'g2:smelt',
+    previousKey: first.key,
+  })
+  const nextGoal = decideFurnacePrereqObservation({
+    subject,
+    sensedStationCount: 1,
+    goalKey: 'g3:smelt',
+    previousKey: first.key,
+  })
+  const pass =
+    first.line === line &&
+    first.key === `g2:smelt|${line}` &&
+    repeat.line === null &&
+    repeat.key === first.key &&
+    nextGoal.line === line &&
+    nextGoal.key === `g3:smelt|${line}` &&
+    first.line !== null &&
+    !first.line.includes('PREREQ_OPTION ')
+  return {
+    pass,
+    detail: `first=${first.line ?? 'null'} repeat=${repeat.line ?? 'null'} nextGoal=${nextGoal.line ?? 'null'}`,
+  }
+})
+
+addCase('an unsatisfied (or inapplicable) prerequisite returns null so PREREQ_OPTION can still fire', () => {
+  const subject = prereqSubjectForGoal(smeltGoal)
+  const noFurnace = decideFurnacePrereqObservation({ subject, sensedStationCount: 0, goalKey: 'g2:smelt', previousKey: null })
+  const noSubject = decideFurnacePrereqObservation({ subject: null, sensedStationCount: 3, goalKey: 'g2:smelt', previousKey: null })
+  const pass = noFurnace.line === null && noFurnace.key === null && noSubject.line === null && noSubject.key === null
+  return { pass, detail: `noFurnace=${JSON.stringify(noFurnace)} noSubject=${JSON.stringify(noSubject)}` }
 })
 
 let failures = 0

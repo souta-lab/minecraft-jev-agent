@@ -183,6 +183,72 @@ export function prereqSubjectForGoal(goal: PrereqGoalLike | null): 'furnace' | n
   return goal.kind === 'smelt' ? 'furnace' : null
 }
 
+/**
+ * `FURNACE_PREREQ_ALREADY_SATISFIED resource=furnace source=<source>`.
+ *
+ * A prerequisite that is ALREADY satisfied is not a path CHOICE, so it must not
+ * be logged as `PREREQ_OPTION` (which names the chosen acquisition path). Before
+ * this distinct typed observation, an already-satisfied furnace produced no
+ * prerequisite marker at all, so the M2 gate's ordered
+ * `PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE` chain could never start even
+ * when the prerequisite was satisfied.
+ */
+export function formatFurnacePrereqSatisfied(source: 'sensed' | 'placed' | 'held'): string {
+  return `FURNACE_PREREQ_ALREADY_SATISFIED resource=furnace source=${source}`
+}
+
+export interface FurnacePrereqObservationInput {
+  /** `prereqSubjectForGoal` result: non-null only when a furnace prerequisite applies */
+  subject: 'furnace' | null
+  /** sensed furnace stations present in the current world state */
+  sensedStationCount: number
+}
+
+/**
+ * The already-satisfied observation for one prerequisite evaluation, or null
+ * when the subject does not apply or the prerequisite is not yet satisfied. The
+ * controller logs the returned line at most once per goal.
+ */
+export function furnacePrereqSatisfiedObservation(input: FurnacePrereqObservationInput): string | null {
+  if (input.subject === null) return null
+  if (input.sensedStationCount <= 0) return null
+  return formatFurnacePrereqSatisfied('sensed')
+}
+
+export interface FurnacePrereqObservationDecisionInput extends FurnacePrereqObservationInput {
+  /** the current goal revision key (the observation is per goal) */
+  goalKey: string
+  /** the goal|line key already logged, or null */
+  previousKey: string | null
+}
+
+export interface FurnacePrereqObservationDecision {
+  /** the line to log now, or null when it was already logged (or not satisfied) */
+  line: string | null
+  /**
+   * the new dedupe key; non-null exactly when the prerequisite is satisfied, so
+   * the caller can early-return instead of running the acquisition planner (and
+   * never emits a false `PREREQ_OPTION`).
+   */
+  key: string | null
+}
+
+/**
+ * The emit-once decision for an already-satisfied furnace prerequisite. Returns
+ * `key !== null` for a satisfied prerequisite with `line` set only the first
+ * time for that goal; `key === null` when the prerequisite is not satisfied, so
+ * the acquisition planner runs and `PREREQ_OPTION` can still be emitted.
+ */
+export function decideFurnacePrereqObservation(
+  input: FurnacePrereqObservationDecisionInput,
+): FurnacePrereqObservationDecision {
+  const line = furnacePrereqSatisfiedObservation(input)
+  if (line === null) return { line: null, key: null }
+  const key = `${input.goalKey}|${line}`
+  if (input.previousKey === key) return { line: null, key }
+  return { line, key }
+}
+
 export function formatPrereqOption(
   chosen: PrereqPath | 'none',
   over: readonly PrereqPath[],
