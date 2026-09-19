@@ -999,12 +999,13 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     )
   }
 
-  // (b) the same geometry without the tool is refused by name: the cell and the
-  // required tool tier are both carried, and the tool ladder stays actionable.
+  // (b) the same geometry without the tool is refused by name ONLY while no
+  // placeable block is held: the cell and the required tool tier are both
+  // carried, and the tool ladder stays actionable. The refusal is not weakened.
   {
     const state = worldState({
       position: feet,
-      inventory: inventory({ dirt: 4 }),
+      inventory: inventory({ stick: 2, birch_planks: 2 }),
       stepCuts: [cut],
       signals: signals({ knownResources: furnaceOnly }),
       goal: charcoal,
@@ -1014,11 +1015,41 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
     const missing = withheld?.result.missingCapabilities.map(capabilityKey) ?? []
     check(
-      '(12b) clearable geometry without the tool refuses as safe_column:no_tool with the tier',
+      '(12b) stone geometry without the tool and WITHOUT a placeable retains the refusal by name',
       withheld !== undefined &&
         withheld.result.reason === 'needs_ascend' &&
-        missing.join(',') === 'safe_column:no_tool@32,35,37:pickaxe@0,tool:pickaxe@0',
+        missing.join(',') ===
+          'placeable_block,safe_column:no_tool@32,35,37:pickaxe@0,tool:pickaxe@0',
       `missing=[${missing.join(',')}]`,
+    )
+  }
+
+  // (b2) the measured live amplification (RC d54d9a8, run-mu7x7wym-onhb): the
+  // same stone cut with a placeable block held (cobblestone 170) but no pickaxe
+  // must NOT be blocked by `safe_column:no_tool@...:pickaxe@0`, because the
+  // pillar-up mechanic needs no pickaxe at all.
+  {
+    const state = worldState({
+      position: feet,
+      inventory: inventory({ cobblestone: 170, dirt: 37, andesite: 7 }),
+      stepCuts: [cut],
+      signals: signals({ knownResources: furnaceOnly }),
+      goal: charcoal,
+      goalQueue: queueWith(smelt),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const retrieve = grounded.candidates.find((candidate) => candidate.id.includes('station:furnace'))
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id.includes('station:furnace'))
+    check(
+      '(12b2) the same stone cut with a held placeable is feasible via the pillar plan (no pickaxe needed)',
+      retrieve !== undefined &&
+        retrieve.affordance?.feasible === true &&
+        retrieve.meta.vertical === 'pillar' &&
+        retrieve.meta.pillarPlaceName === 'cobblestone' &&
+        withheld === undefined,
+      retrieve === undefined
+        ? `withheld=${withheld?.result.reason ?? 'none'} missing=[${(withheld?.result.missingCapabilities ?? []).map(capabilityKey).join(',')}]`
+        : `vertical=${String(retrieve.meta.vertical)} place=${String(retrieve.meta.pillarPlaceName)} affordance=${JSON.stringify(retrieve.affordance)}`,
     )
   }
 
@@ -1153,6 +1184,76 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
         levelRetrieve !== undefined &&
         levelRetrieve.affordance?.feasible === true,
       `down=${downRetrieve?.affordance?.reason ?? 'none'} level=${levelRetrieve?.affordance?.reason ?? 'none'}`,
+    )
+  }
+
+  // (g) FIRST_FAILED_BOUNDARY (measured, RC d54d9a8, run-mu7x7wym-onhb):
+  //   goal=collect:log:1 presented=2 productive=0 blockedBy=no_productive_action
+  //   missing=["RETRIEVE:known:log:b27_65_19:safe_column:no_tool@39,12,31:pickaxe@0",
+  //            "tool:pickaxe@0"]
+  // Live body: pos=(39.5,11,32.3) underground, birch_planks=2 stick=2
+  // cobblestone=170 dirt=37 andesite=7, NO pickaxe; log at y=65; the only upward
+  // cut is stone at (39,12,31). Pillar-up needs no pickaxe, so the log RETRIEVE
+  // must be offered with vertical=pillar instead of the safe_column refusal.
+  {
+    const liveFeet: Vec3Json = { x: 39.5, y: 11, z: 32.3 }
+    const liveCut: StepCut = {
+      dir: 'N',
+      dx: 0,
+      dz: -1,
+      cut: { x: 39, y: 12, z: 31 },
+      step: { x: 39, y: 12, z: 31 },
+      name: 'stone',
+      safe: true,
+      reason: 'safe',
+    }
+    const liveLogGoal = queuedGoal({
+      id: 'g-live-log',
+      kind: 'collect',
+      description: 'collect 1 x log',
+      targetItem: 'log',
+      requiredCount: 1,
+      origin: 'mechanical',
+    })
+    const state = worldState({
+      position: liveFeet,
+      inventory: inventory({
+        birch_planks: 2,
+        stick: 2,
+        cobblestone: 170,
+        dirt: 37,
+        andesite: 7,
+      }),
+      standable: [{ x: 39, y: 11, z: 32 }, { x: 40, y: 11, z: 32 }],
+      stepCuts: [liveCut],
+      signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 27, y: 65, z: 19 } }] }),
+      goal: goal({ id: 'collect:log', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1 }),
+      goalQueue: queueWith(liveLogGoal),
+    })
+    const grounded = generateGroundedCandidates(state, optionsWith(null))
+    const id = 'RETRIEVE:known:log:b27_65_19'
+    const retrieve = grounded.candidates.find((candidate) => candidate.id === id)
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id === id)
+    const missing = grounded.withheld.flatMap((entry) => entry.result.missingCapabilities.map(capabilityKey))
+    check(
+      '(12g) the measured ascent boundary is feasible via pillar and NOT refused as safe_column:no_tool',
+      retrieve !== undefined &&
+        retrieve.affordance?.feasible === true &&
+        retrieve.affordance.reason === 'reachable' &&
+        retrieve.meta.vertical === 'pillar' &&
+        retrieve.meta.pillarPlaceName === 'cobblestone' &&
+        Number(retrieve.meta.pillarSteps) === 24 &&
+        retrieve.meta.logRoute === 'ascend_then_mine' &&
+        withheld === undefined &&
+        !missing.some((key) => key.startsWith('safe_column')),
+      retrieve === undefined
+        ? `not presented; withheld=${withheld?.result.reason ?? 'none'} missing=[${missing.join(',')}]`
+        : `vertical=${String(retrieve.meta.vertical)} place=${String(retrieve.meta.pillarPlaceName)} steps=${String(retrieve.meta.pillarSteps)} route=${String(retrieve.meta.logRoute)} affordance=${JSON.stringify(retrieve.affordance)} withheld=${withheld?.result.reason ?? 'none'}`,
+    )
+    check(
+      '(12g) no safe_column/tool capability is emitted for the live log route',
+      !missing.includes('tool:pickaxe@0') && !missing.some((key) => key.startsWith('safe_column')),
+      `missing=[${missing.join(',')}]`,
     )
   }
 }

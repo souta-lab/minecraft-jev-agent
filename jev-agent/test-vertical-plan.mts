@@ -186,9 +186,9 @@ function retrieveOf(candidates: readonly Candidate[]): Candidate | null {
 }
 
 /** The mirror of `downStep`: the upper block of a 2-block face opens a step up. */
-function upCut(dir: StepCut['dir'], dx: number, dz: number, feet: Vec3Json): StepCut {
+function upCut(dir: StepCut['dir'], dx: number, dz: number, feet: Vec3Json, name = 'cobblestone'): StepCut {
   const cut = { x: feet.x + dx, y: feet.y + 1, z: feet.z + dz }
-  return { dir, dx, dz, cut, step: cut, name: 'cobblestone', safe: true, reason: 'safe' }
+  return { dir, dx, dz, cut, step: cut, name, safe: true, reason: 'safe' }
 }
 
 const COBBLESTONE_HELD = { name: 'cobblestone', count: 119 }
@@ -398,6 +398,96 @@ addCase('an unsafe step-cut does not ground an upward staircase', () => {
     stepCuts: [cut],
   })
   return { pass: plan === null, detail: JSON.stringify(plan) }
+})
+
+// --- executable upward plans (FIRST_FAILED_BOUNDARY d54d9a8) ---------------------
+//
+// `StepCut.safe` proves the geometry (breakable, landing support, headroom, no
+// hazard) but not that the held tools can finish the dig. The measured live
+// refusal `safe_column:no_tool@39,12,31:pickaxe@0` came from a staircase-up plan
+// the executor could never dig (stone, no pickaxe) shadowing the pillar-up
+// mechanic that the held cobblestone 170 made available. A plan is now only
+// chosen when `canDigBlock` proves the dig executable, so the pillar fallback
+// gets its chance and the soft classes never require a pickaxe.
+
+addCase('a stone step-cut without a pickaxe falls through to the pillar fallback', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [upCut('E', 1, 0, feet, 'stone')],
+    placeable: COBBLESTONE_HELD,
+    inventory: inventory({ cobblestone: 119 }).counts,
+  })
+  const pass =
+    plan?.kind === 'pillar' &&
+    plan.placeName === 'cobblestone' &&
+    plan.fromY === 31 &&
+    plan.toY === 36
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('a stone step-cut without a pickaxe AND without a placeable yields no upward plan', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [upCut('E', 1, 0, feet, 'stone')],
+    placeable: null,
+    inventory: inventory({ birch_planks: 2 }).counts,
+  })
+  return { pass: plan === null, detail: JSON.stringify(plan) }
+})
+
+addCase('a dirt step-cut is diggable by hand without a pickaxe (soft class)', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [upCut('E', 1, 0, feet, 'dirt')],
+    placeable: COBBLESTONE_HELD,
+    inventory: inventory({}).counts,
+  })
+  const pass = plan?.kind === 'staircase-up' && plan.digName === 'dirt' && plan.dig.y === 32
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('with the pickaxe held the same stone step-cut still wins over the pillar (no reordering)', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [upCut('E', 1, 0, feet, 'stone')],
+    placeable: COBBLESTONE_HELD,
+    inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }).counts,
+  })
+  const pass = plan?.kind === 'staircase-up' && plan.dir === 'E' && plan.dig.y === 32
+  return { pass, detail: JSON.stringify(plan) }
+})
+
+addCase('a tool-agnostic caller (no inventory) keeps the geometry-only staircase-up choice', () => {
+  const feet = { x: 39, y: 31, z: 33 }
+  const plan = planVerticalApproach({
+    selfFeetY: feet.y,
+    selfPosition: feet,
+    target: { x: 43, y: 36, z: 33 },
+    tunnel: null,
+    descent: [],
+    stepCuts: [upCut('E', 1, 0, feet, 'cobblestone')],
+  })
+  return { pass: plan?.kind === 'staircase-up', detail: JSON.stringify(plan) }
 })
 
 // --- M2 ascent persistence ------------------------------------------------------

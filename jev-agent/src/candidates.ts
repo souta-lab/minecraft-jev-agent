@@ -2022,6 +2022,7 @@ function verticalInputFor(state: WorldState, target: Vec3Json): VerticalInput {
     stepCuts: state.stepCuts,
     placeable: selectPlaceableBlock(state.inventory.counts),
     columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
+    inventory: state.inventory.counts,
   }
 }
 
@@ -2933,6 +2934,7 @@ export function deriveReachabilityAbilities(
     stepCuts: state.stepCuts,
     placeable: column.placeable,
     columnSafe: column.columnSafe,
+    inventory: counts,
   })
 
   // The ascent column is a FACT, not a plan: an adjacent/forward cell whose
