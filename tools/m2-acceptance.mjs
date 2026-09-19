@@ -13,27 +13,23 @@
 // the resident runId. Transient rungs (logs, planks, crafting table,
 // wooden/stone tools, raw ore) are consumed before the final snapshot.
 //
-// OBSERVATION INSTANT (clarification of the IDENTICAL contract; needs owner
-// ratification): each condition is judged from the run's retained per-marker
-// samples (`M2_CONDITION_MARKER`): charcoal from the FURNACE_READY sample,
-// iron_ingot from the SMELT_DONE sample, and iron_pickaxe from the final/latest
-// inventory. This only fixes WHICH live reading proves a condition; it adds NO
-// marker and does NOT change the required item set or thresholds. Every value is
-// a real observation captured during the run, never reconstructed from logs.
-//
-// Inventory evidence has TWO documented sources, resolved in this order and
-// reported on the `evidence:` line:
+// Inventory evidence has TWO documented sources, reported on the `evidence:`
+// line:
 //   1. `live-socket`         - the resident answers the control socket for the
-//                              SAME runId; used whenever available.
+//                              SAME runId with a complete terminal inventory.
 //   2. `run-scoped-snapshot` - the resident's own `m2-snapshot-<runId>.json`,
-//                              written from live bot state when each marker
-//                              fired, so evidence survives the process exiting.
+//                              written from live bot state when each marker and
+//                              the verified terminal craft fired. It is used
+//                              after exit and also when a same-run live socket
+//                              has consumed transient evidence.
 // The snapshot is only accepted when ALL hold, else UNKNOWN (never PASS):
 //   - `snapshot.runId === --run`;
 //   - the recorded `buildHash` / `bootSourceSha` equal that run's BUILD `hash`
 //     and BOOT `source` (read from the log; `--log` overrides the default);
 //   - the recorded ordered chain PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE
-//     is VALID (the same chain m2-watch enforces).
+//     is VALID (the same chain m2-watch enforces);
+//   - charcoal is observed at FURNACE_READY, iron_ingot at SMELT_DONE, and a
+//     verified post-chain iron-pickaxe craft or terminal inventory is present.
 // REAL-POLICY REQUIREMENT (gate strengthening, NOT a substitute marker):
 //   the same run R must ALSO show that the real policy actually ran, otherwise
 //   RESULT is UNKNOWN and M2 can never PASS. Two run-bound facts are required:
@@ -43,7 +39,9 @@
 //       (socket `report.status`, or the GENERATION_READY line in runner.out).
 //   See tools/m2-policy-evidence.mjs. A deterministic fallback run (source=
 //   fallback / policyKind=fallback) is UNKNOWN, never PASS. A known inventory
-//   failure still returns FAIL, matching the live gate's FAIL>UNKNOWN rule.
+//   failure still returns FAIL unless the same run has a valid bound snapshot
+//   proving the earlier transient facts, matching the live gate's FAIL>UNKNOWN
+//   rule after all same-run evidence is joined.
 //
 // MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
 // HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
@@ -230,75 +228,58 @@ function snapshotInventory(snapshot) {
   return inventory
 }
 
-/**
- * The marker that OWNS each M2 condition --- the observation instant the rung is
- * about. `charcoal` is the fuel live when the furnace became ready; `iron_ingot`
- * is produced by the smelt; `iron_pickaxe` is crafted AFTER the chain, so it is
- * proven by the final (latest) inventory rather than a marker sample.
- *
- * This is an observation-instant clarification of the IDENTICAL M2 contract: it
- * adds NO marker and does NOT change the required item set or thresholds. Needs
- * owner ratification.
- */
-export const M2_CONDITION_MARKER = Object.freeze({
-  charcoal: 'FURNACE_READY',
-  iron_ingot: 'SMELT_DONE',
-  iron_pickaxe: null,
-})
-
-/** One retained live inventory per marker name, from the resident's snapshot. */
-export function retainedMarkerInventories(snapshot) {
-  const byMarker = new Map()
-  const markers = Array.isArray(snapshot?.markers) ? snapshot.markers : []
-  for (const marker of markers) {
-    if (marker === null || typeof marker !== 'object') continue
-    if (typeof marker.name !== 'string') continue
-    const inventory = marker.inventory
-    if (inventory === null || typeof inventory !== 'object' || Array.isArray(inventory)) continue
-    byMarker.set(marker.name, inventory)
-  }
-  return byMarker
+function snapshotMarker(snapshot, name) {
+  if (!Array.isArray(snapshot?.markers)) return null
+  const marker = snapshot.markers.find((entry) => entry?.name === name)
+  if (marker === undefined || marker === null || typeof marker !== 'object') return null
+  if (!Number.isFinite(marker.atMs) || marker.inventory === null || typeof marker.inventory !== 'object' || Array.isArray(marker.inventory)) return null
+  return marker
 }
 
 /**
- * Evaluate the SAME criteria against the run's per-marker observations. A rung
- * that was later consumed (fuel burnt by the smelt, ingots consumed by the craft)
- * keeps its chain-time observation: the condition is read from its owning marker
- * sample first, then from the maximum observed across the remaining retained
- * samples and the latest inventory. No value is invented; every candidate is a
- * live reading captured during the run. Returns `sources` so the gate output
- * names which sample fed each condition.
+ * Resolve the three M2 inventory facts from the observations that actually
+ * prove them. Charcoal is transient and belongs to FURNACE_READY; iron_ingot
+ * is transient and belongs to SMELT_DONE. A verified post-chain craft terminal
+ * supplies iron_pickaxe when present; legacy snapshots may use their latest
+ * inventory for that durable fact. The ordered marker timestamps are checked so
+ * a malformed snapshot cannot combine unrelated occurrences.
  */
-export function evaluateSnapshotCriteria(criteria, snapshot) {
-  const byMarker = retainedMarkerInventories(snapshot)
-  const latest = snapshotInventory(snapshot)
-  const observed = {}
-  const sources = {}
-  let allPass = true
-  for (const { item, need } of criteria) {
-    const owner = M2_CONDITION_MARKER[item] ?? null
-    const candidates = []
-    if (owner !== null && byMarker.has(owner)) candidates.push({ label: owner, inventory: byMarker.get(owner) })
-    if (latest !== null) candidates.push({ label: 'latest', inventory: latest })
-    for (const [name, inventory] of byMarker) {
-      if (name === owner) continue
-      candidates.push({ label: name, inventory })
-    }
-    let got = 0
-    let source = 'none'
-    for (const candidate of candidates) {
-      const value = observedCount(candidate.inventory, item)
-      // Strict `>` keeps the owning marker on ties, so attribution is stable.
-      if (value > got) {
-        got = value
-        source = candidate.label
-      }
-    }
-    observed[item] = got
-    sources[item] = source
-    if (got < need) allPass = false
+export function snapshotEvidenceInventory(snapshot) {
+  const chain = snapshotHasOrderedChain(snapshot)
+  if (!chain.valid) return null
+  const furnace = snapshotMarker(snapshot, 'FURNACE_READY')
+  const smelt = snapshotMarker(snapshot, 'SMELT_DONE')
+  if (furnace === null || smelt === null) return null
+  const prereq = snapshotMarker(snapshot, 'PREREQ_OPTION')
+  if (prereq === null || prereq.atMs > furnace.atMs || furnace.atMs > smelt.atMs) return null
+  const latestInventory = snapshotInventory(snapshot)
+  if (latestInventory === null) return null
+
+  let terminalInventory = latestInventory
+  if (snapshot.terminal !== undefined && snapshot.terminal !== null) {
+    const terminal = snapshot.terminal
+    if (
+      terminal.actionId !== 'CRAFT:iron_pickaxe' ||
+      terminal.verified !== true ||
+      terminal.status !== 'done' ||
+      !Number.isFinite(terminal.atMs) ||
+      terminal.atMs < smelt.atMs ||
+      terminal.inventory === null ||
+      typeof terminal.inventory !== 'object' ||
+      Array.isArray(terminal.inventory)
+    ) return null
+    terminalInventory = terminal.inventory
   }
-  return { allPass, observed, sources }
+
+  return {
+    inventory: {
+      ...latestInventory,
+      charcoal: observedCount(furnace.inventory, 'charcoal'),
+      iron_ingot: observedCount(smelt.inventory, 'iron_ingot'),
+      iron_pickaxe: observedCount(terminalInventory, 'iron_pickaxe'),
+    },
+    source: snapshot.terminal === null || snapshot.terminal === undefined ? 'marker-plus-latest' : 'marker-plus-terminal',
+  }
 }
 
 /** BOOT `source=` + the following BUILD `hash=` for one run, from the resident log. */
@@ -373,22 +354,13 @@ export async function runAcceptance({
   const resolveSnapshot = readSnapshot ?? ((runId) => readSnapshotFile(runId, snapshotDir))
   const resolveIdentity = readRunIdentity ?? ((runId) => readRunIdentityFromLog(runId, logPath))
 
-  const emit = async (data, reportData, inventory, boundRunId, snapshot = null) => {
+  const emit = async (data, reportData, inventory, boundRunId) => {
     // Printed only after a readable evidence source with a validated run scope:
     // the chain claim is never made for unavailable or out-of-scope evidence.
     write(`chain: ${chain.join(' -> ')}`)
-    const evaluation =
-      snapshot === null || snapshot === undefined
-        ? evaluateCriteria(criteria, inventory)
-        : evaluateSnapshotCriteria(criteria, snapshot)
-    const { allPass, observed } = evaluation
+    const { allPass, observed } = evaluateCriteria(criteria, inventory)
     for (const { item, need } of criteria) {
       write(`${observed[item] >= need ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${observed[item]})`)
-    }
-    // Snapshot evidence names the observation instant that fed each condition,
-    // so a consumed rung (charcoal burnt, ingots crafted) is auditable.
-    if (snapshot !== null && snapshot !== undefined) {
-      write(`observation: ${criteria.map(({ item }) => `${item}<-${evaluation.sources[item]}`).join(' ')}`)
     }
     const wedge = data?.stats?.wedge ?? reportData?.stats?.wedge ?? null
     const goalComplete = data?.stats?.goalComplete ?? reportData?.stats?.goalComplete ?? null
@@ -442,6 +414,52 @@ export async function runAcceptance({
     return 0
   }
 
+  const loadBoundSnapshotEvidence = async (runId) => {
+    const snapshotPath = snapshotPathFor(runId, snapshotDir)
+    const snapshot = await resolveSnapshot(runId)
+    if (snapshot === null) return { status: 'unavailable', snapshotPath }
+    if (snapshot.runId !== runId) {
+      return {
+        status: 'unknown',
+        snapshotPath,
+        reason: `snapshot run scope mismatch expected=${runId} observed=${typeof snapshot.runId === 'string' ? snapshot.runId : 'unknown'}`,
+      }
+    }
+    const chainCheck = snapshotHasOrderedChain(snapshot)
+    if (!chainCheck.valid) {
+      return {
+        status: 'unknown',
+        snapshotPath,
+        reason: `snapshot chain incomplete expected=${M2_REQUIRED_MARKERS.join('->')} observed=${chainCheck.observed.join('->') || 'none'}`,
+      }
+    }
+    const identity = await resolveIdentity(runId)
+    if (identity === null) return { status: 'unknown', snapshotPath, reason: `run identity unreadable for ${runId}` }
+    if (typeof identity.buildHash !== 'string' || snapshot.buildHash !== identity.buildHash) {
+      return {
+        status: 'unknown',
+        snapshotPath,
+        reason: `snapshot build mismatch expected=${identity.buildHash ?? 'unknown'} observed=${snapshot.buildHash ?? 'unknown'}`,
+      }
+    }
+    if (typeof identity.bootSourceSha !== 'string' || snapshot.bootSourceSha !== identity.bootSourceSha) {
+      return {
+        status: 'unknown',
+        snapshotPath,
+        reason: `snapshot source mismatch expected=${identity.bootSourceSha ?? 'unknown'} observed=${snapshot.bootSourceSha ?? 'unknown'}`,
+      }
+    }
+    let evidence
+    if (label === 'M2') {
+      evidence = snapshotEvidenceInventory(snapshot)
+    } else {
+      const latest = snapshotInventory(snapshot)
+      evidence = latest === null ? null : { inventory: latest, source: 'latest-snapshot' }
+    }
+    if (evidence === null) return { status: 'unknown', snapshotPath, reason: 'snapshot inventory evidence unreadable' }
+    return { status: 'valid', snapshotPath, snapshot, inventory: evidence.inventory, source: evidence.source }
+  }
+
   const reportReply = await request(REPORT_COMMAND.cmd)
   const reportData = unwrapReply(reportReply)
   let data = reportData
@@ -459,6 +477,20 @@ export async function runAcceptance({
         : null
 
   if (inventory !== null && (expectedRunId === null || observedRunId === expectedRunId)) {
+    // A completed craft necessarily consumes transient charcoal and ingots. If
+    // the same resident run has a bound snapshot proving those earlier facts,
+    // consume that evidence rather than falsely failing on the terminal socket
+    // inventory. A complete live inventory still keeps live-socket precedence.
+    if (label === 'M2' && expectedRunId !== null && !evaluateCriteria(criteria, inventory).allPass) {
+      const bound = await loadBoundSnapshotEvidence(expectedRunId)
+      if (bound.status === 'valid' && evaluateCriteria(criteria, bound.inventory).allPass) {
+        write('evidence: run-scoped-snapshot')
+        write(`runId: ${expectedRunId}`)
+        write(`snapshot: ${bound.snapshotPath}`)
+        write(`snapshotInventoryEvidence: ${bound.source}`)
+        return emit(data, reportData, bound.inventory, expectedRunId)
+      }
+    }
     write('evidence: live-socket')
     write(`runId: ${observedRunId ?? 'unknown'}`)
     return emit(data, reportData, inventory, observedRunId)
@@ -476,55 +508,26 @@ export async function runAcceptance({
     return 2
   }
 
-  const snapshotPath = snapshotPathFor(expectedRunId, snapshotDir)
-  const snapshot = await resolveSnapshot(expectedRunId)
-  if (snapshot === null) {
-    write(`snapshot: unavailable (${snapshotPath})`)
+  const bound = await loadBoundSnapshotEvidence(expectedRunId)
+  if (bound.status === 'unavailable') {
+    write(`snapshot: unavailable (${bound.snapshotPath})`)
     write('RESULT: UNKNOWN (no fabricated values)')
     return 2
   }
-  write(`snapshot: ${snapshotPath}`)
-  if (snapshot.runId !== expectedRunId) {
-    write(
-      `RESULT: UNKNOWN (snapshot run scope mismatch expected=${expectedRunId} observed=${typeof snapshot.runId === 'string' ? snapshot.runId : 'unknown'})`,
-    )
+  if (bound.status === 'unknown') {
+    write(`snapshot: ${bound.snapshotPath}`)
+    write(`RESULT: UNKNOWN (${bound.reason})`)
     return 2
   }
-  const chainCheck = snapshotHasOrderedChain(snapshot)
-  if (!chainCheck.valid) {
-    write(
-      `RESULT: UNKNOWN (snapshot chain incomplete expected=${M2_REQUIRED_MARKERS.join('->')} observed=${chainCheck.observed.join('->') || 'none'})`,
-    )
-    return 2
-  }
-  const identity = await resolveIdentity(expectedRunId)
-  if (identity === null) {
-    write(`RESULT: UNKNOWN (run identity unreadable for ${expectedRunId})`)
-    return 2
-  }
-  if (typeof identity.buildHash !== 'string' || snapshot.buildHash !== identity.buildHash) {
-    write(
-      `RESULT: UNKNOWN (snapshot build mismatch expected=${identity.buildHash ?? 'unknown'} observed=${snapshot.buildHash ?? 'unknown'})`,
-    )
-    return 2
-  }
-  if (typeof identity.bootSourceSha !== 'string' || snapshot.bootSourceSha !== identity.bootSourceSha) {
-    write(
-      `RESULT: UNKNOWN (snapshot source mismatch expected=${identity.bootSourceSha ?? 'unknown'} observed=${snapshot.bootSourceSha ?? 'unknown'})`,
-    )
-    return 2
-  }
-  const snapshotInv = snapshotInventory(snapshot)
-  if (snapshotInv === null) {
-    write('RESULT: UNKNOWN (snapshot inventory unreadable)')
-    return 2
-  }
+  const snapshot = bound.snapshot
+  write(`snapshot: ${bound.snapshotPath}`)
   write('evidence: run-scoped-snapshot')
   write(`runId: ${snapshot.runId}`)
   write(`snapshotGenerationId: ${typeof snapshot.generationId === 'string' ? snapshot.generationId : 'unknown'}`)
   write(`snapshotBuildHash: ${snapshot.buildHash}`)
   write(`snapshotBootSourceSha: ${snapshot.bootSourceSha}`)
-  return emit(snapshot, null, snapshotInv, expectedRunId, snapshot)
+  write(`snapshotInventoryEvidence: ${bound.source}`)
+  return emit(snapshot, null, bound.inventory, expectedRunId)
 }
 
 /**

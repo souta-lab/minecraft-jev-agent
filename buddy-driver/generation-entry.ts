@@ -945,6 +945,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     eventSink: (event, detail) => {
       ctx.log(event, { ...detail, generationId: id })
       m2Snapshot?.recordMarker(event)
+      const actionId = typeof detail.actionId === 'string' ? detail.actionId : null
+      const verified = detail.verified === true
+      const status = typeof detail.status === 'string' ? detail.status : null
+      if (actionId !== null && status !== null) m2Snapshot?.recordTerminal(actionId, { verified, status })
       handleStationEvent(event, detail)
     },
     moveFailureEntries: world.moveFailures,

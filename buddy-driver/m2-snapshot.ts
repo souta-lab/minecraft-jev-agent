@@ -51,6 +51,16 @@ export interface M2SnapshotMarker {
   inventory: Counts
 }
 
+/** A verified durable terminal observation captured after the required chain. */
+export interface M2SnapshotTerminal {
+  actionId: 'CRAFT:iron_pickaxe'
+  verified: true
+  status: 'done'
+  atMs: number
+  at: string
+  inventory: Counts
+}
+
 export interface M2SnapshotChain {
   status: 'VALID' | 'INCOMPLETE'
   required: readonly string[]
@@ -72,6 +82,7 @@ export interface M2Snapshot {
   sequence: string[]
   chain: M2SnapshotChain
   inventory: Counts
+  terminal: M2SnapshotTerminal | null
 }
 
 /**
@@ -117,6 +128,19 @@ function isSnapshotMarker(value: unknown): value is M2SnapshotMarker {
   )
 }
 
+function isSnapshotTerminal(value: unknown): value is M2SnapshotTerminal {
+  if (value === null || typeof value !== 'object') return false
+  const candidate = value as Partial<M2SnapshotTerminal>
+  return (
+    candidate.actionId === 'CRAFT:iron_pickaxe' &&
+    candidate.verified === true &&
+    candidate.status === 'done' &&
+    typeof candidate.atMs === 'number' &&
+    typeof candidate.at === 'string' &&
+    isCounts(candidate.inventory)
+  )
+}
+
 /** Parse and validate a snapshot file body. Returns null for anything malformed. */
 export function parseM2Snapshot(value: unknown): M2Snapshot | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
@@ -127,6 +151,7 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
   if (!Array.isArray(candidate.markers) || !candidate.markers.every(isSnapshotMarker)) return null
   if (!Array.isArray(candidate.sequence) || !candidate.sequence.every((name) => typeof name === 'string')) return null
   if (!isCounts(candidate.inventory)) return null
+  if (candidate.terminal !== undefined && candidate.terminal !== null && !isSnapshotTerminal(candidate.terminal)) return null
   const chain = orderedM2Chain(candidate.sequence)
   return {
     schemaVersion: typeof candidate.schemaVersion === 'number' ? candidate.schemaVersion : M2_SNAPSHOT_SCHEMA_VERSION,
@@ -143,6 +168,7 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
     sequence: [...candidate.sequence],
     chain,
     inventory: { ...candidate.inventory },
+    terminal: isSnapshotTerminal(candidate.terminal) ? { ...candidate.terminal, inventory: { ...candidate.terminal.inventory } } : null,
   }
 }
 
@@ -213,6 +239,7 @@ export class M2SnapshotRecorder {
             sequence: [],
             chain: orderedM2Chain([]),
             inventory: {},
+            terminal: null,
           }
         : existing
   }
@@ -225,6 +252,10 @@ export class M2SnapshotRecorder {
       sequence: [...this.snapshot.sequence],
       chain: { ...this.snapshot.chain, required: [...this.snapshot.chain.required], observed: [...this.snapshot.chain.observed] },
       inventory: { ...this.snapshot.inventory },
+      terminal:
+        this.snapshot.terminal === null
+          ? null
+          : { ...this.snapshot.terminal, inventory: { ...this.snapshot.terminal.inventory } },
     }
   }
 
@@ -253,26 +284,17 @@ export class M2SnapshotRecorder {
       at: new Date(atMs).toISOString(),
       inventory: this.readInventory(),
     }
-    // Exactly ONE retained sample per marker, pinned to the occurrence that
-    // ADVANCES the ordered chain: the first PREREQ_OPTION, the first
-    // FURNACE_READY after it, then the first SMELT_DONE after that. Those are
-    // the observations the causal chain is about, so they are the samples kept.
-    //
-    // A repeat of an already-retained marker (e.g. a second FURNACE_READY once
-    // the furnace has burnt its fuel) must NOT overwrite the earlier live
-    // inventory. Overwriting is what lost the FURNACE_READY-time `charcoal>=1`
-    // observation, leaving only the later fuel-consumed state.
+    // Keep the sample from the occurrence that advances the ordered chain. A
+    // later repeat must not overwrite a valid chain's earlier live inventory.
     const cursor = orderedM2Chain(this.snapshot.sequence).observed.length
     const advancesChain = M2_REQUIRED_MARKERS[cursor] === event
     const index = this.snapshot.markers.findIndex((entry) => entry.name === event)
     if (advancesChain) {
-      // The chain-participating occurrence is authoritative for this marker: it
-      // replaces an out-of-order earlier sample of the same name when present.
       if (index === -1) this.snapshot.markers.push(marker)
       else this.snapshot.markers[index] = marker
     } else if (index === -1) {
-      // No chain sample for this name yet: retain the occurrence as evidence,
-      // but never let a later repeat overwrite it (first observation wins).
+      // Preserve an out-of-order observation for diagnostics, but never let a
+      // later repeat replace it before the chain chooses its occurrence.
       this.snapshot.markers.push(marker)
     }
     if (this.snapshot.sequence.length < M2_SNAPSHOT_MAX_SEQUENCE) this.snapshot.sequence.push(event)
@@ -308,5 +330,54 @@ export class M2SnapshotRecorder {
       inventory: this.snapshot.inventory,
     })
     return marker
+  }
+
+  /**
+   * Record the verified durable M2 terminal after the required marker chain.
+   * This is separate from M2_REQUIRED_MARKERS: it adds no causal marker and
+   * exists only so a post-smelt craft is observable after the resident exits.
+   */
+  recordTerminal(actionId: string, outcome: { verified: boolean; status: string }): M2SnapshotTerminal | null {
+    if (actionId !== 'CRAFT:iron_pickaxe' || outcome.verified !== true || outcome.status !== 'done') return null
+    if (this.snapshot.chain.status !== 'VALID') return null
+    const now = this.options.now ?? Date.now
+    const atMs = now()
+    const terminal: M2SnapshotTerminal = {
+      actionId: 'CRAFT:iron_pickaxe',
+      verified: true,
+      status: 'done',
+      atMs,
+      at: new Date(atMs).toISOString(),
+      inventory: this.readInventory(),
+    }
+    this.snapshot.terminal = terminal
+    this.snapshot.atMs = atMs
+    this.snapshot.at = terminal.at
+    this.snapshot.inventory = { ...terminal.inventory }
+    this.snapshot.generationId = this.options.generationId
+    this.snapshot.bootSourceSha = this.options.bootSourceSha
+    this.snapshot.buildHash = this.options.buildHash
+    this.snapshot.worldEpoch = this.options.worldEpoch
+    this.snapshot.worldKey = this.options.worldKey
+    try {
+      writeM2SnapshotAtomic(this.path, this.snapshot)
+    } catch (error) {
+      this.options.log?.('ERROR', {
+        where: 'm2-snapshot-terminal',
+        actionId,
+        path: this.path,
+        message: error instanceof Error ? error.message : String(error),
+      })
+      return terminal
+    }
+    this.options.log?.('M2_TERMINAL_SNAPSHOT', {
+      actionId,
+      path: this.path,
+      runId: this.snapshot.runId,
+      generationId: this.snapshot.generationId,
+      buildHash: this.snapshot.buildHash,
+      inventory: terminal.inventory,
+    })
+    return terminal
   }
 }
