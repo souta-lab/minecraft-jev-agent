@@ -120,6 +120,111 @@ function jumpDeps(bot: ReturnType<typeof createFakeBot>, isSolid: SolidAt) {
   }
 }
 
+/**
+ * Fake bot for the live packet race. The server holds the body, so a
+ * clientbound `position` packet resets `onGround = false` and zeroes the
+ * velocity after the poll's correction/impulse and before the next
+ * `simulatePlayer` reads the jump gate. Mineflayer emits `forcedMove`
+ * synchronously after that reset (physics.js position handler) - the last
+ * client-side hook before the next tick. The physics order is the real one:
+ * `apply()` (gate + move) first, then the `physicsTick` correction, so a
+ * `physicsTick`-only correction always lands one tick too late.
+ */
+function createHeldPositionBot(input: { y: number }) {
+  const entity = {
+    position: { x: FEET_X + 0.5, y: input.y, z: FEET_Z + 0.5 },
+    velocity: { y: 0 },
+    onGround: false,
+  }
+  const listeners = new Map<string, Set<() => void>>()
+  const emit = (event: string): void => {
+    for (const listener of listeners.get(event) ?? []) listener()
+  }
+  const controls: boolean[] = []
+  const stats = { ticks: 0, packetResets: 0, jumpApplied: 0, clearControlStates: 0 }
+  const bot = {
+    entity,
+    physicsEnabled: false,
+    jumpTicks: 0,
+    jumpQueued: false,
+    setControlState(_control: 'jump', state: boolean): void {
+      controls.push(state)
+      if (state) bot.jumpQueued = true
+    },
+    clearControlStates(): void {
+      stats.clearControlStates += 1
+    },
+    on(event: string, listener: () => void): void {
+      const set = listeners.get(event) ?? new Set<() => void>()
+      set.add(listener)
+      listeners.set(event, set)
+    },
+    removeListener(event: string, listener: () => void): void {
+      listeners.get(event)?.delete(listener)
+    },
+    listenerCount(event: string): number {
+      return listeners.get(event)?.size ?? 0
+    },
+    stats,
+    jumpTransitions(): readonly boolean[] {
+      return controls
+    },
+    /** Clientbound position packet: reset flag + zero velocity, then forcedMove. */
+    packet(): void {
+      stats.packetResets += 1
+      entity.onGround = false
+      entity.velocity.y = 0
+      bot.jumpTicks = 0
+      emit('forcedMove')
+    },
+    /** prismarine-physics tickPhysics: apply (gate + move), then emit physicsTick. */
+    tick(): void {
+      stats.ticks += 1
+      const jumpHeld = controls.length > 0 && controls[controls.length - 1] === true
+      if ((jumpHeld || bot.jumpQueued) && entity.onGround && bot.jumpTicks === 0) {
+        entity.velocity.y = 0.42 // prismarine-physics index.js:726
+        bot.jumpTicks = 10
+        entity.onGround = false
+        stats.jumpApplied += 1
+      } else if (bot.jumpTicks > 0) {
+        bot.jumpTicks -= 1
+      }
+      bot.jumpQueued = false
+      entity.position.y += entity.velocity.y
+      entity.velocity.y = (entity.velocity.y - 0.08) * 0.98
+      if (entity.position.y < input.y && entity.velocity.y <= 0) {
+        entity.position.y = input.y
+        entity.velocity.y = 0
+      }
+      entity.onGround = false
+      emit('physicsTick')
+    },
+  }
+  return bot
+}
+
+/** Drives the held-position bot: a packet reset every poll, a tick every 50 ms. */
+function heldPositionDeps(bot: ReturnType<typeof createHeldPositionBot>, isSolid: SolidAt) {
+  let clock = 0
+  let lastTickAt = 0
+  return {
+    isSolid,
+    budgetMs: 600,
+    pollMs: 15,
+    sleep: async (ms: number): Promise<void> => {
+      clock += ms
+      // The server's correction packet lands after the poll wrote the impulse
+      // and before simulatePlayer reads the gate.
+      bot.packet()
+      while (clock - lastTickAt >= 50) {
+        lastTickAt += 50
+        bot.tick()
+      }
+    },
+    now: () => clock,
+  }
+}
+
 function runCase(testCase: Case): Promise<CaseResult> {
   return Promise.resolve(testCase.run())
 }
@@ -213,6 +318,28 @@ addCase('with no solid footing the bounded wait reports a no-op instead of hangi
   return {
     pass,
     detail: `airborne=${outcome.airborne} rise=${outcome.peakRise} samples=${outcome.samples}/${expectedSamples} jumpApplied=${bot.stats.jumpApplied} listeners=${bot.listenerCount()}`,
+  }
+})
+
+addCase('a clientbound position reset between ticks cannot discard the takeoff (forcedMove re-grounds)', async () => {
+  // The live race: the server holds the body, so every clientbound `position`
+  // packet resets onGround=false and zeroes velocity AFTER the physicsTick
+  // correction and BEFORE the next simulatePlayer reads the jump gate. A
+  // physicsTick-only correction always loses that race; only re-grounding on
+  // the forcedMove hook (emitted right after the reset) lets the gate fire.
+  const bot = createHeldPositionBot({ y: 10.5 })
+  const outcome = await jumpWithGroundCorrection(bot, heldPositionDeps(bot, footingAt(9)))
+  const pass =
+    outcome.airborne &&
+    outcome.peakRise > TAKEOFF_RISE &&
+    outcome.failure === null &&
+    bot.stats.jumpApplied >= 1 &&
+    bot.stats.packetResets >= 1 &&
+    bot.listenerCount('physicsTick') === 0 &&
+    bot.listenerCount('forcedMove') === 0
+  return {
+    pass,
+    detail: `airborne=${outcome.airborne} rise=${outcome.peakRise} packets=${bot.stats.packetResets} gateFires=${bot.stats.jumpApplied} ticks=${outcome.ticks} failure=${outcome.failure} listeners(physicsTick=${bot.listenerCount('physicsTick')},forcedMove=${bot.listenerCount('forcedMove')})`,
   }
 })
 
