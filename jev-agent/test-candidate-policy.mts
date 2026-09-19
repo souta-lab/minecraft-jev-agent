@@ -198,6 +198,20 @@ addCase('#56: a reachability recovery candidate cannot bypass the final Option s
   return { pass, detail: `candidates=${candidates.map((entry) => `${entry.id}:${String(entry.meta.optionSkill)}`).join(',')}` }
 })
 
+addCase('#56/#170: a craft prerequisite log route survives the final Option skill gate', () => {
+  const state = stateWithOption('craft')
+  const scoped = applyOptionSkillGate(
+    [candidate('MOVE:p42_11_32', 'MOVE', { logRoute: 'explore' }), candidate('WAIT', 'WAIT')],
+    state,
+    ['CRAFT_AT_STATION'],
+  )
+  const pass =
+    scoped.map((entry) => entry.id).join('|') === 'MOVE:p42_11_32|WAIT' &&
+    scoped[0]?.meta.optionSkill === 'PREREQUISITE' &&
+    scoped[1]?.meta.optionSkill === 'CONTROL'
+  return { pass, detail: scoped.map((entry) => `${entry.id}:${String(entry.meta.optionSkill)}`).join(',') }
+})
+
 addCase('#56: the collect Option keeps only its grounded skills plus control', () => {
   const state = stateWithOption('collect')
   const source = [

@@ -399,6 +399,21 @@ export function optionSkillForCandidate(candidate: Candidate, state: WorldState)
   if (candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE') return 'CONTROL'
   if (candidate.kind === 'EAT' || candidate.kind === 'RETREAT') return 'SAFETY'
 
+  // A log route can be synthesized by the reachability recovery gate while a
+  // craft/smelt Option is active. It is the deterministic prerequisite leg for
+  // the parent operation, even when the leg itself is a MOVE rather than a
+  // CRAFT/RETRIEVE candidate. Keep the final Option gate from collapsing this
+  // recovery back to WAIT.
+  const current = state.goalQueue?.current ?? null
+  const prerequisiteLogRoute =
+    typeof candidate.meta[LOG_ROUTE_META] === 'string' &&
+    (current?.kind === 'craft' ||
+      current?.kind === 'smelt' ||
+      current?.strategy === 'smelt_and_craft' ||
+      state.currentOption?.kind === 'craft' ||
+      state.currentOption?.kind === 'smelt')
+  if (prerequisiteLogRoute) return 'PREREQUISITE'
+
   // OptionSpec `goto` is represented as an explore GoalKind when it enters
   // the legacy queue, but its exact CurrentOptionContext still carries the
   // `goto` kind and PATHFIND_TO skill. Preserve that distinction or the
@@ -411,7 +426,6 @@ export function optionSkillForCandidate(candidate: Candidate, state: WorldState)
   const prefixed = OPTION_PREFIX_SKILLS[prefix]
   if (prefixed !== undefined) return prefixed
 
-  const current = state.goalQueue?.current ?? null
   const strategy = current?.strategy ?? null
   if (strategy !== null) {
     switch (strategy) {
