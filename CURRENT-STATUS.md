@@ -3,19 +3,15 @@
 Generated from real evidence only. Every section is labeled EVIDENCE or UNKNOWN; no value is invented.
 
 ## Base commit (origin/main) — EVIDENCE
-- sha: `b7d3aa685a08b992cd98efaa1d11a40a3f69d9fd`
-- subject: docs(status): refresh generated current status
-- date: 2026-09-19T13:18:20+09:00
+- sha: `e46010951751e3ab052c69004378f359ca722bc1`
+- subject: chore(routing): move landed #136 to live-validation queue
+- date: 2026-09-19T13:36:29+09:00
 
 ## Open pull requests — EVIDENCE
-- count: 7
-- #177 integrate: P0 evidence contract and #121 progress taxonomy (head: integrate/p0-121-acceptance)
+- count: 3
+- #178 fix(evidence): isolate run-scoped acceptance gates (head: corrective/p0-evidence-scope-20260919)
 - #176 feat(#121): add typed progress taxonomy foundation (head: task/121-progress-taxonomy)
-- #175 fix(evidence): complete P0 acceptance contract (head: task/p0-evidence-contract)
-- #174 docs(evidence): reconcile #136 machine state (head: docs/136-evidence-state)
 - #173 fix(#56): scope grounded candidates to active option skills (head: task/56-option-fixture-typecheck)
-- #172 chore(#103): reconcile closed issue evidence state (head: task/113-issue-state-drift)
-- #171 fix(evidence): resolve current run from BOOT boundaries (head: task/evidence-runid-guard)
 
 ## Open issues — EVIDENCE
 - count: 39
@@ -73,22 +69,22 @@ live: report received
     "runId": "run-mu7a4z6r-hcus",
     "frozen": false,
     "connected": true,
-    "generations": 3235,
-    "reloads": 299,
-    "recoveries": 2899,
+    "generations": 3305,
+    "reloads": 300,
+    "recoveries": 2968,
     "milestone": "iron_ingot",
     "worldKey": {
       "serverId": "127.0.0.1:25565",
       "dimension": "minecraft:overworld",
       "worldEpoch": 1
     },
-    "generationId": "gen-mu7vpq27-tqz8x1",
-    "generationHash": "56aaa4f6f6d8",
+    "generationId": "gen-mu7wd8qz-4q11cm",
+    "generationHash": "03e3b62b67ac",
     "contractVersion": 3,
     "lease": {
-      "activeId": "gen-mu7vpq27-tqz8x1",
-      "acquisitions": 2331,
-      "revocations": 2301
+      "activeId": "gen-mu7wd8qz-4q11cm",
+      "acquisitions": 2401,
+      "revocations": 2370
     },
     "reconnect": {
       "reconnects": 0,
@@ -121,8 +117,8 @@ live: report received
         "kicked": 0,
         "error": 0
       },
-      "reloadsChangedHash": 30,
-      "reloadsSkippedUnchanged": 15,
+      "reloadsChangedHash": 31,
+      "reloadsSkippedUnchanged": 16,
       "reloadsFailed": 0,
       "freezeCycles": 0,
       "wedge": true,
@@ -192,7 +188,7 @@ live: report received
       "queue": {
         "depth": 21,
         "current": {
-          "id": "g46034:collect:log",
+          "id": "g47504:collect:log",
           "kind": "collect",
           "description": "collect 1 x log",
           "targetItem": "log",
@@ -203,8 +199,8 @@ live: report received
           "haveCount": 0,
           "status": "active",
           "origin": "llm",
-          "createdAt": 1789791611874,
-          "updatedAt": 1789791620026,
+          "createdAt": 1789792709171,
+          "updatedAt": 1789792717620,
           "detail": null,
           "protected": false,
           "core": false
@@ -214,7 +210,7 @@ live: report received
         "done": 0,
         "goals": [
           {
-            "id": "g46034:collect:log",
+            "id": "g47504:collect:log",
             "kind": "collect",
             "description": "collect 1 x log",
             "targetItem": "log",
@@ -225,14 +221,14 @@ live: report received
             "haveCount": 0,
             "status": "active",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791620026,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792717620,
             "detail": null,
             "protected": false,
             "core": false
           },
           {
-            "id": "g46035:craft:stone_pickaxe",
+            "id": "g47505:craft:stone_pickaxe",
             "kind": "craft",
             "description": "craft 1 x stone_pickaxe",
             "targetItem": "stone_pickaxe",
@@ -243,14 +239,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46036:collect:flint",
+            "id": "g47506:collect:flint",
             "kind": "collect",
             "description": "collect 1 x flint (from gravel)",
             "targetItem": "flint",
@@ -261,14 +257,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": true,
             "core": true
           },
           {
-            "id": "g46037:place:nether_portal",
+            "id": "g47507:place:nether_portal",
             "kind": "place",
             "description": "build the 4x5 obsidian portal frame (10 blocks)",
             "targetItem": "nether_portal",
@@ -279,14 +275,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46038:craft:wooden_pickaxe",
+            "id": "g47508:craft:wooden_pickaxe",
             "kind": "craft",
             "description": "craft 1 x wooden_pickaxe",
             "targetItem": "wooden_pickaxe",
@@ -297,14 +293,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46039:smelt:charcoal",
+            "id": "g47509:smelt:charcoal",
             "kind": "smelt",
             "description": "smelt 1 x charcoal",
             "targetItem": "charcoal",
@@ -315,14 +311,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46040:collect:raw_iron",
+            "id": "g47510:collect:raw_iron",
             "kind": "collect",
             "description": "collect 3 x raw_iron",
             "targetItem": "raw_iron",
@@ -333,14 +329,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46041:smelt:iron_ingot",
+            "id": "g47511:smelt:iron_ingot",
             "kind": "smelt",
             "description": "smelt 3 x iron_ingot",
             "targetItem": "iron_ingot",
@@ -351,14 +347,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46042:craft:iron_pickaxe",
+            "id": "g47512:craft:iron_pickaxe",
             "kind": "craft",
             "description": "craft 1 x iron_pickaxe",
             "targetItem": "iron_pickaxe",
@@ -369,14 +365,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46043:collect:raw_iron",
+            "id": "g47513:collect:raw_iron",
             "kind": "collect",
             "description": "collect 26 x raw_iron",
             "targetItem": "raw_iron",
@@ -387,14 +383,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46044:smelt:iron_ingot",
+            "id": "g47514:smelt:iron_ingot",
             "kind": "smelt",
             "description": "smelt 26 x iron_ingot",
             "targetItem": "iron_ingot",
@@ -405,14 +401,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46045:craft:iron_chestplate",
+            "id": "g47515:craft:iron_chestplate",
             "kind": "craft",
             "description": "craft 1 x iron_chestplate",
             "targetItem": "iron_chestplate",
@@ -423,14 +419,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46046:craft:iron_leggings",
+            "id": "g47516:craft:iron_leggings",
             "kind": "craft",
             "description": "craft 1 x iron_leggings",
             "targetItem": "iron_leggings",
@@ -441,14 +437,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46047:craft:iron_helmet",
+            "id": "g47517:craft:iron_helmet",
             "kind": "craft",
             "description": "craft 1 x iron_helmet",
             "targetItem": "iron_helmet",
@@ -459,14 +455,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46048:craft:iron_boots",
+            "id": "g47518:craft:iron_boots",
             "kind": "craft",
             "description": "craft 1 x iron_boots",
             "targetItem": "iron_boots",
@@ -477,14 +473,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46049:craft:iron_sword",
+            "id": "g47519:craft:iron_sword",
             "kind": "craft",
             "description": "craft 1 x iron_sword",
             "targetItem": "iron_sword",
@@ -495,14 +491,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46050:collect:diamond",
+            "id": "g47520:collect:diamond",
             "kind": "collect",
             "description": "collect 1 x diamond",
             "targetItem": "diamond",
@@ -513,14 +509,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46051:craft:diamond_pickaxe",
+            "id": "g47521:craft:diamond_pickaxe",
             "kind": "craft",
             "description": "craft 1 x diamond_pickaxe",
             "targetItem": "diamond_pickaxe",
@@ -531,14 +527,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": false,
             "core": true
           },
           {
-            "id": "g46052:craft:flint_and_steel",
+            "id": "g47522:craft:flint_and_steel",
             "kind": "craft",
             "description": "craft 1 x flint_and_steel",
             "targetItem": "flint_and_steel",
@@ -549,14 +545,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": true,
             "core": true
           },
           {
-            "id": "g46053:collect:diamond",
+            "id": "g47523:collect:diamond",
             "kind": "collect",
             "description": "collect 3 x diamond",
             "targetItem": "diamond",
@@ -567,14 +563,14 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": true,
             "core": true
           },
           {
-            "id": "g46054:collect:obsidian",
+            "id": "g47524:collect:obsidian",
             "kind": "collect",
             "description": "mine 10 x obsidian with diamond_pickaxe",
             "targetItem": "obsidian",
@@ -585,8 +581,8 @@ live: report received
             "haveCount": 0,
             "status": "pending",
             "origin": "llm",
-            "createdAt": 1789791611874,
-            "updatedAt": 1789791611874,
+            "createdAt": 1789792709171,
+            "updatedAt": 1789792709171,
             "detail": null,
             "protected": true,
             "core": true
