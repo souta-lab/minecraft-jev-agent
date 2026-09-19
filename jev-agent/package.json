@@ -20,6 +20,7 @@
     "furnace-prereq-gate-test": "tsx test-furnace-prereq-gate.mts",
     "furnace-transfer-test": "tsx test-furnace-transfer.mts",
     "m2-in-run-completion-test": "tsx test-m2-in-run-completion.mts",
+    "bootstrap-preserve-test": "tsx test-bootstrap-preserve.mts",
     "reachability-test": "tsx test-reachability.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
