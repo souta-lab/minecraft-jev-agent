@@ -287,6 +287,9 @@ const UNREACHABLE_FURNACE: StationEntry = { x: 23, y: 69, z: 24, source: 'sensed
 const REACHABLE_FURNACE: StationEntry = { x: 35, y: 65, z: 34, source: 'sensed' }
 const UNREACHABLE_KEY = knownStationKey({ name: 'furnace', position: { x: UNREACHABLE_FURNACE.x, y: UNREACHABLE_FURNACE.y, z: UNREACHABLE_FURNACE.z } })
 
+const REMEMBERED_NEAR_FURNACE: StationEntry = { x: 8, y: 65, z: 24, source: 'remembered' }
+const REMEMBERED_FAR_FURNACE: StationEntry = { x: 16, y: 64, z: 11, source: 'remembered' }
+
 /** The live guard probe: the placed furnace cell cannot be pathed to. */
 const livePathProbe = (position: Vec3Json): boolean =>
   !(position.x === UNREACHABLE_FURNACE.x && position.y === UNREACHABLE_FURNACE.y && position.z === UNREACHABLE_FURNACE.z)
@@ -308,6 +311,36 @@ function smeltOptions(unreachable: ReadonlySet<string>): typeof defaultCandidate
 async function main(): Promise<void> {
   process.stdout.write('smelt charcoal abandon boundary: complete when reachable, retire when not\n')
   process.stdout.write('-'.repeat(78) + '\n')
+
+  // A remembered station projection is deliberately kept in `state.furnaces`
+  // for Jev perception even after the controller filters an unreachable
+  // resource out of `signals.knownResources`. Candidate generation must not
+  // re-introduce that filtered coordinate: the guard and the generator must
+  // agree on the same durable truth source.
+  {
+    const state = worldState({
+      position: LIVE_FEET,
+      inventory: inventory({ oak_log: 1, birch_planks: 1 }),
+      furnaces: [REMEMBERED_NEAR_FURNACE, REMEMBERED_FAR_FURNACE],
+      signals: signals({
+        knownResources: [
+          { name: 'furnace', kind: 'station', position: { x: REMEMBERED_FAR_FURNACE.x, y: REMEMBERED_FAR_FURNACE.y, z: REMEMBERED_FAR_FURNACE.z } },
+        ],
+      }),
+    })
+    const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability: { memory: null } })
+    const retrieve = grounded.candidates.find((entry) => entry.kind === 'RETRIEVE')
+    await check(
+      '(truth) a filtered remembered furnace is not re-injected from state.furnaces',
+      retrieve !== undefined &&
+        retrieve.target !== null &&
+        retrieve.target.x === REMEMBERED_FAR_FURNACE.x &&
+        retrieve.target.y === REMEMBERED_FAR_FURNACE.y &&
+        retrieve.target.z === REMEMBERED_FAR_FURNACE.z &&
+        !grounded.candidates.some((entry) => entry.id === 'RETRIEVE:known:station:furnace:b8_65_24'),
+      `ids=[${grounded.candidates.map((entry) => entry.id).join(',')}]`,
+    )
+  }
 
   // (a) a reachable sensed furnace is selected, clears the guard, and the done
   // path emits SMELT_DONE only on a real gain. Pre-fix `smeltCandidates` picked
