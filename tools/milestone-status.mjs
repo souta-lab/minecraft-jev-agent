@@ -35,8 +35,11 @@ export function validateContract(contract) {
     if (evaluator?.type === 'manual' && (typeof evaluator.reason !== 'string' || evaluator.reason.length === 0)) {
       errors.push(`${id}.evaluator.reason is required for manual gates`)
     }
-    if (evaluator?.type === 'command' && (typeof evaluator.script !== 'string' || evaluator.script.length === 0)) {
-      errors.push(`${id}.evaluator.script is required for command gates`)
+    if (evaluator?.type === 'command') {
+      if (typeof evaluator.script !== 'string' || evaluator.script.length === 0) errors.push(`${id}.evaluator.script is required for command gates`)
+      if (evaluator.scopeArg !== undefined && evaluator.scopeArg !== '--since' && evaluator.scopeArg !== '--run') {
+        errors.push(`${id}.evaluator.scopeArg must be --since|--run when present`)
+      }
     }
   }
   return errors
@@ -54,12 +57,14 @@ export function evaluateMilestone(contract, id, options = {}) {
   if (evaluator.type === 'manual') return { id, status: 'UNKNOWN', reason: evaluator.reason }
 
   const since = options.since ?? null
-  if (evaluator.scopeArg === '--since' && (typeof since !== 'string' || since.trim().length === 0)) {
-    return { id, status: 'UNKNOWN', reason: 'run_scope_required' }
+  const runId = options.runId ?? null
+  const scopeValue = evaluator.scopeArg === '--run' ? runId : evaluator.scopeArg === '--since' ? since : null
+  if (evaluator.scopeArg !== undefined && (typeof scopeValue !== 'string' || scopeValue.trim().length === 0)) {
+    return { id, status: 'UNKNOWN', reason: evaluator.scopeArg === '--run' ? 'exact_run_scope_required' : 'run_scope_required' }
   }
 
   const args = [join(ROOT, evaluator.script)]
-  if (evaluator.scopeArg === '--since') args.push('--since', since)
+  if (evaluator.scopeArg !== undefined) args.push(evaluator.scopeArg, scopeValue)
   const run = options.runCommand ?? ((argv) => spawnSync(process.execPath, argv, { cwd: ROOT, encoding: 'utf8' }))
   const result = run(args)
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
@@ -70,11 +75,12 @@ export function evaluateMilestone(contract, id, options = {}) {
 }
 
 function parseArgs(argv) {
-  const out = { milestone: null, since: null, json: false, check: false, list: false }
+  const out = { milestone: null, since: null, runId: null, json: false, check: false, list: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--milestone') out.milestone = argv[++i] ?? null
     else if (arg === '--since') out.since = argv[++i] ?? null
+    else if (arg === '--run') out.runId = argv[++i] ?? null
     else if (arg === '--json') out.json = true
     else if (arg === '--check') out.check = true
     else if (arg === '--list') out.list = true
@@ -100,8 +106,8 @@ function main() {
     for (const [id, milestone] of Object.entries(contract.milestones)) process.stdout.write(`${id}\t${milestone.title}\n`)
     return
   }
-  if (args.milestone === null) throw new Error('usage: milestone-status --milestone M0|M1|M2|M3|M4 [--since ISO] [--json]')
-  const result = evaluateMilestone(contract, args.milestone, { since: args.since })
+  if (args.milestone === null) throw new Error('usage: milestone-status --milestone M0|M1|M2|M3|M4 [--run RUN_ID|--since ISO] [--json]')
+  const result = evaluateMilestone(contract, args.milestone, { since: args.since, runId: args.runId })
   if (args.json) process.stdout.write(`${JSON.stringify(result)}\n`)
   else process.stdout.write(`MILESTONE_RESULT id=${result.id} status=${result.status} reason=${JSON.stringify(result.reason)}\n`)
   process.exitCode = result.status === 'PASS' ? 0 : result.status === 'FAIL' ? 1 : 2
