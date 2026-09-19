@@ -1,19 +1,16 @@
 #!/usr/bin/env node
-// m2-acceptance: read-only M2 exit-criteria check against the live resident
-// control socket. Prints PASS/FAIL per criterion with observed numbers.
+// m2-acceptance: read-only terminal M2 snapshot check against the live resident
+// control socket. Historical M2 progression is proved by m2-watch; this file
+// deliberately checks only state that must still be true at the END of M2.
 // Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable (never fabricates a value).
 //
-// MILESTONES.md:16 defines M2 as ending in a diamond pickaxe:
-//   furnace + charcoal -> iron ore -> iron tools -> diamond pickaxe
-// The durable inventory rungs are an ORDERED causal chain that closes M2 only
-// when every rung is observed within ONE resident run:
-//   charcoal -> iron_ingot x3 -> iron_pickaxe -> diamond_pickaxe
-// A single snapshot cannot prove ordering by itself, so the within-run rule is
-// enforced by the exact runId join: `--run <runId>` (or M2_RUN_ID) must match
-// the resident runId, and m2-live-gate additionally requires the ordered
-// PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE log chain for that same run.
-// Transient rungs (logs, planks, crafting table, wooden/stone tools, raw ore)
-// are consumed before the final snapshot; the log chain carries their proof.
+// MILESTONES.md defines M2 as ending in a diamond pickaxe. Earlier rungs are
+// consumable evidence, NOT simultaneous inventory requirements: charcoal may be
+// consumed as fuel and iron_ingot x3 is consumed to craft the iron pickaxe.
+// Requiring all intermediate items in one final snapshot creates a false
+// negative precisely when the agent progresses correctly. Same-run history is
+// therefore owned by m2-watch; the terminal durable predicate here is simply:
+//   diamond_pickaxe >= 1
 import { existsSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
@@ -21,29 +18,12 @@ import { pathToFileURL } from 'node:url'
 export const SOCK_PATH =
   process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
-/**
- * Resident report can briefly queue behind a generation boundary. Three
- * seconds produced false UNKNOWN results during an otherwise healthy socket
- * session, which weakened the M2 FAIL-vs-UNKNOWN evidence distinction.
- */
+/** Resident reports can briefly queue behind a generation boundary. */
 export const M2_CONTROL_TIMEOUT_MS = 10_000
 
-/**
- * Durable-inventory ladder in causal order. Each rung's `requires` names the
- * rung that must already have happened in the same run; the terminal rung is
- * the M2 target from MILESTONES.md:16. The iron rungs stay because a diamond
- * pickaxe can only exist after the full iron tier, and they keep the FAIL
- * output diagnostic about which rung is missing.
- */
-export const M2_CRITERIA = [
-  { item: 'charcoal', need: 1, requires: null },
-  { item: 'iron_ingot', need: 3, requires: 'charcoal' },
-  { item: 'iron_pickaxe', need: 1, requires: 'iron_ingot' },
-  { item: 'diamond_pickaxe', need: 1, requires: 'iron_pickaxe' },
-]
-
-/** Ordered item names of M2_CRITERIA, printed so the required order is explicit in gate output. */
-export const M2_CAUSAL_CHAIN = Object.freeze(M2_CRITERIA.map(({ item }) => item))
+/** Final-state predicates only. Historical rung evidence belongs to m2-watch. */
+export const M2_CRITERIA = Object.freeze([{ item: 'diamond_pickaxe', need: 1 }])
+export const M2_TERMINAL_ITEM = 'diamond_pickaxe'
 
 export const REPORT_COMMAND = { id: 'm2', cmd: 'report' }
 
@@ -128,7 +108,7 @@ export async function runAcceptance({
   expectedRunId = null,
 } = {}) {
   const ts = now().toISOString()
-  write(`M2 acceptance check — ${ts}`)
+  write(`M2 terminal acceptance check — ${ts}`)
   write(`socket : ${sockPath}`)
   write(`command: ${JSON.stringify(REPORT_COMMAND)}`)
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
@@ -161,10 +141,7 @@ export async function runAcceptance({
     return 2
   }
 
-  // Printed only after a readable snapshot with a validated run scope: the
-  // chain claim is never made for unavailable or out-of-scope evidence.
-  write(`chain: ${M2_CAUSAL_CHAIN.join(' -> ')}`)
-
+  write('history: delegated to exact-run m2-watch (consumable intermediates are not final-snapshot gates)')
   const observed = {}
   let allPass = true
   for (const { item, need } of M2_CRITERIA) {
@@ -181,7 +158,7 @@ export async function runAcceptance({
   write(`milestone: ${milestone === null ? 'unknown' : milestone}`)
   write(`wedge: ${wedge === null ? 'unknown' : wedge}`)
   write(`goalComplete: ${goalComplete === null ? 'unknown' : goalComplete}`)
-  write(`inventory: ${JSON.stringify(observed)}`)
+  write(`terminalInventory: ${JSON.stringify(observed)}`)
   write(`RESULT: ${allPass ? 'PASS' : 'FAIL'}`)
   return allPass ? 0 : 1
 }
