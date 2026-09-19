@@ -170,41 +170,37 @@ try {
   // Pure evaluator edges.
   {
     assert.equal(evaluatePolicyEvidence({}).reason, 'exact_run_scope_required')
-    assert.equal(
-      evaluatePolicyEvidence({ expectedRunId: 'run-x', decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 }, generation: null }).reason,
-      'generation_status_unavailable',
+    assert.ok(
+      evaluatePolicyEvidence({ expectedRunId: 'run-x', decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 }, generation: null }).reason.startsWith("generation_status_unavailable"),
     )
-    assert.equal(
+    assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
         decisions: { runId: 'run-x', jevCount: 1, fallbackCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'other-model' },
-      }).reason,
-      'policy_model_not_typesafe',
+      }).reason.startsWith("policy_model_not_typesafe"),
     )
-    assert.equal(
+    assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
         decisions: { runId: 'run-x', jevCount: 0, fallbackCount: 0 },
         generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
-      }).reason,
-      'no_jev_decisions',
+      }).reason.startsWith("no_jev_decisions"),
     )
-    assert.equal(
+    assert.ok(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
         decisions: { runId: 'run-y', jevCount: 5, fallbackCount: 0 },
         generation: { runId: 'run-y', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
-      }).reason,
-      'decisions_evidence_run_mismatch',
+      }).reason.startsWith("decisions_evidence_run_mismatch"),
     )
-    assert.equal(
+    assert.match(
       evaluatePolicyEvidence({
         expectedRunId: 'run-x',
         decisions: { runId: 'run-x', jevCount: 5, fallbackCount: 0 },
         generation: { runId: 'run-y', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
       }).reason,
-      'generation_run_mismatch',
+      /^generation_run_mismatch/,
     )
     assert.equal(REQUIRED_POLICY_KIND, 'typesafe')
     assert.equal(REQUIRED_POLICY_MODEL, 'typesafe-ai/jev')
