@@ -51,10 +51,29 @@ function ok(label) {
 
 {
   assert.equal(hasRunScope(['--since', '2026-09-18T14:00:00Z'], {}), true)
+  assert.equal(hasRunScope(['--run', 'run-abc'], {}), true)
+  assert.equal(hasRunScope([], { M2_RUN_ID: 'run-abc' }), true)
   assert.equal(hasRunScope([], { M2_SINCE: '2026-09-18T14:00:00Z' }), true)
   assert.equal(hasRunScope([], {}), false)
   assert.equal(hasRunScope(['--log', '/tmp/run.log'], {}), false)
   ok('run scope must come from --since or M2_SINCE')
+}
+
+{
+  const calls = []
+  const runner = async (script, args) => {
+    calls.push({ script, args })
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const code = await runGate({
+    argv: ['--run', 'run-abc'],
+    env: {},
+    runner,
+    write: () => undefined,
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(calls[0], { script: WATCH, args: ['--run', 'run-abc'] })
+  ok('exact runId scope is forwarded to m2-watch')
 }
 
 {
@@ -119,4 +138,4 @@ function ok(label) {
   ok('M2_SINCE scope is inherited by both child processes')
 }
 
-console.log(`m2-live-gate: ${checks}/10 checks passed`)
+console.log(`m2-live-gate: ${checks}/11 checks passed`)
