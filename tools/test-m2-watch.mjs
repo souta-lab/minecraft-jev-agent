@@ -10,12 +10,9 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const helper = join(repoRoot, 'tools', 'm2-watch.mjs')
 const dir = mkdtempSync(join(tmpdir(), 'm2-watch-'))
-
 function run(logPath, extra = []) {
   try {
-    const stdout = execFileSync(process.execPath, [helper, '--log', logPath, ...extra], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const stdout = execFileSync(process.execPath, [helper, '--log', logPath, ...extra], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     return { status: 0, stdout, stderr: '' }
   } catch (error) {
     return { status: error.status, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }
@@ -28,7 +25,6 @@ const T1 = '2026-09-18T09:00:01.000Z'
 const T2 = '2026-09-18T09:00:02.000Z'
 const T3 = '2026-09-18T09:00:03.000Z'
 const line = (ts, body) => `[${ts}] ${body}`
-
 const FULL = [
   line(T0, 'BOOT pid=11 runId=run-full bundle=new'),
   line(T0, 'PREREQ_OPTION chosen=craft_and_place'),
@@ -50,7 +46,6 @@ try {
   assert.match(complete.stdout, /M2_SEQUENCE status=VALID/)
   passed++
 
-  // A generic SMELT_DONE for the wrong item must never satisfy the iron boundary.
   const charcoalOnlyPath = join(dir, 'charcoal-only.log')
   writeFileSync(charcoalOnlyPath, FULL.replace(line(T3, 'SMELT_DONE item=iron_ingot gained=3 input=raw_iron fuel=charcoal output=3'), line(T3, 'SMELT_DONE item=charcoal gained=1 input=oak_log fuel=planks output=2')))
   const charcoalOnly = run(charcoalOnlyPath, ['--run', 'run-full'])
@@ -68,7 +63,6 @@ try {
   assert.match(noCharcoal.stdout, /next=SMELT_DONE_CHARCOAL/)
   passed++
 
-  // Both item markers exist, but the iron smelt occurred before charcoal: invalid.
   const wrongOrderPath = join(dir, 'wrong-order.log')
   writeFileSync(wrongOrderPath, [
     line(T0, 'BOOT pid=12 runId=run-order bundle=x'),
@@ -82,17 +76,31 @@ try {
   assert.match(wrongOrder.stdout, /M2_SEQUENCE status=INVALID/)
   passed++
 
-  // Old complete run cannot fill missing evidence in a new run.
+  // A single host run containing two successful generation hashes is not one
+  // exact-source experiment even if its marker chain looks complete.
+  const mixedSourcePath = join(dir, 'mixed-source.log')
+  writeFileSync(mixedSourcePath, [
+    line(T0, 'BOOT pid=30 runId=run-source bundle=none'),
+    line(T0, 'BUILD hash=aaaaaaaaaaaa bytes=1'),
+    line(T0, 'PREREQ_OPTION chosen=craft_and_place'),
+    line(T1, 'FURNACE_READY pos=1,2,3'),
+    line(T1, 'RELOAD ok=true trigger=source hash=bbbbbbbbbbbb id=gen-b'),
+    line(T2, 'SMELT_DONE item=charcoal gained=1'),
+    line(T3, 'SMELT_DONE item=iron_ingot gained=3'),
+  ].join('\n') + '\n')
+  const mixedSource = run(mixedSourcePath, ['--run', 'run-source'])
+  assert.equal(mixedSource.status, 2)
+  assert.match(mixedSource.stdout, /M2_SOURCE generationHashes=aaaaaaaaaaaa,bbbbbbbbbbbb/)
+  assert.match(mixedSource.stderr, /reason=mixed_generation_hashes/)
+  passed++
+
   const scopedPath = join(dir, 'scoped.log')
   writeFileSync(scopedPath, [
     line(OLD, 'BOOT pid=10 runId=run-old bundle=old'),
-    line(OLD, 'PREREQ_OPTION chosen=craft_and_place'),
-    line(OLD, 'FURNACE_READY pos=9,9,9'),
-    line(OLD, 'SMELT_DONE item=charcoal gained=1'),
-    line(OLD, 'SMELT_DONE item=iron_ingot gained=3'),
+    line(OLD, 'PREREQ_OPTION chosen=craft_and_place'), line(OLD, 'FURNACE_READY pos=9,9,9'),
+    line(OLD, 'SMELT_DONE item=charcoal gained=1'), line(OLD, 'SMELT_DONE item=iron_ingot gained=3'),
     line(T0, 'BOOT pid=11 runId=run-new bundle=new'),
-    line(T0, 'PREREQ_OPTION chosen=craft_and_place'),
-    line(T1, 'FURNACE_READY pos=1,2,3'),
+    line(T0, 'PREREQ_OPTION chosen=craft_and_place'), line(T1, 'FURNACE_READY pos=1,2,3'),
     line(T2, 'SMELT_DONE item=charcoal gained=1'),
   ].join('\n') + '\n')
   const scoped = run(scopedPath, ['--run', 'run-new'])
@@ -102,11 +110,8 @@ try {
 
   const mixedPath = join(dir, 'mixed-runs.log')
   writeFileSync(mixedPath, [
-    line(T0, 'BOOT pid=20 runId=run-a bundle=a'),
-    line(T0, 'PREREQ_OPTION'),
-    line(T1, 'FURNACE_READY'),
-    line(T2, 'SMELT_DONE item=charcoal gained=1'),
-    line(T3, 'BOOT pid=21 runId=run-b bundle=b'),
+    line(T0, 'BOOT pid=20 runId=run-a bundle=a'), line(T0, 'PREREQ_OPTION'), line(T1, 'FURNACE_READY'),
+    line(T2, 'SMELT_DONE item=charcoal gained=1'), line(T3, 'BOOT pid=21 runId=run-b bundle=b'),
     line(T3, 'SMELT_DONE item=iron_ingot gained=3'),
   ].join('\n') + '\n')
   const mixed = run(mixedPath, ['--since', OLD])
@@ -135,7 +140,7 @@ try {
   assert.match(unreadable.stdout, /^UNKNOWN$/m)
   passed++
 
-  console.log(`m2-watch: ${passed}/10 checks passed`)
+  console.log(`m2-watch: ${passed}/11 checks passed`)
 } finally {
   rmSync(dir, { recursive: true, force: true })
 }
