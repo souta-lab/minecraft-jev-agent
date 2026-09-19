@@ -27,6 +27,13 @@ const M2_LIVE = {
   oak_log: 2,
 }
 
+addCase('the cobblestone rung uses the concrete stone drop, not the semantic class', () => {
+  const goals = rung('cobblestone').goals(M2_LIVE, world())
+  const goal = goals[0]
+  const concrete = goal?.kind === 'collect' && goal.targetItem === 'cobblestone' && goal.description === 'collect 12 x cobblestone'
+  return { pass: concrete, detail: `goal=${goal?.kind ?? 'none'}:${goal?.targetItem ?? 'none'}:${goal?.description ?? 'none'}` }
+})
+
 function rung(id: string) {
   const found = RUNGS.find((candidate) => candidate.id === id)
   if (found === undefined) throw new Error(`no rung ${id}`)
