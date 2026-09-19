@@ -118,6 +118,12 @@ try {
   assert.match(pinned.stdout, /PREREQ_OPTION MISSING/)
   passed += 2
 
+  const missingRun = run(mixedPath, ['--run', 'run-does-not-exist'])
+  assert.equal(missingRun.status, 2, `missing explicit run must be UNKNOWN, got ${missingRun.status}\n${missingRun.stdout}${missingRun.stderr}`)
+  assert.match(missingRun.stdout, /^UNKNOWN$/m)
+  assert.match(missingRun.stderr, /explicit_run_boundary_missing/)
+  passed++
+
   // All three marker names exist, but the causal order is wrong. Counts alone
   // must not upgrade this log to complete.
   const unorderedPath = join(dir, 'unordered.log')
@@ -146,7 +152,7 @@ try {
   assert.match(unreadable.stdout, /^UNKNOWN$/m)
   passed++
 
-  console.log(`m2-watch: ${passed}/8 checks passed`)
+  console.log(`m2-watch: ${passed}/9 checks passed`)
 } finally {
   rmSync(dir, { recursive: true, force: true })
 }
