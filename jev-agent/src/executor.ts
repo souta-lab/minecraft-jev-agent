@@ -438,6 +438,87 @@ export function classifyMoveArrival(input: MoveArrivalInput): {
   return { atTarget, anchorNowInReach, verified: atTarget || anchorNowInReach }
 }
 
+/** Read-only world probe the interaction-stand search needs (never a side effect). */
+export interface InteractionStandProbe {
+  passable(x: number, y: number, z: number): boolean
+  solidSupport(x: number, y: number, z: number): boolean
+}
+
+/** Eye→block-AABB distance from an explicit eye position (the reach test). */
+function faceDistanceFromEye(eye: Vec3Json, block: Vec3Json): number {
+  const x = Math.max(block.x, Math.min(eye.x, block.x + 1))
+  const y = Math.max(block.y, Math.min(eye.y, block.y + 1))
+  const z = Math.max(block.z, Math.min(eye.z, block.z + 1))
+  return Math.hypot(eye.x - x, eye.y - y, eye.z - z)
+}
+
+/** Eye→block-AABB distance from a candidate stand's eyes (its interaction reach). */
+export function interactionFaceDistance(stand: Vec3Json, block: Vec3Json): number {
+  return faceDistanceFromEye({ x: stand.x + 0.5, y: stand.y + 1.62, z: stand.z + 0.5 }, block)
+}
+
+function standDistanceFromFeet(stand: Vec3Json, feet: Vec3Json): number {
+  return Math.hypot(stand.x + 0.5 - feet.x, stand.z + 0.5 - feet.z)
+}
+
+/**
+ * The valid interaction stands for `block`: each of the four horizontal
+ * neighbours at the block's level, one above and one below, whose feet+head
+ * cells are passable, which rests on solid support, and from whose eye position
+ * the block's own AABB face is within `reach`. Ordered nearest-first from
+ * `feet`, so a bot that already stands on a valid cell gets it as candidate[0].
+ *
+ * This is the generic station-approach geometry. Live RC9 evidence
+ * (`craftAtTable` at CRAFT:stone_pickaxe, table `-50,79,-7`, bot below/offset):
+ * a bot that is merely below or offset from a station has NO candidate here, so
+ * the executor must establish a real stand - or fail loud - before it opens a
+ * window, instead of calling `openBlock` blindly with no face.
+ */
+export function interactionStandCandidates(
+  block: Vec3Json,
+  feet: Vec3Json,
+  probe: InteractionStandProbe,
+  reach: number,
+): Vec3Json[] {
+  const offsets: Vec3Json[] = [
+    { x: 1, y: 0, z: 0 },
+    { x: -1, y: 0, z: 0 },
+    { x: 0, y: 0, z: 1 },
+    { x: 0, y: 0, z: -1 },
+  ]
+  const candidates: Vec3Json[] = []
+  for (const offset of offsets) {
+    for (const dy of [0, 1, -1]) {
+      const spot = { x: block.x + offset.x, y: block.y + dy, z: block.z + offset.z }
+      if (!probe.passable(spot.x, spot.y, spot.z)) continue
+      if (!probe.passable(spot.x, spot.y + 1, spot.z)) continue
+      if (!probe.solidSupport(spot.x, spot.y - 1, spot.z)) continue
+      if (interactionFaceDistance(spot, block) > reach) continue
+      candidates.push(spot)
+    }
+  }
+  candidates.sort((a, b) => standDistanceFromFeet(a, feet) - standDistanceFromFeet(b, feet))
+  return candidates
+}
+
+/**
+ * The geometric face of `block` a body at `from` interacts with, as the outward
+ * face normal (the `block_place` direction the server validates):
+ *  - `from` at/above the block's top → the top face `(0,1,0)`;
+ *  - otherwise the horizontal side the body is on (dominant axis).
+ *
+ * Live RC9: `openBlock(table)` was called with no direction while the bot was
+ * below/offset, so the server rejected the interaction and the 20 s open timed
+ * out. The face is derived from where the body actually stands, never hardcoded.
+ */
+export function deriveInteractionFace(from: Vec3Json, block: Vec3Json): Vec3Json {
+  if (from.y - block.y >= 1) return { x: 0, y: 1, z: 0 }
+  const dx = from.x - block.x
+  const dz = from.z - block.z
+  if (Math.abs(dx) >= Math.abs(dz)) return { x: dx >= 0 ? 1 : -1, y: 0, z: 0 }
+  return { x: 0, y: 0, z: dz >= 0 ? 1 : -1 }
+}
+
 /** The feet-distance slack that counts as "arrived" for a remembered retrieve. */
 export const RETRIEVE_ARRIVAL_RADIUS = 2
 
@@ -3083,13 +3164,15 @@ export class Executor {
     if (itemId === null) throw new ExecutorError('craft_error', `${itemName} is unknown to the connected version`)
 
     let table: Block | null = null
+    let tableTarget: Vec3Json | null = null
     if (candidate.meta.requiresTable === true) {
       const target = candidate.target
       if (target === null) {
         throw new ExecutorError('craft_error', 'recipe needs a crafting_table but no station position was supplied')
       }
-      // The sensor may see a table far outside interaction reach; walking to it
-      // is required, otherwise activateBlock never opens the crafting window.
+      // The sensor may see a table far outside interaction reach; the executor
+      // must first stand on a real interaction face (never merely be near it), or
+      // this fails loud with a typed reason.
       this.setPhase(candidate, epoch, 'pathing-to-table')
       await this.approachPlacedBlock(target, 'crafting_table', epoch, signal)
       this.ensureOwned(epoch, signal)
@@ -3098,6 +3181,7 @@ export class Executor {
         throw new ExecutorError('target_gone', `no crafting_table at (${target.x},${target.y},${target.z})`)
       }
       table = block
+      tableTarget = target
     }
 
     // One CRAFT decision performs ONE craft (producing `recipe.result.count`
@@ -3142,7 +3226,18 @@ export class Executor {
       if (table === null) {
         await this.bot.craft(recipe, craftCount)
       } else {
-        await craftAtTable(this.bot, table, recipe as unknown as CraftRecipeLike)
+        const station = tableTarget
+        if (station === null) {
+          throw new ExecutorError('craft_error', 'crafting_table station position was lost before the open')
+        }
+        // Re-assert the stand immediately before EVERY open (a cheap no-op when
+        // already standing correctly) and derive the geometric face the body
+        // interacts with, so openBlock never runs offset/below with no face.
+        const stand = await this.approachPlacedBlock(station, 'crafting_table', epoch, signal)
+        this.ensureOwned(epoch, signal)
+        const face = deriveInteractionFace(stand, station)
+        const faceVec = this.bot.entity.position.clone().set(face.x, face.y, face.z)
+        await craftAtTable(this.bot, table, recipe as unknown as CraftRecipeLike, faceVec)
       }
       this.ensureOwned(epoch, signal)
       after = this.countItem(itemName)
@@ -3528,27 +3623,41 @@ export class Executor {
   }
 
   /**
-   * Approach a placed station (crafting_table / furnace / chest). Stock
-   * `mineflayer-pathfinder` gets a small bounded slice; when it stalls, a
-   * direct-bearing control nudge with the pre-contact jump takes over in its own
-   * reserved window (the same recipe that fixed drop pickup). Arrival is
-   * horizontal distance to the block plus reachability of its interaction face,
-   * so a station one level up cannot veto an adjacent stand. A blocked 2-block
-   * face is opened by cutting its upper block (the sensor `stepCuts` safety
-   * predicates), never by tunnelling, and the whole thing fails fast with a
-   * clear reason so the agent re-targets instead of wedging.
+   * Approach a placed station (crafting_table / furnace / chest) and return the
+   * valid interaction stand the bot ends on. Stock `mineflayer-pathfinder` gets
+   * a small bounded slice; when it stalls, a direct-bearing control nudge with
+   * the pre-contact jump takes over in its own reserved window (the same recipe
+   * that fixed drop pickup). Arrival is NOT a loose distance: the feet must
+   * occupy a real `interactionStandCandidates` cell (passable, supported, face
+   * in reach), so a bot below/offset from the block cannot report arrived. When
+   * no such stand exists or none can be reached, this fails fast with the typed
+   * `path_stuck` code so the agent re-targets instead of wedging. A blocked
+   * 2-block face is opened by cutting its upper block (the sensor `stepCuts`
+   * safety predicates), never by tunnelling.
    */
   private async approachPlacedBlock(
     block: Vec3Json,
     label: string,
     epoch: number,
     signal: AbortSignal,
-  ): Promise<void> {
-    const arrived = (): boolean => this.interactionArrived(block)
-    if (arrived()) return
+  ): Promise<Vec3Json> {
+    const stands = this.interactionStands(block)
+    const alreadyAt = this.standAt(block, stands)
+    if (alreadyAt !== null) return alreadyAt
+    if (stands.length === 0) {
+      this.notifyPathFailed(block, 'stuck')
+      throw new ExecutorError(
+        'path_stuck',
+        `no interaction stand for ${label} at (${block.x},${block.y},${block.z}): no passable, supported standing face within ${this.options.reach}m`,
+      )
+    }
     const startDistance = this.horizontalToFeet(block)
-    const stand = this.bestInteractionStand(block)
-    const destination = stand ?? block
+    const destination = stands[0]
+    if (destination === undefined) {
+      this.notifyPathFailed(block, 'stuck')
+      throw new ExecutorError('path_stuck', `no interaction stand for ${label} at (${block.x},${block.y},${block.z})`)
+    }
+    const arrivedAt = (): Vec3Json | null => this.standAt(block, stands)
 
     if (this.options.actuation === 'pathfinder') {
       let result: PathOutcome = 'noPath'
@@ -3574,19 +3683,20 @@ export class Executor {
           { block, actionId: this.action?.id ?? 'unknown' },
         )
       }
-      if (arrived()) {
+      const reached = arrivedAt()
+      if (reached !== null) {
         this.logger.info(
           'executor',
-          `approach ${label} via stock pathfinder horizontal=${round2(this.horizontalToFeet(block))}m face=${round2(this.blockFaceDistance(block))}m`,
+          `approach ${label} via stock pathfinder stand=(${reached.x},${reached.y},${reached.z}) horizontal=${round2(this.horizontalToFeet(block))}m face=${round2(interactionFaceDistance(reached, block))}m`,
           { block },
         )
-        return
+        return reached
       }
     }
 
     let cuts = 0
     const deadline = Date.now() + PLACED_NUDGE_TOTAL_MS
-    while (!arrived() && Date.now() < deadline) {
+    while (arrivedAt() === null && Date.now() < deadline) {
       try {
         await this.walkByControls(destination, epoch, signal, {
           directBearing: true,
@@ -3594,14 +3704,14 @@ export class Executor {
           anchor: block,
           reach: this.options.reach,
           budgetMs: PLACED_NUDGE_BUDGET_MS,
-          arrivedAt: arrived,
+          arrivedAt: () => arrivedAt() !== null,
         })
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
         const message = error instanceof Error ? error.message : String(error)
         this.logger.warn('executor', `approach ${label} nudge failed: ${message}`)
       }
-      if (arrived()) break
+      if (arrivedAt() !== null) break
       if (cuts >= PLACED_MAX_STEP_CUTS) continue
       const cut = this.findApproachStepCut(block)
       if (cut === null) continue
@@ -3616,60 +3726,45 @@ export class Executor {
       this.ensureOwned(epoch, signal)
     }
 
-    if (arrived()) {
+    const reached = arrivedAt()
+    if (reached !== null) {
       this.logger.info(
         'executor',
-        `approach ${label} arrival horizontal=${round2(startDistance)}m->${round2(this.horizontalToFeet(block))}m face=${round2(this.blockFaceDistance(block))}m cuts=${cuts}`,
+        `approach ${label} arrival stand=(${reached.x},${reached.y},${reached.z}) horizontal=${round2(startDistance)}m->${round2(this.horizontalToFeet(block))}m face=${round2(interactionFaceDistance(reached, block))}m cuts=${cuts}`,
         { block },
       )
       this.notifyPathCompleted(block)
-      return
+      return reached
     }
     this.notifyPathFailed(block, 'stuck')
     throw new ExecutorError(
       'path_stuck',
-      `approach to ${label} at (${block.x},${block.y},${block.z}) blocked ${round2(this.horizontalToFeet(block))}m away (face reach ${round2(this.blockFaceDistance(block))}m > ${this.options.reach})`,
+      `approach to ${label} at (${block.x},${block.y},${block.z}) could not reach an interaction stand within ${this.options.reach}m`,
     )
   }
 
-  private interactionArrived(block: Vec3Json): boolean {
-    return (
-      this.horizontalToFeet(block) <= PLACED_APPROACH_HORIZONTAL &&
-      this.blockFaceDistance(block) <= this.options.reach
+  /** The valid interaction stands for `block`, nearest-first from the bot's feet. */
+  private interactionStands(block: Vec3Json): Vec3Json[] {
+    const feet = this.bot.entity.position
+    return interactionStandCandidates(
+      block,
+      { x: feet.x, y: feet.y, z: feet.z },
+      {
+        passable: (x, y, z) => this.passableAt(x, y, z),
+        solidSupport: (x, y, z) => this.solidSupportAt(x, y, z),
+      },
+      this.options.reach,
     )
   }
 
-  private blockFaceDistance(block: Vec3Json): number {
-    const eye = this.bot.entity.position.offset(0, 1.62, 0)
-    const x = Math.max(block.x, Math.min(eye.x, block.x + 1))
-    const y = Math.max(block.y, Math.min(eye.y, block.y + 1))
-    const z = Math.max(block.z, Math.min(eye.z, block.z + 1))
-    return Math.hypot(eye.x - x, eye.y - y, eye.z - z)
-  }
-
-  private bestInteractionStand(block: Vec3Json): Vec3Json | null {
-    const offsets: Vec3Json[] = [
-      { x: 1, y: 0, z: 0 },
-      { x: -1, y: 0, z: 0 },
-      { x: 0, y: 0, z: 1 },
-      { x: 0, y: 0, z: -1 },
-    ]
-    let best: { spot: Vec3Json; distance: number } | null = null
-    for (const offset of offsets) {
-      for (const dy of [0, 1, -1]) {
-        const spot = { x: block.x + offset.x, y: block.y + dy, z: block.z + offset.z }
-        if (
-          !this.passableAt(spot.x, spot.y, spot.z) ||
-          !this.passableAt(spot.x, spot.y + 1, spot.z) ||
-          !this.solidSupportAt(spot.x, spot.y - 1, spot.z)
-        ) {
-          continue
-        }
-        const d = this.horizontalToFeet(spot)
-        if (best === null || d < best.distance) best = { spot, distance: d }
-      }
+  /** The valid stand the bot's feet currently occupy, or null when it is not on one. */
+  private standAt(block: Vec3Json, stands: readonly Vec3Json[]): Vec3Json | null {
+    const position = this.bot.entity.position
+    const feet = { x: position.x, y: position.y, z: position.z }
+    for (const stand of stands) {
+      if (sameBlockCell(feet, stand)) return stand
     }
-    return best?.spot ?? null
+    return null
   }
 
   private findApproachStepCut(block: Vec3Json): Vec3Json | null {
