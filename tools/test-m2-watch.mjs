@@ -80,19 +80,48 @@ try {
   writeFileSync(
     scopedPath,
     [
-      line(OLD, 'PREREQ_OPTION chosen=craft_and_place'),
-      line(OLD, 'FURNACE_READY pos=9,9,9'),
-      line(OLD, 'SMELT_DONE item=iron_ingot'),
-      line(T, 'PREREQ_OPTION chosen=craft_and_place'),
-      line(T2, 'FURNACE_READY pos=1,2,3'),
+      line(OLD, 'BOOT pid=10 runId=run-old bundle=old'),
+      line(OLD, 'PREREQ_OPTION chosen=craft_and_place runId=run-old'),
+      line(OLD, 'FURNACE_READY pos=9,9,9 runId=run-old'),
+      line(OLD, 'SMELT_DONE item=iron_ingot runId=run-old'),
+      line(T, 'BOOT pid=11 runId=run-new bundle=new'),
+      line(T, 'PREREQ_OPTION chosen=craft_and_place runId=run-new'),
+      line(T2, 'FURNACE_READY pos=1,2,3 runId=run-new'),
       line(T3, 'HEARTBEAT pos=1,2,3 health=20 running=true rung=iron_ingot'),
     ].join('\n') + '\n',
   )
   const scoped = run(scopedPath, ['--since', T])
   assert.equal(scoped.status, 1, `scoped fresh run expected 1, got ${scoped.status}\n${scoped.stdout}`)
-  assert.match(scoped.stdout, /M2_SCOPE since=2026-09-18T09:00:00\.000Z/)
+  assert.match(scoped.stdout, /M2_SCOPE since=2026-09-18T09:00:00\.000Z runId=run-new/)
   assert.match(scoped.stdout, /SMELT_DONE MISSING/)
   assert.match(scoped.stdout, /M2_FRONTIER stage=FURNACE_READY next=SMELT_DONE/)
+  passed++
+
+  const mixedPath = join(dir, 'mixed-runs.log')
+  writeFileSync(
+    mixedPath,
+    [
+      line(T, 'BOOT pid=20 runId=run-a bundle=a'),
+      line(T, 'PREREQ_OPTION runId=run-a'),
+      line(T2, 'FURNACE_READY runId=run-a'),
+      line(T3, 'BOOT pid=21 runId=run-b bundle=b'),
+      line(T3, 'SMELT_DONE runId=run-b'),
+    ].join('\n') + '\n',
+  )
+  const mixed = run(mixedPath, ['--since', OLD])
+  assert.equal(mixed.status, 2, `mixed runs must be UNKNOWN, got ${mixed.status}\n${mixed.stdout}`)
+  assert.match(mixed.stdout, /^UNKNOWN$/m)
+  assert.match(mixed.stderr, /multiple_run_boundaries_after_since/)
+  const pinned = run(mixedPath, ['--run', 'run-b', '--since', OLD])
+  assert.equal(pinned.status, 1, `pinned incomplete run expected 1, got ${pinned.status}\n${pinned.stdout}`)
+  assert.match(pinned.stdout, /M2_SCOPE since=2026-09-18T08:00:00\.000Z runId=run-b/)
+  assert.match(pinned.stdout, /PREREQ_OPTION MISSING/)
+  passed += 2
+
+  const missingRun = run(mixedPath, ['--run', 'run-does-not-exist'])
+  assert.equal(missingRun.status, 2, `missing explicit run must be UNKNOWN, got ${missingRun.status}\n${missingRun.stdout}${missingRun.stderr}`)
+  assert.match(missingRun.stdout, /^UNKNOWN$/m)
+  assert.match(missingRun.stderr, /explicit_run_boundary_missing/)
   passed++
 
   // All three marker names exist, but the causal order is wrong. Counts alone
@@ -123,7 +152,7 @@ try {
   assert.match(unreadable.stdout, /^UNKNOWN$/m)
   passed++
 
-  console.log(`m2-watch: ${passed}/6 checks passed`)
+  console.log(`m2-watch: ${passed}/9 checks passed`)
 } finally {
   rmSync(dir, { recursive: true, force: true })
 }

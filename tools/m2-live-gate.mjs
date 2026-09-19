@@ -1,15 +1,16 @@
 #!/usr/bin/env node
-// m2-live-gate: combine run-scoped causal evidence with the resident's current
-// inventory acceptance. This is the close/no-close gate for the M2 live path.
+// m2-live-gate: combine exact-run causal evidence with the resident inventory
+// acceptance for the SAME run. This is the close/no-close gate for the M2 path.
 //
 // PASS requires BOTH:
-//   1. an ordered run-scoped PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain
-//      from tools/m2-watch.mjs; and
-//   2. the live resident inventory criteria from tools/m2-acceptance.mjs.
+//   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
+//      the explicit resident runId; and
+//   2. live resident inventory criteria observed while the resident still
+//      reports that same runId.
 //
-// The combined close/no-close gate MUST have an explicit run scope. Without
-// --since (or M2_SINCE), m2-watch falls back to all-time buddy.log evidence and
-// an old successful attempt could falsely green a fresh run.
+// `--since` remains useful for diagnosis in m2-watch, but is not a sufficient
+// join key for this close/no-close gate. An explicit --run (or M2_RUN_ID) is
+// required so causal and inventory evidence can never come from two lifetimes.
 //
 // Exit: 0 = PASS, 1 = FAIL (at least one known criterion failed),
 //       2 = UNKNOWN (no known failure, but evidence is unavailable/unreadable).
@@ -20,6 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const WATCH = join(HERE, 'm2-watch.mjs')
 export const ACCEPTANCE = join(HERE, 'm2-acceptance.mjs')
+const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 
 export function combineEvidence(watchCode, acceptanceCode) {
   const known = new Set([0, 1, 2])
@@ -67,11 +69,11 @@ export function runNode(script, args = [], { env = process.env } = {}) {
   })
 }
 
-function watchArgs(argv) {
+function forwardedWatchArgs(argv) {
   const out = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if ((arg === '--log' || arg === '--since') && argv[i + 1]) {
+    if ((arg === '--log' || arg === '--since' || arg === '--run') && argv[i + 1]) {
       out.push(arg, argv[i + 1])
       i += 1
     }
@@ -79,12 +81,30 @@ function watchArgs(argv) {
   return out
 }
 
-/** True only when the causal proof is explicitly scoped to this live attempt. */
+export function exactRunId(argv, env = process.env) {
+  const args = forwardedWatchArgs(argv)
+  const runIndex = args.indexOf('--run')
+  const raw =
+    runIndex !== -1 && typeof args[runIndex + 1] === 'string'
+      ? args[runIndex + 1]
+      : typeof env.M2_RUN_ID === 'string'
+        ? env.M2_RUN_ID
+        : null
+  if (raw === null || raw.trim() === '') return null
+  const runId = raw.trim()
+  return RUN_ID_RE.test(runId) ? runId : null
+}
+
+/** Close/no-close acceptance requires an exact resident lifetime, not timestamp only. */
 export function hasRunScope(argv, env = process.env) {
-  const args = watchArgs(argv)
-  const sinceIndex = args.indexOf('--since')
-  if (sinceIndex !== -1 && typeof args[sinceIndex + 1] === 'string' && args[sinceIndex + 1].trim() !== '') return true
-  return typeof env.M2_SINCE === 'string' && env.M2_SINCE.trim() !== ''
+  return exactRunId(argv, env) !== null
+}
+
+function acceptanceArgs(argv, env = process.env) {
+  const runId = exactRunId(argv, env)
+  if (runId === null) return []
+  const args = forwardedWatchArgs(argv)
+  return args.includes('--run') ? ['--run', runId] : []
 }
 
 export async function runGate({
@@ -93,18 +113,19 @@ export async function runGate({
   write = console.log,
   env = process.env,
 } = {}) {
-  if (!hasRunScope(argv, env)) {
+  const runId = exactRunId(argv, env)
+  if (runId === null) {
     write('M2_LIVE_GATE')
-    write('M2_LIVE_RESULT status=UNKNOWN reason=run_scope_required watch=2 acceptance=2')
+    write('M2_LIVE_RESULT status=UNKNOWN reason=exact_run_scope_required watch=2 acceptance=2')
     return 2
   }
 
   const [watch, acceptance] = await Promise.all([
-    runner(WATCH, watchArgs(argv), { env }),
-    runner(ACCEPTANCE, [], { env }),
+    runner(WATCH, forwardedWatchArgs(argv), { env }),
+    runner(ACCEPTANCE, acceptanceArgs(argv, env), { env }),
   ])
 
-  write('M2_LIVE_GATE')
+  write(`M2_LIVE_GATE runId=${runId}`)
   write('--- causal evidence (m2-watch) ---')
   if (watch.stdout.trim()) write(watch.stdout.trimEnd())
   if (watch.stderr.trim()) write(watch.stderr.trimEnd())
@@ -114,7 +135,7 @@ export async function runGate({
 
   const result = combineEvidence(watch.code, acceptance.code)
   write(
-    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} watch=${watch.code} acceptance=${acceptance.code}`,
+    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code}`,
   )
   return result.code
 }
