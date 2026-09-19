@@ -41,10 +41,11 @@
 import type { GoalKind, GoalQueueState, GoalStrategy, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
-import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { ResourceClass } from './resourceClass.ts'
 import {
   PICKAXE_TIER_ORDER,
+  fuelCountFor,
   loadGameData,
   recipesFor,
   requiredPickaxeRank1,
@@ -824,13 +825,18 @@ function craftPreconditions(item: string, inventory?: Readonly<Record<string, nu
  *
  * The input becomes a semantic-class predicate when gameData resolves it to a
  * class, so any log satisfies a charcoal smelt; otherwise it is a concrete-item
- * predicate with the smelt count. Fuel is symmetric: one unit of the `fuel`
- * class is the initiation condition (the exact burn count for the held fuel is
- * computed by `fuelCountFor` when the SMELT candidate is built). These are the
+ * predicate with the smelt count. Fuel is symmetric but capacity-aware: the
+ * predicate demands the fuel units `fuelCountFor(count, heldFuel)` requires for
+ * the whole batch (one charcoal covers 8 smelts, one log only 1.5), so a
+ * three-item iron smelt with a single log is not startable. These are the
  * predicates `completeStartablePrerequisites` turns into the producer goal
  * (`collect 1 x <log>`) ordered in front of the smelt.
  */
-function smeltPreconditions(item: string, count: number): Predicate[] {
+function smeltPreconditions(
+  item: string,
+  count: number,
+  inventory?: Readonly<Record<string, number>>,
+): Predicate[] {
   const preconditions: Predicate[] = [{ kind: 'stationKnown', station: 'furnace' }]
   const input = smeltInputFor(item)
   if (input !== null) {
@@ -840,7 +846,15 @@ function smeltPreconditions(item: string, count: number): Predicate[] {
         : { kind: 'inventoryAtLeast', item: input, count },
     )
   }
-  preconditions.push({ kind: 'inventoryClassAtLeast', cls: 'fuel', count: 1 })
+  // The fuel predicate demands enough fuel UNITS for the whole smelt count, not
+  // merely one item: one charcoal/coal smelts 8, but one log only 1.5, so
+  // `smelt 3 x iron_ingot` with one log is not startable until a second log (or a
+  // denser fuel) is held. `fuelCountFor` derives the units from the held fuel's
+  // burn ticks. Without an inventory snapshot the predicate falls back to the
+  // historical one-unit demand.
+  const heldFuel = inventory === undefined ? null : findInventoryFuel(inventory)
+  const fuelUnits = heldFuel === null ? 1 : fuelCountFor(count, heldFuel.item)
+  preconditions.push({ kind: 'inventoryClassAtLeast', cls: 'fuel', count: fuelUnits })
   return preconditions
 }
 
@@ -871,7 +885,7 @@ function preconditionsForGoal(goal: PlannedGoal, snapshot?: OptionWorldSnapshot)
       return preconditions
     }
     case 'smelt':
-      return smeltPreconditions(item, count)
+      return smeltPreconditions(item, count, snapshot?.inventory)
     case 'place':
       if (item === 'furnace') return [{ kind: 'inventoryAtLeast', item: 'furnace', count: 1 }]
       if (item === 'crafting_table') return [{ kind: 'inventoryAtLeast', item: 'crafting_table', count: 1 }]

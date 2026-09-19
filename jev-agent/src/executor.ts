@@ -551,12 +551,25 @@ export async function executeFurnaceSmelt(
     deps.log('SMELT_PLACED', { inputItem: params.inputItem, inputCount: placedInput, fuelItem: params.fuelItem, fuelCount: placedFuel })
     deps.ensureOwned()
     const deadline = Date.now() + deps.timeoutMs
-    let after = before
-    // Output taken out of the furnace window. While the window is open the bot
-    // inventory does not include it (see the close-and-recount below), so this
-    // is the only production evidence observable during the poll.
+    // Harvest the WHOLE placed batch, not just the first output. Before this the
+    // poll stopped at `harvested === 0` (the guard added with the #199
+    // open-window fix), so a `SMELT:iron_ingot` that placed `raw_iron x3` with
+    // one charcoal took one ingot and closed the window; the other two
+    // inputs/outputs were left inside the furnace while the planner saw raw_iron
+    // absent and fell back to re-mining/re-fuelling (live run-mu8c89s6-rnv6:
+    // `SMELT_DONE gained=1` then `SMELT_INPUT_PREREQ input=raw_iron present=false`).
+    // Keep taking outputs until the placed input is consumed, the furnace reports
+    // no remaining input, or the action deadline is reached. While the window is
+    // open the bot inventory does not include the output (see the close-and-
+    // recount below), so `takeOutput()` is the only production evidence.
     let harvested = 0
-    while (after <= before && harvested === 0 && Date.now() < deadline) {
+    let lastHarvestAt = 0
+    // A furnace smelts one item every 200 ticks (10 s); a stall larger than one
+    // smelt interval means the batch produced everything it can (e.g. the held
+    // fuel ran out). The `inputItem` slot is NOT a valid completion signal: it
+    // empties when the LAST smelt BEGINS, while that item is still cooking.
+    const noOutputStallMs = 15_000
+    while (harvested < placedInput && Date.now() < deadline) {
       await deps.wait(500)
       deps.ensureOwned()
       const output = furnace.outputItem()
@@ -564,13 +577,18 @@ export async function executeFurnaceSmelt(
         harvested += Math.max(1, Math.floor(output.count))
         await furnace.takeOutput()
         await deps.wait(250)
+        lastHarvestAt = Date.now()
+        continue
       }
-      after = deps.countItem(params.outputItem)
+      // No output ready: keep waiting for the next smelt in the batch, but stop
+      // after a full no-output interval so a fuel-starved furnace cannot pin the
+      // action to its whole timeout.
+      if (harvested > 0 && Date.now() - lastHarvestAt >= noOutputStallMs) break
     }
     // Final sweep: the output can land in the furnace window at/after the last
     // poll (live run-mu89hsqv-rcy0 read charcoal=0 with the item already in the
     // window). Take it once more before closing so production is never missed.
-    if (harvested === 0) {
+    if (harvested < placedInput) {
       const output = furnace.outputItem()
       if (output !== null) {
         harvested += Math.max(1, Math.floor(output.count))
@@ -587,7 +605,7 @@ export async function executeFurnaceSmelt(
     const consumedInput = furnaceSlotConsumed(placedInput, furnace.inputItem?.())
     const consumedFuel = furnaceSlotConsumed(placedFuel, furnace.fuelItem?.())
     closeOnce()
-    after = deps.countItem(params.outputItem)
+    const after = deps.countItem(params.outputItem)
     const gained = Math.max(Math.max(0, after - before), harvested)
     const outputCount = before + gained
     // #79 + live run-mu89hsqv-rcy0: SMELT_DONE is earned by real production - an
