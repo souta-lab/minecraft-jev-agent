@@ -13,6 +13,11 @@
 // `failed`; the controller uses `decideActionOutcome` / `evaluateUnverifiedBudget`
 // to log ACTION_UNVERIFIED and to stop retrying one strategy forever.
 
+import { classifyProgress, hasObservableProgress } from './progressTaxonomy.ts'
+import type { ProgressClassification } from './progressTaxonomy.ts'
+
+export { hasObservableProgress } from './progressTaxonomy.ts'
+
 /**
  * How many unverified attempts the same planId + strategy gets before the
  * controller abandons it (`ABANDON_REASON=action_unverified`) and selects the
@@ -39,6 +44,13 @@ export interface ActionOutcomeInput {
   strategy?: string | null
   /** unverified attempts recorded for this planId INCLUDING this one, when known */
   attempts?: number | null
+  /** Optional #121 dimensions; legacy callers may omit them. */
+  failure?: string | null
+  goalProgressDelta?: number
+  searchProgressDelta?: number
+  initiationBlocked?: boolean
+  structurallyImpossible?: boolean
+  abandonRequested?: boolean
 }
 
 /** Everything a strict SMELT post-condition needs to know about one run. */
@@ -109,12 +121,6 @@ export function describeActionPostcondition(kind: string): string {
  * body change (a verified climb chunk that gained altitude). `progressed` is
  * evidence of change only - it never makes an unverified action verified.
  */
-export function hasObservableProgress(
-  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
-): boolean {
-  return input.itemsGained > 0 || input.blockRemoved === true || input.progressed === true
-}
-
 /** Zero observable change: nothing was gained, no block was removed, no body change proven. */
 export function isZeroProgressOutcome(
   input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
@@ -139,13 +145,14 @@ export interface ActionUnverifiedFields {
   postcondition: string
 }
 
-/** Exact log line: `ACTION_UNVERIFIED planId=... actionId=... strategy=... [attempts=N] postcondition=...`. */
+/** Exact log line with a typed #121 reason code. */
 export function formatActionUnverified(fields: ActionUnverifiedFields): string {
   const attempts =
     fields.attempts === undefined || fields.attempts === null ? '' : ` attempts=${fields.attempts}`
   return (
     `ACTION_UNVERIFIED planId=${fields.planId ?? 'null'} actionId=${fields.actionId ?? 'null'} ` +
-    `strategy=${fields.strategy ?? 'null'}${attempts} postcondition=${fields.postcondition}`
+    `strategy=${fields.strategy ?? 'null'}${attempts} postcondition=${fields.postcondition} ` +
+    'reason=postcondition_unverified'
   )
 }
 
@@ -156,6 +163,8 @@ export interface ActionOutcomeDecision {
   /** true only when this result may advance the ladder/rung */
   advances: boolean
   postcondition: string
+  /** Shared #121 classification; authority remains with deterministic inputs. */
+  classification: ProgressClassification
   /** the ACTION_UNVERIFIED line, or null when this is not an unverified outcome */
   unverifiedLine: string | null
 }
@@ -167,20 +176,22 @@ export interface ActionOutcomeDecision {
  */
 export function decideActionOutcome(input: ActionOutcomeInput): ActionOutcomeDecision {
   const postcondition = describeActionPostcondition(input.kind)
+  const classification = classifyProgress(input)
   if (input.status === 'cancelled') {
-    return { verdict: 'cancelled', advances: false, postcondition, unverifiedLine: null }
+    return { verdict: 'cancelled', advances: false, postcondition, classification, unverifiedLine: null }
   }
   if (input.status === 'failed') {
-    return { verdict: 'failed', advances: false, postcondition, unverifiedLine: null }
+    return { verdict: 'failed', advances: false, postcondition, classification, unverifiedLine: null }
   }
   if (input.status === 'done' && input.verified) {
-    return { verdict: 'verified', advances: true, postcondition, unverifiedLine: null }
+    return { verdict: 'verified', advances: true, postcondition, classification, unverifiedLine: null }
   }
   if (isUnverifiedOutcome(input)) {
     return {
       verdict: 'unverified',
       advances: false,
       postcondition,
+      classification,
       unverifiedLine: formatActionUnverified({
         planId: input.planId ?? null,
         actionId: input.actionId ?? null,
@@ -190,7 +201,7 @@ export function decideActionOutcome(input: ActionOutcomeInput): ActionOutcomeDec
       }),
     }
   }
-  return { verdict: 'inconclusive', advances: false, postcondition, unverifiedLine: null }
+  return { verdict: 'inconclusive', advances: false, postcondition, classification, unverifiedLine: null }
 }
 
 export interface UnverifiedBudgetInput {
