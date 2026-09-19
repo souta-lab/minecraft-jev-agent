@@ -529,6 +529,16 @@ export async function executeFurnaceSmelt(
   const fuelCount = Math.max(1, Math.floor(params.fuelCount))
   const before = deps.countItem(params.outputItem)
   const furnace = await deps.openFurnace()
+  let closed = false
+  const closeOnce = (): void => {
+    if (closed) return
+    closed = true
+    try {
+      furnace.close()
+    } catch {
+      // the server already closed the window
+    }
+  }
   try {
     const input = deps.inventoryItems().find((entry) => entry.name === params.inputItem)
     const fuel = deps.inventoryItems().find((entry) => entry.name === params.fuelItem)
@@ -542,34 +552,56 @@ export async function executeFurnaceSmelt(
     deps.ensureOwned()
     const deadline = Date.now() + deps.timeoutMs
     let after = before
-    while (after <= before && Date.now() < deadline) {
+    // Output taken out of the furnace window. While the window is open the bot
+    // inventory does not include it (see the close-and-recount below), so this
+    // is the only production evidence observable during the poll.
+    let harvested = 0
+    while (after <= before && harvested === 0 && Date.now() < deadline) {
       await deps.wait(500)
       deps.ensureOwned()
-      if (furnace.outputItem() !== null) {
+      const output = furnace.outputItem()
+      if (output !== null) {
+        harvested += Math.max(1, Math.floor(output.count))
         await furnace.takeOutput()
         await deps.wait(250)
       }
       after = deps.countItem(params.outputItem)
     }
-    // #79: no timeout throw. The strict post-condition is decided from evidence:
-    // an output gain OR a furnace that actually consumed the placed input+fuel.
-    // Nothing consumed and nothing gained is an UNVERIFIED outcome that
-    // applyPostcondition() downgrades to a failed ACTION_UNVERIFIED.
+    // Final sweep: the output can land in the furnace window at/after the last
+    // poll (live run-mu89hsqv-rcy0 read charcoal=0 with the item already in the
+    // window). Take it once more before closing so production is never missed.
+    if (harvested === 0) {
+      const output = furnace.outputItem()
+      if (output !== null) {
+        harvested += Math.max(1, Math.floor(output.count))
+        await furnace.takeOutput()
+        await deps.wait(250)
+      }
+    }
+    // #79: no timeout throw. Evidence is read while the window still exposes its
+    // slots, then the window is closed. mineflayer folds an open container's
+    // player-inventory slots back into `bot.inventory` only on close
+    // (copyInventory is called from closeWindow), so a count taken while the
+    // furnace is open is the pre-open snapshot and misses an output harvested
+    // during the smelt. Closing first makes the true delta visible.
     const consumedInput = furnaceSlotConsumed(placedInput, furnace.inputItem?.())
     const consumedFuel = furnaceSlotConsumed(placedFuel, furnace.fuelItem?.())
-    const gained = after - before
-    if (gained > 0) {
-      deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: params.fuelItem, outputCount: after, beforeCount: before })
+    closeOnce()
+    after = deps.countItem(params.outputItem)
+    const gained = Math.max(Math.max(0, after - before), harvested)
+    const outputCount = before + gained
+    // #79 + live run-mu89hsqv-rcy0: SMELT_DONE is earned by real production - an
+    // output gain OR a furnace that actually consumed the placed input+fuel
+    // (isSmeltPostconditionMet). A no-op that gained and consumed nothing stays
+    // SMELT_UNPRODUCED, so the marker can never fire on a no-op.
+    if (isSmeltPostconditionMet({ gained, placedInput, placedFuel, consumedInput, consumedFuel })) {
+      deps.log('SMELT_DONE', { item: params.outputItem, gained, inputItem: params.inputItem, fuelItem: params.fuelItem, outputCount, beforeCount: before })
     } else {
       deps.log('SMELT_UNPRODUCED', { item: params.outputItem, placedInput, placedFuel, consumedInput, consumedFuel })
     }
-    return { gained, outputCount: after, placedInput, placedFuel, consumedInput, consumedFuel }
+    return { gained, outputCount, placedInput, placedFuel, consumedInput, consumedFuel }
   } finally {
-    try {
-      furnace.close()
-    } catch {
-      // the server already closed the window
-    }
+    closeOnce()
   }
 }
 
