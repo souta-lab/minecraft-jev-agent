@@ -191,6 +191,22 @@ addCase('#38 nested guards: _client.write / collectBlock.collect / entity.positi
   }
 })
 
+addCase('#38 a leased read observes the position object prismarine-physics replaces (apply substitution)', () => {
+  const manager = new ActuationLeaseManager()
+  const fake = makeFakeBot()
+  const leased = withActuationLease(fake as unknown as Bot, manager, 'g1') as unknown as FakeBot
+  manager.acquire('g1')
+  // The executor's launch read primes the guard's position proxy around the
+  // current Vec3. prismarine-physics `apply()` then REPLACES `entity.position`
+  // with a fresh Vec3 (`bot.entity.position = this.pos`, index.js:855) instead
+  // of mutating the existing one in place.
+  const launchY = leased.entity.position.y
+  fake.entity.position = new Vec3(fake.entity.position.x, launchY + 0.42, fake.entity.position.z)
+  const advancedY = leased.entity.position.y
+  const pass = launchY === 64 && advancedY === 64.42 && fake.entity.position.y === 64.42
+  return { pass, detail: `launchY=${launchY} advancedY=${advancedY} rawY=${fake.entity.position.y}` }
+})
+
 addCase('#38 surface check: the raw bot is flagged, the leased proxy passes', () => {
   const manager = new ActuationLeaseManager()
   const fake = makeFakeBot()

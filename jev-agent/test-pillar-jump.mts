@@ -12,8 +12,10 @@
 // `onGround=false` rubber-band - no live server.
 //
 //   npm run pillar-jump-test
+import type { Bot } from 'mineflayer'
+import { ActuationLeaseManager, withActuationLease } from '../buddy-driver/resident-safety.ts'
 import { correctStandingOnGround, formatPillarUpStep, jumpWithGroundCorrection, JUMP_IMPULSE_VY, TAKEOFF_RISE } from './src/pillarJump.ts'
-import type { SolidAt } from './src/pillarJump.ts'
+import type { JumpBotLike, SolidAt } from './src/pillarJump.ts'
 
 interface CaseResult {
   pass: boolean
@@ -225,6 +227,97 @@ function heldPositionDeps(bot: ReturnType<typeof createHeldPositionBot>, isSolid
   }
 }
 
+/**
+ * Bounded invariant for the live frozen-position failure: prismarine-physics
+ * computes a positive `dy`, and `apply()` REPLACES `bot.entity.position` with a
+ * fresh Vec3 (index.js `bot.entity.position = this.pos`, where `this.pos` was
+ * cloned in the PlayerState constructor) instead of mutating the existing Vec3.
+ * The executor reads the position through the leased bot proxy
+ * (`buddy-driver/resident-safety.ts`), so this fake mirrors the real `apply`
+ * write path - it substitutes a NEW position object each tick and never mutates
+ * the old one - and drives the production jump through the real lease guard.
+ * Before the guard fix the cached position proxy wrapped the launch Vec3, so
+ * `positionY` stayed byte-identical while `velocityY` advanced (the exact
+ * `no_rise` trace); after the fix every replacement is observed.
+ */
+function createReplacingPositionBot(input: { y: number; floorTop?: number }) {
+  const floorTop = input.floorTop ?? Number.NEGATIVE_INFINITY
+  const entity: { position: { x: number; y: number; z: number }; velocity: { y: number }; onGround: boolean } = {
+    position: { x: FEET_X + 0.5, y: input.y, z: FEET_Z + 0.5 },
+    velocity: { y: 0 },
+    onGround: false,
+  }
+  const listeners = new Map<string, Set<() => void>>()
+  const emit = (event: string): void => {
+    for (const listener of listeners.get(event) ?? []) listener()
+  }
+  const controls: boolean[] = []
+  const stats = { ticks: 0, jumpApplied: 0, replacements: 0 }
+  const bot = {
+    entity,
+    physicsEnabled: false,
+    jumpTicks: 0,
+    jumpQueued: false,
+    setControlState(_control: 'jump', state: boolean): void {
+      controls.push(state)
+      if (state) bot.jumpQueued = true
+    },
+    clearControlStates(): void {},
+    on(event: string, listener: () => void): void {
+      const set = listeners.get(event) ?? new Set<() => void>()
+      set.add(listener)
+      listeners.set(event, set)
+    },
+    removeListener(event: string, listener: () => void): void {
+      listeners.get(event)?.delete(listener)
+    },
+    listenerCount(event: string): number {
+      return listeners.get(event)?.size ?? 0
+    },
+    stats,
+    tick(): void {
+      stats.ticks += 1
+      const jumpHeld = controls.length > 0 && controls[controls.length - 1] === true
+      if ((jumpHeld || bot.jumpQueued) && entity.onGround && bot.jumpTicks === 0) {
+        entity.velocity.y = 0.42 // prismarine-physics index.js:726 jump gate
+        bot.jumpTicks = 10
+        entity.onGround = false
+        stats.jumpApplied += 1
+      } else if (bot.jumpTicks > 0) {
+        bot.jumpTicks -= 1
+      }
+      bot.jumpQueued = false
+      const nextY = entity.position.y + entity.velocity.y
+      // prismarine-physics apply(): SUBSTITUTE the Vec3, never mutate it in place.
+      entity.position = { x: entity.position.x, y: nextY, z: entity.position.z }
+      stats.replacements += 1
+      entity.velocity.y = (entity.velocity.y - 0.08) * 0.98
+      if (entity.position.y < floorTop && entity.velocity.y <= 0) {
+        entity.position = { x: entity.position.x, y: floorTop, z: entity.position.z }
+        entity.velocity.y = 0
+      }
+      entity.onGround = false
+      emit('physicsTick')
+    },
+  }
+  return bot
+}
+
+/** Drives the replacing-position bot: one physics tick per simulated sleep. */
+function replacingPositionDeps(bot: ReturnType<typeof createReplacingPositionBot>, isSolid: SolidAt) {
+  let clock = 0
+  return {
+    isSolid,
+    budgetMs: 600,
+    pollMs: 15,
+    sleep: async (ms: number): Promise<void> => {
+      clock += ms
+      bot.tick()
+    },
+    now: () => clock,
+  }
+}
+
 function runCase(testCase: Case): Promise<CaseResult> {
   return Promise.resolve(testCase.run())
 }
@@ -377,6 +470,34 @@ addCase('the attempt trace correlates impulse, physics ticks, ground transitions
   return {
     pass,
     detail: `impulse=${impulse ? `${impulse.velocityYBefore}->${impulse.velocityY}` : '-'} physicsTick=${physicsTick !== undefined} forcedMove=${forcedMove !== undefined} groundedTransition=${groundedTransition !== undefined} airborne=${packetAirborne} samples=${packetOutcome.trace.samples.length} monotonic=${monotonic}`,
+  }
+})
+
+addCase('a positive-velocity tick advances the leased positionY (physics apply replaces the Vec3)', async () => {
+  // Invariant: after a physics tick with positive velocityY, positionY MUST
+  // advance. The executor reads through the leased bot, so the read goes through
+  // buddy-driver's entity/position guards; the real prismarine-physics apply
+  // substitutes the position object each tick. Before the guard fix the launch
+  // Vec3 proxy was cached, this assertion failed (rise=0) and only the impulse
+  // path kept velocity positive - exactly the live `no_rise` trace.
+  const manager = new ActuationLeaseManager()
+  const raw = createReplacingPositionBot({ y: 10.5 })
+  const leased = withActuationLease(raw as unknown as Bot, manager, 'g1') as unknown as JumpBotLike
+  manager.acquire('g1')
+  // The executor's launch read: the first guarded `entity.position` access
+  // caches the guard's position proxy around the launch Vec3, as in production.
+  const launchY = leased.entity.position.y
+  const outcome = await jumpWithGroundCorrection(leased, replacingPositionDeps(raw, footingAt(9)))
+  const pass =
+    launchY === 10.5 &&
+    raw.stats.replacements >= 1 &&
+    outcome.impulses === 0 &&
+    outcome.ticks >= 1 &&
+    outcome.airborne &&
+    outcome.peakRise > TAKEOFF_RISE
+  return {
+    pass,
+    detail: `launchY=${launchY} airborne=${outcome.airborne} rise=${outcome.peakRise} ticks=${outcome.ticks} impulses=${outcome.impulses} replacements=${raw.stats.replacements} gateFires=${raw.stats.jumpApplied}`,
   }
 })
 

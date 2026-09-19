@@ -498,10 +498,22 @@ export function withActuationLease(
   let collectBlockProxy: object | null = null
   let entityProxy: object | null = null
   let positionProxy: object | null = null
+  let positionTarget: object | null = null
   const trackedBot = resources === undefined ? null : wrapEmitterResources(bot, resources)
 
   const guardPosition = (position: object): object => {
-    if (positionProxy !== null) return positionProxy
+    // prismarine-physics `apply()` REPLACES `entity.position` with a fresh Vec3
+    // every tick (prismarine-physics/index.js: `bot.entity.position = this.pos`,
+    // where `this.pos` is cloned in the PlayerState constructor) instead of
+    // mutating the existing Vec3 in place. A proxy cached across that
+    // replacement would keep wrapping the launch Vec3, so every guarded read
+    // (`bot.entity.position.y` in the executor) would observe a frozen position
+    // while `entity.velocity` - replaced on the same `apply()` call but never
+    // proxied - kept advancing. Rebuild the proxy whenever the underlying Vec3
+    // is no longer the one it wraps; keep the previous proxy while the object is
+    // stable (the in-place `position.set(...)` path).
+    if (positionProxy !== null && positionTarget === position) return positionProxy
+    positionTarget = position
     positionProxy = new Proxy(position, {
       get(vTarget, vProp, vRecv): unknown {
         const vValue = Reflect.get(vTarget, vProp, vRecv) as unknown
