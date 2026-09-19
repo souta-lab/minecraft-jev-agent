@@ -99,7 +99,7 @@ addCase('A. a genuine MOVE arrival (body displaced) stays a verified success', (
   return { pass, detail: `verified=${truth.verified} status=${truth.status} observable=${truth.observableProgress}` }
 })
 
-addCase('A. a verified climb chunk (progressed=true, no item, no block) stays verified', () => {
+addCase('A. a verified climb chunk (progressed=true, no closure) is UNREACHED, never verified', () => {
   const truth = truthfulActionOutcome({
     kind: 'RETRIEVE',
     status: 'done',
@@ -109,11 +109,20 @@ addCase('A. a verified climb chunk (progressed=true, no item, no block) stays ve
     progressed: true,
     arrived: false,
   })
-  const pass = truth.verified === true && truth.status === 'done' && truth.downgraded === false
-  return { pass, detail: `verified=${truth.verified} status=${truth.status}` }
+  const pass =
+    truth.verified === false &&
+    truth.status === 'unreached' &&
+    truth.observableProgress === false &&
+    truth.resetsFailureMemory === false &&
+    truth.replanProgress === true &&
+    truth.downgraded === true
+  return {
+    pass,
+    detail: `verified=${truth.verified} status=${truth.status} observable=${truth.observableProgress} reset=${truth.resetsFailureMemory} replan=${truth.replanProgress}`,
+  }
 })
 
-addCase('A. a RETRIEVE arrival alone is not accepted: retrieval progress needs observable change', () => {
+addCase('A. a RETRIEVE that actually arrives is a verified success and may reset the memory', () => {
   const truth = truthfulActionOutcome({
     kind: 'RETRIEVE',
     status: 'done',
@@ -123,8 +132,33 @@ addCase('A. a RETRIEVE arrival alone is not accepted: retrieval progress needs o
     progressed: false,
     arrived: true,
   })
-  const pass = truth.verified === false && truth.status === 'zero_progress' && truth.downgraded === true
-  return { pass, detail: `verified=${truth.verified} status=${truth.status} observable=${truth.observableProgress}` }
+  const pass =
+    truth.verified === true &&
+    truth.status === 'done' &&
+    truth.observableProgress === true &&
+    truth.resetsFailureMemory === true &&
+    truth.downgraded === false
+  return { pass, detail: `verified=${truth.verified} status=${truth.status} reset=${truth.resetsFailureMemory}` }
+})
+
+addCase('A. a RETRIEVE with a measured distance closure is a verified success', () => {
+  const truth = truthfulActionOutcome({
+    kind: 'RETRIEVE',
+    status: 'done',
+    verified: true,
+    itemsGained: 0,
+    blockRemoved: false,
+    progressed: true,
+    arrived: false,
+    distanceClosed: true,
+  })
+  const pass =
+    truth.verified === true &&
+    truth.status === 'done' &&
+    truth.resetsFailureMemory === true &&
+    truth.replanProgress === false &&
+    truth.downgraded === false
+  return { pass, detail: `verified=${truth.verified} status=${truth.status} reset=${truth.resetsFailureMemory}` }
 })
 
 addCase('A. strict-post-condition kinds (PLACE/SMELT) are not over-downgraded', () => {

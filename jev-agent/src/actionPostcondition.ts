@@ -90,7 +90,7 @@ export function describeActionPostcondition(kind: string): string {
     case 'MINE':
       return 'target block removed AND (drop collected OR observed)'
     case 'RETRIEVE':
-      return 'remembered resource reached (distance closed / staircase step) or item count increased'
+      return 'remembered resource reached (remaining distance to the target decreased) or item count increased'
     case 'DESCEND':
       return 'target block removed and the descend step is reachable'
     case 'STEP':
@@ -175,17 +175,27 @@ export interface TruthfulOutcomeInput {
    * the executor's lenient `verified` flag.
    */
   arrived?: boolean
+  /**
+   * RETRIEVE completion evidence: the executor measured that the remaining
+   * feet-distance to the remembered target actually shrank. A vertical chunk
+   * step (`progressed`) can never set this.
+   */
+  distanceClosed?: boolean
 }
 
 export interface TruthfulOutcome {
   /** the verified flag a truthful record may carry */
   verified: boolean
-  /** the status a truthful record may carry (`zero_progress` when a claimed success is rejected) */
+  /** the status a truthful record may carry (`zero_progress` / `unreached` when a claim is rejected) */
   status: string
   /** true when this action left observable evidence of a world/body change */
   observableProgress: boolean
   /** true when the raw executor claimed `done`+`verified` but the truth layer rejects it */
   downgraded: boolean
+  /** true only when this outcome completed; the sole gate for a MOVE_FAILMEM reset */
+  resetsFailureMemory: boolean
+  /** true when a bounded body change happened without completion (replan, never reset) */
+  replanProgress: boolean
 }
 
 /**
@@ -198,25 +208,91 @@ export interface TruthfulOutcome {
  *   `RETRIEVE:known:raw_iron:b36_56_41 timeout` ... `PATH_CALLBACK outcome=stuck`
  *   ... `CAUSAL verified=true status=done progressDelta=0`
  *
- * The executor's RETRIEVE sets `verified=true` from a lenient `closed` signal, so
- * a stuck hop toward an unreachable remembered resource was recorded as a
- * verified success with zero observable progress. Zero-observable-progress
- * outcomes are failures that keep the failure memory charged; they are never
- * reset by this gate.
+ * A RETRIEVE is special: `progressed` (a bounded vertical chunk) is durable
+ * body evidence but NOT completion, so a retrieve is a truthful success only on
+ * arrival, a measured distance closure, or concrete item/block evidence.
+ * Everything else is `unreached` (bounded progress, never resets the failure
+ * memory) or `zero_progress` (nothing changed at all).
  */
 export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutcome {
+  const itemOrBlock = input.itemsGained > 0 || input.blockRemoved === true
+  const bodyProgress = input.progressed === true
+  if (input.kind === 'RETRIEVE') {
+    const claimed = input.status === 'done'
+    const completed = claimed && input.verified && (input.arrived === true || input.distanceClosed === true || itemOrBlock)
+    if (completed) {
+      return {
+        verified: true,
+        status: 'done',
+        observableProgress: true,
+        downgraded: false,
+        resetsFailureMemory: true,
+        replanProgress: false,
+      }
+    }
+    const replanProgress = bodyProgress || itemOrBlock
+    if (replanProgress) {
+      return {
+        verified: false,
+        status: 'unreached',
+        observableProgress: false,
+        downgraded: claimed && input.verified,
+        resetsFailureMemory: false,
+        replanProgress: true,
+      }
+    }
+    if (claimed && input.verified) {
+      return {
+        verified: false,
+        status: 'zero_progress',
+        observableProgress: false,
+        downgraded: true,
+        resetsFailureMemory: false,
+        replanProgress: false,
+      }
+    }
+    return {
+      verified: false,
+      status: input.status,
+      observableProgress: false,
+      downgraded: false,
+      resetsFailureMemory: false,
+      replanProgress: false,
+    }
+  }
   const directProgress =
     hasObservableProgress(input) || (input.arrived === true && ARRIVAL_EVIDENCE_KINDS.has(input.kind))
   if (input.status !== 'done' || !input.verified) {
-    return { verified: input.verified, status: input.status, observableProgress: directProgress, downgraded: false }
+    return {
+      verified: input.verified,
+      status: input.status,
+      observableProgress: directProgress,
+      downgraded: false,
+      resetsFailureMemory: false,
+      replanProgress: !input.verified && directProgress,
+    }
   }
   // A strict-post-condition kind already proved a world change; its `verified`
   // flag is the evidence. Nothing else may be promoted to success on a lenient
   // movement signal alone.
   if (directProgress || SELF_EVIDENT_VERIFIED_KINDS.has(input.kind)) {
-    return { verified: true, status: 'done', observableProgress: true, downgraded: false }
+    return {
+      verified: true,
+      status: 'done',
+      observableProgress: true,
+      downgraded: false,
+      resetsFailureMemory: true,
+      replanProgress: false,
+    }
   }
-  return { verified: false, status: 'zero_progress', observableProgress: false, downgraded: true }
+  return {
+    verified: false,
+    status: 'zero_progress',
+    observableProgress: false,
+    downgraded: true,
+    resetsFailureMemory: false,
+    replanProgress: false,
+  }
 }
 
 export interface ActionUnverifiedFields {

@@ -142,6 +142,12 @@ export interface ExecutionResult {
    * chunk that gained altitude). Never a substitute for `verified`.
    */
   progressed: boolean
+  /**
+   * A RETRIEVE proved the remaining feet-distance to the remembered target
+   * shrank by the meaningful epsilon. This is completion evidence the truth
+   * layer may trust; `progressed` (a vertical chunk step) never is.
+   */
+  distanceClosed?: boolean
   /** item the action actually produced (MINE drop or crafted item), when known */
   yieldItem?: string | null
   /**
@@ -500,6 +506,48 @@ export function classifyRetrieveApproach(input: RetrieveApproachInput): Retrieve
     closed,
     verticalProgress,
     verified: arrived || verticalProgress || input.verticalStep,
+  }
+}
+
+export interface RetrieveOutcomeInput {
+  /** feet->target distance before the retrieve attempt */
+  before: number
+  /** feet->target distance after the retrieve attempt */
+  after: number
+  /** a vertical leg carried the body toward the target's Y */
+  verticalStep: boolean
+  /** the vertical gap to the target's Y shrank (the body moved) */
+  verticalProgress: boolean
+}
+
+export interface RetrieveOutcome {
+  /** the remaining distance to the target actually decreased */
+  closed: boolean
+  /** completion of the RETRIEVE post-condition; never `verticalStep` alone */
+  verified: boolean
+  /** durable body evidence toward the target that is NOT completion */
+  progressed: boolean
+}
+
+/**
+ * Honest RETRIEVE outcome. A retrieve completes only when the remaining
+ * distance to the remembered target actually decreased (`closed`): a bounded
+ * vertical chunk or a reuse-tunnel nudge toward the target's Y is durable
+ * `progressed` evidence - never completion.
+ *
+ * Live M2 boundary (RC 42cb46e, target 36,56,41):
+ *   `arrival targetDistance=11.26m->11.25m y=59.5->58 vertical=reuse`
+ * reported `verified=true status=done progressDelta=0` even though the distance
+ * did NOT shrink, and the controller then logged `MOVE_FAILMEM_RESET` while the
+ * inventory never gained raw_iron and PATH_CALLBACK stayed `outcome=stuck`.
+ * `verticalProgress`/`verticalStep` must not promote an unreached retrieve.
+ */
+export function classifyRetrieveOutcome(input: RetrieveOutcomeInput): RetrieveOutcome {
+  const closed = input.after < input.before - 0.01
+  return {
+    closed,
+    verified: closed,
+    progressed: input.verticalStep || input.verticalProgress,
   }
 }
 
@@ -1473,6 +1521,20 @@ export class Executor {
       })
     ) {
       const direction = climbedTo > startFloorY ? 'climbed' : 'descended'
+      const currentY = this.bot.entity.position.y
+      const outcome = classifyRetrieveOutcome({
+        before,
+        after: this.distanceToFeet(target),
+        verticalStep,
+        verticalProgress: Math.abs(currentY - target.y) < Math.abs(startY - target.y) - 0.01,
+      })
+      if (!outcome.verified && outcome.progressed) {
+        this.logger.warn(
+          'executor',
+          `RETRIEVE_UNREACHED ${candidate.id} ${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk without closure)`,
+          { target, actionId: candidate.id, vertical: activeVertical, before: round2(before) },
+        )
+      }
       return this.buildResult(
         candidate,
         epoch,
@@ -1482,12 +1544,13 @@ export class Executor {
         `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
         null,
         {
-          verified: true,
+          verified: outcome.verified,
           blockRemoved: dugVertical && verticalStep,
           dropObserved: false,
           itemsGained: 0,
           goalItemCount: this.countGoalItem(),
-          progressed: true,
+          progressed: outcome.progressed,
+          distanceClosed: outcome.closed,
         },
       )
     }
@@ -1522,6 +1585,12 @@ export class Executor {
       verticalStep,
       approachFailed: approachError !== null,
     })
+    const outcome = classifyRetrieveOutcome({
+      before,
+      after,
+      verticalStep,
+      verticalProgress: approach.verticalProgress,
+    })
     if (approach.outcome === 'stalled') {
       const failure =
         approachError ??
@@ -1536,18 +1605,31 @@ export class Executor {
       )
       throw failure
     }
+    // Distance-closure requirement (#238 + truthful outcome): an unreached
+    // retrieve is a success only when the feet actually arrived or the
+    // remaining distance shrank by the meaningful epsilon. A bounded vertical
+    // chunk step is durable `progressed` evidence, never completion.
+    const verified = approach.arrived || approach.closed
+    if (!verified && outcome.progressed) {
+      this.logger.warn(
+        'executor',
+        `RETRIEVE_UNREACHED ${candidate.id} before=${round2(before)}m after=${round2(after)}m vertical=${activeVertical} (progressed without closure)`,
+        { target, actionId: candidate.id, before: round2(before), after: round2(after), vertical: activeVertical },
+      )
+    }
     this.logger.info(
       'executor',
       `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${activeVertical} outcome=${approach.outcome}`,
       { target, actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m (${approach.outcome})`, null, {
-      verified: approach.verified,
+      verified,
       blockRemoved: dugVertical && verticalStep,
       dropObserved: false,
       itemsGained: 0,
       goalItemCount: this.countGoalItem(),
-      progressed: !dugVertical && verticalStep,
+      progressed: outcome.progressed,
+      distanceClosed: approach.closed,
     })
   }
 
@@ -4122,6 +4204,7 @@ export class Executor {
     failure: FailureCode | null,
     extra: Pick<ExecutionResult, 'verified' | 'blockRemoved' | 'dropObserved' | 'itemsGained' | 'goalItemCount'> & {
       progressed?: boolean
+      distanceClosed?: boolean
     },
   ): ExecutionResult {
     return {
