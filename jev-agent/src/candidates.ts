@@ -38,7 +38,7 @@ import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
-import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
+import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
@@ -144,6 +144,13 @@ export interface ReachabilityGateOptions {
   pathProbe?: ((position: Vec3Json) => PathProbeResult) | null
   /** proven-unreachable (candidateId -> fingerprint) suppression memory */
   memory?: StateFingerprintMemory | null
+  /**
+   * #station-reachability: the live interaction-stand + path verdict for a
+   * sensed station. Absent = no probe (pure callers keep the existing behavior).
+   * Supplied by the controller so a sensed furnace/crafting_table is only
+   * offered when the executor can actually stand at and walk to its face.
+   */
+  stationApproach?: StationApproachProbe | null
 }
 
 export interface CandidateReachability {
@@ -1489,7 +1496,10 @@ function sensedCraftingTableAvailable(state: WorldState, options: CandidateOptio
   // stations. A stale sensor result must not bypass MOVE_FAILMEM and re-enter
   // the same CRAFT:furnace -> JUMP_FAIL loop on every prerequisite decision.
   const sensed = state.craftingTables.find(
-    (position) => isSensedStation(position) && !unreachableStations.has(knownStationKey({ name: 'crafting_table', position })),
+    (position) =>
+      isSensedStation(position) &&
+      !unreachableStations.has(knownStationKey({ name: 'crafting_table', position })) &&
+      stationApproachReachable(state, options, position, 'crafting_table'),
   )
   if (sensed === undefined) return false
   const craftFailures = state.signals.failedCandidates[`CRAFT:${focusItem}`] ?? 0
@@ -1544,22 +1554,68 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
 }
 
 /**
- * The first sensed furnace the controller has NOT proven unreachable. A station
- * the `canDig=false` pathfinder cannot path to does not satisfy the smelt
- * precondition (nor belong in a direct SMELT candidate): offering it produced
- * the live loop where `SMELT:charcoal` was guard-rejected `NO_PATH` every tick
- * while the acquisition ladder (`craft_and_place` -> a reachable/placed furnace)
- * was never generated, so `SMELT_DONE` never fired.
+ * Generic station-approach evaluation: can the executor stand at `station` and
+ * interact with its face? The controller supplies the live facts (a passable,
+ * supported stand within reach plus the `canDig=false` path verdict to it), and
+ * this runs the SAME `evaluateReachability` the affordance gate uses for
+ * locomotion targets, so hazard/vertical/approach/path all apply.
+ *
+ * When no probe is supplied the station is treated as viable: pure callers
+ * (tests, offline generation) keep the existing behavior and the controller is
+ * the only place that can add live world facts.
+ */
+function stationApproachReachable(
+  state: WorldState,
+  options: CandidateOptions,
+  station: Vec3Json,
+  kind: 'furnace' | 'crafting_table',
+): boolean {
+  const probe = options.reachability?.stationApproach ?? null
+  if (probe === null) return true
+  const fact = probe(station, kind)
+  if (fact.approach === null) return false
+  const column = columnFacts(state)
+  const abilities = deriveReachabilityAbilities(state, station, column)
+  const target: ReachabilityTarget = {
+    candidateId: `STATION:${kind}:${blockId('b', station)}`,
+    kind,
+    position: station,
+    barrier: null,
+  }
+  const world: ReachabilityWorld = {
+    self: state.self.position,
+    approach: fact.approach,
+    reach: options.reach,
+    hazardAtTarget: state.blocks.some(
+      (block) => block.kind === 'hazard' && distance(block.position, station) <= HAZARD_PROXIMITY,
+    ),
+    footingSolid: column.footingSolid,
+    headroomClear: column.headroomClear,
+  }
+  return evaluateReachability(target, world, state.inventory.counts, abilities, fact.path ?? 'unknown').reachable
+}
+
+/**
+ * The first sensed furnace the controller has NOT proven unreachable AND whose
+ * interaction approach is viable. A station the `canDig=false` pathfinder cannot
+ * path to does not satisfy the smelt precondition (nor belong in a direct SMELT
+ * candidate): offering it produced the live loop where `SMELT:charcoal` was
+ * guard-rejected `NO_PATH` every tick while the acquisition ladder
+ * (`craft_and_place` -> a reachable/placed furnace) was never generated, so
+ * `SMELT_DONE` never fired. The same fact now also rejects a sensed furnace with
+ * no reachable interaction stand (live RC9: `SMELT:iron_ingot` -> `path_stuck`
+ * four times at the first sensed furnace before the recovery ladder ran).
  */
 function reachableSensedFurnace(state: WorldState, options: CandidateOptions): StationEntry | null {
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
-  return (
-    (state.furnaces ?? []).find(
-      (entry) =>
-        isSensedStation(entry) &&
-        !unreachableStations.has(knownStationKey({ name: 'furnace', position: { x: entry.x, y: entry.y, z: entry.z } })),
-    ) ?? null
-  )
+  for (const entry of state.furnaces ?? []) {
+    if (!isSensedStation(entry)) continue
+    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+    if (unreachableStations.has(knownStationKey({ name: 'furnace', position }))) continue
+    if (!stationApproachReachable(state, options, position, 'furnace')) continue
+    return entry
+  }
+  return null
 }
 
 /**
@@ -1752,10 +1808,12 @@ function knownFurnaces(state: WorldState): KnownStationLike[] {
  */
 function sensedTableUsable(
   state: WorldState,
-  unreachableStations: ReadonlySet<string>,
+  options: CandidateOptions,
   sensed: Vec3Json,
 ): boolean {
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
   if (unreachableStations.has(knownStationKey({ name: 'crafting_table', position: sensed }))) return false
+  if (!stationApproachReachable(state, options, sensed, 'crafting_table')) return false
   const craftFailures = state.signals.failedCandidates['CRAFT:furnace'] ?? 0
   const lastFailure = state.signals.lastFailureCode
   const pathFailure = lastFailure === 'path_no_path' || lastFailure === 'path_stuck'
@@ -1783,7 +1841,7 @@ function craftingTableSource(
   // USABLE sensed table wins; blacklisted/failed cells are skipped, not fatal.
   const sensed = state.craftingTables.find(
     (position) =>
-      isSensedStation(position) && sensedTableUsable(state, unreachableStations, position),
+      isSensedStation(position) && sensedTableUsable(state, options, position),
   )
   const sensedInReach = sensed !== undefined && distance(sensed, state.self.eyePosition) <= options.reach
   if (sensed !== undefined && sensedInReach) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }

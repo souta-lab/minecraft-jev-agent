@@ -26,7 +26,8 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
-import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
+import { capabilityKey, formatCandidateWithheld, formatReachability, formatStationUnreachable } from './reachability.ts'
+import type { StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
@@ -55,7 +56,7 @@ import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
-import { ActionCancelled, defaultExecutorOptions, Executor } from './executor.ts'
+import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates } from './executor.ts'
 import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
@@ -1328,6 +1329,7 @@ export class JevController {
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
+  private readonly stationApproachLogged = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
   private moveFailMemory: MoveFailMemory
   /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
@@ -5074,7 +5076,77 @@ export class JevController {
 
   /** Gate facts, shared by both candidate generations in one tick. */
   private reachabilityGateOptions(): ReachabilityGateOptions {
-    return { memory: this.reachabilityProofs, pathProbe: null }
+    return { memory: this.reachabilityProofs, pathProbe: null, stationApproach: this.stationApproachProbe() }
+  }
+
+  private stationApproachProbe(): StationApproachProbe {
+    const cache = new Map<string, StationApproachFact>()
+    return (station, kind) => {
+      const cacheKey = `${kind}:${station.x},${station.y},${station.z}`
+      const cached = cache.get(cacheKey)
+      if (cached !== undefined) return cached
+      const feet = this.bot.entity.position
+      const stands = interactionStandCandidates(
+        station,
+        { x: feet.x, y: feet.y, z: feet.z },
+        {
+          passable: (x, y, z) => this.botPassableAt(x, y, z),
+          solidSupport: (x, y, z) => this.botSolidSupportAt(x, y, z),
+        },
+        this.options.reach,
+      )
+      const stand = stands[0] ?? null
+      let fact: StationApproachFact
+      if (stand === null) {
+        this.noteStationUnreachable(kind, station, 'no_interaction_stand')
+        fact = { approach: null, path: null }
+      } else {
+        const path = this.canComputePathNear(stand) ? 'reachable' : 'no_path'
+        if (path === 'no_path') this.noteStationUnreachable(kind, station, 'no_path_to_stand')
+        else this.forgetStationUnreachable(kind, station)
+        fact = { approach: stand, path }
+      }
+      cache.set(cacheKey, fact)
+      return fact
+    }
+  }
+
+  private botPassableAt(x: number, y: number, z: number): boolean {
+    const block = this.bot.blockAt(this.bot.entity.position.clone().set(x, y, z))
+    return block === null || block.boundingBox === 'empty'
+  }
+
+  private botSolidSupportAt(x: number, y: number, z: number): boolean {
+    const block = this.bot.blockAt(this.bot.entity.position.clone().set(x, y, z))
+    return block !== null && block.boundingBox === 'block'
+  }
+
+  private canComputePathNear(position: Vec3Json): boolean {
+    if (this.bot.pathfinder === undefined) return false
+    try {
+      const goal = new goals.GoalNear(position.x, position.y, position.z, 1)
+      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
+      return plan.status !== 'noPath'
+    } catch {
+      return false
+    }
+  }
+
+  private noteStationUnreachable(
+    kind: 'furnace' | 'crafting_table',
+    station: Vec3Json,
+    reason: StationApproachRefusal,
+  ): void {
+    const key = formatStationUnreachable(kind, station, reason)
+    if (this.stationApproachLogged.has(key)) return
+    this.stationApproachLogged.add(key)
+    this.logger.warn('agent', key, { kind, station, reason }, this.tickCounter)
+  }
+
+  private forgetStationUnreachable(kind: 'furnace' | 'crafting_table', station: Vec3Json): void {
+    for (const reason of ['no_interaction_stand', 'no_path_to_stand'] as const) {
+      this.stationApproachLogged.delete(formatStationUnreachable(kind, station, reason))
+    }
   }
 
   /**
