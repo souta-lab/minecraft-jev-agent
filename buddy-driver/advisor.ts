@@ -8,10 +8,10 @@
 // already-grounded goal list the planner seeds; the controller turns it into
 // guarded macro-actions exactly as before.
 //
-// Failure (missing key, timeout, 429, malformed answer) falls back to the
-// deterministic ladder immediately and logs `ADVISOR source=fallback`. In
-// deterministic planner mode the LLM is never called, so `llm.called==false`
-// stays provable.
+// Failure (missing key, timeout, 429, malformed answer) is retried a bounded
+// number of times and then fatals: the resident logs a FATAL line and exits,
+// never a deterministic ladder. In deterministic planner mode the LLM is never
+// called, so `llm.called==false` stays provable; that mode is explicit opt-in.
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -19,6 +19,8 @@ import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
+import type { KeyResolution } from '../jev-agent/src/jev.ts'
+import { FatalModelError, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 
 export const ADVISOR_STRATEGIES = [
   'descend_to_y16',
@@ -185,6 +187,12 @@ export interface AdvisorOptions {
   model?: string
   minIntervalMs?: number
   timeoutMs?: number
+  /** bound on model attempts (default `BUDDY_ADVISOR_MAX_ATTEMPTS` or 3) */
+  maxAttempts?: number
+  /** resident process terminator; absent in tests (the fatal error is thrown) */
+  terminate?: () => never
+  /** key resolver seam for tests; defaults to `resolveJevApiKey` */
+  resolveKey?: () => KeyResolution | null
   /**
    * Compile a grounded strategy into executable goals. Injected by the planner so
    * the cache stores the PLAN (not just the label) and replays it verbatim.
@@ -243,6 +251,9 @@ export class Advisor {
   readonly model: string
   private readonly minIntervalMs: number
   private readonly timeoutMs: number
+  private readonly maxAttempts: number
+  private readonly terminate: (() => never) | undefined
+  private readonly resolveKey: () => KeyResolution | null
   private readonly compile: AdvisorOptions['compile']
   private cache: AdvisorCacheFile
   private calls = 0
@@ -254,6 +265,9 @@ export class Advisor {
     this.model = options.model ?? process.env.BUDDY_ADVISOR_MODEL ?? DEFAULT_JEV_MODEL
     this.minIntervalMs = options.minIntervalMs ?? Number(process.env.BUDDY_ADVISOR_MIN_INTERVAL_MS ?? 30000)
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_ADVISOR_TIMEOUT_MS ?? 8000)
+    this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_ADVISOR_MAX_ATTEMPTS ?? 3)
+    this.terminate = options.terminate
+    this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.compile = options.compile
     this.cache = this.loadCache()
     this.log('ADVISOR_CACHE_GUARD', {
@@ -274,6 +288,7 @@ export class Advisor {
 
     const stateHash = this.hashState(state)
     const cached = this.cache.entries[stateHash]
+    let bypassed = false
     if (cached !== undefined) {
       const replays = cached.replays ?? 0
       const consecutive = this.cache.consecutiveStrategy === cached.strategy ? this.cache.consecutiveCount ?? 0 : 0
@@ -289,91 +304,113 @@ export class Advisor {
           consecutive,
         })
         this.resetConsecutive()
-        return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `cache bypass (${bypass}) -> deterministic ladder`, state)
-      }
-      cached.replays = replays + 1
-      this.bumpConsecutive(cached.strategy)
-      this.saveCache()
-      const decision: AdvisorDecision = {
-        strategy: cached.strategy,
-        source: 'llm',
-        reason,
-        costUsd: 0,
-        ms: Date.now() - started,
-        cached: true,
-        note: `cached advisor plan (${cached.strategy})`,
-        ...(cached.goals !== undefined ? { goals: cached.goals } : {}),
-      }
-      this.logDecision(decision)
-      return decision
-    }
-
-    const key = resolveJevApiKey()
-    if (key === null) {
-      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, 'no gateway key', state)
-    }
-
-    const now = Date.now()
-    if (this.calls > 0 && now - this.cache.lastCallAt < this.minIntervalMs) {
-      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`, state)
-    }
-
-    try {
-      process.env.AI_GATEWAY_API_KEY = key.key
-      const questions = {
-        next_strategy: {
-          type: 'choice',
-          instructions: STRATEGY_INSTRUCTIONS,
-          criteria: STRATEGY_CRITERIA,
-        },
-      } satisfies Record<string, Experimental_EvaluationQuestion>
-      const response = await evaluate({
-        model: this.model,
-        state: JSON.parse(JSON.stringify(state)) as Parameters<typeof evaluate>[0]['state'],
-        questions,
-        maxRetries: 0,
-        abortSignal: AbortSignal.timeout(this.timeoutMs),
-      })
-      this.calls += 1
-      const answers = response.answers as Record<string, unknown>
-      const raw = answers.next_strategy
-      const choice = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>).choice : undefined
-      const inputTokens = response.usage.inputTokens ?? 0
-      const outputTokens = response.usage.outputTokens ?? 0
-      const costUsd = (inputTokens + outputTokens) * COST_PER_TOKEN_USD
-      this.cache.lastCallAt = Date.now()
-      if (isStrategy(choice)) {
-        const grounded = groundStrategy(choice, state)
-        if (grounded.refused) this.logRefusal(grounded)
-        const goals = this.compile?.(grounded.strategy, state)
-        this.cache.entries[stateHash] = {
-          strategy: grounded.strategy,
-          costUsd,
-          ts: Date.now(),
-          ...(goals !== undefined ? { goals } : {}),
-          replays: 0,
-        }
-        this.resetConsecutive()
-        this.trimCache()
+        bypassed = true
+      } else {
+        cached.replays = replays + 1
+        this.bumpConsecutive(cached.strategy)
         this.saveCache()
         const decision: AdvisorDecision = {
-          strategy: grounded.strategy,
+          strategy: cached.strategy,
           source: 'llm',
           reason,
-          costUsd,
+          costUsd: 0,
           ms: Date.now() - started,
-          cached: false,
-          note: `llm chose ${grounded.strategy}`,
-          ...(goals !== undefined ? { goals } : {}),
+          cached: true,
+          note: `cached advisor plan (${cached.strategy})`,
+          ...(cached.goals !== undefined ? { goals: cached.goals } : {}),
         }
         this.logDecision(decision)
         return decision
       }
-      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, costUsd, started, false, `unknown strategy ${String(choice)} -> ${fallback}`, state)
-    } catch (error) {
-      const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
-      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `${kind}: ${describeError(error)}`, state)
     }
+
+    const key = this.resolveKey()
+    if (key === null) {
+      return this.failFatally(new FatalModelError('advisor-no-key', 1, 'no gateway key resolved'))
+    }
+
+    const now = Date.now()
+    if (!bypassed && this.calls > 0 && now - this.cache.lastCallAt < this.minIntervalMs) {
+      // Rate control, not a model failure: wait out the throttle, then ask the model.
+      // Live mode must never degrade to a deterministic/fallback decision here.
+      const waitMs = this.minIntervalMs - (now - this.cache.lastCallAt)
+      if (Number.isFinite(waitMs) && waitMs > 0) {
+        this.log('ADVISOR_THROTTLE_WAIT', { waitMs, minIntervalMs: this.minIntervalMs })
+        await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
+      }
+    }
+
+    try {
+      const result = await withModelRetries(
+        'advisor',
+        this.maxAttempts,
+        async () => {
+          process.env.AI_GATEWAY_API_KEY = key.key
+          const questions = {
+            next_strategy: {
+              type: 'choice',
+              instructions: STRATEGY_INSTRUCTIONS,
+              criteria: STRATEGY_CRITERIA,
+            },
+          } satisfies Record<string, Experimental_EvaluationQuestion>
+          const response = await evaluate({
+            model: this.model,
+            state: JSON.parse(JSON.stringify(state)) as Parameters<typeof evaluate>[0]['state'],
+            questions,
+            maxRetries: 0,
+            abortSignal: AbortSignal.timeout(this.timeoutMs),
+          })
+          const answers = response.answers as Record<string, unknown>
+          const raw = answers.next_strategy
+          const choice = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>).choice : undefined
+          if (!isStrategy(choice)) throw new Error(`unknown strategy ${String(choice)}`)
+          return { choice, response }
+        },
+        {
+          onRetry: ({ attempt, nextAttempt, error }) => {
+            this.log('ADVISOR_RETRY', { attempt, nextAttempt, error: describeError(error) })
+          },
+        },
+      )
+      this.calls += 1
+      const { choice, response } = result
+      const inputTokens = response.usage.inputTokens ?? 0
+      const outputTokens = response.usage.outputTokens ?? 0
+      const costUsd = (inputTokens + outputTokens) * COST_PER_TOKEN_USD
+      this.cache.lastCallAt = Date.now()
+      const grounded = groundStrategy(choice, state)
+      if (grounded.refused) this.logRefusal(grounded)
+      const goals = this.compile?.(grounded.strategy, state)
+      this.cache.entries[stateHash] = {
+        strategy: grounded.strategy,
+        costUsd,
+        ts: Date.now(),
+        ...(goals !== undefined ? { goals } : {}),
+        replays: 0,
+      }
+      this.resetConsecutive()
+      this.trimCache()
+      this.saveCache()
+      const decision: AdvisorDecision = {
+        strategy: grounded.strategy,
+        source: 'llm',
+        reason,
+        costUsd,
+        ms: Date.now() - started,
+        cached: false,
+        note: `llm chose ${grounded.strategy}`,
+        ...(goals !== undefined ? { goals } : {}),
+      }
+      this.logDecision(decision)
+      return decision
+    } catch (error) {
+      const fatal = error instanceof FatalModelError ? error : new FatalModelError('advisor', this.maxAttempts, describeError(error))
+      return this.failFatally(fatal)
+    }
+  }
+
+  private failFatally(error: FatalModelError): never {
+    return failLoud(error, this.log, this.terminate)
   }
 
   private deliver(

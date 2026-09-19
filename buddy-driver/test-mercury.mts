@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   describeErrorFull,
+  isRetryableModelError,
   isTimeoutError,
   MERCURY_ALLOWED_GOALS,
   mercuryCostUsd,
@@ -245,6 +246,41 @@ addCase('counts a first-attempt success without a retry', async () => {
     pass: result.ok && result.result === 'plan' && result.attempts === 1 && result.failures === 0 && result.attempts - 1 === 0,
     detail: JSON.stringify(result),
   }
+})
+
+addCase('retries rate-limit, 5xx and transport errors but not config or schema failures', () => {
+  const checks = {
+    rateLimit: isRetryableModelError(Object.assign(new Error('rate limited'), { statusCode: 429 })),
+    serverError: isRetryableModelError(Object.assign(new Error('bad gateway'), { statusCode: 503 })),
+    gatewayInternal: isRetryableModelError(Object.assign(new Error('boom'), { name: 'GatewayInternalServerError' })),
+    transport: isRetryableModelError(new Error('fetch failed')),
+    budgetConfig: isRetryableModelError(new Error('hourly budget exhausted (20/h)')),
+    schema: isRetryableModelError(Object.assign(new Error('invalid plan'), { name: 'ZodError' })),
+  }
+  const pass =
+    checks.rateLimit &&
+    checks.serverError &&
+    checks.gatewayInternal &&
+    checks.transport &&
+    !checks.budgetConfig &&
+    !checks.schema
+  return { pass, detail: JSON.stringify(checks) }
+})
+
+addCase('bounded attempts with the retryable predicate stop at maxAttempts on a 429', async () => {
+  let calls = 0
+  const result = await runMercuryAttempts({
+    maxAttempts: 3,
+    reserveAttempt: () => undefined,
+    call: async () => {
+      calls += 1
+      throw Object.assign(new Error('rate limited'), { statusCode: 429 })
+    },
+    isRetryable: isRetryableModelError,
+    onRetry: () => undefined,
+  })
+  const pass = !result.ok && result.attempts === 3 && calls === 3
+  return { pass, detail: JSON.stringify({ result, calls }) }
 })
 
 let failures = 0

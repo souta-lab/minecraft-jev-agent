@@ -15,8 +15,9 @@
 //   * Every call is written to logs/jev/mercury-calls.jsonl with the SAME schema
 //     family as jev-calls.jsonl so responses can be audited.
 //   * Cost is bounded: state-hash cache + a hard N-calls/hour guard.
-//   * Any error / rate limit / budget exhausted / disabled -> deterministic ladder,
-//     logged as `ADVISOR source=fallback`.
+//   * Any error / rate limit / budget exhausted / disabled -> bounded retries, then
+//     a FATAL line and process exit; never a deterministic ladder. The
+//     deterministic ladder is reachable only through explicit planner mode `off`.
 //
 // TRANSPORT (verified 2026-09-18): the AI Gateway does NOT advertise
 // `response_format` for inception/mercury-2.5 (supported_parameters has no
@@ -33,6 +34,8 @@ import { z } from 'zod'
 import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
+import type { KeyResolution } from '../jev-agent/src/jev.ts'
+import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
@@ -643,6 +646,10 @@ export interface MercurySystem2Options {
   /** Extra attempts after a timeout/abort (1 = one retry). */
   retries?: number
   maxOutputTokens?: number
+  /** resident process terminator; absent in tests (the fatal error is thrown) */
+  terminate?: () => never
+  /** key resolver seam for tests; defaults to `resolveJevApiKey` */
+  resolveKey?: () => KeyResolution | null
   /** true when this generation was created fresh because the bot died. */
   postDeathRecovery?: boolean
 }
@@ -727,6 +734,22 @@ export function isTimeoutError(error: unknown, depth = 0): boolean {
   return Array.isArray(errors) && errors.some((entry) => isTimeoutError(entry, depth + 1))
 }
 
+export function isRetryableModelError(error: unknown, depth = 0): boolean {
+  if (isTimeoutError(error, depth) || isRateLimitError(error, depth)) return true
+  if (depth > 4 || error === null || typeof error !== 'object') return false
+  const record = error as Record<string, unknown>
+  const status = typeof record.statusCode === 'number' ? record.statusCode : undefined
+  if (status !== undefined && status >= 500) return true
+  const name = typeof record.name === 'string' ? record.name : ''
+  if (/InternalServerError|ServiceUnavailable|GatewayInternalServerError|APICallError/i.test(name)) return true
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (/fetch failed|ECONNREFUSED|EAI_AGAIN|socket hang up|gateway/i.test(message)) return true
+  if (isRetryableModelError(record.lastError, depth + 1)) return true
+  if (isRetryableModelError(record.cause, depth + 1)) return true
+  const errors = record.errors
+  return Array.isArray(errors) && errors.some((entry) => isRetryableModelError(entry, depth + 1))
+}
+
 export type MercuryAttemptRun<T> =
   | { readonly ok: true; readonly result: T; readonly attempts: number; readonly failures: number }
   | { readonly ok: false; readonly error: unknown; readonly attempts: number; readonly failures: number }
@@ -808,6 +831,8 @@ export class MercurySystem2 implements System2Brain {
   private readonly timeoutMs: number
   private readonly maxAttempts: number
   private readonly maxOutputTokens: number
+  private readonly terminate: (() => never) | undefined
+  private readonly resolveKey: () => KeyResolution | null
   private cache: MercuryCacheFile
   private callCounter = 0
   private calls = 0
@@ -825,8 +850,10 @@ export class MercurySystem2 implements System2Brain {
     // of hidden reasoning, so the timeout must comfortably exceed that. The
     // observed failure mode was an abort at ~50ms, so we also retry once.
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 25000)
-    this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 1))
+    this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
+    this.terminate = options.terminate
+    this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.postDeathPending = options.postDeathRecovery === true
     this.cacheIdentity = mercuryCacheIdentity(options.worldKey)
     this.cache = this.loadCache()
@@ -849,11 +876,12 @@ export class MercurySystem2 implements System2Brain {
     return this.fallbacks
   }
 
-  /** Standalone System2Brain entry point. Throws when Mercury cannot answer. */
+  /** Standalone System2Brain entry point. Fatals when Mercury cannot answer. */
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const trigger = this.deriveTrigger(request)
+    const started = Date.now()
     const repair = await this.tryRepair(request, trigger)
-    if (repair === null) throw new Error('mercury unavailable: deterministic fallback required')
+    if (repair === null) return this.modelFailure(trigger, started, this.summarize(request, trigger), 'mercury returned no repair')
     return repair.plan
   }
 
@@ -872,10 +900,10 @@ export class MercurySystem2 implements System2Brain {
   }
 
   /**
-   * Consult Mercury. Never throws. Returns null when Mercury must be skipped
-   * (cache is not valid, hourly budget exhausted, key missing, request failed, or
-   * the response could not be validated) - the caller then uses the deterministic
-   * ladder immediately.
+   * Consult Mercury. On any failure (invalid cache, hourly budget exhausted, key
+   * missing, request failed, unvalidated response) it retries within the bounded
+   * attempt budget, then fatals: FATAL + process exit for the resident, a thrown
+   * FatalModelError for tests. It never degrades to the deterministic ladder.
    */
   async tryRepair(request: System2PlanRequest, trigger: MercuryTriggerReason): Promise<MercuryRepairResult | null> {
     const started = Date.now()
@@ -940,8 +968,8 @@ export class MercurySystem2 implements System2Brain {
       this.saveCache()
     }
 
-    const key = resolveJevApiKey()
-    if (key === null) return this.fallback(trigger, started, state, 'no gateway key resolved')
+    const key = this.resolveKey()
+    if (key === null) return this.modelFailure(trigger, started, state, 'no gateway key resolved')
     // The gateway provider reads this at request time; the value is never logged.
     process.env.AI_GATEWAY_API_KEY = key.key
 
@@ -992,7 +1020,7 @@ export class MercurySystem2 implements System2Brain {
           })
         },
         call: callOnce,
-        isRetryable: isTimeoutError,
+        isRetryable: isRetryableModelError,
         onRetry: ({ attempt, nextAttempt, error }) => {
           this.log('MERCURY_RETRY', {
             callId,
@@ -1028,7 +1056,7 @@ export class MercurySystem2 implements System2Brain {
           error: message,
           errorDetail: describeErrorFull(attemptRun.error),
         })
-        return this.fallback(trigger, started, state, message, 0, Date.now() - started)
+        return this.modelFailure(trigger, started, state, message, Date.now() - started)
       }
       const result = attemptRun.result
       this.calls += 1
@@ -1065,7 +1093,7 @@ export class MercurySystem2 implements System2Brain {
           cost: Number(costUsd.toFixed(8)),
           error,
         })
-        return this.fallback(trigger, started, state, error, costUsd, latencyMs)
+        return this.modelFailure(trigger, started, state, error, latencyMs)
       }
 
       const grounded = groundMercuryPlan(validated.plan, state)
@@ -1156,35 +1184,27 @@ export class MercurySystem2 implements System2Brain {
         error: message,
         errorDetail: describeErrorFull(error),
       })
-      return this.fallback(trigger, started, state, message, 0, latencyMs)
+      return this.modelFailure(trigger, started, state, message, latencyMs)
     }
   }
 
-  private fallback(
+  private modelFailure(
     trigger: MercuryTriggerReason,
     started: number,
     state: MercuryStateSummary,
     note: string,
-    costUsd = 0,
     latencyMs = Date.now() - started,
-  ): null {
+  ): never {
     this.fallbacks += 1
-    this.log('ADVISOR', {
-      source: 'fallback',
-      reason: trigger,
-      strategy: 'deterministic_ladder',
-      cost: Number(costUsd.toFixed(6)),
-      ms: latencyMs,
-      cached: false,
-      note: `mercury -> fallback: ${note}`,
-    })
-    this.log('ADVISOR_FALLBACK_STATE', {
+    this.log('MERCURY_FAILURE_STATE', {
       rung: state.rung,
       inventory: Object.keys(state.inventory).length,
       wait: state.consecutiveWait,
       queueDepth: state.queue.depth,
+      ms: latencyMs,
     })
-    return null
+    const error = new FatalModelError(`mercury:${trigger}`, this.maxAttempts, note)
+    return failLoud(error, this.log, this.terminate)
   }
 
   private hashState(state: MercuryStateSummary): string {

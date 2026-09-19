@@ -1,0 +1,106 @@
+// modelFailure.ts - the single loud exit for a model that will not answer.
+//
+// Owner directive: a model failure must never degrade into a deterministic
+// decision. Every bounded retry loop that exhausts its attempts funnels through
+// `failLoud()`, which logs a FATAL line and then either terminates the resident
+// process (host-provided `terminate`) or raises a `FatalModelError` so the
+// caller/test observes the failure. Silent `-> deterministic` substitution is
+// not an option here.
+//
+// These primitives are shared by both packages: buddy-driver imports them from
+// `../jev-agent/src/modelFailure.ts`, exactly like `resolveJevApiKey`.
+
+/** A structured logger the host already writes to (buddy.log / agent-event JSONL). */
+export type FailureLog = (event: string, detail?: Record<string, unknown>) => void
+
+/**
+ * Terminate the resident process. Supplied by the host; returns `never` so the
+ * type system knows control does not continue. Tests omit it and observe the
+ * thrown `FatalModelError` instead.
+ */
+export type FatalTerminator = () => never
+
+/**
+ * The one fatal error shape for "the model did not answer". `attempts` is the
+ * number of bounded attempts already spent; `reason` is the underlying error.
+ */
+export class FatalModelError extends Error {
+  readonly context: string
+  readonly attempts: number
+  readonly reason: string
+
+  constructor(context: string, attempts: number, reason: string) {
+    super(`FATAL model failure in ${context} after ${attempts} attempt(s): ${reason}`)
+    this.name = 'FatalModelError'
+    this.context = context
+    this.attempts = attempts
+    this.reason = reason
+  }
+}
+
+export function describeFailure(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return '<unserialisable>'
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+export interface ModelRetryHooks {
+  /** called before the next attempt after a retryable failure */
+  onRetry?: (detail: { attempt: number; nextAttempt: number; error: unknown }) => void
+  /** when false the failure is fatal immediately (no wasted attempts) */
+  isRetryable?: (error: unknown) => boolean
+  /** linear/backoff delay between attempts; default is no delay */
+  delayMs?: (attempt: number) => number
+}
+
+/**
+ * Run a model call with a bounded number of attempts. Rate-limit waits are NOT
+ * counted here (the Jev policy owns its own rate-limit budget); this is the
+ * generic "try a few times" bound. On exhaustion throws `FatalModelError`.
+ */
+export async function withModelRetries<T>(
+  context: string,
+  attempts: number,
+  run: (attempt: number) => Promise<T>,
+  hooks: ModelRetryHooks = {},
+): Promise<T> {
+  const max = Math.max(1, Math.floor(attempts))
+  const isRetryable = hooks.isRetryable ?? (() => true)
+  let last: unknown = null
+  for (let attempt = 1; attempt <= max; attempt += 1) {
+    try {
+      return await run(attempt)
+    } catch (error) {
+      last = error
+      if (attempt >= max || !isRetryable(error)) break
+      hooks.onRetry?.({ attempt, nextAttempt: attempt + 1, error })
+      const delay = hooks.delayMs?.(attempt) ?? 0
+      if (delay > 0) await sleep(delay)
+    }
+  }
+  throw new FatalModelError(context, max, describeFailure(last))
+}
+
+/**
+ * Log the FATAL line with the underlying error, then stop. The resident host
+ * passes `terminate` (non-zero exit); tests omit it and catch the thrown error.
+ */
+export function failLoud(error: FatalModelError, log: FailureLog, terminate: FatalTerminator | undefined): never {
+  log('FATAL', {
+    code: 'MODEL_UNAVAILABLE',
+    context: error.context,
+    attempts: error.attempts,
+    error: error.reason,
+  })
+  if (terminate !== undefined) return terminate()
+  throw error
+}

@@ -67,6 +67,7 @@ import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
+import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
@@ -246,6 +247,12 @@ export interface JevAgentOptions {
   logDir: string
   forceFallbackPolicy: boolean
   /**
+   * Resident host terminator. When set, an exhausted Jev model call logs FATAL
+   * and exits the process instead of degrading to a synthetic WAIT. Tests omit
+   * it and observe the thrown FatalModelError.
+   */
+  terminateOnModelFailure?: () => never
+  /**
    * #22: `false` (default) keeps `abandon_option` shadow-only: it is recorded
    * as a `BETA_SHADOW` vote and can never, by itself, cause a replan/abandon.
    * `true` is the explicit #24 opt-in that lets a threshold-crossing beta drive
@@ -327,7 +334,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   ledgerPath: null,
   stopAfterSubgoals: 0,
   jevTimeoutMs: 8000,
-  jevMaxRetries: 0,
+  jevMaxRetries: 3,
   jevRateLimitRetries: 4,
   jevRateLimitBaseDelayMs: 7000,
   logDir: 'logs',
@@ -1363,15 +1370,7 @@ export class JevController {
       this.options.eventSink === undefined
         ? new EventLogger(this.runWriter, this.options.verbose)
         : new MirroringEventLogger(this.runWriter, this.options.verbose, this.options.eventSink)
-    this.jev = createJevPolicy({
-      writer: this.jevWriter,
-      model: process.env.AI_GATEWAY_MODEL ?? null,
-      timeoutMs: this.options.jevTimeoutMs,
-      maxRetries: this.options.jevMaxRetries,
-      rateLimitRetries: this.options.jevRateLimitRetries,
-      rateLimitBaseDelayMs: this.options.jevRateLimitBaseDelayMs,
-      forceFallback: this.options.forceFallbackPolicy,
-    })
+    this.jev = this.buildPolicy()
     this.scheduler = this.buildScheduler()
     this.executor = new Executor(bot, this.logger, executorOptions(this.options, this.scheduler))
     this.system2 = new StubSystem2(this.system2Writer)
@@ -1442,18 +1441,31 @@ export class JevController {
       this.options.eventSink === undefined
         ? new EventLogger(this.runWriter, this.options.verbose)
         : new MirroringEventLogger(this.runWriter, this.options.verbose, this.options.eventSink)
-    this.jev = createJevPolicy({
-      writer: this.jevWriter,
-      model: process.env.AI_GATEWAY_MODEL ?? null,
-      timeoutMs: this.options.jevTimeoutMs,
-      maxRetries: this.options.jevMaxRetries,
-      rateLimitRetries: this.options.jevRateLimitRetries,
-      rateLimitBaseDelayMs: this.options.jevRateLimitBaseDelayMs,
-      forceFallback: this.options.forceFallbackPolicy,
-    })
+    this.jev = this.buildPolicy()
     this.scheduler = this.buildScheduler()
     this.executor = new Executor(this.bot, this.logger, executorOptions(this.options, this.scheduler))
     this.system2 = new StubSystem2(this.system2Writer)
+  }
+
+  private buildPolicy(): JevPolicy {
+    try {
+      return createJevPolicy({
+        writer: this.jevWriter,
+        model: process.env.AI_GATEWAY_MODEL ?? null,
+        timeoutMs: this.options.jevTimeoutMs,
+        maxRetries: this.options.jevMaxRetries,
+        rateLimitRetries: this.options.jevRateLimitRetries,
+        rateLimitBaseDelayMs: this.options.jevRateLimitBaseDelayMs,
+        forceFallback: this.options.forceFallbackPolicy,
+      })
+    } catch (error) {
+      const fatal = error instanceof FatalModelError ? error : new FatalModelError('jev-policy', 1, describeFailure(error))
+      return failLoud(fatal, this.policyFailureLog, this.options.terminateOnModelFailure)
+    }
+  }
+
+  private readonly policyFailureLog = (event: string, detail?: Record<string, unknown>): void => {
+    this.logger.error('policy', event, detail ?? {}, this.tickCounter)
   }
 
   private createMoveFailMemory(): MoveFailMemory {
@@ -2668,11 +2680,8 @@ export class JevController {
       }
       return result
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.logger.error('policy', `Jev call failed: ${message}`, { trigger }, this.tickCounter)
-      this.escalate('policy_error', message)
-      this.recordFailure('unknown_event', `policy error: ${message}`)
-      return this.syntheticWait()
+      const fatal = error instanceof FatalModelError ? error : new FatalModelError('jev-policy', 1, describeFailure(error))
+      return failLoud(fatal, (event, detail) => this.logger.error('policy', event, { trigger, ...(detail ?? {}) }, this.tickCounter), this.options.terminateOnModelFailure)
     }
   }
 
@@ -3823,8 +3832,8 @@ export class JevController {
       })
       .catch((error: unknown) => {
         this.llmInFlight = false
-        const message = error instanceof Error ? error.message : String(error)
-        this.logger.error('system2', `LLM plan failed: ${message}`, { reason }, this.tickCounter)
+        const fatal = error instanceof FatalModelError ? error : new FatalModelError('system2-plan', 1, describeFailure(error))
+        failLoud(fatal, (event, detail) => this.logger.error('system2', event, { reason, ...(detail ?? {}) }, this.tickCounter), this.options.terminateOnModelFailure)
       })
 
     return resummon
