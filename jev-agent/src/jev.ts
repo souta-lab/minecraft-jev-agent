@@ -12,10 +12,11 @@
 //     *grounded macro-action choice* whose labels are the deterministic
 //     candidate ids that actually exist right now.
 //
-//   * FallbackJevPolicy - a clearly-marked deterministic local policy used when
-//     neither the gateway key file nor AI_GATEWAY_API_KEY is present, so the
-//     loop is runnable today. Same interface, so swapping is a no-op for the
-//     rest of the agent.
+//   * FallbackJevPolicy - a clearly-marked deterministic local policy used ONLY
+//     when the caller explicitly opts in (`forceFallback: true`, wired from
+//     `BUDDY_POLICY=fallback` for offline/CI). A model failure never selects it:
+//     `createJevPolicy` throws a FatalModelError when no key resolves, and the
+//     controller turns an exhausted Jev call into a FATAL + process exit.
 //
 // Verified SDK facts this file encodes:
 //   * `experimental_evaluate` question types are `choice` | `score` | `boolean`.
@@ -33,6 +34,7 @@ import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { Candidate } from './candidates.ts'
+import { FatalModelError } from './modelFailure.ts'
 import type { WorldState } from './state.ts'
 
 type EvaluateArgs = Parameters<typeof evaluate>[0]
@@ -728,6 +730,8 @@ export interface JevPolicyOptions {
   rateLimitBaseDelayMs: number
   /** force the local deterministic policy even when a key is present */
   forceFallback?: boolean
+  /** key resolver seam for tests; defaults to `resolveJevApiKey` */
+  resolveKey?: () => KeyResolution | null
 }
 
 /**
@@ -953,10 +957,13 @@ class TypeSafeJevPolicy implements JevPolicy {
     const callId = randomUUID()
     const requested = request.questionNames ?? QUESTION_NAMES
     const questions = buildQuestions(request.candidates, requested)
+    const maxAttempts = Math.max(1, this.maxRetries + 1)
     let attempt = 0
+    let generalAttempt = 0
     let rateLimitWaitMs = 0
     for (;;) {
-      if (signal?.aborted === true) throw new JevPolicyError(`aborted before attempt ${attempt + 1}`)
+      if (signal?.aborted === true) throw new FatalModelError('jev-policy', generalAttempt, `aborted before attempt ${generalAttempt + 1}`)
+      generalAttempt += 1
       const attemptStart = Date.now()
       const timeoutSignal = AbortSignal.timeout(this.timeoutMs)
       const abortSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
@@ -966,7 +973,7 @@ class TypeSafeJevPolicy implements JevPolicy {
           state: toEvaluationState(request.state),
           questions,
           abortSignal,
-          maxRetries: this.maxRetries,
+          maxRetries: 0,
         })
         const latencyMs = Date.now() - attemptStart
         const answers: Record<string, JevAnswer> = {}
@@ -995,6 +1002,7 @@ class TypeSafeJevPolicy implements JevPolicy {
         const message = describeError(error)
         if (attempt < this.rateLimitRetries && isRateLimitError(error)) {
           attempt += 1
+          generalAttempt -= 1
           const delayMs = this.rateLimitBaseDelayMs * attempt
           rateLimitWaitMs += delayMs
           this.writer.write({
@@ -1007,6 +1015,18 @@ class TypeSafeJevPolicy implements JevPolicy {
             error: message,
           } satisfies JevRetryRecord)
           await sleep(delayMs)
+          continue
+        }
+        if (generalAttempt < maxAttempts) {
+          this.writer.write({
+            record: 'jev-retry',
+            callId,
+            ts: new Date().toISOString(),
+            attempt: generalAttempt,
+            delayMs: 0,
+            totalWaitMs: rateLimitWaitMs,
+            error: message,
+          } satisfies JevRetryRecord)
           continue
         }
         const record: JevCallRecord = {
@@ -1025,7 +1045,7 @@ class TypeSafeJevPolicy implements JevPolicy {
           error: message,
         }
         this.writer.write(record)
-        throw new JevPolicyError(message)
+        throw new FatalModelError('jev-policy', generalAttempt, message)
       }
     }
   }
@@ -1198,15 +1218,19 @@ export interface CreateJevPolicyResult {
 }
 
 /**
- * THE swap point. A resolvable gateway key selects the real policy; otherwise
- * the marked deterministic fallback keeps the loop testable today.
+ * THE swap point. `forceFallback: true` is the ONLY way to get the deterministic
+ * policy; it is an explicit offline/CI opt-in (BUDDY_POLICY=fallback). Without
+ * it a resolvable gateway key selects the real policy, and an unresolvable key
+ * is a fatal model-configuration failure, never a silent degradation.
  */
 export function createJevPolicy(options: JevPolicyOptions): JevPolicy {
-  const resolved = options.forceFallback === true ? null : resolveJevApiKey()
+  if (options.forceFallback === true) return new FallbackJevPolicy(options)
+  const resolve = options.resolveKey ?? resolveJevApiKey
+  const resolved = resolve()
   if (resolved !== null) {
     return new TypeSafeJevPolicy({ ...options, key: resolved })
   }
-  return new FallbackJevPolicy(options)
+  throw new FatalModelError('jev-policy-key', 1, 'no gateway key resolved and forceFallback was not set')
 }
 
 export function writeOutcome(writer: JsonlWriter, record: Omit<JevOutcomeRecord, 'record' | 'ts'>): void {

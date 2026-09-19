@@ -15,6 +15,7 @@ import {
 } from './mercury-system2.ts'
 import type { MercuryStateSummary } from './mercury-system2.ts'
 import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 
 interface Case {
@@ -181,23 +182,28 @@ addCase('cache bypasses repeat_no_progress after MAX_CACHE_REPLAYS identical hit
     log: hostLog(logs),
     cachePath,
     mode: 'llm',
+    resolveKey: () => null,
     compile: (strategy, s) => (strategy === 'branch_mine' ? branchGoals : [{ kind: 'collect', description: `fallback ${strategy}`, targetItem: 'cobblestone', requiredCount: s.toolRank }]),
   })
   const decisions = []
-  for (let i = 0; i <= MAX_CACHE_REPLAYS; i += 1) decisions.push(await advisor.decide(state, 'wait_limit'))
+  for (let i = 0; i < MAX_CACHE_REPLAYS; i += 1) decisions.push(await advisor.decide(state, 'wait_limit'))
+  let thrown: unknown = null
+  try {
+    await advisor.decide(state, 'wait_limit')
+  } catch (error) {
+    thrown = error
+  }
   const bypass = logs.find((line) => line.includes('ADVISOR_CACHE bypass'))
   const cachedRun = decisions.filter((d) => d.cached).length
-  const last = decisions[decisions.length - 1]
   return {
     pass:
       cachedRun === MAX_CACHE_REPLAYS &&
-      last !== undefined &&
-      !last.cached &&
-      last.strategy === 'return_to_known_ore' &&
+      thrown instanceof FatalModelError &&
+      thrown.context === 'advisor-no-key' &&
       bypass !== undefined &&
       bypass.includes('reason=repeat_no_progress') &&
       bypass.includes('strategy=branch_mine'),
-    detail: `cachedRun=${cachedRun} bypass=${bypass ?? 'none'} last=${last?.strategy}/${last?.cached}`,
+    detail: `cachedRun=${cachedRun} bypass=${bypass ?? 'none'} thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)}`,
   }
 })
 
@@ -215,20 +221,26 @@ addCase('consecutive same-strategy cached hits across states are capped', async 
     log: hostLog(logs),
     cachePath,
     mode: 'llm',
+    resolveKey: () => null,
     compile: () => branchGoals,
   })
   const a = await advisor.decide(stateA, 'wait_limit')
   const b1 = await advisor.decide(stateB, 'wait_limit')
-  const b2 = await advisor.decide(stateB, 'wait_limit')
+  let thrown: unknown = null
+  try {
+    await advisor.decide(stateB, 'wait_limit')
+  } catch (error) {
+    thrown = error
+  }
   const bypass = logs.find((line) => line.includes('ADVISOR_CACHE bypass'))
   return {
     pass:
       a.cached &&
       b1.cached &&
-      !b2.cached &&
+      thrown instanceof FatalModelError &&
       bypass !== undefined &&
       bypass.includes('reason=consecutive_same_strategy'),
-    detail: `a=${a.cached} b1=${b1.cached} b2=${b2.cached} bypass=${bypass ?? 'none'}`,
+    detail: `a=${a.cached} b1=${b1.cached} bypass=${bypass ?? 'none'} thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)}`,
   }
 })
 
@@ -283,7 +295,7 @@ addCase('mercury cache hit replays the cached plan instead of continue + empty g
   }
 })
 
-addCase('mercury cache bypasses after MAX_CACHE_REPLAYS identical hits', async () => {
+addCase('mercury cache bypasses after MAX_CACHE_REPLAYS into a fatal, never a null degrade', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-loop-'))
   const cachePath = join(dir, 'mercury-cache.json')
   const summary = mercuryState()
@@ -319,16 +331,25 @@ addCase('mercury cache bypasses after MAX_CACHE_REPLAYS identical hits', async (
     maxPerHour: 0,
   })
   const results = []
-  for (let i = 0; i <= MERCURY_MAX_REPLAYS; i += 1) results.push(await mercury.tryRepair(planRequest(), 'no_candidate'))
+  for (let i = 0; i < MERCURY_MAX_REPLAYS; i += 1) results.push(await mercury.tryRepair(planRequest(), 'no_candidate'))
+  let thrown: unknown = null
+  try {
+    await mercury.tryRepair(planRequest(), 'no_candidate')
+  } catch (error) {
+    thrown = error
+  }
   const replayCount = results.filter((r) => r !== null && r.cached).length
   const bypass = logs.find((line) => line.includes('ADVISOR_CACHE bypass'))
+  const fatal = logs.find((line) => line.startsWith('FATAL'))
   return {
     pass:
       replayCount === MERCURY_MAX_REPLAYS &&
-      results[results.length - 1] === null &&
+      thrown instanceof FatalModelError &&
       bypass !== undefined &&
-      bypass.includes('reason=repeat_no_progress'),
-    detail: `replays=${replayCount} last=${results[results.length - 1]} bypass=${bypass ?? 'none'}`,
+      bypass.includes('reason=repeat_no_progress') &&
+      fatal !== undefined &&
+      fatal.includes('code=MODEL_UNAVAILABLE'),
+    detail: `replays=${replayCount} thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} bypass=${bypass ?? 'none'}`,
   }
 })
 

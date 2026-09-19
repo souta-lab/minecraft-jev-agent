@@ -853,6 +853,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // `llm` turns the controller's exception paths into bounded replans.
   const plannerMode = resolvePlannerMode()
 
+  // OWNER DIRECTIVE: a model failure is never hidden. The host terminator logs a
+  // FATAL line (through each component's log) and exits non-zero, so the resident
+  // process stops instead of silently degrading to the deterministic ladder.
+  const terminateResident = (): never => {
+    ctx.log('ERROR', { code: 'MODEL_UNAVAILABLE', action: 'terminate-resident', pid: process.pid, exitCode: 1 })
+    process.exit(1)
+  }
+
   // Durable caches (survive hot reloads; keyed by world-state hash).
   const cacheNamespace = worldCacheNamespace(ctx.worldKey)
   const cachePath = fileURLToPath(new URL(`./planner-cache-${cacheNamespace}.json`, import.meta.url))
@@ -861,6 +869,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     log: (event, detail) => ctx.log(event, detail),
     cachePath: advisorCachePath,
     mode: resolveAdvisorMode(plannerMode),
+    terminate: terminateResident,
     compile: (strategy, state) =>
       goalsForStrategy(strategy, state.inventory, world, {
         placedFurnacesNear: furnaces.length,
@@ -879,6 +888,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,
         worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
+        terminate: terminateResident,
         postDeathRecovery,
       })
     : undefined
@@ -911,6 +921,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // Real Jev policy by default (key from the gateway key file or
     // AI_GATEWAY_API_KEY); deterministic fallback only when explicitly requested.
     forceFallbackPolicy: (process.env.BUDDY_POLICY ?? '').trim().toLowerCase() === 'fallback',
+    terminateOnModelFailure: terminateResident,
     actuation: 'pathfinder',
     actuationPort,
     reach: 5,
@@ -971,6 +982,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mode: plannerMode,
     advisor,
     mercury,
+    terminate: terminateResident,
     postDeathRecovery,
   })
 

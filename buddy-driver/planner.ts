@@ -32,6 +32,8 @@ import type { Experimental_EvaluationQuestion } from 'ai'
 import type { PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
+import type { KeyResolution } from '../jev-agent/src/jev.ts'
+import { FatalModelError, describeFailure, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 import { findInventoryFuel, matchesResourceClass, resourceMatches } from '../jev-agent/src/resourceClass.ts'
 import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta, parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
@@ -1618,6 +1620,12 @@ export interface PlannerOptions {
   mercury?: MercurySystem2
   /** true when this generation was created fresh because the bot died. */
   postDeathRecovery?: boolean
+  /** bound on planner model attempts (default `BUDDY_PLANNER_MAX_ATTEMPTS` or 3) */
+  maxAttempts?: number
+  /** resident process terminator; absent in tests (the fatal error is thrown) */
+  terminate?: () => never
+  /** key resolver seam for tests; defaults to `resolveJevApiKey` */
+  resolveKey?: () => KeyResolution | null
 }
 
 type PlannerReason = 'start' | 'queue_empty' | 'impossible' | 'stuck'
@@ -1670,6 +1678,9 @@ export class PlannerBrain implements System2Brain {
   private readonly advisor: Advisor | undefined
   private readonly mercury: MercurySystem2 | undefined
   private readonly postDeathRecovery: boolean
+  private readonly maxAttempts: number
+  private readonly terminate: (() => never) | undefined
+  private readonly resolveKey: () => KeyResolution | null
   private postDeathHandled = false
   private lastAdvisorStrategy: AdvisorStrategy | null = null
   private lastAdvisorSignature: string | null = null
@@ -1702,6 +1713,9 @@ export class PlannerBrain implements System2Brain {
     this.advisor = options.advisor
     this.mercury = options.mercury
     this.postDeathRecovery = options.postDeathRecovery === true
+    this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_PLANNER_MAX_ATTEMPTS ?? 3)
+    this.terminate = options.terminate
+    this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.cache = this.loadCache()
   }
 
@@ -1767,9 +1781,7 @@ export class PlannerBrain implements System2Brain {
         this.logSkills(repair.strategy, option.skills ?? [])
         return this.finishPlanOp(option, request, repair.op, `mercury ${repair.op}: ${repair.strategy}`)
       }
-      // Mercury already logged ADVISOR source=fallback; never use the Jev advisor here.
-      this.logPlan('fallback', deterministicOption, reason, started, 0, 'mercury unavailable -> deterministic ladder')
-      return this.finishPlan(deterministicOption, request, 'mercury unavailable', stalled)
+      return this.fatalModel('planner-mercury', 'mercury returned no repair')
     }
 
     if (reason === 'queue_empty') {
@@ -1838,16 +1850,24 @@ export class PlannerBrain implements System2Brain {
 
     const now = Date.now()
     if (this.calls > 0 && now - this.cache.lastCallAt < this.minIntervalMs) {
-      this.logPlan('fallback', deterministicOption, reason, started, 0, `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`)
-      return this.finishPlan(deterministicOption, request, 'throttled: deterministic ladder', stalled)
+      // Owner directive: live mode never answers a throttled model call with the deterministic ladder.
+      return this.fatalModel('planner-throttle', `model call throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`)
     }
     if (this.calls >= this.maxCalls) {
-      this.logPlan('fallback', deterministicOption, reason, started, 0, `call budget exhausted (${this.maxCalls})`)
-      return this.finishPlan(deterministicOption, request, 'llm call budget exhausted', stalled)
+      return this.fatalModel('planner-budget', `llm call budget exhausted (${this.maxCalls})`)
     }
 
     try {
-      const chosen = await this.askLlm(horizonOptions, request)
+      const chosen = await withModelRetries(
+        'planner-llm',
+        this.maxAttempts,
+        () => this.askLlm(horizonOptions, request),
+        {
+          onRetry: ({ attempt, nextAttempt, error }) => {
+            this.log('PLANNER_RETRY', { attempt, nextAttempt, error: describeError(error) })
+          },
+        },
+      )
       this.calls += 1
       this.cache.lastCallAt = Date.now()
       this.cache.entries[stateHash] = {
@@ -1865,11 +1885,17 @@ export class PlannerBrain implements System2Brain {
       this.logPlan('llm', option, reason, started, chosen.costUsd, note, false, chosen.latencyMs, chosen)
       return this.finishPlan(option, request, note, stalled)
     } catch (error) {
-      const message = describeError(error)
-      const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
-      this.logPlan('fallback', deterministicOption, reason, started, 0, `${kind}: ${message}`)
-      return this.finishPlan(deterministicOption, request, `${kind}: ${message}`, stalled)
+      const fatal = error instanceof FatalModelError ? error : new FatalModelError('planner-llm', this.maxAttempts, describeFailure(error))
+      return this.failFatal(fatal)
     }
+  }
+
+  private failFatal(error: FatalModelError): never {
+    return failLoud(error, this.log, this.terminate)
+  }
+
+  private fatalModel(context: string, reason: string): never {
+    return this.failFatal(new FatalModelError(context, this.maxAttempts, reason))
   }
 
   // -- internals ------------------------------------------------------------
@@ -2266,7 +2292,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async askLlm(options: PlanOption[], request: System2PlanRequest): Promise<LlmChoice> {
-    const key = resolveJevApiKey()
+    const key = this.resolveKey()
     if (key === null) throw new Error('no gateway key resolved')
     // The gateway provider reads this at request time; the value is never logged.
     process.env.AI_GATEWAY_API_KEY = key.key
