@@ -26,8 +26,8 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
-import { capabilityKey, formatCandidateWithheld, formatReachability, formatStationUnreachable } from './reachability.ts'
-import type { StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
+import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
+import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
@@ -1336,6 +1336,9 @@ export class JevController {
   private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
   private withheldCandidateIds: ReadonlySet<string> = new Set<string>()
+  /** gate facts (station/dig approach probes) resolved once per tick. */
+  private gateOptions: ReachabilityGateOptions | null = null
+  private gateOptionsTick = -1
   /** last logged REACHABILITY signature per candidate, so markers change with facts. */
   private readonly reachabilityLogSignatures = new Map<string, string>()
   /** last logged PLACE_REFUSED signature, so one geometry dead end is one line. */
@@ -5020,6 +5023,11 @@ export class JevController {
         detail,
         this.tickCounter,
       )
+      const refusal = entry.candidate.meta.digAccessRefusal
+      const block = entry.candidate.target
+      if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
+        this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
+      }
     }
   }
 
@@ -5076,7 +5084,56 @@ export class JevController {
 
   /** Gate facts, shared by both candidate generations in one tick. */
   private reachabilityGateOptions(): ReachabilityGateOptions {
-    return { memory: this.reachabilityProofs, pathProbe: null, stationApproach: this.stationApproachProbe() }
+    if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
+    this.gateOptions = {
+      memory: this.reachabilityProofs,
+      pathProbe: null,
+      stationApproach: this.stationApproachProbe(),
+      digApproach: this.digApproachProbe(),
+    }
+    this.gateOptionsTick = this.tickCounter
+    return this.gateOptions
+  }
+
+  /**
+   * The #244 interaction stand, generalised from stations to blocked dig targets.
+   * A blocked target's sensor adjacency fact only samples 12 neighbours; a stand
+   * one stance away can still make the block diggable. The stand is resolved with
+   * the SAME live passable+support+face-reach machinery the station path uses.
+   * The expensive `canDig=false` path probe is budgeted per tick; beyond it the
+   * verdict is left unknown and the guard's own path probe still gates the MOVE.
+   */
+  private digApproachProbe(): DigApproachProbe {
+    const cache = new Map<string, DigApproachFact>()
+    let pathProbes = 0
+    const pathProbeBudget = 4
+    return (block) => {
+      const cacheKey = `${block.x},${block.y},${block.z}`
+      const cached = cache.get(cacheKey)
+      if (cached !== undefined) return cached
+      const feet = this.bot.entity.position
+      const stands = interactionStandCandidates(
+        block,
+        { x: feet.x, y: feet.y, z: feet.z },
+        {
+          passable: (x, y, z) => this.botPassableAt(x, y, z),
+          solidSupport: (x, y, z) => this.botSolidSupportAt(x, y, z),
+        },
+        this.options.reach,
+      )
+      const stand = stands[0] ?? null
+      let fact: DigApproachFact
+      if (stand === null) {
+        fact = { approach: null, path: null }
+      } else if (pathProbes < pathProbeBudget) {
+        pathProbes += 1
+        fact = { approach: stand, path: this.canComputePathNear(stand) ? 'reachable' : 'no_path' }
+      } else {
+        fact = { approach: stand, path: null }
+      }
+      cache.set(cacheKey, fact)
+      return fact
+    }
   }
 
   private stationApproachProbe(): StationApproachProbe {

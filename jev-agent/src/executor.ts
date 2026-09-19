@@ -21,6 +21,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
 import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, isBreakableSolidBlock } from './state.ts'
+import { interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
@@ -444,18 +445,7 @@ export interface InteractionStandProbe {
   solidSupport(x: number, y: number, z: number): boolean
 }
 
-/** Eye→block-AABB distance from an explicit eye position (the reach test). */
-function faceDistanceFromEye(eye: Vec3Json, block: Vec3Json): number {
-  const x = Math.max(block.x, Math.min(eye.x, block.x + 1))
-  const y = Math.max(block.y, Math.min(eye.y, block.y + 1))
-  const z = Math.max(block.z, Math.min(eye.z, block.z + 1))
-  return Math.hypot(eye.x - x, eye.y - y, eye.z - z)
-}
-
-/** Eye→block-AABB distance from a candidate stand's eyes (its interaction reach). */
-export function interactionFaceDistance(stand: Vec3Json, block: Vec3Json): number {
-  return faceDistanceFromEye({ x: stand.x + 0.5, y: stand.y + 1.62, z: stand.z + 0.5 }, block)
-}
+export { interactionFaceDistance }
 
 function standDistanceFromFeet(stand: Vec3Json, feet: Vec3Json): number {
   return Math.hypot(stand.x + 0.5 - feet.x, stand.z + 0.5 - feet.z)
@@ -480,15 +470,9 @@ export function interactionStandCandidates(
   probe: InteractionStandProbe,
   reach: number,
 ): Vec3Json[] {
-  const offsets: Vec3Json[] = [
-    { x: 1, y: 0, z: 0 },
-    { x: -1, y: 0, z: 0 },
-    { x: 0, y: 0, z: 1 },
-    { x: 0, y: 0, z: -1 },
-  ]
   const candidates: Vec3Json[] = []
-  for (const offset of offsets) {
-    for (const dy of [0, 1, -1]) {
+  for (const offset of INTERACTION_STAND_OFFSETS) {
+    for (const dy of INTERACTION_STAND_DY) {
       const spot = { x: block.x + offset.x, y: block.y + dy, z: block.z + offset.z }
       if (!probe.passable(spot.x, spot.y, spot.z)) continue
       if (!probe.passable(spot.x, spot.y + 1, spot.z)) continue
