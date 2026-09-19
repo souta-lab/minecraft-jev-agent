@@ -25,7 +25,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "CurrentOptionContext now persists and reaches WorldState/Jev payloads on main; candidate/Skill lists still do not consume or constrain by allowedSkills, and live/replay evidence remains unverified."
+      "note": "CurrentOptionContext now persists the exact OptionSpec into Jev; allowedSkills gates grounded candidates and decision logs record optionSkill attribution. Live/replay/CI evidence and full Option-instance beta joining remain unverified."
     },
     "79": {
       "acceptanceClass": "closed-loop-live",

@@ -123,6 +123,11 @@ export interface CandidateOptions {
   /** affordance gate facts: pathfinder probe + state-fingerprint suppression memory */
   reachability?: ReachabilityGateOptions | null
   /**
+   * #56: grounded skills allowed by the exact active Option. `null`/undefined
+   * keeps the legacy/compiler-disabled candidate pool unchanged.
+   */
+  allowedSkills?: readonly string[] | null
+  /**
    * #11 v2: ordering policy for the furnace prerequisite ladder (`cost` default,
    * `rank` for A/B). Shared by the generator and the controller so both agree on
    * which path the candidate set represents.
@@ -369,7 +374,117 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal)
+  const scoped = applyOptionSkillGate(raw.candidates, state, options.allowedSkills)
+  return applyReachabilityGate(scoped, state, options, raw.placeRefusal)
+}
+
+const OPTION_PREFIX_SKILLS: Readonly<Record<string, string>> = {
+  BRANCH_MINE: 'BRANCH_MINE',
+  RETURN_TO_KNOWN_ORE: 'RETURN_TO_KNOWN_ORE',
+  EXPLORE_CAVE: 'EXPLORE_CAVE_FRONTIER',
+}
+
+/**
+ * Return the deterministic Skill identity for one already-grounded candidate.
+ * The result is deliberately a string: OptionSpec skills are plain serialized
+ * ids and this boundary must not import a runtime/model object.
+ */
+export function optionSkillForCandidate(candidate: Candidate, state: WorldState): string | null {
+  if (candidate.meta.prereqPath !== undefined) return 'PREREQUISITE'
+  if (candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE') return 'CONTROL'
+  if (candidate.kind === 'EAT' || candidate.kind === 'RETREAT') return 'SAFETY'
+
+  // OptionSpec `goto` is represented as an explore GoalKind when it enters
+  // the legacy queue, but its exact CurrentOptionContext still carries the
+  // `goto` kind and PATHFIND_TO skill. Preserve that distinction or the
+  // opt-in gate would discard every MOVE candidate for a valid goto Option.
+  if (state.currentOption?.kind === 'goto') {
+    return candidate.kind === 'MOVE' ? 'PATHFIND_TO' : null
+  }
+
+  const prefix = candidate.id.split(':', 1)[0] ?? ''
+  const prefixed = OPTION_PREFIX_SKILLS[prefix]
+  if (prefixed !== undefined) return prefixed
+
+  const current = state.goalQueue?.current ?? null
+  const strategy = current?.strategy ?? null
+  if (strategy !== null) {
+    switch (strategy) {
+      case 'explore_cave':
+        return candidate.id.startsWith('EXPLORE_CAVE:') ? 'EXPLORE_CAVE_FRONTIER' : null
+      case 'branch_mine':
+        return candidate.kind === 'MINE' || candidate.kind === 'MOVE' || candidate.kind === 'DESCEND'
+          ? 'BRANCH_MINE'
+          : null
+      case 'return_to_known_ore':
+        return candidate.kind === 'RETRIEVE' ? 'RETURN_TO_KNOWN_ORE' : null
+      case 'return_to_surface':
+        return candidate.kind === 'RETRIEVE' && candidate.meta.retrieval === 'surface' ? 'RETURN_TO_SURFACE' : null
+      case 'smelt_and_craft':
+        return candidate.kind === 'CRAFT' || candidate.kind === 'PLACE' || candidate.kind === 'SMELT' || candidate.kind === 'RETRIEVE'
+          ? 'SMELT_AND_CRAFT'
+          : null
+      case 'descend_to_y16':
+        return candidate.kind === 'DESCEND' ? 'STAIRCASE' : null
+    }
+  }
+
+  switch (current?.kind ?? 'collect') {
+    case 'craft':
+      return candidate.kind === 'CRAFT' || candidate.kind === 'PLACE' || candidate.kind === 'RETRIEVE'
+        ? 'CRAFT_AT_STATION'
+        : null
+    case 'smelt':
+      return candidate.kind === 'SMELT' || candidate.kind === 'CRAFT' || candidate.kind === 'PLACE' || candidate.kind === 'RETRIEVE'
+        ? 'SMELT_AT_FURNACE'
+        : null
+    case 'place':
+      return candidate.kind === 'PLACE' ? 'PLACE_STATION' : null
+    case 'explore':
+      return candidate.kind === 'MOVE' || candidate.kind === 'RETRIEVE' || candidate.kind === 'MINE'
+        ? 'EXPLORE_FRONTIER'
+        : null
+    case 'surface':
+      return candidate.kind === 'MOVE' || candidate.kind === 'RETRIEVE' || candidate.kind === 'MINE'
+        ? 'EXPLORE_FRONTIER'
+        : null
+    case 'descend':
+      if (candidate.kind === 'DESCEND') return candidate.meta.mode === 'level' ? 'REUSE_TUNNEL' : 'STAIRCASE'
+      return candidate.kind === 'MINE' || candidate.kind === 'MOVE' ? 'BRANCH_MINE' : null
+    case 'recover':
+    case 'unknown':
+      return candidate.kind === 'ATTACK' ? 'ENGAGE_TARGET' : null
+    case 'collect':
+      if (candidate.kind === 'MINE' || candidate.kind === 'MOVE' || candidate.kind === 'DESCEND') return 'BRANCH_MINE'
+      if (candidate.kind === 'RETRIEVE') {
+        return candidate.meta.retrieval === 'surface' ? 'PREREQUISITE' : 'RETURN_TO_KNOWN_ORE'
+      }
+      return null
+  }
+}
+
+/**
+ * Restrict grounded candidates to the exact Option's allowed skill set.
+ *
+ * This is additive and opt-in: compiler-disabled/legacy calls pass null and
+ * receive a copy of the raw list. Safety/control candidates and deterministic
+ * prerequisite paths remain available because a parent Option must not become
+ * impossible merely because its station/input setup is represented by a
+ * lower-level candidate.
+ */
+export function applyOptionSkillGate(
+  candidates: readonly Candidate[],
+  state: WorldState,
+  allowedSkills: readonly string[] | null | undefined,
+): Candidate[] {
+  if (allowedSkills === null || allowedSkills === undefined) return [...candidates]
+  const allowed = new Set(allowedSkills)
+  return candidates.flatMap((candidate) => {
+    const optionSkill = optionSkillForCandidate(candidate, state)
+    const alwaysAllowed = optionSkill === 'CONTROL' || optionSkill === 'SAFETY' || optionSkill === 'PREREQUISITE'
+    if (!alwaysAllowed && (optionSkill === null || !allowed.has(optionSkill))) return []
+    return [{ ...candidate, meta: { ...candidate.meta, optionSkill: optionSkill ?? 'UNKNOWN' } }]
+  })
 }
 
 function generateRawCandidates(

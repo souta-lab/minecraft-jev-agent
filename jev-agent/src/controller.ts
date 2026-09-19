@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { applyOptionSkillGate, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -739,7 +739,9 @@ export function ensureCraftStepActionable(
   const current = state.goalQueue?.current ?? null
   if (current === null || current.kind !== 'craft') return [...candidates]
   const seen = new Set(candidates.map((candidate) => candidate.id))
-  const step = selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id))
+  const step = applyOptionSkillGate(selfContainedCraftCandidates(state, options), state, options.allowedSkills).filter(
+    (candidate) => !seen.has(candidate.id),
+  )
   return step.length === 0 ? [...candidates] : [...candidates, ...step]
 }
 
@@ -1486,6 +1488,7 @@ export class JevController {
         unreachableStations,
         this.reachabilityGateOptions(),
         blacklistedMoveTargets,
+        state.currentOption?.allowedSkills ?? null,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -1648,6 +1651,7 @@ export class JevController {
             this.unreachableStationKeys(freshState),
             this.reachabilityGateOptions(),
             this.blacklistedMoveTargets(freshState),
+            freshState.currentOption?.allowedSkills ?? null,
           ),
         ).candidates,
         freshState,
@@ -4092,6 +4096,7 @@ export class JevController {
         unreachableStations,
         this.reachabilityGateOptions(),
         this.blacklistedMoveTargets(state),
+        state.currentOption?.allowedSkills ?? null,
       ),
     )
     const decision = planPrereqOptions(input)
@@ -4765,6 +4770,7 @@ function candidateOptions(
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
+  allowedSkills: readonly string[] | null = null,
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -4774,6 +4780,7 @@ function candidateOptions(
     blacklistedMoveTargets,
     reachability,
     prereqRankPolicy: options.prereqRankPolicy,
+    allowedSkills,
   }
 }
 
