@@ -50,15 +50,12 @@ export interface InventoryFuel {
   count: number
 }
 
-/**
- * Issue #43: the first valid furnace fuel held in the live inventory, or null.
- * Valid fuel = any log, planks/wood, coal, charcoal or blaze rod (stick is
- * excluded: it is furnace fuel but not a log substitute). Deterministic order.
- */
-export function findInventoryFuel(counts: Readonly<Record<string, number>>): InventoryFuel | null {
+/** Deterministic fuel candidates, ordered like the historical single choice. */
+export function inventoryFuels(counts: Readonly<Record<string, number>>): InventoryFuel[] {
+  const out: InventoryFuel[] = []
   for (const item of PREFERRED_SINGLE_FUELS) {
     const count = counts[item] ?? 0
-    if (count > 0) return { item, count }
+    if (count > 0) out.push({ item, count })
   }
   const woodIds = Object.keys(counts)
     .filter((name) => {
@@ -66,8 +63,19 @@ export function findInventoryFuel(counts: Readonly<Record<string, number>>): Inv
       return count > 0 && (name.endsWith(LOG_SUFFIX) || name.endsWith(PLANK_SUFFIX) || name.endsWith('_wood'))
     })
     .sort()
-  for (const item of woodIds) return { item, count: counts[item] ?? 0 }
-  return null
+  for (const item of woodIds) {
+    if (!out.some((fuel) => fuel.item === item)) out.push({ item, count: counts[item] ?? 0 })
+  }
+  return out
+}
+
+/**
+ * Issue #43: the first valid furnace fuel held in the live inventory, or null.
+ * Valid fuel = any log, planks/wood, coal, charcoal or blaze rod (stick is
+ * excluded: it is furnace fuel but not a log substitute). Deterministic order.
+ */
+export function findInventoryFuel(counts: Readonly<Record<string, number>>): InventoryFuel | null {
+  return inventoryFuels(counts)[0] ?? null
 }
 
 export function isResourceClass(value: string): value is ResourceClass {

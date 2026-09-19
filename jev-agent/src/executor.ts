@@ -433,19 +433,28 @@ export function classifyMoveArrival(input: MoveArrivalInput): {
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
+export interface SmeltFurnaceSlot {
+  count: number
+  /** Mineflayer exposes the concrete item name; test doubles may omit it. */
+  name?: string
+}
+
 export interface SmeltFurnaceWindow {
   putInput(type: number, metadata: number | null, count: number): Promise<unknown>
   putFuel(type: number, metadata: number | null, count: number): Promise<unknown>
-  outputItem(): { count: number } | null
+  outputItem(): SmeltFurnaceSlot | null
   takeOutput(): Promise<unknown>
   /**
    * #79: the input stack still inside the furnace, when this window exposes it.
    * A smaller-than-placed stack is the evidence that the furnace consumed the
    * input. Windows that cannot report the slot can only verify via `outputItem`.
    */
-  inputItem?(): { count: number } | null
+  inputItem?(): SmeltFurnaceSlot | null
   /** #79: the fuel stack still inside the furnace, when this window exposes it. */
-  fuelItem?(): { count: number } | null
+  fuelItem?(): SmeltFurnaceSlot | null
+  /** Mineflayer can return a partially transferred input/fuel to the inventory. */
+  takeInput?(): Promise<unknown>
+  takeFuel?(): Promise<unknown>
   close(): void
 }
 
@@ -492,6 +501,9 @@ export function formatSmeltLog(event: string, detail: Record<string, unknown>): 
       `consumedInput=${detail.consumedInput} consumedFuel=${detail.consumedFuel}`
     )
   }
+  if (event === 'SMELT_ROLLBACK') {
+    return `SMELT_ROLLBACK slot=${detail.slot} count=${detail.count} reason=${detail.reason}`
+  }
   return `SMELT_PLACED input=${detail.inputItem}:${detail.inputCount} fuel=${detail.fuelItem}:${detail.fuelCount}`
 }
 
@@ -523,6 +535,37 @@ function furnaceSlotConsumed(placed: number, remaining: { count: number } | null
   return (remaining?.count ?? 0) < placed
 }
 
+function furnaceSlotCount(slot: SmeltFurnaceSlot | null | undefined): number {
+  if (slot === null || slot === undefined || !Number.isFinite(slot.count)) return 0
+  return Math.max(0, Math.floor(slot.count))
+}
+
+function furnaceSlotNameMatches(slot: SmeltFurnaceSlot | null | undefined, expected: string): boolean {
+  return slot !== null && slot !== undefined && furnaceSlotCount(slot) > 0 && (slot.name === undefined || slot.name === expected)
+}
+
+function inventoryCounts(items: readonly SmeltInventoryItem[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    if (item.count <= 0) continue
+    counts.set(item.name, (counts.get(item.name) ?? 0) + Math.floor(item.count))
+  }
+  return counts
+}
+
+function inventoryCanSupply(
+  items: readonly SmeltInventoryItem[],
+  inputItem: string,
+  inputCount: number,
+  fuelItem: string,
+  fuelCount: number,
+): boolean {
+  const counts = inventoryCounts(items)
+  const inputAvailable = counts.get(inputItem) ?? 0
+  if (inputItem === fuelItem) return inputAvailable >= inputCount + fuelCount
+  return inputAvailable >= inputCount && (counts.get(fuelItem) ?? 0) >= fuelCount
+}
+
 export async function executeFurnaceSmelt(
   deps: SmeltExecutionDeps,
   params: SmeltExecutionParams,
@@ -542,14 +585,75 @@ export async function executeFurnaceSmelt(
     }
   }
   try {
-    const input = deps.inventoryItems().find((entry) => entry.name === params.inputItem)
-    const fuel = deps.inventoryItems().find((entry) => entry.name === params.fuelItem)
-    if (input === undefined) throw new ExecutorError('smelt_error', `${params.inputItem} left the inventory`)
-    if (fuel === undefined) throw new ExecutorError('smelt_error', `${params.fuelItem} left the inventory`)
-    const placedInput = Math.min(inputCount, input.count)
-    const placedFuel = Math.min(fuelCount, fuel.count)
-    await furnace.putInput(input.type, null, placedInput)
-    await furnace.putFuel(fuel.type, null, placedFuel)
+    // A previous action can leave a valid batch in the furnace window after a
+    // transfer failure. Reuse only a slot whose concrete item is known to
+    // match this recipe; a known different item is a hard mechanical refusal,
+    // never something to overwrite. Test doubles that expose only `count`
+    // retain the old empty/occupied behaviour for compatibility.
+    const existingInput = furnace.inputItem?.() ?? null
+    const existingFuel = furnace.fuelItem?.() ?? null
+    const existingInputCount = furnaceSlotCount(existingInput)
+    const existingFuelCount = furnaceSlotCount(existingFuel)
+    if (!furnaceSlotNameMatches(existingInput, params.inputItem)) {
+      if (existingInputCount > 0 && existingInput?.name !== undefined) {
+        throw new ExecutorError('smelt_error', `furnace input contains ${existingInput.name}, expected ${params.inputItem}`)
+      }
+    }
+    if (!furnaceSlotNameMatches(existingFuel, params.fuelItem)) {
+      if (existingFuelCount > 0 && existingFuel?.name !== undefined) {
+        throw new ExecutorError('smelt_error', `furnace fuel contains ${existingFuel.name}, expected ${params.fuelItem}`)
+      }
+    }
+
+    const inputToPlace = Math.max(0, inputCount - existingInputCount)
+    const fuelToPlace = Math.max(0, fuelCount - existingFuelCount)
+    const items = deps.inventoryItems()
+    if (!inventoryCanSupply(items, params.inputItem, inputToPlace, params.fuelItem, fuelToPlace)) {
+      const counts = inventoryCounts(items)
+      const availableInput = counts.get(params.inputItem) ?? 0
+      const availableFuel = counts.get(params.fuelItem) ?? 0
+      throw new ExecutorError(
+        'smelt_error',
+        `insufficient transfer inventory input=${params.inputItem}:${availableInput}/${inputToPlace} fuel=${params.fuelItem}:${availableFuel}/${fuelToPlace}`,
+      )
+    }
+    const input = items.find((entry) => entry.name === params.inputItem && entry.count > 0)
+    const fuel = items.find((entry) => entry.name === params.fuelItem && entry.count > 0)
+    if (inputToPlace > 0 && input === undefined) throw new ExecutorError('smelt_error', `${params.inputItem} left the inventory`)
+    if (fuelToPlace > 0 && fuel === undefined) throw new ExecutorError('smelt_error', `${params.fuelItem} left the inventory`)
+
+    const placedInput = Math.max(inputCount, existingInputCount)
+    const placedFuel = Math.max(fuelCount, existingFuelCount)
+    let inputTransferAttempted = false
+    let inputTransferred = false
+    try {
+      if (inputToPlace > 0) {
+        inputTransferAttempted = true
+        await furnace.putInput(input!.type, null, inputToPlace)
+        inputTransferred = true
+      }
+      if (fuelToPlace > 0) {
+        await furnace.putFuel(fuel!.type, null, fuelToPlace)
+      }
+    } catch (error) {
+      // A successful input transfer followed by a failed fuel transfer is the
+      // live `destination full`/same-item failure mode. Roll the new input back
+      // when the window can do so, so the next attempt cannot inherit a partial
+      // batch. Never remove an input that was already present before this call.
+      if (inputTransferAttempted && inputTransferred && existingInputCount === 0 && furnace.takeInput !== undefined) {
+        try {
+          await furnace.takeInput()
+          deps.log('SMELT_ROLLBACK', { slot: 'input', count: inputToPlace, reason: error instanceof Error ? error.message : String(error) })
+        } catch (rollbackError) {
+          const original = error instanceof Error ? error.message : String(error)
+          const rollback = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+          throw new ExecutorError('smelt_error', `fuel transfer failed (${original}); input rollback failed (${rollback})`)
+        }
+      }
+      if (error instanceof ExecutorError) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ExecutorError('smelt_error', `furnace transfer failed: ${message}`)
+    }
     deps.log('SMELT_PLACED', { inputItem: params.inputItem, inputCount: placedInput, fuelItem: params.fuelItem, fuelCount: placedFuel })
     deps.ensureOwned()
     const deadline = Date.now() + deps.timeoutMs

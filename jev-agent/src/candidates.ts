@@ -25,7 +25,7 @@ import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
-import { findInventoryFuel, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
@@ -36,7 +36,7 @@ import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
-import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER } from './gameData.ts'
+import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
@@ -1564,13 +1564,12 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   const furnace = reachableSensedFurnace(state, options)
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
-  const fuelItem = smeltFuelFor(state)
-  if (inputItem === null || fuelItem === null) {
+  if (inputItem === null) {
     // Not executable yet: the input/fuel is a code-owned precondition
     // (optionSpec#smeltPreconditions), so offer the deterministic collect route
     // for the missing producer instead of starving to WAIT. `fuel` is the
     // data-driven class route (a log or coal), symmetric with the input route.
-    return mineCandidates(state, options, inputItem === null ? inputSpec : 'fuel', null)
+    return mineCandidates(state, options, inputSpec, null)
   }
 
   const haveOutput = state.inventory.counts[focusItem] ?? 0
@@ -1580,7 +1579,17 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   const available = state.inventory.counts[inputItem] ?? 0
   if (available <= 0) return []
   const count = Math.min(needed, available)
+  const fuelItem = smeltFuelFor(state, inputItem, count)
+  if (fuelItem === null) return mineCandidates(state, options, 'fuel', null)
   const fuelCount = fuelCountFor(count, fuelItem)
+  // A single item cannot occupy both furnace slots. In particular, a
+  // one-log charcoal route must acquire a second log before SMELT is offered;
+  // otherwise the executor transfers the input and then fails fuel transfer,
+  // leaving a stale furnace slot that makes the next attempt report
+  // `destination full`.
+  if (!smeltInventorySufficient(state.inventory.counts, inputItem, count, fuelItem, fuelCount)) {
+    return mineCandidates(state, options, 'fuel', null)
+  }
 
   return [
     {
@@ -1624,8 +1633,12 @@ function smeltInputFor(state: WorldState, focusItem: string): string | null {
   return (state.inventory.counts[mapped] ?? 0) > 0 ? mapped : null
 }
 
-function smeltFuelFor(state: WorldState): string | null {
-  return findInventoryFuel(state.inventory.counts)?.item ?? null
+function smeltFuelFor(state: WorldState, inputItem: string, count: number): string | null {
+  return (
+    inventoryFuels(state.inventory.counts).find((fuel) =>
+      smeltInventorySufficient(state.inventory.counts, inputItem, count, fuel.item, fuelCountFor(count, fuel.item)),
+    )?.item ?? null
+  )
 }
 
 /** The one-line `SMELT_INPUT_PREREQ` record for a smelt goal's input producer. */
