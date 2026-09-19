@@ -12,6 +12,7 @@
     "postinstall": "node scripts/apply-movement-patch.mjs",
     "movement-patch:check": "node scripts/apply-movement-patch.mjs --check",
     "move-failmem-test": "tsx test-move-failmem.mts",
+    "move-stuck-stale-test": "tsx test-move-stuck-stale.mts",
     "reachability-test": "tsx test-reachability.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
