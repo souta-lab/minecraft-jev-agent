@@ -528,9 +528,10 @@ export function isAtRequiredLevel(
   horizontalTolerance = 1.2,
   verticalTolerance = 0.75,
 ): boolean {
+  const sameFloorLevel = Math.floor(position.y) === Math.floor(target.y)
   return (
     Math.hypot(position.x - target.x, position.z - target.z) <= horizontalTolerance &&
-    Math.abs(position.y - target.y) <= verticalTolerance
+    (sameFloorLevel || Math.abs(position.y - target.y) <= verticalTolerance)
   )
 }
 

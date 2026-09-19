@@ -169,6 +169,14 @@ addCase('a vertical waypoint one block above the body is not a completed step', 
   return { pass, detail: `stalled=${isAtRequiredLevel(stalled, target)} reached=${isAtRequiredLevel(reached, target)}` }
 })
 
+addCase('a grounded entity on the target floor is a completed vertical step', () => {
+  const target = { x: 29, y: 62, z: 6 }
+  const grounded = { x: 29.58, y: 62.92, z: 6.5 }
+  const oneFloorAbove = { x: 29.58, y: 63.92, z: 6.5 }
+  const pass = isAtRequiredLevel(grounded, target) && !isAtRequiredLevel(oneFloorAbove, target)
+  return { pass, detail: `grounded=${isAtRequiredLevel(grounded, target)} oneFloorAbove=${isAtRequiredLevel(oneFloorAbove, target)}` }
+})
+
 addCase('vertical executor steps require level-verified path completion', () => {
   const source = readFileSync(fileURLToPath(new URL('./src/executor.ts', import.meta.url)), 'utf8')
   const staircaseRequiresLevel = source.includes('await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })')
