@@ -1,20 +1,28 @@
 // test-mercury.mts - deterministic, no-network safety tests for MercurySystem2.
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  buildCorrectivePrompt,
   describeErrorFull,
+  isRetryableMercuryAttempt,
   isRetryableModelError,
   isTimeoutError,
   MERCURY_ALLOWED_GOALS,
   mercuryCostUsd,
   mercuryGoalKind,
+  mercuryRetryFeedback,
   mercuryStrategyLabel,
+  MercuryPlanValidationError,
+  MercurySystem2,
   plannedGoalsFromMercury,
   resolveMercuryEnablement,
   runMercuryAttempts,
   validateMercuryPlan,
 } from './mercury-system2.ts'
+import type { MercuryStateSummary } from './mercury-system2.ts'
+import type { System2Outcome, System2PlanRequest } from '../jev-agent/src/system2.ts'
+import { FatalModelError } from '../jev-agent/src/modelFailure.ts'
 
 interface Case {
   name: string
@@ -24,6 +32,57 @@ interface Case {
 const cases: Case[] = []
 function addCase(name: string, run: Case['run']): void {
   cases.push({ name, run })
+}
+
+// Mirrors the host logger's `event key=value ...` line format so assertions read
+// the same strings the resident writes to buddy.log.
+function hostLog(sink: string[]): (event: string, detail?: Record<string, unknown>) => void {
+  return (event, detail) => {
+    const parts = Object.entries(detail ?? {}).map(([key, value]) => {
+      const text = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value)
+      return `${key}=${text}`
+    })
+    sink.push(`${event}${parts.length > 0 ? ` ${parts.join(' ')}` : ''}`)
+  }
+}
+
+function outcome(actionId: string): System2Outcome {
+  return { actionId, status: 'ok', failure: null, verified: false, detail: '' }
+}
+
+function planRequest(): System2PlanRequest {
+  return {
+    reason: 'no_progress',
+    detail: 'test',
+    tick: 1,
+    goalQueueState: { depth: 1, current: null, empty: false, hasImpossible: false, done: 0, goals: [] },
+    objective: { targetItem: 'iron_pickaxe', requiredCount: 1, haveCount: 0, complete: false },
+    recentEvents: [],
+    recentOutcomes: [outcome('WAIT'), outcome('WAIT'), outcome('WAIT')],
+  }
+}
+
+function mercurySummary(): MercuryStateSummary {
+  return {
+    trigger: 'no_candidate',
+    wakeReason: 'action_impossible',
+    wakeDetail: 'test',
+    rung: 'crafting_table',
+    rungIndex: 1,
+    position: { x: 10, y: 62, z: 10 },
+    dimension: 'minecraft:overworld',
+    health: 20,
+    toolRank: 0,
+    inventory: {},
+    stations: { craftingTables: 0, furnaces: 0 },
+    knownOres: [],
+    recentFailures: [],
+    consecutiveWait: 0,
+    queue: { depth: 1, done: 0, current: null, hasImpossible: false },
+    objective: { targetItem: 'crafting_table', requiredCount: 1, haveCount: 0, complete: false },
+    deathHistory: [],
+    allowedGoals: { collect: ['stone', 'log'], craft: ['crafting_table'], smelt: ['charcoal'] },
+  }
 }
 
 addCase('maps a valid patch plan onto PlannedGoal records', () => {
@@ -281,6 +340,107 @@ addCase('bounded attempts with the retryable predicate stop at maxAttempts on a 
   })
   const pass = !result.ok && result.attempts === 3 && calls === 3
   return { pass, detail: JSON.stringify({ result, calls }) }
+})
+
+addCase('corrective retry: attempt 2 gets the validation error and its corrected plan succeeds', async () => {
+  const basePrompt = '{"trigger":"no_progress"}'
+  const prompts: string[] = []
+  const feedbacks: (string | null)[] = []
+  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone' }], reason: 'need stone' }
+  const correctedPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 4 }], reason: 'need four stone' }
+  let providerCalls = 0
+  const result = await runMercuryAttempts({
+    maxAttempts: 3,
+    reserveAttempt: () => undefined,
+    feedbackFor: mercuryRetryFeedback,
+    isRetryable: isRetryableMercuryAttempt,
+    onRetry: () => undefined,
+    call: (context) => {
+      feedbacks.push(context.feedback)
+      const prompt = context.feedback === null ? basePrompt : buildCorrectivePrompt(basePrompt, context.feedback)
+      prompts.push(prompt)
+      providerCalls += 1
+      const raw = providerCalls === 1 ? invalidPlan : correctedPlan
+      const validated = validateMercuryPlan(raw)
+      if (!validated.ok) throw new MercuryPlanValidationError(validated.error, raw)
+      return Promise.resolve(validated.plan)
+    },
+  })
+  const second = prompts[1] ?? ''
+  const expectedError = 'goal[0] collect needs a count in [1,64]'
+  return {
+    pass:
+      result.ok &&
+      result.attempts === 2 &&
+      result.failures === 1 &&
+      providerCalls === 2 &&
+      prompts[0] === basePrompt &&
+      !prompts[0]?.includes('CORRECTION REQUIRED') &&
+      second.includes(expectedError) &&
+      second.includes('count in [1,64]') &&
+      feedbacks[1] === expectedError &&
+      result.result.goals[0]?.count === 4,
+    detail: JSON.stringify({
+      attempts: result.attempts,
+      failures: result.failures,
+      secondHasError: second.includes(expectedError),
+      feedback: feedbacks[1] ?? null,
+      goals: result.ok ? result.result.goals : null,
+    }),
+  }
+})
+
+addCase('all attempts invalid ends in the loud fatal with per-attempt audit, never a fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-exhaust-'))
+  const callsPath = join(dir, 'mercury-calls.jsonl')
+  const logs: string[] = []
+  const prompts: string[] = []
+  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone' }], reason: 'need stone' }
+  const mercury = new MercurySystem2({
+    summarize: () => mercurySummary(),
+    log: hostLog(logs),
+    callsPath,
+    cachePath: join(dir, 'mercury-cache.json'),
+    maxPerHour: 10,
+    resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+    transport: ({ prompt }) => {
+      prompts.push(prompt)
+      return Promise.resolve({ toolCalls: [{ input: invalidPlan }], usage: { inputTokens: 10, outputTokens: 5 } })
+    },
+  })
+  let thrown: unknown = null
+  try {
+    await mercury.tryRepair(planRequest(), 'no_candidate')
+  } catch (error) {
+    thrown = error
+  }
+  const fatal = logs.find((line) => line.startsWith('FATAL'))
+  const rejects = logs.filter((line) => line.startsWith('PLAN_REJECTED'))
+  const records = existsSync(callsPath)
+    ? readFileSync(callsPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+    : []
+  const rejected = records.filter((record) => record.outcome === 'plan_rejected')
+  const correctivePrompts = prompts.slice(1).filter((prompt) => prompt.includes('CORRECTION REQUIRED')).length
+  const degraded = logs.some((line) => line.includes('deterministic'))
+  return {
+    pass:
+      thrown instanceof FatalModelError &&
+      thrown.context === 'mercury:no_candidate' &&
+      thrown.reason.includes('invalid plan') &&
+      fatal !== undefined &&
+      fatal.includes('code=MODEL_UNAVAILABLE') &&
+      prompts.length === 3 &&
+      correctivePrompts === 2 &&
+      rejects.length === 3 &&
+      rejected.length === 3 &&
+      rejected.every((record) => typeof record.error === 'string' && String(record.error).includes('invalid plan')) &&
+      rejected.every((record) => record.outcome === 'plan_rejected') &&
+      !degraded,
+    detail: `thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} prompts=${prompts.length} corrective=${correctivePrompts} rejected=${rejected.length} rejects=${rejects.length} fatal=${fatal ?? 'none'}`,
+  }
 })
 
 let failures = 0
