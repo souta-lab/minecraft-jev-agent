@@ -64,7 +64,10 @@ function createStepWorld(input: StepWorldInput) {
     velocity: { y: 0 },
     onGround: false,
   }
-  const listeners = new Set<() => void>()
+  const listeners = new Map<string, Set<() => void>>()
+  const emit = (event: string): void => {
+    for (const listener of listeners.get(event) ?? []) listener()
+  }
   const stats = { ticks: 0, placeCalls: 0, faces: [] as Vec3Like[] }
   const highestFloorTopBelow = (y: number): number => {
     let top = Number.NEGATIVE_INFINITY
@@ -79,11 +82,13 @@ function createStepWorld(input: StepWorldInput) {
     physicsEnabled: false,
     stats,
     setControlState(_control: 'jump', _state: boolean): void {},
-    on(_event: 'physicsTick', listener: () => void): void {
-      listeners.add(listener)
+    on(event: 'physicsTick' | 'forcedMove', listener: () => void): void {
+      const set = listeners.get(event) ?? new Set<() => void>()
+      set.add(listener)
+      listeners.set(event, set)
     },
-    removeListener(_event: 'physicsTick', listener: () => void): void {
-      listeners.delete(listener)
+    removeListener(event: 'physicsTick' | 'forcedMove', listener: () => void): void {
+      listeners.get(event)?.delete(listener)
     },
     /** One physics tick: clientbound packet resets the flag, then the body moves. */
     tick(): void {
@@ -98,7 +103,7 @@ function createStepWorld(input: StepWorldInput) {
         entity.position.y = floorTop
         entity.velocity.y = 0
       }
-      for (const listener of listeners) listener()
+      emit('physicsTick')
     },
   }
   const isSolid: SolidAt = (x, y, z): boolean =>
@@ -216,6 +221,48 @@ addCase('a body that falls before the apex is reported as step=apex', async () =
     marker.startsWith('PILLAR_FAIL step=apex reason=falling_before_place ') &&
     world.stats.placeCalls === 0
   return { pass, detail: `${marker} placeCalls=${world.stats.placeCalls}` }
+})
+
+addCase('an apex observed during the takeoff still places (live falling_before_place)', async () => {
+  // Live run-mu84l153-qry3: prismarine-physics catches up to four ticks per
+  // frame, so the entire ascending arc completed between two takeoff polls. The
+  // takeoff trace recorded a real ceiling-limited apex (rise 0.464 at vy -0.08),
+  // but by the apex loop's first sample the body was already descending
+  // (rise 0.231, vy -0.155) and the next sample crossed vy < -0.25. With a fixed
+  // 0.5 rise floor that emitted `falling_before_place` even though the feet had
+  // cleared the place cell (placeY 10, clearance 11 - 10.75 = 0.25). The takeoff
+  // must seed the window and the demand must follow the geometry.
+  const world = createStepWorld({
+    startY: 10.75,
+    footingY: 9,
+    script: [0.42, 0.044, -0.078, -0.155, -0.304, -0.5],
+  })
+  let clock = 0
+  let burstDone = false
+  const deps = makeDeps(world, 10, {
+    // One catch-up frame: four physics ticks land inside a single 15 ms poll.
+    sleep: async (ms: number): Promise<void> => {
+      const start = clock
+      clock += ms
+      if (!burstDone && start >= 105) {
+        burstDone = true
+        for (let index = 0; index < 4; index += 1) world.bot.tick()
+      } else if (burstDone) {
+        world.bot.tick()
+      }
+    },
+    now: () => clock,
+  })
+  const outcome = await pillarStepUp(world.bot, deps, planFor(world, 9, 10))
+  const pass =
+    outcome.ok &&
+    outcome.apexRise >= 0.25 &&
+    world.stats.placeCalls === 1 &&
+    world.blockPlacedAt(FEET_X, 10, FEET_Z)
+  return {
+    pass,
+    detail: `ok=${outcome.ok} reason=${outcome.ok ? '-' : outcome.fail.reason} placeCalls=${world.stats.placeCalls} apexRise=${outcome.ok ? outcome.apexRise.toFixed(3) : '-'} landingY=${outcome.ok ? outcome.toY.toFixed(3) : '-'}`,
+  }
 })
 
 addCase('a body with no solid footing is reported as step=takeoff', async () => {
