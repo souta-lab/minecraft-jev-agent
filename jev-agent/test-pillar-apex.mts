@@ -53,6 +53,12 @@ interface StepWorldInput {
   placeLands?: boolean
   /** true: place() rejects like a refused server placement */
   placeThrows?: boolean
+  /**
+   * Model the live server rule that produced `step=place reason=refused`: a
+   * placement is rejected while the player's own AABB still intersects the
+   * destination cell. `place()` throws the exact live message in that case.
+   */
+  placeRefusesWhenBodyInside?: boolean
 }
 
 function createStepWorld(input: StepWorldInput) {
@@ -119,6 +125,18 @@ function createStepWorld(input: StepWorldInput) {
     place: async (face: Vec3Like): Promise<void> => {
       stats.placeCalls += 1
       stats.faces.push(face)
+      if (input.footingY !== null) {
+        const destY = input.footingY + face.y
+        const feetY = entity.position.y
+        // Player AABB is [feetY, feetY + 1.8]; the destination cell is
+        // [destY, destY + 1]. Any overlap is refused by the server.
+        const inside = feetY < destY + 1 && feetY + 1.8 > destY
+        if (input.placeRefusesWhenBodyInside === true && inside) {
+          throw new Error(
+            `Server refused to place cobblestone at (${FEET_X}, ${destY}, ${FEET_Z}): the block is still air`,
+          )
+        }
+      }
       if (input.placeThrows === true) throw new Error('server refused the placement')
       if (input.placeLands === false || input.footingY === null) return
       solids.push({ x: FEET_X + face.x, y: input.footingY + face.y, z: FEET_Z + face.z })
@@ -223,19 +241,20 @@ addCase('a body that falls before the apex is reported as step=apex', async () =
   return { pass, detail: `${marker} placeCalls=${world.stats.placeCalls}` }
 })
 
-addCase('an apex observed during the takeoff still places (live falling_before_place)', async () => {
+addCase('the takeoff-observed apex seeds the window and places when the feet clear the cell', async () => {
   // Live run-mu84l153-qry3: prismarine-physics catches up to four ticks per
   // frame, so the entire ascending arc completed between two takeoff polls. The
-  // takeoff trace recorded a real ceiling-limited apex (rise 0.464 at vy -0.08),
-  // but by the apex loop's first sample the body was already descending
-  // (rise 0.231, vy -0.155) and the next sample crossed vy < -0.25. With a fixed
-  // 0.5 rise floor that emitted `falling_before_place` even though the feet had
-  // cleared the place cell (placeY 10, clearance 11 - 10.75 = 0.25). The takeoff
-  // must seed the window and the demand must follow the geometry.
+  // takeoff trace recorded a real ceiling-limited apex (rise 0.464 at vy -0.08)
+  // that must seed `apexRise` so a genuine apex is no longer reported as
+  // `falling_before_place`. The PLACE still needs the CURRENT feet to clear the
+  // place cell: the fourth burst tick here leaves rise 0.336 (feet 11.086) and
+  // vy -0.05, so the cell top at 11 is cleared and the place is sent. The
+  // server-refusal model proves the packet is only sent above the cell top.
   const world = createStepWorld({
     startY: 10.75,
     footingY: 9,
-    script: [0.42, 0.044, -0.078, -0.155, -0.304, -0.5],
+    placeRefusesWhenBodyInside: true,
+    script: [0.42, 0.044, -0.078, -0.05, -0.304, -0.5],
   })
   let clock = 0
   let burstDone = false
@@ -263,6 +282,79 @@ addCase('an apex observed during the takeoff still places (live falling_before_p
     pass,
     detail: `ok=${outcome.ok} reason=${outcome.ok ? '-' : outcome.fail.reason} placeCalls=${world.stats.placeCalls} apexRise=${outcome.ok ? outcome.apexRise.toFixed(3) : '-'} landingY=${outcome.ok ? outcome.toY.toFixed(3) : '-'}`,
   }
+})
+
+addCase('a below-clearance apex is never placed (live run-mu85r15x-qvje refused)', async () => {
+  // Exact live signature: launchY 58.7358, supportY 57, placeY 58, landingY 59.
+  // The catch-up burst peaks at rise 0.464 but the sampled state is rise 0.231
+  // (feet 58.966) at vy -0.231 - still inside cell 58 [58,59]. The old gate
+  // latched the takeoff-observed peak into `sawRise` and placed there; the
+  // server answered `step=place reason=refused ... the block is still air`.
+  // The gate must require the CURRENT rise (0.231 < clearance 0.2641) and must
+  // report the missed apex instead of sending a refused placement.
+  const world = createStepWorld({
+    startY: 58.73584062504456,
+    footingY: 57,
+    placeRefusesWhenBodyInside: true,
+    script: [0.42, 0.044, -0.078, -0.155, -0.304, -0.5],
+  })
+  let clock = 0
+  let burstDone = false
+  const deps = makeDeps(world, 58, {
+    sleep: async (ms: number): Promise<void> => {
+      const start = clock
+      clock += ms
+      if (!burstDone && start >= 105) {
+        burstDone = true
+        for (let index = 0; index < 4; index += 1) world.bot.tick()
+      } else if (burstDone) {
+        world.bot.tick()
+      }
+    },
+    now: () => clock,
+  })
+  const outcome = await pillarStepUp(world.bot, deps, planFor(world, 57, 58))
+  const marker = outcome.ok ? '' : formatPillarFail(outcome.fail)
+  const pass =
+    !outcome.ok &&
+    outcome.fail.step === 'apex' &&
+    outcome.fail.reason === 'apex_missed' &&
+    world.stats.placeCalls === 0 &&
+    !world.blockPlacedAt(FEET_X, 58, FEET_Z)
+  return { pass, detail: `${marker} placeCalls=${world.stats.placeCalls} block=${world.blockPlacedAt(FEET_X, 58, FEET_Z)}` }
+})
+
+addCase('a grounded launch still needs the full one-block clearance (cap removed)', async () => {
+  // launchY 58 (feet on the support top) means the feet must reach 59 to clear
+  // the place cell 58 - a demand of 1.0. Capping the demand at
+  // PILLAR_APEX_MIN_RISE 0.5 would accept this burst sample at rise 0.82
+  // (feet 58.82, inside cell 58) and the server would refuse it. The exact
+  // geometric demand must be used.
+  const world = createStepWorld({
+    startY: 58,
+    footingY: 57,
+    placeRefusesWhenBodyInside: true,
+    script: [0.42, 0.5, 0, -0.1, -0.304, -0.5],
+  })
+  let clock = 0
+  let burstDone = false
+  const deps = makeDeps(world, 58, {
+    sleep: async (ms: number): Promise<void> => {
+      const start = clock
+      clock += ms
+      if (!burstDone && start >= 105) {
+        burstDone = true
+        for (let index = 0; index < 4; index += 1) world.bot.tick()
+      } else if (burstDone) {
+        world.bot.tick()
+      }
+    },
+    now: () => clock,
+  })
+  const outcome = await pillarStepUp(world.bot, deps, planFor(world, 57, 58))
+  const marker = outcome.ok ? '' : formatPillarFail(outcome.fail)
+  const pass = !outcome.ok && outcome.fail.step === 'apex' && world.stats.placeCalls === 0
+  return { pass, detail: `${marker} placeCalls=${world.stats.placeCalls}` }
 })
 
 addCase('a body with no solid footing is reported as step=takeoff', async () => {
