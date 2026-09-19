@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // m2-acceptance: read-only M2 (iron age) exit-criteria check against the live
 // resident control socket. Prints PASS/FAIL per criterion with observed numbers.
-// Exit 0 = PASS, 1 = FAIL, 2 = socket unreadable (never fabricates a value).
+// Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable (never fabricates a value).
 import { existsSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
 
 export const SOCK_PATH =
   process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
+export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 /**
- * Resident report can briefly queue behind a generation boundary.  Three
+ * Resident report can briefly queue behind a generation boundary. Three
  * seconds produced false UNKNOWN results during an otherwise healthy socket
  * session, which weakened the M2 FAIL-vs-UNKNOWN evidence distinction.
  */
@@ -86,19 +87,32 @@ export function observedCount(inventory, item) {
   return Number.isFinite(value) ? value : 0
 }
 
+export function requestedRunId(argv = process.argv.slice(2), env = process.env) {
+  let value = env.M2_RUN_ID ?? null
+  const index = argv.indexOf('--run')
+  if (index !== -1) value = argv[index + 1] ?? null
+  if (value === null || String(value).trim() === '') return null
+  const runId = String(value).trim()
+  if (!RUN_ID_RE.test(runId)) throw new Error(`invalid --run value: ${value}`)
+  return runId
+}
+
 export async function runAcceptance({
   request = makeControl(SOCK_PATH),
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   sockPath = SOCK_PATH,
+  expectedRunId = null,
 } = {}) {
   const ts = now().toISOString()
   write(`M2 acceptance check — ${ts}`)
   write(`socket : ${sockPath}`)
   write(`command: ${JSON.stringify(REPORT_COMMAND)}`)
+  write(`expectedRunId: ${expectedRunId ?? 'none'}`)
 
   const reportReply = await request(REPORT_COMMAND.cmd)
-  let data = unwrapReply(reportReply)
+  const reportData = unwrapReply(reportReply)
+  let data = reportData
   let inventory = extractInventory(data)
   if (reportReply !== null && inventory === null) {
     const statusData = unwrapReply(await request('status'))
@@ -108,7 +122,19 @@ export async function runAcceptance({
 
   if (data === null || typeof data !== 'object' || inventory === null) {
     write('live: unavailable')
-    write('RESULT: UNAVAILABLE (no fabricated values)')
+    write('RESULT: UNKNOWN (no fabricated values)')
+    return 2
+  }
+
+  const observedRunId =
+    typeof reportData?.runId === 'string'
+      ? reportData.runId
+      : typeof data?.runId === 'string'
+        ? data.runId
+        : null
+  write(`runId: ${observedRunId ?? 'unknown'}`)
+  if (expectedRunId !== null && observedRunId !== expectedRunId) {
+    write(`RESULT: UNKNOWN (run scope mismatch expected=${expectedRunId} observed=${observedRunId ?? 'unknown'})`)
     return 2
   }
 
@@ -122,9 +148,9 @@ export async function runAcceptance({
     write(`${pass ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${got})`)
   }
 
-  const wedge = data?.stats?.wedge ?? null
-  const goalComplete = data?.stats?.goalComplete ?? null
-  const milestone = data?.milestone ?? null
+  const wedge = data?.stats?.wedge ?? reportData?.stats?.wedge ?? null
+  const goalComplete = data?.stats?.goalComplete ?? reportData?.stats?.goalComplete ?? null
+  const milestone = data?.milestone ?? reportData?.milestone ?? null
   write(`milestone: ${milestone === null ? 'unknown' : milestone}`)
   write(`wedge: ${wedge === null ? 'unknown' : wedge}`)
   write(`goalComplete: ${goalComplete === null ? 'unknown' : goalComplete}`)
@@ -135,6 +161,13 @@ export async function runAcceptance({
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
-  const code = await runAcceptance()
+  let expectedRunId = null
+  try {
+    expectedRunId = requestedRunId()
+  } catch (error) {
+    process.stderr.write(`M2_ACCEPTANCE status=UNKNOWN reason=${error instanceof Error ? error.message : String(error)}\n`)
+    process.exit(2)
+  }
+  const code = await runAcceptance({ expectedRunId })
   process.exit(code)
 }
