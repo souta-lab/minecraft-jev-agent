@@ -21,7 +21,8 @@
 //
 // This suite locks the two bounded outcomes:
 //   (a) input+fuel held and a REACHABLE sensed furnace completes, and the done
-//       path emits SMELT_DONE only on a real gain (`gained > 0`);
+//       path emits SMELT_DONE only on real production (an output gain OR the
+//       consumed input+fuel of `isSmeltPostconditionMet`, never a no-op);
 //   (b) a smelt that cannot complete retires the station/option with a typed
 //       reason instead of oscillating with `abandonEnforced=false`.
 //
@@ -208,6 +209,77 @@ async function runCharcoalSmelt(options: { produce: boolean; consumeSlots: boole
   return { outcome, stash, lines }
 }
 
+// --- executor fixture: the live open-window inventory race --------------------
+//
+// Live run-mu89hsqv-rcy0: the furnace consumed oak_log + birch_planks and the
+// charcoal landed, but `SMELT_UNPRODUCED item=charcoal gained=0 placedInput=1
+// placedFuel=1 consumedInput=true consumedFuel=true` was logged; `charcoal:1`
+// was in the inventory 2 ms later. Mineflayer keeps an open container window's
+// player-inventory slots out of `bot.inventory` until `close()` (copyInventory
+// is called only from closeWindow), so a count taken while the furnace window
+// is open cannot see an output that has already been taken from the window.
+
+interface WindowRaceFixtureOptions {
+  /** the output slot already holds the product when the run starts */
+  outputInWindowAtStart: boolean
+  /** poll iterations after which the output slot holds the product (null = never) */
+  outputAfterPolls: number | null
+  /** the input/fuel slots report an empty (consumed) stack */
+  consumeSlots: boolean
+  timeoutMs: number
+}
+
+async function runWindowRaceSmelt(options: WindowRaceFixtureOptions): Promise<CharcoalSmeltFixture> {
+  const stash: Record<string, number> = { oak_log: 1, birch_planks: 1, charcoal: 0 }
+  let open = false
+  let frozen = 0
+  let polls = 0
+  let pending = options.outputInWindowAtStart ? 1 : 0
+  const window: SmeltFurnaceWindow = {
+    putInput: async () => {
+      stash.oak_log = 0
+    },
+    putFuel: async () => {
+      stash.birch_planks = 0
+    },
+    outputItem: () => (pending > 0 ? { count: 1 } : null),
+    takeOutput: async () => {
+      pending -= 1
+      stash.charcoal = (stash.charcoal ?? 0) + 1
+    },
+    inputItem: () => (options.consumeSlots ? null : { count: 1 }),
+    fuelItem: () => (options.consumeSlots ? null : { count: 1 }),
+    close: () => {
+      open = false
+    },
+  }
+  const lines: string[] = []
+  const outcome = await executeFurnaceSmelt(
+    {
+      openFurnace: async () => {
+        open = true
+        frozen = stash.charcoal ?? 0
+        return window
+      },
+      inventoryItems: () => Object.entries(stash).map(([name, count], index) => ({ name, type: index, count })),
+      // Mirrors mineflayer: while the furnace window is open the bot-inventory
+      // count is frozen at its pre-open value; close() folds the window's
+      // player-inventory slots back in.
+      countItem: (name) => (open ? frozen : (stash[name] ?? 0)),
+      wait: async () => {
+        polls += 1
+        if (options.outputAfterPolls !== null && polls >= options.outputAfterPolls) pending = 1
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      },
+      ensureOwned: () => undefined,
+      timeoutMs: options.timeoutMs,
+      log: (event, detail) => lines.push(formatSmeltLog(event, detail)),
+    },
+    { inputItem: 'oak_log', fuelItem: 'birch_planks', outputItem: 'charcoal', inputCount: 1, fuelCount: 1 },
+  )
+  return { outcome, stash, lines }
+}
+
 // ----------------------------------------------------------------------------
 
 const LIVE_FEET: Vec3Json = { x: 29.5, y: 65, z: 34.5 }
@@ -291,6 +363,84 @@ async function main(): Promise<void> {
         unproducedDone === undefined &&
         isSmeltPostconditionMet(unproduced.outcome) === false,
       `gained=${unproduced.outcome.gained} lines=[${unproduced.lines.join(' | ')}]`,
+    )
+  }
+
+  // (c) the live open-window inventory race: production in the furnace window is
+  // invisible to bot.inventory until close(), so the old count-based detection
+  // read gained=0 and logged SMELT_UNPRODUCED for a smelt that actually produced.
+  {
+    // (c1) output taken from the window during the poll (stale bot.inventory).
+    const inLoop = await runWindowRaceSmelt({
+      outputInWindowAtStart: true,
+      outputAfterPolls: null,
+      consumeSlots: true,
+      timeoutMs: 25,
+    })
+    const inLoopDone = inLoop.lines.find((line) => line.startsWith('SMELT_DONE')) ?? ''
+    await check(
+      '(c1) an output harvested from the open window reports produced and emits SMELT_DONE with the true gain',
+      inLoop.outcome.gained === 1 &&
+        inLoop.stash.charcoal === 1 &&
+        inLoopDone.includes('gained=1') &&
+        inLoopDone.includes('item=charcoal') &&
+        !inLoop.lines.some((line) => line.startsWith('SMELT_UNPRODUCED')),
+      inLoopDone === '' ? `no SMELT_DONE line [${inLoop.lines.join(' | ')}]` : inLoopDone,
+    )
+
+    // (c2) output already in the output slot at/after the last poll (the poll
+    // window closes before the count can see it: commit evidence at capture).
+    const atCapture = await runWindowRaceSmelt({
+      outputInWindowAtStart: true,
+      outputAfterPolls: null,
+      consumeSlots: true,
+      timeoutMs: 0,
+    })
+    const atCaptureDone = atCapture.lines.find((line) => line.startsWith('SMELT_DONE')) ?? ''
+    await check(
+      '(c2) an output sitting in the window at capture is swept and emits SMELT_DONE with the true gain',
+      atCapture.outcome.gained === 1 &&
+        atCapture.stash.charcoal === 1 &&
+        atCaptureDone.includes('gained=1') &&
+        !atCapture.lines.some((line) => line.startsWith('SMELT_UNPRODUCED')),
+      atCaptureDone === '' ? `no SMELT_DONE line [${atCapture.lines.join(' | ')}]` : atCaptureDone,
+    )
+
+    // (c3) genuine no-op: nothing gained, nothing consumed -> never SMELT_DONE.
+    const noop = await runWindowRaceSmelt({
+      outputInWindowAtStart: false,
+      outputAfterPolls: null,
+      consumeSlots: false,
+      timeoutMs: 25,
+    })
+    const noopDone = noop.lines.find((line) => line.startsWith('SMELT_DONE'))
+    await check(
+      '(c3) a no-op (no output, no consumed input+fuel) still reports unproduced',
+      noop.outcome.gained === 0 &&
+        noop.outcome.consumedInput === false &&
+        noop.outcome.consumedFuel === false &&
+        noopDone === undefined &&
+        isSmeltPostconditionMet(noop.outcome) === false,
+      `gained=${noop.outcome.gained} lines=[${noop.lines.join(' | ')}]`,
+    )
+
+    // (c4) consumed input+fuel is real production even before the output is
+    // countable: the OR clause of isSmeltPostconditionMet earns SMELT_DONE.
+    const consumed = await runWindowRaceSmelt({
+      outputInWindowAtStart: false,
+      outputAfterPolls: null,
+      consumeSlots: true,
+      timeoutMs: 25,
+    })
+    const consumedDone = consumed.lines.find((line) => line.startsWith('SMELT_DONE')) ?? ''
+    await check(
+      '(c4) consumed input+fuel emits SMELT_DONE (the OR production predicate) with the measured gain',
+      consumed.outcome.gained === 0 &&
+        consumed.outcome.consumedInput === true &&
+        consumed.outcome.consumedFuel === true &&
+        isSmeltPostconditionMet(consumed.outcome) === true &&
+        consumedDone.includes('gained=0'),
+      consumedDone === '' ? `no SMELT_DONE line [${consumed.lines.join(' | ')}]` : consumedDone,
     )
   }
 
