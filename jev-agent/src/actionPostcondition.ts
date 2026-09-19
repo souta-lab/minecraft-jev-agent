@@ -130,6 +130,95 @@ export function isUnverifiedOutcome(input: ActionOutcomeInput): boolean {
   return input.status === 'done' && !input.verified && isZeroProgressOutcome(input)
 }
 
+/**
+ * Kinds whose executor `verified=true` is accepted as a truthful success on its
+ * own: the executor gates each of them on a STRICT world post-condition that is
+ * itself observable evidence (a dug block/drop, an increased item count, a block
+ * existing at the target, a removed face block, or the action's own defined
+ * effect). Every other kind is a lenient-movement kind, whose `verified` flag can
+ * be set by a partial signal (a >0.01 m distance decrease) without the remembered
+ * target ever being reached - see `truthfulActionOutcome`.
+ */
+const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
+  'MINE',
+  'CRAFT',
+  'SMELT',
+  'PLACE',
+  'DESCEND',
+  'STEP',
+  'EAT',
+  'ATTACK',
+  'WAIT',
+  'ESCALATE',
+])
+
+/**
+ * Kinds whose post-condition IS arrival, so a live arrival is observable
+ * progress. RETRIEVE is deliberately NOT here: the controller only counts a
+ * retrieved resource as progress on an item / removed block / body change
+ * (`knownRetrieveMadeProgress`, `shouldClearActiveRetrieval`), and arrival alone
+ * must not clear the retrieval-stall track or retire the active target.
+ */
+const ARRIVAL_EVIDENCE_KINDS: ReadonlySet<string> = new Set(['MOVE', 'RETREAT'])
+
+export interface TruthfulOutcomeInput {
+  kind: string
+  status: string
+  verified: boolean
+  itemsGained: number
+  blockRemoved: boolean
+  /** deterministic body change with no item/block evidence (a climb chunk) */
+  progressed?: boolean
+  /**
+   * Live movement arrival from the controller (`classifyMoveOutcome`). Only
+   * counted for the kinds whose post-condition is arrival; never inferred from
+   * the executor's lenient `verified` flag.
+   */
+  arrived?: boolean
+}
+
+export interface TruthfulOutcome {
+  /** the verified flag a truthful record may carry */
+  verified: boolean
+  /** the status a truthful record may carry (`zero_progress` when a claimed success is rejected) */
+  status: string
+  /** true when this action left observable evidence of a world/body change */
+  observableProgress: boolean
+  /** true when the raw executor claimed `done`+`verified` but the truth layer rejects it */
+  downgraded: boolean
+}
+
+/**
+ * Truthful success/failure for ANY action. A `done` action may only be recorded
+ * as `verified=true status=done` when there is observable progress: an item
+ * gained, a block removed, a deterministic body change (`progressed`), a live
+ * arrival, or a strict-post-condition kind whose `verified` IS the world
+ * evidence. The live defect this closes (run-mu8l9a1j-uugz):
+ *
+ *   `RETRIEVE:known:raw_iron:b36_56_41 timeout` ... `PATH_CALLBACK outcome=stuck`
+ *   ... `CAUSAL verified=true status=done progressDelta=0`
+ *
+ * The executor's RETRIEVE sets `verified=true` from a lenient `closed` signal, so
+ * a stuck hop toward an unreachable remembered resource was recorded as a
+ * verified success with zero observable progress. Zero-observable-progress
+ * outcomes are failures that keep the failure memory charged; they are never
+ * reset by this gate.
+ */
+export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutcome {
+  const directProgress =
+    hasObservableProgress(input) || (input.arrived === true && ARRIVAL_EVIDENCE_KINDS.has(input.kind))
+  if (input.status !== 'done' || !input.verified) {
+    return { verified: input.verified, status: input.status, observableProgress: directProgress, downgraded: false }
+  }
+  // A strict-post-condition kind already proved a world change; its `verified`
+  // flag is the evidence. Nothing else may be promoted to success on a lenient
+  // movement signal alone.
+  if (directProgress || SELF_EVIDENT_VERIFIED_KINDS.has(input.kind)) {
+    return { verified: true, status: 'done', observableProgress: true, downgraded: false }
+  }
+  return { verified: false, status: 'zero_progress', observableProgress: false, downgraded: true }
+}
+
 export interface ActionUnverifiedFields {
   planId: string | null
   actionId: string | null

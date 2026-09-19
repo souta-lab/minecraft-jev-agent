@@ -135,7 +135,7 @@ import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
-import { evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 
@@ -456,17 +456,30 @@ function resolveEnvPositiveInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
-/** Map an executor failure code onto a movement-failure reason. */
-function moveFailureReason(failure: string | null): MoveFailureReason {
+/**
+ * Map an executor failure code onto a movement-failure reason.
+ *
+ * `unreachable` is a DURABLE claim: it feeds the reachability gate and resource
+ * retirement, so it must only be recorded when the coordinate was actually shown
+ * unreachable (`path_no_path`, a refused tunnel entry). A timeout (`dig_timeout`,
+ * `smelt_timeout`, `path_timeout`) or an unrelated action error is a STALL, not a
+ * proof of unreachability - recording it as `unreachable` masked the real reason
+ * and blacklisted reachable coordinates.
+ */
+export function moveFailureReason(failure: string | null): MoveFailureReason {
   switch (failure) {
     case 'path_no_path':
       return 'no_path'
     case 'path_stuck':
     case 'path_timeout':
     case 'action_timeout':
+    case 'dig_timeout':
+    case 'smelt_timeout':
       return 'stuck'
-    default:
+    case 'tunnel_entry_refused':
       return 'unreachable'
+    default:
+      return 'no_progress'
   }
 }
 
@@ -2734,11 +2747,31 @@ export class JevController {
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
     if (result.itemsGained > 0 || result.blockRemoved) this.progressEpoch += 1
+    const moved =
+      this.actionStart === null
+        ? 0
+        : Math.hypot(
+            this.bot.entity.position.x - this.actionStart.x,
+            this.bot.entity.position.y - this.actionStart.y,
+            this.bot.entity.position.z - this.actionStart.z,
+          )
+    const moveArrived =
+      (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
+    const retrieveArrived = result.kind === 'RETRIEVE' && this.retrievalArrived(candidate)
+    const truth = truthfulActionOutcome({
+      kind: result.kind,
+      status: result.status,
+      verified: result.verified,
+      itemsGained: result.itemsGained,
+      blockRemoved: result.blockRemoved,
+      progressed: result.progressed,
+      arrived: moveArrived,
+    })
     this.recentOutcomes.push({
       actionId: result.actionId,
       status: result.status,
       failure: result.failure,
-      verified: result.verified,
+      verified: truth.verified,
       detail: result.detail,
     })
     if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
@@ -2749,7 +2782,7 @@ export class JevController {
       policy: decision.policy,
       actionId: result.actionId,
       executed: result.status !== 'cancelled',
-      verified: result.verified,
+      verified: truth.verified,
       failureCode: result.failure,
       goalProgress: result.goalItemCount,
       note: `${result.status}/${result.phase}: ${result.detail}`,
@@ -2764,13 +2797,13 @@ export class JevController {
       completedPlanId = pending.record.goalQueueState.current?.id ?? null
       attachResult(pending.record, {
         actionId: result.actionId,
-        success: result.status === 'done' && result.verified,
+        success: truth.status === 'done' && truth.verified,
         durationMs: result.ms,
         damageTaken: Math.max(0, pending.healthAtDecision - this.bot.health),
         progress: this.goal.progress,
         status: result.status,
         failureCode: result.failure,
-        verified: result.verified,
+        verified: truth.verified,
         blockRemoved: result.blockRemoved,
         dropObserved: result.dropObserved,
       })
@@ -2785,13 +2818,22 @@ export class JevController {
         {
           candidateId: pending.record.chosenAction,
           actionId: result.actionId,
-          verified: result.verified,
-          status: result.status,
+          verified: truth.verified,
+          status: truth.status,
           resource: result.yieldItem ?? result.targetName ?? null,
           progressDelta: result.itemsGained,
+          observable: truth.observableProgress,
         },
       )
       this.logger.info('causal', formatCausalLine(chain), causalRecord(chain), this.tickCounter)
+      if (truth.downgraded) {
+        this.logger.warn(
+          'agent',
+          `ACTION_ZERO_PROGRESS actionId=${result.actionId} kind=${result.kind} reason=verified_without_observable_progress rawStatus=${result.status}`,
+          { actionId: result.actionId, kind: result.kind, verified: result.verified, detail: result.detail },
+          this.tickCounter,
+        )
+      }
     }
 
     if (result.status === 'cancelled' || result.failure === 'cancelled') {
@@ -2807,7 +2849,7 @@ export class JevController {
     this.retireFailedKnownRetrieve(candidate, result)
     if (result.unverifiedPostcondition !== undefined) {
       this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
-    } else if (result.status === 'done' && result.verified) {
+    } else if (truth.status === 'done' && truth.verified) {
       const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
       if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
     }
@@ -2817,7 +2859,7 @@ export class JevController {
         {
           optionId: completedOptionId,
           planId: completedPlanId,
-          verified: result.verified,
+          verified: truth.verified,
           progressDelta: result.itemsGained,
         },
         Date.now(),
@@ -2885,7 +2927,7 @@ export class JevController {
         // verified climb chunk that gained altitude) retires the active target.
         // The executor reports `verified=true` for a sub-metre nudge, so clearing
         // on that would disarm the stall assertion before it can ever fire.
-        if (hasObservableProgress(result)) {
+        if (truth.observableProgress) {
           // A known resource that reported a body change but did NOT arrive keeps
           // the stall track alive (`shouldClearActiveRetrieval`): a vertical or
           // pillar chunk is not arrival, and clearing on it re-armed the live
@@ -2894,7 +2936,7 @@ export class JevController {
             shouldClearActiveRetrieval({
               retrieval: candidate.meta.retrieval,
               hasObservableProgress: true,
-              arrived: this.retrievalArrived(candidate),
+              arrived: retrieveArrived,
             })
           ) {
             this.activeRetrieval = null
@@ -2903,15 +2945,15 @@ export class JevController {
           this.noteCandidateSuccess(result.actionId)
           this.recordMoveSuccess(candidate)
         } else {
-          // `status=done verified=false progressDelta=0` is the live #78 loop: a
-          // retrieval that reports completion while producing nothing must charge
-          // the coordinate failure memory so it is eventually skipped.
+          // A retrieval that reports completion while producing nothing observable
+          // must charge the coordinate failure memory so it is eventually skipped,
+          // and it must never be recorded as a verified success.
           this.recordMoveFailure(candidate, 'no_progress')
         }
         if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
           const outcome = evaluateRetrieveAbandon({
             actionId: result.actionId,
-            verified: result.verified,
+            verified: truth.verified,
             progressDelta: result.itemsGained,
             previous: this.retrieveUnverified,
           })
@@ -2922,11 +2964,6 @@ export class JevController {
         }
       }
       if ((result.kind === 'MOVE' || result.kind === 'RETREAT') && this.actionStart !== null) {
-        const moved = Math.hypot(
-          this.bot.entity.position.x - this.actionStart.x,
-          this.bot.entity.position.y - this.actionStart.y,
-          this.bot.entity.position.z - this.actionStart.z,
-        )
         const outcome = classifyMoveOutcome(result.verified, moved)
         switch (outcome) {
           case 'arrived':
@@ -2952,8 +2989,10 @@ export class JevController {
         }
       }
       this.actionStart = null
-      this.failureStreak = 0
-      this.signals.consecutiveFailures = 0
+      if (!truth.downgraded) {
+        this.failureStreak = 0
+        this.signals.consecutiveFailures = 0
+      }
     } else if (result.kind === 'PLACE' && this.schedulePlaceRetry(result, candidate)) {
       this.noteCandidateFailure(result.actionId)
     } else {

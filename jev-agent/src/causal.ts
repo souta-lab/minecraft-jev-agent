@@ -53,6 +53,12 @@ export interface CausalChain extends CausalStamp {
   /** the item the action actually produced, when known */
   resource: string | null
   progressDelta: number | null
+  /**
+   * True when the action left observable evidence (item, removed block,
+   * deterministic body change, live arrival, or a strict-post-condition kind).
+   * A chain may never carry `verified=true status=done` with `observable=false`.
+   */
+  observable: boolean
 }
 
 /** Mint a fresh chain id. uuid, never a timestamp, so ids are race-free. */
@@ -110,6 +116,7 @@ export interface CausalOutcomeInput {
   status: string | null
   resource?: string | null
   progressDelta?: number | null
+  observable?: boolean
 }
 
 /** Complete a stamp with the executor outcome, preserving every decision-time id. */
@@ -125,6 +132,7 @@ export function completeCausalChain(stamp: CausalStamp, outcome: CausalOutcomeIn
     status: outcome.status,
     resource: outcome.resource ?? null,
     progressDelta: outcome.progressDelta ?? null,
+    observable: outcome.observable ?? (outcome.verified === true && outcome.status === 'done'),
   }
 }
 
@@ -138,7 +146,8 @@ export function formatCausalLine(chain: CausalChain): string {
     `CAUSAL chain=${chain.chainId} option=${text(chain.optionId)} plan=${text(chain.planId)} ` +
     `strategy=${text(chain.strategy)} candidate=${text(chain.candidateId)} action=${text(chain.actionId)} ` +
     `verified=${chain.verified === null ? 'null' : String(chain.verified)} status=${text(chain.status)} ` +
-    `resource=${text(chain.resource)} progressDelta=${chain.progressDelta === null ? 'null' : String(chain.progressDelta)}`
+    `resource=${text(chain.resource)} progressDelta=${chain.progressDelta === null ? 'null' : String(chain.progressDelta)} ` +
+    `observable=${String(chain.observable)}`
   )
 }
 
@@ -156,5 +165,6 @@ export function causalRecord(chain: CausalChain): Record<string, unknown> {
     status: chain.status,
     resource: chain.resource,
     progressDelta: chain.progressDelta,
+    observable: chain.observable,
   }
 }
