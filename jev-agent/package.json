@@ -21,6 +21,7 @@
     "furnace-transfer-test": "tsx test-furnace-transfer.mts",
     "m2-in-run-completion-test": "tsx test-m2-in-run-completion.mts",
     "retrieve-truthful-outcome-test": "tsx test-retrieve-truthful-outcome.mts",
+    "retrieve-failure-memory-test": "tsx test-retrieve-failure-memory.mts",
     "bootstrap-preserve-test": "tsx test-bootstrap-preserve.mts",
     "reachability-test": "tsx test-reachability.mts",
     "place-spot-test": "tsx test-place-spot.mts",
