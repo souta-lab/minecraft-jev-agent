@@ -48,8 +48,14 @@ export interface JumpBotLike {
   setControlState(control: 'jump', state: boolean): void
   /** Clear a stale horizontal/pathfinder push before a pure vertical hop. */
   clearControlStates?: () => void
-  on(event: 'physicsTick', listener: () => void): unknown
-  removeListener(event: 'physicsTick', listener: () => void): unknown
+  /**
+   * `physicsTick` observes the physics loop. `forcedMove` is emitted by
+   * mineflayer's clientbound `position` handler AFTER it resets
+   * `entity.onGround = false` and zeroes the velocity (physics.js), so it is
+   * the last hook that can re-ground the body before the next jump gate read.
+   */
+  on(event: 'physicsTick' | 'forcedMove', listener: () => void): unknown
+  removeListener(event: 'physicsTick' | 'forcedMove', listener: () => void): unknown
 }
 
 /** Reports whether the block at (x,y,z) is a full solid block. */
@@ -113,8 +119,21 @@ export function installGroundCorrection(
     const grounded = correctStandingOnGround(bot, isSolid)
     onTick?.(grounded)
   }
+  // A clientbound `position` packet resets `onGround = false` and zeroes the
+  // velocity, then emits `forcedMove` (physics.js position handler). It can
+  // arrive after the last `physicsTick` correction and before the next
+  // `simulatePlayer`, so a physicsTick-only correction loses the gate race and
+  // `setControlState('jump')` stays a silent no-op. Re-ground on the packet
+  // event too; this does not count as a physics tick.
+  const onForcedMove = (): void => {
+    correctStandingOnGround(bot, isSolid)
+  }
   bot.on('physicsTick', onPhysicsTick)
-  return () => bot.removeListener('physicsTick', onPhysicsTick)
+  bot.on('forcedMove', onForcedMove)
+  return () => {
+    bot.removeListener('physicsTick', onPhysicsTick)
+    bot.removeListener('forcedMove', onForcedMove)
+  }
 }
 
 export interface PillarJumpDeps {
