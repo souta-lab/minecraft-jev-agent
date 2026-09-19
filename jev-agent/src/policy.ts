@@ -367,7 +367,13 @@ function guardWalkToBlock(
       `no ${blockName ?? 'block'} at (${block.x},${block.y},${block.z}) in the current state`,
     )
   }
-  if (!found.hasAdjacentStandable || found.adjacentStandable === null || !samePosition(found.adjacentStandable, target)) {
+  const adjacencyMatches =
+    found.hasAdjacentStandable && found.adjacentStandable !== null && samePosition(found.adjacentStandable, target)
+  // A dig-access MOVE names the same block, but its stand was resolved by the
+  // live #244 interaction-stand probe (`bot.blockAt` passable+support+face
+  // reach), not by the sensor's 12-neighbour sample. The block existence and
+  // path checks below still apply; only the stale adjacency fact is bypassed.
+  if (!adjacencyMatches && candidate.meta.digAccess !== true) {
     return deny(
       candidate.id,
       'NO_SUPPORT',

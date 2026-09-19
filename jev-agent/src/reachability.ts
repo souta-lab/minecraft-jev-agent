@@ -40,6 +40,34 @@ export const DESCEND_GAP_LIMIT = 4
 /** A hazard this close to the destination blocks it (mirrors policy LAVA_PROXIMITY). */
 export const HAZARD_PROXIMITY = 1.5
 
+/**
+ * Eye→block-AABB distance from an explicit eye position (the reach test). The
+ * #244 interaction-stand geometry, shared here so the station approach
+ * (executor) and the dig-access search (candidates) use ONE implementation.
+ */
+export function faceDistanceFromEye(eye: Vec3Json, block: Vec3Json): number {
+  const x = Math.max(block.x, Math.min(eye.x, block.x + 1))
+  const y = Math.max(block.y, Math.min(eye.y, block.y + 1))
+  const z = Math.max(block.z, Math.min(eye.z, block.z + 1))
+  return Math.hypot(eye.x - x, eye.y - y, eye.z - z)
+}
+
+/** Eye→block-AABB distance from a candidate stand's eyes (its interaction reach). */
+export function interactionFaceDistance(stand: Vec3Json, block: Vec3Json): number {
+  return faceDistanceFromEye({ x: stand.x + 0.5, y: stand.y + 1.62, z: stand.z + 0.5 }, block)
+}
+
+/** The four horizontal interaction offsets the #244 stand search examines. */
+export const INTERACTION_STAND_OFFSETS: readonly Vec3Json[] = [
+  { x: 1, y: 0, z: 0 },
+  { x: -1, y: 0, z: 0 },
+  { x: 0, y: 0, z: 1 },
+  { x: 0, y: 0, z: -1 },
+]
+
+/** The three stances (feet levels) the #244 stand search examines per offset. */
+export const INTERACTION_STAND_DY: readonly number[] = [0, 1, -1]
+
 /** Something the body lacks that would make a target reachable if acquired. */
 export type Capability =
   | { kind: 'tool'; tool: HarvestTool; tier: number }
@@ -156,6 +184,31 @@ export function formatStationUnreachable(
   reason: StationApproachRefusal,
 ): string {
   return `STATION_UNREACHABLE kind=${kind} id=b${Math.round(station.x)}_${Math.round(station.y)}_${Math.round(station.z)} reason=${reason}`
+}
+
+/**
+ * The stand geometry for a blocked DIG target, generalised from the #244
+ * interaction stand: the cell from which the target becomes diggable, plus the
+ * `canDig=false` path verdict for walking to it. `approach` null means no such
+ * stand exists; `path: 'no_path'` means it exists but cannot be walked to.
+ */
+export interface DigApproachFact {
+  approach: Vec3Json | null
+  path: PathProbeResult | null
+}
+
+/** Live dig-access probe; the controller wires it to `interactionStandCandidates` (#244). */
+export type DigApproachProbe = (block: Vec3Json) => DigApproachFact
+
+/** The exact reason a blocked dig target has no reachable access. */
+export type DigAccessRefusal = 'no_interaction_stand' | 'no_path_to_stand'
+
+/**
+ * The observability marker for a dig target retired for lack of access. Never
+ * silent: the coordinate and the mechanical fact that refused it are both named.
+ */
+export function formatDigAccessRetired(block: Vec3Json, reason: DigAccessRefusal): string {
+  return `DIG_ACCESS_RETIRED reason=${reason} target=${Math.round(block.x)},${Math.round(block.y)},${Math.round(block.z)}`
 }
 
 export interface ReachabilityResult {

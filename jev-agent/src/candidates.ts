@@ -37,8 +37,8 @@ import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
-import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
-import type { Capability, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
+import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
+import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
@@ -151,6 +151,12 @@ export interface ReachabilityGateOptions {
    * offered when the executor can actually stand at and walk to its face.
    */
   stationApproach?: StationApproachProbe | null
+  /**
+   * The same #244 interaction-stand geometry generalised to a dig target with no
+   * walk-up access: the stand from which the block becomes diggable plus the
+   * `canDig=false` path verdict. Absent = no probe (existing behavior).
+   */
+  digApproach?: DigApproachProbe | null
 }
 
 export interface CandidateReachability {
@@ -575,6 +581,102 @@ function generateRawCandidates(
   return { candidates, placeRefusal }
 }
 
+/** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
+export function digAccessCandidateId(position: Vec3Json): string {
+  return `ACCESS:${blockId('b', position)}`
+}
+
+const DIG_ACCESS_REFUSAL_META = 'digAccessRefusal'
+
+function digAccessRefusalOf(candidate: Candidate): DigAccessRefusal | null {
+  const value = candidate.meta[DIG_ACCESS_REFUSAL_META]
+  return value === 'no_interaction_stand' || value === 'no_path_to_stand' ? value : null
+}
+
+/**
+ * The #244 interaction-stand geometry generalised to a dig target: the caller's
+ * live probe returns the stand from which the block becomes diggable plus the
+ * `canDig=false` path verdict. No probe means the generator keeps its existing
+ * behavior (the target stays a tunnel target). A reachable stand is offered as
+ * an ACCESS MOVE; otherwise the typed refusal retires the target explicitly.
+ */
+function digAccessFor(
+  state: WorldState,
+  options: CandidateOptions,
+  block: BlockState,
+): { stand: Vec3Json | null; refusal: DigAccessRefusal | null } {
+  const probe = options.reachability?.digApproach ?? null
+  if (probe === null) return { stand: null, refusal: null }
+  const fact = probe(block.position)
+  if (fact.approach !== null && fact.path !== 'no_path') return { stand: fact.approach, refusal: null }
+  return { stand: null, refusal: fact.approach === null ? 'no_interaction_stand' : 'no_path_to_stand' }
+}
+
+function digAccessMove(state: WorldState, block: BlockState, stand: Vec3Json): Candidate {
+  const harvestTool = block.harvestTool ?? null
+  return {
+    id: digAccessCandidateId(block.position),
+    kind: 'MOVE',
+    label: `walk to the dig-access stand at (${stand.x},${stand.y},${stand.z}) so ${block.name} at (${block.position.x},${block.position.y},${block.position.z}) becomes in reach and diggable`,
+    targetName: block.name,
+    target: stand,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: harvestTool !== null,
+    toolName: harvestTool,
+    toolTier: block.harvestTier ?? null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: stand.x,
+      y: stand.y,
+      z: stand.z,
+      diggable: block.diggable,
+      yieldItem: block.yield ?? block.name,
+      digAccess: true,
+      targetBlockX: block.position.x,
+      targetBlockY: block.position.y,
+      targetBlockZ: block.position.z,
+      targetBlockName: block.name,
+    },
+  }
+}
+
+/**
+ * The explicit retirement of a dig target with no reachable access. The target is
+ * not presented: the affordance gate withholds it with the typed reason carried
+ * here and records the state fingerprint, so it is not silently re-offered every
+ * tick while the relevant facts are unchanged.
+ */
+function digAccessRetirement(state: WorldState, block: BlockState, refusal: DigAccessRefusal): Candidate {
+  const harvestTool = block.harvestTool ?? null
+  return {
+    id: digAccessCandidateId(block.position),
+    kind: 'MOVE',
+    label: `no reachable dig access for ${block.name} at (${block.position.x},${block.position.y},${block.position.z}) (${refusal})`,
+    targetName: block.name,
+    target: block.position,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: harvestTool !== null,
+    toolName: harvestTool,
+    toolTier: block.harvestTier ?? null,
+    inReach: false,
+    hasStandableAdjacent: false,
+    meta: {
+      tick: state.tick,
+      x: block.position.x,
+      y: block.position.y,
+      z: block.position.z,
+      diggable: block.diggable,
+      yieldItem: block.yield ?? block.name,
+      digAccess: true,
+      [DIG_ACCESS_REFUSAL_META]: refusal,
+    },
+  }
+}
+
 /**
  * MINE/MOVE/DESCEND candidates for the current collect subgoal only.
  *
@@ -584,7 +686,10 @@ function generateRawCandidates(
  *  - a reachable block that is *not* pickup-adjacent is demoted to a MOVE toward
  *    its standable spot, so the next sensor tick re-offers it as a safe MINE;
  *  - a block with no walk-up access is a tunnel target, and the generator emits
- *    a DESCEND staircase/tunnel step toward the nearest one.
+ *    a DESCEND staircase/tunnel step toward the nearest one;
+ *  - a block with no walk-up access AND a reachable #244 interaction stand gets
+ *    an ACCESS MOVE to that stand; with no reachable stand and no downward
+ *    tunnel route it is retired with a typed withheld refusal.
  */
 function mineCandidates(
   state: WorldState,
@@ -601,12 +706,13 @@ function mineCandidates(
   const pool = fallback
   const mineActions: Candidate[] = []
   const moveActions: Candidate[] = []
+  const accessActions: Candidate[] = []
   const tunnelTargets: BlockState[] = []
   let moveCount = 0
   const self = state.self.position
 
   for (const block of pool) {
-    if (mineActions.length + moveActions.length >= options.maxMineCandidates) break
+    if (mineActions.length + moveActions.length + accessActions.length >= options.maxMineCandidates) break
     if (!block.diggable) continue
     const harvestTool = block.harvestTool ?? null
     const tier = block.harvestTier ?? null
@@ -714,6 +820,35 @@ function mineCandidates(
       continue
     }
 
+    // No walk-up access. The sensor sampled only the 12 immediate neighbours,
+    // so a reachable stand may still exist from which the block becomes
+    // diggable. Offer that walk as an explicit dig prerequisite; if none exists
+    // (and the block cannot be tunnelled downward) retire it with a typed
+    // refusal instead of dropping it silently.
+    const access = digAccessFor(state, options, block)
+    if (access.stand !== null) {
+      const stand = access.stand
+      const atStand =
+        Math.hypot(stand.x + 0.5 - self.x, stand.z + 0.5 - self.z) <= 0.9 &&
+        Math.abs(stand.y - self.y) <= 1.5
+      if (
+        !atStand &&
+        mineActions.length + moveActions.length + accessActions.length < options.maxMineCandidates &&
+        !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, stand) &&
+        failureCount(state.signals.failedCandidates, digAccessCandidateId(block.position)) <
+          (options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT)
+      ) {
+        accessActions.push(digAccessMove(state, block, stand))
+        continue
+      }
+    } else if (
+      access.refusal !== null &&
+      block.position.y >= Math.floor(self.y)
+    ) {
+      accessActions.push(digAccessRetirement(state, block, access.refusal))
+      continue
+    }
+
     const tunnelMax = options.tunnelMaxDistance ?? DEFAULT_TUNNEL_MAX_DISTANCE
     if (block.distance <= tunnelMax) tunnelTargets.push(block)
   }
@@ -725,12 +860,13 @@ function mineCandidates(
   if (mineActions.length === 0) candidates.push(...headroomCandidates(state, options))
   if (moveActions.length > 0) candidates.push(...stepCutCandidates(state, options))
   candidates.push(...moveActions)
+  candidates.push(...accessActions)
   const descent = descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY)
   if (candidates.length === 0) {
     candidates.push(...descent)
   } else if (
     mineActions.length === 0 &&
-    moveActions.length > 0 &&
+    (moveActions.length > 0 || accessActions.length > 0) &&
     focusItem !== null &&
     (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined)
   ) {
@@ -2885,6 +3021,16 @@ function evaluateCandidate(
   const position = candidate.target
   if (position === null || !REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
   if (candidate.kind === 'MINE') return evaluateMineCandidate(candidate, context)
+  const accessRefusal = digAccessRefusalOf(candidate)
+  if (accessRefusal !== null) {
+    const target = reachabilityTargetFor(context.state, candidate)
+    const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+    const result: ReachabilityResult =
+      accessRefusal === 'no_path_to_stand'
+        ? { reachable: false, reason: 'no_path', missingCapabilities: [{ kind: 'open_path' }] }
+        : { reachable: false, reason: 'no_standable_approach', missingCapabilities: [{ kind: 'standable_approach' }] }
+    return reachabilityRecord(candidate, target, world, result, context)
+  }
   const target = reachabilityTargetFor(context.state, candidate)
   const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
   const abilities = deriveReachabilityAbilities(context.state, position, context.column)
