@@ -6,7 +6,7 @@
 // promotes a fresh, non-hazard DESCEND candidate instead. It never touches
 // action authority semantics: it is still a local, deterministic rule policy,
 // and the existing guard re-validates the candidate before execution.
-import type { JevPolicy, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
+import type { JevPolicy, JevPolicyKind, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
 import type { DeathHazard } from './resident-types.ts'
 
@@ -36,7 +36,9 @@ function excludeHardHazardCandidates(candidates: readonly Candidate[], hazards: 
 }
 
 export class DescendAwarePolicy implements JevPolicy {
-  readonly kind = 'fallback' as const
+  get kind(): JevPolicyKind {
+    return this.inner.kind
+  }
   readonly model: string
   private readonly inner: JevPolicy
   private readonly hazards: readonly DeathHazard[]
