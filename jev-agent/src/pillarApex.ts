@@ -71,6 +71,84 @@ export function takeoffObservedRise(trace: PillarJumpTrace): number {
   return peak
 }
 
+/**
+ * The takeoff trace is a COMPLETE arc only when it observed the post-vertex
+ * descent (a physics tick with negative velocity) and a `forcedMove` did not
+ * void the segment. `jumpWithGroundCorrection` returns the moment the body
+ * leaves the ground, so a fast single-tick takeoff records only the ascent and
+ * understates the peak - that peak is not a trustworthy ceiling. A complete arc
+ * is what makes `takeoffObservedRise` evidence of the column's real ceiling.
+ */
+export function pillarArcComplete(trace: PillarJumpTrace): boolean {
+  if (trace.truncated) return false
+  // A forcedMove resets the peak (`takeoffObservedRise`), so ANY reset makes the
+  // recorded peak untrustworthy - regardless of where in the trace it landed.
+  if (trace.samples.some((sample) => sample.event === 'forcedMove')) return false
+  let rose = false
+  for (const sample of trace.samples) {
+    if (sample.rise > 0) rose = true
+    if (rose && sample.event === 'physicsTick' && sample.velocityY < 0) return true
+  }
+  return false
+}
+
+/**
+ * The evidence an unsatisfiable-column retire is decided from: the clearance
+ * the server refused against versus what the column's arc actually achieved.
+ */
+export interface PillarRefusalEvidence {
+  /** feet cell the server authoritatively grounds the body in */
+  feetCellY: number
+  /** the cell the refused block must occupy */
+  placeCellY: number
+  /** highest rise this attempt's takeoff trace observed */
+  achievableRise: number
+  /** true when the trace captured the post-vertex descent (a complete arc) */
+  arcComplete: boolean
+  /** forced position resets during the attempt void the trace segment */
+  forcedRepositions: number
+}
+
+/**
+ * The exact clearance the feet must produce to place the block at `placeCellY`,
+ * measured from the feet CELL (`placeCellY + 1 - feetCellY`). The server
+ * validates the refusal against its grounded stance, not the fractional client
+ * float, so clearing the cell from the body's own cell floor is the demand a
+ * refused placement already failed. Never capped below the geometric clearance.
+ */
+export function requiredColumnClearance(feetCellY: number, placeCellY: number): number {
+  return requiredApexRise(feetCellY, placeCellY)
+}
+
+/**
+ * A `place refused` failure proves the column unsatisfiable only when the
+ * required clearance exceeds the highest rise the arc actually achieved AND the
+ * measurement is trustworthy (a complete arc with no forced reposition). A
+ * column that produced the clearance is never retired: its refusal is a
+ * timing/sync refusal, not a ceiling failure, and one unlucky attempt must not
+ * condemn a satisfiable column.
+ */
+export function isPillarRefusalUnsatisfiable(
+  fail: Pick<PillarFail, 'step' | 'reason'>,
+  evidence: PillarRefusalEvidence,
+): boolean {
+  if (fail.step !== 'place' || fail.reason !== 'refused') return false
+  if (!evidence.arcComplete || evidence.forcedRepositions > 0) return false
+  return requiredColumnClearance(evidence.feetCellY, evidence.placeCellY) > evidence.achievableRise
+}
+
+/**
+ * The retire marker: names the unsatisfiable cause and the measured demand so a
+ * refused retry can no longer be silent while the column is relocated.
+ */
+export function formatPillarRetire(cell: Vec3Like, evidence: PillarRefusalEvidence): string {
+  const required = requiredColumnClearance(evidence.feetCellY, evidence.placeCellY)
+  return (
+    `PILLAR_RETIRE cell=${cell.x},${cell.y},${cell.z} reason=unsatisfiable_clearance` +
+    ` required=${round2(required)} achievable=${round2(evidence.achievableRise)} arc=complete`
+  )
+}
+
 /** Landing tolerance around `placeCell.y + 1` (server sync offsets are <= 1/8). */
 export const PILLAR_LANDING_Y_TOLERANCE = 0.2
 
@@ -90,12 +168,21 @@ export interface PillarFail {
 
 /**
  * A takeoff can fail before any placement side effect. A bounded relocation
- * may therefore retry from a different grounded column; apex, placement, and
- * landing failures must remain terminal for the current column because they
- * may already have mutated world state.
+ * may therefore retry from a different grounded column; apex and landing
+ * failures must remain terminal for the current column because they may already
+ * have mutated world state.
+ *
+ * A `place refused` failure is also relocatable when the supplied evidence
+ * proves the column's clearance demand exceeds the arc it can produce (see
+ * `isPillarRefusalUnsatisfiable`). Without evidence the refusal stays terminal,
+ * so a bare `{ step: 'place', reason: 'refused' }` never relocates.
  */
-export function shouldRelocatePillarAfterFailure(fail: Pick<PillarFail, 'step' | 'reason'>): boolean {
-  return fail.step === 'takeoff' && ['no_physics_tick', 'no_support', 'no_rise'].includes(fail.reason)
+export function shouldRelocatePillarAfterFailure(
+  fail: Pick<PillarFail, 'step' | 'reason'>,
+  evidence?: PillarRefusalEvidence,
+): boolean {
+  if (fail.step === 'takeoff' && ['no_physics_tick', 'no_support', 'no_rise'].includes(fail.reason)) return true
+  return evidence !== undefined && isPillarRefusalUnsatisfiable(fail, evidence)
 }
 
 /** The exact live marker emitted when a PILLAR_UP sub-step fails. */
