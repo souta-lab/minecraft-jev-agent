@@ -29,6 +29,7 @@
     "m2-live-gate-test": "node tools/test-m2-live-gate.mjs",
     "run-artifacts-test": "node tools/test-run-artifacts.mjs",
     "known-red-test": "node tools/test-known-red.mjs",
-    "known-red-runner-test": "node tools/test-known-red-runner.mjs"
+    "known-red-runner-test": "node tools/test-known-red-runner.mjs",
+    "issue13-evidence-test": "node tools/test-issue13-evidence.mjs"
   }
 }

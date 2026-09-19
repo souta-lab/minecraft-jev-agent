@@ -44,6 +44,7 @@ export const SUITES = Object.freeze({
     npmRun('convergence.m2-acceptance-test', 'm2-acceptance-test'),
     npmRun('convergence.m2-live-gate-test', 'm2-live-gate-test'),
     npmRun('convergence.known-red-test', 'known-red-test'),
+    npmRun('convergence.issue13-evidence-test', 'issue13-evidence-test'),
     npmRun('convergence.frontier-check', 'frontier:check'),
     npmRun('convergence.issue-state-check', 'issue-state:check'),
   ]),

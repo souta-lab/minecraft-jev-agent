@@ -377,6 +377,11 @@ assertion step are infrastructure `UNKNOWN`, not a known-red test. Never silentl
 baseline to make a lane pass; baseline changes require an explicit review and a new pinned
 `baselineId`/commit.
 
+Resident soak verifiers must carry the resident `runId` from the control report into their log
+window. `tools/verify-issue13.mjs` therefore reports `PASS`, `FAIL`, or `UNKNOWN` with the
+observed run IDs; a missing or changing run scope cannot produce a PASS, and callback evidence
+is bounded by the matching `BOOT` record.
+
 ---
 
 ## 5. Safety and discipline rules
