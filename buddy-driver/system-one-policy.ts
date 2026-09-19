@@ -1,11 +1,11 @@
-// system-one-policy.ts - a deterministic System One policy wrapper.
+// system-one-policy.ts - deterministic FALLBACK-only System One wrapper.
 //
-// The stock fallback policy has no DESCEND branch, so a stalled goal whose only
-// productive candidate is a staircase/tunnel step collapses to WAIT and wedges.
-// This wrapper delegates to the stock fallback and, only when it would WAIT,
-// promotes a fresh, non-hazard DESCEND candidate instead. It never touches
-// action authority semantics: it is still a local, deterministic rule policy,
-// and the existing guard re-validates the candidate before execution.
+// The stock deterministic fallback policy has no DESCEND branch, so a stalled
+// fallback goal whose only productive candidate is a staircase/tunnel step can
+// collapse to WAIT and wedge. This wrapper exists only for the explicit
+// deterministic baseline (`BUDDY_POLICY=fallback`). It must never wrap the real
+// TypeSafe Jev policy: replacing a Jev WAIT with a code-selected DESCEND would
+// make deterministic code a second semantic action authority and violate #11.
 import type { JevPolicy, JevRequest, JevResult } from '../jev-agent/src/jev.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
 import type { DeathHazard } from './resident-types.ts'
@@ -72,16 +72,19 @@ export class DescendAwarePolicy implements JevPolicy {
           ...action,
           value: descend.id,
           probabilities: { [descend.id]: 1 },
-          note: 'descend-aware fallback override (stock policy had no DESCEND branch)',
+          note: 'descend-aware deterministic-baseline override (fallback policy had no DESCEND branch)',
         },
       },
     }
   }
 }
 
-/** Wrap the controller's own System One policy in place. The controller type is
- * imported read-only, so the private field is addressed through a narrow cast;
- * no jev-agent file is modified. */
+/**
+ * Install the deterministic DESCEND helper only when the controller is already
+ * using the explicit fallback policy. A real TypeSafe Jev policy keeps complete
+ * WHICH authority; code may filter hard hazards, but must not replace Jev's
+ * semantic WAIT with a different valid action.
+ */
 export function installDescendAwarePolicy(
   controller: object,
   hazards: readonly DeathHazard[],
@@ -89,5 +92,6 @@ export function installDescendAwarePolicy(
 ): void {
   const holder = controller as { jev?: JevPolicy }
   if (holder.jev === undefined) return
+  if (holder.jev.kind !== 'fallback') return
   holder.jev = new DescendAwarePolicy(holder.jev, hazards, log)
 }
