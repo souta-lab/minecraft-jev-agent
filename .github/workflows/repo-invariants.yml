@@ -62,6 +62,8 @@ jobs:
         run: npm run game-data-test && npm run minecraft-truth-test
       - name: Option and verification semantics
         run: npm run option-spec-test && npm run action-verify-test && npm run protected-goals-test
+      - name: Progress taxonomy fixtures
+        run: npm run progress-taxonomy-test
       - name: Grounded reachability
         run: npm run reachability-test
       - name: Recovery policy regressions
