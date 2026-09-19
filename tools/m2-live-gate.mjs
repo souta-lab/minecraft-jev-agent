@@ -110,7 +110,17 @@ function acceptanceArgs(argv, env = process.env) {
   const runId = exactRunId(argv, env)
   if (runId === null) return []
   const args = forwardedWatchArgs(argv)
-  return args.includes('--run') ? ['--run', runId] : []
+  const out = []
+  if (args.includes('--run')) out.push('--run', runId)
+  const logIndex = args.indexOf('--log')
+  if (logIndex !== -1 && typeof args[logIndex + 1] === 'string') out.push('--log', args[logIndex + 1])
+  return out
+}
+
+/** The inventory evidence source m2-acceptance reported (live socket vs resident snapshot). */
+export function inventoryEvidenceSource(stdout) {
+  const match = /^evidence: (live-socket|run-scoped-snapshot)$/m.exec(typeof stdout === 'string' ? stdout : '')
+  return match?.[1] ?? 'unknown'
 }
 
 export async function runGate({
@@ -140,8 +150,9 @@ export async function runGate({
   if (acceptance.stderr.trim()) write(acceptance.stderr.trimEnd())
 
   const result = combineEvidence(watch.code, acceptance.code)
+  const inventorySource = inventoryEvidenceSource(acceptance.stdout)
   write(
-    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code}`,
+    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code} inventorySource=${inventorySource}`,
   )
   return result.code
 }

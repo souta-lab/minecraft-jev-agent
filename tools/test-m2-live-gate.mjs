@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { combineEvidence, exactRunId, hasRunScope, runGate, WATCH, ACCEPTANCE } from './m2-live-gate.mjs'
+import { combineEvidence, exactRunId, hasRunScope, inventoryEvidenceSource, runGate, WATCH, ACCEPTANCE } from './m2-live-gate.mjs'
 
 let checks = 0
 function ok(label) {
@@ -117,10 +117,40 @@ function ok(label) {
     script: WATCH,
     args: ['--run', 'run-abc', '--since', '2026-09-18T14:00:00Z', '--log', '/tmp/run.log'],
   })
-  assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc'] })
+  assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc', '--log', '/tmp/run.log'] })
   assert.match(lines.join('\n'), /M2_LIVE_GATE runId=run-abc/)
   assert.match(lines.join('\n'), /M2_LIVE_RESULT status=PASS reason=closed_loop_m2_verified runId=run-abc watch=0 acceptance=0/)
   ok('exact run join may carry an additional timestamp lower bound without mixing children')
+
+{
+  // The gate must forward the log so acceptance can verify the snapshot's
+  // build/source against the run's BOOT/BUILD records, and report the source.
+  const calls = []
+  const lines = []
+  const runner = async (script, args) => {
+    calls.push({ script, args })
+    if (script === WATCH) return { code: 0, stdout: 'M2_REQUIRED status=COMPLETE\n', stderr: '' }
+    if (script === ACCEPTANCE) return { code: 0, stdout: 'evidence: run-scoped-snapshot\nRESULT: PASS\n', stderr: '' }
+    throw new Error(`unexpected script ${script}`)
+  }
+  const code = await runGate({
+    argv: ['--run', 'run-abc', '--log', '/tmp/run.log'],
+    env: {},
+    runner,
+    write: (line) => lines.push(line),
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(calls[1], { script: ACCEPTANCE, args: ['--run', 'run-abc', '--log', '/tmp/run.log'] })
+  assert.match(lines.join('\n'), /inventorySource=run-scoped-snapshot/)
+  ok('gate reports the inventory evidence source (run-scoped-snapshot) for a snapshot PASS')
+}
+
+{
+  assert.equal(inventoryEvidenceSource('evidence: live-socket\nRESULT: PASS\n'), 'live-socket')
+  assert.equal(inventoryEvidenceSource('evidence: run-scoped-snapshot\nRESULT: PASS\n'), 'run-scoped-snapshot')
+  assert.equal(inventoryEvidenceSource('RESULT: UNKNOWN\n'), 'unknown')
+  ok('inventoryEvidenceSource distinguishes live-socket, run-scoped-snapshot and unknown')
+}
 }
 
 {
@@ -140,4 +170,4 @@ function ok(label) {
   ok('M2_RUN_ID env scope is inherited by both child processes')
 }
 
-console.log(`m2-live-gate: ${checks}/11 checks passed`)
+console.log(`m2-live-gate: ${checks}/13 checks passed`)

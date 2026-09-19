@@ -13,18 +13,45 @@
 // the resident runId. Transient rungs (logs, planks, crafting table,
 // wooden/stone tools, raw ore) are consumed before the final snapshot.
 //
+// Inventory evidence has TWO documented sources, resolved in this order and
+// reported on the `evidence:` line:
+//   1. `live-socket`         - the resident answers the control socket for the
+//                              SAME runId; used whenever available.
+//   2. `run-scoped-snapshot` - the resident's own `m2-snapshot-<runId>.json`,
+//                              written from live bot state when each marker
+//                              fired, so evidence survives the process exiting.
+// The snapshot is only accepted when ALL hold, else UNKNOWN (never PASS):
+//   - `snapshot.runId === --run`;
+//   - the recorded `buildHash` / `bootSourceSha` equal that run's BUILD `hash`
+//     and BOOT `source` (read from the log; `--log` overrides the default);
+//   - the recorded ordered chain PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE
+//     is VALID (the same chain m2-watch enforces).
+//
 // MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
 // HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
 // belongs to the SEPARATE M3 acceptance defined below (`M3_CRITERIA` /
 // `runM3Acceptance`, CLI `--m3`) and is never consulted by the M2 pass/fail
 // path, so M2 and M3 cannot drift back into each other.
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
 
 export const SOCK_PATH =
   process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
+/**
+ * Run-scoped evidence the RESIDENT writes at marker time. A snapshot for one run
+ * can never satisfy another: both the filename and the body's `runId` are bound,
+ * and the recorded build/source must match the run's BOOT/BUILD records.
+ */
+export const M2_SNAPSHOT_DIR =
+  process.env.M2_SNAPSHOT_DIR ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident'
+export const M2_LOG_PATH =
+  process.env.M2_LOG ?? process.env.BUDDY_LOG ?? '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
+export const M2_SNAPSHOT_RECORD = 'm2-snapshot'
+export const M2_REQUIRED_MARKERS = Object.freeze(['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'])
+
+export const EVIDENCE_SOURCES = Object.freeze(['live-socket', 'run-scoped-snapshot'])
 /**
  * Resident report can briefly queue behind a generation boundary. Three
  * seconds produced false UNKNOWN results during an otherwise healthy socket
@@ -135,6 +162,89 @@ export function evaluateCriteria(criteria, inventory) {
   return { allPass, observed }
 }
 
+export function snapshotPathFor(runId, dir = M2_SNAPSHOT_DIR) {
+  return `${dir}/m2-snapshot-${runId}.json`
+}
+
+export function readSnapshotFile(runId, dir = M2_SNAPSHOT_DIR) {
+  const path = snapshotPathFor(runId, dir)
+  if (!existsSync(path)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    if (parsed.record !== M2_SNAPSHOT_RECORD) return null
+    if (typeof parsed.runId !== 'string' || parsed.runId !== runId) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** Same ordered-subsequence rule as m2-watch deriveFrontier. */
+export function orderedRequiredChain(sequence) {
+  const observed = []
+  let cursor = 0
+  for (const marker of Array.isArray(sequence) ? sequence : []) {
+    const want = M2_REQUIRED_MARKERS[cursor]
+    if (want === undefined) break
+    if (marker !== want) continue
+    observed.push(marker)
+    cursor += 1
+  }
+  return { valid: cursor === M2_REQUIRED_MARKERS.length, observed }
+}
+
+function snapshotHasOrderedChain(snapshot) {
+  const sequence = Array.isArray(snapshot?.sequence)
+    ? snapshot.sequence
+    : Array.isArray(snapshot?.markers)
+      ? snapshot.markers.map((marker) => marker?.name)
+      : []
+  const { valid, observed } = orderedRequiredChain(sequence)
+  if (!valid) return { valid, observed }
+  return { valid: snapshot?.chain?.status === 'VALID', observed }
+}
+
+function snapshotInventory(snapshot) {
+  const inventory = snapshot?.inventory
+  if (inventory === null || typeof inventory !== 'object' || Array.isArray(inventory)) return null
+  return inventory
+}
+
+/** BOOT `source=` + the following BUILD `hash=` for one run, from the resident log. */
+export function readRunIdentityFromLog(runId, logPath = M2_LOG_PATH) {
+  if (!existsSync(logPath)) return null
+  let lines
+  try {
+    lines = readFileSync(logPath, 'utf8').split('\n')
+  } catch {
+    return null
+  }
+  let bootSourceSha = null
+  let buildHash = null
+  let inRun = false
+  for (const line of lines) {
+    if (/\bBOOT\b(?!_)/.test(line)) {
+      const lineRunId = /\brunId=(run-[A-Za-z0-9-]+)/.exec(line)?.[1] ?? null
+      if (lineRunId !== runId) {
+        if (inRun) break
+        continue
+      }
+      inRun = true
+      bootSourceSha = /\bsource=([^\s]+)/.exec(line)?.[1] ?? null
+      continue
+    }
+    if (!inRun) continue
+    const build = /\bBUILD\b[^\n]*\bhash=([^\s]+)/.exec(line)
+    if (build) {
+      buildHash = build[1]
+      break
+    }
+  }
+  if (!inRun) return null
+  return { runId, bootSourceSha, buildHash }
+}
+
 export function requestedRunId(argv = process.argv.slice(2), env = process.env) {
   let value = env.M2_RUN_ID ?? null
   const index = argv.indexOf('--run')
@@ -154,12 +264,38 @@ export async function runAcceptance({
   label = 'M2',
   criteria = M2_CRITERIA,
   chain = M2_CAUSAL_CHAIN,
+  snapshotDir = M2_SNAPSHOT_DIR,
+  logPath = M2_LOG_PATH,
+  readSnapshot,
+  readRunIdentity,
 } = {}) {
   const ts = now().toISOString()
   write(`${label} acceptance check — ${ts}`)
   write(`socket : ${sockPath}`)
   write(`command: ${JSON.stringify(REPORT_COMMAND)}`)
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
+
+  const resolveSnapshot = readSnapshot ?? ((runId) => readSnapshotFile(runId, snapshotDir))
+  const resolveIdentity = readRunIdentity ?? ((runId) => readRunIdentityFromLog(runId, logPath))
+
+  const emit = (data, reportData, inventory) => {
+    // Printed only after a readable evidence source with a validated run scope:
+    // the chain claim is never made for unavailable or out-of-scope evidence.
+    write(`chain: ${chain.join(' -> ')}`)
+    const { allPass, observed } = evaluateCriteria(criteria, inventory)
+    for (const { item, need } of criteria) {
+      write(`${observed[item] >= need ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${observed[item]})`)
+    }
+    const wedge = data?.stats?.wedge ?? reportData?.stats?.wedge ?? null
+    const goalComplete = data?.stats?.goalComplete ?? reportData?.stats?.goalComplete ?? null
+    const milestone = data?.milestone ?? reportData?.milestone ?? null
+    write(`milestone: ${milestone === null ? 'unknown' : milestone}`)
+    write(`wedge: ${wedge === null ? 'unknown' : wedge}`)
+    write(`goalComplete: ${goalComplete === null ? 'unknown' : goalComplete}`)
+    write(`inventory: ${JSON.stringify(observed)}`)
+    write(`RESULT: ${allPass ? 'PASS' : 'FAIL'}`)
+    return allPass ? 0 : 1
+  }
 
   const reportReply = await request(REPORT_COMMAND.cmd)
   const reportData = unwrapReply(reportReply)
@@ -170,43 +306,80 @@ export async function runAcceptance({
     if (statusData !== null && typeof statusData === 'object') data = statusData
     inventory = extractInventory(data)
   }
-
-  if (data === null || typeof data !== 'object' || inventory === null) {
-    write('live: unavailable')
-    write('RESULT: UNKNOWN (no fabricated values)')
-    return 2
-  }
-
   const observedRunId =
     typeof reportData?.runId === 'string'
       ? reportData.runId
       : typeof data?.runId === 'string'
         ? data.runId
         : null
-  write(`runId: ${observedRunId ?? 'unknown'}`)
-  if (expectedRunId !== null && observedRunId !== expectedRunId) {
+
+  if (inventory !== null && (expectedRunId === null || observedRunId === expectedRunId)) {
+    write('evidence: live-socket')
+    write(`runId: ${observedRunId ?? 'unknown'}`)
+    return emit(data, reportData, inventory)
+  }
+
+  if (inventory !== null) {
+    write(`runId: ${observedRunId ?? 'unknown'}`)
     write(`RESULT: UNKNOWN (run scope mismatch expected=${expectedRunId} observed=${observedRunId ?? 'unknown'})`)
     return 2
   }
 
-  // Printed only after a readable snapshot with a validated run scope: the
-  // chain claim is never made for unavailable or out-of-scope evidence.
-  write(`chain: ${chain.join(' -> ')}`)
-
-  const { allPass, observed } = evaluateCriteria(criteria, inventory)
-  for (const { item, need } of criteria) {
-    write(`${observed[item] >= need ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${observed[item]})`)
+  write('live: unavailable')
+  if (expectedRunId === null) {
+    write('RESULT: UNKNOWN (no fabricated values)')
+    return 2
   }
 
-  const wedge = data?.stats?.wedge ?? reportData?.stats?.wedge ?? null
-  const goalComplete = data?.stats?.goalComplete ?? reportData?.stats?.goalComplete ?? null
-  const milestone = data?.milestone ?? reportData?.milestone ?? null
-  write(`milestone: ${milestone === null ? 'unknown' : milestone}`)
-  write(`wedge: ${wedge === null ? 'unknown' : wedge}`)
-  write(`goalComplete: ${goalComplete === null ? 'unknown' : goalComplete}`)
-  write(`inventory: ${JSON.stringify(observed)}`)
-  write(`RESULT: ${allPass ? 'PASS' : 'FAIL'}`)
-  return allPass ? 0 : 1
+  const snapshotPath = snapshotPathFor(expectedRunId, snapshotDir)
+  const snapshot = await resolveSnapshot(expectedRunId)
+  if (snapshot === null) {
+    write(`snapshot: unavailable (${snapshotPath})`)
+    write('RESULT: UNKNOWN (no fabricated values)')
+    return 2
+  }
+  write(`snapshot: ${snapshotPath}`)
+  if (snapshot.runId !== expectedRunId) {
+    write(
+      `RESULT: UNKNOWN (snapshot run scope mismatch expected=${expectedRunId} observed=${typeof snapshot.runId === 'string' ? snapshot.runId : 'unknown'})`,
+    )
+    return 2
+  }
+  const chainCheck = snapshotHasOrderedChain(snapshot)
+  if (!chainCheck.valid) {
+    write(
+      `RESULT: UNKNOWN (snapshot chain incomplete expected=${M2_REQUIRED_MARKERS.join('->')} observed=${chainCheck.observed.join('->') || 'none'})`,
+    )
+    return 2
+  }
+  const identity = await resolveIdentity(expectedRunId)
+  if (identity === null) {
+    write(`RESULT: UNKNOWN (run identity unreadable for ${expectedRunId})`)
+    return 2
+  }
+  if (typeof identity.buildHash !== 'string' || snapshot.buildHash !== identity.buildHash) {
+    write(
+      `RESULT: UNKNOWN (snapshot build mismatch expected=${identity.buildHash ?? 'unknown'} observed=${snapshot.buildHash ?? 'unknown'})`,
+    )
+    return 2
+  }
+  if (typeof identity.bootSourceSha !== 'string' || snapshot.bootSourceSha !== identity.bootSourceSha) {
+    write(
+      `RESULT: UNKNOWN (snapshot source mismatch expected=${identity.bootSourceSha ?? 'unknown'} observed=${snapshot.bootSourceSha ?? 'unknown'})`,
+    )
+    return 2
+  }
+  const snapshotInv = snapshotInventory(snapshot)
+  if (snapshotInv === null) {
+    write('RESULT: UNKNOWN (snapshot inventory unreadable)')
+    return 2
+  }
+  write('evidence: run-scoped-snapshot')
+  write(`runId: ${snapshot.runId}`)
+  write(`snapshotGenerationId: ${typeof snapshot.generationId === 'string' ? snapshot.generationId : 'unknown'}`)
+  write(`snapshotBuildHash: ${snapshot.buildHash}`)
+  write(`snapshotBootSourceSha: ${snapshot.bootSourceSha}`)
+  return emit(snapshot, null, snapshotInv)
 }
 
 /**
@@ -218,6 +391,13 @@ export function runM3Acceptance(options = {}) {
   return runAcceptance({ ...options, label: 'M3', criteria: M3_CRITERIA, chain: M3_CAUSAL_CHAIN })
 }
 
+function requestedArg(name, argv = process.argv.slice(2), env = process.env, envName = null) {
+  const index = argv.indexOf(name)
+  if (index !== -1 && typeof argv[index + 1] === 'string') return argv[index + 1]
+  if (envName !== null && typeof env[envName] === 'string' && env[envName].trim() !== '') return env[envName]
+  return null
+}
+
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
   let expectedRunId = null
@@ -227,7 +407,10 @@ if (isMain) {
     process.stderr.write(`M2_ACCEPTANCE status=UNKNOWN reason=${error instanceof Error ? error.message : String(error)}\n`)
     process.exit(2)
   }
+  const logPath = requestedArg('--log', process.argv.slice(2), process.env, 'M2_LOG') ?? M2_LOG_PATH
+  const snapshotDir = requestedArg('--snapshot-dir', process.argv.slice(2), process.env, 'M2_SNAPSHOT_DIR') ?? M2_SNAPSHOT_DIR
   const useM3 = process.argv.slice(2).includes('--m3')
-  const code = useM3 ? await runM3Acceptance({ expectedRunId }) : await runAcceptance({ expectedRunId })
+  const options = { expectedRunId, logPath, snapshotDir }
+  const code = useM3 ? await runM3Acceptance(options) : await runAcceptance(options)
   process.exit(code)
 }

@@ -22,6 +22,7 @@ import type { GoalQueueSnapshot, PlannedGoal, QueuedGoal } from '../jev-agent/sr
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
+import { M2SnapshotRecorder } from './m2-snapshot.ts'
 import { OptionCompilingSystem2, optionSnapshotFromBot } from './option-brain.ts'
 import {
   MERCURY_ALLOWED_GOALS,
@@ -638,6 +639,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const m2Snapshot =
+    ctx.runId === undefined || ctx.m2SnapshotDir === undefined
+      ? null
+      : new M2SnapshotRecorder({
+          runId: ctx.runId,
+          generationId: id,
+          bootSourceSha: ctx.bootSourceSha ?? null,
+          buildHash: ctx.buildHash ?? null,
+          worldEpoch: ctx.worldKey.worldEpoch,
+          worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+          dir: ctx.m2SnapshotDir,
+          readInventory: () => inventoryCounts(ctx.bot),
+          log: (event, detail) => ctx.log(event, detail),
+        })
   const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
@@ -929,6 +944,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     verbose: true,
     eventSink: (event, detail) => {
       ctx.log(event, { ...detail, generationId: id })
+      m2Snapshot?.recordMarker(event)
       handleStationEvent(event, detail)
     },
     moveFailureEntries: world.moveFailures,
