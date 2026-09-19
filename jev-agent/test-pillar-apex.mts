@@ -14,7 +14,7 @@
 // impulse (its own regression is in test-pillar-jump.mts). No live server.
 //
 //   npm run pillar-apex-test
-import { formatPillarFail, pillarStepUp, PILLAR_APEX_MIN_RISE } from './src/pillarApex.ts'
+import { formatPillarFail, pillarStepUp, PILLAR_APEX_MIN_RISE, shouldRelocatePillarAfterFailure } from './src/pillarApex.ts'
 import type { PillarStepUpDeps } from './src/pillarApex.ts'
 import { formatPillarUpStep } from './src/pillarJump.ts'
 import type { SolidAt, Vec3Like } from './src/pillarJump.ts'
@@ -278,6 +278,19 @@ addCase('the PILLAR_FAIL marker carries all four sub-steps in the pinned format'
   ]
   const pass = markers.every((marker, index) => marker === expected[index])
   return { pass, detail: markers.join(' | ') }
+})
+
+addCase('only pre-placement takeoff failures are eligible for bounded pillar relocation', () => {
+  const takeoff = ['no_physics_tick', 'no_support', 'no_rise'].map((reason) =>
+    shouldRelocatePillarAfterFailure({ step: 'takeoff', reason }),
+  )
+  const terminal = [
+    shouldRelocatePillarAfterFailure({ step: 'apex', reason: 'no_rise' }),
+    shouldRelocatePillarAfterFailure({ step: 'place', reason: 'refused' }),
+    shouldRelocatePillarAfterFailure({ step: 'landing', reason: 'not_on_block' }),
+  ]
+  const pass = takeoff.every(Boolean) && terminal.every((value) => !value)
+  return { pass, detail: `takeoff=${takeoff.join(',')} terminal=${terminal.join(',')}` }
 })
 
 let failures = 0

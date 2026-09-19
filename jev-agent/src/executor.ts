@@ -55,7 +55,7 @@ import {
   formatPillarSearch,
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
-import { formatPillarFail, pillarStepUp } from './pillarApex.ts'
+import { formatPillarFail, pillarStepUp, shouldRelocatePillarAfterFailure } from './pillarApex.ts'
 import {
   formatPillarUpStep,
   installGroundCorrection,
@@ -1562,11 +1562,51 @@ export class Executor {
           isSolid: (y) => this.solidSupportAt(feet.x, y, feet.z),
         })
         if (placeStack === undefined || pose === null) {
-          this.logger.warn(
-            'executor',
-            formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
-            { actionId: candidate.id, ...feet },
-          )
+          if (pose === null && placeStack !== undefined) {
+            this.logger.warn(
+              'executor',
+              formatPillarRefused({ reason: 'no_footing', cell: feet, obstacle: null }),
+              { actionId: candidate.id, ...feet },
+            )
+            refusedColumns.add(pillarColumnKey(feet))
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations })
+            const fallback = relocation.target
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation from no-footing column to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
+          }
+          if (!(pose === null && placeStack !== undefined)) {
+            this.logger.warn(
+              'executor',
+              formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
+              { actionId: candidate.id, ...feet },
+            )
+          }
           break
         }
         const columnSafe = !this.pillarColumnUnsafe()
@@ -1703,6 +1743,40 @@ export class Executor {
             endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
             forcedRepositions: forcedTracker.value - forcedBefore,
           })
+          if (shouldRelocatePillarAfterFailure(climb.fail)) {
+            refusedColumns.add(pillarColumnKey(feet))
+            const relocation = decidePillarRelocation({
+              relocations,
+              policy: PILLAR_SEARCH_POLICY,
+              probes: this.probePillarColumns(feet, refusedColumns),
+              self: feet,
+            })
+            this.logger.info('agent', formatPillarSearch(relocation), { actionId: candidate.id, relocations, failure: climb.fail.reason })
+            const fallback = relocation.target
+            if (fallback !== null) {
+              this.logger.info('agent', formatPillarRelocate(feet, fallback, null), {
+                actionId: candidate.id,
+                from: feet,
+                to: fallback,
+                failure: climb.fail.reason,
+              })
+              try {
+                this.setPhase(candidate, epoch, 'pathing-to-pillar-column')
+                await this.pathTo(fallback, epoch, signal, 'GoalBlock')
+              } catch (error) {
+                if (error instanceof ActionCancelled) throw error
+                this.logger.warn(
+                  'executor',
+                  `PILLAR_UP relocation after takeoff failure to (${fallback.x},${fallback.y},${fallback.z}) failed: ${error instanceof Error ? error.message : String(error)}`,
+                  { actionId: candidate.id, failure: climb.fail.reason },
+                )
+                break
+              }
+              this.ensureOwned(epoch, signal)
+              relocations += 1
+              continue
+            }
+          }
           break
         }
         climbed += 1
@@ -1805,11 +1879,13 @@ export class Executor {
   }
 
   /**
-   * Move to the centre of the current grounded cell when only a fractional
-   * AABB overlap blocks headroom. The custom arrival predicate is intentionally
-   * tighter than normal path arrival so a same-cell no-op cannot be reported
-   * as a successful recenter. The two axis-aligned legs avoid asking the
-   * collision resolver to escape a diagonal corner overlap in one step.
+   * Move to a safe interior point of the current grounded cell when only a
+   * fractional AABB overlap blocks headroom. The custom arrival predicate is
+   * intentionally tighter than normal path arrival so a same-cell no-op cannot
+   * be reported as a successful recenter. The two axis-aligned legs avoid
+   * asking the collision resolver to escape a diagonal corner overlap in one
+   * step, while the boundary-derived target avoids extending the footprint
+   * farther into unsupported neighbouring cells than necessary.
    */
   private async recenterPillarColumn(
     candidate: Candidate,
@@ -1819,20 +1895,29 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<boolean> {
     const origin = this.bot.entity.position.clone()
-    const center = { x: column.x + 0.5, z: column.z + 0.5 }
-    const atCenter = (): boolean => {
+    const halfWidth = this.bot.entity.width > 0 ? this.bot.entity.width / 2 : 0.3
+    const margin = 0.04
+    const minX = column.x + halfWidth + margin
+    const maxX = column.x + 1 - halfWidth - margin
+    const minZ = column.z + halfWidth + margin
+    const maxZ = column.z + 1 - halfWidth - margin
+    const destination = {
+      x: blocker.x < column.x ? minX : blocker.x > column.x ? maxX : column.x + 0.5,
+      z: blocker.z < column.z ? minZ : blocker.z > column.z ? maxZ : column.z + 0.5,
+    }
+    const atDestination = (): boolean => {
       const position = this.bot.entity.position
       return (
         Math.floor(position.y + 1e-4) === Math.floor(origin.y + 1e-4) &&
-        Math.hypot(position.x - center.x, position.z - center.z) <= 0.08
+        Math.hypot(position.x - destination.x, position.z - destination.z) <= 0.08
       )
     }
-    if (atCenter()) return true
+    if (atDestination()) return true
     this.setPhase(candidate, epoch, 'recentering-pillar-column')
     const floorY = Math.floor(origin.y + 1e-4)
     const deadline = Date.now() + PILLAR_RECENTER_BUDGET_MS
-    const deltaX = center.x - origin.x
-    const deltaZ = center.z - origin.z
+    const deltaX = destination.x - origin.x
+    const deltaZ = destination.z - origin.z
     const awayX = Math.sign(column.x - blocker.x)
     const awayZ = Math.sign(column.z - blocker.z)
     const xMovesAway = awayX !== 0 && Math.sign(deltaX) === awayX
@@ -1845,12 +1930,12 @@ export class Executor {
           : Math.abs(deltaX) > Math.abs(deltaZ)
     const legs = xFirst
       ? [
-          { x: center.x, z: origin.z },
-          center,
+          { x: destination.x, z: origin.z },
+          destination,
         ]
       : [
-          { x: origin.x, z: center.z },
-          center,
+          { x: origin.x, z: destination.z },
+          destination,
         ]
     const atPoint = (point: { x: number; z: number }): boolean => {
       const position = this.bot.entity.position
@@ -1880,16 +1965,16 @@ export class Executor {
       this.logger.info('agent', `PILLAR_RECENTER failed reason=${error instanceof Error ? error.message : String(error)}`, {
         actionId: candidate.id,
         from: { x: origin.x, y: origin.y, z: origin.z },
-        to: { x: center.x, y: origin.y, z: center.z },
+        to: { x: destination.x, y: origin.y, z: destination.z },
       })
       return false
     }
     const position = this.bot.entity.position
-    const ok = atCenter()
+    const ok = atDestination()
     this.logger.info('agent', `PILLAR_RECENTER from=${origin.x},${origin.y},${origin.z} to=${position.x},${position.y},${position.z} ok=${ok}`, {
       actionId: candidate.id,
       column,
-      center,
+      destination,
     })
     return ok
   }
