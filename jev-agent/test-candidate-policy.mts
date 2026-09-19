@@ -184,6 +184,20 @@ addCase('#56: the integrated generator applies the active Option skill gate befo
   return { pass, detail: `branch=[${branch.map((entry) => entry.id).join(',')}] knownOnly=[${knownOnly.map((entry) => entry.id).join(',')}]` }
 })
 
+addCase('#56: a reachability recovery candidate cannot bypass the final Option skill gate', () => {
+  const base = stateWithOption('collect')
+  const current = { ...base.goalQueue.current!, targetItem: 'log', description: 'collect 1 x log' }
+  const state = {
+    ...base,
+    goal: { ...base.goal, targetItem: 'log', description: 'collect 1 x log' },
+    goalQueue: { ...base.goalQueue, current, goals: [current] },
+  }
+  const candidates = generateCandidates(state, { ...defaultCandidateOptions, allowedSkills: [] })
+  const fallbackMoves = candidates.filter((entry) => entry.kind === 'MOVE')
+  const pass = fallbackMoves.length === 0 && candidates.every((entry) => entry.kind === 'WAIT' || entry.kind === 'ESCALATE')
+  return { pass, detail: `candidates=${candidates.map((entry) => `${entry.id}:${String(entry.meta.optionSkill)}`).join(',')}` }
+})
+
 addCase('#56: the collect Option keeps only its grounded skills plus control', () => {
   const state = stateWithOption('collect')
   const source = [

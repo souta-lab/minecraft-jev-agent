@@ -375,7 +375,12 @@ export function generateGroundedCandidates(
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
   const scoped = applyOptionSkillGate(raw.candidates, state, options.allowedSkills)
-  return applyReachabilityGate(scoped, state, options, raw.placeRefusal)
+  const grounded = applyReachabilityGate(scoped, state, options, raw.placeRefusal)
+  // Reachability may add deterministic recovery candidates after it evaluates
+  // the initial list (for example the log exploration fallback). Re-apply the
+  // active Option's skill gate at the final boundary so a recovery path cannot
+  // escape the exact OptionSpec contract that scoped the raw candidates.
+  return { ...grounded, candidates: applyOptionSkillGate(grounded.candidates, state, options.allowedSkills) }
 }
 
 const OPTION_PREFIX_SKILLS: Readonly<Record<string, string>> = {
