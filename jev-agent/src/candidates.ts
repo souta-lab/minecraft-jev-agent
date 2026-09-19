@@ -714,8 +714,21 @@ function mineCandidates(
   if (mineActions.length === 0) candidates.push(...headroomCandidates(state, options))
   if (moveActions.length > 0) candidates.push(...stepCutCandidates(state, options))
   candidates.push(...moveActions)
+  const descent = descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY)
   if (candidates.length === 0) {
-    candidates.push(...descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY))
+    candidates.push(...descent)
+  } else if (
+    mineActions.length === 0 &&
+    moveActions.length > 0 &&
+    focusItem !== null &&
+    (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined)
+  ) {
+    // A visible underground target can be mechanically valid but still too far
+    // below the current floor for the MOVE stand spot to be useful.  Preserve
+    // the safe staircase/tunnel fact alongside those MOVE candidates so Jev
+    // can choose the vertical route.  This is candidate enumeration, not a
+    // deterministic preference: no MOVE is replaced or selected here.
+    candidates.push(...descent)
   }
   return candidates
 }

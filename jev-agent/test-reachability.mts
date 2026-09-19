@@ -1584,5 +1584,80 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   )
 }
 
+// (16) a visible stone target below the current floor must expose the proven
+// safe descent action even when ordinary MOVE candidates also exist.  The
+// previous generator only called descendCandidates when the MOVE list was
+// empty, so Jev received several stone MOVE targets but no way to enter the
+// stone layer and looped without progress.
+{
+  const feet: Vec3Json = { x: 10.5, y: 78, z: -34.5 }
+  const stone: BlockState = {
+    kind: 'stone',
+    name: 'stone',
+    position: { x: 12, y: 68, z: -34 },
+    distance: 10.3,
+    diggable: true,
+    inReach: false,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 12, y: 68, z: -35 },
+    yield: 'cobblestone',
+    harvestTool: 'pickaxe',
+    harvestTier: 0,
+  }
+  const down: DescentOption = {
+    dir: 'N',
+    mode: 'down',
+    dx: 0,
+    dz: -1,
+    step: { x: 10, y: 77, z: -35 },
+    wall: { x: 10, y: 78, z: -35 },
+    head: { x: 10, y: 79, z: -35 },
+    floor: { x: 10, y: 77, z: -35 },
+    wallSolid: true,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: 'dirt',
+    digHarvestTool: null,
+    digHarvestTier: null,
+    diggable: true,
+  }
+  const collect = queuedGoal({
+    id: 'g-cobblestone',
+    kind: 'collect',
+    description: 'collect 12 x cobblestone',
+    targetItem: 'cobblestone',
+    requiredCount: 12,
+  })
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ wooden_pickaxe: 1 }),
+    blocks: [stone],
+    descent: [down],
+    goal: goal({ id: 'collect:cobblestone', description: 'collect 12 x cobblestone', targetItem: 'cobblestone', requiredCount: 12 }),
+    goalQueue: queueWith(collect),
+  })
+  const grounded = generateGroundedCandidates(state, optionsWith(null))
+  const moves = grounded.candidates.filter((candidate) => candidate.kind === 'MOVE')
+  const descend = grounded.candidates.find((candidate) => candidate.kind === 'DESCEND')
+  check(
+    '(16a) underground stone target keeps MOVE and adds a safe DESCEND candidate',
+    moves.length > 0 && descend !== undefined && descend.meta.safe === true && descend.meta.mode === 'down',
+    `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  )
+  check(
+    '(16b) the descent candidate names the observed step geometry',
+    descend !== undefined &&
+      descend.target?.x === 10 &&
+      descend.target?.y === 77 &&
+      descend.target?.z === -35 &&
+      descend.meta.stepX === 10 &&
+      descend.meta.stepY === 77 &&
+      descend.meta.stepZ === -35,
+    descend === undefined ? 'no DESCEND candidate' : JSON.stringify(descend.meta),
+  )
+}
+
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)
 if (failures > 0) process.exit(1)
