@@ -1509,5 +1509,80 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   )
 }
 
+// (15) a bounded staircase step can leave the bot on a canopy with no safe
+// downward landing in the current sensor slice. A same-level DescentOption is
+// still a mechanically proven way to reposition and acquire the next descent
+// observation. It must stay inside the selected furnace prerequisite envelope,
+// rather than becoming an unrelated MOVE or an unsafe drop.
+{
+  const feet: Vec3Json = { x: -15.5, y: 71, z: 3.47 }
+  const furnace: KnownResource = { name: 'furnace', kind: 'station', position: { x: 8, y: 65, z: 24 } }
+  const smelt = queuedGoal({
+    id: 'g-descent-recovery',
+    kind: 'smelt',
+    description: 'smelt 1 x charcoal',
+    targetItem: 'charcoal',
+    requiredCount: 1,
+  })
+  const levelStep: DescentOption = {
+    dir: 'W',
+    mode: 'level',
+    dx: -1,
+    dz: 0,
+    step: { x: -17, y: 71, z: 3 },
+    wall: { x: -17, y: 71, z: 3 },
+    head: { x: -17, y: 72, z: 3 },
+    floor: { x: -17, y: 70, z: 3 },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: null,
+    digHarvestTool: null,
+    digHarvestTier: null,
+    diggable: false,
+  }
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ oak_log: 1, oak_planks: 3, stick: 2 }),
+    descent: [levelStep],
+    signals: signals({ knownResources: [furnace] }),
+    goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 }),
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(state, optionsWith(null))
+  const retrieveId = 'RETRIEVE:known:station:furnace:b8_65_24'
+  const withheld = grounded.withheld.find((entry) => entry.candidate.id === retrieveId)
+  const recovery = grounded.candidates.find(
+    (candidate) => candidate.kind === 'MOVE' && candidate.meta.verticalRecovery === 'safe_level_step',
+  )
+  check(
+    '(15a) no safe down plan with a safe level step yields a reposition candidate',
+    withheld !== undefined &&
+      withheld.result.reason === 'needs_descend' &&
+      withheld.result.missingCapabilities.some((capability) => capability.kind === 'descend_plan') &&
+      recovery !== undefined &&
+      recovery.target?.x === -17 &&
+      recovery.target?.y === 71 &&
+      recovery.target?.z === 3,
+    `withheld=${withheld?.result.reason ?? 'none'} recovery=${recovery?.id ?? 'none'} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  )
+  check(
+    '(15b) the reposition remains in the use_known_station prerequisite envelope',
+    recovery !== undefined &&
+      recovery.meta.capabilityAcquisition === true &&
+      recovery.meta.missingCapability === 'descend_plan' &&
+      recovery.meta.prerequisiteRole === 'furnace_station' &&
+      recovery.meta.prereqPath === 'use_known_station',
+    recovery === undefined ? 'no recovery candidate' : JSON.stringify(recovery.meta),
+  )
+  check(
+    '(15c) no unsafe DROP/DOWN candidate is invented',
+    !grounded.candidates.some((candidate) => candidate.kind === 'DESCEND' || candidate.meta.verticalRecovery === 'unsafe_drop'),
+    grounded.candidates.map((candidate) => `${candidate.kind}:${candidate.id}`).join(','),
+  )
+}
+
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)
 if (failures > 0) process.exit(1)
