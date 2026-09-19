@@ -70,6 +70,26 @@ function snapshot(overrides = {}) {
   }
 }
 
+function consumedIntermediateSnapshot(overrides = {}) {
+  return snapshot({
+    markers: [
+      { name: 'PREREQ_OPTION', atMs: Date.parse('2026-09-19T18:21:53.724Z'), at: '2026-09-19T18:21:53.724Z', inventory: { ...SATISFIED_INVENTORY, charcoal: 1, iron_ingot: 0, iron_pickaxe: 0 } },
+      { name: 'FURNACE_READY', atMs: Date.parse('2026-09-19T18:21:54.724Z'), at: '2026-09-19T18:21:54.724Z', inventory: { ...SATISFIED_INVENTORY, charcoal: 1, iron_ingot: 0, iron_pickaxe: 0 } },
+      { name: 'SMELT_DONE', atMs: Date.parse('2026-09-19T18:22:04.501Z'), at: '2026-09-19T18:22:04.501Z', inventory: { ...SATISFIED_INVENTORY, charcoal: 0, iron_ingot: 3, iron_pickaxe: 0 } },
+    ],
+    inventory: { ...SATISFIED_INVENTORY, charcoal: 0, iron_ingot: 0, iron_pickaxe: 0 },
+    terminal: {
+      actionId: 'CRAFT:iron_pickaxe',
+      verified: true,
+      status: 'done',
+      atMs: Date.parse('2026-09-19T18:22:10.000Z'),
+      at: '2026-09-19T18:22:10.000Z',
+      inventory: { ...SATISFIED_INVENTORY, charcoal: 0, iron_ingot: 0, iron_pickaxe: 1 },
+    },
+    ...overrides,
+  })
+}
+
 const BOOT_IDENTITY = { runId: RUN, bootSourceSha: BOOT_SHA, buildHash: BUILD_HASH }
 
 // Snapshot tests focus on run-scoped inventory/chain provenance. The M2 gate
@@ -80,7 +100,7 @@ const POLICY_EVIDENCE = {
   generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
 }
 
-async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
+async function judge({ snap, identity = BOOT_IDENTITY, live = null, policyEvidence = POLICY_EVIDENCE } = {}) {
   const out = capture()
   const code = await runAcceptance({
     request: async () => live,
@@ -90,7 +110,7 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
     now: () => new Date('2026-09-19T18:32:00.000Z'),
     write: out.write,
     sockPath: '/tmp/no-resident.sock',
-    policyEvidence: POLICY_EVIDENCE,
+    policyEvidence,
   })
   return { code, text: out.text() }
 }
@@ -148,6 +168,57 @@ async function judge({ snap, identity = BOOT_IDENTITY, live = null } = {}) {
   assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
   assert.doesNotMatch(text, /PASS charcoal|FAIL charcoal/, text)
   ok('snapshot without the ordered chain -> UNKNOWN/exit 2')
+}
+
+// The actual acceptance entry point must consume retained marker samples and
+// same-run terminal craft evidence. The top-level latest inventory intentionally
+// has consumed charcoal and ingots.
+{
+  const { code, text } = await judge({ snap: consumedIntermediateSnapshot() })
+  assert.equal(code, 0, `consumed intermediates plus terminal craft must PASS but returned ${code}:\n${text}`)
+  assert.match(text, /PASS charcoal >= 1 \(observed 1\)/, text)
+  assert.match(text, /PASS iron_ingot >= 3 \(observed 3\)/, text)
+  assert.match(text, /PASS iron_pickaxe >= 1 \(observed 1\)/, text)
+  assert.match(text, /RESULT: PASS/, text)
+  ok('runAcceptance consumes per-marker intermediates and terminal craft evidence -> PASS')
+}
+
+{
+  const { code, text } = await judge({ snap: consumedIntermediateSnapshot({ runId: 'run-snapshot-b' }) })
+  assert.equal(code, 2, `consumed per-marker evidence from another run must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
+  ok('consumed per-marker snapshot runId mismatch -> UNKNOWN/exit 2')
+}
+
+{
+  const { code, text } = await judge({ snap: consumedIntermediateSnapshot(), identity: { ...BOOT_IDENTITY, buildHash: 'ffffffffffff' } })
+  assert.equal(code, 2, `consumed per-marker build mismatch must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.doesNotMatch(text, /RESULT: (PASS|FAIL)/, text)
+  ok('consumed per-marker snapshot build mismatch -> UNKNOWN/exit 2')
+}
+
+{
+  const live = { runId: RUN, status: { truth: { inventory: { charcoal: 0, iron_ingot: 0, iron_pickaxe: 1 } } }, stats: {}, milestone: 'iron_pickaxe' }
+  const { code, text } = await judge({ snap: consumedIntermediateSnapshot(), live })
+  assert.equal(code, 0, `same-run terminal socket plus snapshot history must PASS but returned ${code}:\n${text}`)
+  assert.match(text, /evidence: run-scoped-snapshot/, text)
+  assert.match(text, /snapshotInventoryEvidence: marker-plus-terminal/, text)
+  assert.match(text, /RESULT: PASS/, text)
+  ok('same-run live terminal inventory joins bound snapshot history -> PASS')
+}
+
+{
+  const { code, text } = await judge({
+    snap: consumedIntermediateSnapshot(),
+    policyEvidence: {
+      decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 4 },
+      generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback' },
+    },
+  })
+  assert.equal(code, 2, `fallback-only snapshot evidence must be UNKNOWN but returned ${code}:\n${text}`)
+  assert.match(text, /POLICY: UNKNOWN/, text)
+  assert.doesNotMatch(text, /RESULT: PASS/, text)
+  ok('fallback-only snapshot evidence -> UNKNOWN/exit 2')
 }
 
 // 6. A live same-run socket still wins and is reported as such.

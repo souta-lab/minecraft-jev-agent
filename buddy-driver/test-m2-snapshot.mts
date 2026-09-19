@@ -222,6 +222,83 @@ addCase('the snapshot records run/build/world provenance fields', () =>
   }),
 )
 
+addCase('the valid chain keeps the first FURNACE_READY sample when a repeat consumes charcoal', () =>
+  withTempDir((dir) => {
+    const live: Counts = { raw_iron: 3, cobblestone: 28 }
+    const recorder = recorders(dir, RUN_A, () => ({ ...live }))
+    recorder.recordMarker('PREREQ_OPTION')
+    live.charcoal = 1
+    recorder.recordMarker('FURNACE_READY')
+    live.charcoal = 0
+    live.iron_ingot = 3
+    recorder.recordMarker('SMELT_DONE')
+    // A later repeat must not replace the chain-selected FURNACE_READY sample.
+    recorder.recordMarker('FURNACE_READY')
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    const furnace = snapshot?.markers.find((marker) => marker.name === 'FURNACE_READY')
+    const smelt = snapshot?.markers.find((marker) => marker.name === 'SMELT_DONE')
+    return {
+      pass:
+        snapshot?.chain.status === 'VALID' &&
+        furnace?.inventory.charcoal === 1 &&
+        smelt?.inventory.iron_ingot === 3,
+      detail: `chain=${snapshot?.chain.status} furnaceCharcoal=${furnace?.inventory.charcoal} smeltIngot=${smelt?.inventory.iron_ingot}`,
+    }
+  }),
+)
+
+addCase('a verified iron-pickaxe craft records run-scoped terminal inventory after the M2 chain', () =>
+  withTempDir((dir) => {
+    let clock = Date.parse('2026-09-19T18:21:50.000Z')
+    const live: Counts = { charcoal: 1, raw_iron: 3 }
+    const recorder = new M2SnapshotRecorder({
+      runId: RUN_A,
+      generationId: 'gen-one',
+      bootSourceSha: 'a'.repeat(40),
+      buildHash: 'buildhash0001',
+      worldEpoch: 3,
+      worldKey: '127.0.0.1:25565|minecraft:overworld|3',
+      dir,
+      readInventory: () => ({ ...live }),
+      now: () => (clock += 1000),
+    })
+    recorder.recordMarker('PREREQ_OPTION')
+    recorder.recordMarker('FURNACE_READY')
+    live.charcoal = 0
+    live.raw_iron = 0
+    live.iron_ingot = 3
+    recorder.recordMarker('SMELT_DONE')
+    live.iron_ingot = 0
+    live.iron_pickaxe = 1
+    recorder.recordTerminal('CRAFT:iron_pickaxe', { verified: true, status: 'done' })
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    return {
+      pass:
+        snapshot?.chain.status === 'VALID' &&
+        snapshot?.terminal?.actionId === 'CRAFT:iron_pickaxe' &&
+        snapshot?.terminal?.inventory.iron_pickaxe === 1 &&
+        (snapshot?.terminal?.atMs ?? 0) > (snapshot?.markers.find((marker) => marker.name === 'SMELT_DONE')?.atMs ?? 0),
+      detail: `chain=${snapshot?.chain.status} terminal=${snapshot?.terminal?.actionId} pickaxe=${snapshot?.terminal?.inventory.iron_pickaxe}`,
+    }
+  }),
+)
+
+addCase('an unverified or pre-chain iron-pickaxe craft never creates terminal evidence', () =>
+  withTempDir((dir) => {
+    const recorder = recorders(dir, RUN_A, () => ({ iron_pickaxe: 1 }))
+    const beforeChain = recorder.recordTerminal('CRAFT:iron_pickaxe', { verified: true, status: 'done' })
+    recorder.recordMarker('PREREQ_OPTION')
+    recorder.recordMarker('FURNACE_READY')
+    recorder.recordMarker('SMELT_DONE')
+    const unverified = recorder.recordTerminal('CRAFT:iron_pickaxe', { verified: false, status: 'done' })
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    return {
+      pass: beforeChain === null && unverified === null && snapshot?.terminal === null,
+      detail: `beforeChain=${beforeChain} unverified=${unverified} terminal=${snapshot?.terminal}`,
+    }
+  }),
+)
+
 let failures = 0
 process.stdout.write('run-scoped M2 snapshot recorder\n')
 process.stdout.write('-'.repeat(72) + '\n')

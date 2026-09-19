@@ -5,8 +5,9 @@
 // PASS requires BOTH:
 //   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
 //      the explicit resident runId; and
-//   2. the live resident M2 inventory contract observed while the resident still
-//      reports that same runId: charcoal >= 1 / iron_ingot >= 3 / iron_pickaxe >= 1.
+//   2. the resident M2 inventory contract observed in that same runId: transient
+//      charcoal/ingots may come from the resident's run-scoped marker snapshot,
+//      while a complete terminal socket report remains valid live evidence.
 //
 // The diamond-pickaxe terminal in MILESTONES.md is historical spec drift and is
 // deliberately NOT part of M2. It is owned by the SEPARATE M3 acceptance
