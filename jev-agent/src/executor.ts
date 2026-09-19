@@ -1585,6 +1585,15 @@ export class Executor {
       verticalStep,
       approachFailed: approachError !== null,
     })
+    // A vertical leg is only a bounded continuation when the horizontal
+    // approach itself did not fail.  If pathToNear raised a typed failure and
+    // the target is still outside the arrival radius, returning a soft
+    // progressed/done result hides the error and lets the same RETRIEVE reset
+    // its failure memory forever.  Preserve the original mechanical failure;
+    // the controller's bounded retry/retirement path must see it.
+    if (approachError !== null && !approach.arrived) {
+      throw approachError
+    }
     const outcome = classifyRetrieveOutcome({
       before,
       after,
