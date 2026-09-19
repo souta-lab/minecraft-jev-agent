@@ -126,7 +126,13 @@ async function collectBoots(logPath) {
 }
 
 function resolveRunScope(boots, sinceMs, explicitRunId) {
-  if (explicitRunId !== null || sinceMs === null) return { runId: explicitRunId, error: null }
+  if (explicitRunId !== null) {
+    const exists = boots.some((boot) => boot.runId === explicitRunId)
+    return exists
+      ? { runId: explicitRunId, error: null }
+      : { runId: null, error: 'explicit_run_boundary_missing' }
+  }
+  if (sinceMs === null) return { runId: null, error: null }
   const after = boots.filter((boot) => boot.tsMs >= sinceMs)
   if (after.length > 1) return { runId: null, error: 'multiple_run_boundaries_after_since' }
   if (after.length === 1) return { runId: after[0].runId, error: null }
@@ -226,7 +232,7 @@ try {
 
 if (scope.error !== null) {
   console.log('UNKNOWN')
-  console.error(`M2_SCOPE status=UNKNOWN reason=${scope.error} since=${sinceLabel}`)
+  console.error(`M2_SCOPE status=UNKNOWN reason=${scope.error} since=${sinceLabel} requestedRunId=${requestedRunId ?? 'none'}`)
   process.exit(2)
 }
 
