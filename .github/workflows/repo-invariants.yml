@@ -36,6 +36,8 @@ jobs:
         run: npm run milestone-status:check && npm run milestone-status-test
       - name: M2 evidence tooling fixtures
         run: npm run m2-watch-test && npm run m2-acceptance-test && npm run m2-live-gate-test
+      - name: Known-red baseline comparator fixtures
+        run: npm run known-red-test
       - name: Live issue-routing invariant
         run: npm run frontier:check
       - name: Live issue-evidence invariant
