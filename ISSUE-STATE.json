@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-18",
+  "updatedAt": "2026-09-19",
   "dimensions": {
     "policy": ["missing", "defined"],
     "implementation": ["none", "partial", "landed"],
@@ -40,10 +40,10 @@
       "acceptanceClass": "resident-soak",
       "policy": "defined",
       "implementation": "landed",
-      "verification": "integration",
-      "observation": "not-run",
-      "compliance": "unknown",
-      "note": "Lifecycle/resource cleanup fixtures exist; issue explicitly requires >=20 changed-hash reloads plus recovery cycles."
+      "verification": "live",
+      "observation": "pass",
+      "compliance": "pass",
+      "note": "Reconciled with the closed GitHub issue and its acceptance evidence: run-mu79id2u-h59c recorded 21/21 changed-hash reloads plus recovery cycles, listenerLeak=false, after-dispose tracked listeners/timers=0, and verifier PASS 2/2; the later post-restart evidence recorded callback-level checks and the issue closure decision. Current main contains the accepted implementation ancestor 104e689. Healthy observations and the closure decision remain distinct from this machine-readable compliance state."
     },
     "136": {
       "acceptanceClass": "architecture-surface-contract",

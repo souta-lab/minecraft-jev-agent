@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-18",
+  "asOf": "2026-09-19",
   "policy": {
     "wipLimit": 3,
     "unclassified": "backlog",
@@ -10,22 +10,22 @@
   },
   "now": [56, 79],
   "next": [136, 121, 52, 41],
-  "waitingLive": [73, 78, 46, 12, 3, 13],
+  "waitingLive": [73, 78, 46, 12, 3],
   "research": [129, 130],
   "future": [37, 80, 35],
   "referenceOnly": [11, 102],
   "clusters": {
     "M2_SMELT_ACCEPTANCE": [79, 78, 73, 46, 58, 12],
     "GROUNDED_OPTIONS": [11, 56, 136, 52, 121, 41, 130],
-    "RESIDENT_P1": [4, 3, 13, 39],
+    "RESIDENT_P1": [3, 39],
     "REPO_CONVERGENCE": [102, 103, 104, 107, 108, 109, 110, 111, 112, 113, 114, 115, 119, 120, 122, 123, 124, 125, 126, 128]
   },
   "notes": {
     "56": "Primary architecture lane: carry CurrentOptionContext/Option instance semantics to the Jev decision boundary before judging pi/beta authority.",
     "79": "Representative M2 closed-loop acceptance lane. Treat #73/#78/#46/#58/#12 as one smelt/prerequisite acceptance cluster, not five independent coding projects.",
-    "4": "Resolved by merged PR #139: planner mode is deterministic by default and Jev requires explicit opt-in; retain this entry only as historical P1 provenance.",
+    "4": "Resolved by merged PR #139: planner mode is deterministic by default and Jev requires explicit opt-in; retain the machine-readable offline acceptance record as historical P1 provenance without routing it as active work.",
     "136": "Current-code P1 correctness: return_to_surface currently treats a vertical Y target as surface truth and disagrees across planner/controller/Option DONE semantics. Route NEXT behind the active NOW lanes rather than exceeding WIP=3.",
-    "13": "Implementation/lifecycle fixtures exist, but the issue explicitly requires a >=20 changed-hash reload soak; keep WAITING_LIVE rather than starting another refactor without a current failing fixture.",
+    "13": "Closed after the run-scoped live soak and callback evidence recorded in ISSUE-STATE; retain the historical issue comments as provenance and do not start another refactor without a new failing observation.",
     "121": "Next architecture support: typed progress/failure semantics, useful to #11 migration after the hot data-flow is correct.",
     "129": "Research hypothesis only; never blocks runtime work.",
     "130": "Research/A-B experiment; blocked on #56-style state contract and not a NOW implementation target."
