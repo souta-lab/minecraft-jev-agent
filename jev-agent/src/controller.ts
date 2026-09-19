@@ -634,6 +634,32 @@ export function shouldClearActiveRetrieval(input: {
 }
 
 /**
+ * The one boundary between a finished RETRIEVE and the movement failure memory.
+ *
+ * A retrieve may reset the coordinate failure memory (`MOVE_FAILMEM_RESET`) only
+ * when it COMPLETED: the executor's `verified` for a RETRIEVE means the
+ * remaining distance to the target actually decreased. A vertical chunk or a
+ * dug staircase step is durable `progressed`/`blockRemoved` evidence, never
+ * completion - it must not reset the coordinate, and it must not be charged as
+ * zero progress either.
+ *
+ * Live M2 boundary (RC 42cb46e, target 36,56,41): the old gate was
+ * `hasObservableProgress` alone, so
+ * `arrival targetDistance=11.26m->11.25m y=59.5->58 vertical=reuse`
+ * reset the coordinate while PATH_CALLBACK stayed `outcome=stuck`, the
+ * inventory never gained raw_iron and HOP_PLAN / JUMP_ATTEMPT looped forever.
+ * A `done`/`verified=false`/`progressDelta=0` retrieve with no observable change
+ * is the #78 loop and charges the coordinate so it is eventually skipped.
+ */
+export function decideRetrieveMemory(
+  result: Pick<ExecutionResult, 'status' | 'verified' | 'itemsGained' | 'blockRemoved' | 'progressed'>,
+): { reset: boolean; charge: boolean } {
+  const completed = result.status === 'done' && result.verified
+  if (completed) return { reset: true, charge: false }
+  return { reset: false, charge: !hasObservableProgress(result) }
+}
+
+/**
  * The queue op the single-shot bootstrap plan is actually applied with.
  *
  * buddy-driver restores the durable host ledger into the controller queue
@@ -2777,7 +2803,8 @@ export class JevController {
       itemsGained: result.itemsGained,
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
-      arrived: moveArrived,
+      arrived: moveArrived || retrieveArrived,
+      distanceClosed: result.distanceClosed,
     })
     this.recentOutcomes.push({
       actionId: result.actionId,
@@ -2935,19 +2962,17 @@ export class JevController {
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
-        // Only a real retrieval (a dug staircase step, an obtained item, or a
-        // verified climb chunk that gained altitude) retires the active target.
-        // The executor reports `verified=true` for a sub-metre nudge, so clearing
-        // on that would disarm the stall assertion before it can ever fire.
-        if (truth.observableProgress) {
-          // A known resource that reported a body change but did NOT arrive keeps
-          // the stall track alive (`shouldClearActiveRetrieval`): a vertical or
-          // pillar chunk is not arrival, and clearing on it re-armed the live
-          // horizontal dead end (`outcome=stuck` + `MOVE_FAILMEM_RESET` forever).
+        // Only a COMPLETED retrieval (arrival, a measured distance closure, or an
+        // obtained item / removed block) retires the active target and resets the
+        // coordinate failure memory. A vertical chunk or a staircase step is
+        // `progressed` evidence, NOT completion: clearing or resetting on it
+        // re-armed the live horizontal dead end (`outcome=stuck` +
+        // `MOVE_FAILMEM_RESET` forever).
+        if (truth.resetsFailureMemory) {
           if (
             shouldClearActiveRetrieval({
               retrieval: candidate.meta.retrieval,
-              hasObservableProgress: true,
+              hasObservableProgress: hasObservableProgress(result),
               arrived: retrieveArrived,
             })
           ) {
@@ -2956,11 +2981,21 @@ export class JevController {
           }
           this.noteCandidateSuccess(result.actionId)
           this.recordMoveSuccess(candidate)
-        } else {
-          // A retrieval that reports completion while producing nothing observable
-          // must charge the coordinate failure memory so it is eventually skipped,
-          // and it must never be recorded as a verified success.
+        } else if (!truth.replanProgress && !truth.observableProgress) {
+          // A retrieval that reports completion while producing nothing
+          // observable must charge the coordinate failure memory so it is
+          // eventually skipped, and it must never be recorded as a verified
+          // success (`status=done verified=false progressDelta=0`). Bounded
+          // body progress (`replanProgress`) is not zero progress.
           this.recordMoveFailure(candidate, 'no_progress')
+        }
+        if (truth.status === 'unreached') {
+          this.logger.warn(
+            'agent',
+            `ACTION_RETRIEVE_UNREACHED actionId=${result.actionId} progressed=${result.progressed} blockRemoved=${result.blockRemoved} (progressed without closure)`,
+            { actionId: result.actionId, target: candidate.target, progressed: result.progressed },
+            this.tickCounter,
+          )
         }
         if (result.actionId.startsWith('RETRIEVE:known:station:furnace')) {
           const outcome = evaluateRetrieveAbandon({
