@@ -1,23 +1,17 @@
 #!/usr/bin/env node
-// m2-acceptance: read-only M2/M3 exit-criteria check against the live resident
-// control socket. Prints PASS/FAIL per criterion with observed numbers.
-// Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable (never fabricates a value).
+// m2-acceptance: read-only terminal M2/M3 inventory check against the live
+// resident control socket. Historical/consumable M2 proof belongs to m2-watch.
+// Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable.
 //
-// M2 CONTRACT (authoritative, this is the single source of truth):
-//   charcoal >= 1 / iron_ingot >= 3 / iron_pickaxe >= 1
-// joined within ONE resident run by the ordered causal chain
-//   PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE
-// (the log chain itself is enforced by m2-watch / m2-live-gate for the same run).
-// A single snapshot cannot prove ordering by itself, so the within-run rule is
-// enforced by the exact runId join: `--run <runId>` (or M2_RUN_ID) must match
-// the resident runId. Transient rungs (logs, planks, crafting table,
-// wooden/stone tools, raw ore) are consumed before the final snapshot.
+// M2 evidence contract:
+//   historical, same run (m2-watch):
+//     PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE(charcoal) -> SMELT_DONE(iron_ingot)
+//   terminal live predicate (this tool):
+//     iron_pickaxe >= 1
 //
-// MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
-// HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
-// belongs to the SEPARATE M3 acceptance defined below (`M3_CRITERIA` /
-// `runM3Acceptance`, CLI `--m3`) and is never consulted by the M2 pass/fail
-// path, so M2 and M3 cannot drift back into each other.
+// Charcoal and iron ingots are consumable intermediates. Requiring them to remain
+// in the final inventory after smelting/crafting makes correct progression erase
+// its own evidence and incorrectly requires the resident to remanufacture them.
 import { existsSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
@@ -25,38 +19,16 @@ import { pathToFileURL } from 'node:url'
 export const SOCK_PATH =
   process.env.M2_CONTROL_SOCK ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
-/**
- * Resident report can briefly queue behind a generation boundary. Three
- * seconds produced false UNKNOWN results during an otherwise healthy socket
- * session, which weakened the M2 FAIL-vs-UNKNOWN evidence distinction.
- */
 export const M2_CONTROL_TIMEOUT_MS = 10_000
 
-/**
- * The M2 acceptance contract, exactly as ruled: charcoal, iron_ingot and
- * iron_pickaxe. Each rung's `requires` names the rung that must already have
- * happened in the same run. This is the single source of the M2 criteria;
- * `diamond_pickaxe` is deliberately absent (it lives in M3_CRITERIA below).
- */
-export const M2_CRITERIA = [
-  { item: 'charcoal', need: 1, requires: null },
-  { item: 'iron_ingot', need: 3, requires: 'charcoal' },
-  { item: 'iron_pickaxe', need: 1, requires: 'iron_ingot' },
-]
+/** Durable terminal facts only. Consumable M2 facts are proved by m2-watch. */
+export const M2_CRITERIA = [{ item: 'iron_pickaxe', need: 1, requires: 'iron_ingot' }]
+/** Human-readable semantic chain; its historical prefix is delegated to m2-watch. */
+export const M2_CAUSAL_CHAIN = Object.freeze(['charcoal', 'iron_ingot', 'iron_pickaxe'])
 
-/** Ordered item names of M2_CRITERIA, printed so the required order is explicit in gate output. */
-export const M2_CAUSAL_CHAIN = Object.freeze(M2_CRITERIA.map(({ item }) => item))
-
-/**
- * Separate M3 acceptance: owns the diamond-pickaxe terminal that used to be
- * (incorrectly) part of M2. Exported and independently runnable via
- * `runM3Acceptance` / CLI `--m3`. It is NOT consulted by the M2 pass/fail path,
- * so the two contracts can never drift back into each other.
- */
+/** Separate M3 terminal criterion; never consulted by the M2 path. */
 export const M3_CRITERIA = [{ item: 'diamond_pickaxe', need: 1, requires: 'iron_pickaxe' }]
-
-/** Ordered item names of M3_CRITERIA, printed so the required order is explicit in gate output. */
-export const M3_CAUSAL_CHAIN = Object.freeze(M3_CRITERIA.map(({ item }) => item))
+export const M3_CAUSAL_CHAIN = Object.freeze(['diamond_pickaxe'])
 
 export const REPORT_COMMAND = { id: 'm2', cmd: 'report' }
 
@@ -70,9 +42,7 @@ export function makeControl(sockPath, { timeoutMs = M2_CONTROL_TIMEOUT_MS } = {}
       const finish = (value) => {
         if (settled) return
         settled = true
-        try {
-          sock?.destroy()
-        } catch {}
+        try { sock?.destroy() } catch {}
         resolve(value)
       }
       try {
@@ -86,11 +56,7 @@ export function makeControl(sockPath, { timeoutMs = M2_CONTROL_TIMEOUT_MS } = {}
         buf += chunk.toString('utf8')
         const nl = buf.indexOf('\n')
         if (nl === -1) return
-        try {
-          finish(JSON.parse(buf.slice(0, nl)))
-        } catch {
-          finish(null)
-        }
+        try { finish(JSON.parse(buf.slice(0, nl))) } catch { finish(null) }
       })
       sock.on('connect', () => sock.write(`${JSON.stringify({ id: 'm2', cmd })}\n`))
     })
@@ -104,9 +70,7 @@ export function unwrapReply(reply) {
     reply.data !== null &&
     typeof reply.data === 'object' &&
     ('ok' in reply || 'id' in reply)
-  ) {
-    return reply.data
-  }
+  ) return reply.data
   return reply
 }
 
@@ -123,7 +87,6 @@ export function observedCount(inventory, item) {
   return Number.isFinite(value) ? value : 0
 }
 
-/** Pure criterion evaluation shared by the M2 and M3 acceptance paths. */
 export function evaluateCriteria(criteria, inventory) {
   const observed = {}
   let allPass = true
@@ -189,9 +152,8 @@ export async function runAcceptance({
     return 2
   }
 
-  // Printed only after a readable snapshot with a validated run scope: the
-  // chain claim is never made for unavailable or out-of-scope evidence.
   write(`chain: ${chain.join(' -> ')}`)
+  if (label === 'M2') write('history: charcoal + iron_ingot delegated to exact-run m2-watch')
 
   const { allPass, observed } = evaluateCriteria(criteria, inventory)
   for (const { item, need } of criteria) {
@@ -209,11 +171,6 @@ export async function runAcceptance({
   return allPass ? 0 : 1
 }
 
-/**
- * Independent M3 acceptance: owns the diamond-pickaxe criterion moved out of M2.
- * Delegates to the shared runner with the M3 criteria/chain; the M2 pass/fail
- * path above never references it.
- */
 export function runM3Acceptance(options = {}) {
   return runAcceptance({ ...options, label: 'M3', criteria: M3_CRITERIA, chain: M3_CAUSAL_CHAIN })
 }
