@@ -39,6 +39,7 @@ import {
   headroomAcrossFootprint,
   planReuseLeg,
   resolvePillarStep,
+  shouldReplanAfterVerticalChunk,
 } from './verticalPlan.ts'
 import type {
   ApproachBlockage,
@@ -1121,14 +1122,22 @@ export class Executor {
       // Preserve bounded ascent as durable MOVE progress.  The next sensor
       // tick re-plans from the new Y instead of sending a canDig=false
       // horizontal path back down to the original standable spot.
-      if (verticalStep && climbedTo > startFloorY && target.y - climbedTo > 1) {
+      if (
+        shouldReplanAfterVerticalChunk({
+          verticalStep,
+          startY,
+          currentY: this.bot.entity.position.y,
+          targetY: target.y,
+        })
+      ) {
+        const direction = climbedTo > startFloorY ? 'climbed' : 'descended'
         return this.buildResult(
           candidate,
           epoch,
           startedAt,
           'done',
           'arrived',
-          `climbed from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
+          `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
           null,
           {
             verified: true,
@@ -1259,14 +1268,22 @@ export class Executor {
     // return walks back down (live oscillation y 7.8 -> 11.0 -> 9.8), throwing
     // the altitude away. Return the gained altitude as durable progress and let
     // the next decision re-plan the next chunk from the new Y.
-    if (verticalStep && climbedTo > startFloorY && target.y - climbedTo > 1) {
+    if (
+      shouldReplanAfterVerticalChunk({
+        verticalStep,
+        startY,
+        currentY: this.bot.entity.position.y,
+        targetY: target.y,
+      })
+    ) {
+      const direction = climbedTo > startFloorY ? 'climbed' : 'descended'
       return this.buildResult(
         candidate,
         epoch,
         startedAt,
         'done',
         'retrieved',
-        `climbed from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
+        `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
         null,
         {
           verified: true,
