@@ -504,6 +504,20 @@ addCase('readiness ordering moves a ready smelt ahead of an unmet collect (#46)'
   return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] moves=${JSON.stringify(result.moves)}` }
 })
 
+addCase('readiness ordering preserves the ordered core milestone sequence', () => {
+  const snapshot = makeOptionSnapshot({ inventory: {}, toolRank: 0 })
+  const goals: PlannedGoal[] = [
+    { kind: 'craft', description: 'craft 1 x crafting_table', targetItem: 'crafting_table', requiredCount: 1, core: true },
+    { kind: 'collect', description: 'collect 1 x flint', targetItem: 'flint', requiredCount: 1, core: true },
+  ]
+  const result = orderGoalsByReadiness(goals, snapshot)
+  const table = result.goals.findIndex((goal) => goal.targetItem === 'crafting_table')
+  const flint = result.goals.findIndex((goal) => goal.targetItem === 'flint')
+  const flintReady = result.ready.some((goal) => goal.targetItem === 'flint')
+  const pass = table >= 0 && flint > table && flintReady && result.moves.length === 0
+  return { pass, detail: `order=[${result.goals.map((goal) => goal.targetItem).join(',')}] flintReady=${flintReady} moves=${JSON.stringify(result.moves)}` }
+})
+
 addCase('readiness ordering is stable when every goal is ready (#46)', () => {
   // toolRank 3 = iron; diamond ore requires iron tier (#54), so this is the
   // smallest rank at which collect:diamond is ready.
