@@ -20,7 +20,9 @@
 //
 // Oscillation is detected explicitly from the recent position history
 // (`OSCILLATION_DETECTED from=<pos> to=<pos> cycles=<n> action=<escape|blacklist>`)
-// so the loop can be broken instead of merely counted.
+// so the loop can be broken instead of merely counted. The detector accepts
+// short repeated cycles, not only an A/B pair: live exploration can circulate
+// through several standable cells while the goal inventory stays unchanged.
 
 export interface Vec3Like {
   x: number
@@ -346,7 +348,7 @@ export interface OscillationDetection {
   detected: boolean
   from: Vec3Like | null
   to: Vec3Like | null
-  /** how many times the position pair repeated in the alternating suffix */
+  /** how many times the repeated position cycle appears in the suffix */
   cycles: number
 }
 
@@ -355,13 +357,14 @@ export interface OscillationOptions {
   epsilon?: number
   /** only inspect this many trailing samples (default 40) */
   window?: number
-  /** minimum A/B repetitions to call it oscillation (default 3) */
+  /** minimum cycle repetitions to call it oscillation (default 3) */
   minCycles?: number
 }
 
 /**
- * Detect a repeating position pair (A B A B ...) in the recent position history.
- * Pure function so the escape action is testable without a live bot.
+ * Detect a short repeating position cycle (A B A B ..., or A B C D A B C D ...)
+ * in the recent position history. Pure function so the escape action is
+ * testable without a live bot.
  */
 export function detectOscillation(history: readonly Vec3Like[], options: OscillationOptions = {}): OscillationDetection {
   const epsilon = options.epsilon ?? 0.75
@@ -380,23 +383,32 @@ export function detectOscillation(history: readonly Vec3Like[], options: Oscilla
   }
   if (points.length < minCycles * 2) return none
 
-  const last = points[points.length - 1]
-  const first = points[points.length - 2]
-  if (last === undefined || first === undefined || samePosition(first, last, epsilon)) return none
-
-  let cycles = 0
-  let index = points.length - 1
-  while (index >= 1) {
-    const current = points[index]
-    const pair = points[index - 1]
-    if (current === undefined || pair === undefined) break
-    if (!samePosition(current, last, epsilon) || !samePosition(pair, first, epsilon)) break
-    cycles += 1
-    index -= 2
+  const maxPeriod = Math.min(8, Math.floor(points.length / minCycles))
+  for (let period = 2; period <= maxPeriod; period += 1) {
+    if (points.length < period * minCycles) continue
+    const lastCycleStart = points.length - period
+    let cycles = 1
+    while (points.length >= (cycles + 1) * period) {
+      const cycleStart = points.length - (cycles + 1) * period
+      let matches = true
+      for (let offset = 0; offset < period; offset += 1) {
+        const prior = points[cycleStart + offset]
+        const current = points[lastCycleStart + offset]
+        if (prior === undefined || current === undefined || !samePosition(prior, current, epsilon)) {
+          matches = false
+          break
+        }
+      }
+      if (!matches) break
+      cycles += 1
+    }
+    if (cycles < minCycles) continue
+    const from = points[lastCycleStart]
+    const to = points[points.length - 1]
+    if (from === undefined || to === undefined || samePosition(from, to, epsilon)) continue
+    return { detected: true, from, to, cycles }
   }
-
-  if (cycles < minCycles) return none
-  return { detected: true, from: first, to: last, cycles }
+  return none
 }
 
 export function samePosition(a: Vec3Like, b: Vec3Like, epsilon = 0.75): boolean {

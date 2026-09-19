@@ -106,6 +106,15 @@ check(
   !detectOscillation([a, b, { x: 41, y: 12, z: 36 }, { x: 44, y: 14, z: 39 }]).detected,
   'straight history not flagged',
 )
+const c = { x: 41.5, y: 10.0, z: 35.0 }
+const d = { x: 40.5, y: 10.0, z: 36.0 }
+const cycle = [a, b, c, d, a, b, c, d, a, b, c, d]
+const cycleDetected = detectOscillation(cycle)
+check(
+  'a repeated four-position exploration cycle is detected as oscillation',
+  cycleDetected.detected && cycleDetected.cycles >= 3 && cycleDetected.from !== null && cycleDetected.to !== null,
+  `detected=${cycleDetected.detected} cycles=${cycleDetected.cycles}`,
+)
 const escapeMemory = new MoveFailMemory({ failureLimit: 3, cooldownMs: 10_000, now: () => clock })
 escapeMemory.blacklist(OVERWORLD, pos, 'no_progress')
 const escaped = filterBlacklistedMoves(
