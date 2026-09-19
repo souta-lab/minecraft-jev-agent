@@ -3122,6 +3122,31 @@ function capabilityAcquisitionCandidates(
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates
+      } else if (capability.kind === 'descend_plan') {
+        // A safe staircase can disappear after one bounded step when the bot
+        // is standing on a canopy/ledge.  The sensor still proves a same-level
+        // descent step, so expose that level move as the prerequisite action;
+        // the next observation can then derive the next down plan.  Do not
+        // invent a drop or an arbitrary exploration target here.
+        source = (state.descent ?? [])
+          .filter((step) => step.mode === 'level' && step.safe && step.floorSolid && (step.dx !== 0 || step.dz !== 0))
+          .map((step) => {
+            const target = step.step
+            const candidate = exploreMoveCandidate(
+              state,
+              options,
+              target,
+              moveLabel(target, 'reposition on a safe level step for descent', state.self.position),
+              null,
+            )
+            return {
+              ...candidate,
+              meta: {
+                ...candidate.meta,
+                verticalRecovery: 'safe_level_step',
+              },
+            }
+          })
       }
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue
