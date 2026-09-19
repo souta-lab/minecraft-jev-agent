@@ -6,7 +6,9 @@
 //   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
 //      the explicit resident runId; and
 //   2. live resident inventory criteria observed while the resident still
-//      reports that same runId.
+//      reports that same runId. That inventory ladder is ordered and terminal
+//      at `diamond_pickaxe` (MILESTONES.md:16), so an iron-tier snapshot alone
+//      never closes M2: m2-acceptance marks the diamond rung FAIL.
 //
 // `--since` remains useful for diagnosis in m2-watch, but is not a sufficient
 // join key for this close/no-close gate. An explicit --run (or M2_RUN_ID) is

@@ -1,7 +1,19 @@
 #!/usr/bin/env node
-// m2-acceptance: read-only M2 (iron age) exit-criteria check against the live
-// resident control socket. Prints PASS/FAIL per criterion with observed numbers.
+// m2-acceptance: read-only M2 exit-criteria check against the live resident
+// control socket. Prints PASS/FAIL per criterion with observed numbers.
 // Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable (never fabricates a value).
+//
+// MILESTONES.md:16 defines M2 as ending in a diamond pickaxe:
+//   furnace + charcoal -> iron ore -> iron tools -> diamond pickaxe
+// The durable inventory rungs are an ORDERED causal chain that closes M2 only
+// when every rung is observed within ONE resident run:
+//   charcoal -> iron_ingot x3 -> iron_pickaxe -> diamond_pickaxe
+// A single snapshot cannot prove ordering by itself, so the within-run rule is
+// enforced by the exact runId join: `--run <runId>` (or M2_RUN_ID) must match
+// the resident runId, and m2-live-gate additionally requires the ordered
+// PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE log chain for that same run.
+// Transient rungs (logs, planks, crafting table, wooden/stone tools, raw ore)
+// are consumed before the final snapshot; the log chain carries their proof.
 import { existsSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
@@ -16,11 +28,22 @@ export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
  */
 export const M2_CONTROL_TIMEOUT_MS = 10_000
 
+/**
+ * Durable-inventory ladder in causal order. Each rung's `requires` names the
+ * rung that must already have happened in the same run; the terminal rung is
+ * the M2 target from MILESTONES.md:16. The iron rungs stay because a diamond
+ * pickaxe can only exist after the full iron tier, and they keep the FAIL
+ * output diagnostic about which rung is missing.
+ */
 export const M2_CRITERIA = [
-  { item: 'charcoal', need: 1 },
-  { item: 'iron_ingot', need: 3 },
-  { item: 'iron_pickaxe', need: 1 },
+  { item: 'charcoal', need: 1, requires: null },
+  { item: 'iron_ingot', need: 3, requires: 'charcoal' },
+  { item: 'iron_pickaxe', need: 1, requires: 'iron_ingot' },
+  { item: 'diamond_pickaxe', need: 1, requires: 'iron_pickaxe' },
 ]
+
+/** Ordered item names of M2_CRITERIA, printed so the required order is explicit in gate output. */
+export const M2_CAUSAL_CHAIN = Object.freeze(M2_CRITERIA.map(({ item }) => item))
 
 export const REPORT_COMMAND = { id: 'm2', cmd: 'report' }
 
@@ -137,6 +160,10 @@ export async function runAcceptance({
     write(`RESULT: UNKNOWN (run scope mismatch expected=${expectedRunId} observed=${observedRunId ?? 'unknown'})`)
     return 2
   }
+
+  // Printed only after a readable snapshot with a validated run scope: the
+  // chain claim is never made for unavailable or out-of-scope evidence.
+  write(`chain: ${M2_CAUSAL_CHAIN.join(' -> ')}`)
 
   const observed = {}
   let allPass = true
