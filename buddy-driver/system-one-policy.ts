@@ -36,7 +36,6 @@ function excludeHardHazardCandidates(candidates: readonly Candidate[], hazards: 
 }
 
 export class DescendAwarePolicy implements JevPolicy {
-  readonly kind = 'fallback' as const
   readonly model: string
   private readonly inner: JevPolicy
   private readonly hazards: readonly DeathHazard[]
@@ -47,6 +46,12 @@ export class DescendAwarePolicy implements JevPolicy {
     this.hazards = hazards
     this.log = log
     this.model = `${inner.model}+descend-aware`
+  }
+
+  // Report the wrapped policy's kind, not a hardcoded one: JevController.policyKind
+  // (controller.ts:1408) and agent-runner's llm/deterministic pick read it.
+  get kind(): JevPolicy['kind'] {
+    return this.inner.kind
   }
 
   async decide(request: JevRequest, signal?: AbortSignal): Promise<JevResult> {
