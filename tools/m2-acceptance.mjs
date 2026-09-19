@@ -1,19 +1,23 @@
 #!/usr/bin/env node
-// m2-acceptance: read-only M2 exit-criteria check against the live resident
+// m2-acceptance: read-only M2/M3 exit-criteria check against the live resident
 // control socket. Prints PASS/FAIL per criterion with observed numbers.
 // Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable (never fabricates a value).
 //
-// MILESTONES.md:16 defines M2 as ending in a diamond pickaxe:
-//   furnace + charcoal -> iron ore -> iron tools -> diamond pickaxe
-// The durable inventory rungs are an ORDERED causal chain that closes M2 only
-// when every rung is observed within ONE resident run:
-//   charcoal -> iron_ingot x3 -> iron_pickaxe -> diamond_pickaxe
+// M2 CONTRACT (authoritative, this is the single source of truth):
+//   charcoal >= 1 / iron_ingot >= 3 / iron_pickaxe >= 1
+// joined within ONE resident run by the ordered causal chain
+//   PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE
+// (the log chain itself is enforced by m2-watch / m2-live-gate for the same run).
 // A single snapshot cannot prove ordering by itself, so the within-run rule is
 // enforced by the exact runId join: `--run <runId>` (or M2_RUN_ID) must match
-// the resident runId, and m2-live-gate additionally requires the ordered
-// PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE log chain for that same run.
-// Transient rungs (logs, planks, crafting table, wooden/stone tools, raw ore)
-// are consumed before the final snapshot; the log chain carries their proof.
+// the resident runId. Transient rungs (logs, planks, crafting table,
+// wooden/stone tools, raw ore) are consumed before the final snapshot.
+//
+// MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
+// HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
+// belongs to the SEPARATE M3 acceptance defined below (`M3_CRITERIA` /
+// `runM3Acceptance`, CLI `--m3`) and is never consulted by the M2 pass/fail
+// path, so M2 and M3 cannot drift back into each other.
 import { existsSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
@@ -29,21 +33,30 @@ export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 export const M2_CONTROL_TIMEOUT_MS = 10_000
 
 /**
- * Durable-inventory ladder in causal order. Each rung's `requires` names the
- * rung that must already have happened in the same run; the terminal rung is
- * the M2 target from MILESTONES.md:16. The iron rungs stay because a diamond
- * pickaxe can only exist after the full iron tier, and they keep the FAIL
- * output diagnostic about which rung is missing.
+ * The M2 acceptance contract, exactly as ruled: charcoal, iron_ingot and
+ * iron_pickaxe. Each rung's `requires` names the rung that must already have
+ * happened in the same run. This is the single source of the M2 criteria;
+ * `diamond_pickaxe` is deliberately absent (it lives in M3_CRITERIA below).
  */
 export const M2_CRITERIA = [
   { item: 'charcoal', need: 1, requires: null },
   { item: 'iron_ingot', need: 3, requires: 'charcoal' },
   { item: 'iron_pickaxe', need: 1, requires: 'iron_ingot' },
-  { item: 'diamond_pickaxe', need: 1, requires: 'iron_pickaxe' },
 ]
 
 /** Ordered item names of M2_CRITERIA, printed so the required order is explicit in gate output. */
 export const M2_CAUSAL_CHAIN = Object.freeze(M2_CRITERIA.map(({ item }) => item))
+
+/**
+ * Separate M3 acceptance: owns the diamond-pickaxe terminal that used to be
+ * (incorrectly) part of M2. Exported and independently runnable via
+ * `runM3Acceptance` / CLI `--m3`. It is NOT consulted by the M2 pass/fail path,
+ * so the two contracts can never drift back into each other.
+ */
+export const M3_CRITERIA = [{ item: 'diamond_pickaxe', need: 1, requires: 'iron_pickaxe' }]
+
+/** Ordered item names of M3_CRITERIA, printed so the required order is explicit in gate output. */
+export const M3_CAUSAL_CHAIN = Object.freeze(M3_CRITERIA.map(({ item }) => item))
 
 export const REPORT_COMMAND = { id: 'm2', cmd: 'report' }
 
@@ -110,6 +123,18 @@ export function observedCount(inventory, item) {
   return Number.isFinite(value) ? value : 0
 }
 
+/** Pure criterion evaluation shared by the M2 and M3 acceptance paths. */
+export function evaluateCriteria(criteria, inventory) {
+  const observed = {}
+  let allPass = true
+  for (const { item, need } of criteria) {
+    const got = observedCount(inventory, item)
+    observed[item] = got
+    if (got < need) allPass = false
+  }
+  return { allPass, observed }
+}
+
 export function requestedRunId(argv = process.argv.slice(2), env = process.env) {
   let value = env.M2_RUN_ID ?? null
   const index = argv.indexOf('--run')
@@ -126,9 +151,12 @@ export async function runAcceptance({
   write = (line) => process.stdout.write(`${line}\n`),
   sockPath = SOCK_PATH,
   expectedRunId = null,
+  label = 'M2',
+  criteria = M2_CRITERIA,
+  chain = M2_CAUSAL_CHAIN,
 } = {}) {
   const ts = now().toISOString()
-  write(`M2 acceptance check — ${ts}`)
+  write(`${label} acceptance check — ${ts}`)
   write(`socket : ${sockPath}`)
   write(`command: ${JSON.stringify(REPORT_COMMAND)}`)
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
@@ -163,16 +191,11 @@ export async function runAcceptance({
 
   // Printed only after a readable snapshot with a validated run scope: the
   // chain claim is never made for unavailable or out-of-scope evidence.
-  write(`chain: ${M2_CAUSAL_CHAIN.join(' -> ')}`)
+  write(`chain: ${chain.join(' -> ')}`)
 
-  const observed = {}
-  let allPass = true
-  for (const { item, need } of M2_CRITERIA) {
-    const got = observedCount(inventory, item)
-    observed[item] = got
-    const pass = got >= need
-    if (!pass) allPass = false
-    write(`${pass ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${got})`)
+  const { allPass, observed } = evaluateCriteria(criteria, inventory)
+  for (const { item, need } of criteria) {
+    write(`${observed[item] >= need ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${observed[item]})`)
   }
 
   const wedge = data?.stats?.wedge ?? reportData?.stats?.wedge ?? null
@@ -186,6 +209,15 @@ export async function runAcceptance({
   return allPass ? 0 : 1
 }
 
+/**
+ * Independent M3 acceptance: owns the diamond-pickaxe criterion moved out of M2.
+ * Delegates to the shared runner with the M3 criteria/chain; the M2 pass/fail
+ * path above never references it.
+ */
+export function runM3Acceptance(options = {}) {
+  return runAcceptance({ ...options, label: 'M3', criteria: M3_CRITERIA, chain: M3_CAUSAL_CHAIN })
+}
+
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
   let expectedRunId = null
@@ -195,6 +227,7 @@ if (isMain) {
     process.stderr.write(`M2_ACCEPTANCE status=UNKNOWN reason=${error instanceof Error ? error.message : String(error)}\n`)
     process.exit(2)
   }
-  const code = await runAcceptance({ expectedRunId })
+  const useM3 = process.argv.slice(2).includes('--m3')
+  const code = useM3 ? await runM3Acceptance({ expectedRunId }) : await runAcceptance({ expectedRunId })
   process.exit(code)
 }

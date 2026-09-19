@@ -14,8 +14,8 @@
     },
     "M2": {
       "title": "Iron-age closed loop",
-      "requires": ["run_scoped_prereq_option", "furnace_ready", "smelt_done:iron_ingot", "iron_pickaxe_inventory", "diamond_pickaxe_inventory", "current_main_live_inventory"],
-      "evaluator": { "type": "command", "script": "tools/m2-live-gate.mjs", "scopeArg": "--since" }
+      "requires": ["run_scoped_prereq_option", "furnace_ready", "smelt_done:iron_ingot", "iron_pickaxe_inventory", "current_main_live_inventory"],
+      "evaluator": { "type": "command", "script": "tools/m2-live-gate.mjs", "scopeArg": "--run" }
     },
     "M3": {
       "title": "Nether progression",
