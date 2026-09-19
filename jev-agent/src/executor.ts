@@ -514,6 +514,26 @@ export const RETRIEVE_ARRIVAL_RADIUS = 2
  */
 export const RETRIEVE_CLOSE_EPSILON = 0.5
 
+/**
+ * A vertical waypoint is not reached merely because the body is horizontally
+ * close to it.  The live M2 run reached the same x/z column one block above a
+ * staircase waypoint, then treated the no-op as a completed step and retried
+ * the distant resource forever.  Keep this predicate aligned with the
+ * `requireLevel` arrival branch in `walkByControls` so callers can verify the
+ * postcondition after any pathfinder fallback.
+ */
+export function isAtRequiredLevel(
+  position: { x: number; y: number; z: number },
+  target: Vec3Json,
+  horizontalTolerance = 1.2,
+  verticalTolerance = 0.75,
+): boolean {
+  return (
+    Math.hypot(position.x - target.x, position.z - target.z) <= horizontalTolerance &&
+    Math.abs(position.y - target.y) <= verticalTolerance
+  )
+}
+
 export type RetrieveApproachOutcome = 'arrived' | 'progressed' | 'stalled'
 
 export interface RetrieveApproachInput {
@@ -1724,9 +1744,18 @@ export class Executor {
     if (block === null || block.boundingBox === 'empty') {
       this.setPhase(candidate, epoch, 'stepping')
       try {
-        await this.pathTo(step, epoch, signal, goalKind)
+        await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
+        throw error instanceof ExecutorError
+          ? error
+          : new ExecutorError('path_stuck', `vertical step failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      if (!isAtRequiredLevel(this.bot.entity.position, step)) {
+        throw new ExecutorError(
+          'path_stuck',
+          `vertical step did not reach (${step.x},${step.y},${step.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
+        )
       }
       return false
     }
@@ -1763,9 +1792,18 @@ export class Executor {
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'stepping')
     try {
-      await this.pathTo(step, epoch, signal, goalKind)
+      await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
+      throw error instanceof ExecutorError
+        ? error
+        : new ExecutorError('path_stuck', `vertical step failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (!isAtRequiredLevel(this.bot.entity.position, step)) {
+      throw new ExecutorError(
+        'path_stuck',
+        `vertical step did not reach (${step.x},${step.y},${step.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
+      )
     }
     return true
   }
@@ -1861,7 +1899,13 @@ export class Executor {
     const startY = this.bot.entity.position.y
     let pathFailed = false
     try {
-      await this.pathToNear(tunnel, 1, epoch, signal)
+      await this.pathToNear(tunnel, 1, epoch, signal, { requireLevel: true })
+      if (!isAtRequiredLevel(this.bot.entity.position, tunnel)) {
+        throw new ExecutorError(
+          'path_stuck',
+          `tunnel entry did not reach (${tunnel.x},${tunnel.y},${tunnel.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
+        )
+      }
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       if (!(error instanceof ExecutorError)) throw error
@@ -1884,7 +1928,13 @@ export class Executor {
       const cleared = await this.localClearCell(candidate, leg.cell, blockName, epoch, signal)
       if (cleared) {
         try {
-          await this.pathToNear(tunnel, 1, epoch, signal)
+          await this.pathToNear(tunnel, 1, epoch, signal, { requireLevel: true })
+          if (!isAtRequiredLevel(this.bot.entity.position, tunnel)) {
+            throw new ExecutorError(
+              'path_stuck',
+              `tunnel entry did not reach (${tunnel.x},${tunnel.y},${tunnel.z}) after clearance`,
+            )
+          }
           this.ensureOwned(epoch, signal)
           return { step: verticalStepTowardTarget({ startY, currentY: this.bot.entity.position.y, targetY: target.y }), refused: false }
         } catch (retry) {
@@ -2705,7 +2755,7 @@ export class Executor {
       const position = this.bot.entity.position
       const horizontal = Math.hypot(position.x - target.x, position.z - target.z)
       if (options.requireLevel === true) {
-        return horizontal <= tolerance && Math.abs(position.y - target.y) <= 0.75
+        return isAtRequiredLevel(position, target, tolerance)
       }
       // Pickup targets legitimately sit a level below; horizontal-only arrival
       // lets the automatic pickup fire instead of the bot hopping at the edge.
@@ -3365,9 +3415,18 @@ export class Executor {
     if (Number.isFinite(step.x) && Number.isFinite(step.y) && Number.isFinite(step.z)) {
       this.setPhase(candidate, epoch, 'stepping')
       try {
-        await this.pathTo(step, epoch, signal, 'GoalBlock')
+        await this.pathTo(step, epoch, signal, 'GoalBlock', { requireLevel: true })
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
+        throw error instanceof ExecutorError
+          ? error
+          : new ExecutorError('path_stuck', `descent step failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      if (!isAtRequiredLevel(this.bot.entity.position, step)) {
+        throw new ExecutorError(
+          'path_stuck',
+          `descent step did not reach (${step.x},${step.y},${step.z}) from (${round2(this.bot.entity.position.x)},${round2(this.bot.entity.position.y)},${round2(this.bot.entity.position.z)})`,
+        )
       }
     }
     return this.buildResult(candidate, epoch, startedAt, 'done', 'descended', `descended via (${target.x},${target.y},${target.z})`, null, {
@@ -3567,10 +3626,13 @@ export class Executor {
     range: number,
     epoch: number,
     signal: AbortSignal,
+    options: { requireLevel?: boolean } = {},
   ): Promise<void> {
     if (this.options.actuation === 'pathfinder') {
       try {
-        const goal = new goals.GoalNear(position.x, position.y, position.z, range)
+        const goal = options.requireLevel === true
+          ? new goals.GoalBlock(position.x, position.y, position.z)
+          : new goals.GoalNear(position.x, position.y, position.z, range)
         const outcome = this.waitForGoal(epoch, signal, this.options.pickupPathTimeoutMs)
         this.bot.pathfinder.setGoal(goal)
         const result = await outcome
@@ -3585,13 +3647,15 @@ export class Executor {
         if (error instanceof ActionCancelled) throw error
         this.ensureOwned(epoch, signal)
         const message = error instanceof Error ? error.message : String(error)
-        this.logger.warn('executor', `stock pathfinder GoalNear failed (${message}); control-walk fallback`, {
+        const goalName = options.requireLevel === true ? 'GoalBlock' : 'GoalNear'
+        this.logger.warn('executor', `stock pathfinder ${goalName} failed (${message}); control-walk fallback`, {
           position,
           actionId: this.action?.id ?? 'unknown',
         })
       }
       const controlsWorked = await this.walkByControls(position, epoch, signal, {
         range,
+        requireLevel: options.requireLevel,
         budgetMs: this.options.pickupPathTimeoutMs,
       })
       if (!controlsWorked) await this.walkByPackets(position, range, epoch, signal)
@@ -3600,6 +3664,7 @@ export class Executor {
     }
     const controlsWorked = await this.walkByControls(position, epoch, signal, {
       range,
+      requireLevel: options.requireLevel,
       budgetMs: this.options.pickupPathTimeoutMs,
     })
     if (!controlsWorked) await this.walkByPackets(position, range, epoch, signal)

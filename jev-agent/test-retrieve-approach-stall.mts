@@ -17,7 +17,7 @@
 //      node --test test-retrieve-approach-stall.mts
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { classifyRetrieveApproach, ExecutorError, RETRIEVE_ARRIVAL_RADIUS } from './src/executor.ts'
+import { classifyRetrieveApproach, ExecutorError, isAtRequiredLevel, RETRIEVE_ARRIVAL_RADIUS } from './src/executor.ts'
 import type { RetrieveApproachInput } from './src/executor.ts'
 
 interface Case {
@@ -159,6 +159,22 @@ addCase('the typed stall carries the original path_stuck code, not a generic err
   const failure = new ExecutorError('path_stuck', 'packet locomotion blocked before (x,y,z)')
   const pass = failure.code === 'path_stuck' && failure.name === 'ExecutorError'
   return { pass, detail: `code=${failure.code} name=${failure.name}` }
+})
+
+addCase('a vertical waypoint one block above the body is not a completed step', () => {
+  const target = { x: -1, y: 61, z: 24 }
+  const stalled = { x: -0.66, y: 62, z: 23.5 }
+  const reached = { x: -0.5, y: 61, z: 24 }
+  const pass = !isAtRequiredLevel(stalled, target) && isAtRequiredLevel(reached, target)
+  return { pass, detail: `stalled=${isAtRequiredLevel(stalled, target)} reached=${isAtRequiredLevel(reached, target)}` }
+})
+
+addCase('vertical executor steps require level-verified path completion', () => {
+  const source = readFileSync(fileURLToPath(new URL('./src/executor.ts', import.meta.url)), 'utf8')
+  const staircaseRequiresLevel = source.includes('await this.pathTo(step, epoch, signal, goalKind, { requireLevel: true })')
+  const reuseRequiresLevel = source.includes('await this.pathToNear(tunnel, 1, epoch, signal, { requireLevel: true })')
+  const pass = staircaseRequiresLevel && reuseRequiresLevel
+  return { pass, detail: `staircase=${staircaseRequiresLevel} reuse=${reuseRequiresLevel}` }
 })
 
 let failures = 0
