@@ -13,7 +13,7 @@
 // and reports the failed one as `PILLAR_FAIL step=...`, so a consumed item can
 // never again read as an unattributed no-progress action.
 import { jumpWithGroundCorrection } from './pillarJump.ts'
-import type { JumpBotLike, PillarJumpDeps, Vec3Like } from './pillarJump.ts'
+import type { JumpBotLike, PillarJumpDeps, PillarJumpTrace, Vec3Like } from './pillarJump.ts'
 
 /**
  * The apex window. A verified vertex needs all three: a rise of at least
@@ -40,6 +40,8 @@ export interface PillarFail {
   rise: number
   samples: number
   detail?: string
+  /** takeoff observations for this exact pillar attempt, when available */
+  jumpTrace?: PillarJumpTrace
 }
 
 /**
@@ -89,7 +91,7 @@ export interface PillarStepUpDeps extends PillarJumpDeps {
 }
 
 export type PillarStepOutcome =
-  | { ok: true; fromY: number; toY: number; apexRise: number; samples: number }
+  | { ok: true; fromY: number; toY: number; apexRise: number; samples: number; jumpTrace: PillarJumpTrace }
   | { ok: false; fail: PillarFail }
 
 /**
@@ -109,7 +111,13 @@ export async function pillarStepUp(
     y: plan.placeCell.y - plan.support.y,
     z: plan.placeCell.z - plan.support.z,
   }
-  const fail = (step: PillarFailStep, reason: string, samples: number, detail?: string): PillarStepOutcome => ({
+  const fail = (
+    step: PillarFailStep,
+    reason: string,
+    samples: number,
+    detail?: string,
+    jumpTrace?: PillarJumpTrace,
+  ): PillarStepOutcome => ({
     ok: false,
     fail: {
       step,
@@ -118,6 +126,7 @@ export async function pillarStepUp(
       rise: bot.entity.position.y - launchY,
       samples,
       detail,
+      jumpTrace,
     },
   })
   // The place must target the cell above the support block AND above the launch
@@ -133,6 +142,7 @@ export async function pillarStepUp(
       jump.failure ?? 'no_rise',
       jump.samples,
       `ticks=${jump.ticks} impulses=${jump.impulses} peakRise=${round2(jump.peakRise)}`,
+      jump.trace,
     )
   }
 
@@ -156,17 +166,17 @@ export async function pillarStepUp(
     if (vy < PILLAR_APEX_FALL_VY) {
       // Already past the vertex: placing now puts the block wherever the body
       // happens to be, which is exactly the "no level gained" live failure.
-      return fail('apex', sawRise ? 'apex_missed' : 'falling_before_place', apexSamples)
+      return fail('apex', sawRise ? 'apex_missed' : 'falling_before_place', apexSamples, undefined, jump.trace)
     }
     await deps.sleep(deps.pollMs)
   }
-  if (!atApex) return fail('apex', sawRise ? 'apex_timeout' : 'no_rise', apexSamples)
+  if (!atApex) return fail('apex', sawRise ? 'apex_timeout' : 'no_rise', apexSamples, undefined, jump.trace)
 
   let placeSamples = 0
   try {
     await deps.place(face)
   } catch (error) {
-    return fail('place', 'refused', placeSamples, error instanceof Error ? error.message : String(error))
+    return fail('place', 'refused', placeSamples, error instanceof Error ? error.message : String(error), jump.trace)
   }
   const placeDeadline = deps.now() + deps.placeSettleMs
   let placed = false
@@ -199,9 +209,10 @@ export async function pillarStepUp(
         toY: y,
         apexRise,
         samples: jump.samples + apexSamples + placeSamples + landingSamples,
+        jumpTrace: jump.trace,
       }
     }
     await deps.sleep(deps.pollMs)
   }
-  return fail('landing', 'not_on_block', placeSamples + landingSamples)
+  return fail('landing', 'not_on_block', placeSamples + landingSamples, undefined, jump.trace)
 }

@@ -68,7 +68,7 @@ import {
   PILLAR_TAKEOFF_BUDGET_MS,
   PILLAR_TAKEOFF_POLL_MS,
 } from './pillarJump.ts'
-import type { SolidAt } from './pillarJump.ts'
+import type { PillarJumpTrace, SolidAt } from './pillarJump.ts'
 import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 
 const { Movements, goals } = pathfinderModule
@@ -1760,12 +1760,14 @@ export class Executor {
           endControls: readControlState(this.bot),
           forcedRepositions: forcedTracker.value - forcedBefore,
         }
+        const jumpTrace: PillarJumpTrace | null = climb.ok ? climb.jumpTrace : (climb.fail.jumpTrace ?? null)
         const emitPillarTakeoff = (peakRise: number, failureStep: string | null, failureReason: string | null) => {
           const takeoff = buildPillarTakeoffTelemetry({ ...takeoffBase, peakRise, failureStep, failureReason })
           this.logger.info('agent', formatPillarTakeoffTelemetry(takeoff), {
             actionId: candidate.id,
             attemptId: takeoff.attemptId,
             horizontalLeak: takeoff.horizontalLeak,
+            jumpTrace,
           })
           return takeoff
         }
@@ -1804,6 +1806,7 @@ export class Executor {
             endCollidedVertically: endEntity.isCollidedVertically ?? null,
             endJumpTicks: (this.bot as Bot & { jumpTicks?: number }).jumpTicks ?? null,
             forcedRepositions: forcedTracker.value - forcedBefore,
+            jumpTrace,
           })
           if (shouldRelocatePillarAfterFailure(climb.fail)) {
             refusedColumns.add(pillarColumnKey(feet))

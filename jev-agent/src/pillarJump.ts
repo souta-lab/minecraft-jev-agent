@@ -88,6 +88,42 @@ export const PILLAR_TAKEOFF_IMPULSE_INTERVAL_MS = 50
 export const JUMP_IMPULSE_VY = Math.fround(0.42)
 
 /**
+ * Bounded, attempt-local observations for diagnosing a failed takeoff.
+ * These are deliberately descriptive: recording an observation must not
+ * choose a control, mutate a velocity, or alter the takeoff gate.
+ */
+export type PillarJumpTraceEvent = 'initial' | 'control' | 'physicsTick' | 'forcedMove' | 'poll' | 'impulse'
+
+export interface PillarJumpTraceSample {
+  /** milliseconds from the start of this jump attempt */
+  atMs: number
+  event: PillarJumpTraceEvent
+  onGroundBefore: boolean
+  onGroundAfter: boolean
+  /** result of the block-grid correction for this observation */
+  grounded: boolean
+  positionY: number
+  velocityY: number
+  /** positionY - launch positionY */
+  rise: number
+  /** the same position-based predicate used by the takeoff gate */
+  airborne: boolean
+  ticks: number
+  impulses: number
+  /** populated for an explicit impulse observation */
+  velocityYBefore?: number
+}
+
+export interface PillarJumpTrace {
+  /** false means every event in the attempt was retained */
+  truncated: boolean
+  samples: readonly PillarJumpTraceSample[]
+}
+
+/** A stalled attempt has at most a few dozen events; keep malformed runs bounded. */
+export const MAX_PILLAR_JUMP_TRACE_SAMPLES = 128
+
+/**
  * Patch mineflayer's stale `onGround` flag from the block grid. The feet cell
  * (a partial mount such as a slab or snow layer lives in it) or the cell below
  * must be a full solid block - the same contiguous scan `resolvePillarStep`
@@ -114,10 +150,14 @@ export function installGroundCorrection(
   bot: JumpBotLike,
   isSolid: SolidAt,
   onTick?: (grounded: boolean) => void,
+  onEvent?: (event: 'physicsTick' | 'forcedMove', grounded: boolean, onGroundBefore: boolean, onGroundAfter: boolean) => void,
 ): () => void {
   const onPhysicsTick = (): void => {
+    const onGroundBefore = bot.entity.onGround
     const grounded = correctStandingOnGround(bot, isSolid)
+    const onGroundAfter = bot.entity.onGround
     onTick?.(grounded)
+    onEvent?.('physicsTick', grounded, onGroundBefore, onGroundAfter)
   }
   // A clientbound `position` packet resets `onGround = false` and zeroes the
   // velocity, then emits `forcedMove` (physics.js position handler). It can
@@ -126,7 +166,10 @@ export function installGroundCorrection(
   // `setControlState('jump')` stays a silent no-op. Re-ground on the packet
   // event too; this does not count as a physics tick.
   const onForcedMove = (): void => {
-    correctStandingOnGround(bot, isSolid)
+    const onGroundBefore = bot.entity.onGround
+    const grounded = correctStandingOnGround(bot, isSolid)
+    const onGroundAfter = bot.entity.onGround
+    onEvent?.('forcedMove', grounded, onGroundBefore, onGroundAfter)
   }
   bot.on('physicsTick', onPhysicsTick)
   bot.on('forcedMove', onForcedMove)
@@ -162,6 +205,8 @@ export interface PillarJumpOutcome {
   impulses: number
   /** why takeoff failed; null once airborne */
   failure: TakeoffFailure | null
+  /** bounded, attempt-local observation trace for run-scoped diagnosis */
+  trace: PillarJumpTrace
 }
 
 /**
@@ -187,6 +232,37 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
   let ticks = 0
   let impulses = 0
   let lastImpulseAt = Number.NEGATIVE_INFINITY
+  const traceSamples: PillarJumpTraceSample[] = []
+  let traceTruncated = false
+
+  const record = (
+    event: PillarJumpTraceEvent,
+    grounded: boolean,
+    onGroundBefore: boolean,
+    onGroundAfter: boolean,
+    velocityYBefore?: number,
+  ): void => {
+    if (traceSamples.length >= MAX_PILLAR_JUMP_TRACE_SAMPLES) {
+      traceTruncated = true
+      return
+    }
+    const positionY = bot.entity.position.y
+    const rise = positionY - startY
+    traceSamples.push({
+      atMs: Math.max(0, deps.now() - startedAt),
+      event,
+      onGroundBefore,
+      onGroundAfter,
+      grounded,
+      positionY,
+      velocityY: bot.entity.velocity.y,
+      rise,
+      airborne: rise > TAKEOFF_RISE,
+      ticks,
+      impulses,
+      ...(velocityYBefore === undefined ? {} : { velocityYBefore }),
+    })
+  }
   // Leaf rejects a jump packet that still carries a blocked horizontal push.
   // PILLAR_UP is a pure vertical actuator; a prior pathfinder/control-walk
   // action must not leak `forward`/`back`/strafe into its takeoff.
@@ -196,25 +272,34 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
   const uninstall = installGroundCorrection(bot, deps.isSolid, (grounded) => {
     ticks += 1
     groundedOnce = groundedOnce || grounded
+  }, (event, grounded, onGroundBefore, onGroundAfter) => {
+    record(event, grounded, onGroundBefore, onGroundAfter)
   })
   bot.physicsEnabled = true
   try {
     // Ground the body before the jump control is set: the next physics tick
     // reads `entity.onGround` and applies `velocity.y = 0.42`.
+    const initialOnGround = bot.entity.onGround
     groundedNow = correctStandingOnGround(bot, deps.isSolid)
     groundedOnce = groundedOnce || groundedNow
+    record('initial', groundedNow, initialOnGround, bot.entity.onGround)
     bot.setControlState('jump', true)
+    record('control', groundedNow, bot.entity.onGround, bot.entity.onGround)
     const deadline = startedAt + deps.budgetMs
     while (deps.now() < deadline) {
+      const pollOnGroundBefore = bot.entity.onGround
       groundedNow = correctStandingOnGround(bot, deps.isSolid)
       groundedOnce = groundedOnce || groundedNow
+      const pollOnGroundAfter = bot.entity.onGround
       samples += 1
       const rise = bot.entity.position.y - startY
       if (rise > peakRise) peakRise = rise
       if (rise > TAKEOFF_RISE) {
         airborne = true
+        record('poll', groundedNow, pollOnGroundBefore, pollOnGroundAfter)
         break
       }
+      record('poll', groundedNow, pollOnGroundBefore, pollOnGroundAfter)
       // The flag race lost (physicsTick fires after the gate read, or the loop
       // is idle): assert the exact vanilla impulse while the body is grounded.
       const now = deps.now()
@@ -223,9 +308,11 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
         now - startedAt >= PILLAR_TAKEOFF_IMPULSE_MS &&
         now - lastImpulseAt >= PILLAR_TAKEOFF_IMPULSE_INTERVAL_MS
       ) {
+        const velocityYBefore = bot.entity.velocity.y
         bot.entity.velocity.y = JUMP_IMPULSE_VY
         impulses += 1
         lastImpulseAt = now
+        record('impulse', groundedNow, bot.entity.onGround, bot.entity.onGround, velocityYBefore)
       }
       await deps.sleep(deps.pollMs)
     }
@@ -241,7 +328,15 @@ export async function jumpWithGroundCorrection(bot: JumpBotLike, deps: PillarJum
       : !groundedOnce
         ? 'no_support'
         : 'no_rise'
-  return { airborne, peakRise, samples, ticks, impulses, failure }
+  return {
+    airborne,
+    peakRise,
+    samples,
+    ticks,
+    impulses,
+    failure,
+    trace: { truncated: traceTruncated, samples: traceSamples },
+  }
 }
 
 /** One line per real PILLAR_UP step: the live proof the climb started. */
