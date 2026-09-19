@@ -331,7 +331,13 @@ export class Advisor {
 
     const now = Date.now()
     if (!bypassed && this.calls > 0 && now - this.cache.lastCallAt < this.minIntervalMs) {
-      return this.deliver(groundStrategy(fallback, state), 'fallback', reason, 0, started, false, `throttled ${now - this.cache.lastCallAt}ms < ${this.minIntervalMs}ms`, state)
+      // Rate control, not a model failure: wait out the throttle, then ask the model.
+      // Live mode must never degrade to a deterministic/fallback decision here.
+      const waitMs = this.minIntervalMs - (now - this.cache.lastCallAt)
+      if (Number.isFinite(waitMs) && waitMs > 0) {
+        this.log('ADVISOR_THROTTLE_WAIT', { waitMs, minIntervalMs: this.minIntervalMs })
+        await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
+      }
     }
 
     try {

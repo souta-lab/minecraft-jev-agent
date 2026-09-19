@@ -734,6 +734,22 @@ export function isTimeoutError(error: unknown, depth = 0): boolean {
   return Array.isArray(errors) && errors.some((entry) => isTimeoutError(entry, depth + 1))
 }
 
+export function isRetryableModelError(error: unknown, depth = 0): boolean {
+  if (isTimeoutError(error, depth) || isRateLimitError(error, depth)) return true
+  if (depth > 4 || error === null || typeof error !== 'object') return false
+  const record = error as Record<string, unknown>
+  const status = typeof record.statusCode === 'number' ? record.statusCode : undefined
+  if (status !== undefined && status >= 500) return true
+  const name = typeof record.name === 'string' ? record.name : ''
+  if (/InternalServerError|ServiceUnavailable|GatewayInternalServerError|APICallError/i.test(name)) return true
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (/fetch failed|ECONNREFUSED|EAI_AGAIN|socket hang up|gateway/i.test(message)) return true
+  if (isRetryableModelError(record.lastError, depth + 1)) return true
+  if (isRetryableModelError(record.cause, depth + 1)) return true
+  const errors = record.errors
+  return Array.isArray(errors) && errors.some((entry) => isRetryableModelError(entry, depth + 1))
+}
+
 export type MercuryAttemptRun<T> =
   | { readonly ok: true; readonly result: T; readonly attempts: number; readonly failures: number }
   | { readonly ok: false; readonly error: unknown; readonly attempts: number; readonly failures: number }
@@ -1004,7 +1020,7 @@ export class MercurySystem2 implements System2Brain {
           })
         },
         call: callOnce,
-        isRetryable: isTimeoutError,
+        isRetryable: isRetryableModelError,
         onRetry: ({ attempt, nextAttempt, error }) => {
           this.log('MERCURY_RETRY', {
             callId,
