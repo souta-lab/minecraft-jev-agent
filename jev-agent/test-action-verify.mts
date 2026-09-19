@@ -238,14 +238,19 @@ addCase('(#79f) smelt that increased iron_ingot is verified and advances the lad
     strategy: STRATEGY,
     attempts: 1,
   })
+  // The fixture places inputCount=3, so the action must harvest all three outputs,
+  // not just the first (#199's `harvested === 0` stop). Live run-mu8c89s6-rnv6
+  // logged `SMELT_DONE gained=1` from a `raw_iron x3` placement and stranded the
+  // other two in the furnace.
   const pass =
-    outcome.gained === 1 &&
-    stash.iron_ingot === 1 &&
+    outcome.gained === 3 &&
+    outcome.placedInput === 3 &&
+    stash.iron_ingot === 3 &&
     verified === true &&
     decision.verdict === 'verified' &&
     decision.advances === true &&
     decision.unverifiedLine === null
-  return { pass, detail: `gained=${outcome.gained} inv=${stash.iron_ingot} verdict=${decision.verdict} advances=${decision.advances}` }
+  return { pass, detail: `gained=${outcome.gained} placed=${outcome.placedInput} inv=${stash.iron_ingot} verdict=${decision.verdict} advances=${decision.advances}` }
 })
 
 addCase('(#79g) smelt whose furnace consumed input+fuel is verified even with no count increase (OR clause)', async () => {

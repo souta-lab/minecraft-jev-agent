@@ -185,8 +185,17 @@ export function planNextCraftStep(
   const have = (item: string, want: number): boolean => (inventory[item] ?? 0) >= want
 
   const canProduce = (item: string, want: number, stack: ReadonlySet<string>, depth: number): boolean => {
+    // Cycle guard BEFORE the held-item check. An item already on the production
+    // stack is a live ancestor: the inventory copies of it are what that ancestor
+    // step is about to consume, so they must not be counted again to satisfy the
+    // ancestor's own recipe. Without this, `produce` double-books the held stack:
+    // live run-mu8c89s6-rnv6 asked for `iron_ingot x3` with one held ingot and
+    // "produced" `craft 9 iron_nugget` via the reverse recipe
+    // `iron_ingot <= iron_nugget x9` whose own ingredient is that same ingot,
+    // converting the only ingot into nuggets instead of a pickaxe.
+    if (stack.has(item)) return false
     if (have(item, want)) return true
-    if (depth > MAX_DEPTH || stack.has(item)) return false
+    if (depth > MAX_DEPTH) return false
     const variants = index.recipesFor(item)
     if (variants.length === 0) return false
     const nextStack = new Set(stack)
