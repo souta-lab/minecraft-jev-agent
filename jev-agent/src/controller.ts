@@ -1113,6 +1113,16 @@ class MirroringEventLogger extends EventLogger {
   }
 }
 
+/**
+ * Keep controller failure-memory charging on the same mechanical predicate
+ * as the affordance/policy gate. In particular, a generated vertical plan
+ * is executable even when its target is more than the horizontal pathfinder
+ * gap above the bot.
+ */
+export function controllerUnreachableMoveReason(candidate: Candidate, state: WorldState): ReturnType<typeof unreachableMove> {
+  return unreachableMove(candidate, state)
+}
+
 export class JevController {
   private readonly bot: Bot
   private options: JevAgentOptions
@@ -4917,16 +4927,15 @@ export class JevController {
    * another candidate (descend/explore/reachable target) win instead.
    */
   private checkUnreachableMove(candidate: Candidate, state: WorldState): void {
-    if (candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE') return
-    if (candidate.target === null) return
-    const dy = Math.round(candidate.target.y - state.self.position.y)
-    if (dy <= MOVE_VERTICAL_GAP_LIMIT) return
+    const reason = controllerUnreachableMoveReason(candidate, state)
+    if (reason === null) return
+    const { target, dy } = reason
     const key = `${candidate.id}:${dy}`
     if (!this.loggedUnreachableMoves.has(key)) {
       this.loggedUnreachableMoves.add(key)
       this.logger.warn(
         'agent',
-        formatMoveUnreachable(candidate.target, dy),
+        formatMoveUnreachable(target, dy),
         { actionId: candidate.id, dy, kind: candidate.kind, limit: MOVE_VERTICAL_GAP_LIMIT },
         this.tickCounter,
       )
