@@ -2948,6 +2948,7 @@ export class JevController {
         }
       }
       if (result.kind === 'MINE' && result.verified) {
+        if (result.blockRemoved) this.resetDescendBudgetAfterWorldChange(result.actionId, 'verified_mine')
         this.noteCandidateSuccess(result.actionId)
         this.verifiedDigs += 1
         if (result.blockRemoved) this.blocksRemoved += 1
@@ -5171,16 +5172,7 @@ export class JevController {
 
   private recordMoveSuccess(candidate: Candidate): void {
     if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
-    const dig = this.digMemory.snapshot()
-    if (dig.descendLimitReached) {
-      this.digMemory.resetDescendBudget()
-      this.logger.info(
-        'agent',
-        `DESCEND_BUDGET_RESET actionId=${candidate.id} reason=verified_move`,
-        { actionId: candidate.id, previousNoProgress: dig.descendNoProgress },
-        this.tickCounter,
-      )
-    }
+    this.resetDescendBudgetAfterWorldChange(candidate.id, 'verified_move')
     const dimension = this.currentDimension()
     const key = moveFailureKey(dimension, candidate.target)
     if (!this.moveFailMemory.reset(dimension, candidate.target)) return
@@ -5189,6 +5181,18 @@ export class JevController {
     }
     this.logger.info('agent', formatMoveFailMemReset(key), { actionId: candidate.id, key, kind: candidate.kind }, this.tickCounter)
     this.notifyMoveFailureMemory()
+  }
+
+  private resetDescendBudgetAfterWorldChange(actionId: string, reason: 'verified_mine' | 'verified_move'): void {
+    const dig = this.digMemory.snapshot()
+    if (!dig.descendLimitReached) return
+    this.digMemory.resetDescendBudget()
+    this.logger.info(
+      'agent',
+      `DESCEND_BUDGET_RESET actionId=${actionId} reason=${reason}`,
+      { actionId, previousNoProgress: dig.descendNoProgress, reason },
+      this.tickCounter,
+    )
   }
 
   private notifyMoveFailureMemory(): void {
