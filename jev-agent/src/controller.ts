@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatReachability } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -167,6 +167,36 @@ const ESCALATION_TO_SUMMON: Record<EscalationReason, LlmSummonReason> = {
   goal_complete: 'queue_empty',
   unknown_event: 'unknown_situation',
   policy_error: 'unknown_situation',
+}
+
+/**
+ * Keep the active furnace prerequisite's semantic envelope closed.
+ *
+ * A furnace route may need a mechanically-derived acquisition step (for
+ * example clearing headroom before retrieving a remembered crafting table),
+ * so those candidates inherit the selected `prereqPath` from candidates.ts.
+ * Safety and control remain available regardless of the selected route.  An
+ * untagged productive candidate is not a safe fallback: allowing it here
+ * silently replaces the selected prerequisite with a different semantic goal
+ * and was the source of the exact-run `CRAFT:stick` detour.
+ */
+export function filterFurnacePrerequisiteCandidates(
+  candidates: readonly Candidate[],
+  chosen: PrereqPath | null,
+): Candidate[] {
+  return candidates.filter((candidate) => {
+    if (
+      candidate.kind === 'ATTACK' ||
+      candidate.kind === 'EAT' ||
+      candidate.kind === 'RETREAT' ||
+      candidate.kind === 'WAIT' ||
+      candidate.kind === 'ESCALATE'
+    ) {
+      return true
+    }
+    const role = candidate.meta.prerequisiteRole
+    return role === FURNACE_PREREQUISITE_ROLE && chosen !== null && candidate.meta.prereqPath === chosen
+  })
 }
 
 export interface JevAgentOptions {
@@ -4519,12 +4549,7 @@ export class JevController {
         )
       }
     }
-    const keep = (candidate: Candidate): boolean => {
-      const path = candidate.meta.prereqPath
-      if (path === undefined) return true
-      return chosen !== null && path === chosen
-    }
-    const kept = candidates.filter(keep)
+    const kept = filterFurnacePrerequisiteCandidates(candidates, chosen)
     if (chosen === null) return kept
 
     const signature = prereqProgressSignature(chosen, input)
@@ -4549,10 +4574,7 @@ export class JevController {
       { from: chosen, to: next, stallTicks: this.prereqStallTicks, goal: goalKey },
       this.tickCounter,
     )
-    return candidates.filter((candidate) => {
-      const path = candidate.meta.prereqPath
-      return path === undefined || path === next
-    })
+    return filterFurnacePrerequisiteCandidates(candidates, next)
   }
 
   /** The next feasible prereq path that has not been abandoned for this goal. */

@@ -85,6 +85,15 @@ export interface Candidate {
   meta: Record<string, string | number | boolean>
 }
 
+/**
+ * Typed role for candidates that acquire the furnace station required to
+ * initiate the active smelt Option.  The role is deliberately separate from
+ * `prereqPath`: the path identifies the semantic route selected by the
+ * prerequisite solver, while the role explains why a mechanically-derived
+ * acquisition candidate is still inside that route's envelope.
+ */
+export const FURNACE_PREREQUISITE_ROLE = 'furnace_station' as const
+
 export interface CandidateOptions {
   reach: number
   maxMineCandidates: number
@@ -1928,6 +1937,7 @@ function furnaceAcquisitionCandidates(state: WorldState, options: CandidateOptio
         meta: {
           ...candidate.meta,
           prereqPath: option.path,
+          prerequisiteRole: FURNACE_PREREQUISITE_ROLE,
           prereqCost: Math.round(option.cost * 10) / 10,
           ...(option.path === 'place_held' ? { furnaceSource: 'held' } : {}),
         },
@@ -3061,12 +3071,26 @@ function capabilityAcquisitionCandidates(
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue
         seen.add(candidate.id)
+        const inheritedPrereqPath =
+          typeof entry.candidate.meta.prereqPath === 'string' ? entry.candidate.meta.prereqPath : null
+        const inheritedPrerequisiteRole =
+          typeof entry.candidate.meta.prerequisiteRole === 'string'
+            ? entry.candidate.meta.prerequisiteRole
+            : inheritedPrereqPath === null
+              ? null
+              : FURNACE_PREREQUISITE_ROLE
         out.push({
           ...withAffordance(candidate, null),
           meta: {
             ...candidate.meta,
             capabilityAcquisition: true,
             missingCapability: capabilityKey(capability),
+            ...(inheritedPrereqPath === null
+              ? {}
+              : {
+                  prereqPath: inheritedPrereqPath,
+                  prerequisiteRole: inheritedPrerequisiteRole ?? FURNACE_PREREQUISITE_ROLE,
+                }),
           },
         })
       }
