@@ -1,7 +1,12 @@
 // Regression for the M2 prerequisite route: a craft goal may be blocked by a
-// missing log even when the current goal is not itself `collect log`.  A
-// remembered log whose ascent is impossible must not reduce the policy to
-// WAIT; the grounded candidate layer should offer bounded exploration instead.
+// missing log even when the current goal is not itself `collect log`.
+//
+// (1) With a placeable block held (the measured d54d9a8 live shape), the ascent
+// is feasible via the no-pickaxe pillar-up mechanic, so the prerequisite is the
+// direct RETRIEVE route.
+// (2) Without any placeable block the ascent is truthfully impossible and the
+// withheld log route must not reduce the policy to WAIT; the grounded candidate
+// layer should offer bounded exploration instead.
 
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
@@ -73,7 +78,7 @@ function queue(current: QueuedGoal, ...goals: QueuedGoal[]): GoalQueueState {
   }
 }
 
-function world(): WorldState {
+function world(inventoryCounts: Record<string, number> = { birch_planks: 2, stick: 2, cobblestone: 170, dirt: 37 }): WorldState {
   const position = { x: 39, y: 11, z: 32 }
   const current = queuedGoal({})
   const logGoal = queuedGoal({
@@ -142,7 +147,7 @@ function world(): WorldState {
     tick: 41,
     timestampMs: 1_700_000_000_000,
     self: self(position),
-    inventory: inventory({ birch_planks: 2, stick: 2, cobblestone: 170, dirt: 37 }),
+    inventory: inventory(inventoryCounts),
     entities: [],
     blocks: [blockingStone, sensedLog],
     terrain: { standable: [position, { x: 41, y: 11, z: 32 }, { x: 42, y: 11, z: 32 }] },
@@ -159,18 +164,52 @@ function world(): WorldState {
   }
 }
 
-const grounded = generateGroundedCandidates(world(), defaultCandidateOptions)
-const ids = grounded.candidates.map((candidate) => candidate.id)
-const logRoute = grounded.candidates.find((candidate) => candidate.meta.logRoute === 'explore')
-const withheldLog = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'log')
-const pass =
-  logRoute !== undefined &&
-  logRoute.kind === 'MOVE' &&
-  logRoute.target?.x === 42 &&
-  withheldLog !== undefined &&
-  grounded.candidates.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+// (1) The repaired live shape (FIRST_FAILED_BOUNDARY, RC d54d9a8): the same
+// underground body holds cobblestone 170, so the pillar-up mechanic reaches the
+// remembered log at (27,65,19) without a pickaxe. The craft prerequisite is a
+// direct body-moving RETRIEVE instead of a needs_ascend refusal.
+{
+  const grounded = generateGroundedCandidates(world(), defaultCandidateOptions)
+  const ids = grounded.candidates.map((candidate) => candidate.id)
+  const retrieve = grounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:log:b27_65_19')
+  const withheldLog = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'log')
+  const pass =
+    retrieve !== undefined &&
+    retrieve.affordance?.feasible === true &&
+    retrieve.meta.vertical === 'pillar' &&
+    retrieve.meta.pillarPlaceName === 'cobblestone' &&
+    withheldLog === undefined &&
+    grounded.candidates.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
 
-process.stdout.write(
-  `craft prerequisite log route: ${pass ? 'PASS' : 'FAIL'} candidates=[${ids.join(',')}] withheld=${withheldLog?.result.reason ?? 'none'}\n`,
-)
-if (!pass) process.exitCode = 1
+  process.stdout.write(
+    `craft prerequisite log route (placeable held): ${pass ? 'PASS' : 'FAIL'} candidates=[${ids.join(',')}] ` +
+      `vertical=${String(retrieve?.meta.vertical ?? 'none')} place=${String(retrieve?.meta.pillarPlaceName ?? 'none')} ` +
+      `withheld=${withheldLog?.result.reason ?? 'none'}\n`,
+  )
+  if (!pass) process.exitCode = 1
+}
+
+// (2) Without any placeable block the ascent is truthfully impossible: the log
+// route is withheld as needs_ascend and the bounded exploration MOVE keeps the
+// policy off WAIT (the regression this file originally pinned).
+{
+  const grounded = generateGroundedCandidates(
+    world({ birch_planks: 2, stick: 2 }),
+    defaultCandidateOptions,
+  )
+  const ids = grounded.candidates.map((candidate) => candidate.id)
+  const logRoute = grounded.candidates.find((candidate) => candidate.meta.logRoute === 'explore')
+  const withheldLog = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'log')
+  const pass =
+    logRoute !== undefined &&
+    logRoute.kind === 'MOVE' &&
+    logRoute.target?.x === 42 &&
+    withheldLog !== undefined &&
+    withheldLog.result.reason === 'needs_ascend' &&
+    grounded.candidates.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+
+  process.stdout.write(
+    `craft prerequisite log route (no placeable): ${pass ? 'PASS' : 'FAIL'} candidates=[${ids.join(',')}] withheld=${withheldLog?.result.reason ?? 'none'}\n`,
+  )
+  if (!pass) process.exitCode = 1
+}
