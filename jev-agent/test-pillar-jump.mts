@@ -12,7 +12,7 @@
 // `onGround=false` rubber-band - no live server.
 //
 //   npm run pillar-jump-test
-import { correctStandingOnGround, formatPillarUpStep, jumpWithGroundCorrection, TAKEOFF_RISE } from './src/pillarJump.ts'
+import { correctStandingOnGround, formatPillarUpStep, jumpWithGroundCorrection, JUMP_IMPULSE_VY, TAKEOFF_RISE } from './src/pillarJump.ts'
 import type { SolidAt } from './src/pillarJump.ts'
 
 interface CaseResult {
@@ -340,6 +340,43 @@ addCase('a clientbound position reset between ticks cannot discard the takeoff (
   return {
     pass,
     detail: `airborne=${outcome.airborne} rise=${outcome.peakRise} packets=${bot.stats.packetResets} gateFires=${bot.stats.jumpApplied} ticks=${outcome.ticks} failure=${outcome.failure} listeners(physicsTick=${bot.listenerCount('physicsTick')},forcedMove=${bot.listenerCount('forcedMove')})`,
+  }
+})
+
+addCase('the attempt trace correlates impulse, physics ticks, ground transitions, and the rise predicate', async () => {
+  // Disable the fake jump gate so the explicit impulse is the only possible
+  // source of takeoff. This makes the impulse observation independently
+  // distinguishable from a physics-tick gate application.
+  const impulseBot = createFakeBot({ y: 10.5, gate: false, floorTop: 10 })
+  const impulseOutcome = await jumpWithGroundCorrection(impulseBot, jumpDeps(impulseBot, footingAt(9)))
+  const impulse = impulseOutcome.trace.samples.find((sample) => sample.event === 'impulse')
+  const physicsTick = impulseOutcome.trace.samples.find((sample) => sample.event === 'physicsTick')
+
+  const packetBot = createHeldPositionBot({ y: 10.5 })
+  const packetOutcome = await jumpWithGroundCorrection(packetBot, heldPositionDeps(packetBot, footingAt(9)))
+  const forcedMove = packetOutcome.trace.samples.find((sample) => sample.event === 'forcedMove')
+  const groundedTransition = packetOutcome.trace.samples.find(
+    (sample) => sample.onGroundBefore === false && sample.onGroundAfter === true,
+  )
+  const packetAirborne = packetOutcome.trace.samples.some((sample) => sample.airborne)
+  const times = packetOutcome.trace.samples.map((sample) => sample.atMs)
+  const monotonic = times.every((atMs, index) => index === 0 || atMs >= (times[index - 1] ?? atMs))
+  const pass =
+    impulseOutcome.trace.truncated === false &&
+    impulse !== undefined &&
+    impulse.velocityYBefore === 0 &&
+    impulse.velocityY === JUMP_IMPULSE_VY &&
+    impulse.impulses >= 1 &&
+    physicsTick !== undefined &&
+    forcedMove !== undefined &&
+    groundedTransition !== undefined &&
+    packetAirborne &&
+    monotonic &&
+    times.every((atMs) => atMs >= 0) &&
+    packetOutcome.trace.samples.length <= 128
+  return {
+    pass,
+    detail: `impulse=${impulse ? `${impulse.velocityYBefore}->${impulse.velocityY}` : '-'} physicsTick=${physicsTick !== undefined} forcedMove=${forcedMove !== undefined} groundedTransition=${groundedTransition !== undefined} airborne=${packetAirborne} samples=${packetOutcome.trace.samples.length} monotonic=${monotonic}`,
   }
 })
 
