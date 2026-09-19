@@ -1,18 +1,20 @@
 #!/usr/bin/env node
-// m2-live-gate: combine exact-run causal evidence with the resident inventory
-// acceptance for the SAME run. This is the close/no-close gate for the M2 path.
+// m2-live-gate: join TWO kinds of evidence for the SAME exact resident run:
 //
-// PASS requires BOTH:
-//   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
-//      the explicit resident runId; and
-//   2. live resident inventory criteria observed while the resident still
-//      reports that same runId. That inventory ladder is ordered and terminal
-//      at `diamond_pickaxe` (MILESTONES.md:16), so an iron-tier snapshot alone
-//      never closes M2: m2-acceptance marks the diamond rung FAIL.
+//   1. m2-watch proves the consumable historical chain in buddy.log:
+//      PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE(charcoal)
+//      -> SMELT_DONE(iron_ingot)
 //
-// `--since` remains useful for diagnosis in m2-watch, but is not a sufficient
-// join key for this close/no-close gate. An explicit --run (or M2_RUN_ID) is
-// required so causal and inventory evidence can never come from two lifetimes.
+//   2. m2-acceptance proves the durable terminal state while the resident still
+//      reports that exact runId: diamond_pickaxe >= 1.
+//
+// Intermediate inventory is intentionally NOT required in the final snapshot:
+// charcoal and iron ingots are consumed by correct progression. Requiring them
+// simultaneously with the diamond pickaxe creates a false negative.
+//
+// `--since` remains diagnostic-only. Close/no-close acceptance requires an
+// exact --run (or M2_RUN_ID) so history and terminal state cannot be joined
+// across resident lifetimes.
 //
 // Exit: 0 = PASS, 1 = FAIL (at least one known criterion failed),
 //       2 = UNKNOWN (no known failure, but evidence is unavailable/unreadable).
@@ -36,10 +38,10 @@ export function combineEvidence(watchCode, acceptanceCode) {
       status: 'FAIL',
       reason:
         watch === 1 && acceptance === 1
-          ? 'causal_chain_and_inventory_incomplete'
+          ? 'causal_chain_and_terminal_state_incomplete'
           : watch === 1
             ? 'causal_chain_incomplete'
-            : 'inventory_incomplete',
+            : 'terminal_state_incomplete',
     }
   }
   if (watch === 2 || acceptance === 2) {
@@ -48,10 +50,10 @@ export function combineEvidence(watchCode, acceptanceCode) {
       status: 'UNKNOWN',
       reason:
         watch === 2 && acceptance === 2
-          ? 'causal_chain_and_inventory_unavailable'
+          ? 'causal_chain_and_terminal_state_unavailable'
           : watch === 2
             ? 'causal_chain_unavailable'
-            : 'inventory_unavailable',
+            : 'terminal_state_unavailable',
     }
   }
   return { code: 0, status: 'PASS', reason: 'closed_loop_m2_verified' }
@@ -97,7 +99,6 @@ export function exactRunId(argv, env = process.env) {
   return RUN_ID_RE.test(runId) ? runId : null
 }
 
-/** Close/no-close acceptance requires an exact resident lifetime, not timestamp only. */
 export function hasRunScope(argv, env = process.env) {
   return exactRunId(argv, env) !== null
 }
@@ -109,12 +110,7 @@ function acceptanceArgs(argv, env = process.env) {
   return args.includes('--run') ? ['--run', runId] : []
 }
 
-export async function runGate({
-  argv = process.argv.slice(2),
-  runner = runNode,
-  write = console.log,
-  env = process.env,
-} = {}) {
+export async function runGate({ argv = process.argv.slice(2), runner = runNode, write = console.log, env = process.env } = {}) {
   const runId = exactRunId(argv, env)
   if (runId === null) {
     write('M2_LIVE_GATE')
@@ -128,20 +124,17 @@ export async function runGate({
   ])
 
   write(`M2_LIVE_GATE runId=${runId}`)
-  write('--- causal evidence (m2-watch) ---')
+  write('--- exact-run historical evidence (m2-watch) ---')
   if (watch.stdout.trim()) write(watch.stdout.trimEnd())
   if (watch.stderr.trim()) write(watch.stderr.trimEnd())
-  write('--- live inventory (m2-acceptance) ---')
+  write('--- live terminal state (m2-acceptance) ---')
   if (acceptance.stdout.trim()) write(acceptance.stdout.trimEnd())
   if (acceptance.stderr.trim()) write(acceptance.stderr.trimEnd())
 
   const result = combineEvidence(watch.code, acceptance.code)
-  write(
-    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code}`,
-  )
+  write(`M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code}`)
   return result.code
 }
 
-const invokedDirectly =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 if (invokedDirectly) process.exitCode = await runGate()
