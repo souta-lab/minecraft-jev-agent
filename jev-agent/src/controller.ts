@@ -64,7 +64,7 @@ import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { GoalQueueSnapshot, GoalQueueState, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
-import { PICKAXE_TIER_ORDER } from './gameData.ts'
+import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
@@ -77,7 +77,7 @@ import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refre
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
-import { isResourceClass, matchesResourceClass } from './resourceClass.ts'
+import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
@@ -994,6 +994,46 @@ export function goalPreconditionCause(goal: PlannedGoal | null, snapshot: Option
   if (ok) return null
   const first = unmet[0]
   return first === undefined ? null : `precondition:${preconditionCauseName(first)}`
+}
+
+/**
+ * Live M2 blocker (run-mu8b2647-rj7f, RC 8a671a0): the deterministic single-shot
+ * plan was built while `raw_iron: 0`, so the ladder floor led with the ORE
+ * descent `descend_to:Y=-3` and only then `collect 3 x raw_iron` / `smelt 3 x
+ * iron_ingot`. The bot acquired `raw_iron: 3` + `charcoal: 1` while descending,
+ * but `singleShotPlanner` supplies the plan exactly once, so
+ * `planner.ts#smeltPriorityGoal` (which would lead with the smelt) was never
+ * consulted again. The queue stayed on the stale ore descent and the smelt - with
+ * its PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain - never ran.
+ *
+ * A `descend` goal exists only to bring its ore within reach for a later
+ * smelt/collect. When the queue already holds a smelt for an item produced from
+ * the ore this descend targets, and that smelt's ITEM preconditions (input count
+ * + fuel) all hold, the descend is a STALE PREREQUISITE. It is retired so the
+ * queue advances to the smelt (and, when the furnace station is still missing,
+ * to the existing furnace prereq path). The criterion reads the existing
+ * OptionSpec precondition set, so it introduces no second smelt policy: it only
+ * recognises a prerequisite the compiler already declares obsolete.
+ */
+export function staleOreDescend(
+  current: Pick<QueuedGoal, 'kind' | 'targetItem'>,
+  goals: readonly QueuedGoal[],
+  snapshot: OptionWorldSnapshot,
+): QueuedGoal | null {
+  if (current.kind !== 'descend' || current.targetItem === null) return null
+  for (const candidate of goals) {
+    if (candidate.kind !== 'smelt' || candidate.targetItem === null) continue
+    if (candidate.status === 'done' || candidate.status === 'impossible') continue
+    const input = smeltInputFor(candidate.targetItem)
+    if (input === null) continue
+    if (!resourceMatches(current.targetItem, input)) continue
+    const spec = compilePlannedGoal(queuedToPlanned(candidate), snapshot)
+    const itemPreconditions = spec.preconditions.filter((predicate) => predicate.kind !== 'stationKnown')
+    if (itemPreconditions.length === 0) continue
+    if (!evaluatePredicates(itemPreconditions, snapshot).ok) continue
+    return candidate
+  }
+  return null
 }
 
 /** Tees marker-prefixed agent log lines to an external sink (the resident log)
@@ -3109,6 +3149,37 @@ export class JevController {
     const current = this.queue.current
     if (current === null) return
     if (current.kind === 'descend') {
+      // The plan was supplied before the smelt inputs were held, so the ore
+      // descent that preceded the smelt is now a stale prerequisite. Retire it
+      // so the queue advances to the smelt / its furnace path instead of
+      // descending forever (see `staleOreDescend`).
+      const staleSmelt = staleOreDescend(current, this.queue.state.goals, this.queuePreconditionSnapshot())
+      if (staleSmelt !== null) {
+        const beforeId = current.id
+        const beforeDescription = current.description
+        this.queue.markDone()
+        const after = this.queue.current
+        this.pendingTransition = {
+          fromId: beforeId,
+          fromDescription: beforeDescription,
+          toId: after?.id ?? null,
+          toDescription: after?.description ?? null,
+          trigger,
+          inventory: this.inventorySnapshot(),
+        }
+        this.lastProgressAt = Date.now()
+        this.lastProgress = 0
+        this.descendHaveBaseline = 0
+        this.digMemory.markResourceProgress()
+        this.logger.warn(
+          'queue',
+          `subgoal COMPLETE [${beforeDescription}] -> [${after?.description ?? 'plan complete'}] trigger=${trigger} stale_ore_descend_for=${staleSmelt.description} inventory=${JSON.stringify(this.pendingTransition.inventory)}`,
+          { from: beforeId, to: after?.id ?? null, trigger, staleFor: staleSmelt.id, staleForDescription: staleSmelt.description },
+          this.tickCounter,
+        )
+        if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}:stale-ore-descend`)
+        return
+      }
       const evaluation = this.evaluateDescendGoal(current)
       if (evaluation === null) {
         const impossible = this.queue.markImpossible(`descend goal '${current.id}' has no targetY predicate`)
@@ -3437,6 +3508,37 @@ export class JevController {
       toolRank,
       knownStations: [...knownStations],
       knownOres,
+    })
+  }
+
+  /**
+   * The OptionSpec preconditions a queue goal is checked against, built before
+   * the tick's `WorldState` exists. Only inventory and station names are read by
+   * the smelt item preconditions `staleOreDescend` inspects.
+   */
+  private queuePreconditionSnapshot(): OptionWorldSnapshot {
+    const counts = this.inventorySnapshot()
+    let toolRank = 0
+    for (let i = 0; i < PICKAXE_TIER_ORDER.length; i += 1) {
+      const name = PICKAXE_TIER_ORDER[i]
+      if (name !== undefined && (counts[name] ?? 0) > 0) toolRank = i + 1
+    }
+    const knownStations = new Set<'crafting_table' | 'furnace'>()
+    if ((counts['crafting_table'] ?? 0) > 0) knownStations.add('crafting_table')
+    if ((counts['furnace'] ?? 0) > 0) knownStations.add('furnace')
+    for (const resource of this.options.knownResources ?? []) {
+      if (resource.name === 'furnace') knownStations.add('furnace')
+      if (resource.name === 'crafting_table') knownStations.add('crafting_table')
+    }
+    const position = this.bot.entity?.position
+    return makeOptionSnapshot({
+      inventory: counts,
+      dimension: this.bot.game?.dimension ?? null,
+      position: position === undefined ? null : { x: position.x, y: position.y, z: position.z },
+      health: this.bot.health ?? null,
+      toolRank,
+      knownStations: [...knownStations],
+      knownOres: [],
     })
   }
 
