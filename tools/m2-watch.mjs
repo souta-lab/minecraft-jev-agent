@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // m2-watch: read-only scan of the buddy-driver log for M2 milestone markers.
-// Usage: node tools/m2-watch.mjs [--log <path>] [--since <ISO timestamp|epoch-ms>]
+// Usage: node tools/m2-watch.mjs [--log <path>] [--since <ISO timestamp|epoch-ms>] [--run <runId>]
 // Default log: /home/s0u7a/mc-ai/buddy-driver/buddy.log
 // Exit: 0 = ordered required M2 chain complete, 1 = incomplete/invalid chain,
 //       2 = log/scope unreadable. Prints UNKNOWN and never fabricates data.
@@ -8,11 +8,14 @@
 // `--since` is deliberately explicit: an all-time marker count can make a fresh
 // live run look green because FURNACE_READY/SMELT_DONE happened hours ago. A
 // worker should capture the run start timestamp, then watch only evidence at or
-// after that timestamp.
+// after that timestamp. When a timestamp scope is used, BOOT boundaries are
+// resolved as well so markers from two resident runs cannot be combined into a
+// false causal chain. Use --run to pin an exact resident run explicitly.
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 const DEFAULT_LOG = '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
+const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 
 const MARKERS = [
   'PREREQ_OPTION',
@@ -50,6 +53,7 @@ function parseSince(raw) {
 function parseArgs(argv) {
   let logPath = process.env.BUDDY_LOG || DEFAULT_LOG
   let sinceRaw = process.env.M2_SINCE ?? null
+  let runId = process.env.M2_RUN_ID ?? null
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--log' && argv[i + 1]) {
@@ -62,8 +66,14 @@ function parseArgs(argv) {
       i += 1
       continue
     }
+    if (arg === '--run' && argv[i + 1]) {
+      runId = argv[i + 1]
+      i += 1
+      continue
+    }
   }
-  return { logPath, ...parseSince(sinceRaw) }
+  if (runId !== null && !RUN_ID_RE.test(runId.trim())) throw new Error(`invalid --run value: ${runId}`)
+  return { logPath, runId: runId?.trim() ?? null, ...parseSince(sinceRaw) }
 }
 
 const TS_RE = /^\[([^\]]+)\]/
@@ -80,6 +90,15 @@ function extractTimestampMs(line) {
   return Number.isFinite(value) ? value : null
 }
 
+function extractRunId(line) {
+  const match = typeof line === 'string' ? line.match(/\brunId=(run-[A-Za-z0-9-]+)/) : null
+  return match?.[1] ?? null
+}
+
+function isBootLine(line) {
+  return /\bBOOT\b(?!_)/.test(line)
+}
+
 function emptyStats() {
   return {
     counts: new Map(MARKERS.map((marker) => [marker, 0])),
@@ -92,11 +111,50 @@ function emptyStats() {
   }
 }
 
-async function scan(logPath, sinceMs) {
+async function collectBoots(logPath) {
+  const boots = []
+  let lineNumber = 0
+  const rl = createInterface({ input: createReadStream(logPath, { encoding: 'utf8' }), crlfDelay: Infinity })
+  for await (const line of rl) {
+    lineNumber += 1
+    if (!isBootLine(line)) continue
+    const runId = extractRunId(line)
+    const tsMs = extractTimestampMs(line)
+    if (runId !== null && tsMs !== null) boots.push({ runId, tsMs, lineNumber })
+  }
+  return boots
+}
+
+function resolveRunScope(boots, sinceMs, explicitRunId) {
+  if (explicitRunId !== null) {
+    const exists = boots.some((boot) => boot.runId === explicitRunId)
+    return exists
+      ? { runId: explicitRunId, error: null }
+      : { runId: null, error: 'explicit_run_boundary_missing' }
+  }
+  if (sinceMs === null) return { runId: null, error: null }
+  const after = boots.filter((boot) => boot.tsMs >= sinceMs)
+  if (after.length > 1) return { runId: null, error: 'multiple_run_boundaries_after_since' }
+  if (after.length === 1) return { runId: after[0].runId, error: null }
+  const before = boots.filter((boot) => boot.tsMs < sinceMs)
+  const current = before.at(-1)
+  if (current === undefined) return { runId: null, error: 'run_boundary_missing' }
+  return { runId: current.runId, error: null }
+}
+
+async function scan(logPath, sinceMs, runId) {
   const stats = emptyStats()
+  let activeRunId = null
   const rl = createInterface({ input: createReadStream(logPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
     stats.totalLines += 1
+    if (isBootLine(line)) {
+      const bootRunId = extractRunId(line)
+      if (bootRunId !== null) activeRunId = bootRunId
+    }
+    const lineRunId = extractRunId(line)
+    const owningRunId = lineRunId ?? activeRunId
+    if (runId !== null && owningRunId !== runId) continue
     if (sinceMs !== null) {
       const tsMs = extractTimestampMs(line)
       // A scoped proof may only use attributable timestamped evidence. Untimed
@@ -147,7 +205,7 @@ try {
   process.exit(2)
 }
 
-const { logPath, sinceMs, sinceLabel } = args
+const { logPath, sinceMs, sinceLabel, runId: requestedRunId } = args
 if (!existsSync(logPath)) {
   console.log('UNKNOWN')
   console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=missing`)
@@ -162,9 +220,25 @@ try {
   process.exit(2)
 }
 
+let scope
+try {
+  const boots = await collectBoots(logPath)
+  scope = resolveRunScope(boots, sinceMs, requestedRunId)
+} catch (error) {
+  console.log('UNKNOWN')
+  console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
+  process.exit(2)
+}
+
+if (scope.error !== null) {
+  console.log('UNKNOWN')
+  console.error(`M2_SCOPE status=UNKNOWN reason=${scope.error} since=${sinceLabel} requestedRunId=${requestedRunId ?? 'none'}`)
+  process.exit(2)
+}
+
 let stats
 try {
-  stats = await scan(logPath, sinceMs)
+  stats = await scan(logPath, sinceMs, scope.runId)
 } catch (error) {
   console.log('UNKNOWN')
   console.error(`M2_WATCH log=${logPath} status=UNREADABLE reason=${error instanceof Error ? error.message : String(error)}`)
@@ -172,7 +246,7 @@ try {
 }
 
 console.log(`M2_WATCH log=${logPath}`)
-console.log(`M2_SCOPE since=${sinceLabel} scopedLines=${stats.scopedLines} totalLines=${stats.totalLines}`)
+console.log(`M2_SCOPE since=${sinceLabel} runId=${scope.runId ?? 'all'} scopedLines=${stats.scopedLines} totalLines=${stats.totalLines}`)
 for (const marker of MARKERS) {
   const count = stats.counts.get(marker)
   if (count === 0) {
