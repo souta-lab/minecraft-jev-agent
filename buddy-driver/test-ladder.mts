@@ -1,11 +1,11 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
 import { buildLadder, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungGoalsWithPrereq, RUNGS } from './planner.ts'
-import { snapshotGoals } from './generation-entry.ts'
+import { selectLedgerSnapshot, snapshotGoals } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
-import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 
 interface Case {
   name: string
@@ -237,6 +237,56 @@ addCase('#prereq-order: with a stone pickaxe the blocked goal is the head and no
   queue.applyPlan(ordered, 'llm', 'replace')
   const pass = ordered.length === 1 && queue.current?.targetItem === 'raw_iron'
   return { pass, detail: `goals=${ordered.length} head=${String(queue.current?.targetItem)}` }
+})
+
+addCase('a legitimate wedge abort resumes the preserved ledger at the same rung (#11 v2 §7)', () => {
+  const counts = { birch_planks: 2, stick: 2, cobblestone: 170, dirt: 37, leaf_litter: 4, andesite: 7 }
+  const memory = world()
+  const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
+  const emit = (event: string, detail?: Record<string, unknown>): void => {
+    log.push({ event, detail })
+  }
+  // The aborted generation's plan, still recorded in the host ledger. A wedge
+  // abort never archives the ledger (only goal-complete does), so the restart
+  // reads this exact snapshot and the live inventory.
+  const hostSnapshot: GoalQueueSnapshot = {
+    counter: 42,
+    goals: [
+      {
+        id: 'g-craft-pick',
+        kind: 'craft',
+        description: 'craft 1 x wooden_pickaxe',
+        targetItem: 'wooden_pickaxe',
+        requiredCount: 1,
+        startCount: 0,
+        haveCount: 0,
+        status: 'active',
+        origin: 'bootstrap',
+        createdAt: 0,
+        updatedAt: 0,
+        detail: null,
+      },
+    ],
+  }
+  const chosen = selectLedgerSnapshot(hostSnapshot, null, counts, memory)
+  const before = deriveResumeRung(counts, memory, emit)
+  const after = deriveResumeRung(counts, memory, emit)
+  const resumedLadder = buildLadder(counts, memory, emit, { resumeRungIndex: after.rungIndex })
+  const queue = new GoalQueue()
+  if (chosen !== null) queue.restore(chosen.snapshot)
+  const fallback = log.filter((entry) => entry.event === 'LADDER_RESUME_FALLBACK')
+  const pass =
+    chosen?.source === 'host-snapshot' &&
+    before.rungId === after.rungId &&
+    before.rungIndex === after.rungIndex &&
+    after.rungIndex > 0 &&
+    fallback.length === 0 &&
+    resumedLadder.rungId === after.rungId &&
+    queue.current?.description === 'craft 1 x wooden_pickaxe'
+  return {
+    pass,
+    detail: `rung=${after.rungId}@${after.rungIndex} source=${chosen?.source} fallback=${fallback.length} head=${queue.current?.description ?? 'none'} ladder=${resumedLadder.rungId}`,
+  }
 })
 
 let failures = 0

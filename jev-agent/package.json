@@ -43,6 +43,7 @@
     "vertical-plan-test": "tsx test-vertical-plan.mts",
     "log-route-test": "tsx test-log-route.mts",
     "craft-log-route-test": "tsx test-craft-log-route.mts",
+    "wedge-guard-test": "tsx test-wedge-guard.mts",
     "retrieval-stall-test": "tsx test-retrieval-stall.mts",
     "prereq-option-test": "tsx test-prereq-option.mts",
     "prereq-oscillation-test": "tsx test-prereq-oscillation.mts",
