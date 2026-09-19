@@ -45,9 +45,16 @@ export interface CraftRecipeLike {
 
 type SyncableBot = Bot & { _syncWindow?: (window: Window) => Promise<void> }
 
-/** Craft one `recipe` at a placed crafting table, opening/closing the window. */
-export async function craftAtTable(bot: Bot, table: Block, recipe: CraftRecipeLike): Promise<void> {
-  const win = await bot.openBlock(table)
+/** The `block_place` direction `openBlock` accepts (a vec3 face normal). */
+type InteractionFace = Parameters<Bot['openBlock']>[1]
+
+/**
+ * Craft one `recipe` at a placed crafting table, opening/closing the window.
+ * `face` is the geometric side of the table the body stands at; the server
+ * validates the interaction against it, so it is forwarded to `openBlock`.
+ */
+export async function craftAtTable(bot: Bot, table: Block, recipe: CraftRecipeLike, face?: InteractionFace): Promise<void> {
+  const win = await bot.openBlock(table, face)
   try {
     if (typeof win.type !== 'string' || !win.type.startsWith('minecraft:crafting')) {
       throw new Error(`crafting: non craftingTable window ${String(win.type)}`)
