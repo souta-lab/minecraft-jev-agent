@@ -3849,17 +3849,22 @@ export class Executor {
       // frame. Validating that suffix alone can never prove a 10-edge frame,
       // so include the live obsidian edges that preceded this action.
       const validation = this.portalFramePlacementValidation(cells, candidate.placementAxis ?? 'x')
-      const ready = validation?.shape === 'ok' ? formatPortalFrameReady(validation) : null
-      if (ready === null) {
+      if (validation === null || validation.shape !== 'ok') {
         throw new ExecutorError(
           'verify_failed',
           `frame build over ${cells.length} cells did not validate (${placedCells.length} placed)`,
         )
       }
+      const ready = formatPortalFrameReady(validation)
       this.logger.info('agent', ready, {
         source: 'placed',
         at: `${candidate.target?.x ?? 0},${candidate.target?.y ?? 0},${candidate.target?.z ?? 0}`,
         actionId: candidate.id,
+        // Preserve the code-verified postcondition as structured evidence. The
+        // human-readable marker is useful for diagnostics, but the run-scoped
+        // M2 recorder must not have to parse it back into semantics.
+        blocks: validation.blocks,
+        shape: validation.shape,
       })
     }
     return this.buildResult(candidate, epoch, startedAt, 'done', 'placed', `placed ${itemName} at ${placedCells.length} cells`, null, {
@@ -4171,6 +4176,7 @@ export class Executor {
     this.logger.info('agent', verifyPortal({ lit: true, portalBlockPresent: true, dimension }).line, {
       actionId: candidate.id,
       dimension,
+      verified: true,
     })
 
     return this.buildResult(
