@@ -1,164 +1,105 @@
 #!/usr/bin/env node
-// m2-live-gate: historical exact-run iron-age compatibility gate. It combines
-// causal evidence with resident inventory for the SAME run and is retained for
-// regression/evidence replay only. The current M2 close/no-close definition is
-// the diamond-to-Nether-gate contract in MILESTONE-CONTRACT.json.
+// m2-live-gate: the executable close/no-close gate for the CURRENT M2
+// contract (diamond -> Nether-gate). The historical iron-age tools remain
+// available for replay, but this command must never evaluate that old chain.
 //
-// PASS requires BOTH:
-//   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
-//      the explicit resident runId; and
-//   2. the resident M2 inventory contract observed in that same runId: transient
-//      charcoal/ingots may come from the resident's run-scoped marker snapshot,
-//      while a complete terminal socket report remains valid live evidence.
+// An exact resident runId is mandatory. `--since` is accepted as a diagnostic
+// annotation only; without `--run R` (or M2_RUN_ID=R) this command cannot PASS.
+// The delegated gate reads only R-bound evidence, so inventory and the ordered
+// portal chain cannot be borrowed from different resident lifetimes.
 //
-// The old diamond-pickaxe terminal split is historical compatibility behavior;
-// the current contract moves the diamond-to-gate path into M2 and the
-// post-gate Nether progression into M3. This tool intentionally does not
-// evaluate the current portal contract.
-//
-// `--since` remains useful for diagnosis in m2-watch, but is not a sufficient
-// join key for this close/no-close gate. An explicit --run (or M2_RUN_ID) is
-// required so causal and inventory evidence can never come from two lifetimes.
-//
-// Exit: 0 = PASS, 1 = FAIL (at least one known criterion failed),
-//       2 = UNKNOWN (no known failure, but evidence is unavailable/unreadable).
-import { execFile } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+// Exit: 0 = PASS, 1 = known current-M2 failure, 2 = UNKNOWN.
+import { pathToFileURL } from 'node:url'
+import {
+  M2_GATE_LOG,
+  M2_GATE_SNAPSHOT_DIR,
+  M2_RUN_RESULT,
+  RUN_ID_RE,
+  runM2Gate,
+  requestedRunId,
+} from './m2-gate.mjs'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-export const WATCH = join(HERE, 'm2-watch.mjs')
-export const ACCEPTANCE = join(HERE, 'm2-acceptance.mjs')
-const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
+export const CURRENT_M2 = 'diamond_to_nether_gate'
 
-export function combineEvidence(watchCode, acceptanceCode) {
-  const known = new Set([0, 1, 2])
-  const watch = known.has(watchCode) ? watchCode : 2
-  const acceptance = known.has(acceptanceCode) ? acceptanceCode : 2
-
-  if (watch === 1 || acceptance === 1) {
-    return {
-      code: 1,
-      status: 'FAIL',
-      reason:
-        watch === 1 && acceptance === 1
-          ? 'causal_chain_and_inventory_incomplete'
-          : watch === 1
-            ? 'causal_chain_incomplete'
-            : 'inventory_incomplete',
-    }
+/** Compatibility helper for callers that used the former wrapper API. */
+export function exactRunId(argv = process.argv.slice(2), env = process.env) {
+  try {
+    return requestedRunId(argv, env)
+  } catch {
+    return null
   }
-  if (watch === 2 || acceptance === 2) {
-    return {
-      code: 2,
-      status: 'UNKNOWN',
-      reason:
-        watch === 2 && acceptance === 2
-          ? 'causal_chain_and_inventory_unavailable'
-          : watch === 2
-            ? 'causal_chain_unavailable'
-            : 'inventory_unavailable',
-    }
-  }
-  return { code: 0, status: 'PASS', reason: 'closed_loop_m2_verified' }
 }
 
-export function runNode(script, args = [], { env = process.env } = {}) {
-  return new Promise((resolveResult) => {
-    execFile(
-      process.execPath,
-      [script, ...args],
-      { encoding: 'utf8', env, maxBuffer: 16 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        const code = error === null ? 0 : typeof error.code === 'number' ? error.code : 2
-        resolveResult({ code, stdout: stdout ?? '', stderr: stderr ?? '' })
-      },
-    )
-  })
-}
-
-function forwardedWatchArgs(argv) {
-  const out = []
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]
-    if ((arg === '--log' || arg === '--since' || arg === '--run') && argv[i + 1]) {
-      out.push(arg, argv[i + 1])
-      i += 1
-    }
-  }
-  return out
-}
-
-export function exactRunId(argv, env = process.env) {
-  const args = forwardedWatchArgs(argv)
-  const runIndex = args.indexOf('--run')
-  const raw =
-    runIndex !== -1 && typeof args[runIndex + 1] === 'string'
-      ? args[runIndex + 1]
-      : typeof env.M2_RUN_ID === 'string'
-        ? env.M2_RUN_ID
-        : null
-  if (raw === null || raw.trim() === '') return null
-  const runId = raw.trim()
-  return RUN_ID_RE.test(runId) ? runId : null
-}
-
-/** Close/no-close acceptance requires an exact resident lifetime, not timestamp only. */
-export function hasRunScope(argv, env = process.env) {
-  return exactRunId(argv, env) !== null
-}
-
-function acceptanceArgs(argv, env = process.env) {
+export function hasRunScope(argv = process.argv.slice(2), env = process.env) {
   const runId = exactRunId(argv, env)
-  if (runId === null) return []
-  const args = forwardedWatchArgs(argv)
-  const out = []
-  if (args.includes('--run')) out.push('--run', runId)
-  const logIndex = args.indexOf('--log')
-  if (logIndex !== -1 && typeof args[logIndex + 1] === 'string') out.push('--log', args[logIndex + 1])
-  return out
+  return runId !== null && RUN_ID_RE.test(runId)
 }
 
-/** The inventory evidence source m2-acceptance reported (live socket vs resident snapshot). */
-export function inventoryEvidenceSource(stdout) {
-  const match = /^evidence: (live-socket|run-scoped-snapshot)$/m.exec(typeof stdout === 'string' ? stdout : '')
-  return match?.[1] ?? 'unknown'
+function optionValue(argv, name) {
+  const index = argv.indexOf(name)
+  return index === -1 ? null : argv[index + 1] ?? null
+}
+
+/** Forward only evidence-reader options. `--since` is deliberately not used for acceptance. */
+export function gateOptions(argv = []) {
+  return {
+    logPath: optionValue(argv, '--log') ?? M2_GATE_LOG,
+    snapshotDir: optionValue(argv, '--snapshot-dir') ?? M2_GATE_SNAPSHOT_DIR,
+    json: argv.includes('--json'),
+  }
+}
+
+function statusForCode(code) {
+  return code === 0 ? 'PASS' : code === 1 ? 'FAIL' : 'UNKNOWN'
 }
 
 export async function runGate({
   argv = process.argv.slice(2),
-  runner = runNode,
-  write = console.log,
   env = process.env,
+  readEvidence = null,
+  write = (line) => process.stdout.write(`${line}\n`),
 } = {}) {
   const runId = exactRunId(argv, env)
+  const options = gateOptions(argv)
   if (runId === null) {
-    write('M2_LIVE_GATE')
-    write('M2_LIVE_RESULT status=UNKNOWN reason=exact_run_scope_required watch=2 acceptance=2')
+    if (options.json) {
+      write(JSON.stringify({ id: 'M2', status: 'UNKNOWN', reason: 'exact_run_scope_required', runId: null }))
+    } else {
+      write(`M2_LIVE_GATE current=${CURRENT_M2}`)
+      write('M2_LIVE_RESULT status=UNKNOWN reason=exact_run_scope_required runId=none')
+    }
     return 2
   }
 
-  const [watch, acceptance] = await Promise.all([
-    runner(WATCH, forwardedWatchArgs(argv), { env }),
-    runner(ACCEPTANCE, acceptanceArgs(argv, env), { env }),
-  ])
-
-  write(`M2_LIVE_GATE runId=${runId}`)
-  write('--- causal evidence (m2-watch) ---')
-  if (watch.stdout.trim()) write(watch.stdout.trimEnd())
-  if (watch.stderr.trim()) write(watch.stderr.trimEnd())
-  write('--- live inventory (m2-acceptance) ---')
-  if (acceptance.stdout.trim()) write(acceptance.stdout.trimEnd())
-  if (acceptance.stderr.trim()) write(acceptance.stderr.trimEnd())
-
-  const result = combineEvidence(watch.code, acceptance.code)
-  const inventorySource = inventoryEvidenceSource(acceptance.stdout)
-  write(
-    `M2_LIVE_RESULT status=${result.status} reason=${result.reason} runId=${runId} watch=${watch.code} acceptance=${acceptance.code} inventorySource=${inventorySource}`,
-  )
-  return result.code
+  if (!options.json) write(`M2_LIVE_GATE current=${CURRENT_M2} runId=${runId}`)
+  let delegateResult = ''
+  const code = await runM2Gate({
+    expectedRunId: runId,
+    readEvidence,
+    logPath: options.logPath,
+    snapshotDir: options.snapshotDir,
+    json: options.json,
+    write: (line) => {
+      delegateResult = String(line)
+      write(line)
+    },
+  })
+  if (!options.json) {
+    const match = new RegExp(`${M2_RUN_RESULT} status=(PASS|FAIL|UNKNOWN) reason=([^ ]+) runId=${runId}`).exec(delegateResult)
+    const status = match?.[1] ?? statusForCode(code)
+    const reason = match?.[2] ?? 'delegated_current_m2_gate'
+    write(`M2_LIVE_RESULT status=${status} reason=${reason} runId=${runId}`)
+  }
+  return code
 }
 
 const invokedDirectly =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-if (invokedDirectly) process.exitCode = await runGate()
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+if (invokedDirectly) {
+  try {
+    process.exitCode = await runGate()
+  } catch (error) {
+    process.stderr.write(`M2_LIVE_GATE_ERROR ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exitCode = 2
+  }
+}

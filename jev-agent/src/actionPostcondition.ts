@@ -81,6 +81,18 @@ export function isPlacePostconditionMet(blockNameAtTarget: string | null, itemNa
   return blockNameAtTarget === itemName
 }
 
+/**
+ * #79 STRICT ignition post-condition. A nether portal is lit only when the
+ * `nether_portal` block exists at EVERY expected interior cell; a single air
+ * cell means the frame was not lit and the action is unverified.
+ */
+export function isIgnitePostconditionMet(
+  blockNamesAtCells: readonly (string | null)[],
+  itemName: string = 'nether_portal',
+): boolean {
+  return blockNamesAtCells.length > 0 && blockNamesAtCells.every((name) => isPlacePostconditionMet(name, itemName))
+}
+
 /** Everything a strict MINE post-condition needs to distinguish a collect from a pure dig. */
 export interface MinePostconditionEvidence {
   /** true when the active goal must end with the drop in the inventory (a collect goal) */
@@ -117,6 +129,8 @@ export function describeActionPostcondition(kind: string): string {
       return 'target item count increased OR (furnace block at target AND input+fuel consumed)'
     case 'PLACE':
       return 'block exists at the target'
+    case 'IGNITE':
+      return 'the nether_portal block exists at every expected portal cell after flint_and_steel activation'
     case 'CRAFT':
       return 'output item count increased'
     case 'MINE':
@@ -187,6 +201,7 @@ const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
   'CRAFT',
   'SMELT',
   'PLACE',
+  'IGNITE',
   'DESCEND',
   'STEP',
   'EAT',

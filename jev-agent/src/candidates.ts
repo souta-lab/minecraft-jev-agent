@@ -42,6 +42,15 @@ import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, R
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
+import {
+  FLINT_AND_STEEL,
+  NETHER_PORTAL,
+  OBSIDIAN,
+  groundPortalFrame,
+  planPortalIgnition,
+  serializePortalCells,
+} from './netherPortalPlan.ts'
+import type { PortalFrameValidation } from './netherPortalPlan.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -49,6 +58,7 @@ export type CandidateKind =
   | 'CRAFT'
   | 'PLACE'
   | 'SMELT'
+  | 'IGNITE'
   | 'DESCEND'
   | 'STEP'
   | 'RETRIEVE'
@@ -82,6 +92,10 @@ export interface Candidate {
   hasStandableAdjacent: boolean
   /** deterministic affordance facts: infeasible candidates are never presented */
   affordance?: CandidateAffordance
+  /** ordered cells a multi-cell PLACE fills with `itemName` (generic frame build) */
+  placementCells?: Vec3Json[]
+  /** plane axis of a placement sequence; 'x' spans x (normal z), 'z' spans z */
+  placementAxis?: 'x' | 'z'
   meta: Record<string, string | number | boolean>
 }
 
@@ -137,6 +151,12 @@ export interface CandidateOptions {
    * which path the candidate set represents.
    */
   prereqRankPolicy?: PrereqRankPolicy
+  /**
+   * The validated Nether portal frame the current goal refers to, when one has
+   * been sensed/validated. Present + tool held + a `nether_portal` place goal is
+   * the ONLY way an IGNITE candidate is offered (issue lane: live ignition).
+   */
+  portalFrame?: PortalFrameValidation | null
 }
 
 export interface ReachabilityGateOptions {
@@ -179,6 +199,12 @@ export interface GroundedCandidatesResult {
    * surfaced (never silent), even when no alternative candidate exists.
    */
   placeRefusal: PlaceRefusal | null
+  /**
+   * Typed ignition refusal (`PORTAL_LIGHT_REFUSED` / `PRECONDITION_MISSING`)
+   * when a portal goal's frame could not be lit. Null when no ignition was
+   * requested this cycle (never when one was requested and withheld).
+   */
+  ignitionRefusal: IgnitionRefusal | null
 }
 
 /**
@@ -203,6 +229,67 @@ export interface PlaceRefusal {
 /** The exact `PLACE_REFUSED` observability line for one typed refusal. */
 export function formatPlaceRefusal(refusal: PlaceRefusal): string {
   return `PLACE_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} item=${refusal.item}`
+}
+
+/**
+ * Why an ignition was not offered: a malformed frame (`PORTAL_LIGHT_REFUSED`)
+ * or a missing flint_and_steel (`PRECONDITION_MISSING`). Surfaced instead of
+ * silence, so a portal goal can never look "starved" for no reason.
+ */
+export interface IgnitionRefusal {
+  reason: string
+  line: string
+  frameShape: 'ok' | 'bad'
+}
+
+/**
+ * The grounded ignition candidates for the active goal. Offered only while the
+ * goal targets the `nether_portal` place operation and a validated frame is
+ * supplied, and only when flint_and_steel is held; otherwise the typed refusal
+ * (or null when the goal is unrelated) is returned.
+ */
+export function ignitionCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+): { candidates: Candidate[]; refusal: IgnitionRefusal | null } {
+  const current = state.goalQueue?.current ?? null
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem !== NETHER_PORTAL) return { candidates: [], refusal: null }
+  const frame = options.portalFrame ?? null
+  if (frame === null) return { candidates: [], refusal: null }
+
+  const hasTool = (state.inventory.counts[FLINT_AND_STEEL] ?? 0) > 0
+  const plan = planPortalIgnition({ frame, hasFlintAndSteel: hasTool })
+  if (!plan.ok) {
+    return { candidates: [], refusal: { reason: plan.reason, line: plan.line, frameShape: frame.shape } }
+  }
+  const ignition = plan.candidate
+  return {
+    candidates: [
+      {
+        id: ignition.id,
+        kind: 'IGNITE',
+        label: `use ${FLINT_AND_STEEL} on the portal frame at (${ignition.lightPosition.x},${ignition.lightPosition.y},${ignition.lightPosition.z}) to light the nether portal`,
+        targetName: NETHER_PORTAL,
+        target: ignition.lightPosition,
+        targetEntityId: null,
+        itemName: FLINT_AND_STEEL,
+        requiresTool: false,
+        toolName: null,
+        inReach: distance(ignition.lightPosition, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          lightX: ignition.lightPosition.x,
+          lightY: ignition.lightPosition.y,
+          lightZ: ignition.lightPosition.z,
+          dimension: ignition.dimension,
+          portalCells: serializePortalCells(ignition.portalCells),
+        },
+      },
+    ],
+    refusal: null,
+  }
 }
 
 /**
@@ -391,7 +478,7 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal)
+  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal)
 }
 
 function generateRawCandidates(
@@ -400,6 +487,7 @@ function generateRawCandidates(
 ): RawCandidatesResult {
   let candidates: Candidate[] = []
   let placeRefusal: PlaceRefusal | null = null
+  let ignitionRefusal: IgnitionRefusal | null = null
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -416,9 +504,13 @@ function generateRawCandidates(
     case 'smelt':
       candidates.push(...smeltCandidates(state, options, focusItem))
       break
-    case 'place':
+    case 'place': {
       candidates.push(...placeCandidates(state, options, focusItem))
+      const ignition = ignitionCandidates(state, options)
+      candidates.push(...ignition.candidates)
+      ignitionRefusal = ignition.refusal
       break
+    }
     default:
       candidates.push(...mineCandidates(state, options, focusItem, descendTargetY))
       break
@@ -578,7 +670,7 @@ function generateRawCandidates(
     })
   }
 
-  return { candidates, placeRefusal }
+  return { candidates, placeRefusal, ignitionRefusal }
 }
 
 /** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
@@ -1552,6 +1644,7 @@ interface CraftCandidatesResult {
 interface RawCandidatesResult {
   candidates: Candidate[]
   placeRefusal: PlaceRefusal | null
+  ignitionRefusal: IgnitionRefusal | null
 }
 
 /**
@@ -1672,6 +1765,42 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
   return best
 }
 
+function explicitPlacementCells(state: WorldState): Vec3Json[] | null {
+  const cells = state.goalQueue?.current?.placementCells ?? null
+  if (cells === null || cells.length === 0) return null
+  return cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+}
+
+/**
+ * Code-owned frame geometry for an abstract `place obsidian` goal: the site is
+ * chosen from the live placement spots and the cells come from `portalFrameLayout`.
+ * This is where the executor-time grounding happens, never in the model plan.
+ */
+function frameBuildCells(state: WorldState): Vec3Json[] | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'place' || current.targetItem !== OBSIDIAN) return null
+  const grounding = groundPortalFrame(state.placementSpots, state.self.position)
+  if (grounding === null) return null
+  return grounding.cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+}
+
+function placeSequenceCells(state: WorldState, focusItem: string): Vec3Json[] | null {
+  const explicit = explicitPlacementCells(state)
+  if (explicit !== null) return explicit
+  const frame = frameBuildCells(state)
+  if (frame === null) return null
+  if ((state.inventory.counts[focusItem] ?? 0) < frame.length) return null
+  return frame
+}
+
+function placementAxisFor(cells: readonly Vec3Json[]): 'x' | 'z' {
+  const first = cells[0]
+  if (first === undefined) return 'x'
+  const sameZ = cells.every((cell) => cell.z === first.z)
+  const sameX = cells.every((cell) => cell.x === first.x)
+  return sameZ && !sameX ? 'x' : 'z'
+}
+
 /**
  * PLACE candidate for a `place` subgoal (e.g. the M2 furnace). The item is in
  * the inventory and there is a grounded placement spot within reach.
@@ -1679,6 +1808,36 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
   if ((state.inventory.counts[focusItem] ?? 0) <= 0) return []
+  const sequence = placeSequenceCells(state, focusItem)
+  if (sequence !== null) {
+    const target = sequence[0] ?? null
+    return [
+      {
+        id: `PLACE:${focusItem}:build:${sequence.length}@${target === null ? 'none' : blockId('p', target)}`,
+        kind: 'PLACE',
+        label: `place ${sequence.length} x ${focusItem} at ${sequence.length} specified cells, starting at (${target?.x},${target?.y},${target?.z})`,
+        targetName: focusItem,
+        target,
+        targetEntityId: null,
+        itemName: focusItem,
+        requiresTool: false,
+        toolName: null,
+        inReach: target !== null && distance(target, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        placementCells: sequence,
+        placementAxis: placementAxisFor(sequence),
+        meta: {
+          tick: state.tick,
+          x: target?.x ?? 0,
+          y: target?.y ?? 0,
+          z: target?.z ?? 0,
+          placementCount: sequence.length,
+        },
+      },
+    ]
+  }
+  const current = state.goalQueue?.current ?? null
+  if (current !== null && current.kind === 'place' && current.targetItem === OBSIDIAN) return []
   const spot = leastFailedPlacementSpot(state, focusItem)
   if (spot === null) return []
   return [
@@ -2954,6 +3113,7 @@ export function applyReachabilityGate(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
   placeRefusal: PlaceRefusal | null = null,
+  ignitionRefusal: IgnitionRefusal | null = null,
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -3030,7 +3190,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal }
 }
 
 /** null when the candidate carries no capability precondition of its own. */

@@ -5,16 +5,22 @@ import { join } from 'node:path'
 import {
   buildCorrectivePrompt,
   describeErrorFull,
+  isBudgetExhaustedError,
   isRetryableMercuryAttempt,
   isRetryableModelError,
   isTimeoutError,
   MERCURY_ALLOWED_GOALS,
+  MERCURY_DEFAULT_COUNT,
   mercuryCostUsd,
   mercuryGoalKind,
   mercuryRetryFeedback,
   mercuryStrategyLabel,
+  mercuryTransportMode,
+  MUSE_SPARK_MODEL,
   MercuryPlanValidationError,
   MercurySystem2,
+  normalizeMercuryPlan,
+  parseMercuryJsonText,
   plannedGoalsFromMercury,
   resolveMercuryEnablement,
   runMercuryAttempts,
@@ -209,6 +215,126 @@ addCase('allowed goal sets are disjoint and non-empty', () => {
   }
 })
 
+addCase('portal prerequisite capabilities are exposed without exposing frame semantics', () => {
+  const flint = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'flint', count: 1 }], reason: 'portal ignition' })
+  const steel = validateMercuryPlan({
+    op: 'patch',
+    goals: [{ kind: 'craft', item: 'flint_and_steel', count: 1 }],
+    reason: 'portal ignition',
+  })
+  const obsidian = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'obsidian', count: 10 }], reason: 'portal frame' })
+  const frame = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'place', item: 'nether_portal', count: 1 }], reason: 'portal frame' })
+  const pass = flint.ok && steel.ok && obsidian.ok && !frame.ok
+  return {
+    pass,
+    detail: `flint=${flint.ok} steel=${steel.ok} obsidian=${obsidian.ok} frame=${frame.ok ? 'accepted' : frame.error}`,
+  }
+})
+
+addCase('muse transport uses strict JSON text while Mercury keeps named tool calls', () => {
+  const exact = parseMercuryJsonText('{"op":"patch","goals":[],"reason":"ok"}')
+  const fenced = parseMercuryJsonText('reasoning\n```json\n{"op":"abort","goals":[],"reason":"blocked"}\n```')
+  const malformed = parseMercuryJsonText('not a plan')
+  const pass =
+    mercuryTransportMode(MUSE_SPARK_MODEL) === 'json-text' &&
+    mercuryTransportMode('inception/mercury-2.5') === 'tool-call' &&
+    (exact as { op?: string } | null)?.op === 'patch' &&
+    (fenced as { op?: string } | null)?.op === 'abort' &&
+    malformed === null
+  return { pass, detail: `muse=${mercuryTransportMode(MUSE_SPARK_MODEL)} mercury=${mercuryTransportMode('inception/mercury-2.5')} malformed=${malformed}` }
+})
+
+addCase('(a) a valid model plan that omits count is accepted and normalized, not rejected', () => {
+  // Ground truth 2026-09-19T18:22:16Z: Mercury proposed this exact goal list and
+  // the validator rejected it with `goal[1] collect needs a count in [1,64]`.
+  const checked = validateMercuryPlan({
+    op: 'replace',
+    goals: [
+      { kind: 'goto_resource', item: 'diamond' },
+      { kind: 'collect', item: 'oak_log' },
+      { kind: 'place', item: 'crafting_table' },
+      { kind: 'craft', item: 'diamond_pickaxe' },
+    ],
+    reason: 'blocked obsidian; take the diamond route',
+  })
+  if (!checked.ok) return { pass: false, detail: `REJECTED (the exact 18:22 rejection): ${checked.error}` }
+  const goals = plannedGoalsFromMercury(checked.plan)
+  const pass =
+    checked.plan.goals[1]?.count === MERCURY_DEFAULT_COUNT &&
+    checked.plan.goals[3]?.count === MERCURY_DEFAULT_COUNT &&
+    goals.length === 4 &&
+    goals[0]?.kind === 'collect' &&
+    goals[0]?.targetItem === 'diamond' &&
+    goals[1]?.kind === 'collect' &&
+    goals[1]?.targetItem === 'oak_log' &&
+    goals[1]?.requiredCount === MERCURY_DEFAULT_COUNT &&
+    goals[2]?.kind === 'place' &&
+    goals[2]?.targetItem === 'crafting_table' &&
+    goals[3]?.kind === 'craft' &&
+    goals[3]?.targetItem === 'diamond_pickaxe'
+  return { pass, detail: goals.map((goal) => `${goal.kind}:${goal.targetItem}x${goal.requiredCount}`).join(' -> ') }
+})
+
+addCase('(b) an explicit out-of-range count is still rejected with a clear error', () => {
+  const zero = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'oak_log', count: 0 }], reason: 'x' })
+  const tooBig = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'oak_log', count: 65 }], reason: 'x' })
+  const fractional = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'oak_log', count: 1.5 }], reason: 'x' })
+  const reasons = [zero, tooBig, fractional].map((result) => (result.ok ? 'ACCEPTED' : result.error))
+  const pass = !zero.ok && !tooBig.ok && !fractional.ok && reasons.every((reason) => reason.toLowerCase().includes('count'))
+  return { pass, detail: reasons.join(' | ') }
+})
+
+addCase('(c) budget exhaustion is a distinct observable status, never a silent fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-budget-'))
+  const callsPath = join(dir, 'mercury-calls.jsonl')
+  const logs: string[] = []
+  let transportCalls = 0
+  const mercury = new MercurySystem2({
+    summarize: () => mercurySummary(),
+    log: hostLog(logs),
+    callsPath,
+    cachePath: join(dir, 'mercury-cache.json'),
+    maxPerHour: 0,
+    resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+    transport: () => {
+      transportCalls += 1
+      return Promise.resolve({ toolCalls: [], usage: null })
+    },
+  })
+  let thrown: unknown = null
+  try {
+    await mercury.tryRepair(planRequest(), 'no_candidate')
+  } catch (error) {
+    thrown = error
+  }
+  const records = existsSync(callsPath)
+    ? readFileSync(callsPath, 'utf8')
+        .trim()
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+    : []
+  const status = records.find((record) => record.outcome === 'budget_exhausted')
+  const silentFallback = records.some((record) => record.outcome === 'fallback')
+  const budgetLog = logs.find((line) => line.startsWith('MERCURY_BUDGET_EXHAUSTED'))
+  const deterministic = logs.some((line) => line.includes('deterministic'))
+  const errorText = typeof status?.error === 'string' ? status.error : ''
+  const pass =
+    thrown instanceof FatalModelError &&
+    thrown.context === 'mercury:no_candidate' &&
+    thrown.reason.includes('hourly budget exhausted') &&
+    transportCalls === 0 &&
+    status !== undefined &&
+    errorText.includes('hourly budget exhausted') &&
+    budgetLog !== undefined &&
+    !silentFallback &&
+    !deterministic
+  return {
+    pass,
+    detail: `thrown=${thrown instanceof FatalModelError ? thrown.reason : String(thrown)} transportCalls=${transportCalls} outcomes=${records.map((record) => String(record.outcome)).join(',')} budgetLog=${budgetLog !== undefined} silentFallback=${silentFallback} deterministic=${deterministic}`,
+  }
+})
+
 addCase('retries only abort/timeout errors, never schema errors', () => {
   const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
   const wrapper = new Error('outer', { cause: timeout })
@@ -346,7 +472,9 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
   const basePrompt = '{"trigger":"no_progress"}'
   const prompts: string[] = []
   const feedbacks: (string | null)[] = []
-  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone' }], reason: 'need stone' }
+  // A genuinely invalid plan (ungrounded item), NOT a count-less plan: a missing
+  // count is now normalized mechanically and must not be used as a rejection fixture.
+  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'not_a_real_item', count: 2 }], reason: 'need it' }
   const correctedPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 4 }], reason: 'need four stone' }
   let providerCalls = 0
   const result = await runMercuryAttempts({
@@ -367,7 +495,8 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
     },
   })
   const second = prompts[1] ?? ''
-  const expectedError = 'goal[0] collect needs a count in [1,64]'
+  const invalidCheck = validateMercuryPlan(invalidPlan)
+  const expectedError = invalidCheck.ok ? 'unexpectedly accepted' : invalidCheck.error
   return {
     pass:
       result.ok &&
@@ -376,8 +505,9 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
       providerCalls === 2 &&
       prompts[0] === basePrompt &&
       !prompts[0]?.includes('CORRECTION REQUIRED') &&
+      !invalidCheck.ok &&
       second.includes(expectedError) &&
-      second.includes('count in [1,64]') &&
+      second.includes('CORRECTION REQUIRED') &&
       feedbacks[1] === expectedError &&
       result.result.goals[0]?.count === 4,
     detail: JSON.stringify({
@@ -395,7 +525,8 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
   const callsPath = join(dir, 'mercury-calls.jsonl')
   const logs: string[] = []
   const prompts: string[] = []
-  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone' }], reason: 'need stone' }
+  // Out-of-range count stays a hard rejection (missing count no longer rejects).
+  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 65 }], reason: 'need stone' }
   const mercury = new MercurySystem2({
     summarize: () => mercurySummary(),
     log: hostLog(logs),
@@ -423,6 +554,7 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
         .map((line) => JSON.parse(line) as Record<string, unknown>)
     : []
   const rejected = records.filter((record) => record.outcome === 'plan_rejected')
+  const fabricatedFallback = records.filter((record) => record.outcome === 'fallback').length
   const correctivePrompts = prompts.slice(1).filter((prompt) => prompt.includes('CORRECTION REQUIRED')).length
   const degraded = logs.some((line) => line.includes('deterministic'))
   return {
@@ -436,10 +568,11 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
       correctivePrompts === 2 &&
       rejects.length === 3 &&
       rejected.length === 3 &&
+      fabricatedFallback === 0 &&
       rejected.every((record) => typeof record.error === 'string' && String(record.error).includes('invalid plan')) &&
       rejected.every((record) => record.outcome === 'plan_rejected') &&
       !degraded,
-    detail: `thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} prompts=${prompts.length} corrective=${correctivePrompts} rejected=${rejected.length} rejects=${rejects.length} fatal=${fatal ?? 'none'}`,
+    detail: `thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} prompts=${prompts.length} corrective=${correctivePrompts} rejected=${rejected.length} rejects=${rejects.length} fabricatedFallback=${fabricatedFallback} fatal=${fatal ?? 'none'}`,
   }
 })
 

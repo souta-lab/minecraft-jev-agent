@@ -20,7 +20,7 @@
         { "id": "portal_built", "requires": ["portal_frame_verified"] },
         { "id": "portal_lit", "requires": ["portal_lit_verified", "portal_verified", "dimension=minecraft:overworld"] }
       ],
-      "evaluator": { "type": "manual", "reason": "The current M2 is the diamond-to-Nether-gate milestone. The old tools/m2-live-gate.mjs evaluates historical iron-age evidence and is not a current M2 gate." }
+      "evaluator": { "type": "command", "script": "tools/m2-gate.mjs", "scopeArg": "--run" }
     },
     "M3": {
       "title": "Nether progression after the gate",

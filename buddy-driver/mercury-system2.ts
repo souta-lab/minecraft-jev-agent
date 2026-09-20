@@ -39,6 +39,13 @@ import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
+  NETHER_PORTAL,
+  OBSIDIAN,
+  OVERWORLD,
+  PORTAL_LIT_PREDICATE,
+  PORTAL_OBSIDIAN_REQUIRED,
+} from '../jev-agent/src/netherPortalPlan.ts'
+import {
   MERCURY_ALLOWED_GOALS,
   MERCURY_EXPLORE_MODES,
   MERCURY_MODEL_DEFAULT,
@@ -148,12 +155,45 @@ function itemList(set: ReadonlySet<string>): string {
   return [...set].join(',')
 }
 
+/**
+ * Mechanical default count when the model omits one on an item goal. Code owns
+ * mechanical validity; Mercury/Jev own WHAT NEXT. A missing count must never
+ * discard an otherwise-valid plan, so it is filled with this safe minimum.
+ */
+export const MERCURY_DEFAULT_COUNT = 1
+
+function goalNeedsCount(kind: string | null): boolean {
+  return kind === 'collect' || kind === 'craft' || kind === 'smelt'
+}
+
+/**
+ * Fill a missing count on an item goal with MERCURY_DEFAULT_COUNT. Purely
+ * mechanical: it never reorders, invents, or drops goals, and an explicit count
+ * (valid or not) passes through untouched so the validator still rejects it.
+ */
+export function normalizeMercuryGoal(goal: MercuryPlanGoalJson): MercuryPlanGoalJson {
+  if (goal.count !== undefined) return goal
+  const kind = goal.kind ?? mercuryGoalKind(goal.item ?? '')
+  if (!goalNeedsCount(kind)) return goal
+  return { ...goal, count: MERCURY_DEFAULT_COUNT }
+}
+
+/** Normalize every goal in a parsed plan; returns the same object when nothing changed. */
+export function normalizeMercuryPlan(plan: MercuryPlanJson): MercuryPlanJson {
+  let changed = false
+  const goals = plan.goals.map((goal) => {
+    const normalized = normalizeMercuryGoal(goal)
+    if (normalized !== goal) changed = true
+    return normalized
+  })
+  return changed ? { ...plan, goals } : plan
+}
+
 function validateItemGoal(
   index: number,
   kind: string,
   goal: MercuryPlanGoalJson,
   allowed: ReadonlySet<string>,
-  opts?: { requireCount?: boolean },
 ): string | null {
   const item = typeof goal.item === 'string' ? goal.item : ''
   if (item.length === 0 || !allowed.has(item)) {
@@ -161,9 +201,6 @@ function validateItemGoal(
   }
   if (goal.count !== undefined && (!Number.isInteger(goal.count) || goal.count < 1 || goal.count > 64)) {
     return `goal[${index}] ${kind} count must be an integer in [1,64]`
-  }
-  if (opts?.requireCount === true && goal.count === undefined) {
-    return `goal[${index}] ${kind} needs a count in [1,64]`
   }
   return null
 }
@@ -176,19 +213,19 @@ export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): s
   // Legacy item goal: kind is inferred locally (backward compatible).
   if (goal.kind === undefined) {
     if (typeof goal.item !== 'string' || goal.item.length === 0) return `goal[${index}] legacy goal needs an item`
+    if (mercuryGoalKind(goal.item) === null) return `goal[${index}] ungrounded item: ${goal.item}`
     if (goal.count === undefined || !Number.isInteger(goal.count) || goal.count < 1 || goal.count > 64) {
       return `goal[${index}] legacy goal needs count in [1,64]`
     }
-    if (mercuryGoalKind(goal.item) === null) return `goal[${index}] ungrounded item: ${goal.item}`
     return null
   }
   switch (goal.kind) {
     case 'collect':
-      return validateItemGoal(index, 'collect', goal, collectableItems(), { requireCount: true })
+      return validateItemGoal(index, 'collect', goal, collectableItems())
     case 'craft':
-      return validateItemGoal(index, 'craft', goal, craftableItems(), { requireCount: true })
+      return validateItemGoal(index, 'craft', goal, craftableItems())
     case 'smelt':
-      return validateItemGoal(index, 'smelt', goal, smeltableItems(), { requireCount: true })
+      return validateItemGoal(index, 'smelt', goal, smeltableItems())
     case 'place':
       // count is optional for place; a station is singular.
       return validateItemGoal(index, 'place', goal, placeableItems())
@@ -216,9 +253,35 @@ export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): s
       }
       return null
     }
+    case 'build_portal_frame':
+      return validatePortalParameterlessGoal(index, 'build_portal_frame', goal, { allowDimension: false })
+    case 'light':
+    case 'light_portal':
+    case 'verify':
+    case 'verify_portal':
+      return validatePortalParameterlessGoal(index, goal.kind, goal, { allowDimension: true })
     default:
       return `goal[${index}] unsupported kind: ${String(goal.kind)}`
   }
+}
+
+function validatePortalParameterlessGoal(
+  index: number,
+  kind: string,
+  goal: MercuryPlanGoalJson,
+  opts: { allowDimension: boolean },
+): string | null {
+  if (goal.item !== undefined) return `goal[${index}] ${kind} takes no item: geometry is code-owned`
+  if (goal.count !== undefined) return `goal[${index}] ${kind} takes no count`
+  if (goal.y !== undefined) return `goal[${index}] ${kind} takes no y: geometry is code-owned`
+  if (goal.mode !== undefined) return `goal[${index}] ${kind} takes no mode`
+  if (goal.dimension !== undefined) {
+    if (!opts.allowDimension) return `goal[${index}] ${kind} takes no dimension`
+    if (typeof goal.dimension !== 'string' || goal.dimension.length === 0) {
+      return `goal[${index}] ${kind} dimension must be a non-empty string`
+    }
+  }
+  return null
 }
 
 /**
@@ -232,7 +295,7 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
     const issue = parsed.error.issues[0]
     return { ok: false, error: `schema: ${issue?.path.join('.') ?? '?'} ${issue?.message ?? 'invalid'}` }
   }
-  const plan = parsed.data
+  const plan = normalizeMercuryPlan(parsed.data)
   if (plan.op === 'abort' && plan.goals.length !== 0) {
     return { ok: false, error: 'abort plans must not contain goals' }
   }
@@ -361,6 +424,29 @@ export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | nul
         dimension: 'minecraft:overworld',
         detail: 'mercury explore:cave',
       }
+    case 'build_portal_frame':
+      return {
+        kind: 'place',
+        description: `build the ${PORTAL_OBSIDIAN_REQUIRED}-block obsidian nether portal frame`,
+        targetItem: OBSIDIAN,
+        requiredCount: PORTAL_OBSIDIAN_REQUIRED,
+        detail: 'mercury build_portal_frame',
+      }
+    case 'light':
+    case 'light_portal':
+    case 'verify':
+    case 'verify_portal': {
+      const lighting = goal.kind === 'light' || goal.kind === 'light_portal'
+      return {
+        kind: 'place',
+        description: lighting ? 'light the nether portal with flint_and_steel' : 'verify the lit nether portal',
+        targetItem: NETHER_PORTAL,
+        requiredCount: 1,
+        targetPredicate: PORTAL_LIT_PREDICATE,
+        dimension: goal.dimension ?? OVERWORLD,
+        detail: `mercury ${goal.kind}`,
+      }
+    }
     default:
       return null
   }
@@ -649,7 +735,7 @@ export interface MercuryCallRecord {
   retries: number
   /** 1-based index of the attempt this record describes (retry audit trail). */
   attempt?: number
-  outcome: 'success' | 'plan_rejected' | 'fallback'
+  outcome: 'success' | 'plan_rejected' | 'fallback' | 'budget_exhausted'
   state: unknown
   prompt: { system: string; user: string }
   response: unknown
@@ -732,7 +818,73 @@ export interface MercuryTransportResult {
 
 export type MercuryTransport = (request: MercuryTransportRequest) => Promise<MercuryTransportResult>
 
+/**
+ * Some gateway models accept the AI SDK tool schema but reject a named
+ * `tool_choice`.  Keep their compatibility path explicit: the model still
+ * emits only a high-level plan, and the exact same local schema/capability
+ * validation remains authoritative after transport parsing.
+ */
+export const MUSE_SPARK_MODEL = 'muse-spark-1.3-contributor'
+
+export type MercuryTransportMode = 'tool-call' | 'json-text'
+
+export function mercuryTransportMode(model: string): MercuryTransportMode {
+  return model === MUSE_SPARK_MODEL ? 'json-text' : 'tool-call'
+}
+
+/** Extract one JSON object from a model's text response without repairing it. */
+export function parseMercuryJsonText(text: string): unknown | null {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return null
+  const candidates: string[] = [trimmed]
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]
+  if (fenced !== undefined) candidates.push(fenced.trim())
+  const first = trimmed.indexOf('{')
+  const last = trimmed.lastIndexOf('}')
+  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1))
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate)
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    } catch {
+      // The caller turns null into the normal schema rejection/corrective retry.
+    }
+  }
+  return null
+}
+
+const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
+  'This model cannot use a named tool choice. Prefer one emitPlan tool call when supported; otherwise return exactly one JSON object in the response text, with no prose or markdown. ' +
+  'The top-level op must be exactly one of continue, patch, replace, or abort. ' +
+  'Use goals for the typed goal objects; never use a goal kind as op. ' +
+  'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
+
 function defaultMercuryTransport(model: string): MercuryTransport {
+  if (mercuryTransportMode(model) === 'json-text') {
+    return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+      const result = await generateText({
+        model,
+        system: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
+        prompt,
+        tools: {
+          emitPlan: tool({
+            description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
+            inputSchema: MERCURY_PLAN_SCHEMA,
+          }),
+        },
+        // muse rejects a named tool choice but accepts the provider-neutral
+        // auto mode. If it spends its output budget reasoning without a tool
+        // call, the strict JSON-text parser below is the non-semantic fallback.
+        toolChoice: 'auto',
+        maxOutputTokens,
+        maxRetries: 0,
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      })
+      if (result.toolCalls.length > 0) return { toolCalls: result.toolCalls, usage: result.usage }
+      const parsed = parseMercuryJsonText(result.text)
+      return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage: result.usage }
+    }
+  }
   return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
     const result = await generateText({
       model,
@@ -765,6 +917,11 @@ A goal is EITHER a legacy item goal { item, count } (the verb is inferred locall
 - { kind: 'goto_resource', item }    known-resource retrieval; allowed: allowedGoals.goto_resources
 - { kind: 'descend_to', y }          integer y in [-59, 320]; optional dimension, defaults to overworld
 - { kind: 'explore', mode }          mode is 'cave' or 'surface'
+- { kind: 'build_portal_frame' }     build the standard 4x5 obsidian Nether portal frame; takes NO item, count, y, dimension or coordinates (the site and cell geometry are code-owned)
+- { kind: 'light_portal', dimension }   light the validated frame with flint_and_steel; optional dimension defaults to minecraft:overworld. The ignition post-condition verifies the nether_portal block. 'light' is an accepted synonym.
+- { kind: 'verify_portal', dimension }  re-verify the lit nether_portal block in the dimension. 'verify' is an accepted synonym.
+When the portal materials are ready, { kind: 'build_portal_frame' }, { kind: 'light' } and { kind: 'verify' } are distinct WHAT goals you may emit in the order you choose: Code grounds the frame geometry and owns the ignition verification. Never emit coordinates, a frame cell list, or { kind: 'place', item: 'nether_portal' }.
+Every collect/craft/smelt goal MUST include an explicit integer count in [1,64]; when the quantity is not otherwise constrained, emit count: 1. Local normalization fills a missing count with 1, but an explicit count is required to express your intent, and a count outside [1,64] is rejected.
 Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions; goto references a resource name, never an x/z position.
 Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.
 If a furnace is held but the world has no placed furnace, emit { kind: 'place', item: 'furnace' } so the placement is a first-class planned step.
@@ -847,6 +1004,10 @@ export function isRetryableModelError(error: unknown, depth = 0): boolean {
   if (isRetryableModelError(record.cause, depth + 1)) return true
   const errors = record.errors
   return Array.isArray(errors) && errors.some((entry) => isRetryableModelError(entry, depth + 1))
+}
+
+export function isBudgetExhaustedError(error: unknown): boolean {
+  return error instanceof Error && /hourly budget exhausted/i.test(error.message)
 }
 
 export type MercuryAttemptRun<T> =
@@ -1178,14 +1339,48 @@ export class MercurySystem2 implements System2Brain {
       })
       attempts = attemptRun.attempts
       failures = attemptRun.failures
-      retriesUsed = attempts - 1
+      retriesUsed = Math.max(0, attempts - 1)
       this.flushRejectedAttempts(callId, trigger, started, state, rejectedAttempts, attempts, failures, retriesUsed)
       rejectionsFlushed = true
       if (!attemptRun.ok) {
         const error = attemptRun.error
         const isValidation = error instanceof MercuryPlanValidationError
-        const message = isValidation ? error.message : `llm_error: ${describeError(error)}`
-        if (rejectedAttempts.length === 0) {
+        const budgetExhausted = isBudgetExhaustedError(error)
+        const message = isValidation
+          ? error.message
+          : budgetExhausted
+            ? `budget_exhausted: ${describeError(error)}`
+            : `llm_error: ${describeError(error)}`
+        if (budgetExhausted) {
+          this.log('MERCURY_BUDGET_EXHAUSTED', {
+            callId,
+            trigger,
+            stage: trigger,
+            maxPerHour: this.maxPerHour,
+            budgetUsed: this.cache.callTimes.length,
+            attempts,
+          })
+          this.writeCall({
+            record: 'mercury-call',
+            callId,
+            ts: new Date().toISOString(),
+            model: this.model,
+            stage: trigger,
+            latencyMs: Date.now() - started,
+            attempts,
+            failures,
+            retries: retriesUsed,
+            attempt: attempts,
+            outcome: 'budget_exhausted',
+            state,
+            prompt: { system: SYSTEM_PROMPT, user: userPrompt },
+            response: null,
+            usage: null,
+            cost: 0,
+            error: message,
+            errorDetail: describeErrorFull(error),
+          })
+        } else if (rejectedAttempts.length === 0) {
           this.writeCall({
             record: 'mercury-call',
             callId,
@@ -1283,6 +1478,8 @@ export class MercurySystem2 implements System2Brain {
         cached: false,
       }
     } catch (error) {
+      // modelFailure() already wrote the authoritative record; do not fabricate a 'fallback'.
+      if (error instanceof FatalModelError) throw error
       const latencyMs = Date.now() - started
       const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
       const message = `${kind}: ${describeError(error)}`

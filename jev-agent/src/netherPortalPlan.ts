@@ -46,6 +46,14 @@ export const PORTAL_VERIFIED = 'PORTAL_VERIFIED'
 /** The portal could not be lit (precondition or bad frame). */
 export const PORTAL_LIGHT_REFUSED = 'PORTAL_LIGHT_REFUSED'
 
+/**
+ * The queue-level predicate that names the ignition operation. Both the
+ * `light:nether_portal` and `verify:nether_portal` capability steps compile to a
+ * `place nether_portal` goal carrying this predicate, so a queue dedups them
+ * into ONE ignition action whose executor post-condition IS the verification.
+ */
+export const PORTAL_LIT_PREDICATE = 'portal_lit'
+
 /** The portal frame is a 4-wide x 5-tall obsidian rectangle. */
 export const PORTAL_FRAME_WIDTH = 4
 export const PORTAL_FRAME_HEIGHT = 5
@@ -169,6 +177,9 @@ export interface PortalBuildFrameStep extends PortalStepCommon {
   readonly width: number
   readonly height: number
   readonly blocks: number
+  /** bottom-left frame origin; when set, the step compiles to its exact cells */
+  readonly origin?: PortalBlockPosition
+  readonly widthAxis?: PortalWidthAxis
 }
 
 export interface PortalLightStep extends PortalStepCommon {
@@ -427,6 +438,52 @@ export function formatPortalBlockPlaced(pos: PortalBlockPosition): string {
   return `${PORTAL_BLOCK_PLACED} pos=${formatPos(pos)}`
 }
 
+export interface BlockPlacementStep {
+  readonly item: string
+  readonly cell: PortalBlockPosition
+}
+
+/** Deterministic support-friendly order: bottom-up, then width, then normal. */
+export function orderedPlacementCells(cells: readonly PortalBlockPosition[]): PortalBlockPosition[] {
+  return [...cells].sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z)
+}
+
+/** Compile "place N blocks of `item` at `cells`" into an ordered cell sequence. */
+export function planBlockPlacements(item: string, cells: readonly PortalBlockPosition[]): BlockPlacementStep[] {
+  return orderedPlacementCells(cells).map((cell) => ({ item, cell }))
+}
+
+/** The executable frame-build sequence at `origin` (geometry from portalFrameLayout). */
+export function portalFramePlacementSteps(
+  origin: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+  item: string = OBSIDIAN,
+): BlockPlacementStep[] {
+  return planBlockPlacements(item, portalFrameLayout(origin, widthAxis).frame)
+}
+
+/** The code-grounded frame site + ordered cells for an abstract build-the-frame goal. */
+export interface PortalFrameGrounding {
+  readonly origin: PortalBlockPosition
+  readonly widthAxis: PortalWidthAxis
+  readonly cells: PortalBlockPosition[]
+}
+
+export function groundPortalFrame(
+  sites: readonly PortalBlockPosition[],
+  self: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+): PortalFrameGrounding | null {
+  if (sites.length === 0) return null
+  const chosen = choosePortalSite(
+    sites.map((position) => ({ position, safe: true, reachable: true })),
+    self,
+  )
+  if (chosen === null) return null
+  const layout = portalFrameLayout(chosen.position, widthAxis)
+  return { origin: chosen.position, widthAxis, cells: orderedPlacementCells(layout.frame) }
+}
+
 // ---------------------------------------------------------------------------
 // safe site selection
 // ---------------------------------------------------------------------------
@@ -518,15 +575,105 @@ export function verifyPortal(input: VerifyPortalInput): VerifyPortalResult {
 }
 
 // ---------------------------------------------------------------------------
+// live ignition decision (the executable half of `light:nether_portal`)
+// ---------------------------------------------------------------------------
+
+/** A grounded ignition candidate: the frame is valid and flint_and_steel is held. */
+export interface PortalIgnitionCandidate {
+  readonly id: string
+  /** where flint_and_steel is used (the bottom interior cell) */
+  readonly lightPosition: PortalBlockPosition
+  /** the 2x3 interior cells that must become nether_portal after ignition */
+  readonly portalCells: PortalBlockPosition[]
+  readonly dimension: string
+  readonly line: string
+}
+
+export type PortalIgnitionPlan =
+  | { readonly ok: true; readonly candidate: PortalIgnitionCandidate }
+  | { readonly ok: false; readonly refused: true; readonly reason: string; readonly line: string }
+
+/**
+ * Decide whether a frame may be lit RIGHT NOW. A malformed frame is refused with
+ * `PORTAL_LIGHT_REFUSED`; a valid frame without flint_and_steel is refused with
+ * `PRECONDITION_MISSING tool=flint_and_steel`. Only a valid frame plus the tool
+ * yields the activation candidate, so no impossible ignition is ever offered.
+ */
+export function planPortalIgnition(input: LightPortalInput): PortalIgnitionPlan {
+  const lighting = lightPortal(input)
+  if (!lighting.lit) {
+    return { ok: false, refused: true, reason: lighting.reason, line: lighting.line }
+  }
+  const portalCells = [...input.frame.interior]
+  if (portalCells.length === 0) {
+    return {
+      ok: false,
+      refused: true,
+      reason: 'frame_shape_bad',
+      line: `${PORTAL_LIGHT_REFUSED} reason=frame_shape_bad shape=${input.frame.shape}`,
+    }
+  }
+  return {
+    ok: true,
+    candidate: {
+      id: `IGNITE:${formatPos(lighting.position)}`,
+      lightPosition: lighting.position,
+      portalCells,
+      dimension: input.dimension ?? OVERWORLD,
+      line: lighting.line,
+    },
+  }
+}
+
+/** The live block name at a cell, or null when the cell is unloaded. */
+export type PortalBlockLookup = (pos: PortalBlockPosition) => string | null
+
+/** Strict ignition post-condition: every expected interior cell is nether_portal. */
+export function isPortalIgnitionPostconditionMet(
+  expectedCells: readonly PortalBlockPosition[],
+  blockAt: PortalBlockLookup,
+  expectedBlock: string = NETHER_PORTAL,
+): boolean {
+  if (expectedCells.length === 0) return false
+  return expectedCells.every((cell) => blockAt(cell) === expectedBlock)
+}
+
+/** Encode the expected portal cells for a candidate's primitive-only `meta`. */
+export function serializePortalCells(cells: readonly PortalBlockPosition[]): string {
+  return cells.map(formatPos).join(';')
+}
+
+/** Decode the `meta.portalCells` encoding back into positions. Invalid parts are dropped. */
+export function parsePortalCells(serialized: string): PortalBlockPosition[] {
+  const cells: PortalBlockPosition[] = []
+  for (const part of serialized.split(';')) {
+    if (part.length === 0) continue
+    const [rawX, rawY, rawZ] = part.split(',')
+    const x = Number(rawX)
+    const y = Number(rawY)
+    const z = Number(rawZ)
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) cells.push({ x, y, z })
+  }
+  return cells
+}
+
+/** The `PORTAL_LIT` marker line for a lit frame, in the required dimension. */
+export function formatPortalLit(position: PortalBlockPosition, dimension: string = OVERWORLD): string {
+  return `${PORTAL_LIT} pos=${formatPos(position)} dimension=${dimension}`
+}
+
+// ---------------------------------------------------------------------------
 // typed plan -> PlannedGoal compiler (#19 compatibility)
 // ---------------------------------------------------------------------------
 
 /**
- * Compile a portal step into the existing typed `PlannedGoal` kinds. Steps with
- * no queue-level equivalent (`light`/`verify`) return null: they are executor
- * sub-steps of the single `place nether_portal` operation.
+ * Compile a portal step into the existing typed `PlannedGoal` kinds. The
+ * `light`/`verify` operations are executor sub-steps of the ONE `place
+ * nether_portal` ignition action: both compile to the same goal, carrying
+ * `PORTAL_LIT_PREDICATE`, so the GoalQueue dedups them and the IGNITE executor
+ * owns lighting AND its verification post-condition.
  */
-export function portalStepToPlannedGoal(step: PortalStep): PlannedGoal | null {
+export function portalStepToPlannedGoal(step: PortalStep): PlannedGoal {
   const flags = {
     ...(step.protected === true ? { protected: true } : {}),
     ...(step.core === true ? { core: true } : {}),
@@ -538,21 +685,45 @@ export function portalStepToPlannedGoal(step: PortalStep): PlannedGoal | null {
       return { kind: 'craft', description: step.description, targetItem: step.item, requiredCount: step.count, ...flags }
     case 'smelt':
       return { kind: 'smelt', description: step.description, targetItem: step.item, requiredCount: step.count, ...flags }
-    case 'build_portal_frame':
-      return { kind: 'place', description: step.description, targetItem: NETHER_PORTAL, requiredCount: 1, ...flags }
+    case 'build_portal_frame': {
+      const cells =
+        step.origin === undefined
+          ? undefined
+          : portalFramePlacementSteps(step.origin, step.widthAxis ?? 'x').map((entry) => entry.cell)
+      return {
+        kind: 'place',
+        description: step.description,
+        targetItem: OBSIDIAN,
+        requiredCount: cells?.length ?? step.blocks,
+        ...(cells === undefined ? {} : { placementCells: cells }),
+        ...flags,
+      }
+    }
     case 'light_portal':
+      return {
+        kind: 'place',
+        description: step.description,
+        targetItem: NETHER_PORTAL,
+        requiredCount: 1,
+        targetPredicate: PORTAL_LIT_PREDICATE,
+        dimension: step.postcondition.kind === 'portalLit' ? step.postcondition.dimension : OVERWORLD,
+        ...flags,
+      }
     case 'verify_portal':
-      return null
+      return {
+        kind: 'place',
+        description: step.description,
+        targetItem: NETHER_PORTAL,
+        requiredCount: 1,
+        targetPredicate: PORTAL_LIT_PREDICATE,
+        dimension: step.dimension,
+        ...flags,
+      }
   }
 }
 
 export function portalStepsToPlannedGoals(steps: readonly PortalStep[]): PlannedGoal[] {
-  const goals: PlannedGoal[] = []
-  for (const step of steps) {
-    const goal = portalStepToPlannedGoal(step)
-    if (goal !== null) goals.push(goal)
-  }
-  return goals
+  return steps.map((step) => portalStepToPlannedGoal(step))
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +899,7 @@ export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan
       width: PORTAL_FRAME_WIDTH,
       height: PORTAL_FRAME_HEIGHT,
       blocks: PORTAL_OBSIDIAN_REQUIRED,
+      ...(site === null ? {} : { origin: site.position, widthAxis: 'x' as const }),
       postcondition: { kind: 'frameShapeOk' },
       core: true,
     },
