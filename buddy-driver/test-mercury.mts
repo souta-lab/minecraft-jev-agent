@@ -5,10 +5,12 @@ import { join } from 'node:path'
 import {
   buildCorrectivePrompt,
   describeErrorFull,
+  isBudgetExhaustedError,
   isRetryableMercuryAttempt,
   isRetryableModelError,
   isTimeoutError,
   MERCURY_ALLOWED_GOALS,
+  MERCURY_DEFAULT_COUNT,
   mercuryCostUsd,
   mercuryGoalKind,
   mercuryRetryFeedback,
@@ -17,6 +19,7 @@ import {
   MUSE_SPARK_MODEL,
   MercuryPlanValidationError,
   MercurySystem2,
+  normalizeMercuryPlan,
   parseMercuryJsonText,
   plannedGoalsFromMercury,
   resolveMercuryEnablement,
@@ -239,6 +242,97 @@ addCase('muse transport uses strict JSON text while Mercury keeps named tool cal
     (fenced as { op?: string } | null)?.op === 'abort' &&
     malformed === null
   return { pass, detail: `muse=${mercuryTransportMode(MUSE_SPARK_MODEL)} mercury=${mercuryTransportMode('inception/mercury-2.5')} malformed=${malformed}` }
+})
+
+addCase('(a) a valid model plan that omits count is accepted and normalized, not rejected', () => {
+  // Ground truth 2026-09-19T18:22:16Z: Mercury proposed this exact goal list and
+  // the validator rejected it with `goal[1] collect needs a count in [1,64]`.
+  const checked = validateMercuryPlan({
+    op: 'replace',
+    goals: [
+      { kind: 'goto_resource', item: 'diamond' },
+      { kind: 'collect', item: 'oak_log' },
+      { kind: 'place', item: 'crafting_table' },
+      { kind: 'craft', item: 'diamond_pickaxe' },
+    ],
+    reason: 'blocked obsidian; take the diamond route',
+  })
+  if (!checked.ok) return { pass: false, detail: `REJECTED (the exact 18:22 rejection): ${checked.error}` }
+  const goals = plannedGoalsFromMercury(checked.plan)
+  const pass =
+    checked.plan.goals[1]?.count === MERCURY_DEFAULT_COUNT &&
+    checked.plan.goals[3]?.count === MERCURY_DEFAULT_COUNT &&
+    goals.length === 4 &&
+    goals[0]?.kind === 'collect' &&
+    goals[0]?.targetItem === 'diamond' &&
+    goals[1]?.kind === 'collect' &&
+    goals[1]?.targetItem === 'oak_log' &&
+    goals[1]?.requiredCount === MERCURY_DEFAULT_COUNT &&
+    goals[2]?.kind === 'place' &&
+    goals[2]?.targetItem === 'crafting_table' &&
+    goals[3]?.kind === 'craft' &&
+    goals[3]?.targetItem === 'diamond_pickaxe'
+  return { pass, detail: goals.map((goal) => `${goal.kind}:${goal.targetItem}x${goal.requiredCount}`).join(' -> ') }
+})
+
+addCase('(b) an explicit out-of-range count is still rejected with a clear error', () => {
+  const zero = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'oak_log', count: 0 }], reason: 'x' })
+  const tooBig = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'oak_log', count: 65 }], reason: 'x' })
+  const fractional = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'oak_log', count: 1.5 }], reason: 'x' })
+  const reasons = [zero, tooBig, fractional].map((result) => (result.ok ? 'ACCEPTED' : result.error))
+  const pass = !zero.ok && !tooBig.ok && !fractional.ok && reasons.every((reason) => reason.toLowerCase().includes('count'))
+  return { pass, detail: reasons.join(' | ') }
+})
+
+addCase('(c) budget exhaustion is a distinct observable status, never a silent fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-budget-'))
+  const callsPath = join(dir, 'mercury-calls.jsonl')
+  const logs: string[] = []
+  let transportCalls = 0
+  const mercury = new MercurySystem2({
+    summarize: () => mercurySummary(),
+    log: hostLog(logs),
+    callsPath,
+    cachePath: join(dir, 'mercury-cache.json'),
+    maxPerHour: 0,
+    resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+    transport: () => {
+      transportCalls += 1
+      return Promise.resolve({ toolCalls: [], usage: null })
+    },
+  })
+  let thrown: unknown = null
+  try {
+    await mercury.tryRepair(planRequest(), 'no_candidate')
+  } catch (error) {
+    thrown = error
+  }
+  const records = existsSync(callsPath)
+    ? readFileSync(callsPath, 'utf8')
+        .trim()
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+    : []
+  const status = records.find((record) => record.outcome === 'budget_exhausted')
+  const silentFallback = records.some((record) => record.outcome === 'fallback')
+  const budgetLog = logs.find((line) => line.startsWith('MERCURY_BUDGET_EXHAUSTED'))
+  const deterministic = logs.some((line) => line.includes('deterministic'))
+  const errorText = typeof status?.error === 'string' ? status.error : ''
+  const pass =
+    thrown instanceof FatalModelError &&
+    thrown.context === 'mercury:no_candidate' &&
+    thrown.reason.includes('hourly budget exhausted') &&
+    transportCalls === 0 &&
+    status !== undefined &&
+    errorText.includes('hourly budget exhausted') &&
+    budgetLog !== undefined &&
+    !silentFallback &&
+    !deterministic
+  return {
+    pass,
+    detail: `thrown=${thrown instanceof FatalModelError ? thrown.reason : String(thrown)} transportCalls=${transportCalls} outcomes=${records.map((record) => String(record.outcome)).join(',')} budgetLog=${budgetLog !== undefined} silentFallback=${silentFallback} deterministic=${deterministic}`,
+  }
 })
 
 addCase('retries only abort/timeout errors, never schema errors', () => {
