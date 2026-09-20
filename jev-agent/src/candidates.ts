@@ -1396,8 +1396,7 @@ function heldStationPlacement(
   const retryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
 
   if (state.placementSpots.length > 0) {
-    const spot =
-      state.placementSpots.find((cell) => failureCountFor(cell) < retryLimit) ?? state.placementSpots[0]
+    const spot = state.placementSpots.find((cell) => failureCountFor(cell) < retryLimit)
     if (spot !== undefined) return { spot, refusal: null, alternative: null }
   }
 
@@ -1483,16 +1482,16 @@ function craftCandidates(
     const holdsTable = (state.inventory.counts.crafting_table ?? 0) > 0
     const craftFailed = (state.signals.failedCandidates[`CRAFT:${op.item}`] ?? 0) > 0
     if (op.requiresTable && !tableInReach && holdsTable && craftFailed && state.placementSpots.length > 0) {
-      const spot =
-        state.placementSpots.find(
-          (candidate) =>
-            (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
-            (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
-        ) ?? state.placementSpots[0]
-      if (spot === undefined) return none
-      return {
-        candidates: [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)],
-        placeRefusal: null,
+      const spot = state.placementSpots.find(
+        (candidate) =>
+          (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+          (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
+      )
+      if (spot !== undefined) {
+        return {
+          candidates: [placeStationCandidate(state, options, 'crafting_table', spot, `craft ${focusItem}`)],
+          placeRefusal: null,
+        }
       }
     }
   }
@@ -2169,12 +2168,11 @@ function craftingTableSource(
   )
   if (remembered !== undefined) return { kind: 'remembered', station: remembered }
   if ((state.inventory.counts.crafting_table ?? 0) > 0) {
-    const spot =
-      state.placementSpots.find(
-        (candidate) =>
-          (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
-          placeSpotRetryLimit,
-      ) ?? state.placementSpots[0]
+    const spot = state.placementSpots.find(
+      (candidate) =>
+        (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
+        placeSpotRetryLimit,
+    )
     if (spot !== undefined) return { kind: 'held-place', spot }
   }
   if (sensed !== undefined) return { kind: 'sensed', station: { name: 'crafting_table', position: sensed } }
