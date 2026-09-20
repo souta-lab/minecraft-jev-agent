@@ -9,41 +9,50 @@
     "compliance": ["pass", "fail", "unknown"]
   },
   "issues": {
+    "80": {
+      "acceptanceClass": "portal-build-live",
+      "policy": "defined",
+      "implementation": "landed",
+      "verification": "live",
+      "observation": "unknown",
+      "compliance": "unknown",
+      "note": "Typed build/light/verify portal mechanics are landed. Recent exact-RC runs advanced into frame placement and exposed executor geometry/approach defects; current main includes the latest packet-waypoint normalization after RC 0485a04 failed before placement. No PASS is carried across source changes: 3c83c69 still needs a fresh run-scoped portal gate."
+    },
     "226": {
       "acceptanceClass": "architecture-authority-implementation",
       "policy": "defined",
-      "implementation": "partial",
+      "implementation": "landed",
       "verification": "offline",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "#230 landed fail-loud model errors, but current main still defaults planner authority to deterministic, bypasses model choice on queue_empty, force-selects capability-gap recovery, pre-selects furnace prerequisite routes by code cost, and contains hand-ranking prompt/commitment paths. Draft #260 pins planner/prompt no-bypass requirements; #261 removes cheapest-candidate anti-flap authority pending local fixture/typecheck evidence."
+      "observation": "unknown",
+      "compliance": "unknown",
+      "note": "Static re-audit on current main no longer reproduces the old bypass list. Planner defaults to model authority; deterministic is explicit-only; invalid mode throws; capability-gap recovery is an offered grounded option; queue-empty no longer bypasses System2; model failures fail loud; the real-Jev anti-flap path holds only a Jev-selected candidate. Remaining acceptance is fresh live fail-loud/no-hidden-fallback evidence."
     },
     "221": {
       "acceptanceClass": "architecture-authority-live",
       "policy": "defined",
-      "implementation": "partial",
+      "implementation": "landed",
       "verification": "live",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "The original measured iron-pickaxe run used deterministic fallback with no real Jev/LLM/Mercury invocation. #222 restored real Jev wiring and #230 made model failures fail loud, but a fresh acceptance run cannot count until #226 removes remaining pre-model semantic bypasses."
+      "observation": "unknown",
+      "compliance": "unknown",
+      "note": "The historical fallback-only run remains a valid failure for its old RC, not for current main. The authority overhaul and fail-loud wiring have landed, and recent live work reports Mercury/System2 choices at later M2/portal stages. A current run-scoped proof still must show effective non-fallback Jev policy plus real invocation counters and no hidden semantic substitution before this issue can close."
     },
     "11": {
       "acceptanceClass": "architecture-authority",
       "policy": "defined",
       "implementation": "partial",
       "verification": "live",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "Live evidence showed deterministic code had accumulated semantic WHICH/WHAT authority. Morning re-audit confirms most overnight mechanics/truth fixes are reusable, while prereq cost selection, anti-flap cheapest commitment, forced recovery and abandon/retry ladders remain policy-plane migration targets."
+      "observation": "unknown",
+      "compliance": "unknown",
+      "note": "Current main has the #11 authority facade: System2 owns WHAT, Jev pi owns WHICH, Jev beta owns Option termination, and code retains truth/safety/mechanics/verification. The facade now disables most legacy prereq/retry/wedge semantic selectors on the real-Jev path, and anti-flap no longer chooses by cost. Continue live-path audit; do not treat historical fallback-only failures as current compliance failures."
     },
     "128": {
       "acceptanceClass": "runtime-config-authority",
       "policy": "defined",
       "implementation": "none",
       "verification": "none",
-      "observation": "fail",
-      "compliance": "fail",
-      "note": "A typed/versioned effective config is still absent. Immediate planner-default and invalid-value behavior is blocked on #226; #128 then consolidates requested/resolved authority state and cache/artifact namespacing."
+      "observation": "not-run",
+      "compliance": "unknown",
+      "note": "A typed/versioned effective authority config is still absent. Build it after the current live authority proof so requested/resolved modes and artifact namespaces cannot drift silently."
     },
     "107": {
       "acceptanceClass": "architecture-authority-map",
@@ -52,7 +61,7 @@
       "verification": "none",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Rebuild the authority map from the corrected runtime after #221 rather than documenting the old deterministic takeover as intended architecture."
+      "note": "Rebuild the authority map from the corrected runtime after current live authority evidence rather than documenting historical deterministic takeover."
     },
     "121": {
       "acceptanceClass": "architecture-observability",
@@ -61,7 +70,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Truth/progress classification remains useful and #220 strengthens the verified-success boundary. Any remaining taxonomy work must stay descriptive and must not choose semantic actions."
+      "note": "Truth/progress classification remains useful and verified-success boundaries are stronger. Any remaining taxonomy work must stay descriptive and must not choose semantic actions."
     },
     "56": {
       "acceptanceClass": "architecture-dataflow",
@@ -70,7 +79,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "CurrentOptionContext reaches the Jev payload, but remaining Option-to-Skill authority work is deferred until real Jev is proven on-path. Old PR #173 is closed and must not be revived."
+      "note": "CurrentOptionContext reaches the Jev payload. Any remaining Option-to-Skill authority work should restart from current main after live authority proof; stale PR #173 remains superseded."
     },
     "3": {
       "acceptanceClass": "resident-restart-live",
@@ -97,7 +106,7 @@
       "verification": "offline",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Code-owned vertical recovery truth fix is landed/offline-verified; live revalidation waits for the corrected Jev-authoritative runtime."
+      "note": "Code-owned vertical recovery truth fix is landed/offline-verified; live revalidation waits for a current run that exercises the boundary."
     },
     "130": {
       "acceptanceClass": "research",
@@ -106,7 +115,7 @@
       "verification": "none",
       "observation": "not-run",
       "compliance": "unknown",
-      "note": "Research only. Do not start factorized/multi-head policy work before the simple real-Jev authority path is proven."
+      "note": "Research only. Do not start factorized/multi-head policy work before the simple real-Jev authority path is proven live."
     }
   }
 }
