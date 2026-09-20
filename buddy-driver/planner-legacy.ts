@@ -1131,7 +1131,14 @@ export function buildPlanOptions(
   }
   const diamondIndex = unsat.findIndex((rung) => rung.id === 'diamond_pickaxe')
   if (diamondIndex >= 0) {
-    const diamond = unsat.slice(0, diamondIndex + 1).flatMap((rung) => planGoals(rung))
+    // M2 is diamond-to-Nether-gate: full iron armour is NOT a required prerequisite of
+    // the diamond/portal route, so the diamond option must not inherit the optional
+    // iron_gear rung. iron_gear stays a separate selectable option below; this is an
+    // affordance-boundary fix, not a deterministic reordering.
+    const diamond = unsat
+      .slice(0, diamondIndex + 1)
+      .filter((rung) => rung.id !== 'iron_gear')
+      .flatMap((rung) => planGoals(rung))
     if (diamond.length > 0) options.push({ id: 'diamond_road', title: 'push to diamond + diamond_pickaxe', goals: diamond })
   }
   const whole = unsat.flatMap((rung) => planGoals(rung))

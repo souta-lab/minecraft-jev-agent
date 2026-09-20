@@ -236,6 +236,21 @@ addCase('(i) without a capability gap the deterministic floor never emits the su
   }
 })
 
+addCase("(j) M2=diamond-to-Nether-gate: the diamond route needs no mandatory full iron armour", () => {
+  const counts = { crafting_table: 1, iron_ingot: 3, iron_pickaxe: 1 }
+  const options = buildPlanOptions(counts, emptyWorldMemory())
+  const diamondRoad = options.find((option) => option.id === "diamond_road")
+  const armour = ["iron_chestplate", "iron_leggings", "iron_helmet", "iron_boots", "iron_sword"]
+  const diamondGoals = (diamondRoad?.goals ?? []).map((goal) => goal.targetItem).filter((item): item is string => typeof item === "string")
+  const noArmour = !diamondGoals.some((item) => item !== undefined && armour.includes(item))
+  const hasDiamond = diamondGoals.includes("diamond")
+  const gearStillOffered = options.some((option) => option.id === "iron_gear")
+  return {
+    pass: diamondRoad !== undefined && noArmour && hasDiamond && gearStillOffered,
+    detail: `diamond_road=[${diamondGoals.join(",")}] noArmour=${noArmour} hasDiamond=${hasDiamond} gearOffered=${gearStillOffered}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('ladder floor / rung source of truth (#73)\n')
 for (const testCase of cases) {
