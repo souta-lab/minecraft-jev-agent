@@ -939,7 +939,11 @@ export function computeFrontier(counts: Counts, world: ResidentWorldMemory): { r
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || !isMandatoryRung(rung)) continue
-    if (!rung.satisfied(counts, world)) return { rungIndex: i, rungId: rung.id }
+    // Frontier and resume must use the same capability-closure predicate. A
+    // higher-tier capability (or a live world predicate such as a lit portal)
+    // proves earlier rungs are behind the resident; checking only the rung's
+    // local inventory predicate resurrects historical work after completion.
+    if (!rungBehindInventory(rung, counts, world)) return { rungIndex: i, rungId: rung.id }
   }
   return { rungIndex: RUNGS.length, rungId: 'complete' }
 }

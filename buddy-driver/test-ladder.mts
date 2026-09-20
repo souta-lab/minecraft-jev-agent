@@ -1,6 +1,6 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
-import { buildLadder, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungBehindInventory, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { buildLadder, computeFrontier, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungBehindInventory, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { selectLedgerSnapshot, snapshotGoals } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
@@ -146,10 +146,11 @@ addCase('a live verified portal closes the rung without an inventory portal item
   const live = world({ portalVerified: true })
   const resume = deriveResumeRung(counts, live)
   const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
+  const frontier = computeFrontier(counts, live).rungId
   const portalGoal = ladder.goals.some((goal) => goal.targetItem === 'obsidian' || goal.targetItem === 'nether_portal')
   return {
-    pass: resume.rungId === 'complete' && ladder.rungId === 'complete' && !portalGoal,
-    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} goals=${ladder.goals.length} portalGoal=${portalGoal}`,
+    pass: resume.rungId === 'complete' && ladder.rungId === 'complete' && frontier === 'complete' && !portalGoal,
+    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} frontier=${frontier} goals=${ladder.goals.length} portalGoal=${portalGoal}`,
   }
 })
 

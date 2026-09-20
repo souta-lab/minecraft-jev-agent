@@ -98,20 +98,17 @@ addCase('(b) the floor supplies the remaining steps for two other rungs (raw_iro
   }
 })
 
-addCase('(c) a mismatched planner/ledger rung adopts the ledger deterministically', () => {
+addCase('(c) planner and ledger share the capability-closed frontier', () => {
   const log: Array<{ event: string; detail: Record<string, unknown> | undefined }> = []
   const resolved = resolveRungSourceOfTruth(MISMATCH_INVENTORY, emptyWorldMemory(), hostLog(log))
-  const mismatch = log.find((entry) => entry.event === 'RUNG_MISMATCH')
-  const adopt = log.find((entry) => entry.event === 'RUNG_ADOPT')
   return {
     pass:
-      resolved.mismatch &&
-      resolved.plannerRungId === 'wooden_pickaxe' &&
+      !resolved.mismatch &&
+      resolved.plannerRungId === 'iron_ingot' &&
       resolved.ledgerRungId === 'iron_ingot' &&
       resolved.adoptedRungId === 'iron_ingot' &&
-      resolved.source === 'ledger' &&
-      mismatch?.detail?.adopt === 'iron_ingot' &&
-      adopt?.detail?.source === 'ledger',
+      resolved.source === 'planner' &&
+      log.length === 0,
     detail: `planner=${resolved.plannerRungId} ledger=${resolved.ledgerRungId} adopt=${resolved.adoptedRungId}/${resolved.source} log=[${log.map((entry) => entry.event).join(',')}]`,
   }
 })
