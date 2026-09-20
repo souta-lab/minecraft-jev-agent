@@ -11,6 +11,7 @@
 // The tool does not choose the next semantic action.
 
 import { createRequire } from 'node:module'
+import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { socketReport } from './agent-report.mjs'
@@ -255,6 +256,48 @@ export function normalizeDimension(dimension) {
   return dimension.includes(':') ? dimension : `minecraft:${dimension}`
 }
 
+function socketCommand(sockPath, command, args = {}, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    if (!sockPath) return resolve({ ok: false, error: 'resident-socket-disabled' })
+    let socket
+    try {
+      socket = net.createConnection(sockPath)
+    } catch (error) {
+      return resolve({ ok: false, error: String(error?.message ?? error) })
+    }
+    let buffer = ''
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      try { socket.destroy() } catch {}
+      resolve(value)
+    }
+    socket.setTimeout(timeoutMs, () => finish({ ok: false, error: 'timeout' }))
+    socket.on('error', (error) => finish({ ok: false, error: String(error?.message ?? error) }))
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8')
+      const newline = buffer.indexOf('\n')
+      if (newline < 0) return
+      try {
+        const result = JSON.parse(buffer.slice(0, newline))
+        finish({ ok: result.ok !== false, data: result.data ?? result, error: result.ok === false ? result.error ?? 'not-ok' : null })
+      } catch (error) {
+        finish({ ok: false, error: `bad-json:${String(error?.message ?? error)}` })
+      }
+    })
+    socket.on('connect', () => socket.write(JSON.stringify({ id: Date.now() % 100000, cmd: command, args }) + '\n'))
+  })
+}
+
+function residentStateProjection(result) {
+  return {
+    available: result?.ok === true && result.data !== null,
+    error: result?.ok === true ? null : result?.error ?? 'resident-state-unavailable',
+    data: result?.ok === true ? result.data : null,
+  }
+}
+
 export function evaluateClosedLoop({ connected, targetPosition, inventory, dimension, difficulty, blockSummary, entitySummary, resident }) {
   const unknown = []
   if (!connected) unknown.push('observer_disconnected')
@@ -425,21 +468,30 @@ function residentProjection(result) {
   }
 }
 
-export function makeSnapshot({ bot, options, residentResult = null, admin = null }) {
+export function makeSnapshot({ bot, options, residentResult = null, residentStateResult = null, admin = null }) {
   const resident = residentProjection(residentResult)
+  const residentState = residentStateProjection(residentStateResult)
+  resident.liveStateAvailable = residentState.available
   const targetPlayer = bot.players?.[options.target]
   const targetEntity = targetPlayer?.entity ?? liveEntities(bot).find((entity) => entity?.username === options.target) ?? null
   const targetEntityPosition = positionOf(targetEntity?.position)
-  const residentTruth = resident.status?.truth ?? null
+  const residentTruth = residentState.data?.truth ?? resident.status?.truth ?? null
   const targetPosition = admin?.position ?? residentTruth?.position ?? targetEntityPosition
   const targetHealth = admin?.health ?? residentTruth?.health ?? entityHealth(targetEntity)
   const targetInventory = admin?.inventory ?? (residentTruth === null ? null : residentTruth.inventory)
   const dimension = residentTruth?.dimension ?? bot.game?.dimension ?? null
   const difficulty = admin?.difficulty ?? null
-  const blockSummary = summarizeBlocks(liveBlockObservations(bot, targetPosition, options.radius, options.verticalRadius))
-  blockSummary.support = liveGround(bot, targetPosition).support
-  const ground = liveGround(bot, targetPosition)
-  const entitySummary = summarizeEntities(liveEntities(bot), targetPosition, options.radius)
+  const stateArea = residentState.data?.area ?? null
+  const blockSummary = stateArea?.blocks?.counts !== undefined
+    ? stateArea.blocks
+    : summarizeBlocks(liveBlockObservations(bot, targetPosition, options.radius, options.verticalRadius))
+  if (blockSummary.support === undefined) blockSummary.support = liveGround(bot, targetPosition).support
+  const ground = stateArea?.blocks?.support !== undefined
+    ? { support: stateArea.blocks.support, feet: null, head: null }
+    : liveGround(bot, targetPosition)
+  const entitySummary = Array.isArray(stateArea?.entities)
+    ? summarizeEntities(stateArea.entities, targetPosition, options.radius)
+    : summarizeEntities(liveEntities(bot), targetPosition, options.radius)
   const connected = bot.entity !== undefined
   const closedLoop = evaluateClosedLoop({
     connected,
@@ -477,7 +529,7 @@ export function makeSnapshot({ bot, options, residentResult = null, admin = null
       food: residentTruth?.food ?? null,
       onGround: residentTruth?.onGround ?? null,
       inventory: targetInventory,
-      stateSource: admin !== null ? 'operator-read-only-nbt' : residentTruth !== null ? 'resident-server-truth' : targetEntityPosition !== null ? 'entity-observation' : 'unknown',
+      stateSource: admin !== null ? 'operator-read-only-nbt' : residentState.data?.truth !== undefined ? 'resident-live-state' : residentTruth !== null ? 'resident-server-truth' : targetEntityPosition !== null ? 'entity-observation' : 'unknown',
     },
     area: {
       radius: options.radius,
@@ -487,13 +539,21 @@ export function makeSnapshot({ bot, options, residentResult = null, admin = null
     },
     closedLoop,
     ground,
+    residentState: {
+      available: residentState.available,
+      error: residentState.error,
+      capturedAt: residentState.data?.capturedAt ?? null,
+    },
   }
 }
 
 export async function observeOnce(options, bot) {
   const residentResult = options.controlSocket === null ? null : await socketReport(options.controlSocket, options.timeoutMs)
+  const residentStateResult = options.controlSocket === null
+    ? null
+    : await socketCommand(options.controlSocket, 'state', { radius: options.radius, verticalRadius: options.verticalRadius }, options.timeoutMs)
   const admin = await readAdminState(options)
-  return makeSnapshot({ bot, options, residentResult, admin })
+  return makeSnapshot({ bot, options, residentResult, residentStateResult, admin })
 }
 
 const HELP = `world-player-state.mjs - read-only live state observer
