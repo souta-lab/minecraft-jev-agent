@@ -5519,7 +5519,22 @@ export class JevController {
     this.logger.info(
       'candidates',
       `generated ${candidates.length} executable candidate(s); skipped ${countBlockedLogs(state)} blocked log(s) (canDig=false, no walk-up access)`,
-      { ids: candidates.map((candidate) => candidate.id), detail: candidates.map((candidate) => candidate.label) },
+      {
+        ids: candidates.map((candidate) => candidate.id),
+        detail: candidates.map((candidate) => candidate.label),
+        sensorBlocks: state.blocks
+          .filter((block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore')
+          .slice(0, 32)
+          .map((block) => ({
+            kind: block.kind,
+            name: block.name,
+            yield: block.yield ?? null,
+            position: block.position,
+            inReach: block.inReach,
+            hasAdjacentStandable: block.hasAdjacentStandable,
+            adjacentStandable: block.adjacentStandable,
+          })),
+      },
       this.tickCounter,
     )
   }
