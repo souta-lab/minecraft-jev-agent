@@ -8,8 +8,8 @@ import { classifyActionOutcome, truthfulActionOutcome } from '../jev-agent/src/a
 import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-legacy.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
-import { evaluateSystem2Apply } from '../jev-agent/src/system2Authority.ts'
-import { shouldWakeSystem2AfterLocalFailure } from '../jev-agent/src/system2Escalation.ts'
+import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2Authority.ts'
+import { evaluateBetaTerminationBoundary, shouldWakeSystem2AfterLocalFailure } from '../jev-agent/src/system2Escalation.ts'
 import { system2AuthorityIdentity } from '../jev-agent/src/system2.ts'
 import { compileMercuryGoal, validateMercuryPlan } from './mercury-system2.ts'
 import { PlannerBrain } from './planner.ts'
@@ -50,6 +50,10 @@ assert.equal(
   }).apply,
   true,
 )
+assert.equal(system2BodyOwned('WAIT'), false)
+assert.equal(system2BodyOwned('ESCALATE'), false)
+assert.equal(system2BodyOwned('MINE'), true)
+assert.equal(system2BodyOwned(null), false)
 
 // 2. Body/search progress is evidence even when the semantic goal is unchanged.
 const descend = classifyActionOutcome({
@@ -184,6 +188,55 @@ assert.equal(
   true,
 )
 
+// A beta vote cannot turn a control tick or local body/search evidence into a
+// System2 semantic wake. Only a typed semantic boundary crosses that edge.
+assert.deepEqual(
+  evaluateBetaTerminationBoundary({
+    optionId: 'collect:log',
+    requested: true,
+    decisionActionId: 'WAIT',
+    latestOutcome: null,
+    semanticExhausted: false,
+    semanticInvalid: false,
+  }),
+  { adopt: false, wake: false, reason: 'control_action' },
+)
+assert.equal(
+  evaluateBetaTerminationBoundary({
+    optionId: 'collect:log',
+    requested: true,
+    decisionActionId: 'MOVE:x',
+    latestOutcome: { execution: 'success', progress: 'body', progressKinds: ['body'] },
+    semanticExhausted: false,
+    semanticInvalid: false,
+  }).adopt,
+  false,
+)
+for (let i = 0; i < 20; i += 1) {
+  assert.equal(
+    evaluateBetaTerminationBoundary({
+      optionId: 'collect:log',
+      requested: true,
+      decisionActionId: 'MOVE:x',
+      latestOutcome: { execution: 'failure', failure: 'path_stuck', progress: 'none', progressKinds: ['none'] },
+      semanticExhausted: false,
+      semanticInvalid: false,
+    }).wake,
+    false,
+  )
+}
+assert.deepEqual(
+  evaluateBetaTerminationBoundary({
+    optionId: 'collect:log',
+    requested: true,
+    decisionActionId: 'MINE:oak_log',
+    latestOutcome: null,
+    semanticExhausted: true,
+    semanticInvalid: false,
+  }),
+  { adopt: true, wake: true, reason: 'semantic_boundary' },
+)
+
 // 9. The report identity cannot mistake the Jev facade for Mercury authority.
 assert.deepEqual(
   system2AuthorityIdentity({
@@ -242,4 +295,4 @@ const reportBrain = new PlannerBrain({
 assert.equal(reportBrain.provider, 'hybrid')
 assert.equal(reportBrain.authorityModel.includes('mercury:inception/mercury-2.5'), true)
 
-console.log('system2-causal-authority: PASS (13 causal authority regressions)')
+console.log('system2-causal-authority: PASS (causal authority regressions)')

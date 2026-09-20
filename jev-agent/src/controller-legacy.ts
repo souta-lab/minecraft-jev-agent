@@ -144,9 +144,10 @@ import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified
 import type { ActionOutcomeTaxonomy } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
-import { evaluateSystem2Apply, formatSystem2Discard } from './system2Authority.ts'
+import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
-import { shouldWakeSystem2AfterLocalFailure } from './system2Escalation.ts'
+import { evaluateBetaTerminationBoundary, shouldWakeSystem2AfterLocalFailure } from './system2Escalation.ts'
+import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
 
 export type EscalationReason =
   | 'low_confidence'
@@ -937,6 +938,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   PROTECTION_ABANDON_CONFLICT,
   CANDIDATE_FLAP,
   CANDIDATE_COMMIT_RELEASED,
+  'BETA_DEFERRED',
 ])
 
 /**
@@ -1922,6 +1924,7 @@ export class JevController {
           goal: this.goal,
           goalQueue: this.queue.state,
           currentOption: this.currentOptionContext(),
+          recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
@@ -2110,6 +2113,7 @@ export class JevController {
           goal: this.goal,
           goalQueue: this.queue.state,
           currentOption: this.currentOptionContext(),
+          recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
@@ -2298,6 +2302,22 @@ export class JevController {
         this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
       }
     }
+  }
+
+  /**
+   * A beta vote is semantic, but a control tick, a local route miss, or recent
+   * body/search progress is not semantic abandonment. Keep this boundary pure
+   * and auditable; it never selects the next Option.
+   */
+  private betaTerminationBoundary(decision: JevResult, optionId: string | null): BetaTerminationBoundaryDecision {
+    return evaluateBetaTerminationBoundary({
+      optionId,
+      requested: abandonRequested(decision),
+      decisionActionId: decisionIdFrom(decision),
+      latestOutcome: this.recentOutcomes.at(-1) ?? null,
+      semanticExhausted: false,
+      semanticInvalid: false,
+    })
   }
 
   /**
@@ -4197,10 +4217,10 @@ export class JevController {
           worldEpoch: this.options.worldEpoch,
           stateFingerprint: this.lastStateFingerprint || 'unobserved',
           // Local semantic progress and critical threat changes both invalidate an
-      // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
-      // events that are intentionally absent from the compact world fingerprint.
-      authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
-          actionInFlight: this.executor.current !== null,
+          // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
+          // events that are intentionally absent from the compact world fingerprint.
+          authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+          actionInFlight: system2BodyOwned(this.executor.current?.kind ?? null),
         }
         const validity = evaluateSystem2Apply(requestContext, currentContext)
         if (!validity.apply) {

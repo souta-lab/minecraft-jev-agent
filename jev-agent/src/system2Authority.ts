@@ -40,6 +40,11 @@ export interface System2ApplyDecision {
   reasons: System2DiscardReason[]
 }
 
+/** Control-plane actions do not own the body and must not block a System2 plan apply. */
+export function system2BodyOwned(actionKind: string | null): boolean {
+  return actionKind !== null && actionKind !== 'WAIT' && actionKind !== 'ESCALATE'
+}
+
 /**
  * Prove that a response still describes the state it was requested against.
  * Every mismatch is retained in the result: a discard is evidence, and the

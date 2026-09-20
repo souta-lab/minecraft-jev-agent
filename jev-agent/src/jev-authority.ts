@@ -38,9 +38,11 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
 
 const BETA_INSTRUCTIONS =
   'You are Jev beta. Decide whether the CURRENT Option should end now. Use its explicit preconditions/success facts, ' +
-  'verified progress, recent outcomes, and current grounded alternatives. True means end/abandon this Option and ask ' +
-  'System 2 for WHAT comes next. False means keep the current Option. Do not end it merely because one action failed if ' +
-  'the Option remains viable.'
+  'typed recent outcomes, and current grounded alternatives. True means end/abandon this Option and ask System 2 for ' +
+  'WHAT comes next. False means keep the current Option. WAIT and ESCALATE are control-plane outcomes, not productive ' +
+  'goal progress; body/search progress is real progress even when the goal item is unchanged. A local path failure is ' +
+  'recovery evidence, not semantic exhaustion. Do not end the Option merely because one action failed if the Option ' +
+  'remains viable.'
 
 const RETREAT_INSTRUCTIONS =
   'Should the bot retreat immediately for safety based on the current observed threats, health, and grounded escape actions?'
@@ -215,6 +217,7 @@ function authorityState(request: JevRequest): Record<string, unknown> {
       current: state.goalQueue.current,
     },
     currentOption: state.currentOption ?? null,
+    recentOutcomes: (state.recentOutcomes ?? []).slice(-8),
     candidates: request.candidates.map((candidate) => ({
       id: candidate.id,
       kind: candidate.kind,

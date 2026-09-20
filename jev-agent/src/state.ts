@@ -11,6 +11,7 @@
 import type { Bot } from 'mineflayer'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
+import type { System2Outcome } from './system2.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
@@ -326,6 +327,8 @@ export type WorldState = {
   goalQueue: GoalQueueState
   /** #56: the exact compiled Option instance currently being evaluated by Jev */
   currentOption?: CurrentOptionContext | null
+  /** Typed settled outcomes; Jev beta must see control vs body/search evidence. */
+  recentOutcomes?: System2Outcome[]
   recentEvents: string[]
   signals: AgentSignals
 }
@@ -362,6 +365,7 @@ export interface SensorInput {
   goalQueue: GoalQueueState
   /** #56: the exact compiled Option instance currently being evaluated by Jev */
   currentOption?: CurrentOptionContext | null
+  recentOutcomes?: readonly System2Outcome[]
   /** the item the current subgoal targets, used to focus the block scan */
   focusItem?: string | null
   recentEvents: string[]
@@ -1369,6 +1373,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     goal: input.goal,
     goalQueue: input.goalQueue,
     currentOption: input.currentOption ?? null,
+    recentOutcomes: [...(input.recentOutcomes ?? [])].slice(-8),
     recentEvents: input.recentEvents.slice(-12),
     signals: input.signals,
   }
