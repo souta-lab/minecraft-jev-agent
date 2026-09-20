@@ -26,7 +26,7 @@ import { applyReachabilityGate, defaultCandidateOptions } from './src/candidates
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { capabilityKey } from './src/reachability.ts'
-import type { DescentOption, GoalState, InventoryState, StepCut, Vec3Json, WorldState } from './src/state.ts'
+import type { BlockState, DescentOption, GoalState, InventoryState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -272,6 +272,59 @@ function main(): void {
     goalQueue: queueWith(queuedGoal('furnace', 'place')),
     stepCuts: [safeStepCut()],
   })
+
+  // A vertical retrieval can be mechanically valid except for the held
+  // pillar block.  The capability gate must expose a nearby stone producer as
+  // a typed prerequisite, rather than collapsing the active Option to
+  // WAIT/ESCALATE.
+  {
+    const stone: BlockState = {
+      kind: 'stone',
+      name: 'stone',
+      position: { x: 1, y: 60, z: 0 },
+      distance: 1,
+      diggable: true,
+      inReach: true,
+      hasAdjacentStandable: true,
+      adjacentStandable: BOT,
+      yield: 'cobblestone',
+      harvestTool: 'pickaxe',
+      harvestTier: 0,
+      visible: true,
+    }
+    const ascentState = worldState({
+      goal: goal('log'),
+      goalQueue: queueWith(queuedGoal('log', 'collect')),
+      inventory: inventory({ diamond_pickaxe: 1 }),
+      blocks: [stone],
+    })
+    const blockedRetrieve: Candidate = {
+      id: 'RETRIEVE:known:log:b0_70_0',
+      kind: 'RETRIEVE',
+      label: 'return to remembered log',
+      targetName: 'oak_log',
+      target: { x: 0, y: 70, z: 0 },
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: false,
+      hasStandableAdjacent: true,
+      meta: { tick: ascentState.tick, retrieval: 'known', resource: 'log', resourceKind: 'log' },
+    }
+    const grounded = applyReachabilityGate([waitCandidate(ascentState.tick), blockedRetrieve], ascentState, optionsWith())
+    const prerequisite = grounded.candidates.find(
+      (candidate) => candidate.meta.missingCapability === 'placeable_block',
+    )
+    check(
+      '(f) a missing placeable block exposes a stone producer as a typed prerequisite',
+      prerequisite?.kind === 'MINE' &&
+        prerequisite.meta.capabilityAcquisition === true &&
+        prerequisite.meta.optionSkill === 'PREREQUISITE' &&
+        prerequisite.meta.prerequisiteRole === 'placeable_block',
+      `prerequisite=${prerequisite?.id ?? 'none'} role=${String(prerequisite?.meta.prerequisiteRole ?? 'none')} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+    )
+  }
 
   // (a) RED on 928601f: open_path contributed no enabling candidates, so the
   // only family on offer was WAIT. The generic STEP + explore-MOVE must appear.

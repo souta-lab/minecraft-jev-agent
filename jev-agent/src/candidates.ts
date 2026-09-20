@@ -3761,6 +3761,15 @@ function capabilityAcquisitionCandidates(
       let source: Candidate[] = []
       if (capability.kind === 'headroom') {
         source = headroomCandidates(state, options)
+      } else if (capability.kind === 'placeable_block') {
+        // A vertical Skill may need a held solid block for a pillar/step.  The
+        // missing capability is mechanical, so acquire it from a grounded
+        // stone producer already in the sensor envelope; do not wake System2
+        // or smuggle a semantic collect goal into the queue.  `mineCandidates`
+        // supplies the same tool, pickup and reachability facts as an ordinary
+        // stone route, while the typed envelope below preserves why it is
+        // admitted under the active Option.
+        source = mineCandidates(state, options, 'cobblestone')
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates
@@ -3821,12 +3830,17 @@ function capabilityAcquisitionCandidates(
             : inheritedPrereqPath === null
               ? null
               : FURNACE_PREREQUISITE_ROLE
+        const placeablePrerequisite =
+          capability.kind === 'placeable_block' && inheritedPrereqPath === null && inheritedPrerequisiteRole === null
         out.push({
           ...withAffordance(candidate, null),
           meta: {
             ...candidate.meta,
             capabilityAcquisition: true,
             missingCapability: capabilityKey(capability),
+            ...(placeablePrerequisite
+              ? { optionSkill: 'PREREQUISITE', prerequisiteRole: 'placeable_block' }
+              : {}),
             ...(inheritedPrereqPath === null
               ? {}
               : {
