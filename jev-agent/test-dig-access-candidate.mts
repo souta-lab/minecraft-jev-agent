@@ -37,6 +37,8 @@ function check(label: string, ok: boolean, detail: string): void {
 }
 
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
+const runtimeControllerSource = (): string =>
+  `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
 
 // --- world builders ------------------------------------------------------------
 
@@ -203,8 +205,6 @@ async function main(): Promise<void> {
   process.stdout.write('dig access candidate: a blocked dig target gets an access stand, or is retired\n')
   process.stdout.write('-'.repeat(78) + '\n')
 
-  // (a) RED: blocked log + a reachable #244 access stand => an ACCESS candidate
-  // IS offered (today the log is pushed to tunnelTargets and never surfaced).
   {
     const state = worldState({ position: BOT, blocks: [blockedLog()], goal: goal('log') })
     const grounded = generateGroundedCandidates(state, optionsWith(standExists))
@@ -225,15 +225,11 @@ async function main(): Promise<void> {
     )
     await check(
       '(a) the access candidate is explicitly a dig prerequisite (not a plain walk-up MOVE)',
-      access !== undefined &&
-        access.affordance?.feasible === true &&
-        !(access.id === 'MOVE:b10_64_0'),
+      access !== undefined && access.affordance?.feasible === true && !(access.id === 'MOVE:b10_64_0'),
       `affordance=${JSON.stringify(access?.affordance ?? null)}`,
     )
   }
 
-  // (a2) A stand that exists but has NO canDig=false path is not a reachable
-  // access: no ACCESS MOVE may be offered for it.
   {
     const state = worldState({ position: BOT, blocks: [blockedLog()], goal: goal('log') })
     const grounded = generateGroundedCandidates(state, optionsWith(standNoPath))
@@ -245,9 +241,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (b) RED: a blocked dig target with NO reachable access is not offered AND is
-  // retired explicitly - the withheld refusal is recorded in the suppression
-  // memory so the same target does not re-appear as a fresh offer every tick.
   {
     const memory = new StateFingerprintMemory()
     const state = worldState({
@@ -274,7 +267,6 @@ async function main(): Promise<void> {
       `memory.size=${memory.size()} known=${firstWithheld === undefined ? 'n/a' : memory.check(firstId, firstWithheld.fingerprint).known}`,
     )
 
-    // Second tick, unchanged world: the retirement is durable, not re-offered.
     const second = generateGroundedCandidates(state, optionsWith(noStand, memory))
     const secondAccess = second.candidates.find((candidate) => candidate.id === firstId)
     const secondWithheld = second.withheld.find((entry) => entry.candidate.id === firstId)
@@ -285,7 +277,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (c) The retirement marker names the coordinate and the mechanical fact.
   {
     const line = formatDigAccessRetired(BLOCK, 'no_interaction_stand')
     await check(
@@ -295,8 +286,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (d) Regression: an ordinary walk-up log (sensor adjacency fact present) still
-  // yields the existing `MOVE:<block>` candidate, never an ACCESS injection.
   {
     const reachableLog = blockedLog()
     reachableLog.inReach = false
@@ -312,11 +301,9 @@ async function main(): Promise<void> {
     )
   }
 
-  // (e) Wiring: the generator derives the stand and the controller mirrors the
-  // typed retirement; the shared #244 face geometry lives in reachability.ts.
   {
     const candidates = source('./src/candidates.ts')
-    const controller = source('./src/controller.ts')
+    const controller = runtimeControllerSource()
     const reach = source('./src/reachability.ts')
     const executor = source('./src/executor.ts')
     const wired =
