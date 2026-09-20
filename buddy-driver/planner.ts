@@ -1441,6 +1441,40 @@ type EvaluationQuestion = Experimental_EvaluationQuestion
 
 const COST_PER_TOKEN_USD = 0.04 / 1_000_000 // gateway input rate documented for typesafe-ai/jev
 
+/**
+ * What `askLlm` actually consumes from a gateway evaluation: the per-question
+ * answers plus token usage. Keeping the seam this small means a test stub only
+ * has to return the fields the planner reads, never fake SDK internals.
+ */
+export interface PlannerEvaluation {
+  answers: Record<string, unknown>
+  usage: { inputTokens?: number | undefined; outputTokens?: number | undefined }
+}
+
+/**
+ * Model evaluation call seam for tests; the default performs the real batched
+ * `experimental_evaluate` gateway call. Injected stubs let the authority
+ * fixtures exercise the model's CHOICE without a network round trip.
+ */
+export type PlannerEvaluate = (options: {
+  model: string
+  state: EvaluationState
+  questions: Record<string, EvaluationQuestion>
+  maxRetries: number
+  abortSignal: AbortSignal
+}) => Promise<PlannerEvaluation>
+
+const evaluateOnGateway: PlannerEvaluate = async (options) => {
+  const response = await evaluate({
+    model: options.model,
+    state: options.state,
+    questions: options.questions,
+    maxRetries: options.maxRetries,
+    abortSignal: options.abortSignal,
+  })
+  return { answers: response.answers, usage: response.usage }
+}
+
 interface LlmChoice {
   optionId: string
   latencyMs: number
@@ -1449,7 +1483,6 @@ interface LlmChoice {
   strategyChange: boolean | null
   /** #32: raw P(strategy_change=true); kept alongside the derived boolean */
   strategyChangeProbability: number | null
-  unknownChoice: string | null
 }
 
 function member(source: unknown, key: string): unknown {
@@ -1638,6 +1671,8 @@ export interface PlannerOptions {
   terminate?: () => never
   /** key resolver seam for tests; defaults to `resolveJevApiKey` */
   resolveKey?: () => KeyResolution | null
+  /** model evaluation seam for tests; defaults to the batched `ai` gateway call */
+  evaluate?: PlannerEvaluate
 }
 
 type PlannerReason = 'start' | 'queue_empty' | 'impossible' | 'stuck'
@@ -1693,6 +1728,7 @@ export class PlannerBrain implements System2Brain {
   private readonly maxAttempts: number
   private readonly terminate: (() => never) | undefined
   private readonly resolveKey: () => KeyResolution | null
+  private readonly evaluate: PlannerEvaluate
   private postDeathHandled = false
   private lastAdvisorStrategy: AdvisorStrategy | null = null
   private lastAdvisorSignature: string | null = null
@@ -1728,6 +1764,7 @@ export class PlannerBrain implements System2Brain {
     this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_PLANNER_MAX_ATTEMPTS ?? 3)
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
+    this.evaluate = options.evaluate ?? evaluateOnGateway
     this.cache = this.loadCache()
   }
 
@@ -1862,9 +1899,15 @@ export class PlannerBrain implements System2Brain {
       bypass: bypassCache,
     })
     if (cached !== undefined) {
-      const option = horizonOptions.find((entry) => entry.id === cached.optionId) ?? deterministicOption
-      this.logPlan('llm', option, reason, started, 0, `cached plan (${option.id})`, true)
-      return this.finishPlan(option, request, `cached plan ${option.id}`, stalled)
+      const option = horizonOptions.find((entry) => entry.id === cached.optionId)
+      if (option !== undefined) {
+        this.logPlan('llm', option, reason, started, 0, `cached plan (${option.id})`, true)
+        return this.finishPlan(option, request, `cached plan ${option.id}`, stalled)
+      }
+      // Owner directive: a cache is an optimisation, not an authority. When the
+      // recorded id is no longer offered the state is a cache MISS and the model
+      // must decide; code never answers with a deterministic option (#226).
+      this.log('PLANNER_CACHE_STALE', { source: 'planner', key: stateHash, cached: cached.optionId })
     }
 
     const now = Date.now()
@@ -1899,8 +1942,11 @@ export class PlannerBrain implements System2Brain {
       }
       this.trimCache()
       this.saveCache()
-      const option = stalled ? deterministicOption : (horizonOptions.find((entry) => entry.id === chosen.optionId) ?? fallbackOption)
-      const note = chosen.unknownChoice !== null ? `unknown choice ${chosen.unknownChoice} -> ${option.id}` : `llm chose ${option.id}`
+      const option = horizonOptions.find((entry) => entry.id === chosen.optionId)
+      if (option === undefined) {
+        return this.fatalModel('planner-llm', `model chose horizon id "${chosen.optionId}" that was not offered`)
+      }
+      const note = `llm chose ${option.id}`
       this.logPlan('llm', option, reason, started, chosen.costUsd, note, false, chosen.latencyMs, chosen)
       return this.finishPlan(option, request, note, stalled)
     } catch (error) {
@@ -1935,7 +1981,7 @@ export class PlannerBrain implements System2Brain {
     if (alreadyActive && !force) {
       return { goals: [], note: `keep current plan (${note})`, op: 'continue' as PlanOp }
     }
-    const adjusted = this.applyBodyDeltaRequirement(option, request, note)
+    const adjusted = this.applyBodyDeltaRequirement(option, request, note, this.mode === 'deterministic')
     if (adjusted === null) return rejectionPlan(note)
     return { goals: adjusted.goals, note, op: 'replace' }
   }
@@ -1957,7 +2003,7 @@ export class PlannerBrain implements System2Brain {
       return rejectionPlan(note)
     }
     const normalizedOption: PlanOption = { id: option.id, title: option.title, goals: normalized.goals }
-    const adjusted = this.applyBodyDeltaRequirement(normalizedOption, request, note)
+    const adjusted = this.applyBodyDeltaRequirement(normalizedOption, request, note, this.mode === 'deterministic')
     if (adjusted === null) {
       for (const decision of normalized.decisions) {
         const reason = decision.action === 'kept' ? 'no_body_delta' : decision.reason
@@ -1976,12 +2022,18 @@ export class PlannerBrain implements System2Brain {
   }
 
   /**
-   * Issue #44 requirement 3: a replacement must change the body. When the
-   * chosen option is stationary relative to the blocked goal, substitute the
-   * deterministic body-change option (descent/ore/retrieval). If even that
-   * cannot change the body, reject the replan and keep the current plan.
+   * Issue #44 requirement 3: a replacement must change the body. The explicit
+   * deterministic baseline may substitute the deterministic body-change option
+   * (descent/ore/retrieval). In llm mode the model owns the selection, so a
+   * stationary plan is rejected (and logged) rather than swapped for a
+   * deterministic one; another deterministic plan is never an authority (#226).
    */
-  private applyBodyDeltaRequirement(option: PlanOption, request: System2PlanRequest, note: string): PlanOption | null {
+  private applyBodyDeltaRequirement(
+    option: PlanOption,
+    request: System2PlanRequest,
+    note: string,
+    allowDeterministicSubstitute: boolean,
+  ): PlanOption | null {
     const current = request.goalQueueState.current
     if (hasBodyDelta(option.goals, current)) return option
     const head = option.goals[0]
@@ -1993,14 +2045,16 @@ export class PlannerBrain implements System2Brain {
       })
       return option
     }
-    const substitute = this.bodyChangeOption()
-    if (hasBodyDelta(substitute.goals, current)) {
-      this.log('REPLAN_BODY_CHANGE', {
-        requested: option.id,
-        replacement: substitute.id,
-        reason: request.reason,
-      })
-      return substitute
+    if (allowDeterministicSubstitute) {
+      const substitute = this.bodyChangeOption()
+      if (hasBodyDelta(substitute.goals, current)) {
+        this.log('REPLAN_BODY_CHANGE', {
+          requested: option.id,
+          replacement: substitute.id,
+          reason: request.reason,
+        })
+        return substitute
+      }
     }
     this.log('REPLAN_REJECTED', {
       reason: 'no_body_delta',
@@ -2332,7 +2386,7 @@ export class PlannerBrain implements System2Brain {
 
     const state = this.compactState(request)
     const started = Date.now()
-    const response = await evaluate({
+    const response = await this.evaluate({
       model: this.model,
       state,
       questions,
@@ -2346,18 +2400,22 @@ export class PlannerBrain implements System2Brain {
     const planFit = readScore(answers.plan_fit)
     const strategyChangeProbability = readBooleanProbability(answers.strategy_change)
     const strategyChange = strategyChangeProbability === null ? null : strategyChangeProbability >= resolveStrategyChangeThreshold()
-    const match = chosenId === null ? undefined : options.find((option) => option.id === chosenId)
+    // Owner directive: an unresolvable choice is a model failure, never a silent
+    // fall back to options[0] / FRONT_FALLBACK. Throwing here lets the bounded
+    // `withModelRetries` loop retry, then FATAL through `failLoud` (#226).
+    if (chosenId === null) throw new Error('model returned no horizon choice')
+    const chosen = options.find((option) => option.id === chosenId)
+    if (chosen === undefined) throw new Error(`model chose unknown horizon id "${chosenId}"`)
     const inputTokens = response.usage.inputTokens ?? 0
     const outputTokens = response.usage.outputTokens ?? 0
     const costUsd = (inputTokens + outputTokens) * COST_PER_TOKEN_USD
     return {
-      optionId: (match ?? options[0] ?? FRONT_FALLBACK).id,
+      optionId: chosen.id,
       latencyMs,
       costUsd,
       planFit,
       strategyChange,
       strategyChangeProbability,
-      unknownChoice: chosenId !== null && match === undefined ? chosenId : null,
     }
   }
 
