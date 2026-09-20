@@ -34,6 +34,7 @@ import {
   candidateStarvationMissing,
   formatCandidateStarvation,
 } from './src/controller.ts'
+import { compileGoalQueue } from './src/optionSpec.ts'
 import { formatCandidateWithheld } from './src/reachability.ts'
 import { evaluateSummonConditions, LLM_SUMMON_REASONS } from './src/system2.ts'
 import type { AgentSignals, GoalState, InventoryState, StepCut, Vec3Json, WorldState } from './src/state.ts'
@@ -172,6 +173,37 @@ function worldState(overrides: {
 /** The classified-live success inventory: the prior ladder run left these held. */
 const HELD_AFTER_LADDER = inventory({ furnace: 1, iron_ingot: 3, iron_pickaxe: 1 })
 
+/**
+ * Preceding success in the same live run (`run-mu98ondr-192ql`), the tick before
+ * the boundary: the craft ladder resumed (`LADDER_RESUME`), the iron_gear
+ * milestone was reached (`MILESTONE iron_gear done=true`), and the Options
+ * compiler emitted the abstract `place:furnace` goal (`OPTION_COMPILE`).
+ */
+const PRECEDING_RUN_EVENTS: readonly string[] = ['LADDER_RESUME', 'MILESTONE iron_gear done=true']
+const PRECEDING_OPTION_ID = 'place:furnace'
+
+/**
+ * The boundary state must still carry the preceding-success facts: the items the
+ * ladder left held, the `place` kind, and the OPTION_COMPILE'd `place:furnace`
+ * spec - not a synthetic bare `place` goal.
+ */
+function precedingSuccessHolds(state: WorldState): { ok: boolean; detail: string } {
+  const held = state.inventory.counts
+  const compiled = compileGoalQueue(state.goalQueue).map((spec) => spec.id)
+  const ok =
+    PRECEDING_RUN_EVENTS.length === 2 &&
+    held.furnace === 1 &&
+    held.iron_ingot === 3 &&
+    held.iron_pickaxe === 1 &&
+    state.goal.targetItem === 'furnace' &&
+    state.goalQueue.current?.kind === 'place' &&
+    compiled.includes(PRECEDING_OPTION_ID)
+  return {
+    ok,
+    detail: `events=[${PRECEDING_RUN_EVENTS.join(', ')}] held=${JSON.stringify(held)} goal=${state.goal.id} kind=${state.goalQueue.current?.kind ?? 'none'} OPTION_COMPILE=[${compiled.join(',')}]`,
+  }
+}
+
 /** The live path probe: the placement approach has no path, the front is walkable. */
 const livePathProbe = (position: Vec3Json): 'reachable' | 'no_path' =>
   position.x === PLACE_TARGET.x && position.y === PLACE_TARGET.y && position.z === PLACE_TARGET.z
@@ -228,6 +260,18 @@ async function main(): Promise<void> {
   // failed check instead of aborting the whole suite on a module-load error.
   const controllerModule = (await import('./src/controller.ts')) as unknown as Record<string, unknown>
   const candidateStarvationSummon = controllerModule.candidateStarvationSummon as StarvationSummonFn | undefined
+
+  // (0) preceding success: the boundary tick still carries the iron_gear ladder
+  // result and the OPTION_COMPILE'd `place:furnace` goal.
+  {
+    const state = worldState({ inventory: HELD_AFTER_LADDER })
+    const preceding = precedingSuccessHolds(state)
+    await check(
+      '(0) the preceding ladder success + OPTION_COMPILE place:furnace are reproduced',
+      preceding.ok,
+      preceding.detail,
+    )
+  }
 
   // (1) exact withheld shape: MOVE:p56_60_24 -> no_path / open_path.
   {
