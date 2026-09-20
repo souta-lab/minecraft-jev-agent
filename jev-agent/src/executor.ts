@@ -308,6 +308,10 @@ function pillarColumnKey(cell: Vec3Json): string {
   return `${cell.x},${cell.y},${cell.z}`
 }
 
+function portalCellKey(cell: Vec3Json): string {
+  return `${cell.x}|${cell.y}|${cell.z}`
+}
+
 /** The cell itself plus its six face neighbours: the flood check for a dig. */
 const DIG_SAFETY_OFFSETS: readonly Vec3Json[] = [
   { x: 0, y: 0, z: 0 },
@@ -3717,7 +3721,11 @@ export class Executor {
       this.emitFrameCell(candidate, itemName, placedName, cell)
     }
     if (FRAME_PLACE_ITEMS.has(itemName)) {
-      const ready = frameReadyLine(placedCells, candidate.placementAxis ?? 'x')
+      // `cells` is normally only the missing suffix of a sensed partial
+      // frame. Validating that suffix alone can never prove a 10-edge frame,
+      // so include the live obsidian edges that preceded this action.
+      const validation = this.portalFramePlacementValidation(cells, candidate.placementAxis ?? 'x')
+      const ready = validation?.shape === 'ok' ? formatPortalFrameReady(validation) : null
       if (ready === null) {
         throw new ExecutorError(
           'verify_failed',
@@ -3737,6 +3745,63 @@ export class Executor {
       itemsGained: 0,
       goalItemCount: this.countItem(itemName),
     })
+  }
+
+  /**
+   * Reconstruct the selected portal footprint from live obsidian plus the
+   * already-selected placement suffix. The candidate remains the semantic
+   * choice; this helper only recovers code-owned frame geometry needed for
+   * placement support and the final post-condition.
+   */
+  private portalFramePlacementValidation(
+    plannedCells: readonly Vec3Json[],
+    widthAxis: 'x' | 'z',
+  ): ReturnType<typeof validatePortalFrame> | null {
+    if (plannedCells.length === 0) return null
+    const planned = new Set(plannedCells.map(portalCellKey))
+    const possibilities: Array<{
+      validation: ReturnType<typeof validatePortalFrame>
+      existing: number
+      distance: number
+    }> = []
+    const seenOrigins = new Set<string>()
+    for (const cell of plannedCells) {
+      const width = widthAxis === 'x' ? cell.x : cell.z
+      const normal = widthAxis === 'x' ? cell.z : cell.x
+      for (let originWidth = width - 3; originWidth <= width; originWidth += 1) {
+        for (let originY = cell.y - 4; originY <= cell.y; originY += 1) {
+          const origin =
+            widthAxis === 'x'
+              ? { x: originWidth, y: originY, z: normal }
+              : { x: normal, y: originY, z: originWidth }
+          const originKey = portalCellKey(origin)
+          if (seenOrigins.has(originKey)) continue
+          seenOrigins.add(originKey)
+          const layout = portalFrameLayout(origin, widthAxis)
+          const frame = new Set(layout.frame.map(portalCellKey))
+          if (plannedCells.some((plannedCell) => !frame.has(portalCellKey(plannedCell)))) continue
+          const blocks = layout.frame.filter(
+            (frameCell) =>
+              planned.has(portalCellKey(frameCell)) || this.currentBlockAt(frameCell)?.name === OBSIDIAN,
+          )
+          if (blocks.length !== layout.frame.length) continue
+          const validation = validatePortalFrame({ blocks, widthAxis })
+          if (validation.shape !== 'ok') continue
+          const existing = blocks.filter((block) => !planned.has(portalCellKey(block))).length
+          const distance = this.distanceToEyes(origin)
+          possibilities.push({ validation, existing, distance })
+        }
+      }
+    }
+    possibilities.sort((a, b) => {
+      if (a.existing !== b.existing) return b.existing - a.existing
+      if (a.distance !== b.distance) return a.distance - b.distance
+      const ao = a.validation.origin
+      const bo = b.validation.origin
+      if (ao === null || bo === null) return 0
+      return ao.y - bo.y || ao.x - bo.x || ao.z - bo.z
+    })
+    return possibilities[0]?.validation ?? null
   }
 
   /** A player must not occupy the target cell while the server processes placement. */
@@ -3815,18 +3880,21 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<void> {
-    const validation = validatePortalFrame({ blocks: [...cells], widthAxis: candidate.placementAxis ?? 'x' })
-    if (validation.shape !== 'ok' || validation.origin === null) return
+    const validation = this.portalFramePlacementValidation(cells, candidate.placementAxis ?? 'x')
+    if (validation === null || validation.shape !== 'ok' || validation.origin === null) return
     const layout = portalFrameLayout(validation.origin, validation.widthAxis)
     if (this.findPlaceReference(cell) !== null) return
-    // The minimal frame omits all four corners.  The two lower corners support
-    // the side columns; one upper corner starts the otherwise disconnected top
-    // edge.  Try the optional corners in deterministic order and use the first
-    // one that is both empty and itself placeable from the already-built frame.
-    const scaffold = layout.corners.find((corner) => {
-      const existing = this.currentBlockAt(corner)
-      return existing?.boundingBox !== 'block' && this.findPlaceReference(corner) !== null
-    })
+    // The minimal frame omits all four corners. Pick a corner adjacent to the
+    // current target first; a merely placeable lower corner cannot support a
+    // disconnected top-edge placement.
+    const manhattan = (left: Vec3Json, right: Vec3Json): number =>
+      Math.abs(left.x - right.x) + Math.abs(left.y - right.y) + Math.abs(left.z - right.z)
+    const scaffold = [...layout.corners]
+      .sort((a, b) => manhattan(a, cell) - manhattan(b, cell))
+      .find((corner) => {
+        const existing = this.currentBlockAt(corner)
+        return existing?.boundingBox !== 'block' && manhattan(corner, cell) === 1 && this.findPlaceReference(corner) !== null
+      })
     if (scaffold === undefined) return
     const supportItem = this.findPortalScaffoldItem()
     if (supportItem === undefined) {

@@ -450,6 +450,7 @@ function makePlaceBot(
   failPlacements: boolean,
   equipFailures = 0,
   preexistingCorners = true,
+  preexistingFrame: readonly Vec3Json[] = [],
 ) {
   const grid = new Map<string, string>()
   for (let x = ORIGIN.x - 1; x <= ORIGIN.x + 4; x += 1) {
@@ -458,6 +459,7 @@ function makePlaceBot(
   if (preexistingCorners) {
     for (const corner of LAYOUT.corners) grid.set(key(corner), OBSIDIAN)
   }
+  for (const cell of preexistingFrame) grid.set(key(cell), OBSIDIAN)
   const blockAt = (v: { x: number; y: number; z: number }): FakeBlock | null => {
     const name = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
     if (name === undefined) return null
@@ -586,6 +588,27 @@ async function runMinimalFrameBuild() {
   return { fixture, result, messages: lines.map((entry) => entry.message ?? '') }
 }
 
+async function runPartialFrameBuild() {
+  const missing = [
+    { x: ORIGIN.x + 3, y: ORIGIN.y + 3, z: ORIGIN.z },
+    { x: ORIGIN.x + 1, y: ORIGIN.y + 4, z: ORIGIN.z },
+    { x: ORIGIN.x + 2, y: ORIGIN.y + 4, z: ORIGIN.z },
+  ]
+  const missingKeys = new Set(missing.map(key))
+  const existing = FRAME_CELLS.filter((cell) => !missingKeys.has(key(cell)))
+  const fixture = makePlaceBot({ x: 6.5, y: 64, z: -1.5 }, missing, false, 0, false, existing)
+  const dir = mkdtempSync(join(tmpdir(), 'frame-build-partial-'))
+  const logPath = join(dir, 'agent.jsonl')
+  const logger = new EventLogger(new JsonlWriter(logPath), false)
+  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const result = await executor.claim(placeFrameCandidate(missing, OBSIDIAN)).completion
+  const lines = readFileSync(logPath, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((entry) => JSON.parse(entry) as { message?: string })
+  return { fixture, result, messages: lines.map((entry) => entry.message ?? ''), missing, existing }
+}
+
 async function runReferenceApproachBuild() {
   const target = { x: ORIGIN.x, y: ORIGIN.y + 1, z: 0 }
   const fixture = makePlaceBot({ x: 30.5, y: 64, z: 30.5 }, [target], false, 0, false)
@@ -660,6 +683,26 @@ async function runReferenceApproachBuild() {
   process.stdout.write(
     `${pass ? 'PASS' : 'FAIL'}  (5a-minimal) the 10-edge frame adds one mechanical corner scaffold and still verifies\n` +
       `      status=${result.status} placed=${placed.length} support=${support.length} corners=${scaffoldCorners.length} failure=${result.failure ?? 'none'} detail=${result.detail} ready=${ready[0] ?? 'none'}\n`,
+  )
+  if (!pass) failures += 1
+}
+
+{
+  const { fixture, result, messages, missing, existing } = await runPartialFrameBuild()
+  const placed = messages.filter((line) => line.startsWith(PORTAL_BLOCK_PLACED))
+  const ready = messages.filter((line) => line.startsWith(PORTAL_FRAME_READY))
+  const support = messages.filter((line) => line.startsWith('PORTAL_SUPPORT_PLACED'))
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    placed.length === missing.length &&
+    ready.length === 1 &&
+    support.length === 1 &&
+    existing.every((cell) => fixture.grid.get(key(cell)) === OBSIDIAN) &&
+    missing.every((cell) => fixture.grid.get(key(cell)) === OBSIDIAN)
+  process.stdout.write(
+    `${pass ? 'PASS' : 'FAIL'}  (5a-partial) a sensed 7/10 frame continues with adjacent top-edge scaffolding\n` +
+      `      status=${result.status} placed=${placed.length} support=${support.length} ready=${ready[0] ?? 'none'} failure=${result.failure ?? 'none'}\n`,
   )
   if (!pass) failures += 1
 }
