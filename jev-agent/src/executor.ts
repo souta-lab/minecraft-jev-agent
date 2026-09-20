@@ -84,6 +84,12 @@ import {
 } from './pillarJump.ts'
 import type { PillarJumpTrace, SolidAt } from './pillarJump.ts'
 import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
+import {
+  OBSIDIAN,
+  formatPortalBlockPlaced,
+  formatPortalFrameReady,
+  validatePortalFrame,
+} from './netherPortalPlan.ts'
 
 const { Movements, goals } = pathfinderModule
 
@@ -730,6 +736,26 @@ export function placedStationReadyLine(itemName: string, placedName: string | nu
   if (!STATION_PLACE_ITEMS.has(itemName)) return null
   if (!isPlacePostconditionMet(placedName, itemName)) return null
   return formatFurnaceReady('placed', at)
+}
+
+/** The items whose verified per-cell placement is a nether-portal frame block. */
+export const FRAME_PLACE_ITEMS: ReadonlySet<string> = new Set([OBSIDIAN])
+
+/**
+ * The durable per-cell marker for a verified frame placement, or null when the
+ * REAL placement post-condition is unmet. Mirrors `placedStationReadyLine`: an
+ * unverified/failed placement never records a frame cell.
+ */
+export function placedFrameCellLine(itemName: string, placedName: string | null, at: Vec3Json): string | null {
+  if (!FRAME_PLACE_ITEMS.has(itemName)) return null
+  if (!isPlacePostconditionMet(placedName, itemName)) return null
+  return formatPortalBlockPlaced(at)
+}
+
+/** The frame-ready marker, or null when `validatePortalFrame` rejects the cells. */
+export function frameReadyLine(cells: readonly Vec3Json[], widthAxis: 'x' | 'z' = 'x'): string | null {
+  const validation = validatePortalFrame({ blocks: [...cells], widthAxis })
+  return validation.shape === 'ok' ? formatPortalFrameReady(validation) : null
 }
 
 /**
@@ -3504,29 +3530,13 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const itemName = candidate.itemName
     if (itemName === null) throw new ExecutorError('place_error', 'PLACE candidate has no item')
+    const sequence = candidate.placementCells
+    if (sequence !== undefined && sequence.length > 0) {
+      return this.runPlaceCells(candidate, sequence, itemName, epoch, signal, startedAt)
+    }
     const target = candidate.target
     if (target === null) throw new ExecutorError('place_error', 'PLACE candidate has no coordinates')
-    const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
-    if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
-    const reference = this.findPlaceReference(target)
-    if (reference === null) {
-      throw new ExecutorError('place_error', `no supporting block adjacent to (${target.x},${target.y},${target.z})`)
-    }
-
-    this.setPhase(candidate, epoch, 'equipping')
-    await this.bot.equip(item, 'hand')
-    this.ensureOwned(epoch, signal)
-    this.setPhase(candidate, epoch, 'placing')
-    await this.bot.placeBlock(reference.block, reference.face)
-    this.ensureOwned(epoch, signal)
-
-    const placedName = await this.waitForPlacedBlock(target, itemName, epoch, signal)
-    if (!isPlacePostconditionMet(placedName, itemName)) {
-      throw new ExecutorError(
-        'verify_failed',
-        `placeBlock did not create ${itemName} at (${target.x},${target.y},${target.z}) (found ${placedName ?? 'air'})`,
-      )
-    }
+    const placedName = await this.placeOneCell(candidate, target, itemName, epoch, signal)
     const readyLine = placedStationReadyLine(itemName, placedName, target)
     if (readyLine !== null) {
       this.logger.info('agent', readyLine, {
@@ -3542,6 +3552,101 @@ export class Executor {
       blockRemoved: false,
       itemsGained: 0,
       goalItemCount: this.countItem(itemName),
+    })
+  }
+
+  /** One post-condition-gated placement at an already-near cell. */
+  private async placeOneCell(
+    candidate: Candidate,
+    target: Vec3Json,
+    itemName: string,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
+    if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
+    const reference = this.findPlaceReference(target)
+    if (reference === null) {
+      throw new ExecutorError('place_error', `no supporting block adjacent to (${target.x},${target.y},${target.z})`)
+    }
+    this.setPhase(candidate, epoch, 'equipping')
+    await this.bot.equip(item, 'hand')
+    this.ensureOwned(epoch, signal)
+    this.setPhase(candidate, epoch, 'placing')
+    await this.bot.placeBlock(reference.block, reference.face)
+    this.ensureOwned(epoch, signal)
+    const placedName = await this.waitForPlacedBlock(target, itemName, epoch, signal)
+    if (!isPlacePostconditionMet(placedName, itemName)) {
+      throw new ExecutorError(
+        'verify_failed',
+        `placeBlock did not create ${itemName} at (${target.x},${target.y},${target.z}) (found ${placedName ?? 'air'})`,
+      )
+    }
+    return placedName
+  }
+
+  /**
+   * The generic multi-cell PLACE run: walk to each ordered cell, place one block,
+   * and emit the durable per-cell marker only after the post-condition holds. When
+   * the item is a frame block the completed cell set must also pass
+   * `validatePortalFrame` before PORTAL_FRAME_READY is emitted.
+   */
+  private async runPlaceCells(
+    candidate: Candidate,
+    cells: readonly Vec3Json[],
+    itemName: string,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const placedCells: Vec3Json[] = []
+    for (const cell of cells) {
+      const existing = this.currentBlockAt(cell)?.name ?? null
+      if (isPlacePostconditionMet(existing, itemName)) {
+        placedCells.push(cell)
+        this.emitFrameCell(candidate, itemName, existing, cell)
+        continue
+      }
+      if (this.distanceToEyes(cell) > this.options.reach) {
+        this.setPhase(candidate, epoch, 'pathing')
+        await this.pathToNear(cell, 2, epoch, signal)
+        this.ensureOwned(epoch, signal)
+      }
+      const placedName = await this.placeOneCell(candidate, cell, itemName, epoch, signal)
+      placedCells.push(cell)
+      this.emitFrameCell(candidate, itemName, placedName, cell)
+    }
+    if (FRAME_PLACE_ITEMS.has(itemName)) {
+      const ready = frameReadyLine(placedCells, candidate.placementAxis ?? 'x')
+      if (ready === null) {
+        throw new ExecutorError(
+          'verify_failed',
+          `frame build over ${cells.length} cells did not validate (${placedCells.length} placed)`,
+        )
+      }
+      this.logger.info('agent', ready, {
+        source: 'placed',
+        at: `${candidate.target?.x ?? 0},${candidate.target?.y ?? 0},${candidate.target?.z ?? 0}`,
+        actionId: candidate.id,
+      })
+    }
+    return this.buildResult(candidate, epoch, startedAt, 'done', 'placed', `placed ${itemName} at ${placedCells.length} cells`, null, {
+      verified: true,
+      dropObserved: false,
+      blockRemoved: false,
+      itemsGained: 0,
+      goalItemCount: this.countItem(itemName),
+    })
+  }
+
+  private emitFrameCell(candidate: Candidate, itemName: string, placedName: string | null, cell: Vec3Json): void {
+    const line = placedFrameCellLine(itemName, placedName, cell)
+    if (line === null) return
+    this.logger.info('agent', line, {
+      source: 'placed',
+      at: `${cell.x},${cell.y},${cell.z}`,
+      target: cell,
+      actionId: candidate.id,
     })
   }
 

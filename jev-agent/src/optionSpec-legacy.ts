@@ -983,6 +983,7 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.optionInstanceId === undefined ? {} : { optionInstanceId: goal.optionInstanceId }),
     ...(goal.optionTemplateId === undefined ? {} : { optionTemplateId: goal.optionTemplateId }),
     ...(goal.optionSpec === undefined ? {} : { optionSpec: goal.optionSpec }),
+    ...(goal.placementCells === undefined ? {} : { placementCells: [...goal.placementCells] }),
   }
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) planned.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) planned.dimension = goal.dimension

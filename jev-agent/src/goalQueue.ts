@@ -72,6 +72,18 @@ export function formatDuplicateGoalSkipped(goal: PlannedGoal): string {
   return `${DUPLICATE_GOAL_SKIPPED} instance=${goalInstanceKey(goal)} description="${goal.description}"`
 }
 
+/**
+ * A plain-data world cell in a finite multi-cell placement sequence. This is the
+ * goal-level ("place N blocks of item X at specified cells") counterpart of the
+ * executor's per-cell PLACE: the geometry lives in the goal, never hardcoded in
+ * the executor.
+ */
+export interface PlacementCell {
+  readonly x: number
+  readonly y: number
+  readonly z: number
+}
+
 export interface QueuedGoal {
   id: string
   /**
@@ -102,6 +114,8 @@ export interface QueuedGoal {
   optionTemplateId?: string
   /** Issue #56: the full plain-data spec survives queue persistence/restart. */
   optionSpec?: OptionSpec
+  /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
+  placementCells?: readonly PlacementCell[]
   /** how many relevant items the bot held when the goal was created */
   startCount: number
   /** live progress toward `requiredCount` (collect goals) */
@@ -132,6 +146,8 @@ export interface PlannedGoal {
   optionTemplateId?: string
   /** Issue #56: the full plain-data spec survives queue persistence/restart. */
   optionSpec?: OptionSpec
+  /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
+  placementCells?: readonly PlacementCell[]
   detail?: string
   /** Issue #55: deterministic prerequisite; a patch/replace may not drop it. */
   protected?: boolean
@@ -379,6 +395,7 @@ export class GoalQueue {
       ...(plan.optionInstanceId === undefined ? {} : { optionInstanceId: plan.optionInstanceId }),
       ...(plan.optionTemplateId === undefined ? {} : { optionTemplateId: plan.optionTemplateId }),
       ...(plan.optionSpec === undefined ? {} : { optionSpec: plan.optionSpec }),
+      ...(plan.placementCells === undefined ? {} : { placementCells: [...plan.placementCells] }),
       startCount: 0,
       haveCount: 0,
       status: 'pending',

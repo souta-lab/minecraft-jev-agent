@@ -169,6 +169,9 @@ export interface PortalBuildFrameStep extends PortalStepCommon {
   readonly width: number
   readonly height: number
   readonly blocks: number
+  /** bottom-left frame origin; when set, the step compiles to its exact cells */
+  readonly origin?: PortalBlockPosition
+  readonly widthAxis?: PortalWidthAxis
 }
 
 export interface PortalLightStep extends PortalStepCommon {
@@ -427,6 +430,30 @@ export function formatPortalBlockPlaced(pos: PortalBlockPosition): string {
   return `${PORTAL_BLOCK_PLACED} pos=${formatPos(pos)}`
 }
 
+export interface BlockPlacementStep {
+  readonly item: string
+  readonly cell: PortalBlockPosition
+}
+
+/** Deterministic support-friendly order: bottom-up, then width, then normal. */
+export function orderedPlacementCells(cells: readonly PortalBlockPosition[]): PortalBlockPosition[] {
+  return [...cells].sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z)
+}
+
+/** Compile "place N blocks of `item` at `cells`" into an ordered cell sequence. */
+export function planBlockPlacements(item: string, cells: readonly PortalBlockPosition[]): BlockPlacementStep[] {
+  return orderedPlacementCells(cells).map((cell) => ({ item, cell }))
+}
+
+/** The executable frame-build sequence at `origin` (geometry from portalFrameLayout). */
+export function portalFramePlacementSteps(
+  origin: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+  item: string = OBSIDIAN,
+): BlockPlacementStep[] {
+  return planBlockPlacements(item, portalFrameLayout(origin, widthAxis).frame)
+}
+
 // ---------------------------------------------------------------------------
 // safe site selection
 // ---------------------------------------------------------------------------
@@ -538,8 +565,20 @@ export function portalStepToPlannedGoal(step: PortalStep): PlannedGoal | null {
       return { kind: 'craft', description: step.description, targetItem: step.item, requiredCount: step.count, ...flags }
     case 'smelt':
       return { kind: 'smelt', description: step.description, targetItem: step.item, requiredCount: step.count, ...flags }
-    case 'build_portal_frame':
-      return { kind: 'place', description: step.description, targetItem: NETHER_PORTAL, requiredCount: 1, ...flags }
+    case 'build_portal_frame': {
+      const cells =
+        step.origin === undefined
+          ? undefined
+          : portalFramePlacementSteps(step.origin, step.widthAxis ?? 'x').map((entry) => entry.cell)
+      return {
+        kind: 'place',
+        description: step.description,
+        targetItem: OBSIDIAN,
+        requiredCount: cells?.length ?? step.blocks,
+        ...(cells === undefined ? {} : { placementCells: cells }),
+        ...flags,
+      }
+    }
     case 'light_portal':
     case 'verify_portal':
       return null
@@ -728,6 +767,7 @@ export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan
       width: PORTAL_FRAME_WIDTH,
       height: PORTAL_FRAME_HEIGHT,
       blocks: PORTAL_OBSIDIAN_REQUIRED,
+      ...(site === null ? {} : { origin: site.position, widthAxis: 'x' as const }),
       postcondition: { kind: 'frameShapeOk' },
       core: true,
     },

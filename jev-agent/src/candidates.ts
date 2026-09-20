@@ -82,6 +82,10 @@ export interface Candidate {
   hasStandableAdjacent: boolean
   /** deterministic affordance facts: infeasible candidates are never presented */
   affordance?: CandidateAffordance
+  /** ordered cells a multi-cell PLACE fills with `itemName` (generic frame build) */
+  placementCells?: Vec3Json[]
+  /** plane axis of a placement sequence; 'x' spans x (normal z), 'z' spans z */
+  placementAxis?: 'x' | 'z'
   meta: Record<string, string | number | boolean>
 }
 
@@ -1672,6 +1676,20 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
   return best
 }
 
+function placementSequenceCells(state: WorldState): Vec3Json[] | null {
+  const cells = state.goalQueue?.current?.placementCells ?? null
+  if (cells === null || cells.length === 0) return null
+  return cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+}
+
+function placementAxisFor(cells: readonly Vec3Json[]): 'x' | 'z' {
+  const first = cells[0]
+  if (first === undefined) return 'x'
+  const sameZ = cells.every((cell) => cell.z === first.z)
+  const sameX = cells.every((cell) => cell.x === first.x)
+  return sameZ && !sameX ? 'x' : 'z'
+}
+
 /**
  * PLACE candidate for a `place` subgoal (e.g. the M2 furnace). The item is in
  * the inventory and there is a grounded placement spot within reach.
@@ -1679,6 +1697,34 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
   if ((state.inventory.counts[focusItem] ?? 0) <= 0) return []
+  const sequence = placementSequenceCells(state)
+  if (sequence !== null) {
+    const target = sequence[0] ?? null
+    return [
+      {
+        id: `PLACE:${focusItem}:build:${sequence.length}@${target === null ? 'none' : blockId('p', target)}`,
+        kind: 'PLACE',
+        label: `place ${sequence.length} x ${focusItem} at ${sequence.length} specified cells, starting at (${target?.x},${target?.y},${target?.z})`,
+        targetName: focusItem,
+        target,
+        targetEntityId: null,
+        itemName: focusItem,
+        requiresTool: false,
+        toolName: null,
+        inReach: target !== null && distance(target, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        placementCells: sequence,
+        placementAxis: placementAxisFor(sequence),
+        meta: {
+          tick: state.tick,
+          x: target?.x ?? 0,
+          y: target?.y ?? 0,
+          z: target?.z ?? 0,
+          placementCount: sequence.length,
+        },
+      },
+    ]
+  }
   const spot = leastFailedPlacementSpot(state, focusItem)
   if (spot === null) return []
   return [

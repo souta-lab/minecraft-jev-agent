@@ -155,7 +155,7 @@ addCase('(f) the portal rung supplies its typed prerequisite chain from the dete
   const flint = floor.goals.findIndex((goal) => goal.targetItem === 'flint')
   const steel = floor.goals.findIndex((goal) => goal.targetItem === 'flint_and_steel')
   const obsidian = floor.goals.findIndex((goal) => goal.targetItem === 'obsidian')
-  const frame = floor.goals.findIndex((goal) => goal.kind === 'place' && goal.targetItem === 'nether_portal')
+  const frame = floor.goals.findIndex((goal) => goal.kind === 'place' && goal.targetItem === 'obsidian')
   const obsidianGoal = floor.goals[obsidian]
   const frameGoal = floor.goals[frame]
   return {
