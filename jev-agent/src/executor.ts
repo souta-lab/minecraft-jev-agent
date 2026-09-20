@@ -285,6 +285,9 @@ const PLACED_NUDGE_TOTAL_MS = 5000
 const PLACED_MAX_STEP_CUTS = 3
 /** #79: bounded settle for the PLACE post-condition (client world is one tick behind the server). */
 const PLACE_VERIFY_SETTLE_MS = 500
+/** A server/client inventory update can lag the equip transaction by a tick. */
+const PLACE_EQUIP_RETRIES = 4
+const PLACE_EQUIP_SETTLE_MS = 50
 
 /** PILLAR_UP: jump-apex window in which the block is placed under the feet. */
 const PILLAR_APEX_BUDGET_MS = 700
@@ -3595,6 +3598,41 @@ export class Executor {
   }
 
   /** One post-condition-gated placement at an already-near cell. */
+  private async equipPlacementItem(
+    candidate: Candidate,
+    itemName: string,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let observed: string | null = this.bot.heldItem?.name ?? null
+    for (let attempt = 1; attempt <= PLACE_EQUIP_RETRIES; attempt += 1) {
+      const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
+      if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
+      if (observed !== itemName) {
+        if (this.options.actuationPort !== undefined) {
+          await this.options.actuationPort.equip(item, 'hand')
+        } else {
+          await this.bot.equip(item, 'hand')
+        }
+        this.ensureOwned(epoch, signal)
+      }
+      observed = this.bot.heldItem?.name ?? null
+      if (observed === itemName) {
+        this.logger.info('executor', `PLACE_EQUIP_READY item=${itemName} attempt=${attempt}`, {
+          actionId: candidate.id,
+          itemName,
+          attempt,
+        })
+        return
+      }
+      if (attempt < PLACE_EQUIP_RETRIES) await delay(PLACE_EQUIP_SETTLE_MS, signal)
+    }
+    throw new ExecutorError(
+      'place_error',
+      `equip ${itemName} was not reflected in the live held item (found ${observed ?? 'empty'})`,
+    )
+  }
+
   private async placeOneCell(
     candidate: Candidate,
     target: Vec3Json,
@@ -3602,15 +3640,12 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<string | null> {
-    const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
-    if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
     const reference = this.findPlaceReference(target)
     if (reference === null) {
       throw new ExecutorError('place_error', `no supporting block adjacent to (${target.x},${target.y},${target.z})`)
     }
     this.setPhase(candidate, epoch, 'equipping')
-    await this.bot.equip(item, 'hand')
-    this.ensureOwned(epoch, signal)
+    await this.equipPlacementItem(candidate, itemName, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
     await this.bot.placeBlock(reference.block, reference.face)
     this.ensureOwned(epoch, signal)
