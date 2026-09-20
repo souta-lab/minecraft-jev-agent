@@ -67,9 +67,8 @@ async function mustReachModelBoundary(label: string, planner: PlannerBrain, inpu
     thrown = error
   }
   const pass = thrown instanceof FatalModelError
-  process.stdout.write(
-    `${pass ? 'PASS' : 'FAIL'}  ${label} -> ${pass ? thrown.message : `returned deterministic plan ${JSON.stringify(returned)}`}\n`,
-  )
+  const observed = thrown instanceof Error ? thrown.message : `returned deterministic plan ${JSON.stringify(returned)}`
+  process.stdout.write(`${pass ? 'PASS' : 'FAIL'}  ${label} -> ${observed}\n`)
   return pass
 }
 

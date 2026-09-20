@@ -12,13 +12,14 @@
 //                 exactly one deterministically grounded horizon plan. It cannot
 //                 invent a goal: the candidate plan ids ARE the only options.
 //
-//   * fallback  - the deterministic capability ladder (no network, never stalls).
+//   * deterministic - the capability ladder, reachable only through the explicit
+//                     `BUDDY_PLANNER=deterministic|off` baseline.
 //
 // Safety / rate-limit behaviour:
 //   - plans are cached by a world-state hash and identical states are deduped;
 //   - LLM calls are spaced by a minimum interval (the gateway allows few calls);
-//   - any failure (missing key, timeout, HTTP 429, malformed answer) falls back
-//     to the deterministic ladder immediately and is logged.
+//   - any failure (missing key, timeout, HTTP 429, malformed answer) is a loud
+//     fatal through `failLoud`; it never degrades into a deterministic plan.
 //
 // The planner is woken by the controller's exception paths via `summonLlm`
 // (`queue_empty` / `action_impossible` / `no_progress` / `need_llm`), so it only
@@ -72,11 +73,20 @@ export type Counts = Record<string, number>
 
 export type PlannerMode = 'llm' | 'deterministic'
 
-/** Explicit opt-in only: `BUDDY_PLANNER=llm|jev|on`; all other values fail closed. */
+/**
+ * The model is the resident default (#226). Unset, `auto` and an empty value all
+ * request the model path; the deterministic ladder is an explicit baseline only.
+ * An unrecognised value throws loudly instead of quietly selecting deterministic,
+ * because a typo must never decide that code - not Mercury/System2 + Jev - owns
+ * the planning decision.
+ */
 export function resolvePlannerMode(): PlannerMode {
-  const raw = (process.env.BUDDY_PLANNER ?? 'deterministic').trim().toLowerCase()
-  if (raw === 'llm' || raw === 'jev' || raw === 'on') return 'llm'
-  return 'deterministic'
+  const raw = (process.env.BUDDY_PLANNER ?? '').trim().toLowerCase()
+  if (raw === '' || raw === 'auto' || raw === 'llm' || raw === 'jev' || raw === 'on') return 'llm'
+  if (raw === 'deterministic' || raw === 'off' || raw === 'fallback' || raw === 'none') return 'deterministic'
+  throw new Error(
+    `unknown BUDDY_PLANNER value "${raw}"; use llm|jev|on|auto (model authority) or deterministic|off|fallback|none (explicit baseline)`,
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1746,7 +1756,10 @@ export class PlannerBrain implements System2Brain {
     const horizonOptions =
       surfaceOption !== null && (capabilityGap !== null || surfaceApplies) ? [...options, surfaceOption] : options
 
-    if (forcedSurface !== null) {
+    // Owner directive: the deterministic forced surface return is an explicit
+    // baseline behaviour only. In llm mode the recovery option is offered in the
+    // horizon and the model decides; code must never force-select it (#226).
+    if (forcedSurface !== null && this.mode === 'deterministic') {
       this.logUpperAccessRecoveryPolicy(forcedSurface, options)
       this.logPlan('fallback', forcedSurface, reason, started, 0, 'capability gap -> return_to_surface')
       return this.finishPlan(forcedSurface, request, 'capability gap -> return_to_surface', true, true)
@@ -1786,7 +1799,11 @@ export class PlannerBrain implements System2Brain {
       return this.fatalModel('planner-mercury', 'mercury returned no repair')
     }
 
-    if (reason === 'queue_empty') {
+    // Same owner directive as the forced surface path: the deterministic ladder
+    // floor answers queue_empty only in explicit baseline mode. In llm mode a
+    // queue_empty boundary must reach the model; a missing key is a loud fatal,
+    // never a silent deterministic plan (#226).
+    if (reason === 'queue_empty' && this.mode === 'deterministic') {
       const floor = ladderFloorGoals(counts, this.world, {
         resumeRungIndex: rung.adoptedRungIndex,
         dimension: this.bot.game?.dimension ?? null,
