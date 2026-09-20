@@ -3206,7 +3206,7 @@ export function applyReachabilityGate(
     memory: options.reachability?.memory ?? null,
     column: columnFacts(state),
   }
-  const presented: Candidate[] = []
+  let presented: Candidate[] = []
   const reachability: CandidateReachability[] = []
   const withheld: CandidateReachability[] = []
 
@@ -3263,6 +3263,30 @@ export function applyReachabilityGate(
   if (presented.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
     run(selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
+  }
+
+  // A generic route-opening candidate is an enabling alternative only while
+  // the active goal has no grounded route of its own.  Once a direct goal
+  // candidate is reachable (the live case was RETRIEVE:known:log), keeping
+  // capability-acquisition MOVEs in the same set lets Jev abandon the goal
+  // route for a local tunnel and repeatedly jump/pillar without progress.
+  // This is a candidate-validity envelope, not a semantic preference: when no
+  // direct route exists, all grounded recovery families remain available.
+  const hasGroundedGoalRoute = presented.some(
+    (candidate) =>
+      candidate.kind !== 'WAIT' &&
+      candidate.kind !== 'ESCALATE' &&
+      candidate.meta.capabilityAcquisition !== true &&
+      candidate.meta.clearance !== true,
+  )
+  if (hasGroundedGoalRoute) {
+    presented = presented.filter(
+      (candidate) =>
+        !(
+          candidate.meta.capabilityAcquisition === true &&
+          (candidate.meta.missingCapability === 'open_path' || candidate.meta.missingCapability === 'standable_approach')
+        ),
+    )
   }
 
   const waite = presented.filter((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')
@@ -3644,7 +3668,15 @@ function capabilityAcquisitionCandidates(
         // mechanically-valid forward body change is on offer. This is CAN
         // enumeration only: no item/coordinate/portal special-casing, no
         // ordering or ranking, and the model still owns WHAT and WHICH.
-        source = routeOpeningCandidates(state, options)
+        // Ground the generic recovery family in the exact locomotion target
+        // whose path was refused.  A route-opening MOVE that does not reduce
+        // the distance to that target is only local wandering; the live
+        // underground wedge repeatedly offered such moves and Jev selected
+        // them in a p13/p14/p12 loop with zero inventory progress.  STEP and
+        // DESCEND remain available as mechanical route-opening facts because
+        // they can change the topology even when their immediate landing cell
+        // is not closer in Euclidean distance.
+        source = routeOpeningCandidates(state, options, entry.candidate.target)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -3710,7 +3742,11 @@ function capabilityAcquisitionCandidates(
  * item/coordinate/portal special-cased and none is ordered or ranked against
  * the others; they are facts Jev selects from.
  */
-function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+function routeOpeningCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  blockedTarget: Vec3Json | null = null,
+): Candidate[] {
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const out: Candidate[] = [
     ...stepCutCandidates(state, options),
@@ -3735,7 +3771,28 @@ function routeOpeningCandidates(state: WorldState, options: CandidateOptions): C
       ),
     )
   }
-  return out
+  if (blockedTarget === null) return out
+  return out.filter(
+    (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, blockedTarget),
+  )
+}
+
+/**
+ * A route-continuation MOVE is an enabling fact only when it makes measurable
+ * progress toward the exact locomotion target that was withheld.  This is a
+ * validity gate, not a policy ranking: Jev still chooses among every surviving
+ * candidate family.  A small epsilon avoids re-offering the current cell due
+ * to fractional player coordinates.
+ */
+function moveAdvancesTowardTarget(
+  current: Vec3Json,
+  candidate: Candidate,
+  blockedTarget: Vec3Json,
+): boolean {
+  if (candidate.target === null) return false
+  const currentDistance = distance(current, blockedTarget)
+  const nextDistance = distance(candidate.target, blockedTarget)
+  return nextDistance + 0.1 < currentDistance
 }
 
 /**

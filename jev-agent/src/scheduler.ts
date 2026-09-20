@@ -39,6 +39,40 @@ export const DECISION_TRIGGERS = [
 export type DecisionTrigger = (typeof DECISION_TRIGGERS)[number]
 
 /**
+ * A newly spawned hostile can change the immediate safety calculus only when
+ * it is close enough to become an actionable threat.  The sensor still sees
+ * farther entities on the next decision, but their spawn notification must
+ * not cancel a long-running goal action from across the world.
+ */
+export const MOB_REACTION_RANGE = 8
+
+export type PositionLike = { x: number; y: number; z: number }
+
+/**
+ * Unknown positions fail open: when the distance cannot be established, keep
+ * the safety interrupt rather than silently suppressing it.
+ */
+export function mobAppearanceIsNear(
+  observer: PositionLike | null | undefined,
+  mob: PositionLike,
+  maxDistance = MOB_REACTION_RANGE,
+): boolean {
+  if (
+    observer === null ||
+    observer === undefined ||
+    !Number.isFinite(observer.x) ||
+    !Number.isFinite(observer.y) ||
+    !Number.isFinite(observer.z) ||
+    !Number.isFinite(mob.x) ||
+    !Number.isFinite(mob.y) ||
+    !Number.isFinite(mob.z)
+  ) {
+    return true
+  }
+  return Math.hypot(observer.x - mob.x, observer.y - mob.y, observer.z - mob.z) <= maxDistance
+}
+
+/**
  * Triggers that may preempt an in-flight action because they can change the
  * safety calculus mid-action (mob appeared, taken damage, health changed). The
  * rest - arrival, block broken, inventory change, action completion, path
@@ -181,11 +215,20 @@ export class DecisionScheduler {
   private readonly onEntitySpawn = (entity: Entity): void => {
     const name = entity.username ?? entity.name ?? entity.kind ?? 'unknown'
     if (!isHostileEntityName(name, entity.kind ?? undefined)) return
-    this.request('mob_appeared', {
+    const position = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+    const observer = this.bot.entity?.position
+    const distance = observer === undefined ? null : observer.distanceTo(entity.position)
+    const detail = {
       entity: name,
       id: entity.id,
-      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-    })
+      position,
+      distance,
+    }
+    if (!mobAppearanceIsNear(observer, position)) {
+      this.logger.info('scheduler', 'mob_appeared observed outside reaction range; action continues', detail)
+      return
+    }
+    this.request('mob_appeared', detail)
   }
 
   private readonly onEntityHurt = (entity: Entity): void => {

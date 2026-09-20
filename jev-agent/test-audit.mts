@@ -15,7 +15,7 @@ import type { Bot } from 'mineflayer'
 import { buildQuestions, booleanBand, decisionIdFrom, QUESTION_NAMES, shouldRetreatFrom } from './src/jev.ts'
 import type { JevAnswer, JevResult } from './src/jev.ts'
 import { CRITICAL_TRIGGERS, pickHigherPriority, questionSetForTrigger, TRIGGER_PRIORITY } from './src/controller.ts'
-import { DecisionScheduler } from './src/scheduler.ts'
+import { DecisionScheduler, MOB_REACTION_RANGE, mobAppearanceIsNear } from './src/scheduler.ts'
 import { EventLogger } from './src/jev.ts'
 import { stableStateHash } from './src/decisionlog.ts'
 import { gateBoolean } from './src/gating.ts'
@@ -197,6 +197,10 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
   const bothDelivered = delivered.includes('inventory_changed') && delivered.includes('damage_taken')
   const criticalFirst = delivered.indexOf('damage_taken') < delivered.indexOf('inventory_changed')
 
+  const nearMob = mobAppearanceIsNear({ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: MOB_REACTION_RANGE })
+  const farMob = mobAppearanceIsNear({ x: 0, y: 64, z: 0 }, { x: MOB_REACTION_RANGE + 1, y: 64, z: 0 })
+  const unknownMob = mobAppearanceIsNear(undefined, { x: 0, y: 64, z: 0 })
+
   const pass =
     keptCritical.trigger === 'damage_taken' &&
     promoted.trigger === 'damage_taken' &&
@@ -209,8 +213,11 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
     hashA === hashAClock &&
     hashA !== hashB &&
     bothDelivered &&
-    criticalFirst
-  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}]` }
+    criticalFirst &&
+    nearMob &&
+    !farMob &&
+    unknownMob
+  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}] mobRange=${nearMob}/${farMob}/${unknownMob}` }
 })
 
 // E. monotonic subgoal completion ---------------------------------------------

@@ -663,6 +663,28 @@ export function classifyRetrieveOutcome(input: RetrieveOutcomeInput): RetrieveOu
   }
 }
 
+/**
+ * A pillar leg is a bounded vertical mechanics operation.  If it placed no
+ * block and the body's floor never left the launch floor, continuing into a
+ * horizontal approach only hides the failed climb and causes the same jump
+ * to be replayed on the next decision.  A partial, durable floor change is
+ * still allowed to return as progress.
+ */
+export function shouldAbortUnproductivePillar(input: {
+  vertical: string
+  verticalStep: boolean
+  startY: number
+  currentY: number
+  targetY: number
+}): boolean {
+  return (
+    input.vertical === 'pillar' &&
+    !input.verticalStep &&
+    input.targetY > input.startY + 0.5 &&
+    Math.floor(input.currentY) <= Math.floor(input.startY)
+  )
+}
+
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
 /**
@@ -1535,6 +1557,20 @@ export class Executor {
       }
 
       this.ensureOwned(epoch, signal)
+      if (
+        shouldAbortUnproductivePillar({
+          vertical: activeVertical,
+          verticalStep,
+          startY,
+          currentY: this.bot.entity.position.y,
+          targetY: target.y,
+        })
+      ) {
+        throw new ExecutorError(
+          'path_stuck',
+          `${candidate.id} pillar ascent made no durable height toward y=${target.y}`,
+        )
+      }
       const startFloorY = Math.floor(startY)
       const climbedTo = Math.floor(this.bot.entity.position.y)
       const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
@@ -1678,6 +1714,20 @@ export class Executor {
     }
 
     this.ensureOwned(epoch, signal)
+    if (
+      shouldAbortUnproductivePillar({
+        vertical: activeVertical,
+        verticalStep,
+        startY,
+        currentY: this.bot.entity.position.y,
+        targetY: target.y,
+      })
+    ) {
+      throw new ExecutorError(
+        'path_stuck',
+        `${candidate.id} pillar ascent made no durable height toward y=${target.y}`,
+      )
+    }
     const startFloorY = Math.floor(startY)
     const climbedTo = Math.floor(this.bot.entity.position.y)
     const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
