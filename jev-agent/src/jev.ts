@@ -5,15 +5,23 @@
 // model authority is owned by the small auditable kernel in jev-authority.ts.
 
 export * from './jev-legacy.ts'
-export { AuthorityJevPolicy, AUTHORITY_PRIMARY_INSTRUCTIONS, buildAuthorityQuestions } from './jev-authority.ts'
+export {
+  AuthorityJevPolicy,
+  AUTHORITY_PRIMARY_INSTRUCTIONS,
+  authorityDecisionMeta,
+  buildAuthorityQuestions,
+} from './jev-authority.ts'
+export type { AuthorityDecisionMeta, AuthorityTaggedJevResult } from './jev-authority.ts'
 
 import { FatalModelError } from './modelFailure.ts'
 import {
+  abandonRequested as legacyAbandonRequested,
   createJevPolicy as createLegacyJevPolicy,
   resolveJevApiKey,
 } from './jev-legacy.ts'
-import type { JevPolicy, JevPolicyOptions } from './jev-legacy.ts'
+import type { JevPolicy, JevPolicyOptions, JevResult } from './jev-legacy.ts'
 import { AuthorityJevPolicy, AUTHORITY_PRIMARY_INSTRUCTIONS, buildAuthorityQuestions } from './jev-authority.ts'
+import type { AuthorityTaggedJevResult } from './jev-authority.ts'
 
 /** Neutral public prompt: evidence is not silently upgraded into a hard ranking rule. */
 export const PRIMARY_INSTRUCTIONS = AUTHORITY_PRIMARY_INSTRUCTIONS
@@ -32,6 +40,31 @@ export function resolveBetaAuthority(
   if (raw === '' || raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes' || raw === 'authority') return true
   if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no' || raw === 'shadow') return false
   throw new Error(`invalid BUDDY_BETA_AUTHORITY=${JSON.stringify(env.BUDDY_BETA_AUTHORITY)}; expected authority|shadow`)
+}
+
+/**
+ * Public beta adoption gate.
+ *
+ * The real authority policy stamps the exact Option instance's threshold and the
+ * raw P(abandon=true) onto the JevResult. This function consumes that stamped
+ * event-boundary decision verbatim. A caller-supplied threshold remains only for
+ * explicit compatibility/tests; legacy/fallback results without authority
+ * metadata use the historical global threshold helper.
+ */
+export function abandonRequested(result: JevResult, threshold?: number): boolean {
+  if (threshold !== undefined) return legacyAbandonRequested(result, threshold)
+  const tagged = result as Partial<AuthorityTaggedJevResult>
+  const decision = tagged.authorityDecision
+  if (decision !== undefined) {
+    const raw = result.answers.abandon_option?.probability
+    return (
+      typeof raw === 'number' &&
+      Number.isFinite(raw) &&
+      raw === decision.betaProbability &&
+      decision.betaAdopt
+    )
+  }
+  return legacyAbandonRequested(result)
 }
 
 /**
