@@ -15,7 +15,7 @@ import type { Bot } from 'mineflayer'
 import { buildQuestions, booleanBand, decisionIdFrom, QUESTION_NAMES, shouldRetreatFrom } from './src/jev.ts'
 import type { JevAnswer, JevResult } from './src/jev.ts'
 import { CRITICAL_TRIGGERS, pickHigherPriority, questionSetForTrigger, TRIGGER_PRIORITY } from './src/controller.ts'
-import { DecisionScheduler } from './src/scheduler.ts'
+import { DecisionScheduler, MOB_REACTION_RANGE, mobAppearanceIsNear, shouldInterruptAttackLease } from './src/scheduler.ts'
 import { EventLogger } from './src/jev.ts'
 import { stableStateHash } from './src/decisionlog.ts'
 import { gateBoolean } from './src/gating.ts'
@@ -139,6 +139,33 @@ addCase('C. action is the only authoritative choice; target ids live inside cand
   return { pass: noTargetQuestion && embedded && !executorReadsTargetAnswer, detail: `targetQuestion=${!noTargetQuestion} authority=${authority} executorReadsTargetAnswer=${executorReadsTargetAnswer}` }
 })
 
+addCase('C2. Jev receives ATTACK as a semantic pi choice beside movement and retreat', () => {
+  const attack: Candidate = {
+    ...candidate('ATTACK:e7'),
+    kind: 'ATTACK',
+    label: 'attack zombie 4m away at 4,81,-10',
+    targetName: 'zombie',
+    targetEntityId: 7,
+    meta: { tick: 2, entityId: 7, distance: 4 },
+  }
+  const move: Candidate = { ...candidate('MOVE:p4_81_-10'), kind: 'MOVE', label: 'move toward the current Option' }
+  const retreat: Candidate = { ...candidate('RETREAT:p8_81_-10'), kind: 'RETREAT', label: 'retreat to a safe standable spot' }
+  const action = buildQuestions([attack, move, retreat]).action
+  const instructions = typeof action?.instructions === 'string' ? action.instructions : ''
+  const criteria = (action?.criteria ?? {}) as Record<string, unknown>
+  const pass =
+    criteria['ATTACK:e7'] === attack.label &&
+    criteria['MOVE:p4_81_-10'] === move.label &&
+    criteria['RETREAT:p8_81_-10'] === retreat.label &&
+    instructions.includes('ATTACK versus MOVE, RETREAT, or WAIT is your pi decision') &&
+    instructions.includes('Do not attack merely because a mob exists') &&
+    instructions.includes('must not choose attack for you')
+  return {
+    pass,
+    detail: `attack=${criteria['ATTACK:e7'] ?? 'missing'} move=${criteria['MOVE:p4_81_-10'] ?? 'missing'} retreat=${criteria['RETREAT:p8_81_-10'] ?? 'missing'}`,
+  }
+})
+
 // D. epoch / coalescing -------------------------------------------------------
 addCase('D. coalescing keeps the highest priority and critical triggers revalidate a stale decision', async () => {
   const critical = trigger('damage_taken', 10)
@@ -170,6 +197,13 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
   const bothDelivered = delivered.includes('inventory_changed') && delivered.includes('damage_taken')
   const criticalFirst = delivered.indexOf('damage_taken') < delivered.indexOf('inventory_changed')
 
+  const nearMob = mobAppearanceIsNear({ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: MOB_REACTION_RANGE })
+  const farMob = mobAppearanceIsNear({ x: 0, y: 64, z: 0 }, { x: MOB_REACTION_RANGE + 1, y: 64, z: 0 })
+  const unknownMob = mobAppearanceIsNear(undefined, { x: 0, y: 64, z: 0 })
+  const criticalAttackInterrupt = shouldInterruptAttackLease('hp_changed', 5)
+  const healthyAttackContinues = !shouldInterruptAttackLease('hp_changed', 7)
+  const nonThreatAttackContinues = !shouldInterruptAttackLease('action_completed', 1)
+
   const pass =
     keptCritical.trigger === 'damage_taken' &&
     promoted.trigger === 'damage_taken' &&
@@ -182,8 +216,14 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
     hashA === hashAClock &&
     hashA !== hashB &&
     bothDelivered &&
-    criticalFirst
-  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}]` }
+    criticalFirst &&
+    nearMob &&
+    !farMob &&
+    unknownMob &&
+    criticalAttackInterrupt &&
+    healthyAttackContinues &&
+    nonThreatAttackContinues
+  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}] mobRange=${nearMob}/${farMob}/${unknownMob} attackInterrupt=${criticalAttackInterrupt}/${healthyAttackContinues}/${nonThreatAttackContinues}` }
 })
 
 // E. monotonic subgoal completion ---------------------------------------------

@@ -23,10 +23,11 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentOption, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
 import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
+import { isProtectedStationBlock } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
@@ -97,6 +98,67 @@ export interface Candidate {
   /** plane axis of a placement sequence; 'x' spans x (normal z), 'z' spans z */
   placementAxis?: 'x' | 'z'
   meta: Record<string, string | number | boolean>
+}
+
+/**
+ * A work action is not a safe response to a hostile entity already inside
+ * melee distance.  This is a hard safety envelope, not an attack preference:
+ * Jev still chooses between the grounded ATTACK and RETREAT candidates.  The
+ * envelope only removes MINE/MOVE/CRAFT/etc. while the threat is physically
+ * immediate, so a slow policy call cannot leave the executor digging through
+ * a hit window.
+ */
+export const IMMEDIATE_HOSTILE_RANGE = 3.2
+
+/**
+ * Farther hostiles remain world observations, but are not combat reactions.
+ * The executor may follow an entity mechanically, yet offering a 20m+ attack
+ * when the active goal is temporarily blocked turns Jev's pi choice into an
+ * unproductive travel plan.  Within this envelope Jev still owns ATTACK versus
+ * RETREAT; beyond it the next grounded goal/recovery candidate stays visible.
+ */
+export const COMBAT_CANDIDATE_RANGE = 8
+
+/**
+ * At this health the bot cannot safely trade another melee hit for one more
+ * attack lease.  This is a hard safety envelope, not a combat preference:
+ * above it Jev still chooses ATTACK versus RETREAT; below it ATTACK is kept
+ * only when no grounded escape response exists.
+ */
+export const CRITICAL_COMBAT_HEALTH = 6
+
+export function restrictCandidatesDuringImmediateThreat(
+  state: Pick<WorldState, 'entities'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const immediateHostile = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
+  if (!immediateHostile) return [...candidates]
+  const combat = candidates.filter(
+    (candidate) => candidate.kind === 'ATTACK' || candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE',
+  )
+  // If perception has no grounded combat response, preserve the original set
+  // and let the normal guard report the capability gap; never silently erase
+  // all candidates or invent an attack target.
+  return combat.length > 0 ? combat : [...candidates]
+}
+
+/**
+ * A critical-health response must not silently fall back to an attack that was
+ * already in flight.  The retreat candidate is still generated from sensed
+ * terrain and Jev retains the choice between the grounded escape and an
+ * escalation.  If perception cannot ground either response, preserve the
+ * original set so the missing affordance remains observable.
+ */
+export function restrictCandidatesAtCriticalHealth(
+  state: Pick<WorldState, 'entities' | 'self'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const immediateHostile = state.entities.some(
+    (entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE,
+  )
+  if (!immediateHostile || state.self.health > CRITICAL_COMBAT_HEALTH) return [...candidates]
+  const escape = candidates.filter((candidate) => candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE')
+  return escape.length > 0 ? escape : [...candidates]
 }
 
 /**
@@ -553,7 +615,9 @@ function generateRawCandidates(
     )
   }
 
-  const hostiles = state.entities.filter((entity) => entity.hostile)
+  const hostiles = state.entities.filter(
+    (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
+  )
   for (const entity of hostiles.slice(0, options.maxAttackCandidates)) {
     candidates.push({
       id: `ATTACK:e${entity.id}`,
@@ -590,7 +654,8 @@ function generateRawCandidates(
   }
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
-  const retreat = pickRetreat(state, state.terrain.standable, danger, options.blacklistedMoveTargets)
+  const hostile = nearestHostile(state, IMMEDIATE_HOSTILE_RANGE)
+  const retreat = pickRetreat(state, state.terrain.standable, danger, hostile, options.blacklistedMoveTargets)
   if (retreat !== null) {
     candidates.push({
       id: `RETREAT:${blockId('p', retreat)}`,
@@ -616,6 +681,22 @@ function generateRawCandidates(
   // semantic action, not an alternative mechanical route for the active goal;
   // it was observed live as raw_iron -> unrelated future log retrieval.
   candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0))
+
+  // Clearance MINEs are route-opening safety affordances, not semantic goal
+  // actions. Once the active goal has another grounded route (for example a
+  // remembered raw_iron RETRIEVE), keep the dirt/stone clearance from becoming
+  // an unrelated action Jev can select. A clearance-only pocket is unchanged.
+  const hasGoalRoute = candidates.some(
+    (candidate) =>
+      candidate.meta.clearance !== true &&
+      candidate.kind !== 'WAIT' &&
+      candidate.kind !== 'ESCALATE' &&
+      candidate.kind !== 'ATTACK' &&
+      candidate.kind !== 'RETREAT' &&
+      candidate.kind !== 'EAT',
+  )
+  if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
+
   if (candidates.length === 0) {
     const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
     const explore = pickExplore(
@@ -1032,7 +1113,7 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
  * is simply not executable.
  */
 function stepCutCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe)
+  const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe && !isProtectedStationBlock(cut.name))
   if (cuts.length === 0) return []
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const target = nearestResource(state, focus)
@@ -1120,7 +1201,7 @@ function descendCandidates(
   // is exactly the permanent WAIT this issue fixes. The controller's stall
   // assertion bounds a genuinely impossible descent instead.
   if (state.signals.descendLimitReached === true && descendTargetY === null) return []
-  const steps = (state.descent ?? []).filter((step) => step.safe)
+  const steps = (state.descent ?? []).filter((step) => step.safe && !isProtectedStationBlock(step.digName ?? ''))
   if (steps.length === 0) return []
 
   const target = tunnelTargets[0] ?? nearestResource(state, focusItem)
@@ -1460,7 +1541,17 @@ function craftCandidates(
   if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
     const route = craftIngredientRoute(state, options, focusItem)
-    const merged = route === null ? acquisition.candidates : [...acquisition.candidates, ...route.candidates]
+    const merged = route === null ? [...acquisition.candidates] : [...acquisition.candidates, ...route.candidates]
+    // A remembered station is a grounded alternative, not a guarantee that its
+    // route is mechanically reachable this tick. Preserve the 2x2 prerequisite
+    // step as a second grounded candidate so the reachability gate can withdraw
+    // only the bad retrieval route instead of collapsing the craft Option to
+    // MOVE/WAIT. Jev still chooses between every surviving semantic action.
+    const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false)
+    if (fallbackPlan.op !== null) {
+      const fallback = craftPlanStepCandidate(state, options, fallbackPlan.op, focusItem).candidate
+      if (fallback !== null && !merged.some((candidate) => candidate.id === fallback.id)) merged.push(fallback)
+    }
     if (merged.length > 0 || acquisition.placeRefusal !== null) return { candidates: merged, placeRefusal: acquisition.placeRefusal }
   }
 
@@ -1945,7 +2036,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
     // (optionSpec#smeltPreconditions), so offer the deterministic collect route
     // for the missing producer instead of starving to WAIT. `fuel` is the
     // data-driven class route (a log or coal), symmetric with the input route.
-    return mineCandidates(state, options, inputSpec, null)
+    return smeltPrerequisiteCandidates(state, options, inputSpec, 'smelt_input')
   }
 
   const haveOutput = state.inventory.counts[focusItem] ?? 0
@@ -1956,7 +2047,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (available <= 0) return []
   const count = Math.min(needed, available)
   const fuelItem = smeltFuelFor(state, inputItem, count)
-  if (fuelItem === null) return mineCandidates(state, options, 'fuel', null)
+  if (fuelItem === null) return smeltPrerequisiteCandidates(state, options, 'fuel', 'smelt_fuel')
   const fuelCount = fuelCountFor(count, fuelItem)
   // A single item cannot occupy both furnace slots. In particular, a
   // one-log charcoal route must acquire a second log before SMELT is offered;
@@ -1964,7 +2055,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   // leaving a stale furnace slot that makes the next attempt report
   // `destination full`.
   if (!smeltInventorySufficient(state.inventory.counts, inputItem, count, fuelItem, fuelCount)) {
-    return mineCandidates(state, options, 'fuel', null)
+    return smeltPrerequisiteCandidates(state, options, 'fuel', 'smelt_fuel')
   }
 
   return [
@@ -1995,6 +2086,31 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
       },
     },
   ]
+}
+
+/**
+ * Ground the producer route for a missing smelt precondition and keep its
+ * semantic role visible to Jev.  `mineCandidates` alone only sees the current
+ * sensor window; the collect route also admits a non-stale remembered ore/log
+ * coordinate.  Without that second leg an active smelt can present only
+ * clearance/WAIT candidates after the bot has walked away from the last sensed
+ * producer, which is candidate starvation rather than a real impossibility.
+ */
+function smeltPrerequisiteCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: string,
+  prerequisiteRole: 'smelt_input' | 'smelt_fuel',
+): Candidate[] {
+  return collectRouteCandidates(state, options, spec).map((candidate) => ({
+    ...candidate,
+    meta: {
+      ...candidate.meta,
+      optionSkill: 'PREREQUISITE',
+      prerequisiteRole,
+      prerequisiteItem: spec,
+    },
+  }))
 }
 
 function smeltInputFor(state: WorldState, focusItem: string): string | null {
@@ -2045,7 +2161,7 @@ export function smeltInputPrereq(state: WorldState, options: CandidateOptions): 
   if (reachableSensedFurnace(state, options) === null) return null
   const held = smeltInputFor(state, item)
   if (held !== null) return { item, input: held, present: true, action: 'none' }
-  const route = mineCandidates(state, options, inputSpec, null)
+  const route = smeltPrerequisiteCandidates(state, options, inputSpec, 'smelt_input')
   return {
     item,
     input: nearestProducerYield(state, inputSpec) ?? inputSpec,
@@ -2924,15 +3040,26 @@ function nearestDanger(state: WorldState, radius: number): BlockState | null {
   return nearest
 }
 
+function nearestHostile(state: WorldState, radius: number): EntityState | null {
+  let nearest: EntityState | null = null
+  for (const entity of state.entities) {
+    if (!entity.hostile || entity.distance > radius) continue
+    if (nearest === null || entity.distance < nearest.distance) nearest = entity
+  }
+  return nearest
+}
+
 function pickRetreat(
   state: WorldState,
   standable: Vec3Json[],
   danger: BlockState | null,
+  hostile: EntityState | null,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
-  const hurt = state.self.health <= 6
-  if (danger === null && !hurt) return null
-  const threat = danger?.position ?? state.self.position
+  const hurt = state.self.health <= CRITICAL_COMBAT_HEALTH
+  if (danger === null && hostile === null && !hurt) return null
+  const threat = danger?.position ?? hostile?.position ?? state.self.position
+  const currentThreatDistance = hostile === null ? null : distance(state.self.position, hostile.position)
   let best: Vec3Json | null = null
   let bestScore = Number.NEGATIVE_INFINITY
   for (const spot of standable) {
@@ -2944,7 +3071,13 @@ function pickRetreat(
     }
   }
   if (best === null) return null
-  if (bestScore < HAZARD_DANGER_RADIUS) return null
+  if (hostile !== null) {
+    // A retreat that does not increase separation is only a re-labeled MOVE;
+    // do not offer it as a safety affordance.
+    if (currentThreatDistance === null || bestScore <= currentThreatDistance + 0.25) return null
+  } else if (bestScore < HAZARD_DANGER_RADIUS) {
+    return null
+  }
   return best
 }
 
@@ -3130,7 +3263,7 @@ export function applyReachabilityGate(
     memory: options.reachability?.memory ?? null,
     column: columnFacts(state),
   }
-  const presented: Candidate[] = []
+  let presented: Candidate[] = []
   const reachability: CandidateReachability[] = []
   const withheld: CandidateReachability[] = []
 
@@ -3187,6 +3320,30 @@ export function applyReachabilityGate(
   if (presented.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
     run(selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
+  }
+
+  // A generic route-opening candidate is an enabling alternative only while
+  // the active goal has no grounded route of its own.  Once a direct goal
+  // candidate is reachable (the live case was RETRIEVE:known:log), keeping
+  // capability-acquisition MOVEs in the same set lets Jev abandon the goal
+  // route for a local tunnel and repeatedly jump/pillar without progress.
+  // This is a candidate-validity envelope, not a semantic preference: when no
+  // direct route exists, all grounded recovery families remain available.
+  const hasGroundedGoalRoute = presented.some(
+    (candidate) =>
+      candidate.kind !== 'WAIT' &&
+      candidate.kind !== 'ESCALATE' &&
+      candidate.meta.capabilityAcquisition !== true &&
+      candidate.meta.clearance !== true,
+  )
+  if (hasGroundedGoalRoute) {
+    presented = presented.filter(
+      (candidate) =>
+        !(
+          candidate.meta.capabilityAcquisition === true &&
+          (candidate.meta.missingCapability === 'open_path' || candidate.meta.missingCapability === 'standable_approach')
+        ),
+    )
   }
 
   const waite = presented.filter((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')
@@ -3568,7 +3725,15 @@ function capabilityAcquisitionCandidates(
         // mechanically-valid forward body change is on offer. This is CAN
         // enumeration only: no item/coordinate/portal special-casing, no
         // ordering or ranking, and the model still owns WHAT and WHICH.
-        source = routeOpeningCandidates(state, options)
+        // Ground the generic recovery family in the exact locomotion target
+        // whose path was refused.  A route-opening MOVE that does not reduce
+        // the distance to that target is only local wandering; the live
+        // underground wedge repeatedly offered such moves and Jev selected
+        // them in a p13/p14/p12 loop with zero inventory progress.  STEP and
+        // DESCEND remain available as mechanical route-opening facts because
+        // they can change the topology even when their immediate landing cell
+        // is not closer in Euclidean distance.
+        source = routeOpeningCandidates(state, options, entry.candidate.target)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -3634,7 +3799,11 @@ function capabilityAcquisitionCandidates(
  * item/coordinate/portal special-cased and none is ordered or ranked against
  * the others; they are facts Jev selects from.
  */
-function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+function routeOpeningCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  blockedTarget: Vec3Json | null = null,
+): Candidate[] {
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const out: Candidate[] = [
     ...stepCutCandidates(state, options),
@@ -3659,7 +3828,28 @@ function routeOpeningCandidates(state: WorldState, options: CandidateOptions): C
       ),
     )
   }
-  return out
+  if (blockedTarget === null) return out
+  return out.filter(
+    (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, blockedTarget),
+  )
+}
+
+/**
+ * A route-continuation MOVE is an enabling fact only when it makes measurable
+ * progress toward the exact locomotion target that was withheld.  This is a
+ * validity gate, not a policy ranking: Jev still chooses among every surviving
+ * candidate family.  A small epsilon avoids re-offering the current cell due
+ * to fractional player coordinates.
+ */
+function moveAdvancesTowardTarget(
+  current: Vec3Json,
+  candidate: Candidate,
+  blockedTarget: Vec3Json,
+): boolean {
+  if (candidate.target === null) return false
+  const currentDistance = distance(current, blockedTarget)
+  const nextDistance = distance(candidate.target, blockedTarget)
+  return nextDistance + 0.1 < currentDistance
 }
 
 /**

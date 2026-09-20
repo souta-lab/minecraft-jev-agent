@@ -16,6 +16,7 @@ import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
 import { NETHER_PORTAL, portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
+import { isProtectedStationBlock } from './blockSafety.ts'
 
 export type Vec3Json = {
   x: number
@@ -982,7 +983,11 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
     const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
     let reason = 'safe'
-    if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
+    const protectedDig = [wall, head, floor]
+      .map((cell) => at(cell.x, cell.y, cell.z))
+      .find((block) => block !== null && isProtectedStationBlock(block.name))
+    if (protectedDig !== undefined && protectedDig !== null) reason = `${protectedDig.name} is a protected station`
+    else if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
     else if (!headOk) reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
     else if (!floorOk) reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
     else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
@@ -1094,7 +1099,8 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
       const step = { x, y: top, z }
       const name = at(x, top, z)?.name ?? 'unknown'
       let reason = 'safe'
-      if (!diggableSolid(x, top, z)) reason = `${name} is not breakable`
+      if (isProtectedStationBlock(name)) reason = `${name} is a protected station`
+      else if (!diggableSolid(x, top, z)) reason = `${name} is not breakable`
       else if (!solid(x, top - 1, z)) reason = 'no solid landing under the cut'
       else if (!clear(x, top + 1, z) || !clear(x, top + 2, z)) reason = 'no headroom above the new step'
       else if (hazardsAround(hazardous, cut, step, { x, y: top - 1, z })) reason = 'lava/water in the step column'
@@ -1124,7 +1130,10 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
     const name = block.name
     let safe = true
     let reason = 'safe'
-    if (!isBreakableSolidBlock(block)) {
+    if (isProtectedStationBlock(name)) {
+      safe = false
+      reason = `${name} is a protected station`
+    } else if (!isBreakableSolidBlock(block)) {
       safe = false
       reason = `${name} is not breakable`
     } else if (PROBE_HAZARDS.has(name) || PROBE_FLUIDS.has(name)) {

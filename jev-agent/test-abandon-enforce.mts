@@ -177,16 +177,23 @@ addCase('(e) #79: a never-attempted smelt option stays protected before its prer
   return { pass, detail: `protect=${vote.protection.protect} adopt=${vote.adopt} enforced=${classification.enforced}` }
 })
 
-addCase('#79 wiring: the controller records attempts and emits both markers', () => {
-  const text = source('./src/controller.ts')
+addCase('#79 wiring: the authority facade preserves the legacy attempt/enforcement mechanics', () => {
+  const facade = source('./src/controller.ts')
+  const mechanics = source('./src/controller-legacy.ts')
   const missing = [
     'classifyAbandonRequest({',
     'optionAttempts.noteOutcome(',
     'formatAbandonEnforced(',
     'formatAbandonSuppressed(',
     'enforceUnproductiveAbandon(',
-  ].filter((needle) => !text.includes(needle))
-  return { pass: missing.length === 0, detail: missing.length === 0 ? 'attempt counter + enforcement wired' : `missing ${missing.join(', ')}` }
+  ].filter((needle) => !mechanics.includes(needle))
+  const facadeOwnsAuthority = facade.includes('abandonVerdict = (decision, optionId, planId)')
+  return {
+    pass: missing.length === 0 && facadeOwnsAuthority,
+    detail: missing.length === 0 && facadeOwnsAuthority
+      ? 'legacy attempt/enforcement mechanics + facade authority seam wired'
+      : `missing ${[...missing, ...(facadeOwnsAuthority ? [] : ['facade abandonVerdict seam'])].join(', ')}`,
+  }
 })
 
 let failures = 0

@@ -14,7 +14,7 @@ import {
   isZeroProgressOutcome,
   UNVERIFIED_ACTION_LIMIT,
 } from './src/actionPostcondition.ts'
-import { executeFurnaceSmelt, formatSmeltLog } from './src/executor.ts'
+import { executeFurnaceSmelt, formatSmeltLog, isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './src/executor.ts'
 import type { SmeltFurnaceWindow } from './src/executor.ts'
 
 interface Case {
@@ -332,6 +332,18 @@ addCase('(V2) an unverified zero-delta MOVE is not progress, so it is never succ
   })
   const pass = durable === false && zero === true && downgraded === true
   return { pass, detail: `hasObservableProgress=${durable} zero=${zero} unverified=${downgraded}` }
+})
+
+addCase('(safety) station blocks are protected at the common dig boundary', () => {
+  const protectedNames = ['crafting_table', 'furnace', 'blast_furnace', 'smoker']
+  const rejected = protectedNames.every((name) => isProtectedStationBlock(name))
+  const namespaced = isProtectedStationBlock('minecraft:furnace')
+  const terrainAllowed = !isProtectedStationBlock('dirt') && !isProtectedStationBlock('stone')
+  const complete = protectedNames.every((name) => PROTECTED_STATION_BLOCKS.has(name))
+  return {
+    pass: rejected && namespaced && terrainAllowed && complete,
+    detail: `protected=${protectedNames.join(',')} namespaced=${namespaced} terrainAllowed=${terrainAllowed}`,
+  }
 })
 
 let failures = 0

@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { stableOptionId } from './optionSpec.ts'
 import type { PlannedGoal } from './goalQueue.ts'
+import type { ActionOutcomeTaxonomy } from './actionPostcondition.ts'
 
 /**
  * The subset of a queued goal the causal layer needs. Kept structural so the
@@ -29,6 +30,10 @@ export interface CausalGoalRef {
   requiredCount: number
   /** where the plan row came from: bootstrap | llm | mechanical */
   origin: string
+  /** Canonical Option identity, when the queue row has been compiled. */
+  optionInstanceId?: string
+  optionTemplateId?: string
+  optionSpec?: { id: string }
 }
 
 /** The ids fixed at DECISION time, carried into every downstream log. */
@@ -59,6 +64,11 @@ export interface CausalChain extends CausalStamp {
    * A chain may never carry `verified=true status=done` with `observable=false`.
    */
   observable: boolean
+  execution: ActionOutcomeTaxonomy['execution'] | null
+  verification: ActionOutcomeTaxonomy['verification'] | null
+  progress: ActionOutcomeTaxonomy['progress']
+  progressKinds: string[]
+  control: ActionOutcomeTaxonomy['control']
 }
 
 /** Mint a fresh chain id. uuid, never a timestamp, so ids are race-free. */
@@ -69,6 +79,8 @@ export function makeChainId(): string {
 /** Stable OptionSpec id for a plan row, or null when there is no current row. */
 export function optionIdForGoal(goal: CausalGoalRef | null | undefined): string | null {
   if (goal === null || goal === undefined) return null
+  if (typeof goal.optionTemplateId === 'string' && goal.optionTemplateId.length > 0) return goal.optionTemplateId
+  if (goal.optionSpec !== undefined && typeof goal.optionSpec.id === 'string' && goal.optionSpec.id.length > 0) return goal.optionSpec.id
   return stableOptionId({
     kind: goal.kind,
     description: goal.description,
@@ -117,6 +129,7 @@ export interface CausalOutcomeInput {
   resource?: string | null
   progressDelta?: number | null
   observable?: boolean
+  taxonomy?: ActionOutcomeTaxonomy
 }
 
 /** Complete a stamp with the executor outcome, preserving every decision-time id. */
@@ -133,6 +146,11 @@ export function completeCausalChain(stamp: CausalStamp, outcome: CausalOutcomeIn
     resource: outcome.resource ?? null,
     progressDelta: outcome.progressDelta ?? null,
     observable: outcome.observable ?? (outcome.verified === true && outcome.status === 'done'),
+    execution: outcome.taxonomy?.execution ?? null,
+    verification: outcome.taxonomy?.verification ?? null,
+    progress: outcome.taxonomy?.progress ?? (outcome.observable === true ? 'body' : 'none'),
+    progressKinds: outcome.taxonomy?.progressKinds.slice() ?? (outcome.observable === true ? ['body'] : ['none']),
+    control: outcome.taxonomy?.control ?? 'none',
   }
 }
 
@@ -147,7 +165,9 @@ export function formatCausalLine(chain: CausalChain): string {
     `strategy=${text(chain.strategy)} candidate=${text(chain.candidateId)} action=${text(chain.actionId)} ` +
     `verified=${chain.verified === null ? 'null' : String(chain.verified)} status=${text(chain.status)} ` +
     `resource=${text(chain.resource)} progressDelta=${chain.progressDelta === null ? 'null' : String(chain.progressDelta)} ` +
-    `observable=${String(chain.observable)}`
+    `observable=${String(chain.observable)} execution=${chain.execution ?? 'null'} ` +
+    `verification=${chain.verification ?? 'null'} progress=${chain.progress} ` +
+    `progressKinds=${chain.progressKinds.join(',')} control=${chain.control}`
   )
 }
 
@@ -166,5 +186,10 @@ export function causalRecord(chain: CausalChain): Record<string, unknown> {
     resource: chain.resource,
     progressDelta: chain.progressDelta,
     observable: chain.observable,
+    execution: chain.execution,
+    verification: chain.verification,
+    progress: chain.progress,
+    progressKinds: chain.progressKinds,
+    control: chain.control,
   }
 }

@@ -27,6 +27,8 @@ import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
+import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
+export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 import { FLINT_AND_STEEL, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalLit, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
@@ -119,6 +121,7 @@ export type FailureCode =
   | 'path_stuck'
   | 'tunnel_entry_refused'
   | 'out_of_reach'
+  | 'protected_station'
   | 'dig_error'
   | 'dig_timeout'
   | 'craft_error'
@@ -662,8 +665,48 @@ export function classifyRetrieveOutcome(input: RetrieveOutcomeInput): RetrieveOu
   }
 }
 
+/**
+ * A pillar leg is a bounded vertical mechanics operation.  If it placed no
+ * block and the body's floor never left the launch floor, continuing into a
+ * horizontal approach only hides the failed climb and causes the same jump
+ * to be replayed on the next decision.  A partial, durable floor change is
+ * still allowed to return as progress.
+ */
+export function shouldAbortUnproductivePillar(input: {
+  vertical: string
+  verticalStep: boolean
+  startY: number
+  currentY: number
+  targetY: number
+}): boolean {
+  return (
+    input.vertical === 'pillar' &&
+    !input.verticalStep &&
+    input.targetY > input.startY + 0.5 &&
+    Math.floor(input.currentY) <= Math.floor(input.startY)
+  )
+}
+
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
+/**
+ * ATTACK is a Jev-selected intent, not a one-packet action.  The executor may
+ * close the mechanically-required gap and deliver several cooldown-spaced
+ * swings while that intent owns the actuation lease.  Target/mode selection
+ * remains in the candidate and therefore in Jev; this is only the melee
+ * mechanics envelope.
+ */
+export const MELEE_ATTACK_RANGE = 3.1
+export const ATTACK_LEASE_MS = 2_200
+export const ATTACK_COOLDOWN_MS = 500
+
+/**
+ * Stations are durable world resources, not route terrain. A route-opening or
+ * staircase action may dig the live block at its selected cell, so the final
+ * dig boundary rejects stations even if an earlier sensor snapshot classified
+ * that cell as generic terrain. There is no semantic station-removal
+ * candidate; this is a hard world-preservation invariant, not a policy rank.
+ */
 export interface SmeltFurnaceSlot {
   count: number
   /** Mineflayer exposes the concrete item name; test doubles may omit it. */
@@ -1506,6 +1549,20 @@ export class Executor {
       }
 
       this.ensureOwned(epoch, signal)
+      if (
+        shouldAbortUnproductivePillar({
+          vertical: activeVertical,
+          verticalStep,
+          startY,
+          currentY: this.bot.entity.position.y,
+          targetY: target.y,
+        })
+      ) {
+        throw new ExecutorError(
+          'path_stuck',
+          `${candidate.id} pillar ascent made no durable height toward y=${target.y}`,
+        )
+      }
       const startFloorY = Math.floor(startY)
       const climbedTo = Math.floor(this.bot.entity.position.y)
       const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
@@ -1649,6 +1706,20 @@ export class Executor {
     }
 
     this.ensureOwned(epoch, signal)
+    if (
+      shouldAbortUnproductivePillar({
+        vertical: activeVertical,
+        verticalStep,
+        startY,
+        currentY: this.bot.entity.position.y,
+        targetY: target.y,
+      })
+    ) {
+      throw new ExecutorError(
+        'path_stuck',
+        `${candidate.id} pillar ascent made no durable height toward y=${target.y}`,
+      )
+    }
     const startFloorY = Math.floor(startY)
     const climbedTo = Math.floor(this.bot.entity.position.y)
     const dugVertical = activeVertical === 'staircase' || activeVertical === 'staircase-up'
@@ -3221,19 +3292,66 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const entityId = candidate.targetEntityId
     if (entityId === null) throw new ExecutorError('target_gone', 'ATTACK candidate has no entity id')
-    const entity = this.bot.entities[entityId]
-    if (entity === undefined) throw new ExecutorError('target_gone', `entity ${entityId} is gone`)
-    this.setPhase(candidate, epoch, 'attacking')
-    await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
-    this.ensureOwned(epoch, signal)
-    this.bot.attack(entity)
-    return this.buildResult(candidate, epoch, startedAt, 'done', 'attacked', `attacked ${candidate.targetName ?? entityId}`, null, {
-      verified: true,
-      dropObserved: false,
-      blockRemoved: false,
-      itemsGained: 0,
-      goalItemCount: this.countGoalItem(),
-    })
+    let attacks = 0
+    let following = false
+    const deadline = Date.now() + ATTACK_LEASE_MS
+    try {
+      while (Date.now() < deadline) {
+        this.ensureOwned(epoch, signal)
+        const entity = this.bot.entities[entityId]
+        if (entity === undefined) break
+        const distanceToTarget = Math.hypot(
+          entity.position.x - this.bot.entity.position.x,
+          entity.position.y - this.bot.entity.position.y,
+          entity.position.z - this.bot.entity.position.z,
+        )
+        if (distanceToTarget > MELEE_ATTACK_RANGE) {
+          if (!following && this.bot.pathfinder !== undefined) {
+            this.setPhase(candidate, epoch, 'closing-to-melee-range')
+            this.bot.pathfinder.setGoal(new goals.GoalFollow(entity, MELEE_ATTACK_RANGE - 0.2), true)
+            following = true
+          }
+          await delay(100, signal)
+          continue
+        }
+
+        if (following) {
+          this.bot.pathfinder?.setGoal(null)
+          following = false
+        }
+        this.setPhase(candidate, epoch, 'attacking')
+        await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
+        this.ensureOwned(epoch, signal)
+        this.bot.attack(entity)
+        attacks += 1
+        this.logger.info('executor', `ATTACK_LEASE action#${epoch} attempt=${attacks} distance=${Math.round(distanceToTarget * 100) / 100}m`, {
+          actionId: candidate.id,
+          targetEntityId: entityId,
+          distance: distanceToTarget,
+          attempt: attacks,
+        })
+        await delay(Math.min(ATTACK_COOLDOWN_MS, Math.max(1, deadline - Date.now())), signal)
+      }
+    } finally {
+      if (following) this.bot.pathfinder?.setGoal(null)
+    }
+    if (attacks === 0) throw new ExecutorError('out_of_reach', `could not reach ${candidate.targetName ?? entityId} during ATTACK lease`)
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'attacked',
+      `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) during ${ATTACK_LEASE_MS}ms lease`,
+      null,
+      {
+        verified: true,
+        dropObserved: false,
+        blockRemoved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+      },
+    )
   }
 
   private async runWait(
@@ -3507,7 +3625,8 @@ export class Executor {
       y: readMetaNumber(candidate, 'stepY', Number.NaN),
       z: readMetaNumber(candidate, 'stepZ', Number.NaN),
     }
-    if (Number.isFinite(step.x) && Number.isFinite(step.y) && Number.isFinite(step.z)) {
+    const hasStep = Number.isFinite(step.x) && Number.isFinite(step.y) && Number.isFinite(step.z)
+    if (hasStep) {
       this.setPhase(candidate, epoch, 'stepping')
       try {
         await this.pathTo(step, epoch, signal, 'GoalBlock', { requireLevel: true })
@@ -3528,6 +3647,10 @@ export class Executor {
       verified: true,
       dropObserved: false,
       blockRemoved: true,
+      // A completed staircase DESCEND that reached its step changed the body
+      // state as well as the explored frontier. Preserve that axis explicitly
+      // so System2 never sees a real y-step as zero/bodyless progress.
+      progressed: hasStep,
       itemsGained: 0,
       goalItemCount: this.countGoalItem(),
     })
@@ -4693,6 +4816,12 @@ export class Executor {
 
   private async digBlock(block: Block, epoch: number, signal: AbortSignal): Promise<void> {
     this.ensureOwned(epoch, signal)
+    if (isProtectedStationBlock(block.name)) {
+      throw new ExecutorError(
+        'protected_station',
+        `refusing to break protected station ${block.name} at (${block.position.x},${block.position.y},${block.position.z})`,
+      )
+    }
     if (!this.bot.canDigBlock(block)) {
       throw new ExecutorError('dig_error', `canDigBlock() returned false for ${block.name}`)
     }
@@ -4932,6 +5061,7 @@ export class Executor {
       verified: result.verified,
       itemsGained: result.itemsGained,
       blockRemoved: result.blockRemoved,
+      progressed: result.progressed,
     })
     if (!unverified) return result
     const postcondition = describeActionPostcondition(result.kind)

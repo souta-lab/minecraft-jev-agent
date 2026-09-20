@@ -175,6 +175,23 @@ function unreachableMove(tick: number): Candidate {
   }
 }
 
+function reachableGoalRoute(tick: number): Candidate {
+  return {
+    id: 'RETRIEVE:known:furnace:b3_60_0',
+    kind: 'RETRIEVE',
+    label: 'return to the remembered furnace for the active goal',
+    targetName: 'furnace',
+    target: FRONTIER,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { tick, resource: 'furnace', resourceKind: 'station' },
+  }
+}
+
 /** `no_path` for the withheld target only; the frontier stays reachable. */
 const pathProbe = (position: Vec3Json): 'no_path' | 'reachable' =>
   position.x === OPEN_TARGET.x && position.z === OPEN_TARGET.z ? 'no_path' : 'reachable'
@@ -217,6 +234,29 @@ function downDescent(): DescentOption {
     safe: true,
     reason: 'safe',
     digName: 'dirt',
+    digHarvestTool: null,
+    digHarvestTier: null,
+    diggable: true,
+  }
+}
+
+function levelDescent(dir: 'E' | 'W', step: Vec3Json): DescentOption {
+  const wall = { x: step.x, y: step.y, z: step.z }
+  return {
+    dir,
+    mode: 'level',
+    dx: dir === 'E' ? 1 : -1,
+    dz: 0,
+    step,
+    wall,
+    head: { x: step.x, y: step.y + 1, z: step.z },
+    floor: { x: step.x, y: step.y - 1, z: step.z },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: null,
     digHarvestTool: null,
     digHarvestTier: null,
     diggable: true,
@@ -320,6 +360,59 @@ function main(): void {
       '(c) a collect goal with a safe down step yields the DESCEND recovery candidate',
       descend !== undefined && descend.meta.missingCapability === 'open_path' && descend.meta.safe === true,
       `descend=${descend === undefined ? 'none' : `${descend.id} -> ${String(descend.target?.x)},${String(descend.target?.y)},${String(descend.target?.z)}`} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+    )
+  }
+
+  // (d) A route-continuation MOVE must remain tied to the refused target.  The
+  // live underground loop alternated between nearby level steps that did not
+  // converge on the remembered log.  Keep the generic STEP/DESCEND families,
+  // but withdraw the non-convergent MOVE facts so Jev cannot select a local
+  // walk forever after the first useful step.
+  {
+    const routeState = worldState({
+      goal: goal('furnace'),
+      goalQueue: queueWith(queuedGoal('furnace', 'place')),
+      descent: [
+        levelDescent('E', { x: 3, y: 60, z: 0 }),
+        levelDescent('W', { x: -3, y: 60, z: 0 }),
+      ],
+      standable: [BOT],
+    })
+    const grounded = applyReachabilityGate(
+      [waitCandidate(routeState.tick), unreachableMove(routeState.tick)],
+      routeState,
+      optionsWith(),
+    )
+    const acquisitions = grounded.candidates.filter(
+      (candidate) => candidate.meta.capabilityAcquisition === true && candidate.kind === 'MOVE',
+    )
+    const convergent = acquisitions.some((candidate) => candidate.target?.x === 3)
+    const divergent = acquisitions.some((candidate) => candidate.target?.x === -3)
+    check(
+      '(d) route recovery keeps a MOVE that closes on the withheld target',
+      convergent,
+      `moves=[${acquisitions.map((candidate) => candidate.id).join(',')}] target=${OPEN_TARGET.x},${OPEN_TARGET.y},${OPEN_TARGET.z}`,
+    )
+    check(
+      '(d) route recovery removes a MOVE that increases target distance',
+      !divergent,
+      `moves=[${acquisitions.map((candidate) => candidate.id).join(',')}] divergent=${divergent}`,
+    )
+  }
+
+  // (e) Once the active goal already has a grounded direct route, generic
+  // open_path recovery must not compete with it and trigger a jump/pillar loop.
+  {
+    const grounded = applyReachabilityGate(
+      [waitCandidate(7), reachableGoalRoute(7), unreachableMove(7)],
+      placeGoalState,
+      optionsWith(),
+    )
+    const recovery = grounded.candidates.filter((candidate) => candidate.meta.capabilityAcquisition === true)
+    check(
+      '(e) a grounded goal route suppresses competing generic locomotion recovery',
+      recovery.length === 0 && grounded.candidates.some((candidate) => candidate.id === reachableGoalRoute(7).id),
+      `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] recovery=[${recovery.map((candidate) => candidate.id).join(',')}]`,
     )
   }
 

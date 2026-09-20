@@ -32,6 +32,7 @@ import { dirname, join } from 'node:path'
 import { generateText, tool } from 'ai'
 import { z } from 'zod'
 import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
+import { compilePlannedGoal, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
@@ -81,7 +82,7 @@ export const MERCURY_TRIGGER_REASONS: readonly MercuryTriggerReason[] = [
  */
 export const MERCURY_PLAN_SCHEMA = z
   .object({
-    op: z.enum(['continue', 'patch', 'replace', 'abort']),
+    op: z.enum(['continue', 'patch', 'replace', 'abandon', 'complete', 'abort']),
     goals: z
       .array(
         z
@@ -296,8 +297,8 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
     return { ok: false, error: `schema: ${issue?.path.join('.') ?? '?'} ${issue?.message ?? 'invalid'}` }
   }
   const plan = normalizeMercuryPlan(parsed.data)
-  if (plan.op === 'abort' && plan.goals.length !== 0) {
-    return { ok: false, error: 'abort plans must not contain goals' }
+  if ((plan.op === 'abort' || plan.op === 'complete') && plan.goals.length !== 0) {
+    return { ok: false, error: `${plan.op} plans must not contain goals` }
   }
   for (let index = 0; index < plan.goals.length; index += 1) {
     const goal = plan.goals[index]
@@ -358,7 +359,7 @@ export function buildCorrectivePrompt(basePrompt: string, validationError: strin
  *   explore cave             -> `descend` predicate (existing cave/ore descent)
  *   explore surface          -> `collect log` (existing surface body-change plan)
  */
-export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | null {
+function compileMercuryGoalRaw(goal: MercuryPlanGoalJson): PlannedGoal | null {
   if (goal.kind === undefined) {
     const item = goal.item ?? 'unknown'
     const count = goal.count ?? 1
@@ -452,9 +453,45 @@ export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | nul
   }
 }
 
+/**
+ * Attach the model-selected semantic identity to the executable queue row.
+ * `goto`/`explore` still use existing grounded mechanics underneath, but their
+ * canonical Option id and intent survive the lowering step instead of being
+ * reconstructed later as `collect:*`/`descend:*`.
+ */
+function semanticizeMercuryGoal(source: MercuryPlanGoalJson, compiled: PlannedGoal): PlannedGoal {
+  const item = typeof source.item === 'string' ? normalizeResourceItem(source.item) : null
+  const templateId =
+    source.kind === undefined
+      ? `${compiled.kind}:${item ?? source.item ?? 'unknown'}`
+      : source.kind === 'goto' || source.kind === 'goto_resource'
+        ? `goto:${item ?? 'unknown'}`
+        : source.kind === 'explore'
+          ? `explore:${source.mode ?? 'unknown'}`
+          : source.kind === 'descend_to'
+            ? `descend_to:y${source.y ?? 'unknown'}`
+            : `${source.kind}:${item ?? source.mode ?? (source.y === undefined ? 'goal' : `y${source.y}`)}`
+  const semanticSpec = {
+    ...compilePlannedGoal(compiled),
+    id: templateId,
+    intent: source.kind === undefined ? compiled.description : `${source.kind}${item === null ? '' : ` ${item}`}`,
+  }
+  return {
+    ...compiled,
+    optionTemplateId: semanticSpec.id,
+    optionInstanceId: stableOptionInstanceId(semanticSpec),
+    optionSpec: semanticSpec,
+  }
+}
+
+export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | null {
+  const compiled = compileMercuryGoalRaw(goal)
+  return compiled === null ? null : semanticizeMercuryGoal(goal, compiled)
+}
+
 /** Map the validated plan onto the queue's PlannedGoal records. */
 export function plannedGoalsFromMercury(plan: MercuryPlanJson): PlannedGoal[] {
-  if (plan.op === 'abort') return []
+  if (plan.op === 'abort' || plan.op === 'complete') return []
   const goals: PlannedGoal[] = []
   for (const goal of plan.goals) {
     const compiled = compileMercuryGoal(goal)
@@ -492,7 +529,10 @@ export function groundMercuryPlan(
   if (!(MERCURY_ALLOWED_GOALS.collect as readonly string[]).includes(input)) return { plan, refused: null }
   const count = first.count ?? 1
   return {
-    plan: { ...plan, goals: [{ kind: 'collect', item: input, count }, ...plan.goals.slice(1)] },
+    // Keep the selected smelt Option. The Option compiler / grounded skills
+    // materialise the missing input as a prerequisite underneath it; replacing
+    // the semantic parent here was the source of item-centric identity loss.
+    plan,
     refused: {
       goal: `smelt ${item}`,
       replacement: `collect ${input}`,
@@ -855,8 +895,8 @@ export function parseMercuryJsonText(text: string): unknown | null {
 
 const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
   'This model cannot use a named tool choice. Prefer one emitPlan tool call when supported; otherwise return exactly one JSON object in the response text, with no prose or markdown. ' +
-  'The top-level op must be exactly one of continue, patch, replace, or abort. ' +
-  'Use goals for the typed goal objects; never use a goal kind as op. ' +
+  'The top-level op must be exactly one of continue, patch, replace, abandon, complete, or abort. ' +
+  'Use goals for the typed goal objects; never use a goal kind as op. For complete and abort, goals MUST be empty; abandon may carry the replacement plan. ' +
   'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
 
 function defaultMercuryTransport(model: string): MercuryTransport {
@@ -927,11 +967,29 @@ Do not invent a kind or a target outside the capability matrix; an impossible pa
 If a furnace is held but the world has no placed furnace, emit { kind: 'place', item: 'furnace' } so the placement is a first-class planned step.
 Choose the smallest plan change that can unblock progress.
 
+When wakeDetail includes a grounded blocker or missing capabilities such as
+no_path, no_standable_approach, or open_path, treat that as evidence that the
+current route is not executable. Do not return the same current collect/goto
+goal unchanged or duplicate it. Choose a different valid high-level strategy
+that can expose a new route (for example explore cave/surface or descend_to)
+while preserving already completed work. The route and action remain code-owned.
+
 Plan operations:
-- continue: keep the current queue and append the returned goals.
-- patch: keep completed history and the active goal; replace the pending tail.
-- replace: replace all unfinished goals.
-- abort: the remaining goal is impossible; goals MUST be empty.
+- continue: keep the active semantic Option and append returned goals. Use only
+  when the current Option remains the intended WHAT.
+- patch: keep the active semantic Option and replace only its pending tail. A
+  local route failure is not a reason to invent a new semantic mission.
+- replace: replace all unfinished goals because the current semantic plan is no
+  longer the intended WHAT. The returned first goal becomes active.
+- abandon: explicitly terminate the active semantic Option as abandoned, then
+  install the returned goals. Use only when the Option is semantically invalid
+  or exhausted; code may reject this for a protected prerequisite.
+- complete: request completion of the active Option. Code verifies its success
+  predicate and rejects the operation if DONE is not proven. goals MUST be empty;
+  any existing pending tail remains intact and becomes active after completion.
+- abort: terminate the remaining plan as impossible; goals MUST be empty.
+The operation is typed lifecycle intent. The reason/note never overrides it;
+"switch" or "move on" must use replace or abandon, never patch.
 
 Be concise. In the reason field write at most one short sentence.`
 
@@ -1106,6 +1164,8 @@ function trailingWaitStreak(outcomes: readonly System2Outcome[]): number {
  */
 export class MercurySystem2 implements System2Brain {
   readonly model: string
+  readonly provider = 'mercury'
+  readonly authorityModel: string
   private readonly summarize: MercurySystem2Options['summarize']
   private readonly log: MercurySystem2Options['log']
   private readonly callsPath: string
@@ -1130,6 +1190,7 @@ export class MercurySystem2 implements System2Brain {
     this.callsPath = options.callsPath
     this.cachePath = options.cachePath
     this.model = options.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT
+    this.authorityModel = this.model
     this.maxPerHour = options.maxPerHour ?? Number(process.env.BUDDY_SYSTEM2_MAX_PER_HOUR ?? 20)
     // Mercury is a reasoning model: a correct plan routinely takes several seconds
     // of hidden reasoning, so the timeout must comfortably exceed that. The

@@ -9,8 +9,13 @@
 // layer should offer bounded exploration instead.
 
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import { createRequire } from 'node:module'
+import { createRecipeIndex } from './src/crafting.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+
+const require = createRequire(import.meta.url)
+const recipes = createRecipeIndex(require('minecraft-data')('1.21.11') as unknown)
 
 function self(position: Vec3Json): SelfState {
   return {
@@ -93,6 +98,11 @@ function world(inventoryCounts: Record<string, number> = { birch_planks: 2, stic
     kind: 'log',
     position: { x: 27, y: 65, z: 19 },
   }
+  const rememberedTable: KnownResource = {
+    name: 'crafting_table',
+    kind: 'station',
+    position: { x: 39, y: 3, z: 32 },
+  }
   const blockingStone: BlockState = {
     kind: 'stone',
     name: 'stone',
@@ -160,8 +170,31 @@ function world(inventoryCounts: Record<string, number> = { birch_planks: 2, stic
     goal,
     goalQueue: queue(current, logGoal),
     recentEvents: [],
-    signals: signals({ knownResources: [rememberedLog] }),
+    signals: signals({ knownResources: [rememberedLog, rememberedTable] }),
   }
+}
+
+// (0) A remembered table below the current level is not allowed to starve a
+// craft goal when the same inventory can make a table in the 2x2 grid. The
+// retrieval is withheld by the affordance gate, while the prerequisite craft
+// remains available for Jev to choose.
+{
+  const grounded = generateGroundedCandidates(
+    world({ birch_planks: 4, stick: 2 }),
+    { ...defaultCandidateOptions, recipes },
+  )
+  const fallback = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const withheldStation = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'station')
+  const pass =
+    fallback?.kind === 'CRAFT' &&
+    withheldStation !== undefined &&
+    withheldStation.result.reason === 'needs_descend'
+  process.stdout.write(
+    `craft station fallback (unreachable remembered table): ${pass ? 'PASS' : 'FAIL'} ` +
+      `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] ` +
+      `withheld=${withheldStation?.result.reason ?? 'none'}\n`,
+  )
+  if (!pass) process.exitCode = 1
 }
 
 // (1) The repaired live shape (FIRST_FAILED_BOUNDARY, RC d54d9a8): the same
