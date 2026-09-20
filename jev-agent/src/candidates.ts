@@ -199,6 +199,13 @@ export interface CandidateOptions {
    * apparent fallback when the sole target is restored from a prior generation.
    */
   blacklistedMoveTargets?: ReadonlySet<string>
+  /**
+   * Surface-search waypoints already reached in this world epoch. These are
+   * search-frontier facts, not retry counts: arriving at a waypoint without
+   * seeing/acquiring the requested resource must move the frontier onward, or
+   * the same RETRIEVE:surface candidate is regenerated forever.
+   */
+  searchedSurfaceTargets?: ReadonlySet<string>
   /** failures at one MOVE/RETRIEVE target before the generator stops offering it (default 4) */
   moveFailureLimit?: number
   /** failures at one DESCEND step before the generator stops offering it (default 3) */
@@ -219,6 +226,11 @@ export interface CandidateOptions {
    * the ONLY way an IGNITE candidate is offered (issue lane: live ignition).
    */
   portalFrame?: PortalFrameValidation | null
+}
+
+/** Stable key for a surface-search waypoint in one dimension/world view. */
+export function surfaceSearchKey(dimension: string, position: Vec3Json): string {
+  return `${dimension}:${blockId('p', position)}`
 }
 
 export interface ReachabilityGateOptions {
@@ -2944,6 +2956,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     want.item,
     options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
     options.blacklistedMoveTargets,
+    options.searchedSurfaceTargets,
   )
   if (spot === null) return []
   return [
@@ -2992,11 +3005,12 @@ function retrievalCandidates(
   return []
 }
 
-function surfaceSpot(
+export function surfaceSpot(
   state: WorldState,
   item: string,
   moveFailureLimit: number,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  searchedSurfaceTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
   let best: Vec3Json | null = null
   for (const spot of state.terrain.standable) {
@@ -3010,6 +3024,7 @@ function surfaceSpot(
     // blacklist ordering - only the unreachable constant is fixed.
     if (spot.y <= state.self.position.y) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
+    if (searchedSurfaceTargets?.has(surfaceSearchKey(state.self.dimension, spot))) continue
     const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
     if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
     if (best === null || spot.y > best.y) best = spot

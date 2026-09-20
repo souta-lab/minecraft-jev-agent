@@ -307,7 +307,7 @@ addCase('D1: a known retrieve that progressed but did NOT arrive keeps the stall
   const arrived = shouldClearActiveRetrieval({ retrieval: 'known', hasObservableProgress: true, arrived: true })
   const noProgress = shouldClearActiveRetrieval({ retrieval: 'known', hasObservableProgress: false, arrived: false })
   const surface = shouldClearActiveRetrieval({ retrieval: 'surface', hasObservableProgress: true, arrived: false })
-  const pass = held === false && arrived === true && noProgress === false && surface === true
+  const pass = held === false && arrived === true && noProgress === false && surface === false
   return {
     pass,
     detail: `held=${held} arrived=${arrived} noProgress=${noProgress} surface=${surface}`,

@@ -205,7 +205,11 @@ addCase('C: a real arrival resets the coordinate failure memory', () => {
 // --- the wiring: the controller must gate on the same completion decision --------
 
 addCase('wiring: the RETRIEVE branch gates success on the completion decision, not truth.observableProgress', () => {
-  const source = readFileSync(fileURLToPath(new URL('./src/controller.ts', import.meta.url)), 'utf8')
+  // The #11 facade delegates the mechanical VERIFY branch to the legacy loop;
+  // inspect both files so the wiring assertion follows the actual runtime path.
+  const source =
+    readFileSync(fileURLToPath(new URL('./src/controller.ts', import.meta.url)), 'utf8') +
+    readFileSync(fileURLToPath(new URL('./src/controller-legacy.ts', import.meta.url)), 'utf8')
   const usesCompletion = source.includes('retrieveCompleted(')
   const usesMemoryDecision = source.includes('decideRetrieveMemory(result,')
   const stillUnconditional = /if \(truth\.resetsFailureMemory\) \{\s*if \([\s\S]{0,400}?this\.noteCandidateSuccess\(result\.actionId\)/.test(source)

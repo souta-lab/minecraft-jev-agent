@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
@@ -652,8 +652,8 @@ export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRet
  * vertical chunk. Clearing on that chunk re-armed the live
  * `RETRIEVE:known:raw_iron` loop: `PATH_CALLBACK ... outcome=stuck` followed by
  * `verified=true status=done` and `MOVE_FAILMEM_RESET`, forever. Surface
- * (explore) retrieves and known retrieves that actually arrived keep the old
- * clear behaviour.
+ * waypoints are a separate search frontier and never own an active resource
+ * stall track, so they must not clear this memory.
  */
 export function shouldClearActiveRetrieval(input: {
   retrieval: unknown
@@ -661,7 +661,7 @@ export function shouldClearActiveRetrieval(input: {
   arrived: boolean
 }): boolean {
   if (!input.hasObservableProgress) return false
-  if (input.retrieval !== 'known') return true
+  if (input.retrieval !== 'known') return false
   return input.arrived
 }
 
@@ -1338,6 +1338,8 @@ export class JevController {
   private readonly loggedStaleResources = new Set<string>()
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
+  /** Surface waypoints reached without finding the requested resource. */
+  private readonly searchedSurfaceTargets = new Set<string>()
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
   /**
@@ -1960,6 +1962,7 @@ export class JevController {
         this.reachabilityGateOptions(),
         blacklistedMoveTargets,
         state.portalFrame,
+        this.searchedSurfaceTargets,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -2143,6 +2146,7 @@ export class JevController {
                 this.reachabilityGateOptions(),
                 this.blacklistedMoveTargets(freshState),
                 freshState.portalFrame,
+                this.searchedSurfaceTargets,
               ),
             ).candidates,
             freshState,
@@ -3003,7 +3007,9 @@ export class JevController {
           )
     const moveArrived =
       (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
-    const retrieveArrived = result.kind === 'RETRIEVE' && this.retrievalArrived(candidate)
+    const surfaceSearchArrived = result.kind === 'RETRIEVE' && this.surfaceSearchArrived(candidate)
+    const retrieveArrived = result.kind === 'RETRIEVE' && !surfaceSearchArrived && this.retrievalArrived(candidate)
+    const retrieveDistanceClosed = result.kind === 'RETRIEVE' && !surfaceSearchArrived && result.distanceClosed
     const truth = truthfulActionOutcome({
       kind: result.kind,
       status: result.status,
@@ -3012,7 +3018,8 @@ export class JevController {
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
       arrived: moveArrived || retrieveArrived,
-      distanceClosed: result.distanceClosed,
+      distanceClosed: retrieveDistanceClosed,
+      searchArrived: surfaceSearchArrived,
       requiresPickup: candidate.meta.requiresPickup === true,
     })
     const semanticProgress =
@@ -3025,10 +3032,14 @@ export class JevController {
       itemsGained: result.itemsGained,
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
-      arrived: moveArrived || retrieveArrived,
-      distanceClosed: result.distanceClosed,
+      arrived: moveArrived || retrieveArrived || surfaceSearchArrived,
+      distanceClosed: retrieveDistanceClosed,
+      searchArrived: surfaceSearchArrived,
       semanticProgress,
     })
+    if (surfaceSearchArrived && result.itemsGained === 0 && !result.blockRemoved) {
+      this.recordSurfaceSearch(candidate)
+    }
     if (taxonomy.progressKinds.some((kind) => kind === 'body' || kind === 'search' || kind === 'goal')) {
       this.progressEpoch += 1
       this.semanticStateGeneration += 1
@@ -5016,9 +5027,14 @@ export class JevController {
   }
 
   private retrievalDistance(target: Vec3Json | null): number | null {
+    const exact = this.retrievalDistanceExact(target)
+    return exact === null ? null : Math.round(exact)
+  }
+
+  private retrievalDistanceExact(target: Vec3Json | null): number | null {
     const entity = this.bot.entity
     if (target === null || entity === undefined) return null
-    return Math.round(Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z))
+    return Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z)
   }
 
   /**
@@ -5028,9 +5044,33 @@ export class JevController {
    * `shouldClearActiveRetrieval`; this only measures the live body.
    */
   private retrievalArrived(candidate: Candidate): boolean {
-    if (candidate.target === null) return true
-    const distance = this.retrievalDistance(candidate.target)
+    if (candidate.meta.retrieval !== 'known' || candidate.target === null) return false
+    const distance = this.retrievalDistanceExact(candidate.target)
     return distance !== null && distance <= 2
+  }
+
+  /**
+   * A surface RETRIEVE is a search waypoint, not a remembered resource. Its
+   * postcondition is local arrival so the search frontier can advance; arrival
+   * must never be treated as acquisition of the parent collect Option.
+   */
+  private surfaceSearchArrived(candidate: Candidate): boolean {
+    if (candidate.meta.retrieval !== 'surface' || candidate.target === null) return false
+    const distance = this.retrievalDistanceExact(candidate.target)
+    return distance !== null && distance <= 2
+  }
+
+  private recordSurfaceSearch(candidate: Candidate): void {
+    if (candidate.target === null) return
+    const key = surfaceSearchKey(this.currentDimension(), candidate.target)
+    if (this.searchedSurfaceTargets.has(key)) return
+    this.searchedSurfaceTargets.add(key)
+    this.logger.info(
+      'agent',
+      `SURFACE_SEARCH_RECORDED target=${candidate.target.x},${candidate.target.y},${candidate.target.z}`,
+      { target: candidate.target, key, frontier: 'advanced', resource: candidate.meta.resource ?? null },
+      this.tickCounter,
+    )
   }
 
   /**
@@ -5045,6 +5085,9 @@ export class JevController {
    */
   private retrieveCompleted(candidate: Candidate, result: ExecutionResult): boolean {
     if (result.itemsGained > 0) return true
+    // Surface arrival proves only that a search waypoint was visited. The
+    // requested resource is still absent until the next sensor/MINE cycle.
+    if (candidate.meta.retrieval !== 'known') return false
     const arrived = this.retrievalArrived(candidate)
     if (arrived) return true
     return shouldClearActiveRetrieval({
@@ -5180,6 +5223,8 @@ export class JevController {
         unreachableStations,
         this.reachabilityGateOptions(),
         this.blacklistedMoveTargets(state),
+        null,
+        this.searchedSurfaceTargets,
       ),
     )
     const decision = planPrereqOptions(input)
@@ -6009,6 +6054,7 @@ function candidateOptions(
   reachability: ReachabilityGateOptions | null = null,
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
   portalFrame: PortalFrameValidation | null = null,
+  searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -6016,6 +6062,7 @@ function candidateOptions(
     recipes,
     unreachableStations,
     blacklistedMoveTargets,
+    searchedSurfaceTargets,
     reachability,
     portalFrame,
     prereqRankPolicy: options.prereqRankPolicy,

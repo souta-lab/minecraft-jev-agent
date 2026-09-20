@@ -67,6 +67,8 @@ export interface ActionOutcomeTaxonomy {
 export interface ActionOutcomeTaxonomyInput extends ActionOutcomeInput {
   arrived?: boolean
   distanceClosed?: boolean
+  /** reached a bounded search waypoint without acquiring the semantic target */
+  searchArrived?: boolean
   /** The controller may mark a verified goal-predicate change after re-sensing. */
   semanticProgress?: boolean
   semanticAbandon?: boolean
@@ -103,7 +105,8 @@ export function classifyActionOutcome(input: ActionOutcomeTaxonomyInput): Action
   const search =
     input.blockRemoved === true ||
     (input.kind === 'DESCEND' && input.progressed === true) ||
-    (input.kind === 'RETRIEVE' && (input.progressed === true || input.distanceClosed === true))
+    (input.kind === 'RETRIEVE' &&
+      (input.progressed === true || input.distanceClosed === true || input.searchArrived === true))
   if (body) kinds.push('body')
   if (search) kinds.push('search')
   if (kinds.length === 0) kinds.push('none')
@@ -304,6 +307,12 @@ export interface TruthfulOutcomeInput {
    */
   distanceClosed?: boolean
   /**
+   * A surface RETRIEVE reached its search waypoint. This verifies a local
+   * search observation, not acquisition of the semantic resource, so it must
+   * produce search progress without completing/resetting the resource route.
+   */
+  searchArrived?: boolean
+  /**
    * The candidate is a collect action: its MINE is complete only once the drop
    * is in the inventory (`itemsGained > 0`). A pure dig (clearance / non-collect
    * goal) leaves this false and stays valid on `blockRemoved` alone.
@@ -370,6 +379,16 @@ export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutc
   const bodyProgress = input.progressed === true
   if (input.kind === 'RETRIEVE') {
     const claimed = input.status === 'done'
+    if (claimed && input.searchArrived === true) {
+      return {
+        verified: true,
+        status: 'done',
+        observableProgress: true,
+        downgraded: false,
+        resetsFailureMemory: false,
+        replanProgress: true,
+      }
+    }
     const completed = claimed && input.verified && (input.arrived === true || input.distanceClosed === true || itemOrBlock)
     if (completed) {
       return {
