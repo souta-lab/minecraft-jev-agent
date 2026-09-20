@@ -90,10 +90,15 @@ const planner = new PlannerBrain({
   resolveKey: () => null,
 })
 
-// Before a request the configured stack is hybrid; claiming Mercury already
-// would be false for queue_empty requests that use the Typesafe horizon model.
-assert.equal(planner.provider, 'hybrid')
-assert.match(planner.authorityModel, /typesafe-ai:.*\|mercury:/)
+// Before a request no provider has actually owned a semantic choice yet. The
+// configured stack is still hybrid, but reporting it as the last authority
+// would falsely claim Mercury owned a queue_empty/Typesafe decision.
+assert.equal(planner.provider, 'none')
+assert.equal(planner.authorityModel, 'none')
+assert.deepEqual(planner.authorityStack, {
+  provider: 'hybrid',
+  model: `typesafe-ai:${planner.model}|mercury:${MUSE_SPARK_MODEL}`,
+})
 
 const plan = await planner.plan(request)
 assert.equal(mercury.model, MUSE_SPARK_MODEL)
