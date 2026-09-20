@@ -959,13 +959,25 @@ function mineCandidates(
   candidates.push(...moveActions)
   candidates.push(...accessActions)
   const descent = descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY)
+  // A MOVE/access candidate the affordance gate knows is blocked by `no_path`
+  // (an access refusal of `no_path_to_stand`, or a stand spot whose path probe
+  // says `no_path`) is withheld as `no_path`/`open_path`. That is the same
+  // "open the route first" fact the stone/ore arm below keeps descent for, so
+  // it must not depend on the focus item being a stone/ore yield: the safe
+  // staircase/tunnel step is the generic route-opening body change. Enumeration
+  // only - no MOVE is replaced, ranked or selected here.
+  const pathProbe = options.reachability?.pathProbe ?? null
+  const routeBlockedByNoPath =
+    accessActions.some((action) => digAccessRefusalOf(action) === 'no_path_to_stand') ||
+    (pathProbe !== null &&
+      moveActions.some((action) => action.target !== null && pathProbe(action.target) === 'no_path'))
   if (candidates.length === 0) {
     candidates.push(...descent)
   } else if (
     mineActions.length === 0 &&
     (moveActions.length > 0 || accessActions.length > 0) &&
     focusItem !== null &&
-    (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined)
+    (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined || routeBlockedByNoPath)
   ) {
     // A visible underground target can be mechanically valid but still too far
     // below the current floor for the MOVE stand spot to be useful.  Preserve
@@ -3548,6 +3560,14 @@ function capabilityAcquisitionCandidates(
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates
+      } else if (capability.kind === 'open_path' || capability.kind === 'standable_approach') {
+        // A locomotion target withheld for `no_path` / `no_standable_approach`
+        // must not leave Jev a barren WAIT-only set. Contribute the EXISTING
+        // generic route-opening families (STEP / DESCEND / explore-MOVE) so a
+        // mechanically-valid forward body change is on offer. CAN enumeration
+        // only: no item/coordinate/portal special-casing, no ordering/ranking,
+        // and the model still owns WHAT and WHICH.
+        source = routeOpeningCandidates(state, options)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -3601,6 +3621,34 @@ function capabilityAcquisitionCandidates(
         })
       }
     }
+  }
+  return out
+}
+
+/** Existing STEP/DESCEND/explore-MOVE facts; enumerated only, never ranked or selected. */
+function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const out: Candidate[] = [
+    ...stepCutCandidates(state, options),
+    ...descendCandidates(state, options, focus, [], null),
+  ]
+  const spot = pickExplore(
+    state,
+    state.terrain.standable,
+    focus,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
+  if (spot !== null) {
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        spot,
+        moveLabel(spot, 'walk toward the unreachable target', state.self.position),
+        null,
+      ),
+    )
   }
   return out
 }
