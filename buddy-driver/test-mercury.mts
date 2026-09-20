@@ -13,8 +13,11 @@ import {
   mercuryGoalKind,
   mercuryRetryFeedback,
   mercuryStrategyLabel,
+  mercuryTransportMode,
+  MUSE_SPARK_MODEL,
   MercuryPlanValidationError,
   MercurySystem2,
+  parseMercuryJsonText,
   plannedGoalsFromMercury,
   resolveMercuryEnablement,
   runMercuryAttempts,
@@ -223,6 +226,19 @@ addCase('portal prerequisite capabilities are exposed without exposing frame sem
     pass,
     detail: `flint=${flint.ok} steel=${steel.ok} obsidian=${obsidian.ok} frame=${frame.ok ? 'accepted' : frame.error}`,
   }
+})
+
+addCase('muse transport uses strict JSON text while Mercury keeps named tool calls', () => {
+  const exact = parseMercuryJsonText('{"op":"patch","goals":[],"reason":"ok"}')
+  const fenced = parseMercuryJsonText('reasoning\n```json\n{"op":"abort","goals":[],"reason":"blocked"}\n```')
+  const malformed = parseMercuryJsonText('not a plan')
+  const pass =
+    mercuryTransportMode(MUSE_SPARK_MODEL) === 'json-text' &&
+    mercuryTransportMode('inception/mercury-2.5') === 'tool-call' &&
+    (exact as { op?: string } | null)?.op === 'patch' &&
+    (fenced as { op?: string } | null)?.op === 'abort' &&
+    malformed === null
+  return { pass, detail: `muse=${mercuryTransportMode(MUSE_SPARK_MODEL)} mercury=${mercuryTransportMode('inception/mercury-2.5')} malformed=${malformed}` }
 })
 
 addCase('retries only abort/timeout errors, never schema errors', () => {
