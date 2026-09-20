@@ -307,6 +307,51 @@ function worldState(overrides: {
 }
 
 {
+  const advancedSite: PortalFrameSite = {
+    origin: { x: 20, y: 64, z: 0 },
+    widthAxis: 'x',
+    safe: true,
+    reachable: true,
+    existingFrame: ORDERED_FRAME.slice(0, 7).map((cell) => ({ ...cell, x: cell.x + 15 })),
+  }
+  const nearbySite: PortalFrameSite = {
+    origin: { x: 6, y: 64, z: 0 },
+    widthAxis: 'x',
+    safe: true,
+    reachable: true,
+    existingFrame: [{ x: 6, y: 64, z: 0 }],
+  }
+  const state = worldState({
+    position: { x: 6.5, y: 64, z: -1.5 },
+    inventory: inventory({ obsidian: 10 }),
+    goalQueue: queueWith({
+      ...queuedPlace(OBSIDIAN, []),
+      placementCells: undefined,
+      requiredCount: 10,
+    }),
+    portalFrameSites: [nearbySite, advancedSite],
+  })
+  const grounding = groundPortalFrame([nearbySite, advancedSite], state.self.position)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE')
+  const advancedMissing = portalFrameLayout(advancedSite.origin, advancedSite.widthAxis).frame.filter(
+    (cell) => !(advancedSite.existingFrame ?? []).some((existing) => key(existing) === key(cell)),
+  )
+  const pass =
+    grounding?.origin.x === advancedSite.origin.x &&
+    grounding?.origin.y === advancedSite.origin.y &&
+    grounding?.origin.z === advancedSite.origin.z &&
+    place?.placementCells?.length === advancedMissing.length &&
+    [...cellSet(place?.placementCells ?? [])].every((cell) => cellSet(advancedMissing).has(cell))
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (3c) a more-complete continuation site outranks a nearby partial site\n' +
+      '      selected=' + JSON.stringify(grounding) + ' advanced=' + (advancedSite.existingFrame?.length ?? 0) +
+      ' nearby=' + (nearbySite.existingFrame?.length ?? 0) + ' candidateCells=' + (place?.placementCells?.length ?? 0) + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+{
   const state = worldState({
     position: { x: 6.5, y: 64, z: -1.5 },
     goalQueue: queueWith(queuedPlace(OBSIDIAN, ORDERED_FRAME)),

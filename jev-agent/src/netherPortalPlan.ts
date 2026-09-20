@@ -499,23 +499,39 @@ export function groundPortalFrame(
   // replan cannot silently abandon verified world work for a second frame.
   const continuation = normalized.filter((site) => (site.existingFrame?.length ?? 0) > 0)
   const selectable = continuation.length > 0 ? continuation : normalized
-  const chosen = choosePortalSite(
-    selectable.map((site) => ({ position: site.origin, safe: site.safe !== false, reachable: site.reachable !== false })),
-    self,
-  )
-  if (chosen === null) return null
-  const selected = normalized.find(
-    (site) =>
-      site.origin.x === chosen.position.x &&
-      site.origin.y === chosen.position.y &&
-      site.origin.z === chosen.position.z,
-  )
-  const selectedAxis = selected?.widthAxis ?? widthAxis
-  const layout = portalFrameLayout(chosen.position, selectedAxis)
-  const existing = new Set((selected?.existingFrame ?? []).map(cellKey))
+  const usable = selectable.filter((site) => site.safe !== false && site.reachable !== false)
+  if (usable.length === 0) return null
+  const dist = (site: PortalFrameSite): number => {
+    const dx = site.origin.x - self.x
+    const dy = site.origin.y - self.y
+    const dz = site.origin.z - self.z
+    return Math.sqrt(dx * dx + dy * dy + dz * dz)
+  }
+  usable.sort((a, b) => {
+    // All continuation sites represent the same physical frame. Preserve the
+    // greatest verified progress before distance, so a nearby one-cell false
+    // footprint cannot steal execution from a seven-cell continuation.
+    if (continuation.length > 0) {
+      const aExisting = a.existingFrame?.length ?? 0
+      const bExisting = b.existingFrame?.length ?? 0
+      if (aExisting !== bExisting) return bExisting - aExisting
+    }
+    const da = dist(a)
+    const db = dist(b)
+    if (da !== db) return da - db
+    if (a.origin.y !== b.origin.y) return a.origin.y - b.origin.y
+    if (a.origin.x !== b.origin.x) return a.origin.x - b.origin.x
+    if (a.origin.z !== b.origin.z) return a.origin.z - b.origin.z
+    return a.widthAxis.localeCompare(b.widthAxis)
+  })
+  const selected = usable[0]
+  if (selected === undefined) return null
+  const selectedAxis = selected.widthAxis ?? widthAxis
+  const layout = portalFrameLayout(selected.origin, selectedAxis)
+  const existing = new Set((selected.existingFrame ?? []).map(cellKey))
   const missing = layout.frame.filter((cell) => !existing.has(cellKey(cell)))
   if (missing.length === 0) return null
-  return { origin: chosen.position, widthAxis: selectedAxis, cells: orderedPlacementCells(missing) }
+  return { origin: selected.origin, widthAxis: selectedAxis, cells: orderedPlacementCells(missing) }
 }
 
 // ---------------------------------------------------------------------------

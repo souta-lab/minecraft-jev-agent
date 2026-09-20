@@ -1288,13 +1288,18 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
   return sites.slice(0, 24)
 }
 
-/** Count the required edge blocks in the nearest live partial/full frame. */
-export function countSensedPortalFrameBlocks(bot: Bot): number {
+/** Public late-sensor view used when a planner call outlives the policy snapshot. */
+export function sensedPortalFrameSites(bot: Bot, options: SensorOptions = defaultSensorOptions): PortalFrameSite[] {
   // Planner fixtures use a plain `{x,y,z}` entity position rather than a
   // Mineflayer Vec3. That is an unobserved frame, not a reason to make the
   // fixture construct a fake vector API.
-  if (typeof (bot.entity?.position as unknown as { offset?: unknown })?.offset !== 'function') return 0
-  const sites = buildPortalFrameSites(bot, defaultSensorOptions, buildSelf(bot))
+  if (typeof (bot.entity?.position as unknown as { offset?: unknown })?.offset !== 'function') return []
+  return buildPortalFrameSites(bot, options, buildSelf(bot))
+}
+
+/** Count the required edge blocks in the nearest live partial/full frame. */
+export function countSensedPortalFrameBlocks(bot: Bot): number {
+  const sites = sensedPortalFrameSites(bot)
   return Math.max(0, ...sites.map((site) => site.existingFrame?.length ?? 0))
 }
 

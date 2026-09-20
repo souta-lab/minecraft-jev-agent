@@ -67,7 +67,7 @@ import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPla
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
 import { OBSIDIAN, PORTAL_OBSIDIAN_REQUIRED } from './netherPortalPlan.ts'
-import type { PortalFrameValidation } from './netherPortalPlan.ts'
+import type { PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -77,7 +77,7 @@ import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from 
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, countSensedPortalFrameBlocks, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
+import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -1405,6 +1405,17 @@ export class JevController {
   /** The fingerprint that produced each abandoned prerequisite-path fact. */
   private readonly abandonedPrereqFingerprints = new Map<string, string>()
 
+  /**
+   * Same-run memory of a code-sensed partial/full portal frame. The site is a
+   * verified world fact, not a semantic target: candidate grounding still
+   * re-reads the live cells before actuation and the executor verifies every
+   * placement. Keeping it here prevents an unloaded chunk from erasing the
+   * only route to a frame that System2/Jev already selected.
+   */
+  private rememberedPortalFrameDimension: string | null = null
+  private readonly rememberedPortalFrameSites = new Map<string, PortalFrameSite>()
+  private rememberedPortalFrame: PortalFrameValidation | null = null
+
   private pendingDecisions = new Map<number, PendingDecision>()
   private pendingTrigger: TriggerEvent | null = null
   private deferredTrigger: TriggerEvent | null = null
@@ -1845,7 +1856,7 @@ export class JevController {
         return
       }
 
-      const state = buildWorldState(
+      let state = buildWorldState(
         this.bot,
         {
           tick: this.tickCounter,
@@ -1859,6 +1870,7 @@ export class JevController {
         },
         sensorOptions(this.options),
       )
+      state = this.mergeRememberedPortalFrame(state)
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
@@ -2028,7 +2040,7 @@ export class JevController {
         )
       }
 
-      const freshState = buildWorldState(
+      let freshState = buildWorldState(
         this.bot,
         {
           tick: this.tickCounter,
@@ -2042,6 +2054,7 @@ export class JevController {
         },
         sensorOptions(this.options),
       )
+      freshState = this.mergeRememberedPortalFrame(freshState)
       const freshCandidates = this.filterMoveCandidates(
         generateGroundedCandidates(
           freshState,
@@ -3803,10 +3816,60 @@ export class JevController {
         (planned.optionTemplateId === 'place:obsidian' || planned.description.toLowerCase().includes('portal frame')),
     )
     if (!continuesPortalFrame) return null
-    const existing = countSensedPortalFrameBlocks(this.bot)
+    const sensedSites = sensedPortalFrameSites(this.bot, sensorOptions(this.options))
+    this.rememberPortalFrameSites(sensedSites, this.currentDimension())
+    const existing = Math.max(0, ...sensedSites.map((site) => site.existingFrame?.length ?? 0))
     const held = this.countItem(OBSIDIAN)
     if (existing + held < PORTAL_OBSIDIAN_REQUIRED) return null
     return `portal frame coverage existing=${existing} held=${held} required=${PORTAL_OBSIDIAN_REQUIRED}`
+  }
+
+  /**
+   * Preserve only partial/full frame sites observed by this generation. Empty
+   * candidate footprints are intentionally not remembered. A remembered site
+   * is an affordance hint for re-observation; it never bypasses the executor's
+   * live block and post-condition checks.
+   */
+  private mergeRememberedPortalFrame(state: WorldState): WorldState {
+    const dimension = state.self.dimension
+    if (this.rememberedPortalFrameDimension !== dimension) {
+      this.rememberedPortalFrameDimension = dimension
+      this.rememberedPortalFrameSites.clear()
+      this.rememberedPortalFrame = null
+    }
+    this.rememberPortalFrameSites(state.portalFrameSites ?? [], dimension)
+    if (state.portalFrame?.shape === 'ok') this.rememberedPortalFrame = state.portalFrame
+    if (this.rememberedPortalFrameSites.size === 0 && this.rememberedPortalFrame === null) return state
+
+    const merged: PortalFrameSite[] = []
+    const seen = new Set<string>()
+    for (const site of [...this.rememberedPortalFrameSites.values(), ...(state.portalFrameSites ?? [])]) {
+      const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(site)
+    }
+    return {
+      ...state,
+      portalFrameSites: merged,
+      portalFrame: state.portalFrame ?? this.rememberedPortalFrame,
+    }
+  }
+
+  private rememberPortalFrameSites(sites: readonly PortalFrameSite[], dimension: string): void {
+    if (this.rememberedPortalFrameDimension !== dimension) {
+      this.rememberedPortalFrameDimension = dimension
+      this.rememberedPortalFrameSites.clear()
+      this.rememberedPortalFrame = null
+    }
+    for (const site of sites) {
+      if ((site.existingFrame?.length ?? 0) === 0) continue
+      const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
+      this.rememberedPortalFrameSites.set(key, {
+        ...site,
+        existingFrame: site.existingFrame === undefined ? undefined : site.existingFrame.map((cell) => ({ ...cell })),
+      })
+    }
   }
 
   private logSubgoalStart(goal: QueuedGoal, inventory: Record<string, number>, cause: string): void {
