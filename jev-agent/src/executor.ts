@@ -60,6 +60,7 @@ import {
   decidePillarStepBudget,
   DEFAULT_PILLAR_SEARCH_POLICY,
   formatPillarSearch,
+  PILLAR_PLACE_PRIORITY,
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
 import {
@@ -4060,8 +4061,7 @@ export class Executor {
   }
 
   private findPortalScaffoldItem(): Item | undefined {
-    const preferred = ['cobblestone', 'stone', 'dirt', 'deepslate', 'netherrack']
-    for (const name of preferred) {
+    for (const name of PILLAR_PLACE_PRIORITY) {
       const item = this.bot.inventory.items().find((entry) => entry.name === name)
       if (item !== undefined) return item
     }

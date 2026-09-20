@@ -413,8 +413,8 @@ const liveStationWorld = augmentPlannerWorldWithLiveStations(
 )
 assert.equal(liveStationWorld.craftingTables.length, 1)
 assert.equal(liveStationWorld.furnaces.length, 1)
-assert.equal(reportBrain.provider, 'hybrid')
-assert.equal(reportBrain.authorityModel.includes('mercury:inception/mercury-2.5'), true)
+assert.equal(reportBrain.provider, 'none')
+assert.equal(reportBrain.authorityModel, 'none')
 assert.deepEqual(reportBrain.authorityStack, {
   provider: 'hybrid',
   model: 'typesafe-ai:typesafe-ai/jev|mercury:inception/mercury-2.5',

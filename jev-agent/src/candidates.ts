@@ -1892,14 +1892,17 @@ function explicitPlacementCells(state: WorldState): Vec3Json[] | null {
  * This is where the executor-time grounding happens, never in the model plan.
  */
 function frameBuildCells(state: WorldState): Vec3Json[] | null {
+  return frameBuildGrounding(state)?.cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z })) ?? null
+}
+
+function frameBuildGrounding(state: WorldState): ReturnType<typeof groundPortalFrame> {
   const current = state.goalQueue?.current ?? null
   if (current === null || current.kind !== 'place' || current.targetItem !== OBSIDIAN) return null
   // A portal is a multi-cell mechanics operation.  Prefer sensor-grounded
   // complete footprints; the placementSpots fallback preserves old replay
   // fixtures and the generic single-cell behavior.
   const grounding = groundPortalFrame(state.portalFrameSites ?? state.placementSpots, state.self.position)
-  if (grounding === null) return null
-  return grounding.cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+  return grounding
 }
 
 function placeSequenceCells(state: WorldState, focusItem: string): Vec3Json[] | null {
@@ -1928,6 +1931,14 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
   if ((state.inventory.counts[focusItem] ?? 0) <= 0) return []
   const sequence = placeSequenceCells(state, focusItem)
   if (sequence !== null) {
+    const grounding = focusItem === OBSIDIAN ? frameBuildGrounding(state) : null
+    if (
+      focusItem === OBSIDIAN &&
+      grounding?.temporarySupportRequired === true &&
+      selectPlaceableBlock(state.inventory.counts) === null
+    ) {
+      return portalFrameSupportPrerequisiteCandidates(state, options)
+    }
     const target = sequence[0] ?? null
     return [
       {
@@ -1974,6 +1985,34 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
       meta: { tick: state.tick, x: spot.x, y: spot.y, z: spot.z },
     },
   ]
+}
+
+/**
+ * A minimal obsidian frame can be geometrically grounded while still needing
+ * one temporary solid reference block for an upper edge. Keep that missing
+ * capability inside the active semantic Option: the producer route is the
+ * existing generic placeable-block acquisition envelope, tagged as a typed
+ * prerequisite so Jev can select it without waking System2 or inventing a
+ * portal-specific mission.
+ */
+function portalFrameSupportPrerequisiteCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  return mineCandidates(
+    state,
+    options,
+    null,
+    null,
+    (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
+  ).map((candidate) => ({
+    ...candidate,
+    meta: {
+      ...candidate.meta,
+      optionSkill: 'PREREQUISITE',
+      prerequisiteRole: 'portal_frame_support',
+      prerequisiteItem: 'placeable_block',
+      capabilityAcquisition: true,
+      missingCapability: 'placeable_block',
+    },
+  }))
 }
 
 /**

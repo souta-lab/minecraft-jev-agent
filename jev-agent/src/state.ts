@@ -15,7 +15,7 @@ import type { System2Outcome } from './system2.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
-import { NETHER_PORTAL, portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
+import { NETHER_PORTAL, portalFrameLayout, portalFrameNeedsTemporarySupport, validatePortalFrame } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
@@ -1365,6 +1365,12 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
             }
           }
           if (!supported) continue
+          const temporarySupportRequired = portalFrameNeedsTemporarySupport(
+            origin,
+            widthAxis,
+            existingFrame,
+            (position) => solid(position.x, position.y, position.z),
+          )
           const first = { x: origin.x + 0.5, y: origin.y, z: origin.z + 0.5 }
           if (distance(first, body) < 1.0) continue
           sites.push({
@@ -1372,6 +1378,7 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
             widthAxis,
             safe: true,
             reachable: true,
+            temporarySupportRequired,
             ...(existingFrame.length === 0 ? {} : { existingFrame }),
           })
         }

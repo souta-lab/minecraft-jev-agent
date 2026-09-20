@@ -222,12 +222,8 @@ export class PlannerBrain implements System2Brain {
     this.terminate = options.terminate
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.mercury = options.mercury
-    this.lastAuthorityProvider =
-      this.mode === 'deterministic' ? 'deterministic' : this.mercury === undefined ? 'typesafe-ai' : 'hybrid'
-    this.lastAuthorityModel =
-      this.mode === 'deterministic' || this.mercury === undefined
-        ? this.model
-        : `typesafe-ai:${this.model}|mercury:${this.mercury.model}`
+    this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
+    this.lastAuthorityModel = this.mode === 'deterministic' ? this.model : 'none'
 
     // Baseline is intentionally hermetic: no Advisor/Mercury/model exception path
     // may run when the owner explicitly selected deterministic mode.
