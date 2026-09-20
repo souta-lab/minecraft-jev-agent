@@ -325,7 +325,7 @@ interface FakeBlock {
  * are pre-existing obsidian (a real site may already carry them), which supports
  * the side columns the minimal 10-edge frame leaves disconnected.
  */
-function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlacements: boolean) {
+function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlacements: boolean, equipFailures = 0) {
   const grid = new Map<string, string>()
   for (let x = ORIGIN.x - 1; x <= ORIGIN.x + 4; x += 1) {
     for (let z = -1; z <= 1; z += 1) grid.set(`${x},${ORIGIN.y - 1},${z}`, 'stone')
@@ -343,6 +343,7 @@ function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlace
   const position = new P(feet.x, feet.y, feet.z)
   const obsidianId = (registry.itemsByName as Record<string, { id: number }>).obsidian?.id ?? 0
   const placeCalls: Array<{ x: number; y: number; z: number }> = []
+  let heldName: string | null = null
   const bot = {
     registry,
     entity: {
@@ -365,15 +366,25 @@ function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlace
         { name: OBSIDIAN, type: obsidianId, count: 10 },
       ],
     },
+    get heldItem(): { name: string } | null {
+      return heldName === null ? null : { name: heldName }
+    },
     blockAt,
     on: () => undefined,
     removeListener: () => undefined,
     setControlState: () => undefined,
     lookAt: async () => undefined,
-    equip: async () => undefined,
+    equip: async (item: { name: string }) => {
+      if (equipFailures > 0) {
+        equipFailures -= 1
+        return
+      }
+      heldName = item.name
+    },
     canDigBlock: () => true,
     dig: async () => undefined,
     placeBlock: async (block: FakeBlock, face: { x: number; y: number; z: number }): Promise<void> => {
+      if (heldName !== OBSIDIAN) throw new Error(`wrong held item: ${heldName ?? 'empty'}`)
       const target = {
         x: block.position.x + face.x,
         y: block.position.y + face.y,
@@ -418,8 +429,8 @@ function placeFrameCandidate(cells: readonly Vec3Json[], item: string) {
   }
 }
 
-async function runFrameBuild(failPlacements: boolean) {
-  const fixture = makePlaceBot({ x: 6.5, y: 64, z: -1.5 }, ORDERED_FRAME, failPlacements)
+async function runFrameBuild(failPlacements: boolean, equipFailures = 0) {
+  const fixture = makePlaceBot({ x: 6.5, y: 64, z: -1.5 }, ORDERED_FRAME, failPlacements, equipFailures)
   const dir = mkdtempSync(join(tmpdir(), 'frame-build-'))
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
@@ -451,6 +462,16 @@ async function runFrameBuild(failPlacements: boolean) {
   process.stdout.write(
     `${pass ? 'PASS' : 'FAIL'}  (5a) the Executor places all 10 cells and emits per-cell + frame-ready markers\n` +
       `      status=${result.status} verified=${result.verified} placed=${placed.length} ready=[${ready[0] ?? 'none'}] calls=${fixture.placeCalls.length}\n`,
+  )
+  if (!pass) failures += 1
+}
+
+{
+  const { fixture, result } = await runFrameBuild(false, 1)
+  const pass = result.status === 'done' && result.verified === true && fixture.placeCalls.length === 10
+  process.stdout.write(
+    `${pass ? 'PASS' : 'FAIL'}  (5a-equip) placement verifies the live held item and retries a lagging equip\n` +
+      `      status=${result.status} failure=${result.failure} calls=${fixture.placeCalls.length}\n`,
   )
   if (!pass) failures += 1
 }
