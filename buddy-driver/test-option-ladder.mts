@@ -151,6 +151,26 @@ addCase('an unmet smelt precondition is expanded in front of the ladder goal', (
   return { pass: ok, detail: `ids=[${ids.join(',')}] goals=[${expansion.goals.map((g) => g.targetItem).join(',')}]` }
 })
 
+addCase('model-authoritative portal grounding preserves sensed partial-frame progress', () => {
+  const option = buildPlanOptions(
+    {
+      iron_pickaxe: 1,
+      iron_ingot: 3,
+      flint_and_steel: 1,
+      diamond: 1,
+      diamond_pickaxe: 1,
+      obsidian: 3,
+    },
+    world(),
+    { resumeRungIndex: 13, portalFrameBlocks: 7 },
+  ).find((entry) => entry.id === 'front_nether_portal')
+  if (option === undefined) return { pass: false, detail: 'front_nether_portal option missing' }
+  const descriptions = option.goals.map((goal) => goal.description)
+  const noRedundantMine = !option.goals.some((goal) => goal.kind === 'collect' && goal.targetItem === 'obsidian')
+  const hasFrame = descriptions.some((description) => description.includes('build the 4x5 obsidian portal frame'))
+  return { pass: noRedundantMine && hasFrame, detail: `goals=[${descriptions.join('|')}]` }
+})
+
 addCase('#136 recovery Option requires both upper access and the explicit log predicate', () => {
   const spec = compilePlannedGoals([
     {

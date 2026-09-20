@@ -26,6 +26,7 @@ import { FatalModelError, describeFailure, failLoud, withModelRetries } from '..
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
+import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import {
   PlannerBrain as LegacyPlannerBrain,
   buildPlanOptions,
@@ -197,10 +198,13 @@ export class PlannerBrain implements System2Brain {
   private groundedOptions(request: System2PlanRequest): PlanOption[] {
     const counts = inventoryCounts(this.bot)
     const rung = resolveRungSourceOfTruth(counts, this.world, this.log)
+    const portalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
+    this.log('PORTAL_FRAME_PROGRESS', { blocks: portalFrameBlocks, source: 'system2-grounding' })
     const options = buildPlanOptions(counts, this.world, {
       placedFurnacesNear: this.placedFurnacesNear(),
       knownFurnaces: this.world.furnaces.length,
       resumeRungIndex: rung.adoptedRungIndex,
+      portalFrameBlocks,
       log: this.log,
     })
 
