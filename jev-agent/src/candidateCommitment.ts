@@ -10,11 +10,16 @@
 //   ...
 //
 // A choice that changes on consecutive ticks with zero verified progress and an
-// unchanged state fingerprint is thrashing. The controller commits to one
-// candidate - the cheapest feasible by the existing cost policy, ties broken
-// deterministically by candidate id - until it completes, fails deterministically
-// under the same fingerprint, or the fingerprint changes. This is validity and
-// commitment logic only: no new ranking is introduced. Pure, clock-free.
+// unchanged state fingerprint is thrashing. The controller may temporally commit
+// to a candidate that JEV ACTUALLY CHOSE, so an action has time to settle. It may
+// not convert flap detection into a second semantic selector. In particular,
+// path/resource cost is useful affordance metadata but code must not use argmin
+// cost to replace Jev's WHICH decision.
+//
+// Commitment ends when the selected candidate completes/progresses, becomes
+// deterministically invalid, vanishes from the grounded set, or the relevant
+// state fingerprint changes. After release the raw Jev choice is returned; code
+// does not choose a replacement semantic action. Pure, clock-free.
 
 /** Consecutive changed ticks before a commitment arms (5-tick flap window). */
 export const CANDIDATE_FLAP_TICKS_DEFAULT = 4
@@ -44,16 +49,17 @@ const COMMIT_EXEMPT_IDS: ReadonlySet<string> = new Set(['WAIT', 'ESCALATE'])
 
 export interface FlapCandidate {
   readonly id: string
-  /** cost under the caller's existing policy; lower is cheaper. */
+  /** Mechanical/path/resource cost fact. Never semantic authority in real-Jev commitment. */
   readonly cost: number
 }
 
 export interface CandidateFlapState {
   readonly fingerprint: string
-  /** the policy's own last choice, before any commitment override. */
+  /** the policy's own last choice, before any commitment hold. */
   readonly lastChosenId: string
   /** consecutive changed ticks inside the current fingerprint window. */
   readonly switches: number
+  /** one Jev-selected candidate temporarily held for execution stability. */
   readonly committedId: string | null
   /** candidates deterministic feasibility rejected under this fingerprint. */
   readonly invalid: ReadonlySet<string>
@@ -61,12 +67,12 @@ export interface CandidateFlapState {
 
 export interface CandidateFlapInput {
   readonly previous: CandidateFlapState | null
-  /** the policy's raw choice for this tick. */
+  /** Jev's raw choice for this tick. */
   readonly chosenId: string
   readonly fingerprint: string
   /** true when verified progress happened since the previous tick. */
   readonly progressed: boolean
-  /** current candidates with their existing-policy cost. */
+  /** current grounded candidates. Cost is observation metadata only here. */
   readonly candidates: readonly FlapCandidate[]
   /** candidates rejected by deterministic facts on this tick. */
   readonly invalid: ReadonlySet<string>
@@ -75,16 +81,21 @@ export interface CandidateFlapInput {
 
 export interface CandidateFlapDecision {
   readonly state: CandidateFlapState
-  /** the id the controller must execute (the commitment while one is armed). */
+  /** Jev's choice, or a still-valid prior Jev choice held as temporal commitment. */
   readonly chosenId: string
   readonly committed: boolean
   /** the `CANDIDATE_FLAP ...` line when a flap is detected, else null. */
   readonly line: string | null
-  /** the release line when a deterministic invalidation freed the commitment. */
+  /** the release line when deterministic invalidation freed the commitment. */
   readonly releaseLine: string | null
 }
 
-/** The cheapest feasible candidate, ties broken deterministically by id. */
+/**
+ * Explicit deterministic-baseline helper retained for offline/A-B callers only.
+ * Real-Jev anti-flap commitment MUST NOT call this helper: choosing the cheapest
+ * semantic candidate would seize Jev's WHICH authority. Lower mechanical cost
+ * remains useful metadata and can be exposed to Jev.
+ */
 export function selectCommitCandidate(
   candidates: readonly FlapCandidate[],
   invalid: ReadonlySet<string>,
@@ -103,17 +114,30 @@ export function selectCommitCandidate(
   return best?.id ?? null
 }
 
+function jevChoiceIsCommittable(
+  chosenId: string,
+  offered: ReadonlySet<string>,
+  invalid: ReadonlySet<string>,
+): boolean {
+  return !COMMIT_EXEMPT_IDS.has(chosenId) && offered.has(chosenId) && !invalid.has(chosenId)
+}
+
 /**
- * The anti-thrash commitment state machine. A state change or verified progress
- * clears every fact; otherwise consecutive changed choices with no progress arm
- * a commitment to the cheapest feasible candidate. The commitment is released
- * only when deterministic feasibility rejects it (reachability/blacklist proof)
- * or it vanishes from the offered set - never by a preference.
+ * Anti-thrash temporal commitment for the REAL Jev policy.
+ *
+ * A state change or verified progress clears commitment. Otherwise consecutive
+ * changing Jev choices may arm a hold on the CURRENT Jev-selected candidate.
+ * Code never substitutes a cheaper alternative. A held candidate is released
+ * only when deterministic feasibility rejects it or it vanishes from the
+ * offered set; release returns the current raw Jev choice without auto-committing
+ * a replacement, so the next semantic WHICH remains model-owned.
  */
 export function evaluateCandidateFlap(input: CandidateFlapInput): CandidateFlapDecision {
   const flapTicks = input.flapTicks ?? CANDIDATE_FLAP_TICKS_DEFAULT
   const invalid = new Set(input.invalid)
+  const offered = new Set(input.candidates.map((candidate) => candidate.id))
   const previous = input.previous
+
   if (previous === null || previous.fingerprint !== input.fingerprint || input.progressed) {
     const state: CandidateFlapState = {
       fingerprint: input.fingerprint,
@@ -126,7 +150,6 @@ export function evaluateCandidateFlap(input: CandidateFlapInput): CandidateFlapD
   }
 
   for (const id of previous.invalid) invalid.add(id)
-  const offered = new Set(input.candidates.map((candidate) => candidate.id))
 
   if (previous.committedId !== null) {
     const committedId = previous.committedId
@@ -141,30 +164,30 @@ export function evaluateCandidateFlap(input: CandidateFlapInput): CandidateFlapD
         releaseLine: null,
       }
     }
+
     invalid.add(committedId)
-    const next = selectCommitCandidate(input.candidates, invalid)
     return {
       state: {
         fingerprint: previous.fingerprint,
         lastChosenId: input.chosenId,
         switches: 0,
-        committedId: next,
+        committedId: null,
         invalid,
       },
-      chosenId: next ?? input.chosenId,
-      committed: next !== null,
+      chosenId: input.chosenId,
+      committed: false,
       line: null,
       releaseLine: formatCommitReleased(
         committedId,
         rejectedByFacts ? 'deterministically_invalid' : 'no_longer_offered',
-        next ?? 'none',
+        input.chosenId,
       ),
     }
   }
 
-  const committable =
+  const committableTransition =
     !COMMIT_EXEMPT_IDS.has(input.chosenId) && !COMMIT_EXEMPT_IDS.has(previous.lastChosenId)
-  const changed = input.chosenId !== previous.lastChosenId && committable
+  const changed = input.chosenId !== previous.lastChosenId && committableTransition
   const switches = changed ? previous.switches + 1 : 0
   if (switches < flapTicks) {
     return {
@@ -175,16 +198,20 @@ export function evaluateCandidateFlap(input: CandidateFlapInput): CandidateFlapD
       releaseLine: null,
     }
   }
-  const commit = selectCommitCandidate(input.candidates, invalid)
-  if (commit === null) {
+
+  // Crucial authority invariant: commit only to Jev's current raw choice. If
+  // that choice is no longer grounded/valid, do not manufacture another choice.
+  if (!jevChoiceIsCommittable(input.chosenId, offered, invalid)) {
     return {
-      state: { ...previous, lastChosenId: input.chosenId, switches, invalid },
+      state: { ...previous, lastChosenId: input.chosenId, switches, invalid, committedId: null },
       chosenId: input.chosenId,
       committed: false,
       line: null,
       releaseLine: null,
     }
   }
+
+  const commit = input.chosenId
   return {
     state: {
       fingerprint: previous.fingerprint,
