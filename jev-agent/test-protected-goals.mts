@@ -18,7 +18,7 @@
 import { GoalQueue, READY_HEAD_PRIORITY } from './src/goalQueue.ts'
 import type { PlannedGoal, QueuedGoal } from './src/goalQueue.ts'
 import { compilePlannedGoal, compilePlannedGoals, isOptionStartable, makeOptionSnapshot, optionSpecsToPlannedGoals } from './src/optionSpec.ts'
-import { PROTECTED_GOAL_DROPPED_REJECTED, PROTECTED_GOAL_REINSERTED } from './src/protectedGoals.ts'
+import { PROTECTED_GOAL_DROPPED_REJECTED, PROTECTED_GOAL_REINSERTED, PROTECTED_GOAL_RETIRED } from './src/protectedGoals.ts'
 
 interface Case {
   name: string
@@ -271,6 +271,40 @@ addCase('(i) a non-ready iron smelt does not steal the head from a protected goa
     pass,
     detail: `ready=${ready} current=${queue.current?.description ?? 'none'} order=[${goals.map((goal) => goal.targetItem).join(',')}] lines=[${lines.join(' | ')}]`,
   }
+})
+
+addCase('(j) code-owned truth may retire an obsolete protected prerequisite with an audit line', () => {
+  const queue = new GoalQueue()
+  queue.applyPlan(
+    [{ kind: 'collect', description: 'mine 7 x obsidian', targetItem: 'obsidian', requiredCount: 7, protected: true, core: true }],
+    'mechanical',
+  )
+  const lines: string[] = []
+  const added = queue.applyPlan(
+    [
+      { kind: 'place', description: 'build the obsidian portal frame', targetItem: 'obsidian', requiredCount: 3, optionTemplateId: 'place:obsidian' },
+      { kind: 'place', description: 'light the portal', targetItem: 'nether_portal', requiredCount: 1 },
+    ],
+    'llm',
+    'replace',
+    {
+      onProtection: (line) => lines.push(line),
+      protectedGoalRetireReason: (goal, incoming) =>
+        goal.targetItem === 'obsidian' && incoming.some((plan) => plan.optionTemplateId === 'place:obsidian')
+          ? 'portal frame coverage existing=7 held=3 required=10'
+          : null,
+    },
+  )
+  const stale = queue.state.goals.find((goal) => goal.targetItem === 'obsidian' && goal.kind === 'collect')
+  const retired = lines.find((line) => line.startsWith(PROTECTED_GOAL_RETIRED))
+  const pass =
+    added.length === 2 &&
+    stale?.status === 'impossible' &&
+    stale.detail?.includes('retired by verified world truth') === true &&
+    retired?.includes('existing=7') === true &&
+    queue.current?.kind === 'place' &&
+    queue.current?.targetItem === 'obsidian'
+  return { pass, detail: `added=${added.length} stale=${stale?.status} current=${queue.current?.description ?? 'none'} retired=${retired ?? 'none'}` }
 })
 
 let failures = 0

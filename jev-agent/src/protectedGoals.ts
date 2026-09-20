@@ -24,9 +24,13 @@
 // kind|item|y|dimension) counts as satisfying the protected goal: the old copy
 // may be replaced and the new copy takes over. This is issue #55's
 // "equivalent dependency producer" acceptance.
+// A code-owned world fact may also retire a protected prerequisite, but only
+// through the explicit queue callback; that transition emits
+// `PROTECTED_GOAL_RETIRED` with its exact fact-based reason.
 
 export const PROTECTED_GOAL_REINSERTED = 'PROTECTED_GOAL_REINSERTED'
 export const PROTECTED_GOAL_DROPPED_REJECTED = 'PROTECTED_GOAL_DROPPED_REJECTED'
+export const PROTECTED_GOAL_RETIRED = 'PROTECTED_GOAL_RETIRED'
 export const ABANDON_REASON = 'ABANDON_REASON'
 
 /** The subset of a goal the protection logic reads (PlannedGoal or QueuedGoal). */
@@ -96,6 +100,11 @@ export function formatProtectedGoalReinserted(goal: ProtectableGoal, op: string,
 
 export function formatProtectedGoalDroppedRejected(goal: ProtectableGoal, op: string, reason: string): string {
   return `${PROTECTED_GOAL_DROPPED_REJECTED} goal=${goalLabel(goal)} op=${op} reason=${reason}`
+}
+
+/** A code-owned world fact made a protected prerequisite obsolete. */
+export function formatProtectedGoalRetired(goal: ProtectableGoal, reason: string): string {
+  return `${PROTECTED_GOAL_RETIRED} goal=${goalLabel(goal)} reason=${reason}`
 }
 
 export function formatProtectedGoalAbandoned(goal: ProtectableGoal, reason: string): string {
