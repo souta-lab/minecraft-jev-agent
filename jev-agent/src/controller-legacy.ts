@@ -1513,6 +1513,13 @@ export class JevController {
     return this.system2.provider ?? 'unknown'
   }
 
+  get system2AuthorityStack(): { provider: string; model: string } {
+    return this.system2.authorityStack ?? {
+      provider: this.system2.provider ?? 'unknown',
+      model: this.system2.authorityModel ?? this.system2.model,
+    }
+  }
+
   get policyProvider(): string {
     return this.jev.kind === 'typesafe' ? 'typesafe-ai' : 'deterministic'
   }

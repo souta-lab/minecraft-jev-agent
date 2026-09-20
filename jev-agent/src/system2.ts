@@ -102,6 +102,8 @@ export interface System2Brain {
   readonly provider?: string
   /** Effective model that actually owns semantic System2 decisions. */
   readonly authorityModel?: string
+  /** Configured authority stack, distinct from the last provider that answered. */
+  readonly authorityStack?: { provider: string; model: string }
   plan(request: System2PlanRequest): Promise<System2Plan>
 }
 

@@ -1036,6 +1036,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     policyModel: controller.policyModel,
     system2Provider: controller.system2Provider,
     system2Model: controller.system2Model,
+    system2AuthorityStack: controller.system2AuthorityStack,
+    system2LastAuthority: { provider: controller.system2Provider, model: controller.system2Model },
     deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
     planner: brain.mode,
     plannerModel: brain.model,
@@ -1133,6 +1135,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       policyModel: controller.policyModel,
       system2Provider: controller.system2Provider,
       system2Model: controller.system2Model,
+      system2AuthorityStack: controller.system2AuthorityStack,
+      system2LastAuthority: { provider: controller.system2Provider, model: controller.system2Model },
       deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
       queue: controller.goalQueueState,
       currentAction:

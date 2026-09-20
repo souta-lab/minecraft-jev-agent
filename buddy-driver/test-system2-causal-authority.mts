@@ -294,5 +294,9 @@ const reportBrain = new PlannerBrain({
 })
 assert.equal(reportBrain.provider, 'hybrid')
 assert.equal(reportBrain.authorityModel.includes('mercury:inception/mercury-2.5'), true)
+assert.deepEqual(reportBrain.authorityStack, {
+  provider: 'hybrid',
+  model: 'typesafe-ai:typesafe-ai/jev|mercury:inception/mercury-2.5',
+})
 
 console.log('system2-causal-authority: PASS (causal authority regressions)')

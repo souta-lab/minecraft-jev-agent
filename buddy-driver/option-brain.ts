@@ -54,6 +54,10 @@ export class OptionCompilingSystem2 implements System2Brain {
     return this.inner.authorityModel
   }
 
+  get authorityStack(): { provider: string; model: string } | undefined {
+    return this.inner.authorityStack
+  }
+
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const plan = await this.inner.plan(request)
     if (!this.enabled || plan.goals.length === 0) return plan

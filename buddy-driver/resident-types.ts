@@ -319,6 +319,10 @@ export interface GenerationStatus {
   policyModel: string
   system2Provider: string
   system2Model: string
+  /** Configured System2 authority stack; separate from the last answering authority. */
+  system2AuthorityStack?: { provider: string; model: string }
+  /** Last provider/model that actually answered a System2 request. */
+  system2LastAuthority?: { provider: string; model: string }
   deterministicFallbackEnabled: boolean
   queue: GoalQueueState
   currentAction: { id: string; kind: string; phase: string; startedAt: number } | null

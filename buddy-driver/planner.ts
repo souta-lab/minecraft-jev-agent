@@ -207,6 +207,12 @@ export class PlannerBrain implements System2Brain {
     return this.lastAuthorityModel
   }
 
+  get authorityStack(): { provider: string; model: string } {
+    if (this.mode === 'deterministic') return { provider: 'deterministic', model: this.model }
+    if (this.mercury === undefined) return { provider: 'typesafe-ai', model: this.model }
+    return { provider: 'hybrid', model: `typesafe-ai:${this.model}|mercury:${this.mercury.model}` }
+  }
+
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     if (this.mode === 'deterministic') return this.legacy.plan(request)
     return this.planWithModelAuthority(request)
