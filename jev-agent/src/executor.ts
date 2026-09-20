@@ -28,7 +28,8 @@ import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
-import { isPlacePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
+import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
+import { FLINT_AND_STEEL, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalLit, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -1300,6 +1301,8 @@ export class Executor {
           return await this.runRetrieve(candidate, epoch, signal, startedAt)
         case 'PLACE':
           return await this.runPlace(candidate, epoch, signal, startedAt)
+        case 'IGNITE':
+          return await this.runIgnite(candidate, epoch, signal, startedAt)
         case 'EAT':
           return await this.runEat(candidate, epoch, signal, startedAt)
         case 'ATTACK':
@@ -3670,6 +3673,112 @@ export class Executor {
       placedName = this.currentBlockAt(target)?.name ?? null
     }
     return placedName
+  }
+
+  /**
+   * Live ignition: use flint_and_steel on a validated frame, then require the
+   * nether_portal block at every expected interior cell before claiming success.
+   * The activation goes through the leased actuation port when one is present.
+   */
+  private async runIgnite(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('target_gone', 'IGNITE candidate has no light position')
+    const expectedCells = parsePortalCells(readMetaString(candidate, 'portalCells') ?? '')
+    if (expectedCells.length === 0) {
+      throw new ExecutorError('place_error', 'IGNITE candidate carries no expected portal cells')
+    }
+    const dimension = readMetaString(candidate, 'dimension') ?? 'minecraft:overworld'
+
+    const held = this.bot.inventory.items().find((entry) => entry.name === FLINT_AND_STEEL)
+    if (held === undefined) {
+      throw new ExecutorError('place_error', `${PRECONDITION_MISSING} tool=${FLINT_AND_STEEL}`)
+    }
+
+    if (!candidate.inReach && this.distanceToEyes(target) > this.options.reach) {
+      this.setPhase(candidate, epoch, 'pathing')
+      await this.pathTo(target, epoch, signal, 'GoalBlock')
+      this.ensureOwned(epoch, signal)
+    }
+    if (this.distanceToEyes(target) > this.options.reach) {
+      throw new ExecutorError(
+        'out_of_reach',
+        `light position is ${round2(this.distanceToEyes(target))}m from the eyes (reach ${this.options.reach})`,
+      )
+    }
+
+    this.setPhase(candidate, epoch, 'equipping')
+    if (this.options.actuationPort !== undefined) {
+      await this.options.actuationPort.equip(held, 'hand')
+    } else {
+      await this.bot.equip(held, 'hand')
+    }
+    this.ensureOwned(epoch, signal)
+
+    const block = this.currentBlockAt(target)
+    if (block === null) {
+      throw new ExecutorError('target_gone', `no block at the light position (${target.x},${target.y},${target.z})`)
+    }
+    this.setPhase(candidate, epoch, 'igniting')
+    if (this.options.actuationPort !== undefined) {
+      await this.options.actuationPort.activateBlock(block)
+    } else {
+      await this.bot.activateBlock(block)
+    }
+    this.ensureOwned(epoch, signal)
+
+    this.setPhase(candidate, epoch, 'verifying')
+    const observed = await this.waitForPortalBlocks(expectedCells, epoch, signal)
+    if (!isIgnitePostconditionMet(observed)) {
+      const found = observed.map((name) => name ?? 'air').join(',')
+      throw new ExecutorError(
+        'verify_failed',
+        `activation did not create ${NETHER_PORTAL} at every portal cell (found [${found}])`,
+      )
+    }
+
+    this.logger.info('agent', formatPortalLit(target, dimension), { actionId: candidate.id, target, dimension })
+    this.logger.info('agent', verifyPortal({ lit: true, portalBlockPresent: true, dimension }).line, {
+      actionId: candidate.id,
+      dimension,
+    })
+
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'ignited',
+      `lit ${NETHER_PORTAL} at (${target.x},${target.y},${target.z})`,
+      null,
+      {
+        verified: true,
+        dropObserved: false,
+        blockRemoved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+      },
+    )
+  }
+
+  private async waitForPortalBlocks(
+    cells: readonly Vec3Json[],
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<(string | null)[]> {
+    const read = (): (string | null)[] => cells.map((cell) => this.currentBlockAt(cell)?.name ?? null)
+    const deadline = Date.now() + PLACE_VERIFY_SETTLE_MS
+    let observed = read()
+    while (!isIgnitePostconditionMet(observed) && Date.now() < deadline) {
+      await delay(50, signal)
+      this.ensureOwned(epoch, signal)
+      observed = read()
+    }
+    return observed
   }
 
   // -------------------------------------------------------------------------

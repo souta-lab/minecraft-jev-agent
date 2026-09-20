@@ -109,6 +109,8 @@ export function guardCandidate(
       return guardCraft(candidate, state, context)
     case 'PLACE':
       return guardPlace(candidate, state, context)
+    case 'IGNITE':
+      return guardIgnite(candidate, state, context)
     case 'SMELT':
       return guardSmelt(candidate, state, context)
     case 'DESCEND':
@@ -482,6 +484,29 @@ function guardPlace(candidate: Candidate, state: WorldState, context: GuardConte
   return { ok: true, candidate }
 }
 
+function guardIgnite(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
+  const itemName = candidate.itemName ?? 'flint_and_steel'
+  if ((state.inventory.counts[itemName] ?? 0) <= 0) {
+    return deny(candidate.id, 'EMPTY_HAND', `${itemName} is not in the inventory`)
+  }
+  const target = candidate.target
+  if (target === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'IGNITE candidate carries no light position')
+  }
+  const hazard = nearestHazardTo(state, target)
+  if (hazard !== null) {
+    return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the portal light position`)
+  }
+  if (context.phase === 'dig' && distance(target, state.self.eyePosition) > context.reach) {
+    return deny(
+      candidate.id,
+      'OUT_OF_REACH',
+      `light position is ${round2(distance(target, state.self.eyePosition))}m from the eyes (reach ${context.reach})`,
+    )
+  }
+  return { ok: true, candidate }
+}
+
 function guardSmelt(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
   const target = candidate.target
   if (target === null) {
@@ -687,6 +712,7 @@ export const ACTING_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'MOVE',
   'CRAFT',
   'PLACE',
+  'IGNITE',
   'ATTACK',
   'EAT',
   'RETREAT',

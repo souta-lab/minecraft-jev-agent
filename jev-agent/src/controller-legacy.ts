@@ -25,7 +25,7 @@ import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -1343,6 +1343,8 @@ export class JevController {
   private readonly reachabilityLogSignatures = new Map<string, string>()
   /** last logged PLACE_REFUSED signature, so one geometry dead end is one line. */
   private lastPlacementRefusalKey: string | null = null
+  /** last logged PORTAL_LIGHT_REFUSED signature, so one ignition dead end is one line. */
+  private lastIgnitionRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
@@ -1872,6 +1874,7 @@ export class JevController {
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
+      this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
@@ -5053,6 +5056,15 @@ export class JevController {
       { reason: refusal.reason, cell: refusal.cell, item: refusal.item },
       this.tickCounter,
     )
+  }
+
+  /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */
+  private logIgnitionRefusal(refusal: IgnitionRefusal | null): void {
+    const key = refusal === null ? null : refusal.line
+    if (key === this.lastIgnitionRefusalKey) return
+    this.lastIgnitionRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn('agent', refusal.line, { reason: refusal.reason, frameShape: refusal.frameShape }, this.tickCounter)
   }
 
   /**

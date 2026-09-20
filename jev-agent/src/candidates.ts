@@ -42,6 +42,13 @@ import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, R
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
+import {
+  FLINT_AND_STEEL,
+  NETHER_PORTAL,
+  planPortalIgnition,
+  serializePortalCells,
+} from './netherPortalPlan.ts'
+import type { PortalFrameValidation } from './netherPortalPlan.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -49,6 +56,7 @@ export type CandidateKind =
   | 'CRAFT'
   | 'PLACE'
   | 'SMELT'
+  | 'IGNITE'
   | 'DESCEND'
   | 'STEP'
   | 'RETRIEVE'
@@ -141,6 +149,12 @@ export interface CandidateOptions {
    * which path the candidate set represents.
    */
   prereqRankPolicy?: PrereqRankPolicy
+  /**
+   * The validated Nether portal frame the current goal refers to, when one has
+   * been sensed/validated. Present + tool held + a `nether_portal` place goal is
+   * the ONLY way an IGNITE candidate is offered (issue lane: live ignition).
+   */
+  portalFrame?: PortalFrameValidation | null
 }
 
 export interface ReachabilityGateOptions {
@@ -183,6 +197,12 @@ export interface GroundedCandidatesResult {
    * surfaced (never silent), even when no alternative candidate exists.
    */
   placeRefusal: PlaceRefusal | null
+  /**
+   * Typed ignition refusal (`PORTAL_LIGHT_REFUSED` / `PRECONDITION_MISSING`)
+   * when a portal goal's frame could not be lit. Null when no ignition was
+   * requested this cycle (never when one was requested and withheld).
+   */
+  ignitionRefusal: IgnitionRefusal | null
 }
 
 /**
@@ -207,6 +227,67 @@ export interface PlaceRefusal {
 /** The exact `PLACE_REFUSED` observability line for one typed refusal. */
 export function formatPlaceRefusal(refusal: PlaceRefusal): string {
   return `PLACE_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} item=${refusal.item}`
+}
+
+/**
+ * Why an ignition was not offered: a malformed frame (`PORTAL_LIGHT_REFUSED`)
+ * or a missing flint_and_steel (`PRECONDITION_MISSING`). Surfaced instead of
+ * silence, so a portal goal can never look "starved" for no reason.
+ */
+export interface IgnitionRefusal {
+  reason: string
+  line: string
+  frameShape: 'ok' | 'bad'
+}
+
+/**
+ * The grounded ignition candidates for the active goal. Offered only while the
+ * goal targets the `nether_portal` place operation and a validated frame is
+ * supplied, and only when flint_and_steel is held; otherwise the typed refusal
+ * (or null when the goal is unrelated) is returned.
+ */
+export function ignitionCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+): { candidates: Candidate[]; refusal: IgnitionRefusal | null } {
+  const current = state.goalQueue?.current ?? null
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem !== NETHER_PORTAL) return { candidates: [], refusal: null }
+  const frame = options.portalFrame ?? null
+  if (frame === null) return { candidates: [], refusal: null }
+
+  const hasTool = (state.inventory.counts[FLINT_AND_STEEL] ?? 0) > 0
+  const plan = planPortalIgnition({ frame, hasFlintAndSteel: hasTool })
+  if (!plan.ok) {
+    return { candidates: [], refusal: { reason: plan.reason, line: plan.line, frameShape: frame.shape } }
+  }
+  const ignition = plan.candidate
+  return {
+    candidates: [
+      {
+        id: ignition.id,
+        kind: 'IGNITE',
+        label: `use ${FLINT_AND_STEEL} on the portal frame at (${ignition.lightPosition.x},${ignition.lightPosition.y},${ignition.lightPosition.z}) to light the nether portal`,
+        targetName: NETHER_PORTAL,
+        target: ignition.lightPosition,
+        targetEntityId: null,
+        itemName: FLINT_AND_STEEL,
+        requiresTool: false,
+        toolName: null,
+        inReach: distance(ignition.lightPosition, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          lightX: ignition.lightPosition.x,
+          lightY: ignition.lightPosition.y,
+          lightZ: ignition.lightPosition.z,
+          dimension: ignition.dimension,
+          portalCells: serializePortalCells(ignition.portalCells),
+        },
+      },
+    ],
+    refusal: null,
+  }
 }
 
 /**
@@ -395,7 +476,7 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal)
+  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal)
 }
 
 function generateRawCandidates(
@@ -404,6 +485,7 @@ function generateRawCandidates(
 ): RawCandidatesResult {
   let candidates: Candidate[] = []
   let placeRefusal: PlaceRefusal | null = null
+  let ignitionRefusal: IgnitionRefusal | null = null
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -420,9 +502,13 @@ function generateRawCandidates(
     case 'smelt':
       candidates.push(...smeltCandidates(state, options, focusItem))
       break
-    case 'place':
+    case 'place': {
       candidates.push(...placeCandidates(state, options, focusItem))
+      const ignition = ignitionCandidates(state, options)
+      candidates.push(...ignition.candidates)
+      ignitionRefusal = ignition.refusal
       break
+    }
     default:
       candidates.push(...mineCandidates(state, options, focusItem, descendTargetY))
       break
@@ -582,7 +668,7 @@ function generateRawCandidates(
     })
   }
 
-  return { candidates, placeRefusal }
+  return { candidates, placeRefusal, ignitionRefusal }
 }
 
 /** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
@@ -1556,6 +1642,7 @@ interface CraftCandidatesResult {
 interface RawCandidatesResult {
   candidates: Candidate[]
   placeRefusal: PlaceRefusal | null
+  ignitionRefusal: IgnitionRefusal | null
 }
 
 /**
@@ -3000,6 +3087,7 @@ export function applyReachabilityGate(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
   placeRefusal: PlaceRefusal | null = null,
+  ignitionRefusal: IgnitionRefusal | null = null,
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -3076,7 +3164,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
