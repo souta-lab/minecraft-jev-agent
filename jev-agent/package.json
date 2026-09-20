@@ -26,6 +26,7 @@
     "reachability-test": "tsx test-reachability.mts",
     "candidate-recovery-test": "tsx test-candidate-recovery.mts",
     "route-opening-continuation-test": "tsx test-route-opening-continuation.mts",
+    "log-target-route-test": "tsx test-log-target-route-affordances.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
     "pit-escape-test": "tsx test-pit-escape.mts",

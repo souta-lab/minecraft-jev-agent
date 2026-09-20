@@ -1031,11 +1031,15 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
  * is behind a rise no vanilla client can climb (jump apex 1.2522), so the route
  * is simply not executable.
  */
-function stepCutCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+function stepCutCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  targetPosition: Vec3Json | null = null,
+): Candidate[] {
   const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe)
   if (cuts.length === 0) return []
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
-  const target = nearestResource(state, focus)
+  const target = targetPosition ?? nearestResource(state, focus)?.position ?? null
   const feet = {
     x: Math.floor(state.self.position.x),
     y: Math.floor(state.self.position.y),
@@ -1051,8 +1055,8 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     if (!hasTool(state, tool, tool === null ? null : known?.harvestTier ?? null)) continue
     let penalty = 0
     if (target !== null) {
-      const tdx = target.position.x - feet.x
-      const tdz = target.position.z - feet.z
+      const tdx = target.x - feet.x
+      const tdz = target.z - feet.z
       const dot = cut.dx * Math.sign(tdx) + cut.dz * Math.sign(tdz)
       penalty = dot > 0 ? 0 : 10
     }
@@ -2955,6 +2959,14 @@ function pickExplore(
   focusItem: string | null,
   moveFailureLimit: number,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  /**
+   * The withheld target the approach must reduce distance to. When absent the
+   * nearest resource of `focusItem` is used, which is the pre-existing behavior.
+   * A route-opening pass for a withheld collect/mine target passes THAT block,
+   * so the approach walks toward the block the sensor proved unreachable instead
+   * of collapsing onto the nearest body-adjacent frontier.
+   */
+  resourcePosition: Vec3Json | null = null,
 ): Vec3Json | null {
   const options = standable.filter(
     (spot) =>
@@ -2964,13 +2976,13 @@ function pickExplore(
   )
   if (options.length === 0) return null
 
-  const resource = nearestResource(state, focusItem)
+  const resource = resourcePosition ?? nearestResource(state, focusItem)?.position ?? null
   if (resource !== null) {
-    const currentDistance = distance(state.self.position, resource.position)
+    const currentDistance = distance(state.self.position, resource)
     let best: Vec3Json | null = null
     let bestScore = Number.POSITIVE_INFINITY
     for (const spot of options) {
-      const toResource = distance(spot, resource.position)
+      const toResource = distance(spot, resource)
       if (toResource >= currentDistance) continue
       const score = toResource + distance(spot, state.self.position) * 0.1
       if (score < bestScore) {
@@ -3559,7 +3571,10 @@ function capabilityAcquisitionCandidates(
         // mechanically-valid forward body change is on offer. This is CAN
         // enumeration only: no item/coordinate/portal special-casing, no
         // ordering or ranking, and the model still owns WHAT and WHICH.
-        source = routeOpeningCandidates(state, options)
+        // The withheld block itself is the focus when the candidate names a
+        // dig target, so the route is opened toward it rather than the nearest
+        // body-adjacent resource (the live `collect 3 x log` collapse).
+        source = routeOpeningCandidates(state, options, digTargetBlockFor(state, entry.candidate))
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -3624,12 +3639,23 @@ function capabilityAcquisitionCandidates(
  * goal resource, and the MOVE walks to the nearest standable frontier. None is
  * item/coordinate/portal special-cased and none is ordered or ranked against
  * the others; they are facts Jev selects from.
+ *
+ * `target` is the withheld collect/mine block when the acquisition pass has one.
+ * It is used ONLY as the focus the existing families already take (a tunnel
+ * target and an approach bearing), so the route is opened toward the block the
+ * sensor proved unreachable instead of the nearest body-adjacent resource.
  */
-function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+function routeOpeningCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  target: BlockState | null = null,
+): Candidate[] {
+  const goalFocus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const focus = target === null ? goalFocus : target.yield ?? target.name
+  const targetPosition = target?.position ?? null
   const out: Candidate[] = [
-    ...stepCutCandidates(state, options),
-    ...descendCandidates(state, options, focus, [], null),
+    ...stepCutCandidates(state, options, targetPosition),
+    ...descendCandidates(state, options, focus, target === null ? [] : [target], null),
     ...openLevelStepMoves(state, options),
   ]
   const spot = pickExplore(
@@ -3638,6 +3664,7 @@ function routeOpeningCandidates(state: WorldState, options: CandidateOptions): C
     focus,
     options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
     options.blacklistedMoveTargets,
+    targetPosition,
   )
   if (spot !== null) {
     out.push(
@@ -3651,6 +3678,30 @@ function routeOpeningCandidates(state: WorldState, options: CandidateOptions): C
     )
   }
   return out
+}
+
+/**
+ * The block a withheld candidate proves unreachable: `meta.targetBlock*` for a
+ * walk-to-block candidate, else the candidate's own target when it names a dig
+ * block (a `MINE`, or the explicit dig-access retirement). A plain locomotion
+ * target that names no block yields null and keeps the pre-existing focus.
+ */
+function digTargetBlockFor(state: WorldState, candidate: Candidate): BlockState | null {
+  const x = candidate.meta.targetBlockX
+  const y = candidate.meta.targetBlockY
+  const z = candidate.meta.targetBlockZ
+  const cell =
+    typeof x === 'number' && typeof y === 'number' && typeof z === 'number'
+      ? { x, y, z }
+      : (candidate.kind === 'MINE' || digAccessRefusalOf(candidate) !== null) && candidate.target !== null
+        ? candidate.target
+        : null
+  if (cell === null) return null
+  return (
+    state.blocks.find(
+      (block) => block.position.x === cell.x && block.position.y === cell.y && block.position.z === cell.z,
+    ) ?? null
+  )
 }
 
 /**
