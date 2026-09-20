@@ -2216,6 +2216,7 @@ export class JevController {
         stateHash: stableStateHash(state),
         chainId: causalStamp.chainId,
         optionId: causalStamp.optionId,
+        semanticOptionInstanceId: causalStamp.semanticOptionInstanceId,
         strategy: causalStamp.strategy,
         candidates,
         failedCandidates: this.failureSnapshot(),
@@ -3131,6 +3132,7 @@ export class JevController {
         {
           chainId: pending.record.chainId ?? 'unknown',
           optionId: pending.record.optionId,
+          semanticOptionInstanceId: pending.record.semanticOptionInstanceId,
           planId: pending.record.goalQueueState.current?.id ?? null,
           strategy: pending.record.strategy,
         },
