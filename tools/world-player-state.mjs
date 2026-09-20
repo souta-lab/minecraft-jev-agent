@@ -348,6 +348,41 @@ function entityHealth(entity) {
   return null
 }
 
+function sameInventory(left, right) {
+  if (left === null || right === null) return null
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  if (leftKeys.length !== rightKeys.length) return false
+  return leftKeys.every((key) => left[key] === right[key]) && rightKeys.every((key) => right[key] === left[key])
+}
+
+export function comparePlayerSources({ residentTruth = null, admin = null, entityPosition = null } = {}) {
+  const residentPosition = positionOf(residentTruth?.position)
+  const adminPosition = positionOf(admin?.position)
+  const positionDistance = distance(residentPosition, adminPosition)
+  const entityDistance = distance(residentPosition, entityPosition)
+  const residentInventory = residentTruth?.inventory === undefined ? null : normalizeInventory(residentTruth.inventory)
+  const adminInventory = admin?.inventory ?? null
+  const inventoryEqual = sameInventory(residentInventory, adminInventory)
+  const mismatches = []
+  // The operator query is slower than the resident snapshot while the bot is
+  // moving. Preserve both values and expose the drift instead of silently
+  // rewriting resident truth with a later query.
+  if (positionDistance !== null && positionDistance > 1.5) mismatches.push('resident_admin_position')
+  if (entityDistance !== null && entityDistance > 1.5) mismatches.push('resident_entity_position')
+  if (inventoryEqual === false) mismatches.push('resident_admin_inventory')
+  return {
+    status: mismatches.length === 0 ? 'AGREE_OR_WITHIN_SAMPLE_DRIFT' : 'MISMATCH',
+    mismatches,
+    residentPosition,
+    adminPosition,
+    entityPosition,
+    positionDistance: positionDistance === null ? null : Number(positionDistance.toFixed(3)),
+    entityDistance: entityDistance === null ? null : Number(entityDistance.toFixed(3)),
+    inventoryEqual,
+  }
+}
+
 function liveEntities(bot) {
   return Object.values(bot?.entities ?? {})
 }
@@ -479,9 +514,13 @@ export function makeSnapshot({ bot, options, residentResult = null, residentStat
   const targetEntity = targetPlayer?.entity ?? liveEntities(bot).find((entity) => entity?.username === options.target) ?? null
   const targetEntityPosition = positionOf(targetEntity?.position)
   const residentTruth = residentState.data?.truth ?? resident.status?.truth ?? null
-  const targetPosition = admin?.position ?? residentTruth?.position ?? targetEntityPosition
-  const targetHealth = admin?.health ?? residentTruth?.health ?? entityHealth(targetEntity)
-  const targetInventory = admin?.inventory ?? (residentTruth === null ? null : residentTruth.inventory)
+  const sourceConsistency = comparePlayerSources({ residentTruth, admin, entityPosition: targetEntityPosition })
+  // Resident truth is the timestamped execution snapshot. An operator query is
+  // a read-only cross-check, not a replacement that can make area observations
+  // appear to come from a different position.
+  const targetPosition = residentTruth?.position ?? admin?.position ?? targetEntityPosition
+  const targetHealth = residentTruth?.health ?? admin?.health ?? entityHealth(targetEntity)
+  const targetInventory = residentTruth === null ? admin?.inventory ?? null : normalizeInventory(residentTruth.inventory)
   const dimension = residentTruth?.dimension ?? bot.game?.dimension ?? null
   const difficulty = admin?.difficulty ?? null
   const stateArea = residentState.data?.area ?? null
@@ -506,6 +545,7 @@ export function makeSnapshot({ bot, options, residentResult = null, residentStat
     entitySummary,
     resident,
   })
+  closedLoop.sourceConsistency = sourceConsistency
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     observedAt: new Date().toISOString(),
@@ -532,7 +572,15 @@ export function makeSnapshot({ bot, options, residentResult = null, residentStat
       food: residentTruth?.food ?? null,
       onGround: residentTruth?.onGround ?? null,
       inventory: targetInventory,
-      stateSource: admin !== null ? 'operator-read-only-nbt' : residentState.data?.truth !== undefined ? 'resident-live-state' : residentTruth !== null ? 'resident-server-truth' : targetEntityPosition !== null ? 'entity-observation' : 'unknown',
+      sources: {
+        resident: residentTruth,
+        admin,
+        entity: targetEntityPosition === null ? null : { position: targetEntityPosition, health: entityHealth(targetEntity) },
+        consistency: sourceConsistency,
+      },
+      stateSource: residentTruth !== null
+        ? admin !== null ? 'resident-live-state+operator-read-only-nbt' : 'resident-live-state'
+        : admin !== null ? 'operator-read-only-nbt' : targetEntityPosition !== null ? 'entity-observation' : 'unknown',
     },
     area: {
       radius: options.radius,

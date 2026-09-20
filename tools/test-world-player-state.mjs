@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import {
   classifyEntity,
+  comparePlayerSources,
   evaluateClosedLoop,
   normalizeDimension,
   normalizeInventory,
@@ -101,6 +102,18 @@ add('closed loop is KNOWN only when all required facts are present', () => {
   assert.equal(result.combatAssessment, 'NO_HOSTILE_OBSERVED')
   assert.equal(result.safeGround, 'OBSERVED_SAFE')
   assert.deepEqual(result.unknown, [])
+})
+
+add('resident truth stays primary and cross-source movement drift is explicit', () => {
+  const result = comparePlayerSources({
+    residentTruth: { position: { x: 10, y: 70, z: 4 }, inventory: { oak_log: 3 } },
+    admin: { position: { x: 14, y: 70, z: 4 }, inventory: { oak_log: 3 } },
+    entityPosition: { x: 10.5, y: 70, z: 4 },
+  })
+  assert.equal(result.status, 'MISMATCH')
+  assert.deepEqual(result.mismatches, ['resident_admin_position'])
+  assert.equal(result.inventoryEqual, true)
+  assert.equal(result.positionDistance, 4)
 })
 
 let failed = 0
