@@ -504,6 +504,35 @@ async function runMinimalFrameBuild() {
   return { fixture, result, messages: lines.map((entry) => entry.message ?? '') }
 }
 
+async function runReferenceApproachBuild() {
+  const target = { x: ORIGIN.x, y: ORIGIN.y, z: 0 }
+  const fixture = makePlaceBot({ x: 30.5, y: 64, z: 30.5 }, [target], false, 0, false)
+  for (let x = ORIGIN.x - 2; x <= ORIGIN.x + 2; x += 1) {
+    for (let z = -2; z <= 2; z += 1) {
+      fixture.grid.set(String(x) + ',' + String(ORIGIN.y) + ',' + String(z), 'air')
+      fixture.grid.set(String(x) + ',' + String(ORIGIN.y + 1) + ',' + String(z), 'air')
+    }
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'frame-build-reference-'))
+  const logPath = join(dir, 'agent.jsonl')
+  const logger = new EventLogger(new JsonlWriter(logPath), false)
+  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const approaches: Vec3Json[] = []
+  const internals = executor as unknown as {
+    pathToNear: (position: Vec3Json, range: number, epoch: number, signal: AbortSignal) => Promise<void>
+  }
+  internals.pathToNear = async (position) => {
+    approaches.push({ ...position })
+    ;(fixture.bot.entity as unknown as { position: P }).position.set(position.x, position.y, position.z)
+  }
+  const result = await executor.claim(placeFrameCandidate([target], 'cobblestone')).completion
+  const lines = readFileSync(logPath, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((entry) => JSON.parse(entry) as { message?: string })
+  return { fixture, result, approaches, messages: lines.map((entry) => entry.message ?? '') }
+}
+
 {
   const { fixture, result, messages } = await runFrameBuild(false)
   const placed = messages.filter((line) => line.startsWith(PORTAL_BLOCK_PLACED))
@@ -544,6 +573,23 @@ async function runMinimalFrameBuild() {
   process.stdout.write(
     `${pass ? 'PASS' : 'FAIL'}  (5a-minimal) the 10-edge frame adds one mechanical corner scaffold and still verifies\n` +
       `      status=${result.status} placed=${placed.length} support=${support.length} corners=${scaffoldCorners.length} failure=${result.failure ?? 'none'} detail=${result.detail} ready=${ready[0] ?? 'none'}\n`,
+  )
+  if (!pass) failures += 1
+}
+
+{
+  const target = { x: ORIGIN.x, y: ORIGIN.y, z: 0 }
+  const { fixture, result, approaches, messages } = await runReferenceApproachBuild()
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    fixture.grid.get(key(target)) === 'cobblestone' &&
+    approaches.length === 1 &&
+    approaches[0]?.y === ORIGIN.y &&
+    messages.some((line) => line === 'PLACE_APPROACH target=5,64,0 reference=5,63,0 stand=4,64,0')
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (5a-approach) an out-of-reach placement walks to a lower supported reference stand\n' +
+      '      status=' + result.status + ' verified=' + result.verified + ' approaches=' + JSON.stringify(approaches) + ' failure=' + (result.failure ?? 'none') + '\n',
   )
   if (!pass) failures += 1
 }
