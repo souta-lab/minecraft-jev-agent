@@ -9,13 +9,20 @@
 //   2. written to the JSONL calibration log,
 //   3. replayed in the pure guard unit test with no bot at all.
 import type { Bot } from 'mineflayer'
+import { Vec3 } from 'vec3'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { System2Outcome } from './system2.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
-import { NETHER_PORTAL, portalFrameLayout, portalFrameNeedsTemporarySupport, validatePortalFrame } from './netherPortalPlan.ts'
+import {
+  detectPortalVerification,
+  NETHER_PORTAL,
+  portalFrameLayout,
+  portalFrameNeedsTemporarySupport,
+  validatePortalFrame,
+} from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
@@ -1415,6 +1422,21 @@ export function sensedPortalFrameSites(bot: Bot, options: SensorOptions = defaul
 export function countSensedPortalFrameBlocks(bot: Bot): number {
   const sites = sensedPortalFrameSites(bot)
   return Math.max(0, ...sites.map((site) => site.existingFrame?.length ?? 0))
+}
+
+/**
+ * Live server-truth projection for the ladder frontier. It is never persisted:
+ * an externally broken portal must become unsatisfied on the next read.
+ */
+export function detectLivePortalVerification(bot: Bot): boolean {
+  const dimension = String(bot.game?.dimension ?? 'minecraft:overworld')
+  if (dimension !== 'minecraft:overworld' && dimension !== 'overworld') return false
+  const sites = sensedPortalFrameSites(bot)
+  return detectPortalVerification(
+    dimension,
+    sites,
+    (position) => bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null,
+  )
 }
 
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {

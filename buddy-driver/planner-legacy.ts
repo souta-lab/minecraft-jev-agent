@@ -426,7 +426,7 @@ export const RUNGS: readonly Rung[] = [
     // M2 transition: done only once the lit nether_portal block actually exists.
     // The previous flint_and_steel predicate declared the rung satisfied before a
     // frame was ever built, so the ladder skipped build/light/verify entirely.
-    satisfied: (c) => has(c, 'nether_portal'),
+    satisfied: (c, w) => has(c, 'nether_portal') || w.portalVerified === true,
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
@@ -1738,6 +1738,8 @@ export interface PlannerOptions {
   maxAttempts?: number
   /** resident process terminator; absent in tests (the fatal error is thrown) */
   terminate?: () => never
+  /** Refresh live server predicates before grounding a System2 request. */
+  refreshLiveFacts?: () => void
   /** key resolver seam for tests; defaults to `resolveJevApiKey` */
   resolveKey?: () => KeyResolution | null
 }

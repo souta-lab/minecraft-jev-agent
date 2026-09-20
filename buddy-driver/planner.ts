@@ -204,6 +204,7 @@ export class PlannerBrain implements System2Brain {
   private readonly maxCalls: number
   private readonly resolveKey: () => KeyResolution | null
   private readonly terminate: (() => never) | undefined
+  private readonly refreshLiveFacts: (() => void) | undefined
   private readonly legacy: LegacyPlannerBrain
   private readonly mercury: MercurySystem2 | undefined
   private lastAuthorityProvider: string
@@ -220,6 +221,7 @@ export class PlannerBrain implements System2Brain {
     this.maxCalls = options.maxCalls ?? Number(process.env.BUDDY_PLANNER_MAX_CALLS ?? 200)
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
+    this.refreshLiveFacts = options.refreshLiveFacts
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.mercury = options.mercury
     this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
@@ -252,6 +254,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   async plan(request: System2PlanRequest): Promise<System2Plan> {
+    this.refreshLiveFacts?.()
     if (this.mode === 'deterministic') return this.legacy.plan(request)
     return this.planWithModelAuthority(request)
   }

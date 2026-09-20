@@ -35,7 +35,7 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
-import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
+import { countSensedPortalFrameBlocks, detectLivePortalVerification } from '../jev-agent/src/state.ts'
 import {
   PlannerBrain,
   RUNGS,
@@ -679,6 +679,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
+    portalVerified: detectLivePortalVerification(ctx.bot),
+  }
+  const refreshLiveFacts = (reason: string): void => {
+    const next = detectLivePortalVerification(ctx.bot)
+    if (next === world.portalVerified) return
+    world.portalVerified = next
+    ctx.log('PORTAL_TRUTH', { verified: next, reason, source: 'live-world' })
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const m2Snapshot =
@@ -1062,6 +1069,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mercury,
     terminate: terminateResident,
     postDeathRecovery,
+    refreshLiveFacts: () => refreshLiveFacts('system2-grounding'),
   })
 
   // #21: opt-in Option compiler. OFF by default, so the planner output continues
@@ -1184,6 +1192,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   function status(): GenerationStatus {
+    refreshLiveFacts('status')
     const truth = readTruth()
     const frontier = deriveResumeRung(truth.inventory, world)
     const current = controller.agent.current

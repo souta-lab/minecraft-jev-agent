@@ -739,6 +739,24 @@ export function isPortalIgnitionPostconditionMet(
   return expectedCells.every((cell) => blockAt(cell) === expectedBlock)
 }
 
+/**
+ * Read the portal predicate from live world truth. `nether_portal` is a block,
+ * not an inventory item that can be carried across a resident restart.
+ */
+export function detectPortalVerification(
+  dimension: string | null | undefined,
+  sites: readonly PortalFrameSite[],
+  blockAt: PortalBlockLookup,
+): boolean {
+  if (dimension !== undefined && dimension !== null && normalizeDimension(dimension) !== normalizeDimension(OVERWORLD)) return false
+  for (const site of sites) {
+    const validation = validatePortalFrame({ blocks: site.existingFrame ?? [], widthAxis: site.widthAxis })
+    if (validation.shape !== 'ok') continue
+    if (isPortalIgnitionPostconditionMet(validation.interior, blockAt)) return true
+  }
+  return false
+}
+
 /** Encode the expected portal cells for a candidate's primitive-only `meta`. */
 export function serializePortalCells(cells: readonly PortalBlockPosition[]): string {
   return cells.map(formatPos).join(';')

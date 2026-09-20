@@ -149,6 +149,11 @@ export interface ResidentWorldMemory {
   moveFailures: MoveFailEntry[]
   /** death coordinates; a coordinate that kills twice is excluded (hard hazard) */
   hazards: DeathHazard[]
+  /**
+   * Live server-truth projection; deliberately absent from WorldMemoryDelta and
+   * re-observed after every generation/world change.
+   */
+  portalVerified?: boolean
 }
 
 export function emptyWorldMemory(): ResidentWorldMemory {
