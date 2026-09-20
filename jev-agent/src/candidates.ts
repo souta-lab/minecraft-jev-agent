@@ -2883,7 +2883,15 @@ function surfaceSpot(
 ): Vec3Json | null {
   let best: Vec3Json | null = null
   for (const spot of state.terrain.standable) {
-    if (spot.y <= state.self.position.y + 2) continue
+    // buildTerrain only scans dy in [-1, +1] (state.ts buildTerrain), so the
+    // largest reachable standable y is floor(self.y)+1 < self.y+2. The old
+    // `+ 2` threshold was therefore UNSATISFIABLE: surfaceSpot always returned
+    // null, RETRIEVE:surface was never emitted, and post-death surface
+    // exploration collapsed to local MOVE + WAIT (live run-mu9crrhw-1b5xw, RC
+    // a137735). Require strictly higher ground (+1), which the sensor can
+    // actually reach. Same semantics (explore upward), same candidate id, same
+    // blacklist ordering - only the unreachable constant is fixed.
+    if (spot.y <= state.self.position.y) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
     const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
     if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
