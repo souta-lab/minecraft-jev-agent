@@ -634,9 +634,16 @@ function guardDescend(candidate: Candidate, state: WorldState, context: GuardCon
   // `state.blocks` (logs/stone/ore/hazard only). Validate against the sensor's
   // own pre-computed `descent` options, exactly like `guardStep` uses stepCuts:
   // otherwise every DESCEND toward buried stone is generated and then rejected.
+  // A level step's wall is also the down step's wall at the same direction.
+  // Match the candidate's typed geometry first; coordinate-only matching can
+  // select the down step and reject a valid level step with the wrong support.
+  const mode = candidate.meta.mode === 'down' || candidate.meta.mode === 'level' ? candidate.meta.mode : null
+  const dir = typeof candidate.meta.dir === 'string' ? candidate.meta.dir : null
   const step = (state.descent ?? []).find(
     (entry) =>
-      samePosition(entry.floor, target) || samePosition(entry.wall, target) || samePosition(entry.head, target),
+      (mode === null || entry.mode === mode) &&
+      (dir === null || entry.dir === dir) &&
+      (samePosition(entry.floor, target) || samePosition(entry.wall, target) || samePosition(entry.head, target)),
   )
   if (step === undefined) {
     return deny(candidate.id, 'TARGET_GONE', `no descent step digging (${target.x},${target.y},${target.z}) in the current state`)
