@@ -755,7 +755,6 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     }
   }
 
-  const heldStationItems = new Set(['furnace', 'crafting_table'].filter((item) => (counts[item] ?? 0) > 0))
   const unusableStationKeys = new Set<string>()
   for (const station of [...durableFurnaces, ...durableTables]) {
     if (isStationSelectable(station, now)) continue
@@ -960,7 +959,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       ...world.knownResources
         .filter((resource) => {
           if (resource.kind !== 'station') return true
-          if (heldStationItems.has(resource.name)) return false
+          // Holding a station makes PLACE the preferred prerequisite path, but
+          // it does not make remembered world stations disappear.  In a cave
+          // with no valid placement spot, hiding every known furnace/table
+          // collapses the prerequisite ladder to WAIT even though retrieval is
+          // still a grounded fallback.
           return !unusableStationKeys.has(`${resource.name}:${stationKey(resource)}`)
         })
         .map((resource) => ({
@@ -970,20 +973,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
           ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
         })),
-      ...(heldStationItems.has('furnace')
-        ? []
-        : world.furnaces.map((furnace) => ({
-            name: 'furnace',
-            kind: 'station' as const,
-            position: { x: furnace.x, y: furnace.y, z: furnace.z },
-          }))),
-      ...(heldStationItems.has('crafting_table')
-        ? []
-        : world.craftingTables.map((table) => ({
-            name: 'crafting_table',
-            kind: 'station' as const,
-            position: { x: table.x, y: table.y, z: table.z },
-          }))),
+      // Keep durable stations in the controller envelope even when the same
+      // item is held.  `planPrereqOptions` still ranks a valid held placement
+      // first; these entries are the fallback when placement geometry refuses.
+      ...world.furnaces.map((furnace) => ({
+        name: 'furnace',
+        kind: 'station' as const,
+        position: { x: furnace.x, y: furnace.y, z: furnace.z },
+      })),
+      ...world.craftingTables.map((table) => ({
+        name: 'crafting_table',
+        kind: 'station' as const,
+        position: { x: table.x, y: table.y, z: table.z },
+      })),
     ],
   }
 
