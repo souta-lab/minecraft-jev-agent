@@ -1783,7 +1783,6 @@ export class PlannerBrain implements System2Brain {
     const reason = mapReason(request, this.firstCall)
     this.firstCall = false
     this.emitMilestones(counts)
-    const fallbackOption = options[0] ?? FRONT_FALLBACK
     const capabilityGap = parseCapabilityGap(request.recentEvents)
     const entity = this.bot.entity
     const botY = entity === undefined ? null : entity.position.y
@@ -1806,15 +1805,6 @@ export class PlannerBrain implements System2Brain {
     const stalled = waitStreak >= 3
     const adviseReason = advisorReasonFor(reason, waitStreak)
     const mercuryTrigger = this.mercuryTriggerFor(adviseReason)
-    const stalledOption = stalled
-      ? buildBodyChangeOption(counts, this.world, {
-          placedFurnacesNear: this.placedFurnacesNear(),
-          knownFurnaces: this.world.furnaces.length,
-          resumeRungIndex: rung.adoptedRungIndex,
-          log: this.log,
-        })
-      : null
-    const deterministicOption = stalledOption ?? fallbackOption
     if (this.mercury !== undefined && mercuryTrigger !== null) {
       const repair = await this.mercury.tryRepair(request, mercuryTrigger)
       if (repair !== null) {
@@ -1878,6 +1868,18 @@ export class PlannerBrain implements System2Brain {
     }
 
     if (this.mode === 'deterministic') {
+      // Deterministic candidate construction is baseline-only work: in llm mode
+      // the model owns the choice, so this must never run there (#226).
+      const fallbackOption = options[0] ?? FRONT_FALLBACK
+      const stalledOption = stalled
+        ? buildBodyChangeOption(counts, this.world, {
+            placedFurnacesNear: this.placedFurnacesNear(),
+            knownFurnaces: this.world.furnaces.length,
+            resumeRungIndex: rung.adoptedRungIndex,
+            log: this.log,
+          })
+        : null
+      const deterministicOption = stalledOption ?? fallbackOption
       const ordered = this.applyReadinessOrder(deterministicOption)
       this.logPlan('fallback', ordered, reason, started, 0, 'planner disabled (deterministic mode)')
       const option: PlanOption = { ...ordered, strategy: 'deterministic' }
