@@ -6,7 +6,7 @@ import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import { guardCandidate, guardDecision } from './src/policy.ts'
 import type { GuardCode, GuardContext } from './src/policy.ts'
-import type { BlockState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { BlockState, DescentOption, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 
 const IN_REACH_LOG: Vec3Json = { x: 1, y: 64, z: 0 }
 const FAR_LOG: Vec3Json = { x: 1, y: 64, z: 40 }
@@ -53,6 +53,7 @@ function state(overrides: {
   inventory?: InventoryState
   tick?: number
   standable?: Vec3Json[]
+  descent?: DescentOption[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -65,6 +66,7 @@ function state(overrides: {
     terrain: { standable: overrides.standable ?? [{ x: overrides.self.x, y: overrides.self.y, z: overrides.self.z }] },
     craftingTables: [],
     placementSpots: [],
+    descent: overrides.descent ?? [],
     goal: {
       id: 'chop:oak_log',
       description: 'collect 1 x oak_log',
@@ -357,6 +359,47 @@ addCase('accepts a vertical-plan MOVE when the horizontal path probe refuses', (
   return result.ok ? { code: null, reason: 'accepted vertical plan' } : { code: result.code, reason: result.reason }
 })
 
+addCase('accepts a level DESCEND when a same-direction down step shares its wall', () => {
+  const feet = { x: 0, y: 44, z: 0 }
+  const sharedWall = { x: 0, y: 44, z: 1 }
+  const down: DescentOption = {
+    dir: 'S',
+    mode: 'down',
+    dx: 0,
+    dz: 1,
+    step: { x: 0, y: 43, z: 1 },
+    wall: sharedWall,
+    head: { x: 0, y: 45, z: 1 },
+    floor: { x: 0, y: 43, z: 1 },
+    wallSolid: true,
+    headSolid: false,
+    floorSolid: true,
+    safe: false,
+    reason: 'no solid support at (0,42,1)',
+    digName: 'stone',
+    digHarvestTool: 'pickaxe',
+    digHarvestTier: 1,
+    diggable: true,
+  }
+  const level: DescentOption = {
+    ...down,
+    mode: 'level',
+    step: sharedWall,
+    floor: { x: 0, y: 43, z: 1 },
+    safe: true,
+    reason: 'safe',
+  }
+  const fixture = state({ self: feet, blocks: [], descent: [down, level] })
+  const chunk = candidate({
+    id: 'DESCEND:level:S:b0_44_1',
+    kind: 'DESCEND',
+    target: sharedWall,
+    meta: { tick: 5, mode: 'level', dir: 'S' },
+  })
+  const result = guardCandidate(chunk, fixture, context({ candidateIds: new Set([chunk.id]) }))
+  return result.ok ? { code: null, reason: 'accepted level step' } : { code: result.code, reason: result.reason }
+})
+
 // --- MOVE to a vanished log is rejected, so the executor never walks into nothing
 addCase('rejects a log-anchored MOVE when the log is gone', () => {
   const fixture = state({ self: { x: 0, y: 64, z: 0 }, blocks: [] })
@@ -393,6 +436,7 @@ const expected: Record<string, GuardCode | null> = {
   'rejects CONFLICT_IN_FLIGHT while another mine is running': 'CONFLICT_IN_FLIGHT',
   'accepts a log-anchored MOVE to its walk-up spot': null,
   'accepts a vertical-plan MOVE when the horizontal path probe refuses': null,
+  'accepts a level DESCEND when a same-direction down step shares its wall': null,
   'rejects a log-anchored MOVE when the log is gone': 'TARGET_GONE',
   'rejects EAT when the food left the inventory': 'EMPTY_HAND',
 }
