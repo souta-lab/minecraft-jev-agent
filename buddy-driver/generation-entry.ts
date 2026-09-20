@@ -693,6 +693,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
           dir: ctx.m2SnapshotDir,
           readInventory: () => inventoryCounts(ctx.bot),
+          initialInventory: counts,
           log: (event, detail) => ctx.log(event, detail),
         })
   const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
@@ -987,7 +988,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     verbose: true,
     eventSink: (event, detail) => {
       ctx.log(event, { ...detail, generationId: id })
-      m2Snapshot?.recordMarker(event)
+      m2Snapshot?.recordMarker(event, detail)
       const actionId = typeof detail.actionId === 'string' ? detail.actionId : null
       const verified = detail.verified === true
       const status = typeof detail.status === 'string' ? detail.status : null

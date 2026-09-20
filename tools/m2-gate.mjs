@@ -396,6 +396,8 @@ function snapshotPortalEvents(snapshot) {
 
 function snapshotInventorySamples(snapshot) {
   const samples = []
+  const initial = asCounts(snapshot?.initialInventory)
+  if (initial !== null) samples.push(initial)
   for (const marker of Array.isArray(snapshot?.markers) ? snapshot.markers : []) {
     const counts = asCounts(marker?.inventory)
     if (counts !== null) samples.push(counts)

@@ -214,16 +214,15 @@ for (const [label, marker] of [
     atMs: 1,
     at: '2026-09-20T10:00:07.000Z',
     markers: [
-      { name: 'PREREQ_OPTION', atMs: 1, at: 'x', inventory: { diamond: 3, diamond_pickaxe: 1 } },
-      { name: 'FURNACE_READY', atMs: 2, at: 'x', inventory: { flint_and_steel: 1, obsidian: 10 } },
-      { name: 'PORTAL_BLOCK_PLACED', atMs: 3, at: 'x', inventory: {}, line: 'PORTAL_BLOCK_PLACED pos=1,64,0' },
-      { name: 'PORTAL_FRAME_READY', atMs: 3, at: 'x', inventory: {}, line: 'PORTAL_FRAME_READY blocks=10 shape=ok' },
-      { name: 'PORTAL_LIT', atMs: 4, at: 'x', inventory: {}, line: 'PORTAL_LIT pos=1,65,0 dimension=minecraft:overworld' },
-      { name: 'PORTAL_VERIFIED', atMs: 5, at: 'x', inventory: {}, line: 'PORTAL_VERIFIED=true' },
+      { name: 'PORTAL_BLOCK_PLACED', atMs: 3, at: 'x', inventory: {}, pos: [1, 64, 0] },
+      { name: 'PORTAL_FRAME_READY', atMs: 3, at: 'x', inventory: {}, blocks: 10, shape: 'ok', pos: [1, 68, 0] },
+      { name: 'PORTAL_LIT', atMs: 4, at: 'x', inventory: {}, pos: [1, 65, 0], dimension: 'minecraft:overworld' },
+      { name: 'PORTAL_VERIFIED', atMs: 5, at: 'x', inventory: {}, verified: true, dimension: 'minecraft:overworld' },
     ],
     sequence: [],
     chain: { status: 'INCOMPLETE', required: [], observed: [] },
     inventory: {},
+    initialInventory: { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 10 },
     terminal: null,
   }
   writeFileSync(join(dir, `m2-snapshot-${RUN}.json`), JSON.stringify(snapshot))

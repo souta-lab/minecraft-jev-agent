@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path'
 import type { Counts } from './planner.ts'
 
-export const M2_SNAPSHOT_SCHEMA_VERSION = 1
+export const M2_SNAPSHOT_SCHEMA_VERSION = 2
 export const M2_SNAPSHOT_RECORD = 'm2-snapshot'
 
 /**
@@ -27,13 +27,30 @@ export const M2_SNAPSHOT_RECORD = 'm2-snapshot'
 export const M2_REQUIRED_MARKERS = ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'] as const
 export type M2RequiredMarker = (typeof M2_REQUIRED_MARKERS)[number]
 
+/** Current M2 (diamond -> Nether gate) markers captured by the same recorder. */
+export const M2_PORTAL_MARKERS = [
+  'PORTAL_BLOCK_PLACED',
+  'PORTAL_FRAME_READY',
+  'PORTAL_LIT',
+  'PORTAL_VERIFIED',
+  'PORTAL_LIGHT_REFUSED',
+] as const
+export type M2PortalMarker = (typeof M2_PORTAL_MARKERS)[number]
+
 /** Bound on recorded marker occurrences so a pathological repeat cannot grow the file without limit. */
 export const M2_SNAPSHOT_MAX_SEQUENCE = 64
 
-const REQUIRED_MARKER_SET: ReadonlySet<string> = new Set<string>(M2_REQUIRED_MARKERS)
+const REQUIRED_MARKER_SET: ReadonlySet<string> = new Set<string>([
+  ...M2_REQUIRED_MARKERS,
+  ...M2_PORTAL_MARKERS,
+])
 
-export function isRequiredM2Marker(event: string): event is M2RequiredMarker {
+export function isRequiredM2Marker(event: string): event is M2RequiredMarker | M2PortalMarker {
   return REQUIRED_MARKER_SET.has(event)
+}
+
+export function isPortalM2Marker(event: string): event is M2PortalMarker {
+  return (M2_PORTAL_MARKERS as readonly string[]).includes(event)
 }
 
 export function m2SnapshotFileName(runId: string): string {
@@ -49,6 +66,11 @@ export interface M2SnapshotMarker {
   atMs: number
   at: string
   inventory: Counts
+  blocks?: number
+  shape?: string
+  verified?: boolean
+  dimension?: string
+  pos?: [number, number, number]
 }
 
 /** A verified durable terminal observation captured after the required chain. */
@@ -78,6 +100,8 @@ export interface M2Snapshot {
   worldKey: string | null
   atMs: number
   at: string
+  /** Inventory captured when this resident run first initialized. */
+  initialInventory?: Counts
   markers: M2SnapshotMarker[]
   sequence: string[]
   chain: M2SnapshotChain
@@ -124,7 +148,12 @@ function isSnapshotMarker(value: unknown): value is M2SnapshotMarker {
     typeof candidate.name === 'string' &&
     typeof candidate.atMs === 'number' &&
     typeof candidate.at === 'string' &&
-    isCounts(candidate.inventory)
+    isCounts(candidate.inventory) &&
+    (candidate.blocks === undefined || (typeof candidate.blocks === 'number' && Number.isFinite(candidate.blocks))) &&
+    (candidate.shape === undefined || typeof candidate.shape === 'string') &&
+    (candidate.verified === undefined || typeof candidate.verified === 'boolean') &&
+    (candidate.dimension === undefined || typeof candidate.dimension === 'string') &&
+    (candidate.pos === undefined || (Array.isArray(candidate.pos) && candidate.pos.length === 3 && candidate.pos.every((entry) => typeof entry === 'number' && Number.isFinite(entry))))
   )
 }
 
@@ -164,6 +193,7 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
     worldKey: typeof candidate.worldKey === 'string' ? candidate.worldKey : null,
     atMs: candidate.atMs,
     at: candidate.at,
+    ...(isCounts(candidate.initialInventory) ? { initialInventory: { ...candidate.initialInventory } } : {}),
     markers: candidate.markers.map((marker) => ({ ...marker, inventory: { ...marker.inventory } })),
     sequence: [...candidate.sequence],
     chain,
@@ -202,6 +232,8 @@ export interface M2SnapshotRecorderOptions {
   dir: string
   /** Reads the bot's FULL live inventory. Called at every marker; never cached across markers. */
   readInventory: () => Counts
+  /** Initial run inventory captured by the HOST before the first generation starts. */
+  initialInventory?: Counts
   /** Injectable clock (ms). */
   now?: () => number
   log?: (event: string, detail?: Record<string, unknown>) => void
@@ -235,6 +267,7 @@ export class M2SnapshotRecorder {
             worldKey: options.worldKey,
             atMs: 0,
             at: new Date(0).toISOString(),
+            ...(options.initialInventory === undefined ? {} : { initialInventory: { ...options.initialInventory } }),
             markers: [],
             sequence: [],
             chain: orderedM2Chain([]),
@@ -248,6 +281,7 @@ export class M2SnapshotRecorder {
   current(): M2Snapshot {
     return {
       ...this.snapshot,
+      ...(this.snapshot.initialInventory === undefined ? {} : { initialInventory: { ...this.snapshot.initialInventory } }),
       markers: this.snapshot.markers.map((marker) => ({ ...marker, inventory: { ...marker.inventory } })),
       sequence: [...this.snapshot.sequence],
       chain: { ...this.snapshot.chain, required: [...this.snapshot.chain.required], observed: [...this.snapshot.chain.observed] },
@@ -274,7 +308,7 @@ export class M2SnapshotRecorder {
    * event is not part of the required M2 chain. The marker's timestamp and the
    * FULL live inventory are read at THIS instant; the file update is atomic.
    */
-  recordMarker(event: string): M2SnapshotMarker | null {
+  recordMarker(event: string, detail?: Record<string, unknown>): M2SnapshotMarker | null {
     if (!isRequiredM2Marker(event)) return null
     const now = this.options.now ?? Date.now
     const atMs = now()
@@ -284,12 +318,36 @@ export class M2SnapshotRecorder {
       at: new Date(atMs).toISOString(),
       inventory: this.readInventory(),
     }
+    if (typeof detail?.blocks === 'number' && Number.isFinite(detail.blocks)) marker.blocks = detail.blocks
+    if (typeof detail?.shape === 'string') marker.shape = detail.shape
+    if (typeof detail?.verified === 'boolean') marker.verified = detail.verified
+    if (typeof detail?.dimension === 'string') marker.dimension = detail.dimension
+    const position = detail?.target !== null && typeof detail?.target === 'object'
+      ? detail.target as { x?: unknown; y?: unknown; z?: unknown }
+      : null
+    if (
+      position !== null &&
+      typeof position.x === 'number' &&
+      typeof position.y === 'number' &&
+      typeof position.z === 'number'
+    ) {
+      marker.pos = [position.x, position.y, position.z]
+    } else if (typeof detail?.at === 'string') {
+      const match = /^(-?\d+),(-?\d+),(-?\d+)$/.exec(detail.at)
+      if (match !== null) marker.pos = [Number(match[1]), Number(match[2]), Number(match[3])]
+    }
     // Keep the sample from the occurrence that advances the ordered chain. A
     // later repeat must not overwrite a valid chain's earlier live inventory.
     const cursor = orderedM2Chain(this.snapshot.sequence).observed.length
-    const advancesChain = M2_REQUIRED_MARKERS[cursor] === event
+    const advancesChain = !isPortalM2Marker(event) && M2_REQUIRED_MARKERS[cursor] === event
     const index = this.snapshot.markers.findIndex((entry) => entry.name === event)
-    if (advancesChain) {
+    if (isPortalM2Marker(event)) {
+      // Portal evidence is an ordered event stream, not one slot per marker.
+      // Preserve every occurrence so a later run-scoped gate can prove the
+      // placed -> frame -> lit -> verified chain without reconstructing it
+      // from an all-time log.
+      this.snapshot.markers.push(marker)
+    } else if (advancesChain) {
       if (index === -1) this.snapshot.markers.push(marker)
       else this.snapshot.markers[index] = marker
     } else if (index === -1) {
