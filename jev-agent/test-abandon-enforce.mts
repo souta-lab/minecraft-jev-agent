@@ -1,17 +1,8 @@
-// test-abandon-enforce.mts - issue #79: shadow mode must honor an abandon for a
-// DEMONSTRABLY UNPRODUCTIVE option while still suppressing a SPECULATIVE one.
-//
-// Measured live: `JEV_HEADS action=ESCALATE abandon=1 decision=continue
-// abandonRequested=true betaAuthority=false betaShadowed=true` repeated forever
-// while `CAUSAL ... optionId=smelt:iron_ingot ... verified=false progressDelta=0`.
-// This suite locks the distinction:
-//
-//   (a) 0 attempts in shadow mode -> ABANDON_SUPPRESSED ... action=continue
-//   (b) N unverified zero-progress attempts -> ABANDON_ENFORCED even with
-//       betaAuthority=false
-//   (c) the next ladder rung is selected and the abandoned one is not retried
-//   (d) the per-option counter resets after verified progress
-//   (e) a never-attempted smoke option stays protected before its prereq runs
+// test-abandon-enforce.mts - issue #79 explicit legacy/shadow baseline:
+// a demonstrably unproductive option may be retired by the historical attempt
+// budget while a speculative one remains protected. The normal #11 resident
+// path is beta-authoritative and controller.ts strangles this semantic override;
+// this file keeps the old mechanism covered as an explicit A/B baseline.
 //
 // Pure: no bot, no network, no model.
 import { readFileSync } from 'node:fs'
@@ -39,6 +30,8 @@ const addCase = (name: string, run: Case['run']): void => {
 }
 
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
+const runtimeControllerSource = (): string =>
+  `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
 
 const OPTION = 'smelt:iron_ingot'
 const PLAN = 'g41:smelt:iron_ingot'
@@ -67,7 +60,7 @@ function classify(
   })
 }
 
-addCase('(a) #79: a speculative (0-attempt) request is suppressed in shadow mode', () => {
+addCase('(a) #79 baseline: a speculative (0-attempt) request is suppressed in explicit shadow mode', () => {
   const tracker = new OptionAttemptTracker()
   const classification = classify(tracker)
   const line = formatAbandonSuppressed({ optionId: OPTION, reason: 'speculative', attempts: classification.attempts })
@@ -81,7 +74,7 @@ addCase('(a) #79: a speculative (0-attempt) request is suppressed in shadow mode
   return { pass, detail: `${line} | action=${classification.action} reason=${classification.reason}` }
 })
 
-addCase('(b) #79: after N unverified zero-progress attempts the abandon is enforced despite betaAuthority=false', () => {
+addCase('(b) #79 baseline: after N unverified zero-progress attempts the shadow baseline enforces abandon', () => {
   const tracker = new OptionAttemptTracker()
   unproductive(tracker, LIMIT)
   const state = tracker.stateFor(OPTION, PLAN)
@@ -107,7 +100,7 @@ addCase('(b) #79: after N unverified zero-progress attempts the abandon is enfor
   return { pass, detail: `${line} | attempts=${state.attempts}` }
 })
 
-addCase('(c) #79: the next ladder rung is selected; the abandoned one is not retried', () => {
+addCase('(c) #79 baseline: the next ladder rung is selected; the abandoned one is not retried', () => {
   const input: PrereqInput = {
     goal: { kind: 'smelt', targetItem: 'iron_ingot' },
     heldCount: 1,
@@ -133,7 +126,7 @@ addCase('(c) #79: the next ladder rung is selected; the abandoned one is not ret
   return { pass, detail: `chosen=${decision.chosen} base=${base} afterAbandon=${next} allAbandoned=${escalate}` }
 })
 
-addCase('(d) #79: the counter resets after verified progress', () => {
+addCase('(d) #79 baseline: the counter resets after verified progress', () => {
   const tracker = new OptionAttemptTracker()
   unproductive(tracker, LIMIT)
   const before = tracker.attemptsFor(OPTION, PLAN)
@@ -156,7 +149,7 @@ addCase('(d) #79: the counter resets after verified progress', () => {
   }
 })
 
-addCase('(e) #79: a never-attempted smelt option stays protected before its prereq runs', () => {
+addCase('(e) #79 baseline: a never-attempted smelt option stays protected before its prereq runs', () => {
   const smeltGoal: GoalLike = { kind: 'smelt', targetItem: 'iron_ingot' }
   const vote = betaAuthorityDecision({
     betaAuthority: false,
@@ -177,20 +170,25 @@ addCase('(e) #79: a never-attempted smelt option stays protected before its prer
   return { pass, detail: `protect=${vote.protection.protect} adopt=${vote.adopt} enforced=${classification.enforced}` }
 })
 
-addCase('#79 wiring: the controller records attempts and emits both markers', () => {
-  const text = source('./src/controller.ts')
+addCase('#295 wiring: the runtime composition records legacy attempts/markers and the facade owns the real-beta verdict', () => {
+  const text = runtimeControllerSource()
   const missing = [
     'classifyAbandonRequest({',
     'optionAttempts.noteOutcome(',
     'formatAbandonEnforced(',
     'formatAbandonSuppressed(',
     'enforceUnproductiveAbandon(',
+    'internals.abandonVerdict = (decision, optionId, planId) => {',
+    'const adopt = abandonRequested(decision)',
   ].filter((needle) => !text.includes(needle))
-  return { pass: missing.length === 0, detail: missing.length === 0 ? 'attempt counter + enforcement wired' : `missing ${missing.join(', ')}` }
+  return {
+    pass: missing.length === 0,
+    detail: missing.length === 0 ? 'legacy baseline + authority facade both wired' : `missing ${missing.join(', ')}`,
+  }
 })
 
 let failures = 0
-process.stdout.write('#79 abandon enforce: honor unproductive abandons in shadow mode\n')
+process.stdout.write('#79/#295 abandon baseline + authority-facade wiring\n')
 process.stdout.write('-'.repeat(78) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()
