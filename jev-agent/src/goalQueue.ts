@@ -24,6 +24,7 @@ import {
   formatProtectedGoalAbandoned,
   formatProtectedGoalDroppedRejected,
   formatProtectedGoalReinserted,
+  formatProtectedGoalRetired,
   isProtectedGoal,
   splitProtectedGoals,
 } from './protectedGoals.ts'
@@ -54,6 +55,12 @@ export interface ApplyPlanOptions {
   onProtection?: (line: string) => void
   /** Audit sink for goals skipped because an identical unfinished instance is already queued. */
   onDuplicate?: (line: string) => void
+  /**
+   * Code-owned truth may retire a protected prerequisite when a new plan is
+   * grounded on a verified world fact that makes that prerequisite obsolete.
+   * Returning null keeps the normal #55 reinsertion contract unchanged.
+   */
+  protectedGoalRetireReason?: (goal: QueuedGoal, incoming: readonly PlannedGoal[]) => string | null
 }
 
 export const DUPLICATE_GOAL_SKIPPED = 'DUPLICATE_GOAL_SKIPPED'
@@ -290,7 +297,8 @@ export class GoalQueue {
    * Adopt a plan. Unfinished goals are dropped and replaced; completed goals stay
    * so the queue remains a truthful history for the log. Issue #55: protected/
    * core unfinished goals are re-inserted (or the op is rejected) instead of
-   * being silently dropped.
+   * being silently dropped. A caller may explicitly retire one only when its
+   * code-owned world-truth callback proves that prerequisite obsolete.
    */
   applyPlan(
     planned: readonly PlannedGoal[],
@@ -318,7 +326,20 @@ export class GoalQueue {
       const unfinishedProtected = this.goals.filter(
         (goal) => (goal.status === 'pending' || goal.status === 'active') && isProtectedGoal(goal),
       )
-      const { dropped } = splitProtectedGoals(unfinishedProtected, planned)
+      const now = Date.now()
+      const retiredProtected: QueuedGoal[] = []
+      for (const goal of unfinishedProtected) {
+        const reason = options.protectedGoalRetireReason?.(goal, planned)
+        if (reason === undefined || reason === null || reason.length === 0) continue
+        goal.status = 'impossible'
+        goal.detail = `retired by verified world truth: ${reason}`
+        goal.updatedAt = now
+        retiredProtected.push(goal)
+        options.onProtection?.(formatProtectedGoalRetired(goal, reason))
+      }
+      const retiredIds = new Set(retiredProtected.map((goal) => goal.id))
+      const protectedForMerge = unfinishedProtected.filter((goal) => !retiredIds.has(goal.id))
+      const { dropped } = splitProtectedGoals(protectedForMerge, planned)
       if (planned.length === 0 && dropped.length > 0) {
         for (const goal of dropped) {
           options.onProtection?.(formatProtectedGoalDroppedRejected(goal, op, options.reason ?? 'empty_replan'))
@@ -326,15 +347,14 @@ export class GoalQueue {
         this.activate()
         return []
       }
-      const droppedQueued = unfinishedProtected.filter((goal) => dropped.some((found) => found.id === goal.id))
+      const droppedQueued = protectedForMerge.filter((goal) => dropped.some((found) => found.id === goal.id))
       if (op === 'patch') {
         // keep completed history and the currently active goal; replace the pending tail
-        this.goals = this.goals.filter((goal) => goal.status === 'done' || goal.status === 'active')
+        this.goals = this.goals.filter((goal) => goal.status === 'done' || goal.status === 'active' || retiredIds.has(goal.id))
       } else {
-        this.goals = this.goals.filter((goal) => goal.status === 'done')
+        this.goals = this.goals.filter((goal) => goal.status === 'done' || retiredIds.has(goal.id))
       }
       const keptIds = new Set(this.goals.map((goal) => goal.id))
-      const now = Date.now()
       for (const original of droppedQueued) {
         if (keptIds.has(original.id)) continue
         reinserted.push({ ...original, status: 'pending', updatedAt: now })

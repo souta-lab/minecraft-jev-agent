@@ -35,6 +35,7 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
+import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import {
   PlannerBrain,
   RUNGS,
@@ -831,6 +832,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     placedFurnacesNear: furnaces.length,
     knownFurnaces: world.furnaces.length,
     resumeRungIndex: resume.rungIndex,
+    portalFrameBlocks: countSensedPortalFrameBlocks(ctx.bot),
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })

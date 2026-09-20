@@ -66,6 +66,8 @@ import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
+import { OBSIDIAN, PORTAL_OBSIDIAN_REQUIRED } from './netherPortalPlan.ts'
+import type { PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -75,7 +77,7 @@ import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from 
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
+import { buildWorldState, countSensedPortalFrameBlocks, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -1634,6 +1636,7 @@ export class JevController {
       reason: plan.note,
       onProtection: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
       onDuplicate: (line) => this.logger.warn('agent', line, { op, requested: requestedOp, phase: 'bootstrap' }, this.tickCounter),
+      protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
     })
     this.logQueueDepthDelta(depthBefore, op, `bootstrap`)
     this.subgoalCount = Math.max(added.length, this.queue.size)
@@ -1875,6 +1878,7 @@ export class JevController {
         unreachableStations,
         this.reachabilityGateOptions(),
         blacklistedMoveTargets,
+        state.portalFrame,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -2047,6 +2051,7 @@ export class JevController {
             this.unreachableStationKeys(freshState),
             this.reachabilityGateOptions(),
             this.blacklistedMoveTargets(freshState),
+            freshState.portalFrame,
           ),
         ).candidates,
         freshState,
@@ -3783,6 +3788,27 @@ export class JevController {
     })
   }
 
+  /**
+   * Retire only the stale obsidian acquisition prerequisite that a live partial
+   * frame has already made unnecessary. This is a world-truth/lifecycle
+   * reconciliation, not a semantic preference: every other protected goal keeps
+   * the normal #55 reinsertion guarantee.
+   */
+  private protectedGoalRetireReason(goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null {
+    if (goal.kind !== 'collect' || goal.targetItem !== OBSIDIAN) return null
+    const continuesPortalFrame = incoming.some(
+      (planned) =>
+        planned.kind === 'place' &&
+        planned.targetItem === OBSIDIAN &&
+        (planned.optionTemplateId === 'place:obsidian' || planned.description.toLowerCase().includes('portal frame')),
+    )
+    if (!continuesPortalFrame) return null
+    const existing = countSensedPortalFrameBlocks(this.bot)
+    const held = this.countItem(OBSIDIAN)
+    if (existing + held < PORTAL_OBSIDIAN_REQUIRED) return null
+    return `portal frame coverage existing=${existing} held=${held} required=${PORTAL_OBSIDIAN_REQUIRED}`
+  }
+
   private logSubgoalStart(goal: QueuedGoal, inventory: Record<string, number>, cause: string): void {
     this.logger.warn(
       'queue',
@@ -3889,6 +3915,7 @@ export class JevController {
           reason: plan.note,
           onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
           onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
+          protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
         })
         this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `summon:${reason}`)
         this.waitReplans = 0
@@ -5584,6 +5611,7 @@ function candidateOptions(
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
+  portalFrame: PortalFrameValidation | null = null,
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -5592,6 +5620,7 @@ function candidateOptions(
     unreachableStations,
     blacklistedMoveTargets,
     reachability,
+    portalFrame,
     prereqRankPolicy: options.prereqRankPolicy,
   }
 }
