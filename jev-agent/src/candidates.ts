@@ -697,6 +697,11 @@ function mineCandidates(
   focusItem: string | null,
   descendTargetY: number | null = null,
 ): Candidate[] {
+  // A MINE that feeds an inventory-counted goal (collect/craft/smelt) must end
+  // with its drop in the inventory; a navigation goal (descend/surface/explore)
+  // only needs the block gone, because its drop may be transformed or lost.
+  const goalKind = state.goalQueue?.current?.kind ?? 'collect'
+  const requiresPickup = goalKind === 'collect' || goalKind === 'craft' || goalKind === 'smelt'
   const mineable = state.blocks.filter(
     (block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore',
   )
@@ -754,7 +759,7 @@ function mineCandidates(
         toolTier: tier,
         inReach: true,
         hasStandableAdjacent: block.hasAdjacentStandable,
-        meta: baseMeta,
+        meta: { ...baseMeta, requiresPickup },
       })
       continue
     }
@@ -921,6 +926,7 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
       y: cut.pos.y,
       z: cut.pos.z,
       clearance: true,
+      requiresPickup: false,
       yieldItem: cut.name,
       distance: Math.hypot(cut.pos.x + 0.5 - feet.x, cut.pos.z + 0.5 - feet.z),
     },

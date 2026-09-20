@@ -2830,6 +2830,7 @@ export class JevController {
       progressed: result.progressed,
       arrived: moveArrived || retrieveArrived,
       distanceClosed: result.distanceClosed,
+      requiresPickup: candidate.meta.requiresPickup === true,
     })
     this.recentOutcomes.push({
       actionId: result.actionId,
@@ -2952,16 +2953,16 @@ export class JevController {
           this.signals.heldFurnacePlacedAt = blockId('b', candidate.target)
         }
       }
-      if (result.kind === 'MINE' && result.verified) {
+      if (result.kind === 'MINE' && truth.verified) {
         if (result.blockRemoved) this.resetDescendBudgetAfterWorldChange(result.actionId, 'verified_mine')
         this.noteCandidateSuccess(result.actionId)
         this.verifiedDigs += 1
         if (result.blockRemoved) this.blocksRemoved += 1
         if (result.dropObserved) this.dropObservations += 1
         this.itemsCollected += result.itemsGained
-        // A verified dig whose target block is gone counts as one obtained goal
-        // item even when the pickup walk cannot reach the drop: VERIFY already
-        // accepts `blockRemoved` + `dropObserved` as proof of the dig.
+        // A MINE only counts as one obtained goal item when the truth layer
+        // verified it: a collect MINE whose drop was not picked up is a typed
+        // failure (`pickup_failed`), never a completed collection.
         const current = this.queue.current
         if (result.blockRemoved && current !== null && result.yieldItem === current.targetItem) {
           this.harvestedGoalCount += 1
