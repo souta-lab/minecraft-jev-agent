@@ -33,6 +33,7 @@
     "world-epoch-test": "node ../jev-agent/node_modules/.bin/tsx test-world-epoch.mts",
     "actuation-port-test": "node ../jev-agent/node_modules/.bin/tsx test-actuation-port.mts",
     "mercury-test": "node test-mercury.mts",
+    "mercury-authority-wiring-test": "node ../jev-agent/node_modules/.bin/tsx test-mercury-authority-wiring.mts",
     "mercury-count-budget-test": "node test-mercury-count-budget.mts",
     "mercury-portal-capabilities-test": "node test-mercury-portal-capabilities.mts",
     "advisor-cache-test": "node test-advisor-cache.mts",
