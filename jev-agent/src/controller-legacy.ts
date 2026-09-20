@@ -395,12 +395,18 @@ export interface RunSummary {
 
 export { TRIGGER_PRIORITY }
 
-/** Safety-critical events: a decision made before one of these is stale. */
+/** Safety-critical events: an incompatible threat makes the Jev answer stale. */
 export const CRITICAL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
   'damage_taken',
   'hp_changed',
   'mob_appeared',
 ])
+
+type CriticalThreatFamily = 'injury' | 'mob'
+
+function criticalThreatFamily(trigger: DecisionTrigger): CriticalThreatFamily {
+  return trigger === 'mob_appeared' ? 'mob' : 'injury'
+}
 
 const STALL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
   'path_stuck',
@@ -1999,14 +2005,23 @@ export class JevController {
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
 
-      if (this.criticalArrivedDuringFlight()) {
+      if (this.criticalArrivedDuringFlight(trigger)) {
         this.logger.warn(
           'policy',
-          `discarding stale decision ${decision.callId}: a critical trigger arrived during the Jev flight`,
+          `discarding stale decision ${decision.callId}: an incompatible critical trigger arrived during the Jev flight`,
           {},
           this.tickCounter,
         )
         return
+      }
+
+      if (this.hasCriticalTriggerDuringFlight()) {
+        this.logger.info(
+          'policy',
+          `critical trigger arrived during the Jev flight; revalidating decision ${decision.callId} against fresh state`,
+          {},
+          this.tickCounter,
+        )
       }
 
       const freshState = buildWorldState(
@@ -2650,7 +2665,16 @@ export class JevController {
     return true
   }
 
-  private criticalArrivedDuringFlight(): boolean {
+  private criticalArrivedDuringFlight(trigger: DecisionTrigger): boolean {
+    const pending = this.pendingTrigger
+    const deferred = this.deferredTrigger
+    const critical = [pending, deferred].find((event) => event !== null && CRITICAL_TRIGGERS.has(event.trigger))
+    if (critical === undefined || critical === null) return false
+    if (!CRITICAL_TRIGGERS.has(trigger)) return true
+    return criticalThreatFamily(trigger) !== criticalThreatFamily(critical.trigger)
+  }
+
+  private hasCriticalTriggerDuringFlight(): boolean {
     const pending = this.pendingTrigger
     const deferred = this.deferredTrigger
     return (
