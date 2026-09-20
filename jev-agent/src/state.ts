@@ -14,7 +14,7 @@ import type { CurrentOptionContext } from './optionSpec.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
-import { portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
+import { NETHER_PORTAL, portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 
 export type Vec3Json = {
@@ -1241,7 +1241,10 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
           // Corners are optional and may already contain harmless scaffolding;
           // they are never counted toward the ten required edge blocks. The
           // interior, however, must remain clear for a future ignition.
-          if (!validFootprint || !layout.interior.every((cell) => clear(cell.x, cell.y, cell.z))) continue
+          // A lit portal replaces the interior air with `nether_portal`. Keep
+          // the frame site observable so the controller can re-check that
+          // post-condition from live world truth instead of a stale queue bit.
+          if (!validFootprint || !layout.interior.every((cell) => clear(cell.x, cell.y, cell.z) || at(cell.x, cell.y, cell.z)?.name === NETHER_PORTAL)) continue
           let supported = true
           for (let w = 0; w < 4; w += 1) {
             const bottom =
