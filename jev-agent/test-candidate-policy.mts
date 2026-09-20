@@ -4,7 +4,7 @@
 // inline module constants, and the generator honors the configured value.
 //
 //   npm run candidate-policy-test
-import { blockId, defaultCandidateOptions, generateCandidates, restrictCandidatesDuringImmediateThreat } from './src/candidates.ts'
+import { blockId, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, generateCandidates, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -167,6 +167,29 @@ addCase('an immediate hostile threat removes work actions but leaves Jev ATTACK/
   const ids = kept.map((entry) => entry.id)
   const pass = ids.join('|') === 'ATTACK:e1|RETREAT:p1'
   return { pass, detail: `kept=[${ids.join(',')}]` }
+})
+
+addCase('critical health grounds a retreat from the sensed hostile and removes ATTACK by hard safety', () => {
+  const state = exploreState(0)
+  state.self = { ...state.self, health: CRITICAL_COMBAT_HEALTH - 1 }
+  state.entities = [
+    {
+      id: 7,
+      name: 'zombie',
+      kind: 'mob',
+      username: null,
+      position: { x: 3.5, y: 10, z: 0.5 },
+      distance: 3,
+      hostile: true,
+    },
+  ]
+  state.terrain = { standable: [SELF, { x: -3, y: 10, z: 0.5 }] }
+  const generated = generateCandidates(state)
+  const safe = restrictCandidatesAtCriticalHealth(state, generated)
+  const attacks = generated.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  const retreats = safe.filter((candidate) => candidate.kind === 'RETREAT').map((candidate) => candidate.id)
+  const pass = attacks.length === 1 && retreats.length === 1 && safe.every((candidate) => candidate.kind !== 'ATTACK')
+  return { pass, detail: `health=${state.self.health} attacks=[${attacks.join(',')}] safeRetreats=[${retreats.join(',')}]` }
 })
 
 let failures = 0

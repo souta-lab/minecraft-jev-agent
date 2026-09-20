@@ -86,6 +86,24 @@ export const PREEMPTIVE_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<Decisio
   'action_timeout',
 ])
 
+/**
+ * An ATTACK lease is normally non-preemptive so Jev is not re-asked on every
+ * hit.  Once health is critical, however, deferring the damage event can keep
+ * the executor attacking until death.  This predicate is deliberately small
+ * and pure so the safety exception is observable and testable.
+ */
+export function shouldInterruptAttackLease(
+  trigger: DecisionTrigger,
+  health: number,
+  criticalHealth = 6,
+): boolean {
+  return (
+    (trigger === 'damage_taken' || trigger === 'hp_changed') &&
+    Number.isFinite(health) &&
+    health <= criticalHealth
+  )
+}
+
 /** Higher wins when a burst of triggers is coalesced; a critical trigger is never overwritten. */
 export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
   damage_taken: 10,

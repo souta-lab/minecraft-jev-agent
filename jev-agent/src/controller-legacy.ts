@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
@@ -75,7 +75,7 @@ import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
@@ -1738,6 +1738,16 @@ export class JevController {
         // loop.  Keep the selected attack mechanics together and replay the
         // highest-priority threat trigger immediately after the short lease.
         if (inFlight.kind === 'ATTACK') {
+          if (shouldInterruptAttackLease(trigger, this.bot.health, CRITICAL_COMBAT_HEALTH)) {
+            this.logger.warn(
+              'scheduler',
+              `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${this.bot.health}`,
+              detail,
+              this.tickCounter,
+            )
+            this.scheduleTick(event)
+            return
+          }
           this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
           this.logger.info(
             'scheduler',
@@ -1923,6 +1933,7 @@ export class JevController {
       // goal here so an inputs-held craft is never reported as starved.
       candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
       candidates = restrictCandidatesDuringImmediateThreat(state, candidates)
+      candidates = restrictCandidatesAtCriticalHealth(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -2071,22 +2082,25 @@ export class JevController {
         sensorOptions(this.options),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
-      const freshCandidates = restrictCandidatesDuringImmediateThreat(
+      const freshCandidates = restrictCandidatesAtCriticalHealth(
         freshState,
-        this.filterMoveCandidates(
-          generateGroundedCandidates(
+        restrictCandidatesDuringImmediateThreat(
           freshState,
-          candidateOptions(
-            this.options,
-            this.recipeIndex,
-            this.unreachableStationKeys(freshState),
-            this.reachabilityGateOptions(),
-            this.blacklistedMoveTargets(freshState),
-            freshState.portalFrame,
+          this.filterMoveCandidates(
+            generateGroundedCandidates(
+              freshState,
+              candidateOptions(
+                this.options,
+                this.recipeIndex,
+                this.unreachableStationKeys(freshState),
+                this.reachabilityGateOptions(),
+                this.blacklistedMoveTargets(freshState),
+                freshState.portalFrame,
+              ),
+            ).candidates,
+            freshState,
+            false,
           ),
-          ).candidates,
-          freshState,
-          false,
         ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))

@@ -23,7 +23,7 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentOption, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
 import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
@@ -109,6 +109,14 @@ export interface Candidate {
  */
 export const IMMEDIATE_HOSTILE_RANGE = 3.2
 
+/**
+ * At this health the bot cannot safely trade another melee hit for one more
+ * attack lease.  This is a hard safety envelope, not a combat preference:
+ * above it Jev still chooses ATTACK versus RETREAT; below it ATTACK is kept
+ * only when no grounded escape response exists.
+ */
+export const CRITICAL_COMBAT_HEALTH = 6
+
 export function restrictCandidatesDuringImmediateThreat(
   state: Pick<WorldState, 'entities'>,
   candidates: readonly Candidate[],
@@ -122,6 +130,25 @@ export function restrictCandidatesDuringImmediateThreat(
   // and let the normal guard report the capability gap; never silently erase
   // all candidates or invent an attack target.
   return combat.length > 0 ? combat : [...candidates]
+}
+
+/**
+ * A critical-health response must not silently fall back to an attack that was
+ * already in flight.  The retreat candidate is still generated from sensed
+ * terrain and Jev retains the choice between the grounded escape and an
+ * escalation.  If perception cannot ground either response, preserve the
+ * original set so the missing affordance remains observable.
+ */
+export function restrictCandidatesAtCriticalHealth(
+  state: Pick<WorldState, 'entities' | 'self'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const immediateHostile = state.entities.some(
+    (entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE,
+  )
+  if (!immediateHostile || state.self.health > CRITICAL_COMBAT_HEALTH) return [...candidates]
+  const escape = candidates.filter((candidate) => candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE')
+  return escape.length > 0 ? escape : [...candidates]
 }
 
 /**
@@ -615,7 +642,8 @@ function generateRawCandidates(
   }
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
-  const retreat = pickRetreat(state, state.terrain.standable, danger, options.blacklistedMoveTargets)
+  const hostile = nearestHostile(state, IMMEDIATE_HOSTILE_RANGE)
+  const retreat = pickRetreat(state, state.terrain.standable, danger, hostile, options.blacklistedMoveTargets)
   if (retreat !== null) {
     candidates.push({
       id: `RETREAT:${blockId('p', retreat)}`,
@@ -3000,15 +3028,26 @@ function nearestDanger(state: WorldState, radius: number): BlockState | null {
   return nearest
 }
 
+function nearestHostile(state: WorldState, radius: number): EntityState | null {
+  let nearest: EntityState | null = null
+  for (const entity of state.entities) {
+    if (!entity.hostile || entity.distance > radius) continue
+    if (nearest === null || entity.distance < nearest.distance) nearest = entity
+  }
+  return nearest
+}
+
 function pickRetreat(
   state: WorldState,
   standable: Vec3Json[],
   danger: BlockState | null,
+  hostile: EntityState | null,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): Vec3Json | null {
-  const hurt = state.self.health <= 6
-  if (danger === null && !hurt) return null
-  const threat = danger?.position ?? state.self.position
+  const hurt = state.self.health <= CRITICAL_COMBAT_HEALTH
+  if (danger === null && hostile === null && !hurt) return null
+  const threat = danger?.position ?? hostile?.position ?? state.self.position
+  const currentThreatDistance = hostile === null ? null : distance(state.self.position, hostile.position)
   let best: Vec3Json | null = null
   let bestScore = Number.NEGATIVE_INFINITY
   for (const spot of standable) {
@@ -3020,7 +3059,13 @@ function pickRetreat(
     }
   }
   if (best === null) return null
-  if (bestScore < HAZARD_DANGER_RADIUS) return null
+  if (hostile !== null) {
+    // A retreat that does not increase separation is only a re-labeled MOVE;
+    // do not offer it as a safety affordance.
+    if (currentThreatDistance === null || bestScore <= currentThreatDistance + 0.25) return null
+  } else if (bestScore < HAZARD_DANGER_RADIUS) {
+    return null
+  }
   return best
 }
 

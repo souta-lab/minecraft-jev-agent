@@ -15,7 +15,7 @@ import type { Bot } from 'mineflayer'
 import { buildQuestions, booleanBand, decisionIdFrom, QUESTION_NAMES, shouldRetreatFrom } from './src/jev.ts'
 import type { JevAnswer, JevResult } from './src/jev.ts'
 import { CRITICAL_TRIGGERS, pickHigherPriority, questionSetForTrigger, TRIGGER_PRIORITY } from './src/controller.ts'
-import { DecisionScheduler, MOB_REACTION_RANGE, mobAppearanceIsNear } from './src/scheduler.ts'
+import { DecisionScheduler, MOB_REACTION_RANGE, mobAppearanceIsNear, shouldInterruptAttackLease } from './src/scheduler.ts'
 import { EventLogger } from './src/jev.ts'
 import { stableStateHash } from './src/decisionlog.ts'
 import { gateBoolean } from './src/gating.ts'
@@ -200,6 +200,9 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
   const nearMob = mobAppearanceIsNear({ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: MOB_REACTION_RANGE })
   const farMob = mobAppearanceIsNear({ x: 0, y: 64, z: 0 }, { x: MOB_REACTION_RANGE + 1, y: 64, z: 0 })
   const unknownMob = mobAppearanceIsNear(undefined, { x: 0, y: 64, z: 0 })
+  const criticalAttackInterrupt = shouldInterruptAttackLease('hp_changed', 5)
+  const healthyAttackContinues = !shouldInterruptAttackLease('hp_changed', 7)
+  const nonThreatAttackContinues = !shouldInterruptAttackLease('action_completed', 1)
 
   const pass =
     keptCritical.trigger === 'damage_taken' &&
@@ -216,8 +219,11 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
     criticalFirst &&
     nearMob &&
     !farMob &&
-    unknownMob
-  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}] mobRange=${nearMob}/${farMob}/${unknownMob}` }
+    unknownMob &&
+    criticalAttackInterrupt &&
+    healthyAttackContinues &&
+    nonThreatAttackContinues
+  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}] mobRange=${nearMob}/${farMob}/${unknownMob} attackInterrupt=${criticalAttackInterrupt}/${healthyAttackContinues}/${nonThreatAttackContinues}` }
 })
 
 // E. monotonic subgoal completion ---------------------------------------------
