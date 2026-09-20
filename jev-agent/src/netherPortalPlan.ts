@@ -462,6 +462,28 @@ export function portalFramePlacementSteps(
   return planBlockPlacements(item, portalFrameLayout(origin, widthAxis).frame)
 }
 
+/** The code-grounded frame site + ordered cells for an abstract build-the-frame goal. */
+export interface PortalFrameGrounding {
+  readonly origin: PortalBlockPosition
+  readonly widthAxis: PortalWidthAxis
+  readonly cells: PortalBlockPosition[]
+}
+
+export function groundPortalFrame(
+  sites: readonly PortalBlockPosition[],
+  self: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+): PortalFrameGrounding | null {
+  if (sites.length === 0) return null
+  const chosen = choosePortalSite(
+    sites.map((position) => ({ position, safe: true, reachable: true })),
+    self,
+  )
+  if (chosen === null) return null
+  const layout = portalFrameLayout(chosen.position, widthAxis)
+  return { origin: chosen.position, widthAxis, cells: orderedPlacementCells(layout.frame) }
+}
+
 // ---------------------------------------------------------------------------
 // safe site selection
 // ---------------------------------------------------------------------------

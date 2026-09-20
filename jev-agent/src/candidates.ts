@@ -45,6 +45,8 @@ import type { CraftIngredientNeed } from './optionSpec.ts'
 import {
   FLINT_AND_STEEL,
   NETHER_PORTAL,
+  OBSIDIAN,
+  groundPortalFrame,
   planPortalIgnition,
   serializePortalCells,
 } from './netherPortalPlan.ts'
@@ -1763,10 +1765,32 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
   return best
 }
 
-function placementSequenceCells(state: WorldState): Vec3Json[] | null {
+function explicitPlacementCells(state: WorldState): Vec3Json[] | null {
   const cells = state.goalQueue?.current?.placementCells ?? null
   if (cells === null || cells.length === 0) return null
   return cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+}
+
+/**
+ * Code-owned frame geometry for an abstract `place obsidian` goal: the site is
+ * chosen from the live placement spots and the cells come from `portalFrameLayout`.
+ * This is where the executor-time grounding happens, never in the model plan.
+ */
+function frameBuildCells(state: WorldState): Vec3Json[] | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'place' || current.targetItem !== OBSIDIAN) return null
+  const grounding = groundPortalFrame(state.placementSpots, state.self.position)
+  if (grounding === null) return null
+  return grounding.cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+}
+
+function placeSequenceCells(state: WorldState, focusItem: string): Vec3Json[] | null {
+  const explicit = explicitPlacementCells(state)
+  if (explicit !== null) return explicit
+  const frame = frameBuildCells(state)
+  if (frame === null) return null
+  if ((state.inventory.counts[focusItem] ?? 0) < frame.length) return null
+  return frame
 }
 
 function placementAxisFor(cells: readonly Vec3Json[]): 'x' | 'z' {
@@ -1784,7 +1808,7 @@ function placementAxisFor(cells: readonly Vec3Json[]): 'x' | 'z' {
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
   if ((state.inventory.counts[focusItem] ?? 0) <= 0) return []
-  const sequence = placementSequenceCells(state)
+  const sequence = placeSequenceCells(state, focusItem)
   if (sequence !== null) {
     const target = sequence[0] ?? null
     return [
@@ -1812,6 +1836,8 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
       },
     ]
   }
+  const current = state.goalQueue?.current ?? null
+  if (current !== null && current.kind === 'place' && current.targetItem === OBSIDIAN) return []
   const spot = leastFailedPlacementSpot(state, focusItem)
   if (spot === null) return []
   return [

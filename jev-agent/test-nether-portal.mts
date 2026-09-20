@@ -282,7 +282,8 @@ addCase('missing materials supply the flint/iron/diamond prerequisite chain inst
     goalItems.includes('iron_ingot') &&
     goalItems.includes('diamond') &&
     goalItems.includes(OBSIDIAN) &&
-    !goalItems.includes(NETHER_PORTAL)
+    plan.goals.some((goal) => goal.kind === 'place' && goal.targetItem === OBSIDIAN && goal.description.includes('build the')) &&
+    !plan.goals.some((goal) => goal.description.includes('build the') && goal.targetItem === NETHER_PORTAL)
   return {
     pass,
     detail: `missing=[${missing.join(',')}] goals=${plan.goals.length} queueEmpty=${queue.state.empty} items=[${goalItems.join(',')}]`,

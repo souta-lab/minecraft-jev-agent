@@ -39,6 +39,13 @@ import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
+  NETHER_PORTAL,
+  OBSIDIAN,
+  OVERWORLD,
+  PORTAL_LIT_PREDICATE,
+  PORTAL_OBSIDIAN_REQUIRED,
+} from '../jev-agent/src/netherPortalPlan.ts'
+import {
   MERCURY_ALLOWED_GOALS,
   MERCURY_EXPLORE_MODES,
   MERCURY_MODEL_DEFAULT,
@@ -246,9 +253,35 @@ export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): s
       }
       return null
     }
+    case 'build_portal_frame':
+      return validatePortalParameterlessGoal(index, 'build_portal_frame', goal, { allowDimension: false })
+    case 'light':
+    case 'light_portal':
+    case 'verify':
+    case 'verify_portal':
+      return validatePortalParameterlessGoal(index, goal.kind, goal, { allowDimension: true })
     default:
       return `goal[${index}] unsupported kind: ${String(goal.kind)}`
   }
+}
+
+function validatePortalParameterlessGoal(
+  index: number,
+  kind: string,
+  goal: MercuryPlanGoalJson,
+  opts: { allowDimension: boolean },
+): string | null {
+  if (goal.item !== undefined) return `goal[${index}] ${kind} takes no item: geometry is code-owned`
+  if (goal.count !== undefined) return `goal[${index}] ${kind} takes no count`
+  if (goal.y !== undefined) return `goal[${index}] ${kind} takes no y: geometry is code-owned`
+  if (goal.mode !== undefined) return `goal[${index}] ${kind} takes no mode`
+  if (goal.dimension !== undefined) {
+    if (!opts.allowDimension) return `goal[${index}] ${kind} takes no dimension`
+    if (typeof goal.dimension !== 'string' || goal.dimension.length === 0) {
+      return `goal[${index}] ${kind} dimension must be a non-empty string`
+    }
+  }
+  return null
 }
 
 /**
@@ -391,6 +424,29 @@ export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | nul
         dimension: 'minecraft:overworld',
         detail: 'mercury explore:cave',
       }
+    case 'build_portal_frame':
+      return {
+        kind: 'place',
+        description: `build the ${PORTAL_OBSIDIAN_REQUIRED}-block obsidian nether portal frame`,
+        targetItem: OBSIDIAN,
+        requiredCount: PORTAL_OBSIDIAN_REQUIRED,
+        detail: 'mercury build_portal_frame',
+      }
+    case 'light':
+    case 'light_portal':
+    case 'verify':
+    case 'verify_portal': {
+      const lighting = goal.kind === 'light' || goal.kind === 'light_portal'
+      return {
+        kind: 'place',
+        description: lighting ? 'light the nether portal with flint_and_steel' : 'verify the lit nether portal',
+        targetItem: NETHER_PORTAL,
+        requiredCount: 1,
+        targetPredicate: PORTAL_LIT_PREDICATE,
+        dimension: goal.dimension ?? OVERWORLD,
+        detail: `mercury ${goal.kind}`,
+      }
+    }
     default:
       return null
   }
@@ -861,6 +917,10 @@ A goal is EITHER a legacy item goal { item, count } (the verb is inferred locall
 - { kind: 'goto_resource', item }    known-resource retrieval; allowed: allowedGoals.goto_resources
 - { kind: 'descend_to', y }          integer y in [-59, 320]; optional dimension, defaults to overworld
 - { kind: 'explore', mode }          mode is 'cave' or 'surface'
+- { kind: 'build_portal_frame' }     build the standard 4x5 obsidian Nether portal frame; takes NO item, count, y, dimension or coordinates (the site and cell geometry are code-owned)
+- { kind: 'light_portal', dimension }   light the validated frame with flint_and_steel; optional dimension defaults to minecraft:overworld. The ignition post-condition verifies the nether_portal block. 'light' is an accepted synonym.
+- { kind: 'verify_portal', dimension }  re-verify the lit nether_portal block in the dimension. 'verify' is an accepted synonym.
+When the portal materials are ready, { kind: 'build_portal_frame' }, { kind: 'light' } and { kind: 'verify' } are distinct WHAT goals you may emit in the order you choose: Code grounds the frame geometry and owns the ignition verification. Never emit coordinates, a frame cell list, or { kind: 'place', item: 'nether_portal' }.
 Every collect/craft/smelt goal MUST include an explicit integer count in [1,64]; when the quantity is not otherwise constrained, emit count: 1. Local normalization fills a missing count with 1, but an explicit count is required to express your intent, and a count outside [1,64] is rejected.
 Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions; goto references a resource name, never an x/z position.
 Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.

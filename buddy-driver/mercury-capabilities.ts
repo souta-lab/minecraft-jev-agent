@@ -15,6 +15,15 @@
 //   goto/goto_resource -> known-resource RETRIEVE (drop item)
 //   descend_to    -> DESCEND predicate    (y level)
 //   explore       -> DESCEND/collect body-change plan (mode)
+//   build_portal_frame -> multi-cell PLACE (code-owned frame geometry)
+//   light_portal  -> IGNITE selected skill (place nether_portal + portal_lit)
+//   verify_portal -> IGNITE selected skill (same, re-verifies the postcondition)
+//
+// The M2 Nether gate is exposed as MODEL-VISIBLE WHAT, never as model-supplied
+// geometry. Mercury picks `build_portal_frame` / `light_portal` / `verify_portal`
+// and Code grounds the site (`choosePortalSite`), the cell set
+// (`portalFrameLayout`) and the verification (`validatePortalFrame`). The frame
+// is never leaked as a `place nether_portal` item (#263 pins that refusal).
 //
 // A pair is only added once the deterministic executor can actually ground it.
 
@@ -30,6 +39,13 @@ export const MERCURY_TYPED_GOAL_KINDS = [
   'goto_resource',
   'descend_to',
   'explore',
+  'build_portal_frame',
+  // `light`/`verify` are model-visible synonyms of light_portal/verify_portal,
+  // not a second path: both compile to the same IGNITE selected skill.
+  'light',
+  'light_portal',
+  'verify',
+  'verify_portal',
 ] as const
 
 export type MercuryTypedGoalKind = (typeof MERCURY_TYPED_GOAL_KINDS)[number]
