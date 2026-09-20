@@ -32,6 +32,8 @@
     "m2-policy-evidence-test": "node tools/test-m2-policy-evidence.mjs",
     "m2-snapshot-evidence-test": "node tools/test-m2-snapshot-evidence.mjs",
     "run-artifacts-test": "node tools/test-run-artifacts.mjs",
-    "issue13-evidence-test": "node tools/test-issue13-evidence.mjs"
+    "issue13-evidence-test": "node tools/test-issue13-evidence.mjs",
+    "world-state": "node tools/world-player-state.mjs",
+    "world-state-test": "node tools/test-world-player-state.mjs"
   }
 }
