@@ -881,6 +881,7 @@ function mineCandidates(
   options: CandidateOptions,
   focusItem: string | null,
   descendTargetY: number | null = null,
+  blockFilter: ((block: BlockState) => boolean) | null = null,
 ): Candidate[] {
   // A MINE that feeds an inventory-counted goal (collect/craft/smelt) must end
   // with its drop in the inventory; a navigation goal (descend/surface/explore)
@@ -888,7 +889,9 @@ function mineCandidates(
   const goalKind = state.goalQueue?.current?.kind ?? 'collect'
   const requiresPickup = goalKind === 'collect' || goalKind === 'craft' || goalKind === 'smelt'
   const mineable = state.blocks.filter(
-    (block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore',
+    (block) =>
+      (block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore') &&
+      (blockFilter === null || blockFilter(block)),
   )
   const matching = mineable.filter((block) => focusItem === null || resourceMatches(block.yield, focusItem))
   const fallback =
@@ -3772,10 +3775,13 @@ function capabilityAcquisitionCandidates(
         // tool, pickup and reachability facts as an ordinary route, while the
         // typed envelope below preserves why it is admitted under the active
         // Option.
-        source = mineCandidates(state, options, null).filter((candidate) => {
-          const yieldItem = candidate.meta.yieldItem
-          return typeof yieldItem === 'string' && PILLAR_PLACE_PRIORITY.includes(yieldItem)
-        })
+        source = mineCandidates(
+          state,
+          options,
+          null,
+          null,
+          (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
+        )
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates

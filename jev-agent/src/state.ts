@@ -849,17 +849,20 @@ function buildBlocks(
   // a semantic goal switch: keep the extra scan bounded and only enable it
   // while the capability is actually missing.
   const scanPrerequisiteStone = stoneFocus === null && selectPlaceableBlock(inventoryCounts) === null
+  const stoneScanOptions = scanPrerequisiteStone
+    ? { ...options, maxStoneBlocks: Math.max(options.maxStoneBlocks, 64) }
+    : options
   const stones =
     stoneFocus !== null
       ? buildStoneBlocks(bot, options, self, stoneFocus)
       : scanPrerequisiteStone
-        ? buildStoneBlocks(bot, options, self, null)
+        ? buildStoneBlocks(bot, stoneScanOptions, self, null)
         : []
   const buried =
     stoneFocus !== null
       ? buildBuriedStoneBlocks(bot, options, self, stoneFocus)
       : scanPrerequisiteStone
-        ? buildBuriedStoneBlocks(bot, options, self, null, true)
+        ? buildBuriedStoneBlocks(bot, stoneScanOptions, self, null, true)
         : []
   const ores = buildOreBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)
