@@ -4,7 +4,8 @@
 // inline module constants, and the generator honors the configured value.
 //
 //   npm run candidate-policy-test
-import { blockId, defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
+import { blockId, defaultCandidateOptions, generateCandidates, restrictCandidatesDuringImmediateThreat } from './src/candidates.ts'
+import type { Candidate } from './src/candidates.ts'
 import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
@@ -115,6 +116,23 @@ const moveIds = (state: WorldState, options = defaultCandidateOptions): string[]
     .filter((candidate) => candidate.kind === 'MOVE')
     .map((candidate) => candidate.id)
 
+function policyCandidate(id: string): Candidate {
+  return {
+    id,
+    kind: 'MINE',
+    label: `candidate ${id}`,
+    targetName: 'dirt',
+    target: { x: 0, y: 10, z: 0 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 1 },
+  }
+}
+
 addCase('the generator policy struct carries the audited retry budgets explicitly', () => {
   const pass =
     defaultCandidateOptions.moveFailureLimit === 4 &&
@@ -136,6 +154,19 @@ addCase('the configured MOVE budget suppresses the same spot when set to 2', () 
   const ids = moveIds(exploreState(2), { ...defaultCandidateOptions, moveFailureLimit: 2 })
   const pass = !ids.includes(`MOVE:${blockId('p', EXPLORE_SPOT)}`)
   return { pass, detail: `moveIds=[${ids.join(',')}]` }
+})
+
+addCase('an immediate hostile threat removes work actions but leaves Jev ATTACK/RETREAT authority', () => {
+  const work: Candidate = { ...policyCandidate('MINE:work'), kind: 'MINE', label: 'mine unrelated dirt' }
+  const attack: Candidate = { ...policyCandidate('ATTACK:e1'), kind: 'ATTACK', targetEntityId: 1, label: 'attack zombie' }
+  const retreat: Candidate = { ...policyCandidate('RETREAT:p1'), kind: 'RETREAT', label: 'retreat to safety' }
+  const kept = restrictCandidatesDuringImmediateThreat(
+    { entities: [{ hostile: true, distance: 0.7 }] } as never,
+    [work, attack, retreat],
+  )
+  const ids = kept.map((entry) => entry.id)
+  const pass = ids.join('|') === 'ATTACK:e1|RETREAT:p1'
+  return { pass, detail: `kept=[${ids.join(',')}]` }
 })
 
 let failures = 0

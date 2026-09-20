@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
@@ -1731,6 +1731,21 @@ export class JevController {
     const inFlight = this.executor.current
     if (inFlight !== null) {
       if (PREEMPTIVE_TRIGGERS.has(trigger)) {
+        // ATTACK is a Jev-selected combat lease.  Damage/entity events are
+        // expected while the selected attack is being aimed and delivered;
+        // asking Jev again on every hit cancels the attack before its next
+        // cooldown and lets a nearby zombie turn the agent into a MOVE/WAIT
+        // loop.  Keep the selected attack mechanics together and replay the
+        // highest-priority threat trigger immediately after the short lease.
+        if (inFlight.kind === 'ATTACK') {
+          this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
+          this.logger.info(
+            'scheduler',
+            `trigger=${trigger} deferred during ATTACK lease#${inFlight.epoch} ${inFlight.id}`,
+            detail,
+          )
+          return
+        }
         this.logger.info(
           'scheduler',
           `trigger=${trigger} preempts action#${inFlight.epoch} ${inFlight.id}`,
@@ -1907,6 +1922,7 @@ export class JevController {
       // candidate. Backfill the deterministic craft step for the current craft
       // goal here so an inputs-held craft is never reported as starved.
       candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
+      candidates = restrictCandidatesDuringImmediateThreat(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -2055,8 +2071,10 @@ export class JevController {
         sensorOptions(this.options),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
-      const freshCandidates = this.filterMoveCandidates(
-        generateGroundedCandidates(
+      const freshCandidates = restrictCandidatesDuringImmediateThreat(
+        freshState,
+        this.filterMoveCandidates(
+          generateGroundedCandidates(
           freshState,
           candidateOptions(
             this.options,
@@ -2066,9 +2084,10 @@ export class JevController {
             this.blacklistedMoveTargets(freshState),
             freshState.portalFrame,
           ),
-        ).candidates,
-        freshState,
-        false,
+          ).candidates,
+          freshState,
+          false,
+        ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
@@ -5528,18 +5547,25 @@ export class JevController {
       { from: fromKey, to: toKey, cycles: detection.cycles, action: 'blacklist' },
       this.tickCounter,
     )
-    const target = this.lastMoveTarget
-    if (target !== null) {
-      const result = this.moveFailMemory.blacklist(target.dimension, target.position, 'no_progress')
-      const key = moveFailureKey(target.dimension, target.position)
+    // Blacklist both ends of the observed loop.  Blacklisting only the last
+    // selected target leaves the opposite endpoint available, so Jev can
+    // immediately choose A after B was retired and keep walking A<->B.
+    const dimension = this.currentDimension()
+    const seen = new Set<string>()
+    for (const position of [detection.from, detection.to]) {
+      if (position === null) continue
+      const key = moveFailureKey(dimension, position)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const result = this.moveFailMemory.blacklist(dimension, position, 'no_progress')
       this.logger.warn(
         'agent',
         formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
         { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
         this.tickCounter,
       )
-      this.notifyMoveFailureMemory()
     }
+    if (seen.size > 0) this.notifyMoveFailureMemory()
     this.escalate(
       'progress_stall',
       `OSCILLATION_DETECTED from=${fromKey} to=${toKey} cycles=${detection.cycles}; blacklisting the movement target`,

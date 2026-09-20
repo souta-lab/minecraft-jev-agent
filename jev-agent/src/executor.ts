@@ -666,6 +666,17 @@ export function classifyRetrieveOutcome(input: RetrieveOutcomeInput): RetrieveOu
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
 
 /**
+ * ATTACK is a Jev-selected intent, not a one-packet action.  The executor may
+ * close the mechanically-required gap and deliver several cooldown-spaced
+ * swings while that intent owns the actuation lease.  Target/mode selection
+ * remains in the candidate and therefore in Jev; this is only the melee
+ * mechanics envelope.
+ */
+export const MELEE_ATTACK_RANGE = 3.1
+export const ATTACK_LEASE_MS = 2_200
+export const ATTACK_COOLDOWN_MS = 500
+
+/**
  * Stations are durable world resources, not route terrain. A route-opening or
  * staircase action may dig the live block at its selected cell, so the final
  * dig boundary rejects stations even if an earlier sensor snapshot classified
@@ -3239,19 +3250,66 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const entityId = candidate.targetEntityId
     if (entityId === null) throw new ExecutorError('target_gone', 'ATTACK candidate has no entity id')
-    const entity = this.bot.entities[entityId]
-    if (entity === undefined) throw new ExecutorError('target_gone', `entity ${entityId} is gone`)
-    this.setPhase(candidate, epoch, 'attacking')
-    await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
-    this.ensureOwned(epoch, signal)
-    this.bot.attack(entity)
-    return this.buildResult(candidate, epoch, startedAt, 'done', 'attacked', `attacked ${candidate.targetName ?? entityId}`, null, {
-      verified: true,
-      dropObserved: false,
-      blockRemoved: false,
-      itemsGained: 0,
-      goalItemCount: this.countGoalItem(),
-    })
+    let attacks = 0
+    let following = false
+    const deadline = Date.now() + ATTACK_LEASE_MS
+    try {
+      while (Date.now() < deadline) {
+        this.ensureOwned(epoch, signal)
+        const entity = this.bot.entities[entityId]
+        if (entity === undefined) break
+        const distanceToTarget = Math.hypot(
+          entity.position.x - this.bot.entity.position.x,
+          entity.position.y - this.bot.entity.position.y,
+          entity.position.z - this.bot.entity.position.z,
+        )
+        if (distanceToTarget > MELEE_ATTACK_RANGE) {
+          if (!following && this.bot.pathfinder !== undefined) {
+            this.setPhase(candidate, epoch, 'closing-to-melee-range')
+            this.bot.pathfinder.setGoal(new goals.GoalFollow(entity, MELEE_ATTACK_RANGE - 0.2), true)
+            following = true
+          }
+          await delay(100, signal)
+          continue
+        }
+
+        if (following) {
+          this.bot.pathfinder?.setGoal(null)
+          following = false
+        }
+        this.setPhase(candidate, epoch, 'attacking')
+        await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
+        this.ensureOwned(epoch, signal)
+        this.bot.attack(entity)
+        attacks += 1
+        this.logger.info('executor', `ATTACK_LEASE action#${epoch} attempt=${attacks} distance=${Math.round(distanceToTarget * 100) / 100}m`, {
+          actionId: candidate.id,
+          targetEntityId: entityId,
+          distance: distanceToTarget,
+          attempt: attacks,
+        })
+        await delay(Math.min(ATTACK_COOLDOWN_MS, Math.max(1, deadline - Date.now())), signal)
+      }
+    } finally {
+      if (following) this.bot.pathfinder?.setGoal(null)
+    }
+    if (attacks === 0) throw new ExecutorError('out_of_reach', `could not reach ${candidate.targetName ?? entityId} during ATTACK lease`)
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'attacked',
+      `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) during ${ATTACK_LEASE_MS}ms lease`,
+      null,
+      {
+        verified: true,
+        dropObserved: false,
+        blockRemoved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+      },
+    )
   }
 
   private async runWait(

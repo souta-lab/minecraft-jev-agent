@@ -100,6 +100,31 @@ export interface Candidate {
 }
 
 /**
+ * A work action is not a safe response to a hostile entity already inside
+ * melee distance.  This is a hard safety envelope, not an attack preference:
+ * Jev still chooses between the grounded ATTACK and RETREAT candidates.  The
+ * envelope only removes MINE/MOVE/CRAFT/etc. while the threat is physically
+ * immediate, so a slow policy call cannot leave the executor digging through
+ * a hit window.
+ */
+export const IMMEDIATE_HOSTILE_RANGE = 3.2
+
+export function restrictCandidatesDuringImmediateThreat(
+  state: Pick<WorldState, 'entities'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const immediateHostile = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
+  if (!immediateHostile) return [...candidates]
+  const combat = candidates.filter(
+    (candidate) => candidate.kind === 'ATTACK' || candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE',
+  )
+  // If perception has no grounded combat response, preserve the original set
+  // and let the normal guard report the capability gap; never silently erase
+  // all candidates or invent an attack target.
+  return combat.length > 0 ? combat : [...candidates]
+}
+
+/**
  * Typed role for candidates that acquire the furnace station required to
  * initiate the active smelt Option.  The role is deliberately separate from
  * `prereqPath`: the path identifies the semantic route selected by the
