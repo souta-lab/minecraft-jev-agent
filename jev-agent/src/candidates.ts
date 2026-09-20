@@ -1212,8 +1212,18 @@ function descendCandidates(
   // `descend_to:Y=<n>` is the objective itself; suppressing its only body change
   // is exactly the permanent WAIT this issue fixes. The controller's stall
   // assertion bounds a genuinely impossible descent instead.
-  if (state.signals.descendLimitReached === true && descendTargetY === null) return []
-  const steps = (state.descent ?? []).filter((step) => step.safe && !isProtectedStationBlock(step.digName ?? ''))
+  // When the latch fires, the next valid mechanical move is a lateral search
+  // step, not a semantic replan. Preserve safe level steps while suppressing
+  // only further down steps. Returning [] here made the controller manufacture
+  // `ESCALATE`, which promoted local route starvation into a Mercury mission
+  // switch and left the active Option behind a control-only loop.
+  const lateralSearchOnly = state.signals.descendLimitReached === true && descendTargetY === null
+  const steps = (state.descent ?? []).filter(
+    (step) =>
+      step.safe &&
+      !isProtectedStationBlock(step.digName ?? '') &&
+      (!lateralSearchOnly || step.mode !== 'down'),
+  )
   if (steps.length === 0) return []
 
   const target = tunnelTargets[0] ?? nearestResource(state, focusItem)

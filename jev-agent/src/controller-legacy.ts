@@ -146,7 +146,11 @@ import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
-import { evaluateBetaTerminationBoundary, shouldWakeSystem2AfterLocalFailure } from './system2Escalation.ts'
+import {
+  evaluateBetaTerminationBoundary,
+  evaluateCandidateStarvationBoundary,
+  shouldWakeSystem2AfterLocalFailure,
+} from './system2Escalation.ts'
 import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
 
 export type EscalationReason =
@@ -2060,10 +2064,33 @@ export class JevController {
           this.tickCounter,
         )
         if (this.noProductiveRepeats >= this.options.waitLimit) {
-          this.escalate(
-            'all_candidates_invalid',
-            `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x with no state change on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
-          )
+          const boundary = evaluateCandidateStarvationBoundary({
+            activeOption: this.queue.current !== null,
+            blockedBy,
+            missing,
+            semanticExhausted: false,
+            semanticInvalid: false,
+            semanticAbandoned: false,
+          })
+          if (boundary.wake) {
+            this.escalate(
+              'all_candidates_invalid',
+              `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x after semantic boundary on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
+            )
+          } else {
+            this.logger.warn(
+              'agent',
+              `LOCAL_CANDIDATE_STARVATION repeat=${this.noProductiveRepeats}/${this.options.waitLimit} system2=false reason=${boundary.reason} goal="${this.currentGoalKey()}" blocker=${blockedBy}`,
+              {
+                repeat: this.noProductiveRepeats,
+                goal: this.currentGoalKey(),
+                blocker: blockedBy,
+                missing,
+                boundary: boundary.reason,
+              },
+              this.tickCounter,
+            )
+          }
         }
       } else {
         this.noProductiveRepeats = 0

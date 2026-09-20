@@ -16,6 +16,35 @@ export interface System2WakeBoundaryDecision {
   reason: 'semantic_boundary' | 'local_recovery' | 'no_active_option'
 }
 
+/**
+ * Candidate starvation is an affordance/recovery observation, not a semantic
+ * lifecycle transition.  Keeping this boundary explicit prevents the
+ * controller's repeat counter from becoming a second System2 policy: a set
+ * containing only WAIT/ESCALATE may be useful evidence, but it does not prove
+ * that the current Option is exhausted, invalid, or abandoned.
+ */
+export interface CandidateStarvationBoundaryInput {
+  activeOption: boolean
+  blockedBy: string
+  missing: readonly string[]
+  semanticExhausted: boolean
+  semanticInvalid: boolean
+  semanticAbandoned: boolean
+}
+
+export function evaluateCandidateStarvationBoundary(
+  input: CandidateStarvationBoundaryInput,
+): System2WakeBoundaryDecision {
+  if (!input.activeOption) return { wake: false, reason: 'no_active_option' }
+  if (input.semanticExhausted || input.semanticInvalid || input.semanticAbandoned) {
+    return { wake: true, reason: 'semantic_boundary' }
+  }
+  // `blockedBy`/`missing` are retained in the caller's evidence log.  They
+  // describe the local CAN envelope; neither field is a semantic replacement
+  // decision and neither can authorize a System2 wake by repetition alone.
+  return { wake: false, reason: 'local_recovery' }
+}
+
 /** Compact typed evidence used at the Jev beta -> System2 boundary. */
 export interface BetaOutcomeEvidence {
   actionId?: string | null

@@ -9,7 +9,11 @@ import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-leg
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2Authority.ts'
-import { evaluateBetaTerminationBoundary, shouldWakeSystem2AfterLocalFailure } from '../jev-agent/src/system2Escalation.ts'
+import {
+  evaluateBetaTerminationBoundary,
+  evaluateCandidateStarvationBoundary,
+  shouldWakeSystem2AfterLocalFailure,
+} from '../jev-agent/src/system2Escalation.ts'
 import { system2AuthorityIdentity } from '../jev-agent/src/system2.ts'
 import { compileMercuryGoal, validateMercuryPlan } from './mercury-system2.ts'
 import { PlannerBrain } from './planner.ts'
@@ -186,6 +190,41 @@ assert.equal(
     semanticAbandoned: false,
   }).wake,
   true,
+)
+for (let i = 0; i < 20; i += 1) {
+  assert.deepEqual(
+    evaluateCandidateStarvationBoundary({
+      activeOption: true,
+      blockedBy: 'no_productive_action',
+      missing: ['MOVE:p4_36_12:open_path'],
+      semanticExhausted: false,
+      semanticInvalid: false,
+      semanticAbandoned: false,
+    }),
+    { wake: false, reason: 'local_recovery' },
+  )
+}
+assert.deepEqual(
+  evaluateCandidateStarvationBoundary({
+    activeOption: true,
+    blockedBy: 'no_productive_action',
+    missing: [],
+    semanticExhausted: true,
+    semanticInvalid: false,
+    semanticAbandoned: false,
+  }),
+  { wake: true, reason: 'semantic_boundary' },
+)
+assert.deepEqual(
+  evaluateCandidateStarvationBoundary({
+    activeOption: false,
+    blockedBy: 'no_productive_action',
+    missing: [],
+    semanticExhausted: false,
+    semanticInvalid: false,
+    semanticAbandoned: false,
+  }),
+  { wake: false, reason: 'no_active_option' },
 )
 
 // A beta vote cannot turn a control tick or local body/search evidence into a

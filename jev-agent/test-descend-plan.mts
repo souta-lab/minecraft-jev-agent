@@ -252,6 +252,32 @@ addCase('a latched descend budget still yields a DESCEND candidate for a predica
   }
 })
 
+addCase('a latched item-goal descent budget preserves safe lateral search', () => {
+  const feet = { x: 0, y: 55, z: 0 }
+  const lateral = {
+    ...downStep('E', 1, 0, feet),
+    mode: 'level' as const,
+    step: { x: 1, y: 55, z: 0 },
+    floor: { x: 1, y: 54, z: 0 },
+    wall: { x: 1, y: 55, z: 0 },
+    head: { x: 1, y: 56, z: 0 },
+  }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(
+      queuedGoal({ kind: 'collect', targetY: undefined, description: 'collect raw iron' }),
+    ),
+    signals: signals({ descendLimitReached: true }),
+    descent: [lateral],
+  })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const descend = candidates.find((candidate: Candidate) => candidate.kind === 'DESCEND')
+  return {
+    pass: descend !== undefined && descend.meta.mode === 'level' && descend.meta.dir === 'E',
+    detail: descend === undefined ? 'no lateral DESCEND' : `${descend.id} mode=${String(descend.meta.mode)}`,
+  }
+})
+
 addCase('a predicate goal with only unsafe steps has no DESCEND candidate (escalation path)', () => {
   const feet = { x: 0, y: 55, z: 0 }
   const unsafe = { ...downStep('D', 0, 0, feet), safe: false, reason: 'lava/water in the step column' }
