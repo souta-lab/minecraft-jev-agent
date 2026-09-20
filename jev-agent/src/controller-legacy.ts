@@ -66,6 +66,7 @@ import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
+import type { PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -1875,6 +1876,7 @@ export class JevController {
         unreachableStations,
         this.reachabilityGateOptions(),
         blacklistedMoveTargets,
+        state.portalFrame,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -2047,6 +2049,7 @@ export class JevController {
             this.unreachableStationKeys(freshState),
             this.reachabilityGateOptions(),
             this.blacklistedMoveTargets(freshState),
+            freshState.portalFrame,
           ),
         ).candidates,
         freshState,
@@ -5584,6 +5587,7 @@ function candidateOptions(
   unreachableStations: ReadonlySet<string> = new Set<string>(),
   reachability: ReachabilityGateOptions | null = null,
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
+  portalFrame: PortalFrameValidation | null = null,
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -5592,6 +5596,7 @@ function candidateOptions(
     unreachableStations,
     blacklistedMoveTargets,
     reachability,
+    portalFrame,
     prereqRankPolicy: options.prereqRankPolicy,
   }
 }

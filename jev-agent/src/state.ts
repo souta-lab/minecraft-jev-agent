@@ -14,13 +14,17 @@ import type { CurrentOptionContext } from './optionSpec.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
-import { portalFrameLayout } from './netherPortalPlan.ts'
-import type { PortalFrameSite, PortalWidthAxis } from './netherPortalPlan.ts'
+import { portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
+import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 
 export type Vec3Json = {
   x: number
   y: number
   z: number
+}
+
+function portalCellKey(pos: Vec3Json): string {
+  return `${pos.x}|${pos.y}|${pos.z}`
 }
 
 /**
@@ -308,6 +312,8 @@ export type WorldState = {
   placementSpots: Vec3Json[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
+  /** complete live frame validation, when a sensed site already has all required edges */
+  portalFrame?: PortalFrameValidation | null
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
@@ -1186,7 +1192,7 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
  * still only a mechanical affordance check.  It does not choose a semantic
  * goal or rank Jev actions.
  */
-function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfState): PortalFrameSite[] {
+export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfState): PortalFrameSite[] {
   const base = {
     x: Math.floor(self.position.x),
     y: Math.floor(self.position.y),
@@ -1217,8 +1223,21 @@ function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfStat
         const origin = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
         for (const widthAxis of axes) {
           const layout = portalFrameLayout(origin, widthAxis)
-          const footprint = [...layout.frame, ...layout.corners, ...layout.interior]
-          if (!footprint.every((cell) => clear(cell.x, cell.y, cell.z))) continue
+          const existingFrame: Vec3Json[] = []
+          let validFootprint = true
+          for (const cell of layout.frame) {
+            const block = at(cell.x, cell.y, cell.z)
+            if (block?.name === 'obsidian') existingFrame.push(cell)
+            else if (!clear(cell.x, cell.y, cell.z)) {
+              validFootprint = false
+              break
+            }
+          }
+          if (!validFootprint) continue
+          // Corners are optional and may already contain harmless scaffolding;
+          // they are never counted toward the ten required edge blocks. The
+          // interior, however, must remain clear for a future ignition.
+          if (!validFootprint || !layout.interior.every((cell) => clear(cell.x, cell.y, cell.z))) continue
           let supported = true
           for (let w = 0; w < 4; w += 1) {
             const bottom =
@@ -1226,20 +1245,34 @@ function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfStat
                 ? { x: origin.x + w, y: origin.y, z: origin.z }
                 : { x: origin.x, y: origin.y, z: origin.z + w }
             if (!solid(bottom.x, bottom.y - 1, bottom.z)) {
-              supported = false
-              break
+              const bottomCell = layout.frame.find((cell) => cell.x === bottom.x && cell.y === bottom.y && cell.z === bottom.z)
+              const alreadyBuilt = bottomCell !== undefined && existingFrame.some((cell) => portalCellKey(cell) === portalCellKey(bottomCell))
+              if (!alreadyBuilt) {
+                supported = false
+                break
+              }
             }
           }
           if (!supported) continue
           const first = { x: origin.x + 0.5, y: origin.y, z: origin.z + 0.5 }
           if (distance(first, body) < 1.0) continue
-          sites.push({ origin, widthAxis, safe: true, reachable: true })
+          sites.push({
+            origin,
+            widthAxis,
+            safe: true,
+            reachable: true,
+            ...(existingFrame.length === 0 ? {} : { existingFrame }),
+          })
         }
       }
     }
   }
 
   sites.sort((a, b) => {
+    const aExisting = a.existingFrame?.length ?? 0
+    const bExisting = b.existingFrame?.length ?? 0
+    if ((aExisting > 0) !== (bExisting > 0)) return aExisting > 0 ? -1 : 1
+    if (aExisting !== bExisting) return bExisting - aExisting
     const da = distance(a.origin, self.position)
     const db = distance(b.origin, self.position)
     if (da !== db) return da - db
@@ -1249,6 +1282,16 @@ function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfStat
     return a.widthAxis.localeCompare(b.widthAxis)
   })
   return sites.slice(0, 24)
+}
+
+/** Count the required edge blocks in the nearest live partial/full frame. */
+export function countSensedPortalFrameBlocks(bot: Bot): number {
+  // Planner fixtures use a plain `{x,y,z}` entity position rather than a
+  // Mineflayer Vec3. That is an unobserved frame, not a reason to make the
+  // fixture construct a fake vector API.
+  if (typeof (bot.entity?.position as unknown as { offset?: unknown })?.offset !== 'function') return 0
+  const sites = buildPortalFrameSites(bot, defaultSensorOptions, buildSelf(bot))
+  return Math.max(0, ...sites.map((site) => site.existingFrame?.length ?? 0))
 }
 
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
@@ -1277,6 +1320,14 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
 export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
   const self = buildSelf(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
+  const portalFrameSites = buildPortalFrameSites(bot, options, self)
+  const portalFrame =
+    portalFrameSites
+      .map((site) => {
+        const blocks = site.existingFrame ?? []
+        return blocks.length >= 10 ? validatePortalFrame({ blocks, widthAxis: site.widthAxis }) : null
+      })
+      .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   return {
     schemaVersion: 1,
     tick: input.tick,
@@ -1289,7 +1340,8 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
     placementSpots: buildPlacementSpots(bot, options, self),
-    portalFrameSites: buildPortalFrameSites(bot, options, self),
+    portalFrameSites,
+    portalFrame,
     descent: buildDescent(bot, options, self),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),

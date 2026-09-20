@@ -40,6 +40,7 @@ import { hasBodyDelta, parseCapabilityGap } from '../jev-agent/src/replanThrottl
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
 import { netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
+import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
 import {
   PICKAXE_TIER_ORDER,
@@ -625,8 +626,17 @@ function withFurnacePrereq(
 
 /** A rung's goals, with the predicate descent prerequisite prepended for
  * ore rungs whose ore is not held yet (#12, #41). */
-export function rungGoalsWithPrereq(rung: Rung, c: Counts, w: ResidentWorldMemory): PlannedGoal[] {
-  const base = rung.goals(c, w).map((goal) => (goal.core === true ? goal : { ...goal, core: true }))
+export function rungGoalsWithPrereq(
+  rung: Rung,
+  c: Counts,
+  w: ResidentWorldMemory,
+  existingFrameBlocks?: number,
+): PlannedGoal[] {
+  const raw =
+    rung.id === 'nether_portal' && existingFrameBlocks !== undefined
+      ? netherPortalRungGoals(c, bestPickaxeRank(c), undefined, existingFrameBlocks)
+      : rung.goals(c, w)
+  const base = raw.map((goal) => (goal.core === true ? goal : { ...goal, core: true }))
   if (!needsOreDescent(rung.id, c)) return base
   const oreItem = ORE_RUNG_ITEM[rung.id]
   if (oreItem === undefined) return base
@@ -797,6 +807,8 @@ export function buildLadder(
     placedFurnacesNear?: number
     knownFurnaces?: number
     resumeRungIndex?: number
+    /** live required-edge blocks already present in the portal footprint */
+    portalFrameBlocks?: number
     /** false = a floor query (#73): never invent the synthetic upkeep goal. */
     allowUpkeep?: boolean
   },
@@ -817,7 +829,7 @@ export function buildLadder(
     if (opts?.resumeRungIndex !== undefined && i < opts.resumeRungIndex) continue
     if (rung.satisfied(counts, world)) {
       if (log !== undefined) {
-        for (const goal of rung.goals(counts, world)) {
+        for (const goal of rungGoalsWithPrereq(rung, counts, world, opts?.portalFrameBlocks)) {
           const item = goal.targetItem
           if (typeof item !== 'string') continue
           const have = countResource(counts, item)
@@ -834,14 +846,19 @@ export function buildLadder(
       }
       continue
     }
-    const emitted = withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces)
+    const emitted = withFurnacePrereq(
+      rungGoalsWithPrereq(rung, counts, world, opts?.portalFrameBlocks),
+      counts,
+      opts?.placedFurnacesNear,
+      opts?.knownFurnaces,
+    )
     const rungGoals = filterAlreadyMet(emitted, counts, rung.id, log)
     if (rungGoals.length === 0) continue
     if (rungIndex === RUNGS.length) {
       rungIndex = i
       rungId = rung.id
     }
-    const description = rung.goals(counts, world)[0]?.description ?? rung.id
+    const description = rungGoalsWithPrereq(rung, counts, world, opts?.portalFrameBlocks)[0]?.description ?? rung.id
     const precondition = rungPrecondition(rung, counts, world)
     if (!precondition.ok) {
       const reason = prerequisiteUnsatisfiable(rung, counts, world, opts?.dimension ?? null)
@@ -973,6 +990,7 @@ export function ladderFloorGoals(
     dimension?: string | null
     placedFurnacesNear?: number
     knownFurnaces?: number
+    portalFrameBlocks?: number
     log?: (event: string, detail?: Record<string, unknown>) => void
   },
 ): LadderFloor {
@@ -990,6 +1008,7 @@ export function ladderFloorGoals(
     dimension: opts?.dimension,
     placedFurnacesNear: opts?.placedFurnacesNear,
     knownFurnaces: opts?.knownFurnaces,
+    portalFrameBlocks: opts?.portalFrameBlocks,
     resumeRungIndex: resume.rungIndex,
     allowUpkeep: false,
   })
@@ -1118,11 +1137,22 @@ export function buildPlanOptions(
     placedFurnacesNear?: number
     knownFurnaces?: number
     resumeRungIndex?: number
+    portalFrameBlocks?: number
     log?: (event: string, detail?: Record<string, unknown>) => void
   },
 ): PlanOption[] {
   const planGoals = (rung: Rung): PlannedGoal[] =>
-    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
+    filterAlreadyMet(
+      withFurnacePrereq(
+        rungGoalsWithPrereq(rung, counts, world, opts?.portalFrameBlocks),
+        counts,
+        opts?.placedFurnacesNear,
+        opts?.knownFurnaces,
+      ),
+      counts,
+      rung.id,
+      opts?.log,
+    )
   const allUnsat = reachableUnsatisfiedRungs(counts, world)
   const unsat = allUnsat.filter(
     (rung) => opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex,
@@ -1262,6 +1292,7 @@ export function buildBodyChangeOption(
     placedFurnacesNear?: number
     knownFurnaces?: number
     resumeRungIndex?: number
+    portalFrameBlocks?: number
     log?: (event: string, detail?: Record<string, unknown>) => void
   },
 ): PlanOption {
@@ -1271,7 +1302,17 @@ export function buildBodyChangeOption(
       (opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex),
   )
   const planGoals = (rung: Rung): PlannedGoal[] =>
-    filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
+    filterAlreadyMet(
+      withFurnacePrereq(
+        rungGoalsWithPrereq(rung, counts, world, opts?.portalFrameBlocks),
+        counts,
+        opts?.placedFurnacesNear,
+        opts?.knownFurnaces,
+      ),
+      counts,
+      rung.id,
+      opts?.log,
+    )
   const goals: PlannedGoal[] = []
   const pushUnique = (goal: PlannedGoal): void => {
     if (goals.some((existing) => existing.kind === goal.kind && existing.targetItem === goal.targetItem)) return
@@ -1376,7 +1417,7 @@ export function goalsForStrategy(
   strategy: AdvisorStrategy,
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number; knownFurnaces?: number },
+  opts?: { placedFurnacesNear?: number; knownFurnaces?: number; portalFrameBlocks?: number },
 ): PlannedGoal[] {
   return compileStrategyGoals(strategy, counts, world, opts)
 }
@@ -1385,7 +1426,7 @@ function compileStrategyGoals(
   strategy: AdvisorStrategy,
   counts: Counts,
   world: ResidentWorldMemory,
-  opts?: { placedFurnacesNear?: number; knownFurnaces?: number },
+  opts?: { placedFurnacesNear?: number; knownFurnaces?: number; portalFrameBlocks?: number },
 ): PlannedGoal[] {
   const rank = bestPickaxeRank(counts)
   const ladderFront = buildLadder(counts, world, undefined, opts).goals
@@ -1616,6 +1657,7 @@ export function plannerStateHash(
   world: ResidentWorldMemory,
   objective: { targetItem: string; haveCount: number },
   identity: PlannerCacheIdentity,
+  portalFrameBlocks: number = 0,
 ): string {
   const stable: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) stable[name] = n
@@ -1627,6 +1669,7 @@ export function plannerStateHash(
     inventory: stable,
     frontier: computeFrontier(counts, world).rungId,
     stations: { tables: world.craftingTables.length, furnaces: world.furnaces.length },
+    portalFrameBlocks,
     ores: [...world.discoveredOres].sort(),
     objective: objective.targetItem,
     objectiveHave: objective.haveCount,
@@ -1728,6 +1771,7 @@ export class PlannerBrain implements System2Brain {
   private lastBodySignature: string | null = null
   private lastBodyGoals: PlannedGoal[] = []
   private currentCounts: Counts = {}
+  private currentPortalFrameBlocks = 0
   private adoptedRungId = 'wood'
 
   constructor(options: PlannerOptions) {
@@ -1764,12 +1808,15 @@ export class PlannerBrain implements System2Brain {
     const started = Date.now()
     const counts = inventoryCounts(this.bot)
     this.currentCounts = counts
+    this.currentPortalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
+    this.log('PORTAL_FRAME_PROGRESS', { blocks: this.currentPortalFrameBlocks })
     const rung = resolveRungSourceOfTruth(counts, this.world, this.log)
     this.adoptedRungId = rung.adoptedRungId
     const options = buildPlanOptions(counts, this.world, {
       placedFurnacesNear: this.placedFurnacesNear(),
       knownFurnaces: this.world.furnaces.length,
       resumeRungIndex: rung.adoptedRungIndex,
+      portalFrameBlocks: this.currentPortalFrameBlocks,
       log: this.log,
     })
     const reason = mapReason(request, this.firstCall)
@@ -1800,6 +1847,7 @@ export class PlannerBrain implements System2Brain {
           placedFurnacesNear: this.placedFurnacesNear(),
           knownFurnaces: this.world.furnaces.length,
           resumeRungIndex: rung.adoptedRungIndex,
+          portalFrameBlocks: this.currentPortalFrameBlocks,
           log: this.log,
         })
       : null
@@ -1831,6 +1879,7 @@ export class PlannerBrain implements System2Brain {
         dimension: this.bot.game?.dimension ?? null,
         placedFurnacesNear: this.placedFurnacesNear(),
         knownFurnaces: this.world.furnaces.length,
+        portalFrameBlocks: this.currentPortalFrameBlocks,
         log: this.log,
       })
       const floorOption: PlanOption = {
@@ -1854,6 +1903,7 @@ export class PlannerBrain implements System2Brain {
         goalsForStrategy(decision.strategy, counts, this.world, {
           placedFurnacesNear: this.placedFurnacesNear(),
           knownFurnaces: this.world.furnaces.length,
+          portalFrameBlocks: this.currentPortalFrameBlocks,
         })
       const option: PlanOption = { id: `advisor_${decision.strategy}`, title: `advisor strategy: ${decision.strategy}`, goals, strategy: decision.strategy }
       this.withSkills(option)
@@ -2249,7 +2299,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   private hashState(counts: Counts, request: System2PlanRequest): string {
-    return plannerStateHash(counts, this.world, request.objective, this.cacheIdentity)
+    return plannerStateHash(counts, this.world, request.objective, this.cacheIdentity, this.currentPortalFrameBlocks)
   }
 
   private worldShort(): string {

@@ -103,6 +103,8 @@ export interface PortalFrameSite {
   readonly widthAxis: PortalWidthAxis
   readonly safe?: boolean
   readonly reachable?: boolean
+  /** Required edge cells already occupied by obsidian in the live world. */
+  readonly existingFrame?: readonly PortalBlockPosition[]
 }
 
 function normalizeDimension(dimension: string): string {
@@ -492,8 +494,13 @@ export function groundPortalFrame(
       ? site
       : { origin: site, widthAxis, safe: true, reachable: true },
   )
+  // Once a frame has been started, its continuation is the same grounded
+  // physical operation. Prefer those sites over a fresh empty footprint so a
+  // replan cannot silently abandon verified world work for a second frame.
+  const continuation = normalized.filter((site) => (site.existingFrame?.length ?? 0) > 0)
+  const selectable = continuation.length > 0 ? continuation : normalized
   const chosen = choosePortalSite(
-    normalized.map((site) => ({ position: site.origin, safe: site.safe !== false, reachable: site.reachable !== false })),
+    selectable.map((site) => ({ position: site.origin, safe: site.safe !== false, reachable: site.reachable !== false })),
     self,
   )
   if (chosen === null) return null
@@ -505,7 +512,10 @@ export function groundPortalFrame(
   )
   const selectedAxis = selected?.widthAxis ?? widthAxis
   const layout = portalFrameLayout(chosen.position, selectedAxis)
-  return { origin: chosen.position, widthAxis: selectedAxis, cells: orderedPlacementCells(layout.frame) }
+  const existing = new Set((selected?.existingFrame ?? []).map(cellKey))
+  const missing = layout.frame.filter((cell) => !existing.has(cellKey(cell)))
+  if (missing.length === 0) return null
+  return { origin: chosen.position, widthAxis: selectedAxis, cells: orderedPlacementCells(missing) }
 }
 
 // ---------------------------------------------------------------------------
@@ -760,6 +770,8 @@ export interface NetherPortalPlanInput {
   readonly sites?: readonly PortalSiteCandidate[]
   readonly self?: PortalBlockPosition
   readonly dimension?: string
+  /** Required frame edge blocks already proven by a live world sensor. */
+  readonly existingFrameBlocks?: number
 }
 
 export interface NetherPortalPlan {
@@ -802,6 +814,10 @@ export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan
   const flint = count(inventory, FLINT)
   const flintAndSteel = count(inventory, FLINT_AND_STEEL)
   const obsidian = count(inventory, OBSIDIAN)
+  const existingFrameBlocks = Math.max(
+    0,
+    Math.min(PORTAL_OBSIDIAN_REQUIRED, Math.floor(input.existingFrameBlocks ?? 0)),
+  )
 
   const ironNeededForPickaxe = hasIronPickaxe ? 0 : 3
   const ironNeededForSteel = flintAndSteel < 1 ? 1 : 0
@@ -896,15 +912,16 @@ export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan
     })
   }
   // 8. obsidian (mined only with the diamond pickaxe; the mining decision is gated)
-  if (obsidian < PORTAL_OBSIDIAN_REQUIRED) {
+  const obsidianNeeded = Math.max(0, PORTAL_OBSIDIAN_REQUIRED - existingFrameBlocks - obsidian)
+  if (obsidianNeeded > 0) {
     prerequisites.push({
       kind: 'collect',
       capabilityId: 'collect:obsidian',
-      description: `mine ${PORTAL_OBSIDIAN_REQUIRED - obsidian} x ${OBSIDIAN} with ${DIAMOND_PICKAXE}`,
+      description: `mine ${obsidianNeeded} x ${OBSIDIAN} with ${DIAMOND_PICKAXE}`,
       item: OBSIDIAN,
-      count: PORTAL_OBSIDIAN_REQUIRED - obsidian,
+      count: obsidianNeeded,
       requiredPickaxeRank: obsidianRank,
-      postcondition: { kind: 'inventoryAtLeast', item: OBSIDIAN, count: PORTAL_OBSIDIAN_REQUIRED },
+      postcondition: { kind: 'inventoryAtLeast', item: OBSIDIAN, count: obsidian + obsidianNeeded },
       protected: true,
       core: true,
     })
@@ -964,8 +981,9 @@ export function netherPortalRungGoals(
   inventory: Readonly<Record<string, number>>,
   toolRank: number,
   dimension: string = OVERWORLD,
+  existingFrameBlocks: number = 0,
 ): PlannedGoal[] {
-  return planNetherPortal({ inventory, toolRank, dimension }).goals
+  return planNetherPortal({ inventory, toolRank, dimension, existingFrameBlocks }).goals
 }
 
 // ---------------------------------------------------------------------------

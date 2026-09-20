@@ -299,6 +299,20 @@ addCase('a fully supplied inventory is ready: no prerequisites, only the portal 
   return { pass, detail: `ready=${plan.ready} prereqs=${plan.prerequisites.length} steps=[${stepKinds(plan.steps).join('>')}]` }
 })
 
+addCase('a sensed partial frame counts toward obsidian requirements without borrowing inventory truth', () => {
+  const plan = planNetherPortal({
+    inventory: { diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 3 },
+    toolRank: 4,
+    existingFrameBlocks: 7,
+  })
+  const obsidianPrereq = plan.prerequisites.find((step) => step.capabilityId === 'collect:obsidian')
+  const pass = plan.ready && obsidianPrereq === undefined && plan.operations[0]?.kind === 'build_portal_frame'
+  return {
+    pass,
+    detail: `ready=${plan.ready} prereqs=[${plan.prerequisites.map((step) => step.description).join('|')}] existing=7 held=3`,
+  }
+})
+
 addCase('every emitted PlannedGoal keeps an explicit typed goal kind that compiles to a valid OptionSpec', () => {
   const plan = planNetherPortal({ inventory: {}, toolRank: 0 })
   const allowedKinds = new Set(['collect', 'craft', 'smelt', 'place'])

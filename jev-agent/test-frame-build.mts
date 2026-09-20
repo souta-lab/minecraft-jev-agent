@@ -270,6 +270,43 @@ function worldState(overrides: {
 }
 
 {
+  const existing = ORDERED_FRAME.slice(0, 7)
+  const partialSite: PortalFrameSite = {
+    origin: ORIGIN,
+    widthAxis: 'x',
+    safe: true,
+    reachable: true,
+    existingFrame: existing,
+  }
+  const state = worldState({
+    position: { x: 6.5, y: 64, z: -1.5 },
+    inventory: inventory({ obsidian: 3 }),
+    goalQueue: queueWith({
+      ...queuedPlace(OBSIDIAN, []),
+      placementCells: undefined,
+      requiredCount: 10,
+    }),
+    portalFrameSites: [partialSite],
+  })
+  const grounding = groundPortalFrame([partialSite], state.self.position)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE')
+  const missing = FRAME_CELLS.filter((cell) => !cellSet(existing).has(key(cell)))
+  const pass =
+    grounding !== null &&
+    place?.placementCells !== undefined &&
+    place.placementCells.length === 3 &&
+    cellSet(place.placementCells).size === 3 &&
+    cellSet(place.placementCells).size === cellSet(missing).size &&
+    [...cellSet(place.placementCells)].every((cell) => cellSet(missing).has(cell))
+  process.stdout.write(
+    `${pass ? 'PASS' : 'FAIL'}  (3b) a partial live frame yields only its missing obsidian cells\n` +
+      `      existing=${existing.length} missing=${missing.length} candidate=${place?.id ?? 'none'} cells=${place?.placementCells?.length ?? 0}\n`,
+  )
+  if (!pass) failures += 1
+}
+
+{
   const state = worldState({
     position: { x: 6.5, y: 64, z: -1.5 },
     goalQueue: queueWith(queuedPlace(OBSIDIAN, ORDERED_FRAME)),
