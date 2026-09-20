@@ -4419,7 +4419,11 @@ export class Executor {
       const goal = new goals.GoalNear(target.x, target.y, target.z, Math.max(1, range))
       const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, 2500)
       if (plan.status === 'noPath') return []
-      return plan.path.slice(1).map((node) => ({ x: node.x, y: node.y, z: node.z }))
+      // mineflayer-pathfinder exposes waypoint centers (x/z + 0.5), while
+      // the packet stepper accepts block origins and adds that half-block
+      // offset itself.  Normalize here so a climb or diagonal cannot drift
+      // into the neighboring cell before the first step.
+      return plan.path.slice(1).map((node) => ({ x: Math.floor(node.x), y: node.y, z: Math.floor(node.z) }))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.logger.warn('executor', `pathfinder planning failed, walking directly: ${message}`)

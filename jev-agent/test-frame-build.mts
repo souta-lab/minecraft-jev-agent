@@ -630,5 +630,33 @@ function placeCallsPlacedEveryCell(calls: readonly Vec3Json[], cells: readonly V
   if (!pass) failures += 1
 }
 
+{
+  const fixture = makePlaceBot({ x: 6.5, y: 64, z: -1.5 }, [], false)
+  const pathfinder = fixture.bot.pathfinder as unknown as {
+    getPathTo: (...args: unknown[]) => { status: string; path: P[] }
+  }
+  pathfinder.getPathTo = () => ({
+    status: 'success',
+    path: [new P(8.5, 69, -8.5), new P(7.5, 70, -7.5), new P(8.5, 71, -6.5)],
+  })
+  const executor = new Executor(fixture.bot, new EventLogger(new JsonlWriter(join(mkdtempSync(join(tmpdir(), 'frame-build-waypoint-')), 'agent.jsonl')), false), {
+    ...defaultExecutorOptions,
+    actuation: 'pathfinder',
+  })
+  const internals = executor as unknown as {
+    planWaypoints: (target: Vec3Json, range: number) => Vec3Json[]
+  }
+  const waypoints = internals.planWaypoints({ x: 9, y: 70, z: -4 }, 1)
+  const pass = JSON.stringify(waypoints) === JSON.stringify([
+    { x: 7, y: 70, z: -8 },
+    { x: 8, y: 71, z: -7 },
+  ])
+  process.stdout.write(
+    `${pass ? 'PASS' : 'FAIL'}  (5c) packet waypoints normalize pathfinder center coordinates to block origins\n` +
+      `      waypoints=${JSON.stringify(waypoints)}\n`,
+  )
+  if (!pass) failures += 1
+}
+
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)
 if (failures > 0) process.exit(1)
