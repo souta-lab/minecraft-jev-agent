@@ -537,9 +537,23 @@ export function isAtRequiredLevel(
   verticalTolerance = 0.75,
 ): boolean {
   const sameFloorLevel = Math.floor(position.y) === Math.floor(target.y)
+  // A same-floor target must be OCCUPIED, not merely adjacent. A pure
+  // horizontal-distance test accepted a same-floor neighbouring stance: live RC
+  // run-mu99dkap-19w1f picked `DESCEND:level:E:b55_61_26`, the stock pathfinder
+  // returned `noPath`, and the control-walk fallback made zero body progress
+  // (start=end=(54.5,61,26.43)) yet `runDescend` reported `verified=true
+  // status=done` because the adjacent stance (hypot 0.64) was within the 1.2m
+  // tolerance. The action must fail truthfully instead of masking the failed
+  // route-opening move as DONE. Cell equality is the only sound test here: a
+  // centred-in-cell feet position (e.g. (55.5,61,26.5), hypot 0.707) has a
+  // LARGER radius than the adjacent stance, so no distance threshold can
+  // separate them. Cross-floor arrival keeps the existing tolerances.
+  const sameCell =
+    Math.floor(position.x) === target.x && Math.floor(position.z) === target.z
+  if (sameFloorLevel) return sameCell
   return (
     Math.hypot(position.x - target.x, position.z - target.z) <= horizontalTolerance &&
-    (sameFloorLevel || Math.abs(position.y - target.y) <= verticalTolerance)
+    Math.abs(position.y - target.y) <= verticalTolerance
   )
 }
 

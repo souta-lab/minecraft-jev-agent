@@ -3627,7 +3627,11 @@ function capabilityAcquisitionCandidates(
  */
 function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
-  const out: Candidate[] = [...stepCutCandidates(state, options), ...descendCandidates(state, options, focus, [], null)]
+  const out: Candidate[] = [
+    ...stepCutCandidates(state, options),
+    ...descendCandidates(state, options, focus, [], null),
+    ...openLevelStepMoves(state, options),
+  ]
   const spot = pickExplore(
     state,
     state.terrain.standable,
@@ -3642,6 +3646,44 @@ function routeOpeningCandidates(state: WorldState, options: CandidateOptions): C
         options,
         spot,
         moveLabel(spot, 'walk toward the unreachable target', state.self.position),
+        null,
+      ),
+    )
+  }
+  return out
+}
+
+/**
+ * Route-continuation: a safe `level` step whose wall and head cells are already
+ * clear has nothing left to dig, so `descendCandidates` (which requires a
+ * diggable primary) emits no DESCEND for it. The step is still a mechanically
+ * valid forward body change that continues the route the previous dig opened.
+ * Enumerate its landing cell as an ordinary MOVE so one failed/opened route
+ * attempt cannot collapse the next state to `presented=2 productive=0`
+ * (live RC run-mu99dkap-19w1f: `DESCEND:level:E:b55_61_26` dug its column, then
+ * the stock path returned `noPath` and the next state starved). Facts only: no
+ * item/coordinate/portal special-casing, no ordering, and Jev still chooses.
+ */
+function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candidate[] {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const out: Candidate[] = []
+  for (const step of state.descent ?? []) {
+    if (step.mode !== 'level' || !step.safe) continue
+    // A solid wall or head is still a DESCEND owned by `descendCandidates`.
+    if (step.wallSolid || step.headSolid) continue
+    if (step.dx === 0 && step.dz === 0) continue
+    const target = step.step
+    if (target.x === feet.x && target.y === feet.y && target.z === feet.z) continue
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        target,
+        moveLabel(target, 'step into the route the previous dig opened', state.self.position),
         null,
       ),
     )
