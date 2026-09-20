@@ -3573,6 +3573,18 @@ function capabilityAcquisitionCandidates(
               },
             }
           })
+      } else if (capability.kind === 'standable_approach' || capability.kind === 'open_path') {
+        // A locomotion target the affordance gate dropped (`out_of_reach` /
+        // `no_standable_approach` / `no_path`) must not leave the policy with
+        // only WAIT/ESCALATE: the live starvation (`CANDIDATE_STARVATION
+        // goal=place:furnace:1 presented=2 productive=0` after a withheld
+        // `MOVE:p56_60_24 reason=no_path missing=[open_path]`) re-selected
+        // ESCALATE. Contribute the SAME generic STEP / MOVE / DESCEND families
+        // the raw generator already emits, so a mechanically valid forward body
+        // change is on offer. This is CAN-affordance enumeration only: no
+        // item/coordinate/portal special-casing, no ordering, and the model
+        // still owns WHAT and WHICH.
+        source = routeOpeningCandidates(state, options)
       }
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue
@@ -3601,6 +3613,40 @@ function capabilityAcquisitionCandidates(
         })
       }
     }
+  }
+  return out
+}
+
+/**
+ * The generic route-opening affordances for a withheld locomotion target: the
+ * existing STEP / MOVE / DESCEND candidate families. A STEP cuts the upper block
+ * of a blocked face, a DESCEND tunnels/staircases toward the resource, and a MOVE
+ * walks to the nearest reachable frontier. None is item/coordinate/portal
+ * special-cased and none is ordered against the others; they are facts for Jev.
+ */
+function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const out: Candidate[] = [
+    ...stepCutCandidates(state, options),
+    ...descendCandidates(state, options, focus, [], null),
+  ]
+  const spot = pickExplore(
+    state,
+    state.terrain.standable,
+    focus,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
+  if (spot !== null) {
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        spot,
+        moveLabel(spot, 'walk toward the unreachable target', state.self.position),
+        null,
+      ),
+    )
   }
   return out
 }

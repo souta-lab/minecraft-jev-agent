@@ -37,6 +37,7 @@ export type LlmSummonReason =
   | 'action_impossible'
   | 'unknown_situation'
   | 'no_progress'
+  | 'candidate_starvation'
 
 export const LLM_SUMMON_REASONS: readonly LlmSummonReason[] = [
   'need_llm',
@@ -44,6 +45,7 @@ export const LLM_SUMMON_REASONS: readonly LlmSummonReason[] = [
   'action_impossible',
   'unknown_situation',
   'no_progress',
+  'candidate_starvation',
 ]
 
 /** The deterministic objective the agent was configured with (the plan seed). */
@@ -200,6 +202,8 @@ export interface SummonConditions {
   actionImpossible: boolean
   unknownSituation: boolean
   noProgress: boolean
+  /** the candidate set offered to the policy has no productive option (WAIT/ESCALATE only) */
+  candidateStarvation: boolean
 }
 
 export function evaluateSummonConditions(conditions: SummonConditions): LlmSummonReason[] {
@@ -209,6 +213,7 @@ export function evaluateSummonConditions(conditions: SummonConditions): LlmSummo
   if (conditions.actionImpossible) reasons.push('action_impossible')
   if (conditions.unknownSituation) reasons.push('unknown_situation')
   if (conditions.noProgress) reasons.push('no_progress')
+  if (conditions.candidateStarvation) reasons.push('candidate_starvation')
   return reasons
 }
 

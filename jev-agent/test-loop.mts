@@ -213,13 +213,14 @@ addCase('repeated ticks with unchanged state do NOT grow the queue depth', () =>
   }
 })
 
-addCase('summon conditions map to the 5 documented LLM reasons', () => {
+addCase('summon conditions map to the documented LLM reasons', () => {
   const all = evaluateSummonConditions({
     queueEmpty: true,
     needLlm: true,
     actionImpossible: true,
     unknownSituation: true,
     noProgress: true,
+    candidateStarvation: true,
   })
   const none = evaluateSummonConditions({
     queueEmpty: false,
@@ -227,9 +228,10 @@ addCase('summon conditions map to the 5 documented LLM reasons', () => {
     actionImpossible: false,
     unknownSituation: false,
     noProgress: false,
+    candidateStarvation: false,
   })
   const pass =
-    all.length === 5 &&
+    all.length === LLM_SUMMON_REASONS.length &&
     LLM_SUMMON_REASONS.every((reason) => all.includes(reason)) &&
     none.length === 0
   return { pass, detail: `all=${all.join(',')} none=${none.length}` }
