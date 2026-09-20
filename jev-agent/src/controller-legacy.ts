@@ -77,7 +77,7 @@ import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from 
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, countSensedPortalFrameBlocks, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress } from './state.ts'
+import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -3816,7 +3816,9 @@ export class JevController {
         (planned.optionTemplateId === 'place:obsidian' || planned.description.toLowerCase().includes('portal frame')),
     )
     if (!continuesPortalFrame) return null
-    const existing = countSensedPortalFrameBlocks(this.bot)
+    const sensedSites = sensedPortalFrameSites(this.bot, sensorOptions(this.options))
+    this.rememberPortalFrameSites(sensedSites, this.currentDimension())
+    const existing = Math.max(0, ...sensedSites.map((site) => site.existingFrame?.length ?? 0))
     const held = this.countItem(OBSIDIAN)
     if (existing + held < PORTAL_OBSIDIAN_REQUIRED) return null
     return `portal frame coverage existing=${existing} held=${held} required=${PORTAL_OBSIDIAN_REQUIRED}`
@@ -3835,14 +3837,7 @@ export class JevController {
       this.rememberedPortalFrameSites.clear()
       this.rememberedPortalFrame = null
     }
-    for (const site of state.portalFrameSites ?? []) {
-      if ((site.existingFrame?.length ?? 0) === 0) continue
-      const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
-      this.rememberedPortalFrameSites.set(key, {
-        ...site,
-        existingFrame: site.existingFrame === undefined ? undefined : site.existingFrame.map((cell) => ({ ...cell })),
-      })
-    }
+    this.rememberPortalFrameSites(state.portalFrameSites ?? [], dimension)
     if (state.portalFrame?.shape === 'ok') this.rememberedPortalFrame = state.portalFrame
     if (this.rememberedPortalFrameSites.size === 0 && this.rememberedPortalFrame === null) return state
 
@@ -3858,6 +3853,22 @@ export class JevController {
       ...state,
       portalFrameSites: merged,
       portalFrame: state.portalFrame ?? this.rememberedPortalFrame,
+    }
+  }
+
+  private rememberPortalFrameSites(sites: readonly PortalFrameSite[], dimension: string): void {
+    if (this.rememberedPortalFrameDimension !== dimension) {
+      this.rememberedPortalFrameDimension = dimension
+      this.rememberedPortalFrameSites.clear()
+      this.rememberedPortalFrame = null
+    }
+    for (const site of sites) {
+      if ((site.existingFrame?.length ?? 0) === 0) continue
+      const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
+      this.rememberedPortalFrameSites.set(key, {
+        ...site,
+        existingFrame: site.existingFrame === undefined ? undefined : site.existingFrame.map((cell) => ({ ...cell })),
+      })
     }
   }
 
