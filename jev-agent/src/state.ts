@@ -720,8 +720,10 @@ function buildBuriedStoneBlocks(
   options: SensorOptions,
   self: SelfState,
   focusItem: string | null,
+  scanAllStone = false,
 ): BlockState[] {
-  if (focusItem === null || !STONE_YIELDS.has(focusItem)) return []
+  if (focusItem === null && !scanAllStone) return []
+  if (focusItem !== null && !STONE_YIELDS.has(focusItem)) return []
   const radius = Math.min(options.scanRadius, 24)
   const positions = bot.findBlocks({
     matching: (block) => STONE_LIKE.has(block.name),
@@ -846,19 +848,18 @@ function buildBlocks(
   // the current semantic focus.  This is perception of a mechanical fact, not
   // a semantic goal switch: keep the extra scan bounded and only enable it
   // while the capability is actually missing.
-  const prerequisiteStoneFocus =
-    stoneFocus === null && selectPlaceableBlock(inventoryCounts) === null ? 'cobblestone' : null
+  const scanPrerequisiteStone = stoneFocus === null && selectPlaceableBlock(inventoryCounts) === null
   const stones =
     stoneFocus !== null
       ? buildStoneBlocks(bot, options, self, stoneFocus)
-      : prerequisiteStoneFocus !== null
-        ? buildStoneBlocks(bot, options, self, prerequisiteStoneFocus)
+      : scanPrerequisiteStone
+        ? buildStoneBlocks(bot, options, self, null)
         : []
   const buried =
     stoneFocus !== null
       ? buildBuriedStoneBlocks(bot, options, self, stoneFocus)
-      : prerequisiteStoneFocus !== null
-        ? buildBuriedStoneBlocks(bot, options, self, prerequisiteStoneFocus)
+      : scanPrerequisiteStone
+        ? buildBuriedStoneBlocks(bot, options, self, null, true)
         : []
   const ores = buildOreBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)

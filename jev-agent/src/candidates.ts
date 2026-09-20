@@ -30,7 +30,7 @@ import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
+import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
 import type { VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
@@ -3764,12 +3764,18 @@ function capabilityAcquisitionCandidates(
       } else if (capability.kind === 'placeable_block') {
         // A vertical Skill may need a held solid block for a pillar/step.  The
         // missing capability is mechanical, so acquire it from a grounded
-        // stone producer already in the sensor envelope; do not wake System2
-        // or smuggle a semantic collect goal into the queue.  `mineCandidates`
-        // supplies the same tool, pickup and reachability facts as an ordinary
-        // stone route, while the typed envelope below preserves why it is
-        // admitted under the active Option.
-        source = mineCandidates(state, options, 'cobblestone')
+        // producer already in the sensor envelope; do not wake System2 or
+        // smuggle a semantic collect goal into the queue.  Use the complete
+        // placeable producer envelope (cobblestone, andesite, dirt, etc.), not
+        // only cobblestone: a wall block such as andesite can be the only
+        // reachable producer in a pocket. `mineCandidates` supplies the same
+        // tool, pickup and reachability facts as an ordinary route, while the
+        // typed envelope below preserves why it is admitted under the active
+        // Option.
+        source = mineCandidates(state, options, null).filter((candidate) => {
+          const yieldItem = candidate.meta.yieldItem
+          return typeof yieldItem === 'string' && PILLAR_PLACE_PRIORITY.includes(yieldItem)
+        })
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates
