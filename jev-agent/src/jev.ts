@@ -242,9 +242,9 @@ export const PRIMARY_INSTRUCTIONS =
   'refers to a concrete target that exists in the supplied world state. Answer with the id ' +
   'verbatim; never invent an id. The id already embeds its target (e.g. MINE:b12_64_8, ' +
   'MOVE:p3_64_8, CRAFT:oak_planks); do NOT answer a separate target. The state field ' +
-  'signals.failedCandidates maps candidate ids to how many times they recently failed, so ' +
-  'prefer an id with no recorded failures. The state field goalQueue is the long-horizon ' +
-  'plan from System 2: follow its current goal while plan_still_valid is high.'
+  'signals.failedCandidates maps candidate ids to how many times they recently failed; ' +
+  'treat it as evidence when comparing candidates. The state field goalQueue is the ' +
+  'long-horizon plan from System 2: use it as context for the current goal.'
 
 /**
  * Boolean answers have NO calibrated per-outcome confidence: the primitive only
