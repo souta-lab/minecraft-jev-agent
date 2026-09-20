@@ -696,6 +696,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           initialInventory: counts,
           log: (event, detail) => ctx.log(event, detail),
         })
+  ctx.log('M2_SNAPSHOT_INIT', {
+    enabled: m2Snapshot !== null,
+    runId: ctx.runId ?? null,
+    dir: ctx.m2SnapshotDir ?? null,
+    path: m2Snapshot?.path ?? null,
+  })
   const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
