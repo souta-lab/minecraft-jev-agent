@@ -25,6 +25,7 @@
     "bootstrap-preserve-test": "tsx test-bootstrap-preserve.mts",
     "reachability-test": "tsx test-reachability.mts",
     "candidate-recovery-test": "tsx test-candidate-recovery.mts",
+    "surface-spot-grounding-test": "tsx test-surface-spot-grounding.mts",
     "route-opening-continuation-test": "tsx test-route-opening-continuation.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",

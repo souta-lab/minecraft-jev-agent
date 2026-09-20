@@ -2822,13 +2822,14 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     ]
   }
   if (want.kind !== 'log') return []
-  const spot = surfaceSpot(
+  const pick = surfaceSpot(
     state,
     want.item,
     options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
     options.blacklistedMoveTargets,
   )
-  if (spot === null) return []
+  if (pick === null) return []
+  const spot = pick.spot
   return [
     {
       id: `RETRIEVE:surface:${want.item}:${blockId('p', spot)}`,
@@ -2851,7 +2852,7 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
         x: spot.x,
         y: spot.y,
         z: spot.z,
-        [LOG_ROUTE_META]: 'explore',
+        ...(pick.ascent ? { [LOG_ROUTE_META]: 'explore' } : {}),
       },
     },
   ]
@@ -2875,12 +2876,18 @@ function retrievalCandidates(
   return []
 }
 
+interface SurfaceSpotPick {
+  spot: Vec3Json
+  /** true when the spot came from the strictly-higher ascent scan */
+  ascent: boolean
+}
+
 function surfaceSpot(
   state: WorldState,
   item: string,
   moveFailureLimit: number,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
-): Vec3Json | null {
+): SurfaceSpotPick | null {
   let best: Vec3Json | null = null
   for (const spot of state.terrain.standable) {
     // buildTerrain only scans dy in [-1, +1] (state.ts buildTerrain), so the
@@ -2896,6 +2903,46 @@ function surfaceSpot(
     const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
     if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
     if (best === null || spot.y > best.y) best = spot
+  }
+  if (best !== null) return { spot: best, ascent: true }
+  // Flat terrain has no strictly-higher cell (the live run-mu9crrhw-1b5xw gap).
+  // The fallback only serves the `collect log` contract this route exists for;
+  // a smelt/craft input prerequisite is owned by its own candidate family.
+  if (!logCollectGoal(state)) return null
+  const fallback = groundedSurfaceFallback(state, item, moveFailureLimit, blacklistedMoveTargets)
+  return fallback === null ? null : { spot: fallback, ascent: false }
+}
+
+/**
+ * Terrain-truth fallback for `surfaceSpot`, used only for a `collect log` goal:
+ * when no standable cell is strictly higher, a body-changing ground destination
+ * still exists instead of null. Every non-blacklisted, non-exhausted standable
+ * cell that is NOT the body's own feet cell is mechanically valid; the highest
+ * such cell is preferred, equal heights broken by the farthest horizontal
+ * distance so the fallback explores outward. The id scheme and failure
+ * bookkeeping are identical to the ascent scan. Pure; no item/coordinate
+ * special-casing and no planner.
+ */
+function groundedSurfaceFallback(
+  state: WorldState,
+  item: string,
+  moveFailureLimit: number,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): Vec3Json | null {
+  const self = state.self.position
+  const selfCell = { x: Math.floor(self.x), y: Math.floor(self.y), z: Math.floor(self.z) }
+  let best: Vec3Json | null = null
+  let bestSpread = Number.NEGATIVE_INFINITY
+  for (const spot of state.terrain.standable) {
+    if (spot.x === selfCell.x && spot.y === selfCell.y && spot.z === selfCell.z) continue
+    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
+    const id = `RETRIEVE:surface:${item}:${blockId('p', spot)}`
+    if (failureCount(state.signals.failedCandidates, id) >= moveFailureLimit) continue
+    const spread = Math.hypot(spot.x - self.x, spot.z - self.z)
+    if (best === null || spot.y > best.y || (spot.y === best.y && spread > bestSpread)) {
+      best = spot
+      bestSpread = spread
+    }
   }
   return best
 }
