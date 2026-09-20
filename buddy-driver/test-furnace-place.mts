@@ -863,7 +863,7 @@ addCase('fixture: protected PLACE leads to a SMELT candidate and SMELT_DONE', as
     { inputItem: 'raw_iron', fuelItem: 'coal', outputItem: 'iron_ingot', inputCount: 3, fuelCount: 1 },
   )
   const done = lines.find((line) => line.startsWith('SMELT_DONE'))
-  const pass = outcome.gained === 1 && (stash.iron_ingot ?? 0) === 1 && done !== undefined
+  const pass = outcome.gained === 3 && (stash.iron_ingot ?? 0) === 3 && done !== undefined
   return { pass, detail: `smelt=${smelt.id} target=${smelt.target?.x},${smelt.target?.y},${smelt.target?.z} | ${done ?? 'no SMELT_DONE'}` }
 })
 
