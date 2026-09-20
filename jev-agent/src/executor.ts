@@ -3900,8 +3900,16 @@ export class Executor {
     if (supportItem === undefined) {
       throw new ExecutorError('place_error', 'no temporary support block is available for the minimal obsidian frame')
     }
+    const scaffoldReference = this.findPlaceReference(scaffold)
     if (this.placementCellOverlapsBody(scaffold)) {
-      const stand = this.findPlacementStand(scaffold)
+      // The bot can arrive inside the empty top edge while continuing a
+      // sensed frame. Find a supported lower-level stand beside the existing
+      // edge that supports the optional corner, rather than demanding a
+      // standable block at the same empty top level.
+      const stand =
+        scaffoldReference === null
+          ? this.findPlacementStand(scaffold)
+          : this.findPlacementStandForReference(scaffoldReference.block.position, scaffold)
       if (stand === null) throw new ExecutorError('path_stuck', `no safe standing cell beside portal scaffold (${scaffold.x},${scaffold.y},${scaffold.z})`)
       this.setPhase(candidate, epoch, 'pathing')
       await this.pathToNear(stand, 0.75, epoch, signal)
