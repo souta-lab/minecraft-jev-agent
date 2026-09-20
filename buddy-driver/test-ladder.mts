@@ -118,6 +118,29 @@ addCase('charcoal alone satisfies the charcoal rung', () => {
   }
 })
 
+addCase('a diamond-pickaxe frontier resumes at the current M2 portal rung', () => {
+  const counts = {
+    diamond: 3,
+    diamond_pickaxe: 1,
+    flint_and_steel: 1,
+    obsidian: 10,
+  }
+  const resume = deriveResumeRung(counts, world())
+  const ladder = buildLadder(counts, world(), undefined, { resumeRungIndex: resume.rungIndex })
+  const historicalTargets = new Set(['charcoal', 'raw_iron', 'iron_ingot', 'iron_pickaxe'])
+  const hasHistoricalGoal = ladder.goals.some(
+    (goal) => typeof goal.targetItem === 'string' && historicalTargets.has(goal.targetItem),
+  )
+  return {
+    pass:
+      resume.rungId === 'nether_portal' &&
+      ladder.rungId === 'nether_portal' &&
+      !hasHistoricalGoal &&
+      ladder.goals.some((goal) => goal.kind === 'place' && goal.targetItem === 'obsidian'),
+    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} goals=[${ladder.goals.map((goal) => goal.description).join(' -> ')}]`,
+  }
+})
+
 addCase('with coal held and no charcoal the ladder targets the charcoal rung, never skips it', () => {
   const counts = { coal: 7, furnace: 1, cobblestone: 112, crafting_table: 1, stone_pickaxe: 1 }
   const ladder = buildLadder(counts, world(), undefined, { placedFurnacesNear: 1 })

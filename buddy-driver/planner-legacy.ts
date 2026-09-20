@@ -720,6 +720,36 @@ export function inventoryUsableEmpty(counts: Counts): boolean {
  */
 export function rungBehindInventory(rung: Rung, counts: Counts, world: ResidentWorldMemory): boolean {
   if (rung.satisfied(counts, world)) return true
+  /**
+   * A diamond pickaxe is a durable capability frontier, not merely one more
+   * inventory item.  The current M2 contract starts at the diamond-to-Nether
+   * transition; the furnace/charcoal/iron ladder is retained as a lower
+   * prerequisite path and historical evidence.  Once the live inventory proves
+   * the diamond-pickaxe frontier, a reset must not resurrect those historical
+   * rungs just because their consumable markers are absent.
+   *
+   * This is capability closure, not semantic ranking: it only answers whether
+   * an earlier executable rung is already behind the observed frontier.  It
+   * never chooses among two current semantic Options.
+   */
+  const hasDiamondPickaxe = bestPickaxeRank(counts) >= 4 || has(counts, 'diamond_pickaxe')
+  if (
+    hasDiamondPickaxe &&
+    new Set([
+      'wood',
+      'crafting_table',
+      'wooden_pickaxe',
+      'cobblestone',
+      'furnace',
+      'stone_pickaxe',
+      'charcoal',
+      'raw_iron',
+      'iron_ingot',
+      'iron_pickaxe',
+    ]).has(rung.id)
+  ) {
+    return true
+  }
   switch (rung.id) {
     case 'wood':
       return bestPickaxeRank(counts) >= 1 || countClass(counts, 'stone') >= 1
