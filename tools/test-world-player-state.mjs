@@ -45,6 +45,7 @@ add('operator query parser recovers target position, inventory, health and diffi
 
 add('hostile classification is explicit and does not claim combat success', () => {
   assert.equal(classifyEntity({ name: 'zombie', type: 'mob' }), 'hostile')
+  assert.equal(classifyEntity({ name: 'zombie', type: 'hostile', username: null }), 'hostile')
   assert.equal(classifyEntity({ name: 'pig', type: 'animal', kind: 'Passive mobs' }), 'passive')
   assert.equal(classifyEntity({ name: 'player', type: 'player' }), 'player')
 })

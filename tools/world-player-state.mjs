@@ -169,7 +169,10 @@ function entityName(entity) {
 
 export function classifyEntity(entity) {
   const name = entityName(entity)
-  if (entity?.type === 'player' || entity?.username !== undefined) return 'player'
+  // The resident snapshot deliberately serializes `username: null` for mobs
+  // and dropped items.  Presence of the property is therefore not enough to
+  // identify a player; only a real username or the explicit player type is.
+  if (entity?.type === 'player' || typeof entity?.username === 'string') return 'player'
   if ((name !== null && HOSTILE_NAMES.has(name)) || /hostile/i.test(String(entity?.kind ?? ''))) return 'hostile'
   if (/passive|animal/i.test(String(entity?.kind ?? ''))) return 'passive'
   if (entity?.type === 'mob') return 'mob'
