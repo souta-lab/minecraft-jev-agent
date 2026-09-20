@@ -16,7 +16,9 @@
 //       RETRIEVE:known:station:crafting_table:b-11_71_-9
 //       RETRIEVE:known:station:crafting_table:b40_29_35 ...
 //
-// Pure: no bot, no network, no model. Run: npx tsx test-anti-flap.mts
+// Authority invariant: anti-thrash may HOLD a candidate Jev selected long enough
+// to settle, but it may not choose a cheaper/different semantic candidate on
+// Jev's behalf. Pure: no bot, no network, no model. Run: npx tsx test-anti-flap.mts
 import { readFileSync } from 'node:fs'
 import {
   AbandonmentLedger,
@@ -55,8 +57,8 @@ const FP1 = 'fp1|pos=31,40,37|inv=cobblestone=67|stations=furnace@29,61,35'
 const FP2 = 'fp1|pos=32,40,37|inv=cobblestone=67|stations=furnace@29,61,35'
 
 // The measured live candidate set (#11 v2): multiple reachable remembered
-// stations, no held table, cobblestone 67, charcoal smelt. Costs mirror the
-// controller's existing cost policy (nearest/cheapest first), never a new rank.
+// stations, no held table, cobblestone 67, charcoal smelt. Cost is an affordance
+// FACT exposed by the caller; real-Jev commitment must not turn it into WHICH.
 const CRAFTING_A = 'RETRIEVE:known:station:crafting_table:b-10_67_11'
 const CRAFTING_B = 'RETRIEVE:known:station:crafting_table:b-11_71_-9'
 const CRAFTING_C = 'RETRIEVE:known:station:crafting_table:b40_29_35'
@@ -134,9 +136,9 @@ addCase('(1) a state change clears the abandonment and protection applies again'
   return { pass, detail: `same=${sameFingerprint.protect} changed=${changed.protect} first=${conflictFirst} repeat=${conflictRepeat}` }
 })
 
-// --- (2) five alternating ticks -> CANDIDATE_FLAP + one committed candidate ---
+// --- (2) five alternating ticks -> commit the CURRENT Jev choice -------------
 
-addCase('(2) 5 alternating ticks with zero progress fire CANDIDATE_FLAP and commit', () => {
+addCase('(2) 5 alternating ticks fire CANDIDATE_FLAP and commit Jev current choice', () => {
   let state: CandidateFlapState | null = null
   const choices = [CRAFTING_A, CRAFTING_B, CRAFTING_A, CRAFTING_B, CRAFTING_A]
   const decisions = choices.map((chosenId) => {
@@ -147,17 +149,17 @@ addCase('(2) 5 alternating ticks with zero progress fire CANDIDATE_FLAP and comm
   const fifth = decisions[4]
   if (fifth === undefined) return { pass: false, detail: 'no fifth decision' }
   const expected =
-    `CANDIDATE_FLAP from=${CRAFTING_B} to=${CRAFTING_A} ticks=5 commit=${FURNACE_A}`
+    `CANDIDATE_FLAP from=${CRAFTING_B} to=${CRAFTING_A} ticks=5 commit=${CRAFTING_A}`
   const pass =
     decisions.slice(0, 4).every((decision) => decision.line === null && !decision.committed) &&
     fifth.line === expected &&
     fifth.committed === true &&
-    fifth.chosenId === FURNACE_A &&
-    fifth.line === formatCandidateFlap(CRAFTING_B, CRAFTING_A, 5, FURNACE_A)
+    fifth.chosenId === CRAFTING_A &&
+    fifth.line === formatCandidateFlap(CRAFTING_B, CRAFTING_A, 5, CRAFTING_A)
   return { pass, detail: `line="${fifth.line ?? 'none'}" chosen=${fifth.chosenId}` }
 })
 
-addCase('(2) the commitment holds across subsequent changing ticks', () => {
+addCase('(2) the Jev-owned commitment holds across subsequent changing ticks', () => {
   let state: CandidateFlapState | null = null
   for (const chosenId of [CRAFTING_A, CRAFTING_B, CRAFTING_A, CRAFTING_B, CRAFTING_A]) {
     state = step(state, chosenId, FP1).state
@@ -168,9 +170,9 @@ addCase('(2) the commitment holds across subsequent changing ticks', () => {
     return decision
   })
   const pass =
-    follow.every((decision) => decision.committed === true && decision.chosenId === FURNACE_A) &&
+    follow.every((decision) => decision.committed === true && decision.chosenId === CRAFTING_A) &&
     follow.every((decision) => decision.line === null) &&
-    state?.committedId === FURNACE_A
+    state?.committedId === CRAFTING_A
   return { pass, detail: `chosen=[${follow.map((decision) => decision.chosenId).join(',')}]` }
 })
 
@@ -199,44 +201,47 @@ addCase('(2) WAIT/ESCALATE choices are not thrash and never arm a commitment', (
   return { pass, detail: `committed=${state?.committedId ?? 'none'} switches=${state?.switches ?? -1}` }
 })
 
-// --- (3) deterministic invalidation releases and picks the next cheapest ------
+// --- (3) deterministic invalidation RELEASES; code picks no replacement -------
 
-addCase('(3) a deterministically rejected commitment releases to the next cheapest feasible', () => {
+addCase('(3) deterministic invalidation releases to the current Jev choice without auto-commit', () => {
   let state: CandidateFlapState | null = null
   for (const chosenId of [CRAFTING_A, CRAFTING_B, CRAFTING_A, CRAFTING_B, CRAFTING_A]) {
     state = step(state, chosenId, FP1).state
   }
-  const release = step(state, CRAFTING_C, FP1, { invalid: new Set([FURNACE_A]) })
-  const held = step(release.state, CRAFTING_B, FP1)
+  const release = step(state, CRAFTING_C, FP1, { invalid: new Set([CRAFTING_A]) })
+  const after = step(release.state, CRAFTING_B, FP1)
   const pass =
-    release.committed === true &&
+    release.committed === false &&
     release.chosenId === CRAFTING_C &&
     release.releaseLine ===
-      `CANDIDATE_COMMIT_RELEASED candidate=${FURNACE_A} reason=deterministically_invalid next=${CRAFTING_C}` &&
+      `CANDIDATE_COMMIT_RELEASED candidate=${CRAFTING_A} reason=deterministically_invalid next=${CRAFTING_C}` &&
     release.releaseLine?.startsWith(CANDIDATE_COMMIT_RELEASED) === true &&
-    held.chosenId === CRAFTING_C &&
-    held.committed === true
-  return { pass, detail: `release="${release.releaseLine ?? 'none'}" held=${held.chosenId}` }
+    release.state.committedId === null &&
+    after.chosenId === CRAFTING_B &&
+    after.committed === false
+  return { pass, detail: `release="${release.releaseLine ?? 'none'}" after=${after.chosenId}` }
 })
 
-addCase('(3) a vanished committed candidate releases without ever re-committing to it', () => {
+addCase('(3) a vanished committed candidate releases and current Jev choice remains authoritative', () => {
   let state: CandidateFlapState | null = null
   for (const chosenId of [CRAFTING_A, CRAFTING_B, CRAFTING_A, CRAFTING_B, CRAFTING_A]) {
     state = step(state, chosenId, FP1).state
   }
-  const offered = LIVE_CANDIDATES.filter((candidate) => candidate.id !== FURNACE_A)
-  const release = step(state, CRAFTING_A, FP1, { candidates: offered })
-  const again = step(release.state, CRAFTING_A, FP1, { candidates: offered })
+  const offered = LIVE_CANDIDATES.filter((candidate) => candidate.id !== CRAFTING_A)
+  const release = step(state, CRAFTING_B, FP1, { candidates: offered })
+  const again = step(release.state, CRAFTING_C, FP1, { candidates: offered })
   const pass =
-    release.releaseLine?.includes(`candidate=${FURNACE_A}`) === true &&
+    release.releaseLine?.includes(`candidate=${CRAFTING_A}`) === true &&
     release.releaseLine?.includes('reason=no_longer_offered') === true &&
-    release.chosenId !== FURNACE_A &&
-    again.chosenId !== FURNACE_A &&
-    again.state.invalid.has(FURNACE_A)
+    release.chosenId === CRAFTING_B &&
+    release.committed === false &&
+    again.chosenId === CRAFTING_C &&
+    again.committed === false &&
+    again.state.invalid.has(CRAFTING_A)
   return { pass, detail: `release="${release.releaseLine ?? 'none'}" next=${release.chosenId}` }
 })
 
-addCase('(3) selectCommitCandidate is cheapest-first and tie-breaks by id', () => {
+addCase('(3) deterministic cheapest selector remains an explicit baseline helper only', () => {
   const tied: readonly FlapCandidate[] = [
     { id: 'b', cost: 3 },
     { id: 'a', cost: 3 },
@@ -245,12 +250,12 @@ addCase('(3) selectCommitCandidate is cheapest-first and tie-breaks by id', () =
   const pick = selectCommitCandidate(tied, new Set<string>())
   const skipped = selectCommitCandidate(tied, new Set(['c', 'a']))
   const none = selectCommitCandidate(tied, new Set(['a', 'b', 'c']))
-  return { pass: pick === 'c' && skipped === 'b' && none === null, detail: `pick=${pick} skipped=${skipped} none=${none}` }
+  return { pass: pick === 'c' && skipped === 'b' && none === null, detail: `baselinePick=${pick} skipped=${skipped} none=${none}` }
 })
 
-// --- (4) the live shape must not flap ----------------------------------------
+// --- (4) live shape stays stable without cost taking authority ----------------
 
-addCase('(4) the live smelt-charcoal shape stays on one candidate for 10 ticks', () => {
+addCase('(4) the live smelt-charcoal shape holds one Jev-selected candidate for 10 ticks', () => {
   let state: CandidateFlapState | null = null
   const live = [CRAFTING_A, CRAFTING_B, CRAFTING_C, FURNACE_A, FURNACE_B, CRAFTING_C]
   for (const chosenId of live) state = step(state, chosenId, FP1).state
@@ -263,19 +268,17 @@ addCase('(4) the live smelt-charcoal shape stays on one candidate for 10 ticks',
     follow.push(decision.chosenId)
   }
   const pass =
-    committed === FURNACE_A &&
-    follow.every((chosenId) => chosenId === FURNACE_A) &&
+    committed === FURNACE_B &&
+    follow.every((chosenId) => chosenId === FURNACE_B) &&
     new Set(follow).size === 1
   return { pass, detail: `commit=${committed ?? 'none'} ticks=[${follow.join(',')}]` }
 })
 
-addCase('(4) the candidate cost order is the caller policy, not a new rank', () => {
-  // The commit is the cheapest candidate by the EXISTING cost fields; the
-  // function never inspects kinds or names.
+addCase('(4) lower cost cannot replace the Jev choice at commitment', () => {
   const inverted: readonly FlapCandidate[] = [
     { id: CRAFTING_A, cost: 1 },
     { id: FURNACE_A, cost: 2 },
-    { id: CRAFTING_B, cost: 3 },
+    { id: CRAFTING_B, cost: 99 },
   ]
   let state: CandidateFlapState | null = null
   for (const chosenId of [CRAFTING_B, FURNACE_A, CRAFTING_B, FURNACE_A, CRAFTING_B]) {
@@ -288,7 +291,10 @@ addCase('(4) the candidate cost order is the caller policy, not a new rank', () 
       invalid: new Set<string>(),
     }).state
   }
-  return { pass: state?.committedId === CRAFTING_A, detail: `commit=${state?.committedId ?? 'none'}` }
+  return {
+    pass: state?.committedId === CRAFTING_B && state.committedId !== CRAFTING_A,
+    detail: `jevCommit=${state?.committedId ?? 'none'} cheapest=${CRAFTING_A}`,
+  }
 })
 
 // --- env + wiring -------------------------------------------------------------
@@ -316,7 +322,7 @@ addCase('wiring: the controller reconciles protection with the abandonment ledge
   }
 })
 
-addCase('wiring: the controller commits to one candidate when the choice flaps', () => {
+addCase('wiring: the controller commits to one Jev-selected candidate when the choice flaps', () => {
   const text = source('./src/controller.ts')
   const missing = [
     'evaluateCandidateFlap({',
@@ -345,7 +351,7 @@ addCase('wiring: tunnel entry refusal and local clearance are mirrored markers',
 })
 
 let failures = 0
-process.stdout.write('#11 v2 - state-conditioned validity + anti-thrash commitment\n')
+process.stdout.write('#11 v2 - state-conditioned validity + Jev-owned anti-thrash commitment\n')
 process.stdout.write('-'.repeat(78) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()
