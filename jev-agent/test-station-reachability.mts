@@ -39,6 +39,8 @@ async function check(label: string, ok: boolean, detail: string): Promise<void> 
 }
 
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
+const runtimeControllerSource = (): string =>
+  `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
 
 // --- world state builders (mirror test-smelt-charcoal-abandon) ----------------
 
@@ -182,9 +184,6 @@ async function main(): Promise<void> {
   process.stdout.write('station reachability: evaluate approach before committing to a sensed station\n')
   process.stdout.write('-'.repeat(78) + '\n')
 
-  // (1) A sensed station with NO interaction stand must never become the direct
-  // SMELT target. Today `reachableSensedFurnace` ignores the approach and hands
-  // back the first sensed cell, so this is the red case.
   {
     const state = worldState([UNREACHABLE_FURNACE, REACHABLE_FURNACE], rememberedResource)
     const grounded = generateGroundedCandidates(state, optionsWith(noStand))
@@ -197,8 +196,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (2) A sensed station whose stand exists but has NO canDig=false path is the
-  // live `path_stuck` class: reject it before the first attempt.
   {
     const state = worldState([UNREACHABLE_FURNACE, REACHABLE_FURNACE], rememberedResource)
     const grounded = generateGroundedCandidates(state, optionsWith(noPath))
@@ -211,8 +208,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (3) A genuinely reachable sensed station is still selected and used - and the
-  // nearest unreachable one is skipped, not merely the first cell.
   {
     const probe: StationApproachFn = (station, kind) =>
       kind === 'furnace' && station.x === UNREACHABLE_FURNACE.x && station.z === UNREACHABLE_FURNACE.z
@@ -230,8 +225,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (4) Backward compatibility: with no station-approach probe the generator is
-  // unchanged and still selects the first sensed furnace.
   {
     const smelt = smeltTarget([UNREACHABLE_FURNACE, REACHABLE_FURNACE], optionsWith(null))
     await check(
@@ -241,9 +234,6 @@ async function main(): Promise<void> {
     )
   }
 
-  // (5) The bounded-retry retire hands off to the SAME generic recovery: once the
-  // coordinate is blacklisted by move-failure memory the sensed station joins the
-  // unreachable set and the direct SMELT is no longer offered.
   {
     const memory = new MoveFailMemory({ failureLimit: 3, cooldownMs: 10_000, now: () => 1_000 })
     for (let attempt = 0; attempt < 3; attempt += 1) memory.record('overworld', UNREACHABLE_FURNACE, 'stuck')
@@ -264,11 +254,9 @@ async function main(): Promise<void> {
     )
   }
 
-  // (6) Wiring: the generator gates sensed selection and the controller supplies
-  // the live #244 interaction-stand + bounded path verdict.
   {
     const candidates = source('./src/candidates.ts')
-    const controller = source('./src/controller.ts')
+    const controller = runtimeControllerSource()
     const reachability = source('./src/reachability.ts')
     const wired =
       candidates.includes('function stationApproachReachable') &&
@@ -279,7 +267,7 @@ async function main(): Promise<void> {
       reachability.includes('export function formatStationUnreachable') &&
       reachability.includes('STATION_UNREACHABLE')
     await check(
-      '(6) station-approach reachability is wired through candidates and the controller',
+      '(6) station-approach reachability is wired through candidates and the runtime controller composition',
       wired,
       `gate=${candidates.includes('function stationApproachReachable')} candidatesProbe=${candidates.includes('stationApproach')} controllerProbe=${controller.includes('stationApproach')} stands=${controller.includes('interactionStandCandidates(')} marker=${controller.includes('formatStationUnreachable')}`,
     )
