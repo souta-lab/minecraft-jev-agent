@@ -505,14 +505,19 @@ async function runMinimalFrameBuild() {
 }
 
 async function runReferenceApproachBuild() {
-  const target = { x: ORIGIN.x, y: ORIGIN.y, z: 0 }
+  const target = { x: ORIGIN.x, y: ORIGIN.y + 1, z: 0 }
   const fixture = makePlaceBot({ x: 30.5, y: 64, z: 30.5 }, [target], false, 0, false)
   for (let x = ORIGIN.x - 2; x <= ORIGIN.x + 2; x += 1) {
     for (let z = -2; z <= 2; z += 1) {
+      fixture.grid.set(String(x) + ',' + String(ORIGIN.y - 2) + ',' + String(z), 'air')
+      fixture.grid.set(String(x) + ',' + String(ORIGIN.y - 1) + ',' + String(z), 'air')
       fixture.grid.set(String(x) + ',' + String(ORIGIN.y) + ',' + String(z), 'air')
       fixture.grid.set(String(x) + ',' + String(ORIGIN.y + 1) + ',' + String(z), 'air')
+      fixture.grid.set(String(x) + ',' + String(ORIGIN.y + 2) + ',' + String(z), 'air')
+      fixture.grid.set(String(x) + ',' + String(ORIGIN.y - 3) + ',' + String(z), 'stone')
     }
   }
+  fixture.grid.set(String(ORIGIN.x) + ',' + String(ORIGIN.y) + ',0', OBSIDIAN)
   const dir = mkdtempSync(join(tmpdir(), 'frame-build-reference-'))
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
@@ -578,15 +583,15 @@ async function runReferenceApproachBuild() {
 }
 
 {
-  const target = { x: ORIGIN.x, y: ORIGIN.y, z: 0 }
+  const target = { x: ORIGIN.x, y: ORIGIN.y + 1, z: 0 }
   const { fixture, result, approaches, messages } = await runReferenceApproachBuild()
   const pass =
     result.status === 'done' &&
     result.verified === true &&
     fixture.grid.get(key(target)) === 'cobblestone' &&
     approaches.length === 1 &&
-    approaches[0]?.y === ORIGIN.y &&
-    messages.some((line) => line === 'PLACE_APPROACH target=5,64,0 reference=5,63,0 stand=4,64,0')
+    approaches[0]?.y === ORIGIN.y - 2 &&
+    messages.some((line) => line === 'PLACE_APPROACH target=5,65,0 reference=5,64,0 stand=4,62,0')
   process.stdout.write(
     (pass ? 'PASS' : 'FAIL') + '  (5a-approach) an out-of-reach placement walks to a lower supported reference stand\n' +
       '      status=' + result.status + ' verified=' + result.verified + ' approaches=' + JSON.stringify(approaches) + ' failure=' + (result.failure ?? 'none') + '\n',

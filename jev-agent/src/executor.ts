@@ -3771,7 +3771,7 @@ export class Executor {
    * candidate.
    */
   private findPlacementStandForReference(reference: Vec3Json, target: Vec3Json): Vec3Json | null {
-    for (const feetY of [reference.y - 1, reference.y, reference.y + 1]) {
+    for (const feetY of [reference.y - 2, reference.y - 1, reference.y, reference.y + 1]) {
       const stand = this.findPlacementStandAtLevel(reference, feetY, target)
       if (stand !== null) return stand
     }
