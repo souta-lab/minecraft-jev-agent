@@ -53,9 +53,13 @@ type AbandonVerdictLike = {
   planId: string | null
 }
 
+type SemanticEscalation = { escalate: boolean; reason: string }
+
 type LegacyInternals = {
   jev?: { kind?: string }
   options?: { betaAuthority?: boolean }
+
+  // semantic selector seams we strangle on the real Jev path
   applyFurnacePrereq?: ApplyFurnacePrereq
   advancePrereqAfterUnverified?: () => boolean
   retireFailedKnownRetrieve?: (candidate: Candidate, result: ExecutionResult) => void
@@ -63,11 +67,22 @@ type LegacyInternals = {
   onUnverifiedAction?: (result: ExecutionResult, postcondition: string, pending: PendingLike | undefined) => void
   abandonVerdict?: (decision: JevResult, optionId: string, planId: string | null) => AbandonVerdictLike
   protectedReplanSuppressed?: (reason: string) => boolean
+  filterMoveCandidates?: (candidates: readonly Candidate[], state: WorldState, log?: boolean) => Candidate[]
+  blacklistedMoveTargets?: (state: WorldState) => ReadonlySet<string>
+  unreachableStationKeys?: (state: WorldState) => ReadonlySet<string>
+  breakFailureDeadlock?: (candidates: readonly Candidate[]) => void
+  checkWedge?: (actionId: string) => void
+  semanticEscalation?: (decision: JevResult) => SemanticEscalation
+  escapeOscillation?: (state: unknown) => void
+  abortWedge?: (reason: string) => void
+  escalate?: (reason: string, detail: string) => void
 
   queue?: { current?: { id?: string } | null }
   actionUnverified?: Map<string, number>
   recentEvents?: string[]
   retrieveUnverified?: unknown
+  oscillationState?: unknown
+  lastDecisionId?: string | null
 
   prereqPlan?: unknown
   prereqForcedPath?: unknown
@@ -87,12 +102,30 @@ type LegacyInternals = {
   tickCounter?: number
 }
 
+/** Local failure signals that #11 says belong to pi/beta, not System2 WHAT. */
+const LOCAL_POLICY_ESCALATIONS = new Set([
+  'low_confidence',
+  'same_failure_3x',
+  'pathfinder_no_path',
+  'pathfinder_stuck',
+  'progress_stall',
+])
+
 function realJev(internals: LegacyInternals): boolean {
   return internals.jev?.kind !== 'fallback'
 }
 
 function betaIsAuthoritative(internals: LegacyInternals): boolean {
   return realJev(internals) && internals.options?.betaAuthority === true
+}
+
+function pushPolicyEvidence(internals: LegacyInternals, event: string): void {
+  internals.recentEvents?.push(event)
+  // Keep the in-memory history bounded even if the legacy loop has not reached
+  // its own compaction point yet. Jev itself only receives the newest slice.
+  if (internals.recentEvents !== undefined && internals.recentEvents.length > 128) {
+    internals.recentEvents.splice(0, internals.recentEvents.length - 128)
+  }
 }
 
 function clearLegacyPrereqSelection(internals: LegacyInternals): void {
@@ -152,9 +185,12 @@ export class JevController extends LegacyJevController {
           return
         }
         // #11 rejects fixed-attempt semantic retirement. Hard world-truth
-        // staleness, reachability rejection and move-failure fingerprints still
-        // live in their deterministic subsystems; this count-based selector does
-        // not run on the real model path.
+        // staleness and current deterministic reachability still live in their
+        // own subsystems; count/cooldown history stays evidence only.
+        pushPolicyEvidence(
+          internals,
+          `known retrieve outcome: ${candidate.id} status=${result.status} verified=${result.verified} progress=${result.itemsGained}`,
+        )
       }
     }
 
@@ -170,7 +206,8 @@ export class JevController extends LegacyJevController {
         // pi the same grounded alternatives plus failure history.
         internals.retrieveUnverified = null
         internals.noteCandidateFailure?.(candidate.id)
-        internals.recentEvents?.push(
+        pushPolicyEvidence(
+          internals,
           `local retrieve unverified: ${candidate.id} attempts=${unverified}; semantic authority=jev_pi`,
         )
         internals.logger?.warn(
@@ -207,7 +244,8 @@ export class JevController extends LegacyJevController {
           strategy,
           postcondition,
         })
-        internals.recentEvents?.push(
+        pushPolicyEvidence(
+          internals,
           `action unverified: ${result.actionId}; postcondition=${postcondition}; attempts=${attempts}`,
         )
         internals.logger?.warn(
@@ -224,6 +262,108 @@ export class JevController extends LegacyJevController {
           },
           internals.tickCounter,
         )
+      }
+    }
+
+    // Move failure count/cooldown memory remains useful evidence and a baseline,
+    // but it cannot hide otherwise-grounded alternatives from real pi. Current
+    // hard reachability is still enforced by generateGroundedCandidates + Guard.
+    const legacyFilterMoves = internals.filterMoveCandidates?.bind(this)
+    if (legacyFilterMoves !== undefined) {
+      internals.filterMoveCandidates = (candidates, state, log) =>
+        realJev(internals) ? [...candidates] : legacyFilterMoves(candidates, state, log)
+    }
+
+    const legacyBlacklistedTargets = internals.blacklistedMoveTargets?.bind(this)
+    if (legacyBlacklistedTargets !== undefined) {
+      internals.blacklistedMoveTargets = (state) =>
+        realJev(internals) ? new Set<string>() : legacyBlacklistedTargets(state)
+    }
+
+    const legacyUnreachableStations = internals.unreachableStationKeys?.bind(this)
+    if (legacyUnreachableStations !== undefined) {
+      internals.unreachableStationKeys = (state) =>
+        realJev(internals) ? new Set<string>() : legacyUnreachableStations(state)
+    }
+
+    const legacyDeadlock = internals.breakFailureDeadlock?.bind(this)
+    if (legacyDeadlock !== undefined) {
+      internals.breakFailureDeadlock = (candidates) => {
+        if (!realJev(internals)) {
+          legacyDeadlock(candidates)
+          return
+        }
+        // "all candidates exceeded N failures" is not proof that the Option or
+        // candidate set is structurally invalid. failedCandidates is already in
+        // Jev's state; pi/beta decide from that evidence.
+      }
+    }
+
+    const legacySemanticEscalation = internals.semanticEscalation?.bind(this)
+    if (legacySemanticEscalation !== undefined) {
+      internals.semanticEscalation = (decision) => {
+        if (!realJev(internals)) return legacySemanticEscalation(decision)
+        // should_retreat is local safety/recovery evidence. Guard/pi can retreat;
+        // it is not itself a request for a different long-horizon WHAT.
+        return { escalate: false, reason: 'local safety/recovery remains Jev pi + deterministic guard' }
+      }
+    }
+
+    const legacyEscapeOscillation = internals.escapeOscillation?.bind(this)
+    if (legacyEscapeOscillation !== undefined) {
+      internals.escapeOscillation = (state) => {
+        if (!realJev(internals)) {
+          legacyEscapeOscillation(state)
+          return
+        }
+        // Oscillation is an observation. Do not auto-abandon a retrieval, pick a
+        // different prerequisite route, or wake System2. Expose it to pi/beta.
+        internals.oscillationState = null
+        if (internals.lastDecisionId !== null && internals.lastDecisionId !== undefined) {
+          internals.noteCandidateFailure?.(internals.lastDecisionId)
+        }
+        pushPolicyEvidence(internals, `oscillation detected; semantic authority=jev_pi_beta`)
+      }
+    }
+
+    const legacyCheckWedge = internals.checkWedge?.bind(this)
+    if (legacyCheckWedge !== undefined) {
+      internals.checkWedge = (actionId) => {
+        if (!realJev(internals)) {
+          legacyCheckWedge(actionId)
+          return
+        }
+        // Repeated WAIT is history for pi/beta, not "N waits -> System2/abort".
+        if (actionId === 'WAIT') pushPolicyEvidence(internals, 'Jev pi selected WAIT with no verified progress yet')
+      }
+    }
+
+    const legacyAbortWedge = internals.abortWedge?.bind(this)
+    if (legacyAbortWedge !== undefined) {
+      internals.abortWedge = (reason) => {
+        if (!realJev(internals)) {
+          legacyAbortWedge(reason)
+          return
+        }
+        // Wall-clock/count based no-progress is not a deterministic proof that
+        // the process should abort. Preserve the evidence; beta owns whether the
+        // Option ends and hard safety/lifecycle failures remain elsewhere.
+        pushPolicyEvidence(internals, `wedge observation: ${reason}; termination authority=jev_beta`)
+      }
+    }
+
+    const legacyEscalate = internals.escalate?.bind(this)
+    if (legacyEscalate !== undefined) {
+      internals.escalate = (reason, detail) => {
+        if (!realJev(internals) || !LOCAL_POLICY_ESCALATIONS.has(reason)) {
+          legacyEscalate(reason, detail)
+          return
+        }
+        // Local path/stall/confidence/failure signals are compact policy memory.
+        // They do not change WHAT. Structural reasons (goal complete, genuinely
+        // empty frontier, death/world corruption, policy error) still reach the
+        // legacy System2 handoff.
+        pushPolicyEvidence(internals, `${reason}: ${detail}; semantic authority=jev_pi_beta`)
       }
     }
 
