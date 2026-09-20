@@ -732,7 +732,62 @@ export interface MercuryTransportResult {
 
 export type MercuryTransport = (request: MercuryTransportRequest) => Promise<MercuryTransportResult>
 
+/**
+ * Some gateway models accept the AI SDK tool schema but reject a named
+ * `tool_choice`.  Keep their compatibility path explicit: the model still
+ * emits only a high-level plan, and the exact same local schema/capability
+ * validation remains authoritative after transport parsing.
+ */
+export const MUSE_SPARK_MODEL = 'muse-spark-1.3-contributor'
+
+export type MercuryTransportMode = 'tool-call' | 'json-text'
+
+export function mercuryTransportMode(model: string): MercuryTransportMode {
+  return model === MUSE_SPARK_MODEL ? 'json-text' : 'tool-call'
+}
+
+/** Extract one JSON object from a model's text response without repairing it. */
+export function parseMercuryJsonText(text: string): unknown | null {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return null
+  const candidates: string[] = [trimmed]
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]
+  if (fenced !== undefined) candidates.push(fenced.trim())
+  const first = trimmed.indexOf('{')
+  const last = trimmed.lastIndexOf('}')
+  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1))
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate)
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    } catch {
+      // The caller turns null into the normal schema rejection/corrective retry.
+    }
+  }
+  return null
+}
+
+const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
+  'This model cannot use a named tool choice. Return exactly one JSON object in the response text, with no prose or markdown. ' +
+  'The top-level op must be exactly one of continue, patch, replace, or abort. ' +
+  'Use goals for the typed goal objects; never use a goal kind as op. ' +
+  'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
+
 function defaultMercuryTransport(model: string): MercuryTransport {
+  if (mercuryTransportMode(model) === 'json-text') {
+    return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+      const result = await generateText({
+        model,
+        system: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
+        prompt,
+        maxOutputTokens,
+        maxRetries: 0,
+        abortSignal: AbortSignal.timeout(timeoutMs),
+      })
+      const parsed = parseMercuryJsonText(result.text)
+      return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage: result.usage }
+    }
+  }
   return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
     const result = await generateText({
       model,
