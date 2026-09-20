@@ -50,6 +50,12 @@ const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
 
+const runtimeControllerSource = (): string => {
+  const facade = readFileSync(fileURLToPath(new URL('./src/controller.ts', import.meta.url)), 'utf8')
+  const legacy = readFileSync(fileURLToPath(new URL('./src/controller-legacy.ts', import.meta.url)), 'utf8')
+  return `${facade}\n${legacy}`
+}
+
 const OVERWORLD = 'overworld'
 /** A remembered station coordinate, far beyond RETRIEVE_ARRIVAL_RADIUS (2). */
 const STATION = { x: 36, y: 56, z: 41 }
@@ -91,8 +97,6 @@ function known(previousAttempts: number, result: Result, completed?: boolean) {
   })
 }
 
-// --- B. the retirement counter must be CHARGED for partial chunks ---------------
-
 addCase('B: a partial closure with a body-change flag does NOT clear the retirement counter', () => {
   const decision = known(0, RC8_CLOSURE, false)
   const legacy = knownRetrieveMadeProgress(RC8_CLOSURE)
@@ -107,8 +111,6 @@ addCase('B: a pure partial closure does NOT clear the retirement counter', () =>
 })
 
 addCase('B: RC8 repeated partial closures retire the station instead of looping', () => {
-  // Drive the controller boundary exactly as `retireFailedKnownRetrieve` does:
-  // every attempt reports `completed=false` (no arrival, no acquisition).
   let attempts = 0
   let retiredOn = -1
   let clears = 0
@@ -130,8 +132,6 @@ addCase('B: the RC8 chunk (no closure) is charged by the retirement counter', ()
   const pass = decision.kind === 'charge' && decision.attempts === 1
   return { pass, detail: `decision=${decision.kind}${'attempts' in decision ? `:${decision.attempts}` : ''}` }
 })
-
-// --- A. the coordinate failure memory must NOT reset on a partial chunk ----------
 
 addCase('A: a known retrieve that progressed but did NOT arrive does not reset the coordinate', () => {
   const clear = shouldClearActiveRetrieval({ retrieval: 'known', hasObservableProgress: true, arrived: false })
@@ -177,8 +177,6 @@ addCase('A: repeated partial retrieves never reset a pre-existing coordinate fai
   return { pass, detail: `key=${moveFailureKey(OVERWORLD, STATION)} resets=${resets} before=${before} after=${after.attempts}` }
 })
 
-// --- C. a real arrival or an acquired item DOES reset/clear ----------------------
-
 addCase('C: a real arrival clears the retirement counter', () => {
   const decision = known(1, ARRIVAL, true)
   const pass = decision.kind === 'clear'
@@ -202,10 +200,8 @@ addCase('C: a real arrival resets the coordinate failure memory', () => {
   return { pass, detail: `reset=${decision.reset} known=${check.known}` }
 })
 
-// --- the wiring: the controller must gate on the same completion decision --------
-
 addCase('wiring: the RETRIEVE branch gates success on the completion decision, not truth.observableProgress', () => {
-  const source = readFileSync(fileURLToPath(new URL('./src/controller.ts', import.meta.url)), 'utf8')
+  const source = runtimeControllerSource()
   const usesCompletion = source.includes('retrieveCompleted(')
   const usesMemoryDecision = source.includes('decideRetrieveMemory(result,')
   const stillUnconditional = /if \(truth\.resetsFailureMemory\) \{\s*if \([\s\S]{0,400}?this\.noteCandidateSuccess\(result\.actionId\)/.test(source)
