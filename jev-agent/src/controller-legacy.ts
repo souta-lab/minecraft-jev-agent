@@ -66,7 +66,7 @@ import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { OBSIDIAN, PORTAL_OBSIDIAN_REQUIRED } from './netherPortalPlan.ts'
+import { NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, isPortalIgnitionPostconditionMet, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -3519,7 +3519,11 @@ export class JevController {
       return
     }
     if (current.kind === 'place') {
-      if (current.targetItem !== null && this.countItem(current.targetItem) <= 0) {
+      const complete =
+        current.targetPredicate === PORTAL_LIT_PREDICATE
+          ? this.portalLitTruth(current)
+          : current.targetItem !== null && this.countItem(current.targetItem) <= 0
+      if (complete) {
         const beforeId = current.id
         const beforeDescription = current.description
         this.queue.markDone()
@@ -3626,6 +3630,31 @@ export class JevController {
     return evaluateSpatialPredicate(predicate, this.predicateSnapshot())
   }
 
+  /**
+   * World truth for the portal predicate. `nether_portal` is not an inventory
+   * item, and a prior queue record must never make an unlit frame look done.
+   * Re-sense the frame and require every live interior cell to be a portal.
+   */
+  private portalLitTruth(goal: QueuedGoal): boolean {
+    if (goal.targetPredicate !== PORTAL_LIT_PREDICATE) return false
+    const actualDimension = this.bot.game?.dimension ?? null
+    const expectedDimension = goal.dimension ?? OVERWORLD
+    const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
+    if (actualDimension === null || normalize(actualDimension) !== normalize(expectedDimension)) return false
+    const sites = sensedPortalFrameSites(this.bot, sensorOptions(this.options))
+    const scratch = this.bot.entity?.position?.clone()
+    if (scratch === undefined) return false
+    return sites.some((site) => {
+      if ((site.existingFrame?.length ?? 0) < PORTAL_OBSIDIAN_REQUIRED) return false
+      const layout = portalFrameLayout(site.origin, site.widthAxis)
+      return isPortalIgnitionPostconditionMet(
+        layout.interior,
+        (cell) => this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null,
+        NETHER_PORTAL,
+      )
+    })
+  }
+
   private effectiveHave(): number {
     const current = this.queue.current
     if (current === null || current.targetItem === null) return 0
@@ -3699,11 +3728,11 @@ export class JevController {
     if (current.targetItem === null) return
     const have = this.effectiveHave()
     if (current.kind === 'place') {
-      // A place goal is the inverse of the inventory-counted goals: it completes
-      // when the held station has LEFT the inventory. `have` is the inventory
-      // count, so map "still held" to 0 progress and "gone" to complete.
-      const placed = have <= 0
-      this.goal = { ...subgoalState(current, placed ? current.requiredCount : 0), haveCount: have }
+      // Ordinary PLACE goals are inverse inventory goals. A portal ignition is
+      // different: `nether_portal` is a world block, never an inventory item,
+      // so zero inventory must not masquerade as a completed predicate.
+      const placed = current.targetPredicate === PORTAL_LIT_PREDICATE ? this.portalLitTruth(current) : have <= 0
+      this.goal = { ...subgoalState(current, placed ? current.requiredCount : 0), haveCount: placed ? current.requiredCount : have }
       return
     }
     this.goal = subgoalState(current, have)
