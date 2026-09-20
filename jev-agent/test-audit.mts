@@ -3,7 +3,7 @@
 //   A. architecture consistency (doc question names == code; no phantom fields)
 //   B. Boolean gating (probability bands, no provider confidence)
 //   C. action-target coherence (action is the only authoritative choice)
-//   D. epoch / coalescing (priority merge, critical invalidation, state hash)
+//   D. epoch / coalescing (priority merge, critical revalidation, state hash)
 //   E. monotonic subgoal completion
 //   F. resource abstraction (semantic class -> concrete item)
 //   G. LLM escalation control flow (continue / patch / replace / abort)
@@ -140,13 +140,19 @@ addCase('C. action is the only authoritative choice; target ids live inside cand
 })
 
 // D. epoch / coalescing -------------------------------------------------------
-addCase('D. coalescing keeps the highest priority and critical triggers invalidate a stale decision', async () => {
+addCase('D. coalescing keeps the highest priority and critical triggers revalidate a stale decision', async () => {
   const critical = trigger('damage_taken', 10)
   const normal = trigger('inventory_changed', 6)
   const keptCritical = pickHigherPriority(critical, normal)
   const promoted = pickHigherPriority(normal, critical)
-  const controller = read('src/controller.ts')
-  const wired = controller.includes('criticalArrivedDuringFlight') && controller.includes('CRITICAL_TRIGGERS.has(pending.trigger)')
+  const controller = `${read('src/controller.ts')}\n${read('src/controller-legacy.ts')}`
+  const wired =
+    controller.includes('criticalArrivedDuringFlight') &&
+    controller.includes('hasCriticalTriggerDuringFlight') &&
+    controller.includes('freshCandidates') &&
+    controller.includes('guardDecision')
+  const familyScoped = controller.includes('criticalThreatFamily(trigger)') && controller.includes('criticalThreatFamily(critical.trigger)')
+  const revalidated = controller.includes('critical trigger arrived during the Jev flight; revalidating decision')
   const threatSet = questionSetForTrigger('damage_taken') === 'threat'
   const stateA = { tick: 1, timestampMs: 1, value: 'a' } as unknown as Parameters<typeof stableStateHash>[0]
   const stateAClock = { tick: 1, timestampMs: 999, value: 'a' } as unknown as Parameters<typeof stableStateHash>[0]
@@ -170,12 +176,14 @@ addCase('D. coalescing keeps the highest priority and critical triggers invalida
     CRITICAL_TRIGGERS.has('mob_appeared') &&
     TRIGGER_PRIORITY.damage_taken > TRIGGER_PRIORITY.inventory_changed &&
     wired &&
+    familyScoped &&
+    revalidated &&
     threatSet &&
     hashA === hashAClock &&
     hashA !== hashB &&
     bothDelivered &&
     criticalFirst
-  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}]` }
+  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}]` }
 })
 
 // E. monotonic subgoal completion ---------------------------------------------
