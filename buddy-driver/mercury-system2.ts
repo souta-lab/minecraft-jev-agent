@@ -148,12 +148,45 @@ function itemList(set: ReadonlySet<string>): string {
   return [...set].join(',')
 }
 
+/**
+ * Mechanical default count when the model omits one on an item goal. Code owns
+ * mechanical validity; Mercury/Jev own WHAT NEXT. A missing count must never
+ * discard an otherwise-valid plan, so it is filled with this safe minimum.
+ */
+export const MERCURY_DEFAULT_COUNT = 1
+
+function goalNeedsCount(kind: string | null): boolean {
+  return kind === 'collect' || kind === 'craft' || kind === 'smelt'
+}
+
+/**
+ * Fill a missing count on an item goal with MERCURY_DEFAULT_COUNT. Purely
+ * mechanical: it never reorders, invents, or drops goals, and an explicit count
+ * (valid or not) passes through untouched so the validator still rejects it.
+ */
+export function normalizeMercuryGoal(goal: MercuryPlanGoalJson): MercuryPlanGoalJson {
+  if (goal.count !== undefined) return goal
+  const kind = goal.kind ?? mercuryGoalKind(goal.item ?? '')
+  if (!goalNeedsCount(kind)) return goal
+  return { ...goal, count: MERCURY_DEFAULT_COUNT }
+}
+
+/** Normalize every goal in a parsed plan; returns the same object when nothing changed. */
+export function normalizeMercuryPlan(plan: MercuryPlanJson): MercuryPlanJson {
+  let changed = false
+  const goals = plan.goals.map((goal) => {
+    const normalized = normalizeMercuryGoal(goal)
+    if (normalized !== goal) changed = true
+    return normalized
+  })
+  return changed ? { ...plan, goals } : plan
+}
+
 function validateItemGoal(
   index: number,
   kind: string,
   goal: MercuryPlanGoalJson,
   allowed: ReadonlySet<string>,
-  opts?: { requireCount?: boolean },
 ): string | null {
   const item = typeof goal.item === 'string' ? goal.item : ''
   if (item.length === 0 || !allowed.has(item)) {
@@ -161,9 +194,6 @@ function validateItemGoal(
   }
   if (goal.count !== undefined && (!Number.isInteger(goal.count) || goal.count < 1 || goal.count > 64)) {
     return `goal[${index}] ${kind} count must be an integer in [1,64]`
-  }
-  if (opts?.requireCount === true && goal.count === undefined) {
-    return `goal[${index}] ${kind} needs a count in [1,64]`
   }
   return null
 }
@@ -176,19 +206,19 @@ export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): s
   // Legacy item goal: kind is inferred locally (backward compatible).
   if (goal.kind === undefined) {
     if (typeof goal.item !== 'string' || goal.item.length === 0) return `goal[${index}] legacy goal needs an item`
+    if (mercuryGoalKind(goal.item) === null) return `goal[${index}] ungrounded item: ${goal.item}`
     if (goal.count === undefined || !Number.isInteger(goal.count) || goal.count < 1 || goal.count > 64) {
       return `goal[${index}] legacy goal needs count in [1,64]`
     }
-    if (mercuryGoalKind(goal.item) === null) return `goal[${index}] ungrounded item: ${goal.item}`
     return null
   }
   switch (goal.kind) {
     case 'collect':
-      return validateItemGoal(index, 'collect', goal, collectableItems(), { requireCount: true })
+      return validateItemGoal(index, 'collect', goal, collectableItems())
     case 'craft':
-      return validateItemGoal(index, 'craft', goal, craftableItems(), { requireCount: true })
+      return validateItemGoal(index, 'craft', goal, craftableItems())
     case 'smelt':
-      return validateItemGoal(index, 'smelt', goal, smeltableItems(), { requireCount: true })
+      return validateItemGoal(index, 'smelt', goal, smeltableItems())
     case 'place':
       // count is optional for place; a station is singular.
       return validateItemGoal(index, 'place', goal, placeableItems())
@@ -232,7 +262,7 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
     const issue = parsed.error.issues[0]
     return { ok: false, error: `schema: ${issue?.path.join('.') ?? '?'} ${issue?.message ?? 'invalid'}` }
   }
-  const plan = parsed.data
+  const plan = normalizeMercuryPlan(parsed.data)
   if (plan.op === 'abort' && plan.goals.length !== 0) {
     return { ok: false, error: 'abort plans must not contain goals' }
   }
@@ -649,7 +679,7 @@ export interface MercuryCallRecord {
   retries: number
   /** 1-based index of the attempt this record describes (retry audit trail). */
   attempt?: number
-  outcome: 'success' | 'plan_rejected' | 'fallback'
+  outcome: 'success' | 'plan_rejected' | 'fallback' | 'budget_exhausted'
   state: unknown
   prompt: { system: string; user: string }
   response: unknown
@@ -831,6 +861,7 @@ A goal is EITHER a legacy item goal { item, count } (the verb is inferred locall
 - { kind: 'goto_resource', item }    known-resource retrieval; allowed: allowedGoals.goto_resources
 - { kind: 'descend_to', y }          integer y in [-59, 320]; optional dimension, defaults to overworld
 - { kind: 'explore', mode }          mode is 'cave' or 'surface'
+Every collect/craft/smelt goal MUST include an explicit integer count in [1,64]; when the quantity is not otherwise constrained, emit count: 1. Local normalization fills a missing count with 1, but an explicit count is required to express your intent, and a count outside [1,64] is rejected.
 Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions; goto references a resource name, never an x/z position.
 Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.
 If a furnace is held but the world has no placed furnace, emit { kind: 'place', item: 'furnace' } so the placement is a first-class planned step.
@@ -913,6 +944,10 @@ export function isRetryableModelError(error: unknown, depth = 0): boolean {
   if (isRetryableModelError(record.cause, depth + 1)) return true
   const errors = record.errors
   return Array.isArray(errors) && errors.some((entry) => isRetryableModelError(entry, depth + 1))
+}
+
+export function isBudgetExhaustedError(error: unknown): boolean {
+  return error instanceof Error && /hourly budget exhausted/i.test(error.message)
 }
 
 export type MercuryAttemptRun<T> =
@@ -1244,14 +1279,48 @@ export class MercurySystem2 implements System2Brain {
       })
       attempts = attemptRun.attempts
       failures = attemptRun.failures
-      retriesUsed = attempts - 1
+      retriesUsed = Math.max(0, attempts - 1)
       this.flushRejectedAttempts(callId, trigger, started, state, rejectedAttempts, attempts, failures, retriesUsed)
       rejectionsFlushed = true
       if (!attemptRun.ok) {
         const error = attemptRun.error
         const isValidation = error instanceof MercuryPlanValidationError
-        const message = isValidation ? error.message : `llm_error: ${describeError(error)}`
-        if (rejectedAttempts.length === 0) {
+        const budgetExhausted = isBudgetExhaustedError(error)
+        const message = isValidation
+          ? error.message
+          : budgetExhausted
+            ? `budget_exhausted: ${describeError(error)}`
+            : `llm_error: ${describeError(error)}`
+        if (budgetExhausted) {
+          this.log('MERCURY_BUDGET_EXHAUSTED', {
+            callId,
+            trigger,
+            stage: trigger,
+            maxPerHour: this.maxPerHour,
+            budgetUsed: this.cache.callTimes.length,
+            attempts,
+          })
+          this.writeCall({
+            record: 'mercury-call',
+            callId,
+            ts: new Date().toISOString(),
+            model: this.model,
+            stage: trigger,
+            latencyMs: Date.now() - started,
+            attempts,
+            failures,
+            retries: retriesUsed,
+            attempt: attempts,
+            outcome: 'budget_exhausted',
+            state,
+            prompt: { system: SYSTEM_PROMPT, user: userPrompt },
+            response: null,
+            usage: null,
+            cost: 0,
+            error: message,
+            errorDetail: describeErrorFull(error),
+          })
+        } else if (rejectedAttempts.length === 0) {
           this.writeCall({
             record: 'mercury-call',
             callId,
@@ -1349,6 +1418,8 @@ export class MercurySystem2 implements System2Brain {
         cached: false,
       }
     } catch (error) {
+      // modelFailure() already wrote the authoritative record; do not fabricate a 'fallback'.
+      if (error instanceof FatalModelError) throw error
       const latencyMs = Date.now() - started
       const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
       const message = `${kind}: ${describeError(error)}`
