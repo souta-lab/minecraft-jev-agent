@@ -9,6 +9,15 @@
     "compliance": ["pass", "fail", "unknown"]
   },
   "issues": {
+    "226": {
+      "acceptanceClass": "architecture-authority-implementation",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "#230 landed fail-loud model errors, but current main still defaults planner authority to deterministic, bypasses model choice on queue_empty, force-selects capability-gap recovery, pre-selects furnace prerequisite routes by code cost, and contains hand-ranking prompt/commitment paths. Draft #260 pins planner/prompt no-bypass requirements; #261 removes cheapest-candidate anti-flap authority pending local fixture/typecheck evidence."
+    },
     "221": {
       "acceptanceClass": "architecture-authority-live",
       "policy": "defined",
@@ -16,7 +25,7 @@
       "verification": "live",
       "observation": "fail",
       "compliance": "fail",
-      "note": "A current run proved 31k+ decisions were deterministic fallback with no real Jev/LLM/Mercury invocation. #222 removed the hardcoded forceFallbackPolicy=true, but fail-closed key/config resolution and a fresh real-Jev acceptance run remain required."
+      "note": "The original measured iron-pickaxe run used deterministic fallback with no real Jev/LLM/Mercury invocation. #222 restored real Jev wiring and #230 made model failures fail loud, but a fresh acceptance run cannot count until #226 removes remaining pre-model semantic bypasses."
     },
     "11": {
       "acceptanceClass": "architecture-authority",
@@ -25,7 +34,7 @@
       "verification": "live",
       "observation": "fail",
       "compliance": "fail",
-      "note": "Live evidence showed deterministic code had accumulated semantic WHICH/WHAT authority. Keep deterministic truth/safety/mechanics/verification; quarantine semantic fallback as explicit baseline and migrate semantic choice back to Jev/System2."
+      "note": "Live evidence showed deterministic code had accumulated semantic WHICH/WHAT authority. Morning re-audit confirms most overnight mechanics/truth fixes are reusable, while prereq cost selection, anti-flap cheapest commitment, forced recovery and abandon/retry ladders remain policy-plane migration targets."
     },
     "128": {
       "acceptanceClass": "runtime-config-authority",
@@ -34,7 +43,7 @@
       "verification": "none",
       "observation": "fail",
       "compliance": "fail",
-      "note": "The authority incident was enabled by implicit/default configuration and silent fallback. A typed effective config with requested/resolved policy modes and fail-closed production semantics is not yet landed."
+      "note": "A typed/versioned effective config is still absent. Immediate planner-default and invalid-value behavior is blocked on #226; #128 then consolidates requested/resolved authority state and cache/artifact namespacing."
     },
     "107": {
       "acceptanceClass": "architecture-authority-map",
