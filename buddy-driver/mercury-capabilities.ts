@@ -67,6 +67,13 @@ export const MERCURY_ALLOWED_GOALS: MercuryAllowedGoals = {
     'raw_copper',
     'raw_gold',
     'diamond',
+    // Portal prerequisites are executable through the existing generic
+    // collect path.  The executor/candidate layer still owns the hard
+    // mechanical gates (gravel yield for flint and a diamond pickaxe for
+    // obsidian); exposing the pair here only lets Mercury request the
+    // capability instead of being forced to invent a deterministic route.
+    'flint',
+    'obsidian',
   ],
   craft: [
     'crafting_table',
@@ -75,6 +82,7 @@ export const MERCURY_ALLOWED_GOALS: MercuryAllowedGoals = {
     'iron_pickaxe',
     'diamond_pickaxe',
     'furnace',
+    'flint_and_steel',
     'iron_chestplate',
     'iron_leggings',
     'iron_helmet',
