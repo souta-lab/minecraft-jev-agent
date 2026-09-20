@@ -25,6 +25,7 @@ import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, describeFailure, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
+import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 import {
   PlannerBrain as LegacyPlannerBrain,
   buildPlanOptions,
@@ -72,6 +73,22 @@ function uniqueOptions(options: readonly PlanOption[]): PlanOption[] {
     out.push(option)
   }
   return out
+}
+
+/** Mercury is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
+function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | null {
+  let waitStreak = 0
+  for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
+    const outcome = request.recentOutcomes[i]
+    if (outcome === undefined || outcome.actionId !== 'WAIT') break
+    waitStreak += 1
+  }
+  if (waitStreak >= 3) return 'wait_limit'
+  if (request.reason === 'action_impossible') return 'action_impossible'
+  if (request.reason === 'no_progress' || request.reason === 'need_llm' || request.reason === 'unknown_situation') {
+    return 'no_progress'
+  }
+  return null
 }
 
 function compactPlan(option: PlanOption): Record<string, unknown> {
@@ -145,6 +162,7 @@ export class PlannerBrain implements System2Brain {
   private readonly resolveKey: () => KeyResolution | null
   private readonly terminate: (() => never) | undefined
   private readonly legacy: LegacyPlannerBrain
+  private readonly mercury: MercurySystem2 | undefined
   private calls = 0
 
   constructor(options: PlannerOptions) {
@@ -158,6 +176,7 @@ export class PlannerBrain implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    this.mercury = options.mercury
 
     // Baseline is intentionally hermetic: no Advisor/Mercury/model exception path
     // may run when the owner explicitly selected deterministic mode.
@@ -195,6 +214,26 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
+    const mercuryTrigger = mercuryTriggerFor(request)
+    if (this.mercury !== undefined && mercuryTrigger !== null) {
+      this.log('SYSTEM2_AUTHORITY_INPUT', {
+        model: this.mercury.model,
+        source: 'mercury',
+        trigger: mercuryTrigger,
+        reason: request.reason,
+      })
+      const repair = await this.mercury.tryRepair(request, mercuryTrigger)
+      if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+      this.log('SYSTEM2_AUTHORITY_DECISION', {
+        model: this.mercury.model,
+        source: 'mercury',
+        trigger: mercuryTrigger,
+        op: repair.op,
+        strategy: repair.strategy,
+        goals: repair.goals.map((goal) => goal.description),
+      })
+      return repair.plan
+    }
     const options = this.groundedOptions(request)
     if (options.length === 0) return this.fatal('planner-no-grounded-options', 'System2 has no grounded semantic options')
     if (this.calls >= this.maxCalls) return this.fatal('planner-budget', `model call budget exhausted (${this.maxCalls})`)

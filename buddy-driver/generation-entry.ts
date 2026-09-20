@@ -1032,7 +1032,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     planner: brain.mode,
     plannerModel: brain.model,
     plannerCache: cachePath,
-    advisor: mercuryEnablement.enabled ? `mercury:${MERCURY_MODEL_DEFAULT}` : resolveAdvisorMode(plannerMode),
+    advisor: mercuryEnablement.enabled
+      ? `mercury:${mercury?.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT}`
+      : resolveAdvisorMode(plannerMode),
     advisorSource: mercuryEnablement.source,
     optionCompiler: optionCompilerEnabled,
     futureRungs: ladder.futureRungIds,
