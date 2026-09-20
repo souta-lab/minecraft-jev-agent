@@ -991,6 +991,41 @@ export function candidateStarvationMissing(
   return out
 }
 
+/**
+ * Repeats of a barren (`productive=0`) candidate set before System 2/Mercury is
+ * re-summoned. One starved tick can be a transient sensor frame; a repeat means
+ * the mechanical layer has no forward affordance and the MODEL must repair WHAT.
+ */
+export const CANDIDATE_STARVATION_SUMMON_REPEAT = 2
+
+export interface CandidateStarvationSummon {
+  /** true when this tick should invoke the exception-driven re-summon path */
+  summon: boolean
+  reason: 'candidate_starvation'
+  detail: string
+}
+
+/**
+ * Pure starvation -> re-summon rule. It returns a reason and a detail string,
+ * never a plan: repairing WHAT belongs to System2/Mercury, so no deterministic
+ * goal is substituted here (that would be the planner auto-insertion this
+ * boundary forbids).
+ */
+export function candidateStarvationSummon(
+  productive: number,
+  repeats: number,
+  goal: string,
+  blockedBy: string,
+  missing: readonly string[] = [],
+  threshold: number = CANDIDATE_STARVATION_SUMMON_REPEAT,
+): CandidateStarvationSummon {
+  return {
+    summon: productive === 0 && repeats >= threshold,
+    reason: 'candidate_starvation',
+    detail: `candidate_starvation: no productive candidate ${repeats}x on goal "${goal}" blockedBy=${blockedBy} missing=${JSON.stringify(missing)}`,
+  }
+}
+
 /** True when a withheld candidate is a route for `item` itself (not a sibling). */
 function candidateTargetsItem(candidate: Candidate, item: string): boolean {
   if (candidate.targetName === item) return true
@@ -1967,6 +2002,16 @@ export class JevController {
             'all_candidates_invalid',
             `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x with no state change on goal "${this.currentGoalKey()}"`,
           )
+        }
+        const starvationSummon = candidateStarvationSummon(
+          actionable,
+          this.noProductiveRepeats,
+          this.currentGoalKey(),
+          blockedBy,
+          missing,
+        )
+        if (starvationSummon.summon) {
+          this.summonLlm(starvationSummon.reason, starvationSummon.detail)
         }
       } else {
         this.noProductiveRepeats = 0

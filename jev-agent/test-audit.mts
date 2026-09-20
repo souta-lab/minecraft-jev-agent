@@ -252,7 +252,7 @@ addCase('G. replan ops continue/patch/replace/abort reshape the queue correctly'
     recentEvents: [],
     recentOutcomes: [],
   }
-  const reasons = evaluateSummonConditions({ queueEmpty: false, needLlm: true, actionImpossible: true, unknownSituation: false, noProgress: true })
+  const reasons = evaluateSummonConditions({ queueEmpty: false, needLlm: true, actionImpossible: true, unknownSituation: false, noProgress: true, candidateStarvation: false })
   const escalation = LLM_SUMMON_REASONS.every((reason) => typeof reason === 'string') && reasons.includes('need_llm') && reasons.includes('no_progress')
   const pass = continueKeepsPending && patchDropsPending && replaceKeepsDone && abortStops && escalation
   return { pass, detail: `continue=${continueKeepsPending} patch=${patchDropsPending} replace=${replaceKeepsDone} abort=${abortStops} requestTick=${request.tick}` }
