@@ -146,6 +146,32 @@ addCase('accepts an in-reach oak_log', () => {
   return result.ok ? { code: null, reason: 'accepted' } : { code: result.code, reason: result.reason }
 })
 
+addCase('accepts an out-of-reach multi-cell portal placement for executor approach', () => {
+  const cells = [
+    { x: 10, y: 70, z: -6 },
+    { x: 10, y: 70, z: -5 },
+    { x: 10, y: 71, z: -7 },
+    { x: 10, y: 71, z: -4 },
+  ]
+  const fixture = state({
+    self: { x: 6.5, y: 71, z: -9.1 },
+    blocks: [{ ...logBlock(cells[0] ?? { x: 10, y: 70, z: -6 }, 5.37, false, true), name: 'obsidian' }],
+    inventory: { slots: [], counts: { obsidian: 3 }, totalItems: 3 },
+  })
+  const frame = candidate({
+    id: 'PLACE:obsidian:build:10@p10_70_-6',
+    kind: 'PLACE',
+    targetName: 'obsidian',
+    target: cells[0] ?? null,
+    itemName: 'obsidian',
+    inReach: false,
+    hasStandableAdjacent: true,
+    placementCells: cells,
+  })
+  const result = guardCandidate(frame, fixture, context({ candidateIds: new Set([frame.id]), reach: 5 }))
+  return result.ok ? { code: null, reason: 'accepted executor approach' } : { code: result.code, reason: result.reason }
+})
+
 // --- OUT_OF_REACH: same block, but the bot stands 40 blocks away at dig time
 addCase('rejects OUT_OF_REACH at dig time', () => {
   const fixture = state({
@@ -426,6 +452,7 @@ addCase('rejects EAT when the food left the inventory', () => {
 
 const expected: Record<string, GuardCode | null> = {
   'accepts an in-reach oak_log': null,
+  'accepts an out-of-reach multi-cell portal placement for executor approach': null,
   'rejects OUT_OF_REACH at dig time': 'OUT_OF_REACH',
   'rejects EMPTY_HAND when the tool is missing': 'EMPTY_HAND',
   'rejects UNKNOWN_CANDIDATE (hallucinated id)': 'UNKNOWN_CANDIDATE',

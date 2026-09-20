@@ -462,15 +462,16 @@ function guardPlace(candidate: Candidate, state: WorldState, context: GuardConte
   if (target === null) {
     return deny(candidate.id, 'TARGET_GONE', 'PLACE candidate carries no coordinates')
   }
+  const multiCellPlacement = (candidate.placementCells?.length ?? 0) > 1
   const occupied = findBlock(state, target)
-  if (occupied !== undefined) {
+  if (occupied !== undefined && (!multiCellPlacement || occupied.name !== itemName)) {
     return deny(
       candidate.id,
       'TARGET_GONE',
       `(${target.x},${target.y},${target.z}) is already occupied by ${occupied.name}`,
     )
   }
-  if (distance(target, state.self.eyePosition) > context.reach) {
+  if (!multiCellPlacement && distance(target, state.self.eyePosition) > context.reach) {
     return deny(
       candidate.id,
       'OUT_OF_REACH',
