@@ -28,7 +28,7 @@ import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
-import { isPlacePostconditionMet, isSmeltPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
+import { isPlacePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -119,6 +119,7 @@ export type FailureCode =
   | 'smelt_timeout'
   | 'target_gone'
   | 'verify_failed'
+  | 'pickup_failed'
   | 'cancelled'
   | 'unknown_event'
 
@@ -1372,15 +1373,35 @@ export class Executor {
       { target, actionId: candidate.id },
     )
 
-    // The spec's VERIFY step accepts either "the block is gone" or "the item is
-    // in the inventory". Inventory collection additionally requires walking onto
-    // the drop, so a verified dig is: block removed AND (collected OR the drop
-    // entity was observed in the world).
-    const verified = report.removed && (report.itemsGained > 0 || report.dropObserved)
+    // A collect MINE is complete only when the drop landed in the inventory; a
+    // pure dig (clearance / non-collect goal) is complete on removal because its
+    // drop may be legitimately transformed or lost. The drop was already
+    // actively collected by `collectDrop` above, bounded by pickupPathTimeoutMs.
+    const requiresPickup = candidate.meta.requiresPickup === true
+    const verified = isMinePostconditionMet({
+      requiresPickup,
+      blockRemoved: report.removed,
+      dropObserved: report.dropObserved,
+      itemsGained: report.itemsGained,
+    })
     if (!verified) {
-      throw new ExecutorError(
-        'verify_failed',
-        `blockRemoved=${report.removed} dropObserved=${report.dropObserved} itemsGained=${report.itemsGained} after ${report.settledMs}ms`,
+      const detail = `blockRemoved=${report.removed} dropObserved=${report.dropObserved} itemsGained=${report.itemsGained} after ${report.settledMs}ms`
+      this.logger.warn('verify', `MINE_PICKUP_UNMET ${candidate.id} ${detail}`, { target, actionId: candidate.id })
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'failed',
+        requiresPickup ? 'uncollected' : 'unverified',
+        detail,
+        requiresPickup ? 'pickup_failed' : 'verify_failed',
+        {
+          verified: false,
+          blockRemoved: report.removed,
+          dropObserved: report.dropObserved,
+          itemsGained: report.itemsGained,
+          goalItemCount: report.goalItemCount,
+        },
       )
     }
 
@@ -4188,7 +4209,8 @@ export class Executor {
     signal: AbortSignal,
   ): Promise<VerifyReport> {
     const startedAt = Date.now()
-    const settleDeadline = startedAt + this.options.verifyTimeoutMs
+    const pickupWindowMs = Math.min(this.options.pickupPathTimeoutMs, this.options.verifyTimeoutMs)
+    const settleDeadline = startedAt + pickupWindowMs
     let afterCount = this.countItem(itemName)
     let dropObserved = false
     let nudges = 0

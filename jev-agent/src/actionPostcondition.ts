@@ -31,6 +31,12 @@ export interface ActionOutcomeInput {
   blockRemoved?: boolean
   /** deterministic body change with no block/item evidence (altitude gained), when known */
   progressed?: boolean
+  /**
+   * True when this action must end with its drop in the inventory (a collect
+   * goal). A collect MINE is complete only on `itemsGained > 0`; a removed block
+   * and an observed drop are the DIG, not the acquisition.
+   */
+  requiresPickup?: boolean
   /** local plan revision (GoalQueue row id), when the caller knows it */
   planId?: string | null
   /** executor action id, when the caller knows it */
@@ -75,6 +81,32 @@ export function isPlacePostconditionMet(blockNameAtTarget: string | null, itemNa
   return blockNameAtTarget === itemName
 }
 
+/** Everything a strict MINE post-condition needs to distinguish a collect from a pure dig. */
+export interface MinePostconditionEvidence {
+  /** true when the active goal must end with the drop in the inventory (a collect goal) */
+  requiresPickup: boolean
+  /** the target block is gone */
+  blockRemoved: boolean
+  /** a dropped-item entity for this yield was observed in the world */
+  dropObserved: boolean
+  /** the yield item count increased */
+  itemsGained: number
+}
+
+/**
+ * #79 STRICT MINE post-condition. A pure dig (`requiresPickup=false`, a headroom
+ * clearance cut or a non-collect goal) is verified by the block being gone: its
+ * drop may be legitimately transformed or lost. A collect MINE
+ * (`requiresPickup=true`) is verified only when the drop actually landed in the
+ * inventory - a removed block plus an observed-but-uncollected drop is not
+ * acquisition.
+ */
+export function isMinePostconditionMet(evidence: MinePostconditionEvidence): boolean {
+  if (!evidence.blockRemoved) return false
+  if (evidence.requiresPickup) return evidence.itemsGained > 0
+  return true
+}
+
 /**
  * The per-action post-condition the executor is checking, in words, so the
  * ACTION_UNVERIFIED line names what was expected (issue #79 acceptance).
@@ -88,7 +120,7 @@ export function describeActionPostcondition(kind: string): string {
     case 'CRAFT':
       return 'output item count increased'
     case 'MINE':
-      return 'target block removed AND (drop collected OR observed)'
+      return 'target block removed AND (for a collect goal the drop acquired: itemsGained > 0; a pure dig is complete on removal)'
     case 'RETRIEVE':
       return 'remembered resource reached (remaining distance to the target decreased) or item count increased'
     case 'DESCEND':
@@ -120,6 +152,17 @@ export function isZeroProgressOutcome(
   input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
 ): boolean {
   return !hasObservableProgress(input)
+}
+
+/**
+ * A collect action (a MINE whose drop must land in the inventory) is not
+ * complete until `itemsGained > 0`. `blockRemoved` / `dropObserved` prove the
+ * dig happened, never that the drop was acquired.
+ */
+export function isCollectAcquisitionUnmet(
+  input: Pick<ActionOutcomeInput, 'kind' | 'itemsGained' | 'requiresPickup'>,
+): boolean {
+  return input.kind === 'MINE' && input.requiresPickup === true && input.itemsGained <= 0
 }
 
 /**
@@ -181,6 +224,12 @@ export interface TruthfulOutcomeInput {
    * step (`progressed`) can never set this.
    */
   distanceClosed?: boolean
+  /**
+   * The candidate is a collect action: its MINE is complete only once the drop
+   * is in the inventory (`itemsGained > 0`). A pure dig (clearance / non-collect
+   * goal) leaves this false and stays valid on `blockRemoved` alone.
+   */
+  requiresPickup?: boolean
 }
 
 export interface TruthfulOutcome {
@@ -272,6 +321,18 @@ export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutc
       replanProgress: !input.verified && directProgress,
     }
   }
+  // A collect MINE whose drop did not land in the inventory is not a completed
+  // collect, however clearly the dig is proven.
+  if (isCollectAcquisitionUnmet(input)) {
+    return {
+      verified: false,
+      status: 'zero_progress',
+      observableProgress: directProgress,
+      downgraded: true,
+      resetsFailureMemory: false,
+      replanProgress: directProgress,
+    }
+  }
   // A strict-post-condition kind already proved a world change; its `verified`
   // flag is the evidence. Nothing else may be promoted to success on a lenient
   // movement signal alone.
@@ -339,6 +400,20 @@ export function decideActionOutcome(input: ActionOutcomeInput): ActionOutcomeDec
     return { verdict: 'failed', advances: false, postcondition, unverifiedLine: null }
   }
   if (input.status === 'done' && input.verified) {
+    if (isCollectAcquisitionUnmet(input)) {
+      return {
+        verdict: 'unverified',
+        advances: false,
+        postcondition,
+        unverifiedLine: formatActionUnverified({
+          planId: input.planId ?? null,
+          actionId: input.actionId ?? null,
+          strategy: input.strategy ?? null,
+          attempts: input.attempts ?? null,
+          postcondition,
+        }),
+      }
+    }
     return { verdict: 'verified', advances: true, postcondition, unverifiedLine: null }
   }
   if (isUnverifiedOutcome(input)) {
