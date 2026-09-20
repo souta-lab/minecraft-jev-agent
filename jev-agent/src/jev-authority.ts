@@ -29,7 +29,12 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'action list: the action that best advances the CURRENT Option in the CURRENT world state. Every id is executable ' +
   'candidate data supplied by deterministic code; answer with the id verbatim and never invent an id. Candidate cost, ' +
   'distance, failure history, reachability, and prerequisite-path metadata are evidence. They are not universal ranking ' +
-  'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives.'
+  'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives. When an ' +
+  'ATTACK candidate is present, ATTACK versus MOVE, RETREAT, or WAIT is your pi decision: weigh the target identity and ' +
+  'distance, health, food, equipment, immediate danger, current Option, and available alternatives. Do not attack merely ' +
+  'because a mob exists, and do not ignore ATTACK merely because movement is cheaper. Deterministic code may ground and ' +
+  'safety-check the candidate, but it must not choose attack for you or replace your valid attack choice with a different ' +
+  'semantic action.'
 
 const BETA_INSTRUCTIONS =
   'You are Jev beta. Decide whether the CURRENT Option should end now. Use its explicit preconditions/success facts, ' +

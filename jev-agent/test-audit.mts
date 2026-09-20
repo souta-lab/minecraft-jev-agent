@@ -139,6 +139,33 @@ addCase('C. action is the only authoritative choice; target ids live inside cand
   return { pass: noTargetQuestion && embedded && !executorReadsTargetAnswer, detail: `targetQuestion=${!noTargetQuestion} authority=${authority} executorReadsTargetAnswer=${executorReadsTargetAnswer}` }
 })
 
+addCase('C2. Jev receives ATTACK as a semantic pi choice beside movement and retreat', () => {
+  const attack: Candidate = {
+    ...candidate('ATTACK:e7'),
+    kind: 'ATTACK',
+    label: 'attack zombie 4m away at 4,81,-10',
+    targetName: 'zombie',
+    targetEntityId: 7,
+    meta: { tick: 2, entityId: 7, distance: 4 },
+  }
+  const move: Candidate = { ...candidate('MOVE:p4_81_-10'), kind: 'MOVE', label: 'move toward the current Option' }
+  const retreat: Candidate = { ...candidate('RETREAT:p8_81_-10'), kind: 'RETREAT', label: 'retreat to a safe standable spot' }
+  const action = buildQuestions([attack, move, retreat]).action
+  const instructions = typeof action?.instructions === 'string' ? action.instructions : ''
+  const criteria = (action?.criteria ?? {}) as Record<string, unknown>
+  const pass =
+    criteria['ATTACK:e7'] === attack.label &&
+    criteria['MOVE:p4_81_-10'] === move.label &&
+    criteria['RETREAT:p8_81_-10'] === retreat.label &&
+    instructions.includes('ATTACK versus MOVE, RETREAT, or WAIT is your pi decision') &&
+    instructions.includes('Do not attack merely because a mob exists') &&
+    instructions.includes('must not choose attack for you')
+  return {
+    pass,
+    detail: `attack=${criteria['ATTACK:e7'] ?? 'missing'} move=${criteria['MOVE:p4_81_-10'] ?? 'missing'} retreat=${criteria['RETREAT:p8_81_-10'] ?? 'missing'}`,
+  }
+})
+
 // D. epoch / coalescing -------------------------------------------------------
 addCase('D. coalescing keeps the highest priority and critical triggers revalidate a stale decision', async () => {
   const critical = trigger('damage_taken', 10)
