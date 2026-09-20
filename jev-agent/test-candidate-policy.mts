@@ -210,6 +210,37 @@ addCase('a remote hostile is observed but not offered as a purposeless combat ro
   return { pass: attackIds.length === 0, detail: `remoteDistance=22 attackIds=[${attackIds.join(',')}]` }
 })
 
+addCase('protected station cells are not emitted as DESCEND or STEP dig affordances', () => {
+  const state = exploreState(0)
+  state.goal.targetItem = 'cobblestone'
+  state.goalQueue.current = { ...state.goalQueue.current!, targetItem: 'cobblestone' }
+  state.descent = [
+    {
+      dir: 'E',
+      mode: 'level',
+      dx: 1,
+      dz: 0,
+      step: { x: 1, y: 10, z: 0 },
+      wall: { x: 1, y: 10, z: 0 },
+      head: { x: 1, y: 11, z: 0 },
+      floor: { x: 1, y: 9, z: 0 },
+      wallSolid: true,
+      headSolid: false,
+      floorSolid: true,
+      safe: true,
+      reason: 'safe',
+      digName: 'crafting_table',
+      diggable: true,
+      digHarvestTool: null,
+      digHarvestTier: null,
+    },
+  ]
+  state.stepCuts = [{ dir: 'E', dx: 1, dz: 0, cut: { x: 1, y: 10, z: 0 }, step: { x: 1, y: 10, z: 0 }, name: 'furnace', safe: true, reason: 'safe' }]
+  const candidates = generateCandidates(state)
+  const unsafe = candidates.filter((candidate) => candidate.kind === 'DESCEND' || candidate.kind === 'STEP')
+  return { pass: unsafe.length === 0, detail: `digCandidates=[${unsafe.map((candidate) => candidate.id).join(',')}]` }
+})
+
 let failures = 0
 process.stdout.write('M2 heuristic audit - candidate retry policy is an explicit struct\n')
 process.stdout.write('-'.repeat(72) + '\n')

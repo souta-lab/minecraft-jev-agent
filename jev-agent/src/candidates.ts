@@ -27,6 +27,7 @@ import type { BlockState, DescentOption, EntityState, KnownResource, StationEntr
 import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
 import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
+import { isProtectedStationBlock } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
@@ -1112,7 +1113,7 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
  * is simply not executable.
  */
 function stepCutCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
-  const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe)
+  const cuts = (state.stepCuts ?? []).filter((cut) => cut.safe && !isProtectedStationBlock(cut.name))
   if (cuts.length === 0) return []
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const target = nearestResource(state, focus)
@@ -1200,7 +1201,7 @@ function descendCandidates(
   // is exactly the permanent WAIT this issue fixes. The controller's stall
   // assertion bounds a genuinely impossible descent instead.
   if (state.signals.descendLimitReached === true && descendTargetY === null) return []
-  const steps = (state.descent ?? []).filter((step) => step.safe)
+  const steps = (state.descent ?? []).filter((step) => step.safe && !isProtectedStationBlock(step.digName ?? ''))
   if (steps.length === 0) return []
 
   const target = tunnelTargets[0] ?? nearestResource(state, focusItem)

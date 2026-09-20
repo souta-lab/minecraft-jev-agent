@@ -27,6 +27,8 @@ import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
+import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
+export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 import { FLINT_AND_STEEL, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalLit, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
@@ -705,16 +707,6 @@ export const ATTACK_COOLDOWN_MS = 500
  * that cell as generic terrain. There is no semantic station-removal
  * candidate; this is a hard world-preservation invariant, not a policy rank.
  */
-export const PROTECTED_STATION_BLOCKS: ReadonlySet<string> = new Set([
-  'crafting_table',
-  ...FURNACE_BLOCKS,
-])
-
-export function isProtectedStationBlock(name: string): boolean {
-  const normalized = name.includes(':') ? name.slice(name.lastIndexOf(':') + 1) : name
-  return PROTECTED_STATION_BLOCKS.has(normalized)
-}
-
 export interface SmeltFurnaceSlot {
   count: number
   /** Mineflayer exposes the concrete item name; test doubles may omit it. */
