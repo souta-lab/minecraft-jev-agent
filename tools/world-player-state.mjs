@@ -233,7 +233,7 @@ export function summarizeBlocks(observations) {
   }
 }
 
-export function parseAdminMessages(messages) {
+export function parseAdminMessages(messages, options = {}) {
   const text = (Array.isArray(messages) ? messages : []).join('\n')
   const posMatch = /entity data:\s*\[\s*([-+\d.]+)d,\s*([-+\d.]+)d,\s*([-+\d.]+)d\s*\]/.exec(text)
   const healthMatch = /entity data:\s*([-+\d.]+)f/.exec(text)
@@ -242,11 +242,41 @@ export function parseAdminMessages(messages) {
   for (const match of text.matchAll(/id:\s*"minecraft:([^"]+)"\s*,\s*count:\s*(\d+)/g)) {
     inventory.push({ name: match[1], count: Number(match[2]) })
   }
+  const targetName = typeof options.targetName === 'string' ? options.targetName.trim().toLowerCase() : null
+  const center = posMatch
+    ? { x: Number(posMatch[1]), y: Number(posMatch[2]), z: Number(posMatch[3]) }
+    : null
+  const radius = numberOrNull(options.radius)
+  const hostiles = []
+  // Mineflayer's entity map only contains chunks currently loaded for the
+  // observer account.  The operator command below is deliberately broader:
+  // it asks the server to enumerate entities around the target, then we keep
+  // only names in the explicit hostile taxonomy.  This remains observation
+  // only and does not depend on the observer's own spawn position.
+  const entityPositionPattern = /^(.+?) has the following entity data:\s*\[\s*([-+\d.eE]+)d,\s*([-+\d.eE]+)d,\s*([-+\d.eE]+)d\s*\]/gm
+  for (const match of text.matchAll(entityPositionPattern)) {
+    const name = normalizeItemName(match[1])?.toLowerCase() ?? null
+    if (name === null || name === targetName || !HOSTILE_NAMES.has(name)) continue
+    const position = { x: Number(match[2]), y: Number(match[3]), z: Number(match[4]) }
+    const entityDistance = distance(position, center)
+    if (radius !== null && (entityDistance === null || entityDistance > radius)) continue
+    hostiles.push({
+      id: null,
+      username: null,
+      name,
+      type: 'mob',
+      kind: 'hostile',
+      distance: entityDistance === null ? null : Number(entityDistance.toFixed(3)),
+      position,
+      health: null,
+    })
+  }
   return {
     position: posMatch ? { x: Number(posMatch[1]), y: Number(posMatch[2]), z: Number(posMatch[3]) } : null,
     health: healthMatch ? Number(healthMatch[1]) : null,
     inventory: inventory.length > 0 ? normalizeInventory(inventory) : null,
     difficulty: difficultyMatch ? difficultyMatch[1].toLowerCase() : null,
+    hostiles,
     rawMessageCount: Array.isArray(messages) ? messages.length : 0,
   }
 }
@@ -457,13 +487,17 @@ async function readAdminState(options) {
       `/data get entity ${options.target} Inventory`,
       `/data get entity ${options.target} Health`,
       '/difficulty',
+      // Use the server as the source of truth for nearby entities.  A broad
+      // selector is intentional because some Leaf versions do not resolve
+      // the #minecraft:hostile entity tag in /execute selectors.
+      `/execute at ${options.target} as @e[distance=..${options.radius}] run data get entity @s Pos`,
     ]
     for (const command of commands) {
       bot.chat(command)
       await sleep(120)
     }
     await sleep(Math.max(300, options.settleMs))
-    return parseAdminMessages(messages)
+    return parseAdminMessages(messages, { targetName: options.target, radius: options.radius })
   } finally {
     bot.removeListener('message', onMessage)
     try { bot.quit() } catch {}
@@ -534,9 +568,17 @@ export function makeSnapshot({ bot, options, residentResult = null, residentStat
   const ground = stateArea?.blocks?.support !== undefined
     ? { support: stateArea.blocks.support, feet: null, head: null }
     : liveGround(bot, targetPosition)
-  const entitySummary = Array.isArray(stateArea?.entities)
-    ? summarizeEntities(stateArea.entities, targetPosition, options.radius)
-    : summarizeEntities(liveEntities(bot), targetPosition, options.radius)
+  const residentEntities = Array.isArray(stateArea?.entities) ? stateArea.entities : liveEntities(bot)
+  const operatorHostiles = Array.isArray(admin?.hostiles) ? admin.hostiles : []
+  const operatorOnlyHostiles = operatorHostiles.filter((candidate) => {
+    const candidatePosition = positionOf(candidate?.position)
+    const candidateName = entityName(candidate)
+    return !residentEntities.some((existing) => {
+      const existingPosition = positionOf(existing?.position)
+      return entityName(existing) === candidateName && distance(existingPosition, candidatePosition) !== null && distance(existingPosition, candidatePosition) <= 0.75
+    })
+  })
+  const entitySummary = summarizeEntities([...residentEntities, ...operatorOnlyHostiles], targetPosition, options.radius)
   const connected = bot.entity !== undefined
   const closedLoop = evaluateClosedLoop({
     connected,

@@ -37,11 +37,14 @@ add('operator query parser recovers target position, inventory, health and diffi
     'AI_Buddy has the following entity data: [{Slot: 0b, id: "minecraft:diamond", count: 1}]',
     'AI_Buddy has the following entity data: 20.0f',
     'The difficulty is Easy',
-  ])
+    'Zombie has the following entity data: [8.5d, 71.0d, -7.3d]',
+  ], { targetName: 'AI_Buddy', radius: 8 })
   assert.deepEqual(result.position, { x: 6.5, y: 71, z: -7.3 })
   assert.deepEqual(result.inventory, { diamond: 1 })
   assert.equal(result.health, 20)
   assert.equal(result.difficulty, 'easy')
+  assert.equal(result.hostiles.length, 1)
+  assert.equal(result.hostiles[0].name, 'zombie')
 })
 
 add('hostile classification is explicit and does not claim combat success', () => {
