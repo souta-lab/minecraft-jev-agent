@@ -3682,7 +3682,11 @@ export class Executor {
         this.emitFrameCell(candidate, itemName, existing, cell)
         continue
       }
-      if (this.distanceToEyes(cell) > this.options.reach || this.placementCellOverlapsBody(cell)) {
+      const reference = this.findPlaceReference(cell)
+      const targetInReach = this.distanceToEyes(cell) <= this.options.reach
+      const referenceInReach = reference !== null && this.distanceToEyes(reference.block.position) <= this.options.reach
+      const placementInReach = reference === null ? targetInReach : referenceInReach
+      if (!placementInReach || this.placementCellOverlapsBody(cell)) {
         this.setPhase(candidate, epoch, 'pathing')
         if (this.placementCellOverlapsBody(cell)) {
           const stand = this.findPlacementStand(cell)
@@ -3691,7 +3695,14 @@ export class Executor {
           }
           await this.pathToNear(stand, 0.75, epoch, signal)
         } else {
-          await this.pathToNear(cell, 2, epoch, signal)
+          const stand = reference === null ? null : this.findPlacementStandForReference(reference.block.position, cell)
+          this.logger.info('executor', `PLACE_APPROACH target=${cell.x},${cell.y},${cell.z} reference=${reference === null ? 'none' : `${reference.block.position.x},${reference.block.position.y},${reference.block.position.z}`} stand=${stand === null ? 'target' : `${stand.x},${stand.y},${stand.z}`}`, {
+            actionId: candidate.id,
+            target: cell,
+            reference: reference?.block.position ?? null,
+            stand,
+          })
+          await this.pathToNear(stand ?? cell, stand === null ? 2 : 0.75, epoch, signal)
         }
         this.ensureOwned(epoch, signal)
       }
@@ -3749,6 +3760,25 @@ export class Executor {
 
   /** Find a real supported feet cell that is adjacent enough to place `target`. */
   private findPlacementStand(target: Vec3Json): Vec3Json | null {
+    return this.findPlacementStandAtLevel(target, target.y, target)
+  }
+
+  /**
+   * Find a supported feet cell beside a real placement reference.  A target
+   * above an existing frame edge can be out of reach even though its support
+   * block is reachable from the lower level.  Walking to that lower adjacent
+   * cell is executor geometry, not a replacement for the selected placement
+   * candidate.
+   */
+  private findPlacementStandForReference(reference: Vec3Json, target: Vec3Json): Vec3Json | null {
+    for (const feetY of [reference.y - 1, reference.y, reference.y + 1]) {
+      const stand = this.findPlacementStandAtLevel(reference, feetY, target)
+      if (stand !== null) return stand
+    }
+    return null
+  }
+
+  private findPlacementStandAtLevel(target: Vec3Json, feetY: number, avoidCell: Vec3Json | null): Vec3Json | null {
     const offsets = [
       { x: -1, z: 0 },
       { x: 1, z: 0 },
@@ -3760,13 +3790,13 @@ export class Executor {
       { x: 1, z: 1 },
     ]
     for (const offset of offsets) {
-      const feet = { x: target.x + offset.x, y: target.y, z: target.z + offset.z }
+      const feet = { x: target.x + offset.x, y: feetY, z: target.z + offset.z }
       const feetBlock = this.currentBlockAt(feet)
       const headBlock = this.currentBlockAt({ x: feet.x, y: feet.y + 1, z: feet.z })
       const belowBlock = this.currentBlockAt({ x: feet.x, y: feet.y - 1, z: feet.z })
       if (feetBlock?.boundingBox !== 'empty' || headBlock?.boundingBox !== 'empty') continue
       if (belowBlock?.boundingBox !== 'block') continue
-      if (this.placementCellOverlapsBody(target) && feet.x === Math.floor(this.bot.entity.position.x) && feet.z === Math.floor(this.bot.entity.position.z)) continue
+      if (avoidCell !== null && feet.x === avoidCell.x && feet.z === avoidCell.z && feet.y <= avoidCell.y && feet.y + 1.8 > avoidCell.y) continue
       return feet
     }
     return null
