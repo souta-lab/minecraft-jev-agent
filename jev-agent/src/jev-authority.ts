@@ -34,7 +34,10 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'distance, health, food, equipment, immediate danger, current Option, and available alternatives. Do not attack merely ' +
   'because a mob exists, and do not ignore ATTACK merely because movement is cheaper. Deterministic code may ground and ' +
   'safety-check the candidate, but it must not choose attack for you or replace your valid attack choice with a different ' +
-  'semantic action.'
+  'semantic action. The current Option allowedSkills is an envelope: SAFETY, CONTROL, and PREREQUISITE are always ' +
+  'available when code has grounded them, alongside the Option-declared skills. A typed optionSkill=PREREQUISITE ' +
+  'candidate is an actionable dependency route for the current Option, not an unrelated mission and not a reason to ' +
+  'choose WAIT. Use the typed role/missing-capability facts as evidence, while retaining authority over WHICH candidate.'
 
 const BETA_INSTRUCTIONS =
   'You are Jev beta. Decide whether the CURRENT Option should end now. Use its explicit preconditions/success facts, ' +
@@ -51,6 +54,18 @@ const DANGER_INSTRUCTIONS =
   'Rate immediate physical danger in the current observed state from safe to lethal. This is a safety estimate, not a plan choice.'
 
 type Questions = Partial<Record<QuestionName, Experimental_EvaluationQuestion>>
+
+function candidateCriteria(candidate: Candidate): string {
+  const tags: string[] = []
+  const optionSkill = candidate.meta.optionSkill
+  const prerequisiteRole = candidate.meta.prerequisiteRole
+  const missingCapability = candidate.meta.missingCapability
+  if (typeof optionSkill === 'string') tags.push(`optionSkill=${optionSkill}`)
+  if (typeof prerequisiteRole === 'string') tags.push(`prerequisiteRole=${prerequisiteRole}`)
+  if (typeof missingCapability === 'string') tags.push(`missingCapability=${missingCapability}`)
+  if (candidate.meta.capabilityAcquisition === true) tags.push('capabilityAcquisition=true')
+  return tags.length === 0 ? candidate.label : `${candidate.label} [${tags.join(' ')}]`
+}
 
 export interface AuthorityDecisionMeta {
   /** Exact runtime Option row Jev beta voted on; null only before/without an Option runtime. */
@@ -75,7 +90,7 @@ export function buildAuthorityQuestions(
   const out: Questions = {}
   if (requested.has('action')) {
     const criteria: Record<string, string> = {}
-    for (const candidate of candidates) criteria[candidate.id] = candidate.label
+    for (const candidate of candidates) criteria[candidate.id] = candidateCriteria(candidate)
     out.action = { type: 'choice', instructions: AUTHORITY_PRIMARY_INSTRUCTIONS, criteria }
   }
   if (requested.has('abandon_option')) {

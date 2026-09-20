@@ -198,6 +198,20 @@ export interface CurrentOptionContext {
   runtime: OptionRuntimeState
 }
 
+/**
+ * Skills that are always inside an Option's execution envelope.
+ *
+ * SAFETY and CONTROL are cross-cutting execution capabilities. PREREQUISITE
+ * is the typed bridge for a mechanically proven acquisition that makes the
+ * current semantic Option startable or executable. They are not semantic
+ * ranking rules and do not select a candidate.
+ */
+export const OPTION_ENVELOPE_SKILLS = ['SAFETY', 'CONTROL', 'PREREQUISITE'] as const
+
+export function optionSkillEnvelope(skills: readonly string[]): string[] {
+  return [...new Set([...OPTION_ENVELOPE_SKILLS, ...skills])]
+}
+
 /** The beta threshold used when a spec does not override it. */
 export const DEFAULT_ABORT_THRESHOLD = 0.5
 
@@ -1024,7 +1038,7 @@ export function currentOptionContextForQueuedGoal(
     target: { ...spec.target },
     preconditions: [...spec.preconditions],
     success: [...spec.success],
-    allowedSkills: [...spec.skills],
+    allowedSkills: optionSkillEnvelope(spec.skills),
     abortThreshold: spec.abortThreshold,
     runtime: {
       startedAt: runtime.startedAt ?? goal.createdAt,

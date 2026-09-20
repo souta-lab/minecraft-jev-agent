@@ -988,7 +988,7 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
     context?.target.predicate === spec.target.predicate &&
     context?.preconditions[0]?.kind === 'custom' &&
     successId === 'landmark_ready' &&
-    context?.allowedSkills.join(',') === spec.skills.join(',') &&
+    context?.allowedSkills.join(',') === ['SAFETY', 'CONTROL', 'PREREQUISITE', ...spec.skills].join(',') &&
     context?.abortThreshold === spec.abortThreshold &&
     context?.runtime.verifiedProgress === 0
   return {

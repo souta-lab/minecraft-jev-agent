@@ -5513,7 +5513,19 @@ export class JevController {
   }
 
   private logCandidates(candidates: readonly Candidate[], state: WorldState): void {
-    const signature = candidates.map((candidate) => candidate.id).join('|')
+    const option = state.currentOption
+    const signature = JSON.stringify({
+      optionInstanceId: option?.instanceId ?? null,
+      optionTemplateId: option?.templateId ?? null,
+      allowedSkills: option?.allowedSkills ?? [],
+      queueRevision: this.queue.revision,
+      candidates: candidates.map((candidate) => ({
+        id: candidate.id,
+        optionSkill: candidate.meta.optionSkill ?? null,
+        prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
+        missingCapability: candidate.meta.missingCapability ?? null,
+      })),
+    })
     if (signature === this.lastCandidateSignature) return
     this.lastCandidateSignature = signature
     this.logger.info(
@@ -5522,6 +5534,24 @@ export class JevController {
       {
         ids: candidates.map((candidate) => candidate.id),
         detail: candidates.map((candidate) => candidate.label),
+        option: option === undefined || option === null
+          ? null
+          : {
+              instanceId: option.instanceId,
+              templateId: option.templateId,
+              allowedSkills: [...option.allowedSkills],
+              queueRevision: this.queue.revision,
+            },
+        candidateEvidence: candidates.map((candidate) => ({
+          id: candidate.id,
+          kind: candidate.kind,
+          optionSkill: candidate.meta.optionSkill ?? null,
+          prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
+          missingCapability: candidate.meta.missingCapability ?? null,
+          capabilityAcquisition: candidate.meta.capabilityAcquisition === true,
+          included: true,
+          exclusionReason: null,
+        })),
         sensorBlocks: state.blocks
           .filter((block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore')
           .slice(0, 32)

@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { classifyActionOutcome, truthfulActionOutcome } from '../jev-agent/src/actionPostcondition.ts'
 import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-legacy.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
-import { applyCompiledPlan, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
+import { applyCompiledPlan, currentOptionContextForQueuedGoal, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
+import { buildAuthorityQuestions } from '../jev-agent/src/jev-authority.ts'
 import { evaluateSystem2Apply, system2BodyOwned } from '../jev-agent/src/system2Authority.ts'
 import {
   evaluateBetaTerminationBoundary,
@@ -159,6 +160,35 @@ const compiledSemanticSmelt = applyCompiledPlan(
 const compiledSmelt = compiledSemanticSmelt.goals.find((candidate) => candidate.optionTemplateId === 'smelt:iron_ingot')
 assert.equal(compiledSmelt?.optionSpec?.id, 'smelt:iron_ingot')
 assert.equal(compiledSemanticSmelt.goals[0]?.optionTemplateId, 'collect:raw_iron')
+
+// The current Option exposes the non-semantic execution envelope explicitly;
+// a prerequisite candidate must not look like an unrelated action to Jev.
+const optionContext = currentOptionContextForQueuedGoal(gotoRawIron)
+assert.deepEqual(optionContext?.allowedSkills.slice(0, 3), ['SAFETY', 'CONTROL', 'PREREQUISITE'])
+const prerequisiteQuestions = buildAuthorityQuestions([
+  {
+    id: 'MINE:stone',
+    kind: 'MINE',
+    label: 'mine stone',
+    targetName: 'stone',
+    target: { x: 0, y: 0, z: 0 },
+    targetEntityId: null,
+    itemName: 'cobblestone',
+    requiresTool: true,
+    toolName: 'pickaxe',
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: {
+      optionSkill: 'PREREQUISITE',
+      prerequisiteRole: 'placeable_block',
+      missingCapability: 'placeable_block',
+      capabilityAcquisition: true,
+    },
+  },
+])
+const prerequisiteText = prerequisiteQuestions.action?.criteria?.['MINE:stone'] ?? ''
+assert.match(prerequisiteText, /optionSkill=PREREQUISITE/)
+assert.match(prerequisiteText, /prerequisiteRole=placeable_block/)
 
 // 7. A typed switch replaces the active semantic Option; patch does not.
 const cave = goal({ kind: 'explore', mode: 'cave' })
