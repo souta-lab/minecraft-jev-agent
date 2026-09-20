@@ -47,6 +47,71 @@ export interface ActionOutcomeInput {
   attempts?: number | null
 }
 
+/** Execution and progress are separate axes; `verified` alone is not a taxonomy. */
+export type ExecutionOutcome = 'success' | 'failure' | 'cancelled' | 'control'
+export type VerificationOutcome = 'verified' | 'unverified' | 'not_applicable'
+export type ProgressKind = 'goal' | 'body' | 'search' | 'none'
+
+export interface ActionOutcomeTaxonomy {
+  execution: ExecutionOutcome
+  verification: VerificationOutcome
+  /** Primary progress class; see progressKinds for simultaneous body+search evidence. */
+  progress: ProgressKind
+  progressKinds: ProgressKind[]
+  /** Control-plane actions are neither physical failures nor productive work. */
+  control: 'none' | 'wait' | 'escalate'
+  invalidity: 'none' | 'deterministic'
+  semantic: 'none' | 'goal' | 'abandon'
+}
+
+export interface ActionOutcomeTaxonomyInput extends ActionOutcomeInput {
+  arrived?: boolean
+  distanceClosed?: boolean
+  /** The controller may mark a verified goal-predicate change after re-sensing. */
+  semanticProgress?: boolean
+  semanticAbandon?: boolean
+}
+
+/**
+ * Classify one settled action without collapsing physical, search, and semantic
+ * progress.  This is descriptive evidence only; it does not select a next
+ * action or grant System2 authority.
+ */
+export function classifyActionOutcome(input: ActionOutcomeTaxonomyInput): ActionOutcomeTaxonomy {
+  const control = input.kind === 'ESCALATE' ? 'escalate' : input.kind === 'WAIT' ? 'wait' : 'none'
+  const execution: ExecutionOutcome =
+    control !== 'none'
+      ? 'control'
+      : input.status === 'cancelled' || input.status === 'canceled'
+        ? 'cancelled'
+        : input.status === 'failed'
+          ? 'failure'
+          : 'success'
+  const verification: VerificationOutcome =
+    input.kind === 'WAIT' || input.kind === 'ESCALATE'
+      ? 'not_applicable'
+      : input.verified
+        ? 'verified'
+        : 'unverified'
+  const semantic = input.semanticAbandon === true ? 'abandon' : input.semanticProgress === true ? 'goal' : 'none'
+  const kinds: ProgressKind[] = []
+  if (semantic === 'goal') kinds.push('goal')
+  const body =
+    input.progressed === true ||
+    input.arrived === true ||
+    (input.kind === 'RETRIEVE' && input.distanceClosed === true)
+  const search =
+    input.blockRemoved === true ||
+    (input.kind === 'DESCEND' && input.progressed === true) ||
+    (input.kind === 'RETRIEVE' && (input.progressed === true || input.distanceClosed === true))
+  if (body) kinds.push('body')
+  if (search) kinds.push('search')
+  if (kinds.length === 0) kinds.push('none')
+  const progress = kinds.includes('goal') ? 'goal' : kinds.includes('search') ? 'search' : kinds.includes('body') ? 'body' : 'none'
+  const invalidity = execution === 'failure' && input.kind !== 'ESCALATE' ? 'deterministic' : 'none'
+  return { execution, verification, progress, progressKinds: kinds, control, invalidity, semantic }
+}
+
 /** Everything a strict SMELT post-condition needs to know about one run. */
 export interface SmeltPostconditionEvidence {
   /** output items the run added to the inventory (0 when nothing landed) */
@@ -142,9 +207,9 @@ export function describeActionPostcondition(kind: string): string {
     case 'STEP':
       return 'the face block was removed'
     case 'ESCALATE':
-      return 'System 2 accepted the hand-off (no world effect expected)'
+      return 'control-plane hand-off to System 2 (no physical post-condition)'
     case 'WAIT':
-      return 'a bounded wait elapsed'
+      return 'control wait elapsed (not goal progress)'
     default:
       return 'action produced a verified change'
   }
@@ -184,6 +249,7 @@ export function isCollectAcquisitionUnmet(
  * was unmet (`verified=false`) and it produced no observable change.
  */
 export function isUnverifiedOutcome(input: ActionOutcomeInput): boolean {
+  if (input.kind === 'WAIT' || input.kind === 'ESCALATE') return false
   return input.status === 'done' && !input.verified && isZeroProgressOutcome(input)
 }
 
@@ -206,8 +272,6 @@ const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
   'STEP',
   'EAT',
   'ATTACK',
-  'WAIT',
-  'ESCALATE',
 ])
 
 /**
@@ -279,6 +343,29 @@ export interface TruthfulOutcome {
  * memory) or `zero_progress` (nothing changed at all).
  */
 export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutcome {
+  // WAIT and ESCALATE are control-plane outcomes.  Preserve their completion
+  // for scheduling, but never present them as verified physical progress or as
+  // mechanical failures.
+  if (input.kind === 'WAIT') {
+    return {
+      verified: false,
+      status: input.status === 'failed' ? input.status : 'waited',
+      observableProgress: false,
+      downgraded: false,
+      resetsFailureMemory: false,
+      replanProgress: false,
+    }
+  }
+  if (input.kind === 'ESCALATE') {
+    return {
+      verified: false,
+      status: input.status === 'failed' ? input.status : 'control_transfer',
+      observableProgress: false,
+      downgraded: false,
+      resetsFailureMemory: false,
+      replanProgress: false,
+    }
+  }
   const itemOrBlock = input.itemsGained > 0 || input.blockRemoved === true
   const bodyProgress = input.progressed === true
   if (input.kind === 'RETRIEVE') {
@@ -346,6 +433,22 @@ export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutc
       downgraded: true,
       resetsFailureMemory: false,
       replanProgress: directProgress,
+    }
+  }
+  // A DESCEND step is successful only when the step changed the world/body.
+  // The old `SELF_EVIDENT_VERIFIED_KINDS` rule treated an executor `verified`
+  // flag as enough and produced `DESCEND done/0` while Y was changing in the
+  // live run.  Keep the step descriptive and fail closed when no evidence is
+  // present; body/search progress with `blockRemoved` or `progressed` remains
+  // visible through the taxonomy.
+  if (input.kind === 'DESCEND' && !directProgress) {
+    return {
+      verified: false,
+      status: 'zero_progress',
+      observableProgress: false,
+      downgraded: true,
+      resetsFailureMemory: false,
+      replanProgress: false,
     }
   }
   // A strict-post-condition kind already proved a world change; its `verified`

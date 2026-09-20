@@ -90,8 +90,15 @@ const planner = new PlannerBrain({
   resolveKey: () => null,
 })
 
+// Before a request the configured stack is hybrid; claiming Mercury already
+// would be false for queue_empty requests that use the Typesafe horizon model.
+assert.equal(planner.provider, 'hybrid')
+assert.match(planner.authorityModel, /typesafe-ai:.*\|mercury:/)
+
 const plan = await planner.plan(request)
 assert.equal(mercury.model, MUSE_SPARK_MODEL)
+assert.equal(planner.provider, 'mercury')
+assert.equal(planner.authorityModel, MUSE_SPARK_MODEL)
 assert.equal(plan.goals[0]?.targetItem, 'raw_iron')
 assert.match(plan.note, /mercury/i)
 assert.equal(logs.some((entry) => entry.event === 'MERCURY_ATTEMPT'), true)

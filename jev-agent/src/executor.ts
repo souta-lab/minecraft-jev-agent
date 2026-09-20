@@ -3625,7 +3625,8 @@ export class Executor {
       y: readMetaNumber(candidate, 'stepY', Number.NaN),
       z: readMetaNumber(candidate, 'stepZ', Number.NaN),
     }
-    if (Number.isFinite(step.x) && Number.isFinite(step.y) && Number.isFinite(step.z)) {
+    const hasStep = Number.isFinite(step.x) && Number.isFinite(step.y) && Number.isFinite(step.z)
+    if (hasStep) {
       this.setPhase(candidate, epoch, 'stepping')
       try {
         await this.pathTo(step, epoch, signal, 'GoalBlock', { requireLevel: true })
@@ -3646,6 +3647,10 @@ export class Executor {
       verified: true,
       dropObserved: false,
       blockRemoved: true,
+      // A completed staircase DESCEND that reached its step changed the body
+      // state as well as the explored frontier. Preserve that axis explicitly
+      // so System2 never sees a real y-step as zero/bodyless progress.
+      progressed: hasStep,
       itemsGained: 0,
       goalItemCount: this.countGoalItem(),
     })
@@ -5056,6 +5061,7 @@ export class Executor {
       verified: result.verified,
       itemsGained: result.itemsGained,
       blockRemoved: result.blockRemoved,
+      progressed: result.progressed,
     })
     if (!unverified) return result
     const postcondition = describeActionPostcondition(result.kind)

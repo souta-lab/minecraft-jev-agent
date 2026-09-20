@@ -937,6 +937,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // Real Jev policy by default (key from the gateway key file or
     // AI_GATEWAY_API_KEY); deterministic fallback only when explicitly requested.
     forceFallbackPolicy: (process.env.BUDDY_POLICY ?? '').trim().toLowerCase() === 'fallback',
+    worldEpoch: ctx.worldKey.worldEpoch,
     terminateOnModelFailure: terminateResident,
     actuation: 'pathfinder',
     actuationPort,
@@ -1030,7 +1031,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     rungId: ladder.rungId,
     goals: ladder.goals.map((goal) => goal.description),
     policy: controller.policyKind,
+    policyProvider: controller.policyProvider,
     model: controller.policyModel,
+    policyModel: controller.policyModel,
+    system2Provider: controller.system2Provider,
+    system2Model: controller.system2Model,
+    deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
     planner: brain.mode,
     plannerModel: brain.model,
     plannerCache: cachePath,
@@ -1123,8 +1129,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     return {
       running: controller.isRunning,
       policyKind: controller.policyKind,
+      policyProvider: controller.policyProvider,
       policyModel: controller.policyModel,
+      system2Provider: controller.system2Provider,
       system2Model: controller.system2Model,
+      deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
       queue: controller.goalQueueState,
       currentAction:
         current === null ? null : { id: current.id, kind: current.kind, phase: current.phase, startedAt: current.startedAt },

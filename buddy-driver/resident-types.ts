@@ -315,8 +315,11 @@ export interface ActuationLease {
 export interface GenerationStatus {
   running: boolean
   policyKind: string
+  policyProvider: string
   policyModel: string
+  system2Provider: string
   system2Model: string
+  deterministicFallbackEnabled: boolean
   queue: GoalQueueState
   currentAction: { id: string; kind: string; phase: string; startedAt: number } | null
   /** SERVER TRUTH, DTO only */

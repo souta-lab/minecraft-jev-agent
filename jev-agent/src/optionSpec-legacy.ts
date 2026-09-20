@@ -951,7 +951,7 @@ export function compilePlannedGoal(goal: PlannedGoal, snapshot?: OptionWorldSnap
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) target.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) target.dimension = goal.dimension
   if (typeof goal.targetPredicate === 'string' && goal.targetPredicate.length > 0) target.predicate = goal.targetPredicate
-  return {
+  const compiled: OptionSpec = {
     id: stableOptionId(goal),
     intent: goal.description,
     kind,
@@ -964,6 +964,21 @@ export function compilePlannedGoal(goal: PlannedGoal, snapshot?: OptionWorldSnap
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
   }
+  // A System2 semantic Option may be executed by a lower-level queue kind
+  // (for example `goto:raw_iron` is mechanically compiled to retrieval). Keep
+  // its canonical id/intent/skill envelope while refreshing code-owned
+  // preconditions and success predicates against the current snapshot. This
+  // prevents the executor-facing kind from destroying the selected WHAT.
+  if (goal.optionSpec !== undefined) {
+    return {
+      ...goal.optionSpec,
+      target: { ...goal.optionSpec.target, ...compiled.target },
+      preconditions: compiled.preconditions,
+      success: compiled.success,
+      skills: [...goal.optionSpec.skills],
+    }
+  }
+  return compiled
 }
 
 export function compilePlannedGoals(goals: readonly PlannedGoal[], snapshot?: OptionWorldSnapshot): OptionSpec[] {
