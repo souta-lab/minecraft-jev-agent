@@ -1317,6 +1317,8 @@ export class JevController {
   private noProductiveRepeats = 0
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
+  /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
+  private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   private readonly loggedStaleResources = new Set<string>()
@@ -1983,6 +1985,7 @@ export class JevController {
         const preconditionCause = this.currentGoalPreconditionCause(state)
         const blockedBy = goalStarvationBlockedBy(preconditionCause, this.queue.current, grounded.withheld)
         const missing = candidateStarvationMissing(grounded.withheld)
+        this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
           candidates,
           this.currentGoalKey(),
@@ -2014,12 +2017,13 @@ export class JevController {
         if (this.noProductiveRepeats >= this.options.waitLimit) {
           this.escalate(
             'all_candidates_invalid',
-            `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x with no state change on goal "${this.currentGoalKey()}"`,
+            `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x with no state change on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
           )
         }
       } else {
         this.noProductiveRepeats = 0
         this.noProductiveKey = null
+        this.starvationContext = null
       }
       this.breakFailureDeadlock(candidates)
 
@@ -4006,27 +4010,31 @@ export class JevController {
     this.tickLlmCalls += 1
     this.llmSummonReasons.push(reason)
 
+    const groundedDetail =
+      this.noProductiveThisTick && this.starvationContext !== null
+        ? `${detail}; grounded blocker=${this.starvationContext.blockedBy}${this.starvationContext.missing.length > 0 ? ` missing=${JSON.stringify(this.starvationContext.missing)}` : ''}`
+        : detail
     const queueState = this.queue.state
     const request: System2PlanRequest = {
       reason,
-      detail,
+      detail: groundedDetail,
       tick: this.tickCounter,
       goalQueueState: queueState,
       objective: this.objectiveState(),
       recentEvents: this.recentEvents.slice(-8),
       recentOutcomes: this.recentOutcomes.slice(-8),
     }
-    const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail }
+    const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail: groundedDetail }
     this.tickResummonLog.push(resummon)
 
     this.logger.warn(
       'system2',
-      `SUMMON LLM reason=${reason} queueDepth=${queueState.depth} current=${queueState.current?.description ?? 'none'} :: ${detail}`,
+      `SUMMON LLM reason=${reason} queueDepth=${queueState.depth} current=${queueState.current?.description ?? 'none'} :: ${groundedDetail}`,
       {
         reason,
         queueDepth: queueState.depth,
         currentGoal: queueState.current?.description ?? null,
-        detail,
+        detail: groundedDetail,
         model: this.system2.model,
       },
       this.tickCounter,

@@ -927,6 +927,13 @@ Do not invent a kind or a target outside the capability matrix; an impossible pa
 If a furnace is held but the world has no placed furnace, emit { kind: 'place', item: 'furnace' } so the placement is a first-class planned step.
 Choose the smallest plan change that can unblock progress.
 
+When wakeDetail includes a grounded blocker or missing capabilities such as
+no_path, no_standable_approach, or open_path, treat that as evidence that the
+current route is not executable. Do not return the same current collect/goto
+goal unchanged or duplicate it. Choose a different valid high-level strategy
+that can expose a new route (for example explore cave/surface or descend_to)
+while preserving already completed work. The route and action remain code-owned.
+
 Plan operations:
 - continue: keep the current queue and append the returned goals.
 - patch: keep completed history and the active goal; replace the pending tail.
