@@ -378,7 +378,9 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
   const basePrompt = '{"trigger":"no_progress"}'
   const prompts: string[] = []
   const feedbacks: (string | null)[] = []
-  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone' }], reason: 'need stone' }
+  // A genuinely invalid plan (ungrounded item), NOT a count-less plan: a missing
+  // count is now normalized mechanically and must not be used as a rejection fixture.
+  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'not_a_real_item', count: 2 }], reason: 'need it' }
   const correctedPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 4 }], reason: 'need four stone' }
   let providerCalls = 0
   const result = await runMercuryAttempts({
@@ -399,7 +401,8 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
     },
   })
   const second = prompts[1] ?? ''
-  const expectedError = 'goal[0] collect needs a count in [1,64]'
+  const invalidCheck = validateMercuryPlan(invalidPlan)
+  const expectedError = invalidCheck.ok ? 'unexpectedly accepted' : invalidCheck.error
   return {
     pass:
       result.ok &&
@@ -408,8 +411,9 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
       providerCalls === 2 &&
       prompts[0] === basePrompt &&
       !prompts[0]?.includes('CORRECTION REQUIRED') &&
+      !invalidCheck.ok &&
       second.includes(expectedError) &&
-      second.includes('count in [1,64]') &&
+      second.includes('CORRECTION REQUIRED') &&
       feedbacks[1] === expectedError &&
       result.result.goals[0]?.count === 4,
     detail: JSON.stringify({
@@ -427,7 +431,8 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
   const callsPath = join(dir, 'mercury-calls.jsonl')
   const logs: string[] = []
   const prompts: string[] = []
-  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone' }], reason: 'need stone' }
+  // Out-of-range count stays a hard rejection (missing count no longer rejects).
+  const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 65 }], reason: 'need stone' }
   const mercury = new MercurySystem2({
     summarize: () => mercurySummary(),
     log: hostLog(logs),
@@ -455,6 +460,7 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
         .map((line) => JSON.parse(line) as Record<string, unknown>)
     : []
   const rejected = records.filter((record) => record.outcome === 'plan_rejected')
+  const fabricatedFallback = records.filter((record) => record.outcome === 'fallback').length
   const correctivePrompts = prompts.slice(1).filter((prompt) => prompt.includes('CORRECTION REQUIRED')).length
   const degraded = logs.some((line) => line.includes('deterministic'))
   return {
@@ -468,10 +474,11 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
       correctivePrompts === 2 &&
       rejects.length === 3 &&
       rejected.length === 3 &&
+      fabricatedFallback === 0 &&
       rejected.every((record) => typeof record.error === 'string' && String(record.error).includes('invalid plan')) &&
       rejected.every((record) => record.outcome === 'plan_rejected') &&
       !degraded,
-    detail: `thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} prompts=${prompts.length} corrective=${correctivePrompts} rejected=${rejected.length} rejects=${rejects.length} fatal=${fatal ?? 'none'}`,
+    detail: `thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} prompts=${prompts.length} corrective=${correctivePrompts} rejected=${rejected.length} rejects=${rejects.length} fabricatedFallback=${fabricatedFallback} fatal=${fatal ?? 'none'}`,
   }
 })
 
