@@ -3382,10 +3382,16 @@ export function applyReachabilityGate(
   // route for a local tunnel and repeatedly jump/pillar without progress.
   // This is a candidate-validity envelope, not a semantic preference: when no
   // direct route exists, all grounded recovery families remain available.
+  // ATTACK/RETREAT/EAT are local safety/control actions. Their presence says
+  // nothing about whether the active semantic goal has a grounded route; a
+  // hostile entity must not make a valid route-opening prerequisite disappear.
   const hasGroundedGoalRoute = presented.some(
     (candidate) =>
       candidate.kind !== 'WAIT' &&
       candidate.kind !== 'ESCALATE' &&
+      candidate.kind !== 'ATTACK' &&
+      candidate.kind !== 'RETREAT' &&
+      candidate.kind !== 'EAT' &&
       candidate.meta.capabilityAcquisition !== true &&
       candidate.meta.clearance !== true,
   )

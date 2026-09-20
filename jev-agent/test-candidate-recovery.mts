@@ -175,6 +175,24 @@ function unreachableMove(tick: number): Candidate {
   }
 }
 
+/** A local safety action that must not suppress semantic route recovery. */
+function attackCandidate(tick: number): Candidate {
+  return {
+    id: 'ATTACK:e42',
+    kind: 'ATTACK',
+    label: 'attack the nearby hostile entity',
+    targetName: 'zombie',
+    target: { x: 2, y: 60, z: 0 },
+    targetEntityId: 42,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick, entityId: 42, distance: 2 },
+  }
+}
+
 function reachableGoalRoute(tick: number): Candidate {
   return {
     id: 'RETRIEVE:known:furnace:b3_60_0',
@@ -390,6 +408,23 @@ function main(): void {
       '(b) more than one candidate family remains, so the model still selects',
       kinds.size >= 2,
       `families=[${[...kinds].join(',')}]`,
+    )
+  }
+
+  // (b2) A nearby hostile entity may add a local safety choice, but that
+  // choice is not a grounded route for the active semantic goal. Keeping it
+  // in Jev's set must not hide the generic route-opening facts.
+  {
+    const grounded = applyReachabilityGate(
+      [waitCandidate(placeGoalState.tick), attackCandidate(placeGoalState.tick), unreachableMove(placeGoalState.tick)],
+      placeGoalState,
+      optionsWith(),
+    )
+    const recovery = grounded.candidates.filter((candidate) => candidate.meta.capabilityAcquisition === true)
+    check(
+      '(b2) ATTACK does not suppress semantic route recovery',
+      grounded.candidates.some((candidate) => candidate.id === 'ATTACK:e42') && recovery.length >= 2,
+      `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] recovery=[${recovery.map((candidate) => candidate.id).join(',')}]`,
     )
   }
 
