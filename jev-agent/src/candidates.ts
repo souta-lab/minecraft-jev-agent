@@ -616,6 +616,22 @@ function generateRawCandidates(
   // semantic action, not an alternative mechanical route for the active goal;
   // it was observed live as raw_iron -> unrelated future log retrieval.
   candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0))
+
+  // Clearance MINEs are route-opening safety affordances, not semantic goal
+  // actions. Once the active goal has another grounded route (for example a
+  // remembered raw_iron RETRIEVE), keep the dirt/stone clearance from becoming
+  // an unrelated action Jev can select. A clearance-only pocket is unchanged.
+  const hasGoalRoute = candidates.some(
+    (candidate) =>
+      candidate.meta.clearance !== true &&
+      candidate.kind !== 'WAIT' &&
+      candidate.kind !== 'ESCALATE' &&
+      candidate.kind !== 'ATTACK' &&
+      candidate.kind !== 'RETREAT' &&
+      candidate.kind !== 'EAT',
+  )
+  if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
+
   if (candidates.length === 0) {
     const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
     const explore = pickExplore(
@@ -1955,7 +1971,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
     // (optionSpec#smeltPreconditions), so offer the deterministic collect route
     // for the missing producer instead of starving to WAIT. `fuel` is the
     // data-driven class route (a log or coal), symmetric with the input route.
-    return mineCandidates(state, options, inputSpec, null)
+    return smeltPrerequisiteCandidates(state, options, inputSpec, 'smelt_input')
   }
 
   const haveOutput = state.inventory.counts[focusItem] ?? 0
@@ -1966,7 +1982,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (available <= 0) return []
   const count = Math.min(needed, available)
   const fuelItem = smeltFuelFor(state, inputItem, count)
-  if (fuelItem === null) return mineCandidates(state, options, 'fuel', null)
+  if (fuelItem === null) return smeltPrerequisiteCandidates(state, options, 'fuel', 'smelt_fuel')
   const fuelCount = fuelCountFor(count, fuelItem)
   // A single item cannot occupy both furnace slots. In particular, a
   // one-log charcoal route must acquire a second log before SMELT is offered;
@@ -1974,7 +1990,7 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
   // leaving a stale furnace slot that makes the next attempt report
   // `destination full`.
   if (!smeltInventorySufficient(state.inventory.counts, inputItem, count, fuelItem, fuelCount)) {
-    return mineCandidates(state, options, 'fuel', null)
+    return smeltPrerequisiteCandidates(state, options, 'fuel', 'smelt_fuel')
   }
 
   return [
@@ -2005,6 +2021,31 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
       },
     },
   ]
+}
+
+/**
+ * Ground the producer route for a missing smelt precondition and keep its
+ * semantic role visible to Jev.  `mineCandidates` alone only sees the current
+ * sensor window; the collect route also admits a non-stale remembered ore/log
+ * coordinate.  Without that second leg an active smelt can present only
+ * clearance/WAIT candidates after the bot has walked away from the last sensed
+ * producer, which is candidate starvation rather than a real impossibility.
+ */
+function smeltPrerequisiteCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: string,
+  prerequisiteRole: 'smelt_input' | 'smelt_fuel',
+): Candidate[] {
+  return collectRouteCandidates(state, options, spec).map((candidate) => ({
+    ...candidate,
+    meta: {
+      ...candidate.meta,
+      optionSkill: 'PREREQUISITE',
+      prerequisiteRole,
+      prerequisiteItem: spec,
+    },
+  }))
 }
 
 function smeltInputFor(state: WorldState, focusItem: string): string | null {
@@ -2055,7 +2096,7 @@ export function smeltInputPrereq(state: WorldState, options: CandidateOptions): 
   if (reachableSensedFurnace(state, options) === null) return null
   const held = smeltInputFor(state, item)
   if (held !== null) return { item, input: held, present: true, action: 'none' }
-  const route = mineCandidates(state, options, inputSpec, null)
+  const route = smeltPrerequisiteCandidates(state, options, inputSpec, 'smelt_input')
   return {
     item,
     input: nearestProducerYield(state, inputSpec) ?? inputSpec,

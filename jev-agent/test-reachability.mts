@@ -180,11 +180,87 @@ function worldState(overrides: {
     '(13) sensed furnace + missing visible log yields the log MINE/MOVE route',
     inputMove !== undefined &&
       inputMove.meta.targetBlockName === 'oak_log' &&
+      inputMove.meta.optionSkill === 'PREREQUISITE' &&
+      inputMove.meta.prerequisiteRole === 'smelt_input' &&
       inputMove.meta.vertical === 'pillar' &&
       Number(inputMove.meta.pillarSteps) > 0 &&
       unrelated === undefined &&
       productive.length > 0,
     `productive=[${productive.map((candidate) => candidate.id).join(',')}] input=${inputMove?.id ?? 'none'} vertical=${String(inputMove?.meta.vertical ?? 'none')} steps=${String(inputMove?.meta.pillarSteps ?? 0)}`,
+  )
+}
+
+// (13d) a smelt input route must retain a durable remembered ore coordinate
+// after the ore leaves the current sensor window. The former mine-only bridge
+// returned no route here, so an active iron smelt collapsed to WAIT/ESCALATE
+// even though the world memory still contained a non-stale iron_ore fact.
+{
+  const feet: Vec3Json = { x: 34.5, y: 31, z: 37.5 }
+  const furnace: StationEntry = { x: 37, y: 30, z: 37, source: 'sensed' }
+  const ironOre: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 45, y: 31, z: 37 } }
+  const smelt = queuedGoal({
+    id: 'g-iron-input',
+    kind: 'smelt',
+    description: 'smelt 3 x iron_ingot',
+    targetItem: 'iron_ingot',
+    requiredCount: 3,
+  })
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ stone_pickaxe: 1, cobblestone: 32, coal: 3 }),
+    furnaces: [furnace],
+    signals: signals({ knownResources: [ironOre] }),
+    goal: goal({ id: 'smelt:iron_ingot', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }),
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(state, optionsWith(null))
+  const retrieve = grounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:raw_iron:b45_31_37')
+  const entry = smeltInputPrereq(state, optionsWith(null))
+  const line = entry === null ? null : formatSmeltInputPrereq(entry)
+  check(
+    '(13d) missing iron input keeps the remembered ore prerequisite candidate',
+    retrieve !== undefined &&
+      retrieve.meta.optionSkill === 'PREREQUISITE' &&
+      retrieve.meta.prerequisiteRole === 'smelt_input' &&
+      retrieve.meta.prerequisiteItem === 'raw_iron' &&
+      retrieve.affordance?.feasible === true,
+    `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] retrieve=${retrieve?.id ?? 'none'}`,
+  )
+  check(
+    '(13e) the smelt prerequisite marker agrees with the remembered route',
+    line === 'SMELT_INPUT_PREREQ item=iron_ingot input=raw_iron present=false action=insert_collect',
+    `line="${line ?? 'none'}"`,
+  )
+}
+
+// (13f) a remembered productive route suppresses unrelated headroom digging.
+// The live failure shape presented RETRIEVE:raw_iron beside MINE:dirt ceiling
+// clearance, then Jev selected the dirt despite no goal relation.
+{
+  const feet: Vec3Json = { x: 34.5, y: 31, z: 37.5 }
+  const smelt = queuedGoal({
+    id: 'g-iron-input-clearance',
+    kind: 'smelt',
+    description: 'smelt 3 x iron_ingot',
+    targetItem: 'iron_ingot',
+    requiredCount: 3,
+  })
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ stone_pickaxe: 1, cobblestone: 32, coal: 3 }),
+    furnaces: [{ x: 37, y: 30, z: 37, source: 'sensed' }],
+    headroomCuts: [{ pos: { x: 34, y: 32, z: 37 }, name: 'dirt', safe: true, reason: 'test-ceiling' }],
+    signals: signals({ knownResources: [{ name: 'iron_ore', kind: 'ore', position: { x: 45, y: 31, z: 37 } }] }),
+    goal: goal({ id: 'smelt:iron_ingot', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }),
+    goalQueue: queueWith(smelt),
+  })
+  const grounded = generateGroundedCandidates(state, optionsWith(null))
+  const clearance = grounded.candidates.filter((candidate) => candidate.meta.clearance === true)
+  const retrieve = grounded.candidates.find((candidate) => candidate.id === 'RETRIEVE:known:raw_iron:b45_31_37')
+  check(
+    '(13f) unrelated dirt clearance is withheld when the smelt retrieve route exists',
+    retrieve !== undefined && clearance.length === 0,
+    `retrieve=${retrieve?.id ?? 'none'} clearance=[${clearance.map((candidate) => candidate.id).join(',')}] candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
   )
 }
 

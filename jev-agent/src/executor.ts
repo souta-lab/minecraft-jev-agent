@@ -119,6 +119,7 @@ export type FailureCode =
   | 'path_stuck'
   | 'tunnel_entry_refused'
   | 'out_of_reach'
+  | 'protected_station'
   | 'dig_error'
   | 'dig_timeout'
   | 'craft_error'
@@ -663,6 +664,23 @@ export function classifyRetrieveOutcome(input: RetrieveOutcomeInput): RetrieveOu
 }
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
+
+/**
+ * Stations are durable world resources, not route terrain. A route-opening or
+ * staircase action may dig the live block at its selected cell, so the final
+ * dig boundary rejects stations even if an earlier sensor snapshot classified
+ * that cell as generic terrain. There is no semantic station-removal
+ * candidate; this is a hard world-preservation invariant, not a policy rank.
+ */
+export const PROTECTED_STATION_BLOCKS: ReadonlySet<string> = new Set([
+  'crafting_table',
+  ...FURNACE_BLOCKS,
+])
+
+export function isProtectedStationBlock(name: string): boolean {
+  const normalized = name.includes(':') ? name.slice(name.lastIndexOf(':') + 1) : name
+  return PROTECTED_STATION_BLOCKS.has(normalized)
+}
 
 export interface SmeltFurnaceSlot {
   count: number
@@ -4693,6 +4711,12 @@ export class Executor {
 
   private async digBlock(block: Block, epoch: number, signal: AbortSignal): Promise<void> {
     this.ensureOwned(epoch, signal)
+    if (isProtectedStationBlock(block.name)) {
+      throw new ExecutorError(
+        'protected_station',
+        `refusing to break protected station ${block.name} at (${block.position.x},${block.position.y},${block.position.z})`,
+      )
+    }
     if (!this.bot.canDigBlock(block)) {
       throw new ExecutorError('dig_error', `canDigBlock() returned false for ${block.name}`)
     }
