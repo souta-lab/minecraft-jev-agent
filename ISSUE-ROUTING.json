@@ -7,23 +7,24 @@
     "newIssueRule": "Search existing open/closed issues first. Prefer updating, reopening, or adding acceptance to an existing issue over creating a new issue. Create a new issue only when the acceptance boundary is genuinely distinct.",
     "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, and unclassified BACKLOG are not normal coding work.",
     "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
-    "authorityResetRule": "Until #221 is resolved, do not add deterministic semantic-ranking/retry/goal-ordering policy to advance M2. Preserve deterministic truth, safety, mechanics and verification; semantic WHICH belongs to Jev and strategic WHAT NEXT belongs to System2. Deterministic semantic policy is an explicit baseline only."
+    "authorityResetRule": "Until #226/#221 are resolved, do not add deterministic semantic-ranking/retry/goal-ordering policy to advance M2. Preserve deterministic truth, safety, mechanics and verification; semantic WHICH belongs to Jev and strategic WHAT NEXT belongs to System2. Deterministic semantic policy is an explicit baseline only."
   },
-  "now": [221, 11, 128],
-  "next": [107, 121, 56],
+  "now": [226, 221, 11],
+  "next": [128, 107, 121, 56],
   "waitingLive": [3, 13, 136],
   "research": [130],
   "future": [37, 80, 35, 41, 52],
   "referenceOnly": [],
   "clusters": {
-    "AUTHORITY_RESET": [221, 11, 128, 107, 121, 56, 130],
+    "AUTHORITY_RESET": [226, 221, 11, 128, 107, 121, 56, 130],
     "RESIDENT_CORRECTNESS": [3, 13, 136],
     "FUTURE_CAPABILITIES": [37, 80, 35, 41, 52]
   },
   "notes": {
-    "221": "Primary blocker. The measured iron-pickaxe run used deterministic fallback only. PR/commit #222 removed the hardcoded forceFallbackPolicy=true, but production acceptance still needs fail-closed Jev configuration, real invocation evidence, and proof that deterministic code does not silently substitute semantic choices.",
+    "226": "P0 implementation blocker. #230 removed silent model-error fallback, but current main still defaults PlannerMode to deterministic, bypasses the model on queue_empty, force-selects capability-gap return_to_surface before model choice, and carries universal hand-ranking language in the Jev prompt. Remove these bypasses before more M2 semantic patches.",
+    "221": "P0 live acceptance blocker. The measured iron-pickaxe run used deterministic fallback only. After #226 is statically clean, a fresh run must prove real Jev invocation and model-authoritative System2 behavior with no hidden semantic substitution.",
     "11": "Primary architecture cleanup lane. Inventory the deterministic semantic policy accumulated during M2. KEEP truth/safety/mechanics/verification; QUARANTINE fallback rankings as explicit baseline; MIGRATE WHICH to Jev pi and WHAT NEXT to sparse System2. Do not mass-revert mechanics.",
-    "128": "Immediate recurrence prevention: one typed effective authority config must make requested vs resolved policy/planner modes explicit and reject silent production fallback before action authority starts.",
+    "128": "NEXT recurrence prevention after the immediate #226 bypasses are removed: one typed effective authority config should record requested/resolved policy/planner modes and reject contradictory combinations before action authority starts.",
     "107": "NEXT after the runtime authority contract is real: document the single surviving authority map from code, not aspirational prose.",
     "121": "Truth/progress taxonomy remains useful because it defines observed mechanics and verification; it must not become a semantic ranking policy. Old PR #176 is closed; any implementation restarts from fresh main.",
     "56": "CurrentOptionContext data flow remains relevant only after real Jev is demonstrably on the action path. Old PR #173 is superseded/closed; do not revive it. Rebuild any remaining Option-to-Skill work from fresh main after #221.",
