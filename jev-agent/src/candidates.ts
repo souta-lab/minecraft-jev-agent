@@ -1919,19 +1919,33 @@ function knownStations(state: WorldState, station: string): KnownStationLike[] {
  * Furnace coordinates the smelt prerequisite can walk to.
  *
  * `signals.knownResources` is the controller's canonical, filtered durable
- * resource set. `state.furnaces` also contains a presentation projection of
- * remembered stations, but that projection intentionally survives transient
- * unreachable-resource filtering so Jev can still see the world fact. It must
- * not become a second candidate source: doing so re-inserts a station that the
- * controller has already retired and makes candidate generation disagree with
- * `guardRetrieve` (which validates against the filtered signal set).
+ * resource set. `state.furnaces` is also a grounded projection of remembered
+ * and sensed stations. It is needed here when the host has intentionally
+ * withheld a station from the filtered signal envelope (for example while a
+ * furnace is held); the explicit unreachable set remains the safety boundary
+ * so a retired station cannot be reintroduced.
  *
  * Sensed furnaces are handled separately by `reachableSensedFurnace`; a
- * registered/remembered furnace reaches this list through the canonical signal
- * set, including a station placed by this generation.
+ * registered/remembered furnace reaches this list through either the canonical
+ * signal set or the grounded station projection, including a station placed by
+ * this generation.
  */
-function knownFurnaces(state: WorldState): KnownStationLike[] {
+function knownFurnaces(
+  state: WorldState,
+  unreachableStations: ReadonlySet<string> = EMPTY_STATIONS,
+): KnownStationLike[] {
   const found = knownStations(state, 'furnace')
+  const seen = new Set(found.map((station) => knownStationKey(station)))
+  for (const entry of state.furnaces ?? []) {
+    const station: KnownStationLike = {
+      name: 'furnace',
+      position: { x: entry.x, y: entry.y, z: entry.z },
+    }
+    const key = knownStationKey(station)
+    if (seen.has(key) || unreachableStations.has(key)) continue
+    seen.add(key)
+    found.push(station)
+  }
   found.sort((a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position))
   return found
 }
@@ -2075,7 +2089,7 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     if (count > 0 && matchesResourceClass(name, 'stone')) stoneCount += count
   }
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
-  const furnaces = knownFurnaces(state)
+  const furnaces = knownFurnaces(state, unreachableStations)
   const reachableFurnace = furnaces.find((station) => !unreachableStations.has(knownStationKey(station))) ?? null
   return {
     goal: state.goalQueue?.current ?? null,
