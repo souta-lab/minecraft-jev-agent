@@ -4,13 +4,17 @@ import type { Bot } from 'mineflayer'
 import { emptyWorldMemory } from './resident-types.ts'
 import {
   PlannerBrain,
+  RUNGS,
+  bestPickaxeRank,
   buildPlanOptions,
+  deriveResumeRung,
   deriveUpperAccessTargetY,
   ladderFloorGoals,
   resolveRungSourceOfTruth,
   rungIndexById,
   upperAccessRecoveryApplies,
 } from './planner.ts'
+import { planNetherPortal } from '../jev-agent/src/netherPortalPlan.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { LlmSummonReason, System2PlanRequest } from '../jev-agent/src/system2.ts'
@@ -233,6 +237,96 @@ addCase('(i) without a capability gap the deterministic floor never emits the su
   return {
     pass: !surface && plan.goals.length > 0,
     detail: `surface=${surface} goals=[${plan.goals.map((goal) => goal.kind).join(',')}]`,
+  }
+})
+
+// M2 = diamond-to-Nether-gate. Full iron armour + sword (the iron_gear rung) is a
+// real but OPTIONAL affordance, never a required prerequisite of the diamond /
+// portal route. These cases pin that boundary and the nether_portal transition.
+
+const ARMOUR_ITEMS = ['iron_chestplate', 'iron_leggings', 'iron_helmet', 'iron_boots', 'iron_sword']
+
+function targetItems(goals: readonly PlannedGoal[]): string[] {
+  return goals.map((goal) => goal.targetItem).filter((item): item is string => typeof item === 'string')
+}
+
+addCase("(j) M2=diamond-to-Nether-gate: the diamond route needs no mandatory full iron armour", () => {
+  const counts = { crafting_table: 1, iron_ingot: 3, iron_pickaxe: 1 }
+  const options = buildPlanOptions(counts, emptyWorldMemory())
+  const diamondRoad = options.find((option) => option.id === 'diamond_road')
+  const diamondItems = targetItems(diamondRoad?.goals ?? [])
+  const noArmour = !diamondItems.some((item) => ARMOUR_ITEMS.includes(item))
+  // The old chain inherited `climb(26, ...)`, which demanded ~22 raw_iron for armour.
+  const noRawIronSurge = !(diamondRoad?.goals ?? []).some(
+    (goal) => goal.targetItem === 'raw_iron' && (goal.requiredCount ?? 0) >= 22,
+  )
+  const hasDiamond = diamondItems.includes('diamond')
+  const gearStillOffered = options.some((option) => option.id === 'iron_gear')
+  return {
+    pass: diamondRoad !== undefined && noArmour && noRawIronSurge && hasDiamond && gearStillOffered,
+    detail: `diamond_road=[${diamondItems.join(',')}] noArmour=${noArmour} noRawIronSurge=${noRawIronSurge} hasDiamond=${hasDiamond} gearOffered=${gearStillOffered}`,
+  }
+})
+
+addCase('(k) iron_gear is an explicit optional rung, not a mandatory prerequisite', () => {
+  const gear = RUNGS.find((rung) => rung.id === 'iron_gear')
+  const diamond = RUNGS.find((rung) => rung.id === 'diamond')
+  const portal = RUNGS.find((rung) => rung.id === 'nether_portal')
+  const gearOptional = gear?.optional === true
+  const diamondMandatory = diamond !== undefined && diamond.optional !== true && diamond.future !== true
+  // A portal is only "done" once the nether_portal block exists, not merely when
+  // flint_and_steel is held (the old predicate skipped the build/light entirely).
+  const portalFuture = portal?.future === true
+  const satisfiedEmpty = portal?.satisfied({}, emptyWorldMemory()) === true
+  const satisfiedHeld = portal?.satisfied({ nether_portal: 1 }, emptyWorldMemory()) === true
+  return {
+    pass: gearOptional && diamondMandatory && !portalFuture && !satisfiedEmpty && satisfiedHeld,
+    detail: `gearOptional=${gearOptional} diamondMandatory=${diamondMandatory} portalFuture=${portalFuture} satisfiedEmpty=${satisfiedEmpty} satisfiedHeld=${satisfiedHeld}`,
+  }
+})
+
+addCase('(l) the ladder reaches the nether_portal rung and its typed build/light/verify plan', () => {
+  const counts = {
+    crafting_table: 1,
+    cobblestone: 22,
+    stick: 2,
+    oak_log: 2,
+    stone_pickaxe: 1,
+    furnace: 1,
+    charcoal: 1,
+    iron_ingot: 3,
+    iron_pickaxe: 1,
+    diamond: 3,
+    diamond_pickaxe: 1,
+    flint: 1,
+    flint_and_steel: 1,
+    obsidian: 10,
+  }
+  const resume = deriveResumeRung(counts, emptyWorldMemory())
+  const floor = ladderFloorGoals(counts, emptyWorldMemory(), {
+    resumeRungIndex: resume.rungIndex,
+    placedFurnacesNear: 1,
+    knownFurnaces: 1,
+  })
+  const plan = planNetherPortal({ inventory: counts, toolRank: bestPickaxeRank(counts) })
+  const operationKinds = plan.operations.map((operation) => operation.kind).join(',')
+  const everyPostcondition = plan.operations.every((operation) => typeof operation.postcondition.kind === 'string')
+  const buildGoal = floor.goals.some((goal) => goal.kind === 'place' && goal.targetItem === 'obsidian')
+  const lightGoal = floor.goals.some(
+    (goal) => goal.kind === 'place' && goal.targetItem === 'nether_portal' && goal.targetPredicate === 'portal_lit',
+  )
+  const noArmour = !targetItems(floor.goals).some((item) => ARMOUR_ITEMS.includes(item))
+  return {
+    pass:
+      resume.rungId === 'nether_portal' &&
+      floor.rungId === 'nether_portal' &&
+      floor.supplied &&
+      operationKinds === 'build_portal_frame,light_portal,verify_portal' &&
+      everyPostcondition &&
+      buildGoal &&
+      lightGoal &&
+      noArmour,
+    detail: `resume=${resume.rungId}@${resume.rungIndex} floor=${floor.rungId} supplied=${floor.supplied} ops=[${operationKinds}] postconditions=${everyPostcondition} build=${buildGoal} light=${lightGoal} noArmour=${noArmour}`,
   }
 })
 

@@ -281,6 +281,15 @@ export interface Rung {
    * context but are never selected by the deterministic fallback ladder.
    */
   future?: boolean
+  /**
+   * `optional` rungs are real, executable affordances that are NOT mandatory
+   * prerequisites on the documented road to the M2 diamond-to-Nether gate. They
+   * remain selectable Options (Mercury/Jev choose), but they are excluded from
+   * the mandatory frontier AND from every prerequisite chain, so a later rung
+   * (diamond / nether_portal) never inherits them transitively. This is an
+   * affordance boundary, not a deterministic reordering.
+   */
+  optional?: boolean
   satisfied: (c: Counts, w: ResidentWorldMemory) => boolean
   goals: (c: Counts, w: ResidentWorldMemory) => PlannedGoal[]
 }
@@ -386,6 +395,9 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'iron_gear',
+    // M2 is diamond-to-Nether-gate: full iron armour + sword is a real affordance
+    // but NOT a mandatory prerequisite of the diamond / portal route.
+    optional: true,
     satisfied: (c) =>
       has(c, 'iron_chestplate') && has(c, 'iron_leggings') && has(c, 'iron_helmet') && has(c, 'iron_boots') && has(c, 'iron_sword'),
     goals: (c) =>
@@ -407,10 +419,13 @@ export const RUNGS: readonly Rung[] = [
     satisfied: (c) => has(c, 'diamond_pickaxe'),
     goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
   },
-  // --- M3: nether route (templates only; the current executor cannot run these) ---
+  // --- M2 portal transition + M3/M4 future route ---
   {
     id: 'nether_portal',
-    satisfied: (c) => has(c, 'flint_and_steel') && countClass(c, 'stone') >= 0 && has(c, 'flint'),
+    // M2 transition: done only once the lit nether_portal block actually exists.
+    // The previous flint_and_steel predicate declared the rung satisfied before a
+    // frame was ever built, so the ladder skipped build/light/verify entirely.
+    satisfied: (c) => has(c, 'nether_portal'),
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
@@ -470,6 +485,14 @@ export interface Ladder {
 /** Executable rungs only: the deterministic road the current executor can run. */
 export function executableRungs(): readonly Rung[] {
   return RUNGS.filter((rung) => rung.future !== true)
+}
+
+/**
+ * The M2 mandatory road: executable rungs that are not optional side quests.
+ * Optional rungs stay selectable as Options but never gate a later rung.
+ */
+export function isMandatoryRung(rung: Rung): boolean {
+  return rung.future !== true && rung.optional !== true
 }
 
 export interface PreconditionResult {
@@ -731,7 +754,7 @@ export function deriveResumeRung(
   let candidate = -1
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
-    if (rung === undefined || rung.future === true) continue
+    if (rung === undefined || !isMandatoryRung(rung)) continue
     if (rungBehindInventory(rung, counts, world)) continue
     candidate = i
     break
@@ -749,7 +772,7 @@ export function deriveResumeRung(
   }
   for (let j = candidate - 1; j >= 0; j -= 1) {
     const earlier = RUNGS[j]
-    if (earlier === undefined || earlier.future === true) continue
+    if (earlier === undefined || !isMandatoryRung(earlier)) continue
     if (earlier.satisfied(counts, world)) continue
     if (!rungPrecondition(earlier, counts, world).ok) continue
     log?.('LADDER_RESUME_FALLBACK', {
@@ -787,7 +810,7 @@ export function buildLadder(
   let unsatisfiable: string | null = null
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
-    if (rung === undefined || rung.future === true) continue
+    if (rung === undefined || !isMandatoryRung(rung)) continue
     // Inventory-aware resume (#reset-inventory): rungs the live inventory already
     // put behind the resident are not re-planned, so a reset resumes at the right
     // rung instead of climbing from wood again.
@@ -868,7 +891,7 @@ export function buildLadder(
 export function computeFrontier(counts: Counts, world: ResidentWorldMemory): { rungIndex: number; rungId: string } {
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
-    if (rung === undefined || rung.future === true) continue
+    if (rung === undefined || !isMandatoryRung(rung)) continue
     if (!rung.satisfied(counts, world)) return { rungIndex: i, rungId: rung.id }
   }
   return { rungIndex: RUNGS.length, rungId: 'complete' }
@@ -1100,10 +1123,16 @@ export function buildPlanOptions(
 ): PlanOption[] {
   const planGoals = (rung: Rung): PlannedGoal[] =>
     filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
-  const unsat = reachableUnsatisfiedRungs(counts, world).filter(
+  const allUnsat = reachableUnsatisfiedRungs(counts, world)
+  const unsat = allUnsat.filter(
     (rung) => opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex,
   )
-  if (unsat.length === 0) {
+  // Optional rungs stay selectable regardless of the resume cursor: a resume
+  // cursor points at mandatory progress, and an optional side quest the live
+  // inventory never completed must remain an Option (Mercury/Jev choice) without
+  // being a prerequisite of anything.
+  const optionalUnsat = allUnsat.filter((rung) => rung.optional === true)
+  if (unsat.length === 0 && optionalUnsat.length === 0) {
     return [
       {
         id: 'upkeep',
@@ -1112,29 +1141,37 @@ export function buildPlanOptions(
       },
     ]
   }
+  // The mandatory road: optional rungs never appear in a prerequisite chain.
+  const mandatory = unsat.filter((rung) => rung.optional !== true)
   const options: PlanOption[] = []
-  const first = unsat[0]
+  const first = mandatory[0]
   if (first !== undefined) {
     options.push({ id: `front_${first.id}`, title: `next milestone: ${first.id}`, goals: planGoals(first) })
   }
-  const two = unsat.slice(0, 2).flatMap((rung) => planGoals(rung))
-  if (two.length > 0) options.push({ id: 'two_rungs', title: `next two milestones (${unsat.slice(0, 2).map((r) => r.id).join(' + ')})`, goals: two })
-  const ironIndex = unsat.findIndex((rung) => rung.id === 'iron_pickaxe')
+  const two = mandatory.slice(0, 2).flatMap((rung) => planGoals(rung))
+  if (two.length > 0) options.push({ id: 'two_rungs', title: `next two milestones (${mandatory.slice(0, 2).map((r) => r.id).join(' + ')})`, goals: two })
+  const ironIndex = mandatory.findIndex((rung) => rung.id === 'iron_pickaxe')
   if (ironIndex >= 0) {
-    const iron = unsat.slice(0, ironIndex + 1).flatMap((rung) => planGoals(rung))
+    const iron = mandatory.slice(0, ironIndex + 1).flatMap((rung) => planGoals(rung))
     if (iron.length > 0) options.push({ id: 'finish_iron_age', title: 'finish the iron age (raw_iron -> iron_ingot -> iron_pickaxe)', goals: iron })
   }
-  const gearIndex = unsat.findIndex((rung) => rung.id === 'iron_gear')
-  if (gearIndex >= 0) {
-    const gear = unsat.slice(0, gearIndex + 1).flatMap((rung) => planGoals(rung))
-    if (gear.length > 0) options.push({ id: 'iron_gear', title: 'full iron gear then diamond', goals: gear })
+  for (const rung of optionalUnsat) {
+    const optionalIndex = rungIndexById(rung.id)
+    // Mandatory predecessors follow the resume cursor (no re-planning rungs the
+    // live inventory already put behind the resident); the optional rung itself
+    // is appended so it stays selectable even when the cursor has moved past it.
+    const gear = [
+      ...unsat.filter((candidate) => candidate.optional !== true && rungIndexById(candidate.id) <= optionalIndex),
+      rung,
+    ].flatMap((candidate) => planGoals(candidate))
+    if (gear.length > 0) options.push({ id: rung.id, title: `optional: ${rung.id}`, goals: gear })
   }
-  const diamondIndex = unsat.findIndex((rung) => rung.id === 'diamond_pickaxe')
+  const diamondIndex = mandatory.findIndex((rung) => rung.id === 'diamond_pickaxe')
   if (diamondIndex >= 0) {
-    const diamond = unsat.slice(0, diamondIndex + 1).flatMap((rung) => planGoals(rung))
+    const diamond = mandatory.slice(0, diamondIndex + 1).flatMap((rung) => planGoals(rung))
     if (diamond.length > 0) options.push({ id: 'diamond_road', title: 'push to diamond + diamond_pickaxe', goals: diamond })
   }
-  const whole = unsat.flatMap((rung) => planGoals(rung))
+  const whole = mandatory.flatMap((rung) => planGoals(rung))
   if (whole.length > 0) options.push({ id: 'full_ladder', title: 'the whole remaining ladder', goals: whole })
   const deduped = dedupeOptions(options)
   if (deduped.length === 0) {
@@ -1229,7 +1266,9 @@ export function buildBodyChangeOption(
   },
 ): PlanOption {
   const unsat = reachableUnsatisfiedRungs(counts, world).filter(
-    (rung) => opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex,
+    (rung) =>
+      rung.optional !== true &&
+      (opts?.resumeRungIndex === undefined || rungIndexById(rung.id) >= opts.resumeRungIndex),
   )
   const planGoals = (rung: Rung): PlannedGoal[] =>
     filterAlreadyMet(withFurnacePrereq(rungGoalsWithPrereq(rung, counts, world), counts, opts?.placedFurnacesNear, opts?.knownFurnaces), counts, rung.id, opts?.log)
@@ -1521,7 +1560,7 @@ export function plannerWorldKeyString(key: PlannerWorldKey): string {
  * are invalidated instead of being reinterpreted under the new semantics.
  */
 export function plannerCapabilityHash(): string {
-  const contract = RUNGS.map((rung) => `${rung.id}${rung.future === true ? ':future' : ''}`).join(',')
+  const contract = RUNGS.map((rung) => `${rung.id}${rung.future === true ? ':future' : ''}${rung.optional === true ? ':optional' : ''}`).join(',')
   return createHash('sha1').update(contract).digest('hex').slice(0, 16)
 }
 
