@@ -16,7 +16,9 @@ interface Case {
 }
 
 const cases: Case[] = []
-const addCase = (name: string, run: Case['run']): void => cases.push({ name, run })
+const addCase = (name: string, run: Case['run']): void => {
+  cases.push({ name, run })
+}
 
 const smeltGoal: GoalLike = { kind: 'smelt', targetItem: 'iron_ingot' }
 const collectGoal: GoalLike = { kind: 'collect', targetItem: 'diamond' }
