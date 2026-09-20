@@ -1460,7 +1460,17 @@ function craftCandidates(
   if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
     const route = craftIngredientRoute(state, options, focusItem)
-    const merged = route === null ? acquisition.candidates : [...acquisition.candidates, ...route.candidates]
+    const merged = route === null ? [...acquisition.candidates] : [...acquisition.candidates, ...route.candidates]
+    // A remembered station is a grounded alternative, not a guarantee that its
+    // route is mechanically reachable this tick. Preserve the 2x2 prerequisite
+    // step as a second grounded candidate so the reachability gate can withdraw
+    // only the bad retrieval route instead of collapsing the craft Option to
+    // MOVE/WAIT. Jev still chooses between every surviving semantic action.
+    const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false)
+    if (fallbackPlan.op !== null) {
+      const fallback = craftPlanStepCandidate(state, options, fallbackPlan.op, focusItem).candidate
+      if (fallback !== null && !merged.some((candidate) => candidate.id === fallback.id)) merged.push(fallback)
+    }
     if (merged.length > 0 || acquisition.placeRefusal !== null) return { candidates: merged, placeRefusal: acquisition.placeRefusal }
   }
 
