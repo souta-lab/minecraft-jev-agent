@@ -3316,9 +3316,20 @@ export class Executor {
       // At a table we own the window interaction (openBlock + explicit resync)
       // because bot.craft's crafting-table delivery silently no-ops when the
       // server has moved on (PrismarineJS/mineflayer#3906). The 2x2 player-grid
-      // path is stock and proven, so it still uses bot.craft.
+      // path still uses bot.craft. On a Leaf live run, a timed-out player-grid
+      // craft can leave `currentWindow` as minecraft:crafting even though the
+      // action rejected. If that stale window is carried into the next retry,
+      // bot.craft keeps operating on the dead session and every retry can
+      // reproduce the same zero-gain/updateSlot timeout. Close only this
+      // abandoned crafting window after each player-grid attempt; a successful
+      // stock craft normally leaves no current window, so this is a no-op on
+      // the healthy path.
       if (table === null) {
-        await this.bot.craft(recipe, craftCount)
+        try {
+          await this.bot.craft(recipe, craftCount)
+        } finally {
+          await this.closeAbandonedCraftWindow()
+        }
       } else {
         const station = tableTarget
         if (station === null) {
@@ -3364,6 +3375,22 @@ export class Executor {
     })
     result.yieldItem = itemName
     return result
+  }
+
+  /**
+   * A failed stock 2x2 craft may leave Mineflayer's temporary crafting window
+   * installed after its promise rejects. Treat that window as executor-owned
+   * transient state: close it before the controller retries or replans, while
+   * leaving unrelated container windows untouched.
+   */
+  private async closeAbandonedCraftWindow(): Promise<void> {
+    const window = this.bot.currentWindow
+    if (window === null || typeof window.type !== 'string' || !window.type.startsWith('minecraft:crafting')) return
+    try {
+      await this.bot.closeWindow(window)
+    } catch (error) {
+      this.logger.warn('executor', `crafting window cleanup failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   private async runSmelt(
