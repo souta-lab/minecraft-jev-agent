@@ -768,7 +768,7 @@ export function parseMercuryJsonText(text: string): unknown | null {
 }
 
 const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
-  'This model cannot use a named tool choice. Return exactly one JSON object in the response text, with no prose or markdown. ' +
+  'This model cannot use a named tool choice. Prefer one emitPlan tool call when supported; otherwise return exactly one JSON object in the response text, with no prose or markdown. ' +
   'The top-level op must be exactly one of continue, patch, replace, or abort. ' +
   'Use goals for the typed goal objects; never use a goal kind as op. ' +
   'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
@@ -780,10 +780,21 @@ function defaultMercuryTransport(model: string): MercuryTransport {
         model,
         system: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
         prompt,
+        tools: {
+          emitPlan: tool({
+            description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
+            inputSchema: MERCURY_PLAN_SCHEMA,
+          }),
+        },
+        // muse rejects a named tool choice but accepts the provider-neutral
+        // auto mode. If it spends its output budget reasoning without a tool
+        // call, the strict JSON-text parser below is the non-semantic fallback.
+        toolChoice: 'auto',
         maxOutputTokens,
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(timeoutMs),
       })
+      if (result.toolCalls.length > 0) return { toolCalls: result.toolCalls, usage: result.usage }
       const parsed = parseMercuryJsonText(result.text)
       return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage: result.usage }
     }
