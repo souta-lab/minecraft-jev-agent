@@ -41,6 +41,32 @@ jobs:
       - name: Live issue-evidence invariant
         run: npm run issue-state:check
 
+  authority-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: jev-agent/package-lock.json
+      - name: Install Jev toolchain
+        working-directory: jev-agent
+        run: npm ci
+      - name: Install resident dependencies
+        working-directory: buddy-driver
+        run: npm install --ignore-scripts
+      - name: Resident typecheck
+        working-directory: buddy-driver
+        run: npm run typecheck
+      - name: System2 and Jev authority swap points
+        working-directory: buddy-driver
+        run: npm run authority-test
+      - name: Jev-owned anti-flap commitment
+        working-directory: jev-agent
+        run: npx tsx test-anti-flap.mts
+
   core-deterministic:
     runs-on: ubuntu-latest
     timeout-minutes: 10
