@@ -375,9 +375,16 @@ export class PlannerBrain implements System2Brain {
       // fallback, advisor override, queue_empty override, or stall override.
       // Mechanical compilation/guards may reject a goal later; WHAT remains the
       // model's exact grounded choice.
+      const semanticOptionTemplateId = selected.id
+      const semanticOptionInstanceId = `system2:${selected.id}`
       return {
         op: 'replace',
-        goals: selected.goals.map((goal) => ({ ...goal })),
+        goals: selected.goals.map((goal) => ({
+          ...goal,
+          semanticOptionInstanceId,
+          semanticOptionTemplateId,
+          semanticOptionIntent: selected.title,
+        })),
         note: `model-authoritative System2 chose ${selected.id}`,
       }
     } catch (error) {

@@ -33,14 +33,19 @@ export interface CausalGoalRef {
   /** Canonical Option identity, when the queue row has been compiled. */
   optionInstanceId?: string
   optionTemplateId?: string
+  /** Canonical System2 semantic owner when this row is a prerequisite. */
+  semanticOptionInstanceId?: string
+  semanticOptionTemplateId?: string
   optionSpec?: { id: string }
 }
 
 /** The ids fixed at DECISION time, carried into every downstream log. */
 export interface CausalStamp {
   chainId: string
-  /** OptionSpec id compiled from the current plan row, e.g. `collect:raw_iron` */
+  /** Canonical semantic Option id, e.g. `front_charcoal` or `goto:raw_iron`. */
   optionId: string | null
+  /** Exact semantic Option instance identity, when available. */
+  semanticOptionInstanceId?: string | null
   /** the GoalQueue row id (the local plan revision), e.g. `g3:collect:raw_iron` */
   planId: string | null
   /** the high-level strategy that produced the row (host-supplied or origin:kind) */
@@ -79,6 +84,9 @@ export function makeChainId(): string {
 /** Stable OptionSpec id for a plan row, or null when there is no current row. */
 export function optionIdForGoal(goal: CausalGoalRef | null | undefined): string | null {
   if (goal === null || goal === undefined) return null
+  if (typeof goal.semanticOptionTemplateId === 'string' && goal.semanticOptionTemplateId.length > 0) {
+    return goal.semanticOptionTemplateId
+  }
   if (typeof goal.optionTemplateId === 'string' && goal.optionTemplateId.length > 0) return goal.optionTemplateId
   if (goal.optionSpec !== undefined && typeof goal.optionSpec.id === 'string' && goal.optionSpec.id.length > 0) return goal.optionSpec.id
   return stableOptionId({
@@ -116,6 +124,7 @@ export function makeCausalStamp(input: CausalStampInput): CausalStamp {
   return {
     chainId: input.chainId,
     optionId: optionIdForGoal(input.goal),
+    semanticOptionInstanceId: input.goal?.semanticOptionInstanceId ?? input.goal?.optionInstanceId ?? null,
     planId: planRevisionForGoal(input.goal),
     strategy: input.strategy ?? derivedStrategyForGoal(input.goal),
   }
@@ -137,6 +146,7 @@ export function completeCausalChain(stamp: CausalStamp, outcome: CausalOutcomeIn
   return {
     chainId: stamp.chainId,
     optionId: stamp.optionId,
+    semanticOptionInstanceId: stamp.semanticOptionInstanceId ?? null,
     planId: stamp.planId,
     strategy: stamp.strategy,
     candidateId: outcome.candidateId,
@@ -154,14 +164,14 @@ export function completeCausalChain(stamp: CausalStamp, outcome: CausalOutcomeIn
   }
 }
 
-function text(value: string | null): string {
-  return value === null || value === '' ? 'null' : value
+function text(value: string | null | undefined): string {
+  return value === null || value === undefined || value === '' ? 'null' : value
 }
 
 /** The human-readable one-line marker mirrored into the resident log. */
 export function formatCausalLine(chain: CausalChain): string {
   return (
-    `CAUSAL chain=${chain.chainId} option=${text(chain.optionId)} plan=${text(chain.planId)} ` +
+    `CAUSAL chain=${chain.chainId} option=${text(chain.optionId)} semanticOptionInstance=${text(chain.semanticOptionInstanceId)} plan=${text(chain.planId)} ` +
     `strategy=${text(chain.strategy)} candidate=${text(chain.candidateId)} action=${text(chain.actionId)} ` +
     `verified=${chain.verified === null ? 'null' : String(chain.verified)} status=${text(chain.status)} ` +
     `resource=${text(chain.resource)} progressDelta=${chain.progressDelta === null ? 'null' : String(chain.progressDelta)} ` +
@@ -177,6 +187,7 @@ export function causalRecord(chain: CausalChain): Record<string, unknown> {
     record: 'causal',
     chainId: chain.chainId,
     optionId: chain.optionId,
+    semanticOptionInstanceId: chain.semanticOptionInstanceId,
     planId: chain.planId,
     strategy: chain.strategy,
     candidateId: chain.candidateId,

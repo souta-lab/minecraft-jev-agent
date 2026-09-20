@@ -476,10 +476,17 @@ function semanticizeMercuryGoal(source: MercuryPlanGoalJson, compiled: PlannedGo
     id: templateId,
     intent: source.kind === undefined ? compiled.description : `${source.kind}${item === null ? '' : ` ${item}`}`,
   }
+  const semanticInstanceId = stableOptionInstanceId(semanticSpec)
+  semanticSpec.semanticOptionTemplateId = semanticSpec.id
+  semanticSpec.semanticOptionInstanceId = semanticInstanceId
+  semanticSpec.semanticOptionIntent = semanticSpec.intent
   return {
     ...compiled,
     optionTemplateId: semanticSpec.id,
-    optionInstanceId: stableOptionInstanceId(semanticSpec),
+    optionInstanceId: semanticInstanceId,
+    semanticOptionTemplateId: semanticSpec.id,
+    semanticOptionInstanceId: semanticInstanceId,
+    semanticOptionIntent: semanticSpec.intent,
     optionSpec: semanticSpec,
   }
 }

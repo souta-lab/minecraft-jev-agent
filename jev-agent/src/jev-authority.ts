@@ -68,7 +68,7 @@ function candidateCriteria(candidate: Candidate): string {
 }
 
 export interface AuthorityDecisionMeta {
-  /** Exact runtime Option row Jev beta voted on; null only before/without an Option runtime. */
+  /** Canonical semantic Option instance Jev beta voted on; null before an Option exists. */
   optionInstanceId: string | null
   /** Stable semantic template id of that Option. */
   optionTemplateId: string | null
@@ -207,7 +207,7 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
   const probability = answers.abandon_option?.probability
   const betaProbability = typeof probability === 'number' && Number.isFinite(probability) ? probability : null
   return {
-    optionInstanceId: option?.instanceId ?? null,
+    optionInstanceId: option?.semanticInstanceId ?? option?.instanceId ?? null,
     optionTemplateId: option?.templateId ?? null,
     betaThreshold: threshold,
     betaProbability,

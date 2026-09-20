@@ -160,6 +160,44 @@ const compiledSemanticSmelt = applyCompiledPlan(
 const compiledSmelt = compiledSemanticSmelt.goals.find((candidate) => candidate.optionTemplateId === 'smelt:iron_ingot')
 assert.equal(compiledSmelt?.optionSpec?.id, 'smelt:iron_ingot')
 assert.equal(compiledSemanticSmelt.goals[0]?.optionTemplateId, 'collect:raw_iron')
+assert.equal(compiledSemanticSmelt.goals[0]?.semanticOptionTemplateId, 'smelt:iron_ingot')
+assert.equal(compiledSemanticSmelt.goals[0]?.semanticOptionInstanceId, 'smelt:iron_ingot#c3')
+
+// 6b. A model-selected multi-goal Option keeps one canonical semantic owner
+// while prerequisite/execution rows retain their own mechanical identities.
+const selectedSemanticPlan = applyCompiledPlan(
+  [
+    {
+      kind: 'collect',
+      description: 'collect 2 x log (fuel)',
+      targetItem: 'log',
+      requiredCount: 2,
+      semanticOptionInstanceId: 'system2:front_charcoal',
+      semanticOptionTemplateId: 'front_charcoal',
+      semanticOptionIntent: 'next milestone: charcoal',
+    },
+    {
+      kind: 'smelt',
+      description: 'smelt 1 x charcoal',
+      targetItem: 'charcoal',
+      requiredCount: 1,
+      semanticOptionInstanceId: 'system2:front_charcoal',
+      semanticOptionTemplateId: 'front_charcoal',
+      semanticOptionIntent: 'next milestone: charcoal',
+    },
+  ],
+  makeOptionSnapshot({ inventory: {}, knownStations: ['furnace'], toolRank: 2 }),
+  { enabled: true },
+)
+assert.ok(selectedSemanticPlan.goals.length >= 2)
+for (const compiledGoal of selectedSemanticPlan.goals) {
+  assert.equal(compiledGoal.semanticOptionTemplateId, 'front_charcoal')
+  assert.equal(compiledGoal.semanticOptionInstanceId, 'system2:front_charcoal')
+}
+const selectedQueue = new GoalQueue()
+selectedQueue.applyPlan(selectedSemanticPlan.goals, 'llm', 'replace')
+assert.equal(selectedQueue.current?.semanticOptionTemplateId, 'front_charcoal')
+assert.equal(currentOptionContextForQueuedGoal(selectedQueue.current)?.templateId, 'front_charcoal')
 
 // The current Option exposes the non-semantic execution envelope explicitly;
 // a prerequisite candidate must not look like an unrelated action to Jev.

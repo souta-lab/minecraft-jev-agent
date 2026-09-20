@@ -127,6 +127,14 @@ export interface QueuedGoal {
   optionTemplateId?: string
   /** Issue #56: the full plain-data spec survives queue persistence/restart. */
   optionSpec?: OptionSpec
+  /**
+   * Canonical System2 semantic owner of this execution row. A prerequisite
+   * row keeps its own executable Option identity above, but these fields keep
+   * the parent WHAT visible through compilation, recovery, beta, and evidence.
+   */
+  semanticOptionInstanceId?: string
+  semanticOptionTemplateId?: string
+  semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
   /** how many relevant items the bot held when the goal was created */
@@ -159,6 +167,10 @@ export interface PlannedGoal {
   optionTemplateId?: string
   /** Issue #56: the full plain-data spec survives queue persistence/restart. */
   optionSpec?: OptionSpec
+  /** Canonical System2 semantic owner retained while this row executes. */
+  semanticOptionInstanceId?: string
+  semanticOptionTemplateId?: string
+  semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
   detail?: string
@@ -219,6 +231,8 @@ export interface GoalQueueCurrentLog {
   targetY: number | null
   optionInstanceId?: string | null
   optionTemplateId?: string | null
+  semanticOptionInstanceId?: string | null
+  semanticOptionTemplateId?: string | null
 }
 
 export interface GoalQueueStateLog {
@@ -247,6 +261,8 @@ export function toGoalQueueStateLog(state: GoalQueueState): GoalQueueStateLog {
             targetY: state.current.targetY ?? null,
             optionInstanceId: state.current.optionInstanceId ?? null,
             optionTemplateId: state.current.optionTemplateId ?? null,
+            semanticOptionInstanceId: state.current.semanticOptionInstanceId ?? null,
+            semanticOptionTemplateId: state.current.semanticOptionTemplateId ?? null,
           },
     pending: state.goals.filter((goal) => goal.status === 'pending').map((goal) => goal.id),
   }
@@ -492,6 +508,9 @@ export class GoalQueue {
       optionInstanceId,
       optionTemplateId,
       optionSpec: spec,
+      ...(plan.semanticOptionInstanceId === undefined ? {} : { semanticOptionInstanceId: plan.semanticOptionInstanceId }),
+      ...(plan.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: plan.semanticOptionTemplateId }),
+      ...(plan.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: plan.semanticOptionIntent }),
       ...(plan.placementCells === undefined ? {} : { placementCells: [...plan.placementCells] }),
       startCount: 0,
       haveCount: 0,

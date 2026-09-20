@@ -2713,7 +2713,7 @@ export class JevController {
       .sort()
       .join(';')
     const current = state.goalQueue?.current
-    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}|revision=${state.goalQueue?.revision ?? this.queue.revision}|optionInstance=${current?.optionInstanceId ?? 'none'}|optionTemplate=${current?.optionTemplateId ?? 'none'}`
+    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}|revision=${state.goalQueue?.revision ?? this.queue.revision}|optionInstance=${current?.semanticOptionInstanceId ?? current?.optionInstanceId ?? 'none'}|optionTemplate=${current?.semanticOptionTemplateId ?? current?.optionTemplateId ?? 'none'}`
     return `fp2|epoch=${this.options.worldEpoch}|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
   }
 
@@ -4226,8 +4226,8 @@ export class JevController {
     const requestContext: System2RequestContext = {
       requestId: randomUUID(),
       queueRevision: this.queue.revision,
-      optionInstanceId: currentOption?.optionInstanceId ?? null,
-      optionTemplateId: currentOption?.optionTemplateId ?? null,
+      optionInstanceId: currentOption?.semanticOptionInstanceId ?? currentOption?.optionInstanceId ?? null,
+      optionTemplateId: currentOption?.semanticOptionTemplateId ?? currentOption?.optionTemplateId ?? null,
       worldEpoch: this.options.worldEpoch,
       stateFingerprint: this.lastStateFingerprint || 'unobserved',
       // Local semantic progress and critical threat changes both invalidate an
@@ -4270,8 +4270,8 @@ export class JevController {
         const current = this.queue.state
         const currentContext: System2ApplyState = {
           queueRevision: this.queue.revision,
-          optionInstanceId: current.current?.optionInstanceId ?? null,
-          optionTemplateId: current.current?.optionTemplateId ?? null,
+          optionInstanceId: current.current?.semanticOptionInstanceId ?? current.current?.optionInstanceId ?? null,
+          optionTemplateId: current.current?.semanticOptionTemplateId ?? current.current?.optionTemplateId ?? null,
           worldEpoch: this.options.worldEpoch,
           stateFingerprint: this.lastStateFingerprint || 'unobserved',
           // Local semantic progress and critical threat changes both invalidate an
@@ -5003,7 +5003,7 @@ export class JevController {
   private currentOptionContext(): CurrentOptionContext | null {
     const current = this.queue.state.current
     if (current === null || typeof current.optionInstanceId !== 'string' || current.optionInstanceId.length === 0) return null
-    const optionId = current.optionTemplateId ?? optionIdForGoal(current) ?? this.currentGoalKey()
+    const optionId = current.semanticOptionTemplateId ?? current.optionTemplateId ?? optionIdForGoal(current) ?? this.currentGoalKey()
     const attempts = this.optionAttempts.stateFor(optionId, current.id)
     return currentOptionContextForQueuedGoal(current, {
       failures: attempts.attempts,

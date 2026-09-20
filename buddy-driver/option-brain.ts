@@ -72,6 +72,8 @@ export class OptionCompilingSystem2 implements System2Brain {
       compiled: result.goals.map((goal) => goal.description),
       specs: result.specs.map((spec) => spec.id),
       instanceIds: result.specs.map((spec) => stableOptionInstanceId(spec)),
+      semanticOptionInstanceIds: result.specs.map((spec) => spec.semanticOptionInstanceId ?? null),
+      semanticOptionTemplateIds: result.specs.map((spec) => spec.semanticOptionTemplateId ?? null),
       added: result.added,
       blocked: result.blocked,
       blockedOptions: result.blockedOptions,
