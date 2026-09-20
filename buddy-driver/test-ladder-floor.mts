@@ -11,6 +11,7 @@ import {
   rungIndexById,
   upperAccessRecoveryApplies,
 } from './planner.ts'
+import { planNetherPortal } from '../jev-agent/src/netherPortalPlan.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { LlmSummonReason, System2PlanRequest } from '../jev-agent/src/system2.ts'
@@ -249,6 +250,14 @@ addCase("(j) M2=diamond-to-Nether-gate: the diamond route needs no mandatory ful
     pass: diamondRoad !== undefined && noArmour && hasDiamond && gearStillOffered,
     detail: `diamond_road=[${diamondGoals.join(",")}] noArmour=${noArmour} hasDiamond=${hasDiamond} gearOffered=${gearStillOffered}`,
   }
+})
+
+addCase("(k) the portal plan exposes the typed portal operations with postconditions", () => {
+  const plan = planNetherPortal({ inventory: { diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 10 }, toolRank: 4 })
+  const kinds = plan.operations.map((step) => step.kind)
+  const ordered = kinds.join(",") === "build_portal_frame,light_portal,verify_portal"
+  const postconditions = plan.operations.every((step) => step.postcondition !== undefined)
+  return { pass: ordered && postconditions, detail: `operations=[${kinds.join(",")}] postconditions=${postconditions}` }
 })
 
 let failures = 0
