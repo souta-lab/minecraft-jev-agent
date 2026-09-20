@@ -18,7 +18,7 @@ import type { GameDataRegistry } from './gameData.ts'
 import { NETHER_PORTAL, portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
-import { selectPlaceableBlock } from './pillarSearch.ts'
+import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
 
 export type Vec3Json = {
   x: number
@@ -758,6 +758,51 @@ function buildBuriedStoneBlocks(
 }
 
 /**
+ * Keep a bounded near-field envelope of every grounded block that can provide
+ * a placeable item. `buildStoneBlocks` intentionally keeps the topmost exposed
+ * stone per column for route planning; that invariant is wrong for capability
+ * acquisition because a nearby producer can be exposed below a buried block
+ * in the same column (live pocket: andesite at (4,54,13) below buried stone).
+ *
+ * This is sensor truth only. It does not choose a block or add a semantic goal;
+ * `mineCandidates` still applies reach, visibility, pickup and tool guards and
+ * the prerequisite envelope tags the resulting candidate.
+ */
+function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
+  const positions = bot.findBlocks({
+    matching: (block) => STONE_LIKE.has(block.name),
+    maxDistance: Math.max(options.reach + 2, 8),
+    count: 256,
+  })
+  const out: BlockState[] = []
+  for (const position of positions) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const pos = vecJson(position)
+    const harvest = resolveBlockHarvest(bot, block.name)
+    if (typeof harvest.yield !== 'string' || !PILLAR_PLACE_PRIORITY.includes(harvest.yield)) continue
+    const inReach = distance(pos, self.eyePosition) <= options.reach
+    const adjacentStandable = findAdjacentStandable(bot, pos)
+    out.push({
+      kind: 'stone',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: harvest.yield,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+      visible: blockVisible(bot, { position: pos }, inReach),
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance || b.position.y - a.position.y)
+  return out.slice(0, Math.max(options.maxStoneBlocks, 64))
+}
+
+/**
  * Ore scan for the current collect subgoal. Ores are found by name through
  * `bot.findBlocks` (which sees loaded chunks in every direction) so buried and
  * deepslate ores become tunnel targets, not just exposed surface veins.
@@ -858,6 +903,9 @@ function buildBlocks(
       : scanPrerequisiteStone
         ? buildStoneBlocks(bot, stoneScanOptions, self, null)
         : []
+  const nearbyPlaceableProducers = scanPrerequisiteStone
+    ? buildNearbyPlaceableProducers(bot, stoneScanOptions, self)
+    : []
   const buried =
     stoneFocus !== null
       ? buildBuriedStoneBlocks(bot, options, self, stoneFocus)
@@ -866,7 +914,14 @@ function buildBlocks(
         : []
   const ores = buildOreBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)
-  return [...logs, ...stones, ...buried, ...ores, ...hazards]
+  const blocks = [...logs, ...stones, ...nearbyPlaceableProducers, ...buried, ...ores, ...hazards]
+  const seen = new Set<string>()
+  return blocks.filter((block) => {
+    const key = `${block.kind}:${block.position.x},${block.position.y},${block.position.z}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /**

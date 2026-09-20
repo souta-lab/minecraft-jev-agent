@@ -97,6 +97,10 @@ function fakeStonePrerequisiteBot(): Bot {
   const blocks = new Map<string, { name: string; boundingBox: string; diggable: boolean }>([
     ['31,47,34', { name: 'stone', boundingBox: 'block', diggable: true }],
     ['30,46,34', { name: 'stone', boundingBox: 'block', diggable: true }],
+    // This producer is in the same column below a buried stone cell. The
+    // capability scan must retain it even though the exposed-column scan stops
+    // at the buried cell.
+    ['30,47,35', { name: 'andesite', boundingBox: 'block', diggable: true }],
   ])
   const key = (p: { x: number; y: number; z: number }): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
   const blockAt = (p: { x: number; y: number; z: number }) =>
@@ -269,6 +273,26 @@ addCase('(1) a missing placeable capability keeps a grounded stone producer in p
   const stones = state.blocks.filter((block) => block.kind === 'stone' && block.yield === 'cobblestone')
   const pass = stones.some((stone) => stone.position.x === 31 && stone.position.y === 47 && stone.position.z === 34)
   return { pass, detail: `stones=${JSON.stringify(stones)} blocks=${state.blocks.length}` }
+})
+
+addCase('(1) a near placeable producer below a buried column cell remains sensed', () => {
+  const state = buildWorldState(
+    fakeStonePrerequisiteBot(),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const producer = state.blocks.find(
+    (block) => block.kind === 'stone' && block.name === 'andesite' && block.position.x === 30 && block.position.y === 47 && block.position.z === 35,
+  )
+  const pass = producer !== undefined && producer.inReach
+  return { pass, detail: `producer=${JSON.stringify(producer ?? null)}` }
 })
 
 // --- (2) remembered coordinates never satisfy an in-reach predicate ------------
