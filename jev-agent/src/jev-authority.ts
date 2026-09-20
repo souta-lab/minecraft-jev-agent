@@ -230,7 +230,7 @@ export class AuthorityJevPolicy implements JevPolicy {
     const callId = randomUUID()
     const requested = request.questionNames ?? QUESTION_NAMES
     const questions = buildAuthorityQuestions(request.candidates, requested)
-    const modelState = authorityState(request) as Parameters<typeof evaluate>[0]["state"] as Parameters<typeof evaluate>[0]["state"]
+    const modelState = authorityState(request) as Parameters<typeof evaluate>[0]["state"]
     const maxGeneralAttempts = Math.max(1, this.options.maxRetries + 1)
     let generalAttempt = 0
     let rateAttempt = 0

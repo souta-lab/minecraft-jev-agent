@@ -204,7 +204,7 @@ export class PlannerBrain implements System2Brain {
     process.env.AI_GATEWAY_API_KEY = key.key
 
     const counts = inventoryCounts(this.bot)
-    const state = compactSystem2State(this.bot, this.world, request, counts, options) as Parameters<typeof evaluate>[0]["state"] as Parameters<typeof evaluate>[0]["state"]
+    const state = compactSystem2State(this.bot, this.world, request, counts, options) as Parameters<typeof evaluate>[0]["state"]
     const criteria: Record<string, string> = {}
     for (const option of options) criteria[option.id] = `${option.title} :: ${option.goals.map((goal) => goal.description).join(' -> ')}`
     const questions = {
