@@ -22,6 +22,8 @@ import { JevController as LegacyJevController } from './controller-legacy.ts'
 import type { Candidate } from './candidates.ts'
 import type { ExecutionResult } from './executor.ts'
 import { formatActionUnverified } from './actionPostcondition.ts'
+import { abandonRequested } from './jev.ts'
+import type { JevResult } from './jev.ts'
 import type { WorldState } from './state.ts'
 
 type ApplyFurnacePrereq = (
@@ -37,13 +39,30 @@ type PendingLike = {
   }
 }
 
+type AbandonVerdictLike = {
+  adopt: boolean
+  enforced: boolean
+  suppressed: boolean
+  classification: { attempts: number } & Record<string, unknown>
+  vote: {
+    adopt: boolean
+    shadowed: boolean
+    protection: unknown
+  }
+  optionId: string
+  planId: string | null
+}
+
 type LegacyInternals = {
   jev?: { kind?: string }
+  options?: { betaAuthority?: boolean }
   applyFurnacePrereq?: ApplyFurnacePrereq
   advancePrereqAfterUnverified?: () => boolean
   retireFailedKnownRetrieve?: (candidate: Candidate, result: ExecutionResult) => void
   abandonRetrieveOption?: (line: string, candidate: Candidate, unverified: number) => void
   onUnverifiedAction?: (result: ExecutionResult, postcondition: string, pending: PendingLike | undefined) => void
+  abandonVerdict?: (decision: JevResult, optionId: string, planId: string | null) => AbandonVerdictLike
+  protectedReplanSuppressed?: (reason: string) => boolean
 
   queue?: { current?: { id?: string } | null }
   actionUnverified?: Map<string, number>
@@ -70,6 +89,10 @@ type LegacyInternals = {
 
 function realJev(internals: LegacyInternals): boolean {
   return internals.jev?.kind !== 'fallback'
+}
+
+function betaIsAuthoritative(internals: LegacyInternals): boolean {
+  return realJev(internals) && internals.options?.betaAuthority === true
 }
 
 function clearLegacyPrereqSelection(internals: LegacyInternals): void {
@@ -175,9 +198,9 @@ export class JevController extends LegacyJevController {
         internals.noteCandidateFailure?.(result.actionId)
 
         // Keep the full postcondition failure as bounded policy evidence. Do NOT
-        // call evaluateUnverifiedBudget(), markOptionAbandoned(), pick another
-        // prerequisite path, or summon System2 solely because a retry counter hit
-        // a magic number. beta sees the same evidence and owns termination.
+        // call the legacy retry-budget semantic controller, abandon by count,
+        // pick another prerequisite path, or summon System2 solely because a
+        // magic number was reached. beta sees this evidence and owns termination.
         const marker = formatActionUnverified({
           planId,
           actionId: result.actionId,
@@ -201,6 +224,43 @@ export class JevController extends LegacyJevController {
           },
           internals.tickCounter,
         )
+      }
+    }
+
+    const legacyAbandonVerdict = internals.abandonVerdict?.bind(this)
+    if (legacyAbandonVerdict !== undefined) {
+      internals.abandonVerdict = (decision, optionId, planId) => {
+        const baseline = legacyAbandonVerdict(decision, optionId, planId)
+        if (!betaIsAuthoritative(internals)) return baseline
+
+        // #11 beta v2: semantic termination has one owner. The legacy verdict is
+        // retained only to preserve typed logging metadata; its attempt counts,
+        // protection ladder and enforced/suppressed classification cannot alter
+        // the live decision. Deterministic completion/hard invalidity still live
+        // outside beta in the ordinary queue/guard/VERIFY path.
+        const adopt = abandonRequested(decision)
+        return {
+          ...baseline,
+          adopt,
+          enforced: false,
+          suppressed: false,
+          vote: {
+            ...baseline.vote,
+            adopt,
+            shadowed: false,
+          },
+        }
+      }
+    }
+
+    const legacyProtectedReplanSuppressed = internals.protectedReplanSuppressed?.bind(this)
+    if (legacyProtectedReplanSuppressed !== undefined) {
+      internals.protectedReplanSuppressed = (reason) => {
+        if (!betaIsAuthoritative(internals)) return legacyProtectedReplanSuppressed(reason)
+        // Once beta explicitly ended the Option, a queue-level prerequisite
+        // protection heuristic must not veto the System2 handoff. System2 still
+        // receives only grounded Option/plan ids and code still verifies truth.
+        return false
       }
     }
   }
