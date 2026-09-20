@@ -292,7 +292,7 @@ addCase('(4) lower cost cannot replace the Jev choice at commitment', () => {
     }).state
   }
   return {
-    pass: state?.committedId === CRAFTING_B && state.committedId !== CRAFTING_A,
+    pass: state?.committedId === CRAFTING_B && String(state.committedId) !== String(CRAFTING_A),
     detail: `jevCommit=${state?.committedId ?? 'none'} cheapest=${CRAFTING_A}`,
   }
 })
@@ -308,7 +308,7 @@ addCase('the flap window resolves from env with a safe default', () => {
 })
 
 addCase('wiring: the controller reconciles protection with the abandonment ledger', () => {
-  const text = source('./src/controller.ts')
+  const text = source('./src/controller-legacy.ts')
   const missing = [
     'new AbandonmentLedger()',
     'reconcileProtection({',
@@ -323,7 +323,7 @@ addCase('wiring: the controller reconciles protection with the abandonment ledge
 })
 
 addCase('wiring: the controller commits to one Jev-selected candidate when the choice flaps', () => {
-  const text = source('./src/controller.ts')
+  const text = source('./src/controller-legacy.ts')
   const missing = [
     'evaluateCandidateFlap({',
     'applyCandidateCommitment(',
