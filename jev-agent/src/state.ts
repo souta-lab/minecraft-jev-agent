@@ -1216,9 +1216,13 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
   const axes: PortalWidthAxis[] = ['x', 'z']
   const sites: PortalFrameSite[] = []
   const body = self.position
+  // The portal may have been started several blocks away from the current
+  // spawn/stand position. Keep the search bounded, but wide enough to observe
+  // a nearby partial frame before a planner can replace it with a new site.
+  const frameRadius = Math.min(16, Math.max(8, Math.floor(_options.scanRadius / 3)))
 
-  for (let dx = -8; dx <= 8; dx += 1) {
-    for (let dz = -8; dz <= 8; dz += 1) {
+  for (let dx = -frameRadius; dx <= frameRadius; dx += 1) {
+    for (let dz = -frameRadius; dz <= frameRadius; dz += 1) {
       for (let dy = -4; dy <= 4; dy += 1) {
         const origin = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
         for (const widthAxis of axes) {
