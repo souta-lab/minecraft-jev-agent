@@ -409,15 +409,15 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'diamond',
-    satisfied: (c) => has(c, 'diamond'),
-    goals: () => [{ kind: 'collect', description: 'collect 1 x diamond', targetItem: 'diamond', requiredCount: 1 }],
+    satisfied: (c) => (c['diamond'] ?? 0) >= 3,
+    goals: () => [{ kind: 'collect', description: 'collect 3 x diamond', targetItem: 'diamond', requiredCount: 3 }],
   },
   {
     id: 'diamond_pickaxe',
     satisfied: (c) => has(c, 'diamond_pickaxe'),
     goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
   },
-  // --- M3: nether route (templates only; the current executor cannot run these) ---
+  // --- M2: diamond -> Nether-gate route (typed plan; live executor gate still pending) ---
   {
     id: 'nether_portal',
     satisfied: (c) => has(c, 'flint_and_steel') && countClass(c, 'stone') >= 0 && has(c, 'flint'),

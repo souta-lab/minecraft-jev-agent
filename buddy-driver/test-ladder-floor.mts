@@ -25,7 +25,7 @@ const addCase = (name: string, run: Case['run']): void => {
   cases.push({ name, run })
 }
 
-// M2 alignment: coal is a smelting fuel but not charcoal, so a coal-only
+// Historical lower-ladder alignment: coal is a smelting fuel but not charcoal, so a coal-only
 // inventory is NOT past the charcoal rung. This fixture represents the real
 // post-charcoal iron stage, so it holds `charcoal: 1` explicitly; without it the
 // ladder would (correctly) resume at the charcoal rung instead of iron_ingot.

@@ -15,16 +15,19 @@
 身体性を持つ Minecraft Java エージェント。LLM が長期計画を立て、Jev（TypeSafe の意味判断モデル）が「System One」として局所的に行動を選び、Mineflayer が motor/reflex を担う。3 層は固定周期ではなく「どれだけ先を考えるか」で分ける。
 
 エンドポイント:
-- **M2（iron age）**: furnace → charcoal → iron_ore → iron_ingot x3 → iron_pickaxe。
+- **M2（diamond-to-Nether-gate）**: diamond x3 → diamond_pickaxe → flint_and_steel → obsidian x10 → portal frame → light/verify。
 - **M4（Ender Dragon）**: stronghold → end portal → Ender Dragon 撃破。現状はユーザー判断で後回し。
+
+旧鉄器時代ラダー（furnace → charcoal → iron_ingot → iron_pickaxe）は
+historical M2 evidence として保持するが、現在のM2 acceptanceではない。
 
 マイルストーンのはしご:
 | ID | 内容 | 状態 |
 |---|---|---|
 | M0 | 平坦な closed loop（MOVE → walk → MINE → 検証済み dig） | PASS（`logs/m0-final/`） |
 | M1 | Jev-only 4 サブゴール計画（LLM 呼び出し 0 が目標） | PASS（fresh world, `logs/m1-fresh2-console.log`） |
-| M2 | furnace + charcoal → iron ore → iron tools → diamond pickaxe | 進行中、最高 5/14（`logs/m2-fresh2-console.log`） |
-| M3 | nether portal → blaze rods → ender pearls → eyes of ender | 未着手 |
+| M2 | diamond → diamond pickaxe → obsidian → build/light/verify Nether portal | typed plan PASS、live gate UNKNOWN |
+| M3 | enter Nether → blaze rods → ender pearls → eyes of ender | 未着手 |
 | M4 | THE DRAGON | 後回し |
 
 優先順位（ユーザー最終指示、`RESIDENT-MODE.md` §0）: **M2 ラダーの完走より常駐化（resident + hot-reload）を先に着地させる**。バッチ型ループ（接続 → 200 s 走行 → 切断 → 修正 → 再接続 → 状態ゼロ再構築）がボトルネックであり、同一接続を保ったまま方針だけ差し替えるのが本命。
@@ -337,7 +340,8 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 7. **Runtime/bundler の決定**。**esbuild を既定（安定性優先）**。`Bun.build` と Bun runtime はゲート通過後のみ: (1) `bun run` で接続 + SPAWN（`bot.version==1.21.11`）、(2) movement patch 有効、（3）M1 regression 4/4（deterministic, wedge 0）、(4) テスト全緑を `bun test` で再現、(5) resident 検証を Bun 上で通す。
    - 記録: 現時点の採用は **Node + tsx + esbuild**（`buddy.log`: `runtime=node node=v25.9.0`）。Bun は未検証。
 
-8. その後に capability ladder: M2（charcoal/iron）、iron gear、diamond、… M4。
+8. その後に capability ladder: current M2（diamond → Nether gate）、M3（Nether
+   entry/resources）、… M4。旧charcoal/iron ladderは下位能力とhistorical evidence。
 
 ---
 

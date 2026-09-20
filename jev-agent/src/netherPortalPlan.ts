@@ -1,12 +1,14 @@
-// netherPortalPlan.ts - issue #80 (M3): the typed Nether-portal plan path.
+// netherPortalPlan.ts - issue #80: typed Nether-portal capability grounding.
 //
 // WHY
 // ---
-// M3 is "diamond gear -> nether -> blaze/pearl". The live M2 ladder stops at
-// iron, but the portal capability must be expressible the moment M2 completes.
-// Issue #37 records that peaceful difficulty blocks M3d/M3e (blaze_rod /
-// ender_pearl) but NOT building and lighting the portal, so this module owns the
-// deterministic half only:
+// M2 is "diamond -> Nether gate". The former iron-age ladder remains a lower
+// prerequisite path. This module exposes code-owned truth, hard preconditions,
+// mechanically-valid affordances, and verifiable postconditions; it is not a
+// semantic planner or an authority over ordering. Mercury/System2 and Jev own
+// WHAT NEXT and WHICH grounded option to pursue. Issue #37 records that peaceful
+// difficulty blocks M3d/M3e (blaze_rod / ender_pearl) but NOT building and
+// lighting the portal, so this module owns the mechanically grounded half only:
 //
 //   craft flint_and_steel -> (diamond pickaxe) -> mine obsidian x10 ->
 //   build the 4x5 frame -> validate shape -> light -> verify
@@ -554,7 +556,7 @@ export function portalStepsToPlannedGoals(steps: readonly PortalStep[]): Planned
 }
 
 // ---------------------------------------------------------------------------
-// deterministic prerequisite chain (ladder supply, #12/#73 generalization)
+// grounded prerequisite envelope (mechanical dependencies, #12/#73 generalization)
 // ---------------------------------------------------------------------------
 
 export interface NetherPortalPlanInput {
@@ -584,9 +586,11 @@ function count(inventory: Readonly<Record<string, number>>, item: string): numbe
 }
 
 /**
- * Build the typed Nether-portal plan from a live inventory snapshot. Missing
- * materials produce the prerequisite chain (flint/iron/diamond) FIRST, so the
- * ladder supplies work instead of stalling on an impossible goal.
+ * Build the typed Nether-portal grounding from a live inventory snapshot.
+ * Missing materials expose code-proven prerequisite affordances (flint/iron/
+ * diamond) so Mercury/System2 and Jev can select productive work instead of
+ * receiving an impossible obsidian claim. The dependency order is mechanical
+ * data, not a semantic ranking or an authoritative plan choice.
  */
 export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan {
   const inventory = input.inventory
@@ -756,7 +760,10 @@ export function planNetherPortal(input: NetherPortalPlanInput): NetherPortalPlan
   }
 }
 
-/** Ladder helper: the typed goals a `nether_portal` rung should emit. */
+/**
+ * Grounding helper: typed goals a `nether_portal` rung may expose to the
+ * Option/Jev path. The caller retains semantic choice authority.
+ */
 export function netherPortalRungGoals(
   inventory: Readonly<Record<string, number>>,
   toolRank: number,

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// m2-live-gate: combine exact-run causal evidence with the resident inventory
-// acceptance for the SAME run. This is the close/no-close gate for the M2 path.
+// m2-live-gate: historical exact-run iron-age compatibility gate. It combines
+// causal evidence with resident inventory for the SAME run and is retained for
+// regression/evidence replay only. The current M2 close/no-close definition is
+// the diamond-to-Nether-gate contract in MILESTONE-CONTRACT.json.
 //
 // PASS requires BOTH:
 //   1. an ordered PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain scoped to
@@ -9,11 +11,10 @@
 //      charcoal/ingots may come from the resident's run-scoped marker snapshot,
 //      while a complete terminal socket report remains valid live evidence.
 //
-// The diamond-pickaxe terminal in MILESTONES.md is historical spec drift and is
-// deliberately NOT part of M2. It is owned by the SEPARATE M3 acceptance
-// (tools/m2-acceptance.mjs `M3_CRITERIA` / `runM3Acceptance`, CLI `--m3`),
-// which this gate never consults, so M2 and M3 cannot drift back into each
-// other.
+// The old diamond-pickaxe terminal split is historical compatibility behavior;
+// the current contract moves the diamond-to-gate path into M2 and the
+// post-gate Nether progression into M3. This tool intentionally does not
+// evaluate the current portal contract.
 //
 // `--since` remains useful for diagnosis in m2-watch, but is not a sufficient
 // join key for this close/no-close gate. An explicit --run (or M2_RUN_ID) is

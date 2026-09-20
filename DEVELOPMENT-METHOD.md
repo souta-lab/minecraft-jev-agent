@@ -403,7 +403,8 @@ recorded.
 
 Standing orders (`AGENTS.md` §0, `TODO.md` lines 117-128):
 
-- Final goal is M4 (Ender Dragon). M2 is a waypoint.
+- Final goal is M4 (Ender Dragon). Current M2 is the diamond-to-Nether-gate
+  waypoint; the former iron ladder is retained as historical evidence.
 - Do not wait for the user. If there is nothing to do, invent the next work.
 - Keep primary evidence (log lines, inventory, commits). Do not claim success from opinion.
 - Commit and push in small units, with a secret scan.
@@ -636,11 +637,11 @@ the mitigation is verified.
 | Cost per Mercury call | `cost` field in `mercury-calls.jsonl` | `tools/verify-mercury.mjs` reads it | `cost=0.000281`, `cost=0.000289`, `cost=0.000329` (`TODO.md` line 11; `ARCHITECTURE.md` line 444) |
 | Jev call cost | mean cost per Jev call from `jev-calls.jsonl` | `ARCHITECTURE.md` lines 80 | about `$0.00018/call`, p50 latency 410-720 ms |
 | M1 milestone | 4/4 subgoals, `llm.called==false`, wedge 0 | `README.md`; `jev-agent/logs/m1-fresh2-console.log`; `ARCHITECTURE.md` §5.1 | `planned=4 done=4`, `with_llm_called_true=0`, `verifiedDigs=22` |
-| M2 milestone evidence | iron obtained, proven by inventory | `buddy.log` `LADDER_RESUME ... inventory={...,"raw_iron":8,...}` and `HEARTBEAT ... inv={...,"raw_iron":8,...}` | `raw_iron:8`, charcoal smelted 2026-09-18 00:13 JST (`README.md`); `FURNACE_READY=0`, `SMELT_DONE=0` |
+| Historical iron-age M2 evidence | iron obtained, proven by inventory | `buddy.log` `LADDER_RESUME ... inventory={...,"raw_iron":8,...}` and `HEARTBEAT ... inv={...,"raw_iron":8,...}` | `raw_iron:8`, charcoal smelted 2026-09-18 00:13 JST (`README.md`); `FURNACE_READY=0`, `SMELT_DONE=0` |
 | Stuck heuristics | movement < 5 blocks, action repeats >= 8, no inventory change >= 10 min, abandons >= 3 in a 30-min window | `tools/agent-report.mjs` lines 34-41 | tool exists; VERDICT output is its gate |
 
 Honest reading of the metrics: the improvement signals (churn down, ticks up, digging markers
-nonzero) are real, but the milestone signal for M2 is still negative (`FURNACE_READY=0`,
+nonzero) are real, but the historical iron-age M2 signal is still negative (`FURNACE_READY=0`,
 `SMELT_DONE=0`, `raw_iron_obtained` failing). A churn metric of 0 can also mean the agent is
 frozen rather than productive, which is why `#44` used `FREEZE` deliberately and why
 `verify-issue12` now treats a long-lived generation as healthy.
