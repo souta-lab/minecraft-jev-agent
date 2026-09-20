@@ -22,7 +22,7 @@ import type {
   KeyResolution,
   QuestionName,
 } from './jev-legacy.ts'
-import { DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES } from './jev-legacy.ts'
+import { ABANDON_THRESHOLD_DEFAULT, DEFAULT_JEV_MODEL, DANGER_LEVELS, QUESTION_NAMES } from './jev-legacy.ts'
 
 export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'You are Jev pi, the local policy head of an autonomous Minecraft agent. Choose exactly ONE id from the grounded ' +
@@ -44,6 +44,21 @@ const DANGER_INSTRUCTIONS =
   'Rate immediate physical danger in the current observed state from safe to lethal. This is a safety estimate, not a plan choice.'
 
 type Questions = Partial<Record<QuestionName, Experimental_EvaluationQuestion>>
+
+export interface AuthorityDecisionMeta {
+  /** Exact runtime Option row Jev beta voted on; null only before/without an Option runtime. */
+  optionInstanceId: string | null
+  /** Stable semantic template id of that Option. */
+  optionTemplateId: string | null
+  /** Threshold owned by that exact Option contract. */
+  betaThreshold: number
+  /** Raw P(abandon=true), never thresholded away. */
+  betaProbability: number | null
+  /** Derived event-boundary decision recorded for replay. */
+  betaAdopt: boolean
+}
+
+export type AuthorityTaggedJevResult = JevResult & { authorityDecision: AuthorityDecisionMeta }
 
 export function buildAuthorityQuestions(
   candidates: readonly Candidate[],
@@ -129,7 +144,7 @@ function mapAnswer(name: QuestionName, raw: unknown, metadata: unknown): JevAnsw
     }
   }
   const probability = member(raw, 'probability')
-  if (typeof probability !== 'number' || !Number.isFinite(probability)) {
+  if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
     throw new Error(`malformed Jev boolean ${name}: ${JSON.stringify(raw)}`)
   }
   return {
@@ -152,6 +167,29 @@ function readUsage(raw: unknown): JevUsage {
     inputTokens: typeof input === 'number' ? input : null,
     outputTokens: typeof output === 'number' ? output : null,
     totalTokens: typeof total === 'number' ? total : null,
+  }
+}
+
+function validThreshold(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
+/**
+ * The exact beta contract for this call. The threshold comes from the exact
+ * current Option instance whenever one exists; the global 0.5 is only the
+ * bootstrap/rollback fallback for states without first-class Option metadata.
+ */
+export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Record<string, JevAnswer>>): AuthorityDecisionMeta {
+  const option = request.state.currentOption ?? null
+  const threshold = validThreshold(option?.abortThreshold) ? option.abortThreshold : ABANDON_THRESHOLD_DEFAULT
+  const probability = answers.abandon_option?.probability
+  const betaProbability = typeof probability === 'number' && Number.isFinite(probability) ? probability : null
+  return {
+    optionInstanceId: option?.instanceId ?? null,
+    optionTemplateId: option?.templateId ?? null,
+    betaThreshold: threshold,
+    betaProbability,
+    betaAdopt: betaProbability !== null && betaProbability >= threshold,
   }
 }
 
@@ -230,7 +268,7 @@ export class AuthorityJevPolicy implements JevPolicy {
     const callId = randomUUID()
     const requested = request.questionNames ?? QUESTION_NAMES
     const questions = buildAuthorityQuestions(request.candidates, requested)
-    const modelState = authorityState(request) as Parameters<typeof evaluate>[0]["state"]
+    const modelState = authorityState(request) as Parameters<typeof evaluate>[0]['state']
     const maxGeneralAttempts = Math.max(1, this.options.maxRetries + 1)
     let generalAttempt = 0
     let rateAttempt = 0
@@ -259,6 +297,7 @@ export class AuthorityJevPolicy implements JevPolicy {
           if (!grounded) throw new Error(`Jev invented non-grounded action id ${JSON.stringify(action.value)}`)
         }
 
+        const authorityDecision = authorityDecisionMeta(request, answers)
         const usage = readUsage(response.usage)
         const latencyMs = Date.now() - started
         this.options.writer.write({
@@ -277,9 +316,24 @@ export class AuthorityJevPolicy implements JevPolicy {
           questions,
           response: { model: this.model, usage, answers },
           error: null,
-          authority: { pi: 'model', beta: 'model', code: 'grounding+safety+truth' },
+          authority: {
+            pi: 'model',
+            beta: 'model',
+            code: 'grounding+safety+truth',
+            decision: authorityDecision,
+          },
         })
-        return { callId, policy: this.kind, source: 'jev', model: this.model, latencyMs, usage, answers }
+        const result = {
+          callId,
+          policy: this.kind,
+          source: 'jev' as const,
+          model: this.model,
+          latencyMs,
+          usage,
+          answers,
+          authorityDecision,
+        }
+        return result
       } catch (error) {
         const message = describe(error)
         if (isRateLimit(error) && rateAttempt < this.options.rateLimitRetries) {
