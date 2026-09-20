@@ -914,7 +914,11 @@ function buildBlocks(
         : []
   const ores = buildOreBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)
-  const blocks = [...logs, ...stones, ...nearbyPlaceableProducers, ...buried, ...ores, ...hazards]
+  // Keep the bounded capability envelope ahead of the broad route-planning
+  // stone scan. This is not a semantic ranking: `mineCandidates` applies a
+  // typed placeable-producer filter, but its mechanical candidate cap must not
+  // be consumed by unrelated stone cells before the near producer is seen.
+  const blocks = [...logs, ...nearbyPlaceableProducers, ...stones, ...buried, ...ores, ...hazards]
   const seen = new Set<string>()
   return blocks.filter((block) => {
     const key = `${block.kind}:${block.position.x},${block.position.y},${block.position.z}`
