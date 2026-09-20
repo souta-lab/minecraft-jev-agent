@@ -192,6 +192,24 @@ addCase('critical health grounds a retreat from the sensed hostile and removes A
   return { pass, detail: `health=${state.self.health} attacks=[${attacks.join(',')}] safeRetreats=[${retreats.join(',')}]` }
 })
 
+addCase('a remote hostile is observed but not offered as a purposeless combat route', () => {
+  const state = exploreState(0)
+  state.entities = [
+    {
+      id: 8,
+      name: 'skeleton',
+      kind: 'mob',
+      username: null,
+      position: { x: 22, y: 10, z: 0.5 },
+      distance: 22,
+      hostile: true,
+    },
+  ]
+  const candidates = generateCandidates(state)
+  const attackIds = candidates.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  return { pass: attackIds.length === 0, detail: `remoteDistance=22 attackIds=[${attackIds.join(',')}]` }
+})
+
 let failures = 0
 process.stdout.write('M2 heuristic audit - candidate retry policy is an explicit struct\n')
 process.stdout.write('-'.repeat(72) + '\n')

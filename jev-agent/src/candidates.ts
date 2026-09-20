@@ -110,6 +110,15 @@ export interface Candidate {
 export const IMMEDIATE_HOSTILE_RANGE = 3.2
 
 /**
+ * Farther hostiles remain world observations, but are not combat reactions.
+ * The executor may follow an entity mechanically, yet offering a 20m+ attack
+ * when the active goal is temporarily blocked turns Jev's pi choice into an
+ * unproductive travel plan.  Within this envelope Jev still owns ATTACK versus
+ * RETREAT; beyond it the next grounded goal/recovery candidate stays visible.
+ */
+export const COMBAT_CANDIDATE_RANGE = 8
+
+/**
  * At this health the bot cannot safely trade another melee hit for one more
  * attack lease.  This is a hard safety envelope, not a combat preference:
  * above it Jev still chooses ATTACK versus RETREAT; below it ATTACK is kept
@@ -605,7 +614,9 @@ function generateRawCandidates(
     )
   }
 
-  const hostiles = state.entities.filter((entity) => entity.hostile)
+  const hostiles = state.entities.filter(
+    (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
+  )
   for (const entity of hostiles.slice(0, options.maxAttackCandidates)) {
     candidates.push({
       id: `ATTACK:e${entity.id}`,
