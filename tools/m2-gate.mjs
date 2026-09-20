@@ -24,8 +24,9 @@
 //
 // Exit: 0 = PASS, 1 = FAIL (known portal failure), 2 = UNKNOWN.
 import { createReadStream, existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 export const M2_RUN_RESULT = 'M2_RUN_RESULT'
@@ -60,10 +61,12 @@ export const OBSIDIAN = 'obsidian'
 /** matcher for the run-scoped snapshot record written by buddy-driver/m2-snapshot.ts */
 export const M2_GATE_SNAPSHOT_RECORD = 'm2-snapshot'
 
+const TOOLS_DIR = dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = dirname(TOOLS_DIR)
 export const M2_GATE_LOG =
-  process.env.M2_GATE_LOG ?? process.env.M2_LOG ?? process.env.BUDDY_LOG ?? '/home/s0u7a/mc-ai/buddy-driver/buddy.log'
+  process.env.M2_GATE_LOG ?? process.env.M2_LOG ?? process.env.BUDDY_LOG ?? join(REPO_ROOT, 'buddy-driver', 'buddy.log')
 export const M2_GATE_SNAPSHOT_DIR =
-  process.env.M2_GATE_SNAPSHOT_DIR ?? process.env.M2_SNAPSHOT_DIR ?? '/home/s0u7a/mc-ai/buddy-driver/data/resident'
+  process.env.M2_GATE_SNAPSHOT_DIR ?? process.env.M2_SNAPSHOT_DIR ?? join(REPO_ROOT, 'buddy-driver', 'data', 'resident')
 
 const POS_RE = /pos=(-?\d+),(-?\d+),(-?\d+)/
 const INVENTORY_RE = /\b(?:items|inventory)=(\{[^{}]*\})/
@@ -335,22 +338,28 @@ export function scanRunLines(runId, lines) {
   const inventorySamples = []
   const foreignRuns = new Set()
   let activeRunId = null
-  let matched = false
+  let bootSeen = false
   for (const line of Array.isArray(lines) ? lines : []) {
     const bootRunId = isBootLine(line) ? runIdOfLine(line) : null
-    if (bootRunId !== null) activeRunId = bootRunId
-    const owningRunId = runIdOfLine(line) ?? activeRunId
+    if (bootRunId !== null) {
+      activeRunId = bootRunId
+      if (bootRunId === runId) bootSeen = true
+    }
+    // A marker's own runId field is not a lifetime boundary. Only the real
+    // BOOT line may open R; otherwise a copied/stale marker can be attributed
+    // to a requested run without proof that R ever existed.
+    const owningRunId = activeRunId
     if (owningRunId !== runId) {
-      if (owningRunId !== null) foreignRuns.add(owningRunId)
+      const foreign = runIdOfLine(line) ?? owningRunId
+      if (foreign !== null) foreignRuns.add(foreign)
       continue
     }
-    matched = true
     const portal = parsePortalMarker(line)
     if (portal !== null) portalEvents.push(portal)
     const inventory = parseInventoryMarker(line)
     if (inventory !== null) inventorySamples.push(inventory)
   }
-  if (!matched) return { status: 'unknown', reason: `run_boundary_missing runId=${runId}`, portalEvents: [], inventorySamples: [] }
+  if (!bootSeen) return { status: 'unknown', reason: `run_boundary_missing runId=${runId}`, portalEvents: [], inventorySamples: [] }
   return { status: 'valid', portalEvents, inventorySamples, foreignRuns: [...foreignRuns] }
 }
 

@@ -115,6 +115,17 @@ ok('parseInventoryMarker reads the flat counts map and rejects prose')
   ok('an unscoped line with no BOOT is unknown, never attributed')
 }
 
+{
+  const scanned = scanRunLines(RUN, [
+    `[2026-09-20T10:00:00.000Z] INVENTORY runId=${RUN} items={"diamond":3} pos=0,0,0`,
+    `[2026-09-20T10:00:01.000Z] PORTAL_VERIFIED=true runId=${RUN}`,
+  ])
+  assert.equal(scanned.status, 'unknown')
+  assert.equal(scanned.inventorySamples.length, 0)
+  assert.equal(scanned.portalEvents.length, 0)
+  ok('a marker carrying runId without a real BOOT boundary is unknown')
+}
+
 // ---------------------------------------------------------------------------
 // 2. RED: the same-run full chain is the ONLY PASS
 // ---------------------------------------------------------------------------
