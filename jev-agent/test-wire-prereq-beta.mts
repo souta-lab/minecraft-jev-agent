@@ -1,18 +1,13 @@
-// test-wire-prereq-beta.mts - #63 wiring/compliance guard for #58 + #22.
+// test-wire-prereq-beta.mts - #295 wiring/compliance guard for the #11 authority facade.
 //
-// #63 found that a module (and its log markers) can exist without being on the
-// runtime decision path, so "the marker exists" is not proof of semantics.
-// This suite closes that class of gap for the two modules:
+// The controller is now intentionally split:
+//   controller.ts        = small #11 semantic-authority strangler/facade
+//   controller-legacy.ts = preserved mechanical loop + explicit A/B baseline
 //
-//   1. STATIC  - the controller/candidates sources actually invoke
-//                `planPrereqOptions` / `formatPrereqSwitch` / `formatPrereqOptionFor`
-//                and `betaAuthorityDecision`, and gate adoption behind
-//                `options.betaAuthority`.
-//   2. #58     - a held furnace chooses `place_held` and the logged line names
-//                the path the controller actually follows (not the cost-optimal
-//                one it overrode after a `PREREQ_SWITCH`).
-//   3. #22     - with `betaAuthority:false`, beta=1 records `BETA_SHADOW ...
-//                actual=continue` and can NEVER adopt, even unprotected.
+// Structural tests therefore inspect the runtime composition, never one file in
+// isolation. Legacy prerequisite ranking/stall behaviour is still tested as the
+// explicit deterministic baseline, while the facade must prove that real Jev
+// keeps WHICH authority. Beta is authoritative by default; shadow is explicit.
 //
 // Pure: no bot, no network, no model.
 import { readFileSync } from 'node:fs'
@@ -43,6 +38,8 @@ const addCase = (name: string, run: Case['run']): void => {
 }
 
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
+const runtimeControllerSource = (): string =>
+  `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
 
 const smeltGoal: GoalLike = { kind: 'smelt', targetItem: 'iron_ingot' }
 const collectGoal: GoalLike = { kind: 'collect', targetItem: 'diamond' }
@@ -150,29 +147,30 @@ const heldFurnace = worldState({
 const prereqInput = furnacePrereqInputFromState(heldFurnace, defaultCandidateOptions)
 const heldDecision = planPrereqOptions(prereqInput)
 
-// --- 1. static wiring --------------------------------------------------------
+// --- 1. runtime composition / authority strangler ----------------------------
 
-addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path', () => {
-  const text = source('./src/controller.ts')
-  const missing = [
-    'const unreachableStations = this.unreachableStationKeys(state)',
-    'candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)',
-  ].filter((needle) => !text.includes(needle))
+addCase('#295: runtime controller keeps the legacy prereq call site and the facade prevents it from seizing real-Jev WHICH authority', () => {
+  const text = runtimeControllerSource()
+  const legacyCall =
+    text.includes('const unreachableStations = this.unreachableStationKeys(state)') &&
+    text.includes('candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)')
+  const facadeStrangler =
+    text.includes('internals.applyFurnacePrereq = (state, candidates, unreachableStations) => {') &&
+    text.includes('if (!realJev(internals)) return legacyApplyPrereq(state, candidates, unreachableStations)') &&
+    text.includes('clearLegacyPrereqSelection(internals)') &&
+    text.includes('return [...candidates]')
   return {
-    pass: missing.length === 0,
-    detail:
-      missing.length === 0
-        ? 'tick calls applyFurnacePrereq(state, candidates, unreachableStations)'
-        : `call site missing ${missing.join(', ')}`,
+    pass: legacyCall && facadeStrangler,
+    detail: `legacyCall=${legacyCall} facadeStrangler=${facadeStrangler}`,
   }
 })
 
-addCase('#63: controller.ts invokes planPrereqOptions / formatPrereqSwitch / formatPrereqOptionFor', () => {
-  const text = source('./src/controller.ts')
+addCase('#295: runtime composition retains the explicit deterministic prerequisite baseline wiring', () => {
+  const text = runtimeControllerSource()
   const missing = ['planPrereqOptions(input)', 'formatPrereqSwitch(', 'formatPrereqOptionFor(decision, chosen)'].filter(
     (needle) => !text.includes(needle),
   )
-  return { pass: missing.length === 0, detail: missing.length === 0 ? 'all prereqOption call sites present' : `missing ${missing.join(', ')}` }
+  return { pass: missing.length === 0, detail: missing.length === 0 ? 'legacy A/B prereq wiring present' : `missing ${missing.join(', ')}` }
 })
 
 addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.prereqPath', () => {
@@ -181,19 +179,22 @@ addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.
   return { pass, detail: pass ? 'candidates.ts wires planPrereqOptions + prereqPath' : 'candidates wiring missing' }
 })
 
-addCase('#63: controller.ts gates beta adoption behind the verdict + betaAuthority', () => {
-  const text = source('./src/controller.ts')
+addCase('#295: runtime beta path retains baseline metadata but facade gives authoritative beta the final semantic verdict', () => {
+  const text = runtimeControllerSource()
   const pass =
     text.includes('betaAuthorityDecision({') &&
     text.includes('classifyAbandonRequest({') &&
     text.includes('this.abandonVerdict(result, optionId, planId)') &&
-    text.includes('return this.adoptAbandon(result)')
-  return { pass, detail: pass ? 'betaAuthorityDecision + abandonVerdict + authority path present' : 'beta gate missing' }
+    text.includes('internals.abandonVerdict = (decision, optionId, planId) => {') &&
+    text.includes('const adopt = abandonRequested(decision)') &&
+    text.includes('enforced: false') &&
+    text.includes('suppressed: false')
+  return { pass, detail: pass ? 'legacy evidence + authoritative facade verdict both present' : 'beta runtime composition missing' }
 })
 
-// --- 2. #58 prereq path ------------------------------------------------------
+// --- 2. explicit deterministic A/B prerequisite baseline ---------------------
 
-addCase('#58: a held furnace chooses place_held and logs the alternatives', () => {
+addCase('#58 baseline: a held furnace ranks place_held and logs the alternatives', () => {
   const expected = 'PREREQ_OPTION chosen=place_held over=[use_known_station,craft_and_place] reason=place_held cost=2'
   const candidate = generateCandidates(heldFurnace, defaultCandidateOptions).find((entry) => entry.meta.prereqPath !== undefined)
   const pass =
@@ -205,7 +206,7 @@ addCase('#58: a held furnace chooses place_held and logs the alternatives', () =
   return { pass, detail: `${heldDecision.line} first=${candidate?.id ?? 'none'}` }
 })
 
-addCase('#63: after a forced switch the logged line names the path actually followed', () => {
+addCase('#58 baseline: after a forced switch the logged line names the path actually followed', () => {
   const forced = formatPrereqOptionFor(heldDecision, 'use_known_station')
   const identity = formatPrereqOptionFor(heldDecision, 'place_held')
   const pass =
@@ -216,7 +217,7 @@ addCase('#63: after a forced switch the logged line names the path actually foll
   return { pass, detail: `forced="${forced}" identityOk=${identity === heldDecision.line}` }
 })
 
-addCase('#58: a stalled place_held switches to use_known_station instead of repeating', () => {
+addCase('#58 baseline: a stalled place_held can switch to use_known_station', () => {
   const signature = prereqProgressSignature('place_held', prereqInput)
   let progress: PrereqProgress | null = null
   let stalled = false
@@ -231,11 +232,12 @@ addCase('#58: a stalled place_held switches to use_known_station instead of repe
   return { pass: stalled && next === 'use_known_station' && switchLine === expected, detail: `${switchLine} stalled=${stalled}` }
 })
 
-// --- 3. #22 beta shadow ------------------------------------------------------
+// --- 3. #11 beta default authority + explicit shadow -------------------------
 
-addCase('#22: betaAuthority=false means beta=1 can never adopt (protected path)', () => {
+addCase('#295: explicit beta shadow means beta=1 cannot adopt on the protected baseline path', () => {
+  const shadowMode = resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' })
   const vote = betaAuthorityDecision({
-    betaAuthority: resolveBetaAuthority({}),
+    betaAuthority: shadowMode,
     abandonRequested: true,
     actionId: 'RETRIEVE:known:station:furnace:b29_61_35',
     goals: [smeltGoal],
@@ -246,40 +248,47 @@ addCase('#22: betaAuthority=false means beta=1 can never adopt (protected path)'
   const expected = 'BETA_SHADOW option=smelt:iron_ingot beta=1 threshold=0.5 would=abandon actual=continue'
   const heads = formatJevHeads('RETRIEVE:known:station:furnace:b29_61_35', 1, vote.adopt)
   const pass =
+    shadowMode === false &&
     vote.adopt === false &&
     vote.shadowed === true &&
     line === expected &&
     heads === 'JEV_HEADS action=RETRIEVE:known:station:furnace:b29_61_35 abandon=1 -> continue'
-  return { pass, detail: `adopt=${vote.adopt} shadowed=${vote.shadowed} | ${line}` }
+  return { pass, detail: `mode=${shadowMode} adopt=${vote.adopt} shadowed=${vote.shadowed} | ${line}` }
 })
 
-addCase('#22: betaAuthority=false means beta=1 cannot adopt even unprotected', () => {
+addCase('#295: explicit beta shadow means beta=1 cannot adopt even unprotected', () => {
+  const shadowMode = resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' })
   const vote = betaAuthorityDecision({
-    betaAuthority: resolveBetaAuthority({}),
+    betaAuthority: shadowMode,
     abandonRequested: true,
     actionId: 'MINE:b10_64_0',
     goals: [collectGoal],
     placedFurnaceCount: 0,
   })
   const shadow = betaShadowDecision({ optionId: 'collect:raw_iron', beta: 1, actualReplan: vote.adopt })
-  const pass = vote.adopt === false && vote.shadowed === true && formatBetaShadow(shadow).endsWith('actual=continue')
-  return { pass, detail: `adopt=${vote.adopt} shadowed=${vote.shadowed} | ${formatBetaShadow(shadow)}` }
+  const pass = shadowMode === false && vote.adopt === false && vote.shadowed === true && formatBetaShadow(shadow).endsWith('actual=continue')
+  return { pass, detail: `mode=${shadowMode} adopt=${vote.adopt} shadowed=${vote.shadowed} | ${formatBetaShadow(shadow)}` }
 })
 
-addCase('#22: the same unprotected vote WOULD adopt only with explicit authority', () => {
+addCase('#295: beta authority is ON by default and an unprotected positive vote can adopt', () => {
+  const defaultAuthority = resolveBetaAuthority({})
   const vote = betaAuthorityDecision({
-    betaAuthority: true,
+    betaAuthority: defaultAuthority,
     abandonRequested: true,
     actionId: 'MINE:b10_64_0',
     goals: [collectGoal],
     placedFurnaceCount: 0,
   })
-  const pass = vote.adopt === true && vote.shadowed === false && formatJevHeads('MINE:b10_64_0', 1, vote.adopt).endsWith('-> replan')
-  return { pass, detail: `adopt=${vote.adopt} shadowed=${vote.shadowed}` }
+  const pass =
+    defaultAuthority === true &&
+    vote.adopt === true &&
+    vote.shadowed === false &&
+    formatJevHeads('MINE:b10_64_0', 1, vote.adopt).endsWith('-> replan')
+  return { pass, detail: `defaultAuthority=${defaultAuthority} adopt=${vote.adopt} shadowed=${vote.shadowed}` }
 })
 
 let failures = 0
-process.stdout.write('#63 wiring guard: prereqOption + betaAuthority are on the decision path (#58/#22)\n')
+process.stdout.write('#295 wiring guard: authority facade + explicit legacy baseline\n')
 process.stdout.write('-'.repeat(78) + '\n')
 for (const testCase of cases) {
   const observed = testCase.run()
