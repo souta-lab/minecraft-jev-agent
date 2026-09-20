@@ -939,6 +939,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SMELT_DONE',
   'SMELT_INPUT_PREREQ',
   'CRAFT_INGREDIENT_PREREQ',
+  // Portal milestones are run-scoped acceptance evidence as well as human
+  // diagnostics. Keep them on the same mirrored event path so the host-owned
+  // M2 snapshot recorder receives the structured detail object; reconstructing
+  // these markers from the all-time JSONL would lose run/generation authority.
+  'PORTAL_SUPPORT_PLACED',
+  'PORTAL_BLOCK_PLACED',
+  'PORTAL_FRAME_READY',
+  'PORTAL_LIT',
+  'PORTAL_VERIFIED',
+  'PORTAL_LIGHT_REFUSED',
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
