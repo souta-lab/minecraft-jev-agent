@@ -24,7 +24,7 @@ import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, describeFailure, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
-import type { ResidentWorldMemory } from './resident-types.ts'
+import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import {
@@ -74,6 +74,48 @@ function uniqueOptions(options: readonly PlanOption[]): PlanOption[] {
     out.push(option)
   }
   return out
+}
+
+/**
+ * System2 grounding must use current server truth for nearby stations, not only
+ * the durable station memory. A remembered station can be invalidated as stale
+ * while the same live block is already loaded near the bot; using memory alone
+ * then invents a false `crafting_table`/`furnace` prerequisite and changes the
+ * semantic option set. This helper only augments CAN/TRUE facts; it does not
+ * choose, rank, or synthesize a semantic goal.
+ */
+function liveStationFacts(bot: Bot, names: ReadonlySet<string>, maxDistance: number, count: number): KnownStation[] {
+  try {
+    const positions = bot.findBlocks({
+      matching: (block) => names.has(block.name),
+      maxDistance,
+      count,
+    })
+    return positions.map((position) => ({ x: position.x, y: position.y, z: position.z }))
+  } catch {
+    return []
+  }
+}
+
+export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWorldMemory): ResidentWorldMemory {
+  const tables = liveStationFacts(bot, new Set(['crafting_table']), 48, 64)
+  const furnaces = liveStationFacts(bot, new Set(['furnace', 'blast_furnace', 'smoker']), 48, 32)
+  const merge = (remembered: readonly KnownStation[], sensed: readonly KnownStation[]): KnownStation[] => {
+    const out = [...remembered]
+    const seen = new Set(out.map((station) => `${station.x},${station.y},${station.z}`))
+    for (const station of sensed) {
+      const key = `${station.x},${station.y},${station.z}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(station)
+    }
+    return out
+  }
+  return {
+    ...world,
+    craftingTables: merge(world.craftingTables, tables),
+    furnaces: merge(world.furnaces, furnaces),
+  }
 }
 
 /** Mercury is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
@@ -220,12 +262,13 @@ export class PlannerBrain implements System2Brain {
 
   private groundedOptions(request: System2PlanRequest): PlanOption[] {
     const counts = inventoryCounts(this.bot)
-    const rung = resolveRungSourceOfTruth(counts, this.world, this.log)
+    const planningWorld = augmentPlannerWorldWithLiveStations(this.bot, this.world)
+    const rung = resolveRungSourceOfTruth(counts, planningWorld, this.log)
     const portalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
     this.log('PORTAL_FRAME_PROGRESS', { blocks: portalFrameBlocks, source: 'system2-grounding' })
-    const options = buildPlanOptions(counts, this.world, {
+    const options = buildPlanOptions(counts, planningWorld, {
       placedFurnacesNear: this.placedFurnacesNear(),
-      knownFurnaces: this.world.furnaces.length,
+      knownFurnaces: planningWorld.furnaces.length,
       resumeRungIndex: rung.adoptedRungIndex,
       portalFrameBlocks,
       log: this.log,

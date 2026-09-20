@@ -17,7 +17,7 @@ import {
 } from '../jev-agent/src/system2Escalation.ts'
 import { system2AuthorityIdentity } from '../jev-agent/src/system2.ts'
 import { compileMercuryGoal, validateMercuryPlan } from './mercury-system2.ts'
-import { PlannerBrain } from './planner.ts'
+import { augmentPlannerWorldWithLiveStations, PlannerBrain } from './planner.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 
 function goal(source: Parameters<typeof compileMercuryGoal>[0]) {
@@ -365,6 +365,16 @@ const reportBrain = new PlannerBrain({
   mode: 'llm',
   mercury: { model: 'inception/mercury-2.5' } as never,
 })
+
+const liveStationWorld = augmentPlannerWorldWithLiveStations(
+  {
+    findBlocks: ({ matching }: { matching: (block: { name: string }) => boolean }) =>
+      matching({ name: 'crafting_table' }) ? [{ x: 1, y: 64, z: 1 }] : [{ x: 2, y: 64, z: 2 }],
+  } as never,
+  emptyWorldMemory(),
+)
+assert.equal(liveStationWorld.craftingTables.length, 1)
+assert.equal(liveStationWorld.furnaces.length, 1)
 assert.equal(reportBrain.provider, 'hybrid')
 assert.equal(reportBrain.authorityModel.includes('mercury:inception/mercury-2.5'), true)
 assert.deepEqual(reportBrain.authorityStack, {
