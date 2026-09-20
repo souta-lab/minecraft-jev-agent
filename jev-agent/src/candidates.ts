@@ -3548,6 +3548,13 @@ function capabilityAcquisitionCandidates(
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates
+      } else if (capability.kind === 'open_path' || capability.kind === 'standable_approach') {
+        // No-route capabilities (`no_path` -> open_path, `no_standable_approach`
+        // -> standable_approach) otherwise leave Jev only WAIT/ESCALATE (live
+        // main 928601f: `MOVE:p56_60_24 reason=no_path missing=[open_path]` ->
+        // `CANDIDATE_STARVATION goal=place:furnace:1 productive=0`). Enumerate
+        // the existing generic route-opening families as enabling facts only.
+        source = routeOpeningCandidates(state, options)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -3603,6 +3610,14 @@ function capabilityAcquisitionCandidates(
     }
   }
   return out
+}
+
+// The generic route-opening affordances for a target withheld with no route: the
+// existing STEP face cut and ceiling-clearance MINE families. Neither is
+// item/coordinate/portal special-cased, ordered, or auto-selected; they are
+// enabling facts Jev chooses between.
+function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  return [...stepCutCandidates(state, options), ...headroomCandidates(state, options)]
 }
 
 function toolItemForCapability(capability: Capability): string | null {
