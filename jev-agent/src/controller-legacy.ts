@@ -911,11 +911,19 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'OSCILLATION_DETECTED',
   'RETURN_TO_KNOWN_RESOURCE',
   'RETRIEVE_STALLED',
+  'LOCAL_RETRIEVAL_STALL',
+  'LOCAL_RETRIEVE_RECOVERY',
+  'LOCAL_DESCEND_STALL',
+  'LOCAL_OSCILLATION_ESCAPE',
+  'LOCAL_PROGRESS_STALL',
+  'LOCAL_MOVE_OSCILLATION',
+  'LOCAL_WAIT_RECOVERY',
   'KNOWN_RESOURCE_STALE',
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
   'CAPABILITY_GAP',
+  'LOCAL_CAPABILITY_GAP',
   'CAPABILITY_GAP_POLICY',
   'CAPABILITY_GAP_CLEARED',
   'RETURN_TO_SURFACE',
@@ -3510,7 +3518,12 @@ export class JevController {
     this.prereqProgress = null
     this.prereqLoggedKey = null
     this.retrievalEscalationPending = true
-    this.escalate('progress_stall', `position oscillation ${state.pair ?? 'pair'} cycles=${state.cycles}; escaping the loop`)
+    this.logger.warn(
+      'agent',
+      `LOCAL_OSCILLATION_ESCAPE pair=${state.pair ?? 'pair'} cycles=${state.cycles} system2=false`,
+      { pair: state.pair, cycles: state.cycles, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
   }
 
   private logDescendPlan(candidate: Candidate): void {
@@ -4405,12 +4418,7 @@ export class JevController {
     else if (code === 'verify_failed') {
       this.logger.info('agent', `LOCAL_VERIFY_FAILURE system2=false detail=${detail}`, { code, detail }, this.tickCounter)
     }
-    if (
-      this.failureStreak >= this.options.failureStreakLimit &&
-      code !== 'path_no_path' &&
-      code !== 'path_stuck' &&
-      code !== 'verify_failed'
-    ) {
+    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure && code !== 'verify_failed') {
       this.escalate('same_failure_3x', `${code ?? 'unknown'} failed ${this.failureStreak}x: ${detail}`)
     }
   }
@@ -4491,7 +4499,19 @@ export class JevController {
     const stalledMs = Date.now() - this.lastProgressAt
     this.signals.stalledMs = stalledMs
     if (!this.goal.complete && stalledMs > this.options.stallMs) {
-      this.escalate('progress_stall', `no goal progress for ${stalledMs}ms`)
+      const boundary = shouldWakeSystem2AfterLocalFailure({
+        failureCode: 'path_stuck',
+        activeOption: this.queue.current !== null,
+        semanticExhausted: false,
+        semanticInvalid: false,
+        semanticAbandoned: false,
+      })
+      this.logger.warn(
+        'agent',
+        `LOCAL_PROGRESS_STALL stalledMs=${stalledMs} system2=false reason=${boundary.reason}`,
+        { stalledMs, goal: this.currentGoalKey(), boundary: boundary.reason },
+        this.tickCounter,
+      )
     }
     if (!this.goal.complete && stalledMs > this.options.wedgeStallMs) {
       this.abortWedge(`goal progress stayed 0 for ${stalledMs}ms`)
@@ -4566,7 +4586,19 @@ export class JevController {
       )
     }
     this.ensureCapabilityGapSignal(marker)
-    this.summonLlm('no_progress', `capability gap: ${marker} -> strategic replan`)
+    const boundary = shouldWakeSystem2AfterLocalFailure({
+      failureCode: 'path_stuck',
+      activeOption: this.queue.current !== null,
+      semanticExhausted: false,
+      semanticInvalid: false,
+      semanticAbandoned: false,
+    })
+    this.logger.warn(
+      'agent',
+      `LOCAL_CAPABILITY_GAP target_y=${Math.round(decision.targetY ?? 0)} attempts=${decision.attempts} system2=false reason=${boundary.reason}`,
+      { attempts: decision.attempts, targetY: decision.targetY, boundary: boundary.reason },
+      this.tickCounter,
+    )
   }
 
   /** Keep the gap marker the newest recent event so the planner sees it. */
@@ -4708,13 +4740,16 @@ export class JevController {
       this.tickCounter,
     )
     // Strategy switch: forget the latched descent budget and chosen direction so
-    // the next tick can pick a different column/step, then wake System 2.
+    // the next tick can pick a different column/step. This is local mechanical
+    // recovery; a stalled actuator is not a semantic Option boundary.
     this.digMemory.markResourceProgress()
     this.descendProgress = { bestY: y, ticks: 0 }
     this.descendStallTicks = 0
-    this.escalate(
-      'progress_stall',
-      `descend goal ${current.id} stuck at y=${Math.floor(y)} (target ${targetY}) for ${stallTicks} ticks; switching strategy`,
+    this.logger.warn(
+      'agent',
+      `LOCAL_DESCEND_STALL goal=${current.id} y=${Math.floor(y)} target_y=${targetY} ticks=${stallTicks} system2=false`,
+      { goal: current.id, y, targetY, stallTicks, boundary: 'local_recovery' },
+      this.tickCounter,
     )
   }
 
@@ -4776,7 +4811,12 @@ export class JevController {
     this.activeRetrieval = null
     this.retrievalTrack = null
     this.retrievalEscalationPending = true
-    this.escalate('pathfinder_stuck', `retrieval stalled at ${Math.round(current)}m for ${ticks} ticks`)
+    this.logger.warn(
+      'agent',
+      `LOCAL_RETRIEVAL_STALL target=${active.target.x},${active.target.y},${active.target.z} dist=${Math.round(current)} ticks=${ticks} system2=false`,
+      { target: active.target, dist: Math.round(current), ticks, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
   }
 
   private dropUnreachableResource(
@@ -4917,17 +4957,29 @@ export class JevController {
     this.waitGoalKey = wait.goalKey
     if (wait.outcome === 'below-limit') return
     if (wait.outcome === 'replan') {
-      const summon = this.summonLlm(
-        'no_progress',
-        `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; requesting a replan`,
-      )
+      const boundary = shouldWakeSystem2AfterLocalFailure({
+        failureCode: 'path_stuck',
+        activeOption: this.queue.current !== null,
+        semanticExhausted: false,
+        semanticInvalid: false,
+        semanticAbandoned: false,
+      })
+      // WAIT is a control outcome, not evidence that the current semantic
+      // Option should be replaced. Keep the local recovery loop bounded by
+      // candidate/state changes; a repeated WAIT cannot itself summon WHAT.
+      const summon = boundary.wake
+        ? this.summonLlm(
+            'no_progress',
+            `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; semantic boundary=${boundary.reason}`,
+          )
+        : null
       const counted = summon?.triggered === true
       if (counted) this.waitReplans += 1
       this.waitStreak = 0
       this.wedgeRepeats = 0
       this.logger.warn(
         'agent',
-        `WAIT_LIMIT n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}${counted ? '' : ' THROTTLED'}`,
+        `${boundary.wake ? 'WAIT_LIMIT' : 'LOCAL_WAIT_RECOVERY'} n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}${counted ? '' : ' SYSTEM2=false'}`,
         {
           actionId,
           count: wait.n,
@@ -4935,6 +4987,7 @@ export class JevController {
           waitReplans: this.waitReplans,
           llmSummoned: counted,
           throttled: !counted,
+          boundary: boundary.reason,
         },
         this.tickCounter,
       )
@@ -5403,7 +5456,12 @@ export class JevController {
     this.prereqProgress = null
     this.prereqLoggedKey = null
     this.retrievalEscalationPending = true
-    this.escalate('pathfinder_stuck', `${candidate.id} unverified progress=0 x${unverified}; abandoned option`)
+    this.logger.warn(
+      'agent',
+      `LOCAL_RETRIEVE_RECOVERY candidate=${candidate.id} unverified=${unverified} system2=false`,
+      { candidate: candidate.id, unverified, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
   }
 
   private logStaleKnownResources(state: WorldState): void {
@@ -5917,9 +5975,11 @@ export class JevController {
       )
     }
     if (seen.size > 0) this.notifyMoveFailureMemory()
-    this.escalate(
-      'progress_stall',
-      `OSCILLATION_DETECTED from=${fromKey} to=${toKey} cycles=${detection.cycles}; blacklisting the movement target`,
+    this.logger.warn(
+      'agent',
+      `LOCAL_MOVE_OSCILLATION from=${fromKey} to=${toKey} cycles=${detection.cycles} system2=false`,
+      { from: fromKey, to: toKey, cycles: detection.cycles, boundary: 'local_recovery' },
+      this.tickCounter,
     )
   }
 

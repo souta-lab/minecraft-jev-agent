@@ -2688,6 +2688,31 @@ function nearestResource(state: WorldState, focusItem: string | null): BlockStat
   return best
 }
 
+/**
+ * Return the resource bearing that an exploration leg should approach.
+ *
+ * A sensed block is the strongest local fact, but it is not the only grounded
+ * fact available to the candidate generator.  The controller's durable
+ * `knownResources` signal is also a mechanically valid bearing after the
+ * direct retrieval candidate has been withheld for local recovery.  Falling
+ * back to an arbitrary nearby standable cell in that case turns recovery into
+ * a two-cell walk loop and hides the fact that the current Option still has a
+ * useful route.  This helper preserves the same typed resource matching and
+ * stale/blacklist rules as `knownResourceFor`; it does not choose a semantic
+ * Option or rank missions.
+ */
+function explorationResourcePosition(
+  state: WorldState,
+  focusItem: string | null,
+  blacklistedMoveTargets: ReadonlySet<string> | undefined,
+): Vec3Json | null {
+  const sensed = nearestResource(state, focusItem)
+  if (sensed !== null) return sensed.position
+  const want = retrievalWant(focusItem)
+  if (want === null) return null
+  return knownResourceFor(state, want, blacklistedMoveTargets)?.position ?? null
+}
+
 interface RetrievalWant {
   item: string
   kind: 'ore' | 'log'
@@ -3131,13 +3156,13 @@ function pickExplore(
   )
   if (options.length === 0) return null
 
-  const resource = nearestResource(state, focusItem)
-  if (resource !== null) {
-    const currentDistance = distance(state.self.position, resource.position)
+  const resourcePosition = explorationResourcePosition(state, focusItem, blacklistedMoveTargets)
+  if (resourcePosition !== null) {
+    const currentDistance = distance(state.self.position, resourcePosition)
     let best: Vec3Json | null = null
     let bestScore = Number.POSITIVE_INFINITY
     for (const spot of options) {
-      const toResource = distance(spot, resource.position)
+      const toResource = distance(spot, resourcePosition)
       if (toResource >= currentDistance) continue
       const score = toResource + distance(spot, state.self.position) * 0.1
       if (score < bestScore) {
