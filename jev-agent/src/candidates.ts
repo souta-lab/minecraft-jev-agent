@@ -3424,10 +3424,30 @@ function evaluateCandidate(
   if (accessRefusal !== null) {
     const target = reachabilityTargetFor(context.state, candidate)
     const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
-    const result: ReachabilityResult =
-      accessRefusal === 'no_path_to_stand'
-        ? { reachable: false, reason: 'no_path', missingCapabilities: [{ kind: 'open_path' }] }
-        : { reachable: false, reason: 'no_standable_approach', missingCapabilities: [{ kind: 'standable_approach' }] }
+    // A dig-access probe answers only whether the interaction stand was found;
+    // it must not erase independent body capabilities needed to get to that
+    // target.  The live M2 wedge had a log above the bot with no interaction
+    // stand, and this branch reduced the full fact to only
+    // `standable_approach`, so the prerequisite compiler never offered a
+    // placeable block / vertical recovery candidate and Jev was left with
+    // WAIT.  Evaluate the same target through the ordinary reachability
+    // contract first, then retain the probe refusal as an additional fact.
+    const abilities = deriveReachabilityAbilities(context.state, position, context.column)
+    const probe: PathProbeResult = accessRefusal === 'no_path_to_stand' ? 'no_path' : 'unknown'
+    const vertical = evaluateReachability(target, world, context.state.inventory.counts, abilities, probe)
+    const accessCapability: Capability =
+      accessRefusal === 'no_path_to_stand' ? { kind: 'open_path' } : { kind: 'standable_approach' }
+    const missingCapabilities = [...vertical.missingCapabilities]
+    if (!missingCapabilities.some((capability) => capabilityKey(capability) === capabilityKey(accessCapability))) {
+      missingCapabilities.push(accessCapability)
+    }
+    const reason =
+      vertical.reason === 'needs_ascend' || vertical.reason === 'needs_descend'
+        ? vertical.reason
+        : accessRefusal === 'no_path_to_stand'
+          ? 'no_path'
+          : 'no_standable_approach'
+    const result: ReachabilityResult = { reachable: false, reason, missingCapabilities }
     return reachabilityRecord(candidate, target, world, result, context)
   }
   const target = reachabilityTargetFor(context.state, candidate)

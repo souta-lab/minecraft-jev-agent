@@ -163,7 +163,7 @@ assert.equal(compiledSemanticSmelt.goals[0]?.optionTemplateId, 'collect:raw_iron
 
 // The current Option exposes the non-semantic execution envelope explicitly;
 // a prerequisite candidate must not look like an unrelated action to Jev.
-const optionContext = currentOptionContextForQueuedGoal(gotoRawIron)
+const optionContext = currentOptionContextForQueuedGoal(queue.current)
 assert.deepEqual(optionContext?.allowedSkills.slice(0, 3), ['SAFETY', 'CONTROL', 'PREREQUISITE'])
 const prerequisiteQuestions = buildAuthorityQuestions([
   {
@@ -186,7 +186,11 @@ const prerequisiteQuestions = buildAuthorityQuestions([
     },
   },
 ])
-const prerequisiteText = prerequisiteQuestions.action?.criteria?.['MINE:stone'] ?? ''
+const actionCriteria = prerequisiteQuestions.action?.criteria
+const prerequisiteText =
+  actionCriteria !== undefined && !Array.isArray(actionCriteria) && typeof actionCriteria === 'object'
+    ? String((actionCriteria as Record<string, unknown>)['MINE:stone'] ?? '')
+    : ''
 assert.match(prerequisiteText, /optionSkill=PREREQUISITE/)
 assert.match(prerequisiteText, /prerequisiteRole=placeable_block/)
 

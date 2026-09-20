@@ -37,6 +37,8 @@ function check(label: string, ok: boolean, detail: string): void {
 }
 
 const source = (relative: string): string => readFileSync(new URL(relative, import.meta.url), 'utf8')
+const runtimeControllerSource = (): string =>
+  `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
 
 // --- world builders ------------------------------------------------------------
 
@@ -168,6 +170,16 @@ function blockedLog(): BlockState {
   }
 }
 
+/** A blocked log beyond the ordinary walkable vertical gap. */
+function highBlockedLog(): BlockState {
+  const position = { ...BLOCK, y: 69 }
+  return {
+    ...blockedLog(),
+    position,
+    distance: Math.hypot(BOT.x - position.x, BOT.y - position.y, BOT.z - position.z),
+  }
+}
+
 /** A blocked stone: out of reach, no walk-up access, needs the held pickaxe. */
 function blockedStone(): BlockState {
   return {
@@ -285,6 +297,26 @@ async function main(): Promise<void> {
     )
   }
 
+  // (b2) A dig-access refusal must retain the target's independent vertical
+  // capability facts.  Without this, an elevated log is reduced to only
+  // `standable_approach`, no placeable-block prerequisite is generated, and
+  // the policy is left with WAIT despite a mechanically actionable recovery.
+  {
+    const state = worldState({ position: BOT, blocks: [highBlockedLog()], goal: goal('log') })
+    const grounded = generateGroundedCandidates(state, optionsWith(noStand))
+    const id = 'ACCESS:b10_69_0'
+    const withheld = grounded.withheld.find((entry) => entry.candidate.id === id)
+    const missing = (withheld?.result.missingCapabilities ?? []).map(capabilityKey)
+    await check(
+      '(b2) elevated dig-access refusal preserves vertical prerequisite facts',
+      withheld !== undefined &&
+        withheld.result.reason === 'needs_ascend' &&
+        missing.includes('placeable_block') &&
+        missing.includes('standable_approach'),
+      `reason=${withheld?.result.reason ?? 'none'} missing=[${missing.join(',')}] candidates=[${grounded.candidates.map((c) => c.id).join(',')}]`,
+    )
+  }
+
   // (c) The retirement marker names the coordinate and the mechanical fact.
   {
     const line = formatDigAccessRetired(BLOCK, 'no_interaction_stand')
@@ -316,7 +348,7 @@ async function main(): Promise<void> {
   // typed retirement; the shared #244 face geometry lives in reachability.ts.
   {
     const candidates = source('./src/candidates.ts')
-    const controller = source('./src/controller.ts')
+    const controller = runtimeControllerSource()
     const reach = source('./src/reachability.ts')
     const executor = source('./src/executor.ts')
     const wired =
