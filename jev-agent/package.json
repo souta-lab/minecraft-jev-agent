@@ -45,6 +45,7 @@
     "pillar-search-test": "tsx test-pillar-search.mts",
     "hop-policy-test": "tsx test-hop-policy.mts",
     "candidate-policy-test": "tsx test-candidate-policy.mts",
+    "open-path-recovery-test": "tsx test-open-path-recovery.mts",
     "beta-authority-test": "tsx test-beta-authority.mts",
     "beta-hysteresis-test": "tsx test-beta-hysteresis.mts",
     "abandon-enforce-test": "tsx test-abandon-enforce.mts",

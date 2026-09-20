@@ -3548,6 +3548,18 @@ function capabilityAcquisitionCandidates(
       } else if (capability.kind === 'tool') {
         const item = toolItemForCapability(capability)
         if (item !== null) source = craftCandidates(state, options, item).candidates
+      } else if (capability.kind === 'open_path') {
+        // A locomotion target the affordance gate dropped with `reason=no_path`
+        // (`missing=[open_path]`; e.g. a dig-access target whose stand has no
+        // path, or an out-of-reach MOVE whose live path probe failed) must not
+        // leave the policy with only WAIT/ESCALATE. Contribute the SAME generic
+        // route-opening families the raw generator already emits - STEP (cut a
+        // blocked face), DESCEND (tunnel/staircase toward the resource) and the
+        // explore MOVE (walk toward an unreachable target) - so at least one
+        // mechanically valid forward body change is on offer. This is
+        // CAN-affordance enumeration only: no item/coordinate special-casing, no
+        // ordering/priority, and the model still owns WHAT and WHICH.
+        source = routeOpeningCandidates(state, options)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -3601,6 +3613,41 @@ function capabilityAcquisitionCandidates(
         })
       }
     }
+  }
+  return out
+}
+
+/**
+ * The generic route-opening affordances for a withheld locomotion target whose
+ * capability list says `open_path`: the existing STEP / DESCEND / explore-MOVE
+ * families. A STEP cuts the upper block of a blocked face so the route becomes
+ * climbable, a DESCEND tunnels/staircases toward the resource, and a MOVE walks
+ * to the nearest reachable frontier. None is item/coordinate special-cased and
+ * none is ordered against the others; they are facts for Jev.
+ */
+function routeOpeningCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const out: Candidate[] = [
+    ...stepCutCandidates(state, options),
+    ...descendCandidates(state, options, focus, [], null),
+  ]
+  const spot = pickExplore(
+    state,
+    state.terrain.standable,
+    focus,
+    options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT,
+    options.blacklistedMoveTargets,
+  )
+  if (spot !== null) {
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        spot,
+        moveLabel(spot, 'walk toward the unreachable target', state.self.position),
+        null,
+      ),
+    )
   }
   return out
 }
