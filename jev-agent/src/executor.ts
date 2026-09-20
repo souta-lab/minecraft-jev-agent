@@ -537,7 +537,16 @@ export function isAtRequiredLevel(
   verticalTolerance = 0.75,
 ): boolean {
   const sameFloorLevel = Math.floor(position.y) === Math.floor(target.y)
+  // A same-floor neighbor is not the requested step.  The old distance-only
+  // check accepted a body one cell short (for example x=54.5 for target x=55)
+  // because it was within the 1.2m tolerance.  That let a failed path fallback
+  // report a DESCEND step as complete immediately after digging, without any
+  // body progress.  Keep the tolerance for positions inside the target cell,
+  // but require occupancy of the target x/z cell first.
+  const sameTargetCell =
+    Math.floor(position.x) === Math.floor(target.x) && Math.floor(position.z) === Math.floor(target.z)
   return (
+    sameTargetCell &&
     Math.hypot(position.x - target.x, position.z - target.z) <= horizontalTolerance &&
     (sameFloorLevel || Math.abs(position.y - target.y) <= verticalTolerance)
   )

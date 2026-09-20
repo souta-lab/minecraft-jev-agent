@@ -169,6 +169,17 @@ addCase('a vertical waypoint one block above the body is not a completed step', 
   return { pass, detail: `stalled=${isAtRequiredLevel(stalled, target)} reached=${isAtRequiredLevel(reached, target)}` }
 })
 
+addCase('a same-floor adjacent cell is not a completed required-level step', () => {
+  const target = { x: 55, y: 61, z: 26 }
+  const adjacent = { x: 54.5, y: 61, z: 26.4 }
+  const occupied = { x: 55.3, y: 61, z: 26.4 }
+  const pass = !isAtRequiredLevel(adjacent, target) && isAtRequiredLevel(occupied, target)
+  return {
+    pass,
+    detail: `adjacent=${isAtRequiredLevel(adjacent, target)} occupied=${isAtRequiredLevel(occupied, target)}`,
+  }
+})
+
 addCase('a grounded entity on the target floor is a completed vertical step', () => {
   const target = { x: 29, y: 62, z: 6 }
   const grounded = { x: 29.58, y: 62.92, z: 6.5 }
