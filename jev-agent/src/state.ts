@@ -14,6 +14,8 @@ import type { CurrentOptionContext } from './optionSpec.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
+import { portalFrameLayout } from './netherPortalPlan.ts'
+import type { PortalFrameSite, PortalWidthAxis } from './netherPortalPlan.ts'
 
 export type Vec3Json = {
   x: number
@@ -304,6 +306,8 @@ export type WorldState = {
   furnaces?: StationEntry[]
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
+  /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
+  portalFrameSites?: PortalFrameSite[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
@@ -1173,6 +1177,80 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
   return spots.slice(0, options.maxPlacementSpots)
 }
 
+/**
+ * Ground a whole portal footprint, not just its first placement cell.
+ *
+ * A single supported air cell is insufficient for a frame: the other bottom
+ * cells may be occupied, the interior may be blocked, or the selected cell
+ * may be inside the bot after the sensor snapshot goes stale.  This scan is
+ * still only a mechanical affordance check.  It does not choose a semantic
+ * goal or rank Jev actions.
+ */
+function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfState): PortalFrameSite[] {
+  const base = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const cache = new Map<string, ReturnType<Bot['blockAt']>>()
+  const at = (x: number, y: number, z: number): ReturnType<Bot['blockAt']> => {
+    const key = `${x}|${y}|${z}`
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    const block = bot.blockAt(scratch.set(x, y, z))
+    cache.set(key, block)
+    return block
+  }
+  const clear = (x: number, y: number, z: number): boolean => {
+    const block = at(x, y, z)
+    return block !== null && REPLACEABLE_AIR.has(block.name)
+  }
+  const solid = (x: number, y: number, z: number): boolean => at(x, y, z)?.boundingBox === 'block'
+  const axes: PortalWidthAxis[] = ['x', 'z']
+  const sites: PortalFrameSite[] = []
+  const body = self.position
+
+  for (let dx = -8; dx <= 8; dx += 1) {
+    for (let dz = -8; dz <= 8; dz += 1) {
+      for (let dy = -4; dy <= 4; dy += 1) {
+        const origin = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
+        for (const widthAxis of axes) {
+          const layout = portalFrameLayout(origin, widthAxis)
+          const footprint = [...layout.frame, ...layout.corners, ...layout.interior]
+          if (!footprint.every((cell) => clear(cell.x, cell.y, cell.z))) continue
+          let supported = true
+          for (let w = 0; w < 4; w += 1) {
+            const bottom =
+              widthAxis === 'x'
+                ? { x: origin.x + w, y: origin.y, z: origin.z }
+                : { x: origin.x, y: origin.y, z: origin.z + w }
+            if (!solid(bottom.x, bottom.y - 1, bottom.z)) {
+              supported = false
+              break
+            }
+          }
+          if (!supported) continue
+          const first = { x: origin.x + 0.5, y: origin.y, z: origin.z + 0.5 }
+          if (distance(first, body) < 1.0) continue
+          sites.push({ origin, widthAxis, safe: true, reachable: true })
+        }
+      }
+    }
+  }
+
+  sites.sort((a, b) => {
+    const da = distance(a.origin, self.position)
+    const db = distance(b.origin, self.position)
+    if (da !== db) return da - db
+    if (a.origin.y !== b.origin.y) return a.origin.y - b.origin.y
+    if (a.origin.x !== b.origin.x) return a.origin.x - b.origin.x
+    if (a.origin.z !== b.origin.z) return a.origin.z - b.origin.z
+    return a.widthAxis.localeCompare(b.widthAxis)
+  })
+  return sites.slice(0, 24)
+}
+
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const found: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
@@ -1211,6 +1289,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
     placementSpots: buildPlacementSpots(bot, options, self),
+    portalFrameSites: buildPortalFrameSites(bot, options, self),
     descent: buildDescent(bot, options, self),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),

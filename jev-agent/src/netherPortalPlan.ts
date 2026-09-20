@@ -93,6 +93,18 @@ export interface PortalBlockPosition {
 /** The axis the 4-wide side spans; the remaining horizontal axis is the normal. */
 export type PortalWidthAxis = 'x' | 'z'
 
+/**
+ * A live, code-grounded frame origin.  Unlike a single placement spot, this
+ * record is only emitted after the complete 4x5 footprint has been checked
+ * for clear cells and a solid bottom support row.
+ */
+export interface PortalFrameSite {
+  readonly origin: PortalBlockPosition
+  readonly widthAxis: PortalWidthAxis
+  readonly safe?: boolean
+  readonly reachable?: boolean
+}
+
 function normalizeDimension(dimension: string): string {
   return dimension.replace(/^minecraft:/, '').toLowerCase()
 }
@@ -470,18 +482,30 @@ export interface PortalFrameGrounding {
 }
 
 export function groundPortalFrame(
-  sites: readonly PortalBlockPosition[],
+  sites: readonly PortalFrameSite[] | readonly PortalBlockPosition[],
   self: PortalBlockPosition,
   widthAxis: PortalWidthAxis = 'x',
 ): PortalFrameGrounding | null {
   if (sites.length === 0) return null
+  const normalized = sites.map((site) =>
+    'origin' in site
+      ? site
+      : { origin: site, widthAxis, safe: true, reachable: true },
+  )
   const chosen = choosePortalSite(
-    sites.map((position) => ({ position, safe: true, reachable: true })),
+    normalized.map((site) => ({ position: site.origin, safe: site.safe !== false, reachable: site.reachable !== false })),
     self,
   )
   if (chosen === null) return null
-  const layout = portalFrameLayout(chosen.position, widthAxis)
-  return { origin: chosen.position, widthAxis, cells: orderedPlacementCells(layout.frame) }
+  const selected = normalized.find(
+    (site) =>
+      site.origin.x === chosen.position.x &&
+      site.origin.y === chosen.position.y &&
+      site.origin.z === chosen.position.z,
+  )
+  const selectedAxis = selected?.widthAxis ?? widthAxis
+  const layout = portalFrameLayout(chosen.position, selectedAxis)
+  return { origin: chosen.position, widthAxis: selectedAxis, cells: orderedPlacementCells(layout.frame) }
 }
 
 // ---------------------------------------------------------------------------

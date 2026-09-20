@@ -89,6 +89,7 @@ import {
   OBSIDIAN,
   formatPortalBlockPlaced,
   formatPortalFrameReady,
+  portalFrameLayout,
   validatePortalFrame,
 } from './netherPortalPlan.ts'
 
@@ -3681,10 +3682,24 @@ export class Executor {
         this.emitFrameCell(candidate, itemName, existing, cell)
         continue
       }
-      if (this.distanceToEyes(cell) > this.options.reach) {
+      if (this.distanceToEyes(cell) > this.options.reach || this.placementCellOverlapsBody(cell)) {
         this.setPhase(candidate, epoch, 'pathing')
-        await this.pathToNear(cell, 2, epoch, signal)
+        if (this.placementCellOverlapsBody(cell)) {
+          const stand = this.findPlacementStand(cell)
+          if (stand === null) {
+            throw new ExecutorError('path_stuck', `no safe standing cell beside placement (${cell.x},${cell.y},${cell.z})`)
+          }
+          await this.pathToNear(stand, 0.75, epoch, signal)
+        } else {
+          await this.pathToNear(cell, 2, epoch, signal)
+        }
         this.ensureOwned(epoch, signal)
+      }
+      if (this.placementCellOverlapsBody(cell)) {
+        throw new ExecutorError('path_stuck', `placement cell remains inside bot body at (${cell.x},${cell.y},${cell.z})`)
+      }
+      if (FRAME_PLACE_ITEMS.has(itemName)) {
+        await this.ensurePortalFrameSupport(candidate, cells, cell, epoch, signal)
       }
       const placedName = await this.placeOneCell(candidate, cell, itemName, epoch, signal)
       placedCells.push(cell)
@@ -3711,6 +3726,117 @@ export class Executor {
       itemsGained: 0,
       goalItemCount: this.countItem(itemName),
     })
+  }
+
+  /** A player must not occupy the target cell while the server processes placement. */
+  private placementCellOverlapsBody(cell: Vec3Json): boolean {
+    const entity = this.bot.entity as unknown as { position: { x: number; y: number; z: number }; width?: number; height?: number }
+    const halfWidth = (entity.width ?? 0.6) / 2
+    const height = entity.height ?? 1.8
+    const bodyMinX = entity.position.x - halfWidth
+    const bodyMaxX = entity.position.x + halfWidth
+    const bodyMinZ = entity.position.z - halfWidth
+    const bodyMaxZ = entity.position.z + halfWidth
+    return (
+      bodyMaxX > cell.x &&
+      bodyMinX < cell.x + 1 &&
+      bodyMaxZ > cell.z &&
+      bodyMinZ < cell.z + 1 &&
+      entity.position.y + height > cell.y &&
+      entity.position.y < cell.y + 1
+    )
+  }
+
+  /** Find a real supported feet cell that is adjacent enough to place `target`. */
+  private findPlacementStand(target: Vec3Json): Vec3Json | null {
+    const offsets = [
+      { x: -1, z: 0 },
+      { x: 1, z: 0 },
+      { x: 0, z: -1 },
+      { x: 0, z: 1 },
+      { x: -1, z: -1 },
+      { x: -1, z: 1 },
+      { x: 1, z: -1 },
+      { x: 1, z: 1 },
+    ]
+    for (const offset of offsets) {
+      const feet = { x: target.x + offset.x, y: target.y, z: target.z + offset.z }
+      const feetBlock = this.currentBlockAt(feet)
+      const headBlock = this.currentBlockAt({ x: feet.x, y: feet.y + 1, z: feet.z })
+      const belowBlock = this.currentBlockAt({ x: feet.x, y: feet.y - 1, z: feet.z })
+      if (feetBlock?.boundingBox !== 'empty' || headBlock?.boundingBox !== 'empty') continue
+      if (belowBlock?.boundingBox !== 'block') continue
+      if (this.placementCellOverlapsBody(target) && feet.x === Math.floor(this.bot.entity.position.x) && feet.z === Math.floor(this.bot.entity.position.z)) continue
+      return feet
+    }
+    return null
+  }
+
+  /**
+   * The minimal 10-edge frame omits the corner blocks that ordinary placement
+   * needs as supports.  Add only the corner scaffolds required by the already-
+   * selected frame skill, then continue placing obsidian.  This remains
+   * executor mechanics and never becomes a semantic candidate.
+   */
+  private async ensurePortalFrameSupport(
+    candidate: Candidate,
+    cells: readonly Vec3Json[],
+    cell: Vec3Json,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const validation = validatePortalFrame({ blocks: [...cells], widthAxis: candidate.placementAxis ?? 'x' })
+    if (validation.shape !== 'ok' || validation.origin === null) return
+    const layout = portalFrameLayout(validation.origin, validation.widthAxis)
+    if (this.findPlaceReference(cell) !== null) return
+    // The minimal frame omits all four corners.  The two lower corners support
+    // the side columns; one upper corner starts the otherwise disconnected top
+    // edge.  Try the optional corners in deterministic order and use the first
+    // one that is both empty and itself placeable from the already-built frame.
+    const scaffold = layout.corners.find((corner) => {
+      const existing = this.currentBlockAt(corner)
+      return existing?.boundingBox !== 'block' && this.findPlaceReference(corner) !== null
+    })
+    if (scaffold === undefined) return
+    const supportItem = this.findPortalScaffoldItem()
+    if (supportItem === undefined) {
+      throw new ExecutorError('place_error', 'no temporary support block is available for the minimal obsidian frame')
+    }
+    if (this.placementCellOverlapsBody(scaffold)) {
+      const stand = this.findPlacementStand(scaffold)
+      if (stand === null) throw new ExecutorError('path_stuck', `no safe standing cell beside portal scaffold (${scaffold.x},${scaffold.y},${scaffold.z})`)
+      this.setPhase(candidate, epoch, 'pathing')
+      await this.pathToNear(stand, 0.75, epoch, signal)
+      this.ensureOwned(epoch, signal)
+    }
+    const reference = this.findPlaceReference(scaffold)
+    if (reference === null) {
+      throw new ExecutorError('place_error', `no supporting block adjacent to portal scaffold (${scaffold.x},${scaffold.y},${scaffold.z})`)
+    }
+    this.setPhase(candidate, epoch, 'equipping')
+    await this.equipPlacementItem(candidate, supportItem.name, epoch, signal)
+    this.setPhase(candidate, epoch, 'placing')
+    await this.bot.placeBlock(reference.block, reference.face)
+    this.ensureOwned(epoch, signal)
+    const placedName = await this.waitForPlacedBlock(scaffold, supportItem.name, epoch, signal)
+    if (!isPlacePostconditionMet(placedName, supportItem.name)) {
+      throw new ExecutorError('verify_failed', `portal scaffold did not appear at (${scaffold.x},${scaffold.y},${scaffold.z})`)
+    }
+    this.logger.info('agent', `PORTAL_SUPPORT_PLACED item=${supportItem.name} pos=${scaffold.x},${scaffold.y},${scaffold.z}`, {
+      source: 'placed',
+      at: `${scaffold.x},${scaffold.y},${scaffold.z}`,
+      itemName: supportItem.name,
+      actionId: candidate.id,
+    })
+  }
+
+  private findPortalScaffoldItem(): Item | undefined {
+    const preferred = ['cobblestone', 'stone', 'dirt', 'deepslate', 'netherrack']
+    for (const name of preferred) {
+      const item = this.bot.inventory.items().find((entry) => entry.name === name)
+      if (item !== undefined) return item
+    }
+    return undefined
   }
 
   private emitFrameCell(candidate: Candidate, itemName: string, placedName: string | null, cell: Vec3Json): void {

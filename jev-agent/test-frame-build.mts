@@ -35,6 +35,7 @@ import {
   orderedPlacementCells,
   planBlockPlacements,
   planNetherPortal,
+  groundPortalFrame,
   portalFrameLayout,
   portalFramePlacementSteps,
   portalStepToPlannedGoal,
@@ -43,6 +44,7 @@ import {
 import type { QueuedGoal } from './src/goalQueue.ts'
 import type { GoalQueueState } from './src/goalQueue.ts'
 import type { WorldState, Vec3Json, SelfState, InventoryState, AgentSignals } from './src/state.ts'
+import type { PortalFrameSite } from './src/netherPortalPlan.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import { Executor } from './src/executor.ts'
 import {
@@ -209,6 +211,7 @@ function worldState(overrides: {
   position: Vec3Json
   inventory?: InventoryState
   goalQueue: GoalQueueState
+  portalFrameSites?: PortalFrameSite[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -222,6 +225,7 @@ function worldState(overrides: {
     craftingTables: [],
     furnaces: [],
     placementSpots: [],
+    portalFrameSites: overrides.portalFrameSites,
     descent: [],
     stepCuts: [],
     headroomCuts: [],
@@ -230,6 +234,39 @@ function worldState(overrides: {
     recentEvents: [],
     signals: signals(),
   }
+}
+
+{
+  const groundedSite: PortalFrameSite = { origin: { x: 20, y: 64, z: 3 }, widthAxis: 'z', safe: true, reachable: true }
+  const state = worldState({
+    position: { x: 6.5, y: 64, z: -1.5 },
+    goalQueue: queueWith({
+      ...queuedPlace(OBSIDIAN, []),
+      placementCells: undefined,
+      requiredCount: 10,
+    }),
+    // The old single-cell list points elsewhere; a complete portal site must
+    // be the source of frame geometry when the sensor has one.
+    portalFrameSites: [groundedSite],
+  })
+  const grounding = groundPortalFrame([groundedSite], state.self.position)
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE')
+  const expected = portalFrameLayout(groundedSite.origin, groundedSite.widthAxis).frame
+  const pass =
+    grounding?.origin.x === groundedSite.origin.x &&
+    grounding?.origin.y === groundedSite.origin.y &&
+    grounding?.origin.z === groundedSite.origin.z &&
+    grounding?.widthAxis === 'z' &&
+    place?.placementAxis === 'z' &&
+    place?.placementCells?.length === 10 &&
+    cellSet(place.placementCells).size === cellSet(expected).size &&
+    [...cellSet(place.placementCells)].every((cell) => cellSet(expected).has(cell))
+  process.stdout.write(
+    `${pass ? 'PASS' : 'FAIL'}  (3a) a complete live-grounded portal site outranks the legacy single placement list\n` +
+      `      site=${JSON.stringify(grounding)} candidate=${place?.id ?? 'none'} axis=${place?.placementAxis ?? 'none'}\n`,
+  )
+  if (!pass) failures += 1
 }
 
 {
@@ -325,12 +362,20 @@ interface FakeBlock {
  * are pre-existing obsidian (a real site may already carry them), which supports
  * the side columns the minimal 10-edge frame leaves disconnected.
  */
-function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlacements: boolean, equipFailures = 0) {
+function makePlaceBot(
+  feet: Vec3Json,
+  placeCells: readonly Vec3Json[],
+  failPlacements: boolean,
+  equipFailures = 0,
+  preexistingCorners = true,
+) {
   const grid = new Map<string, string>()
   for (let x = ORIGIN.x - 1; x <= ORIGIN.x + 4; x += 1) {
     for (let z = -1; z <= 1; z += 1) grid.set(`${x},${ORIGIN.y - 1},${z}`, 'stone')
   }
-  for (const corner of LAYOUT.corners) grid.set(key(corner), OBSIDIAN)
+  if (preexistingCorners) {
+    for (const corner of LAYOUT.corners) grid.set(key(corner), OBSIDIAN)
+  }
   const blockAt = (v: { x: number; y: number; z: number }): FakeBlock | null => {
     const name = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
     if (name === undefined) return null
@@ -364,6 +409,7 @@ function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlace
       count: (id: number) => (id === obsidianId ? 10 : 0),
       items: (): Array<{ name: string; type: number; count: number }> => [
         { name: OBSIDIAN, type: obsidianId, count: 10 },
+        ...(preexistingCorners ? [] : [{ name: 'cobblestone', type: registry.itemsByName.cobblestone.id, count: 1 }]),
       ],
     },
     get heldItem(): { name: string } | null {
@@ -384,7 +430,7 @@ function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlace
     canDigBlock: () => true,
     dig: async () => undefined,
     placeBlock: async (block: FakeBlock, face: { x: number; y: number; z: number }): Promise<void> => {
-      if (heldName !== OBSIDIAN) throw new Error(`wrong held item: ${heldName ?? 'empty'}`)
+      if (heldName !== OBSIDIAN && heldName !== 'cobblestone') throw new Error(`wrong held item: ${heldName ?? 'empty'}`)
       const target = {
         x: block.position.x + face.x,
         y: block.position.y + face.y,
@@ -395,7 +441,7 @@ function makePlaceBot(feet: Vec3Json, placeCells: readonly Vec3Json[], failPlace
         // The server rejected the placement: the block never appears.
         return
       }
-      grid.set(key(target), OBSIDIAN)
+      grid.set(key(target), heldName ?? OBSIDIAN)
     },
     pathfinder: {
       movements: null as unknown,
@@ -444,6 +490,20 @@ async function runFrameBuild(failPlacements: boolean, equipFailures = 0) {
   return { fixture, result, messages }
 }
 
+async function runMinimalFrameBuild() {
+  const fixture = makePlaceBot({ x: 6.5, y: 64, z: -1.5 }, ORDERED_FRAME, false, 0, false)
+  const dir = mkdtempSync(join(tmpdir(), 'frame-build-minimal-'))
+  const logPath = join(dir, 'agent.jsonl')
+  const logger = new EventLogger(new JsonlWriter(logPath), false)
+  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const result = await executor.claim(placeFrameCandidate(ORDERED_FRAME, OBSIDIAN)).completion
+  const lines = readFileSync(logPath, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((entry) => JSON.parse(entry) as { message?: string })
+  return { fixture, result, messages: lines.map((entry) => entry.message ?? '') }
+}
+
 {
   const { fixture, result, messages } = await runFrameBuild(false)
   const placed = messages.filter((line) => line.startsWith(PORTAL_BLOCK_PLACED))
@@ -462,6 +522,28 @@ async function runFrameBuild(failPlacements: boolean, equipFailures = 0) {
   process.stdout.write(
     `${pass ? 'PASS' : 'FAIL'}  (5a) the Executor places all 10 cells and emits per-cell + frame-ready markers\n` +
       `      status=${result.status} verified=${result.verified} placed=${placed.length} ready=[${ready[0] ?? 'none'}] calls=${fixture.placeCalls.length}\n`,
+  )
+  if (!pass) failures += 1
+}
+
+{
+  const { fixture, result, messages } = await runMinimalFrameBuild()
+  const placed = messages.filter((line) => line.startsWith(PORTAL_BLOCK_PLACED))
+  const ready = messages.filter((line) => line.startsWith(PORTAL_FRAME_READY))
+  const support = messages.filter((line) => line.startsWith('PORTAL_SUPPORT_PLACED'))
+  const scaffoldCorners = LAYOUT.corners.filter(
+    (corner) => fixture.grid.get(`${corner.x},${corner.y},${corner.z}`) === 'cobblestone',
+  )
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    placed.length === 10 &&
+    ready.length === 1 &&
+    support.length === 3 &&
+    scaffoldCorners.length === 3
+  process.stdout.write(
+    `${pass ? 'PASS' : 'FAIL'}  (5a-minimal) the 10-edge frame adds one mechanical corner scaffold and still verifies\n` +
+      `      status=${result.status} placed=${placed.length} support=${support.length} corners=${scaffoldCorners.length} failure=${result.failure ?? 'none'} detail=${result.detail} ready=${ready[0] ?? 'none'}\n`,
   )
   if (!pass) failures += 1
 }

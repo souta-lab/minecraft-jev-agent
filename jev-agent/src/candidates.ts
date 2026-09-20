@@ -1778,7 +1778,10 @@ function explicitPlacementCells(state: WorldState): Vec3Json[] | null {
 function frameBuildCells(state: WorldState): Vec3Json[] | null {
   const current = state.goalQueue?.current ?? null
   if (current === null || current.kind !== 'place' || current.targetItem !== OBSIDIAN) return null
-  const grounding = groundPortalFrame(state.placementSpots, state.self.position)
+  // A portal is a multi-cell mechanics operation.  Prefer sensor-grounded
+  // complete footprints; the placementSpots fallback preserves old replay
+  // fixtures and the generic single-cell behavior.
+  const grounding = groundPortalFrame(state.portalFrameSites ?? state.placementSpots, state.self.position)
   if (grounding === null) return null
   return grounding.cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
 }
