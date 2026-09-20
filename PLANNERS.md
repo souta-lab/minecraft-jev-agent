@@ -142,6 +142,11 @@ Jev β による自動replan authority
 
 ## 7. M4 へ向けたルール
 
+現在のM2境界は、旧鉄器時代の完走ではなく、ダイヤ獲得後からネザーゲートを
+構築・着火・検証するまでとする。旧furnace/iron ladderはM2の前提能力を供給する
+下位経路およびhistorical evidenceとして再利用する。ゲート以降のdimension entry
+とblaze/pearl/eyesはM3以降で扱う。
+
 M3/M4機能を追加する前に、その機能がどの層に属するか決める:
 
 ```

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// test-m2-acceptance: offline fixtures for the M2 acceptance contract and the
-// separate M3 diamond-pickaxe acceptance.
+// test-m2-acceptance: offline fixtures for the historical iron-age
+// compatibility gate and its separate diamond-pickaxe replay fixture. These
+// tests do not define the current M2; see MILESTONE-CONTRACT.json.
 //
-// M2 contract (authoritative): charcoal >= 1 / iron_ingot >= 3 / iron_pickaxe >= 1,
-// joined within one resident run. The diamond-pickaxe terminal is NOT part of M2;
-// it is owned by the independent M3 acceptance (M3_CRITERIA / runM3Acceptance).
+// Historical compatibility contract: charcoal >= 1 / iron_ingot >= 3 /
+// iron_pickaxe >= 1, joined within one resident run. The current M2 is the
+// diamond-to-Nether-gate contract in MILESTONE-CONTRACT.json.
 import assert from 'node:assert/strict'
 import * as acceptance from './m2-acceptance.mjs'
 

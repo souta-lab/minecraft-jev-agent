@@ -1,6 +1,8 @@
 // test-option-ladder.mts - Issue #21 dry-run demonstration: the compiled Options
-// reproduce the current deterministic ladder for the M2 rungs, and the compiler
-// is a no-op while BUDDY_OPTION_COMPILER is off. Pure: no bot, no server.
+// reproduce the historical iron-age lower-prerequisite ladder, and the
+// compiler is a no-op while BUDDY_OPTION_COMPILER is off. The current M2 is the
+// diamond-to-Nether-gate contract in MILESTONE-CONTRACT.json. Pure: no bot, no
+// server.
 import { applyCompiledPlan, compilePlannedGoals, evaluatePredicates, optionSpecsToPlannedGoals, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { bestPickaxeRank, buildPlanOptions, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { M2_PLAN_JSON, planFromJson } from '../jev-agent/src/system2.ts'
@@ -53,7 +55,7 @@ function sameGoal(a: PlannedGoal, b: PlannedGoal): boolean {
 
 const M2_RUNG_IDS = ['cobblestone', 'furnace', 'stone_pickaxe', 'charcoal', 'raw_iron', 'iron_ingot', 'iron_pickaxe']
 
-addCase('compiled Options match the current ladder for the M2 finish-iron-age rungs', () => {
+addCase('compiled Options match the historical iron-age lower-prerequisite rungs', () => {
   const option = buildPlanOptions(M2_LIVE, M2_WORLD).find((entry) => entry.id === 'finish_iron_age')
   if (option === undefined) return { pass: false, detail: 'finish_iron_age option missing from the ladder' }
   const compiled = applyCompiledPlan(option.goals, M2_SNAPSHOT, { enabled: true })
@@ -69,7 +71,7 @@ addCase('compiled Options match the current ladder for the M2 finish-iron-age ru
   }
 })
 
-addCase('every executable M2 rung compiles and round-trips to the same goal', () => {
+addCase('every executable lower-prerequisite rung compiles and round-trips to the same goal', () => {
   const mismatches: string[] = []
   for (const rung of RUNGS) {
     if (!M2_RUNG_IDS.includes(rung.id)) continue
@@ -89,7 +91,7 @@ addCase('every executable M2 rung compiles and round-trips to the same goal', ()
   return { pass: mismatches.length === 0, detail: `checked=${M2_RUNG_IDS.length} mismatches=[${mismatches.join(',')}]` }
 })
 
-addCase('the M2 plan JSON compiles into stable Option ids', () => {
+addCase('the historical iron-age plan JSON compiles into stable Option ids', () => {
   const specs = compilePlannedGoals(planFromJson(M2_PLAN_JSON))
   const ids = specs.map((spec) => spec.id)
   const expects = [

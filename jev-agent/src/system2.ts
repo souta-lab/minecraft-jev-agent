@@ -137,9 +137,12 @@ export const M1_PLAN_JSON: PlanJson = {
 }
 
 /**
- * The M2 iron-age ladder, supplied once by the planner stub. The log species
- * matches what is reachable around the default spawn (birch); the iron/diamond
- * targets are the sensor's yield names (`raw_iron`, `diamond`).
+ * Historical iron-age ladder, supplied once by the planner stub. It remains
+ * available for regression fixtures and compatibility runs; it is not the
+ * current M2 definition. The current M2 is the diamond-to-Nether-gate path in
+ * MILESTONE-CONTRACT.json. The log species matches what is reachable around
+ * the default spawn (birch); the iron/diamond targets are the sensor's yield
+ * names (`raw_iron`, `diamond`).
  */
 export const M2_PLAN_JSON: PlanJson = {
   goal: 'iron_age',

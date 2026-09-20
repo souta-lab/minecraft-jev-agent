@@ -1,9 +1,9 @@
-// netherPortalPlan.ts - issue #80 (M3): the typed Nether-portal plan path.
+// netherPortalPlan.ts - issue #80: the typed Nether-portal plan path.
 //
 // WHY
 // ---
-// M3 is "diamond gear -> nether -> blaze/pearl". The live M2 ladder stops at
-// iron, but the portal capability must be expressible the moment M2 completes.
+// M2 is "diamond -> Nether gate". The former iron-age ladder remains a lower
+// prerequisite path, while this module owns the deterministic portal capability.
 // Issue #37 records that peaceful difficulty blocks M3d/M3e (blaze_rod /
 // ender_pearl) but NOT building and lighting the portal, so this module owns the
 // deterministic half only:

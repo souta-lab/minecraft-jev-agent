@@ -13,10 +13,10 @@ M1 Jev-only plan (no LLM calls):
   collect oak_log x3 -> crafting_table -> wooden_pickaxe -> cobblestone x16
   metric: LLM calls during the run (target 0), Jev calls, cost
 
-M2 iron age: furnace + charcoal -> iron ore -> iron tools -> diamond pickaxe
+M2 diamond-to-Nether-gate: diamond x3 -> diamond pickaxe -> flint_and_steel -> obsidian x10 -> build/light/verify portal
   (first milestone where the LLM must supply a long-horizon plan)
 
-M3 nether: build portal -> blaze rods -> ender pearls -> eyes of ender
+M3 Nether progression after the gate: enter Nether -> blaze rods -> ender pearls -> eyes of ender
 
 M4 THE DRAGON: stronghold -> end portal -> kill Ender Dragon
 
@@ -209,7 +209,23 @@ M1 after the refinements (my own clean run, `logs/m1-v1b-clean/`, username AI_V1
     (a non-pre-seeded run consumes oak_log into planks/table/pickaxe and leaves the placed table in
     the world).
 
-## M2 (iron age) - IN PROGRESS, blocker = drop pickup / packet locomotion
+## M2 (diamond -> Nether gate) - CURRENT DEFINITION
+
+The current M2 target is the closed loop from a diamond-capable inventory to a
+built, lit, and verified Nether portal. It requires diamond pickaxe capability,
+flint-and-steel, ten obsidian, a validated frame, and run-scoped portal-light
+verification. The former iron-age M2 material below is historical evidence and
+does not satisfy the current M2 contract.
+
+Current compliance: UNKNOWN; the typed portal plan is unit-tested, but a
+run-scoped live portal gate is not yet wired.
+
+## Historical iron-age M2 work - retained evidence
+
+The following sections document the old furnace/charcoal/iron-pickaxe milestone.
+They remain useful regression evidence but are not the current M2 definition.
+
+### Historical M2 - IN PROGRESS, blocker = drop pickup / packet locomotion
 Evidence: /home/s0u7a/mc-ai/M2-PROGRESS.md, runs in jev-agent/logs/m2-s1-m1{,b,c}/, logs/m2-s2-resource-probe.log, logs/m2-s3-ladder/.
 
 Landed (code, typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5):

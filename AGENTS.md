@@ -197,7 +197,7 @@ implemented
 > 作業前に必ず読むこと。詳細は `buddy-driver/AGENTS.md`、設計は `RESIDENT-MODE.md` / `PLANNERS.md`、現状は `ARCHITECTURE.md`。
 
 ## 0. 標準指令（ユーザー指示・恒久）
-1. **最終目標は M4（Ender Dragon 討伐）**。M2（鉄器時代）は通過点。
+1. **最終目標は M4（Ender Dragon 討伐）**。M2（ダイヤ獲得からネザーゲート開通）は通過点。
 2. ユーザーの追加発言を通常の待機条件にしない。やることが無いように見える時は、objective / open issues / evidence gapsから次作業を発見する。
 3. 判断順は **P0 methodology/evidence integrity (#63) → P1 durability/actuation safety → 二重実装回避 → M4への距離**。
 4. 進捗は一次証拠（ログ行・在庫・コミット等）で残す。ログ名やall-time counterだけから意味論を推定しない。
@@ -316,7 +316,7 @@ M3/M4の新規能力はOption/Skill境界の上へ積み、既存GoalQueue/Guard
    closed-loop evidence + hysteresis/corroboration/cooldown後にauthority
 
 6. M2完走
-   furnace -> charcoal -> raw_iron -> iron_ingot×3 -> iron_pickaxe
+   diamond×3 -> diamond_pickaxe -> flint_and_steel -> obsidian×10 -> portal frame -> lit/verified Nether gate
 
 7. #35 semantic planner consolidation
 8. #41 predicate-based capability graph
@@ -486,8 +486,8 @@ HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
 
 ```text
 M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone
-M2: furnace -> charcoal -> iron_ore -> iron_ingot×3 -> iron_pickaxe
-M3: diamond -> diamond gear -> Nether -> blaze rods / ender pearls
+M2: diamond×3 -> diamond_pickaxe -> flint_and_steel -> obsidian×10 -> Nether gate built/lit/verified
+M3: enter Nether -> blaze rods / ender pearls -> eyes of ender
 M4: eyes -> stronghold -> End -> dragon
 ```
 
@@ -562,8 +562,8 @@ M4: eyes -> stronghold -> End -> dragon
 
 ## 7. M4設定blocker
 
-現在difficulty=peaceful。blaze / enderman由来resourceが必要になるM3d前にdifficulty変更をproduct decisionとして明示し、変更runを証拠化する。
-それまではresident/Option/M2の検証を進める。
+現在difficulty=peaceful。M2のネザーゲート構築まではpeacefulで進められる。blaze / enderman由来resourceが必要になるM3前にdifficulty変更をproduct decisionとして明示し、変更runを証拠化する。
+それまではresident/Option/M2（ダイヤからゲートまで）の検証を進める。
 
 ## 8. 設計判定ルール
 
