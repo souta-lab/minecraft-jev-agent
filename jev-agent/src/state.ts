@@ -18,6 +18,7 @@ import type { GameDataRegistry } from './gameData.ts'
 import { NETHER_PORTAL, portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
+import { selectPlaceableBlock } from './pillarSearch.ts'
 
 export type Vec3Json = {
   x: number
@@ -828,10 +829,37 @@ function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): B
   return out
 }
 
-function buildBlocks(bot: Bot, options: SensorOptions, self: SelfState, focusItem: string | null): BlockState[] {
+function buildBlocks(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  focusItem: string | null,
+  inventoryCounts: Readonly<Record<string, number>>,
+): BlockState[] {
   const logs = buildLogBlocks(bot, options, self)
-  const stones = focusItem !== null && STONE_YIELDS.has(focusItem) ? buildStoneBlocks(bot, options, self, focusItem) : []
-  const buried = buildBuriedStoneBlocks(bot, options, self, focusItem)
+  const stoneFocus = focusItem !== null && STONE_YIELDS.has(focusItem) ? focusItem : null
+  // A vertical Skill can be mechanically blocked by the absence of a held
+  // placeable block while the parent Option is collecting/crafting something
+  // else (the live log route is the canonical example).  The prerequisite
+  // solver is deliberately allowed to acquire cobblestone from grounded stone
+  // producers, but that requires the sensor to retain those producers outside
+  // the current semantic focus.  This is perception of a mechanical fact, not
+  // a semantic goal switch: keep the extra scan bounded and only enable it
+  // while the capability is actually missing.
+  const prerequisiteStoneFocus =
+    stoneFocus === null && selectPlaceableBlock(inventoryCounts) === null ? 'cobblestone' : null
+  const stones =
+    stoneFocus !== null
+      ? buildStoneBlocks(bot, options, self, stoneFocus)
+      : prerequisiteStoneFocus !== null
+        ? buildStoneBlocks(bot, options, self, prerequisiteStoneFocus)
+        : []
+  const buried =
+    stoneFocus !== null
+      ? buildBuriedStoneBlocks(bot, options, self, stoneFocus)
+      : prerequisiteStoneFocus !== null
+        ? buildBuriedStoneBlocks(bot, options, self, prerequisiteStoneFocus)
+        : []
   const ores = buildOreBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)
   return [...logs, ...stones, ...buried, ...ores, ...hazards]
@@ -1344,6 +1372,7 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
  */
 export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
   const self = buildSelf(bot)
+  const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   const portalFrameSites = buildPortalFrameSites(bot, options, self)
   const portalFrame =
@@ -1358,9 +1387,9 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     tick: input.tick,
     timestampMs: Date.now(),
     self,
-    inventory: buildInventory(bot),
+    inventory,
     entities: buildEntities(bot, options, self.position),
-    blocks: buildBlocks(bot, options, self, input.focusItem ?? null),
+    blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
     terrain: { standable: buildTerrain(bot, options, self) },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
