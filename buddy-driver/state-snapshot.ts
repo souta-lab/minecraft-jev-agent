@@ -1,7 +1,7 @@
 // state-snapshot.ts - issue #40 class-A snapshot schema, migration and the
 // single-writer commit rules. This is the HOST layer: pure functions, no bot,
 // no network, so the schema contract is unit-testable without a live server.
-import type { GoalQueueSnapshot, GoalQueueState } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { AgentSnapshot, ResidentWorldMemory } from './resident-types.ts'
 import { normalizeWorldMemory } from './resident-types.ts'
 
@@ -82,20 +82,40 @@ export function isGoalQueueSnapshot(value: unknown): value is GoalQueueSnapshot 
   return value.goals.every(isQueuedGoal)
 }
 
-export function goalQueueSnapshotFromState(state: GoalQueueState): GoalQueueSnapshot {
+export function goalQueueSnapshotFromState(state: GoalQueueState, basis?: LedgerBasis): GoalQueueSnapshot {
   let counter = 0
   for (const goal of state.goals) {
     const match = /^g(\d+):/.exec(goal.id)
     const parsed = match?.[1] === undefined ? Number.NaN : Number(match[1])
     if (Number.isFinite(parsed)) counter = Math.max(counter, parsed)
   }
-  return { counter, goals: state.goals.map((goal) => ({ ...goal })) }
+  return { counter, goals: state.goals.map((goal) => ({ ...goal })), ...(basis === undefined ? {} : { basis }) }
+}
+
+function sanitizeLedgerBasis(value: unknown): LedgerBasis | undefined {
+  if (!isRecord(value)) return undefined
+  if (
+    typeof value.worldKey !== 'string' ||
+    value.worldKey.length === 0 ||
+    typeof value.frontierRungId !== 'string' ||
+    value.frontierRungId.length === 0 ||
+    typeof value.frontierRungIndex !== 'number' ||
+    !Number.isInteger(value.frontierRungIndex)
+  ) {
+    return undefined
+  }
+  return {
+    worldKey: value.worldKey,
+    frontierRungId: value.frontierRungId,
+    frontierRungIndex: value.frontierRungIndex,
+  }
 }
 
 function sanitizeGoalQueueSnapshot(value: GoalQueueSnapshot): GoalQueueSnapshot {
   return {
     counter: Math.max(0, asInt(value.counter, 0)),
     goals: value.goals.map((goal) => ({ ...goal })),
+    ...(sanitizeLedgerBasis(value.basis) === undefined ? {} : { basis: sanitizeLedgerBasis(value.basis) }),
   }
 }
 

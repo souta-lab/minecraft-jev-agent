@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
-import type { GoalQueueSnapshot, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
@@ -485,6 +485,28 @@ export function selectLedgerSnapshot(
   return null
 }
 
+/**
+ * A durable queue is semantic state, not an all-time action history. It may be
+ * restored only when its live world and mandatory frontier still match the
+ * state from which it was committed. Legacy snapshots without a basis are
+ * accepted only when they contain no unfinished work; otherwise the current
+ * generation must re-ground instead of reviving an old Option.
+ */
+export function evaluateLedgerRestoreBasis(
+  snapshot: GoalQueueSnapshot,
+  live: LedgerBasis,
+): { accept: boolean; reasons: string[] } {
+  const unfinished = snapshot.goals.some((goal) => goal.status === 'active' || goal.status === 'pending')
+  if (!unfinished) return { accept: true, reasons: [] }
+  const basis = snapshot.basis
+  if (basis === undefined) return { accept: false, reasons: ['missing_frontier_basis'] }
+  const reasons: string[] = []
+  if (basis.worldKey !== live.worldKey) reasons.push('world_key_changed')
+  if (basis.frontierRungIndex !== live.frontierRungIndex) reasons.push('frontier_index_changed')
+  if (basis.frontierRungId !== live.frontierRungId) reasons.push('frontier_id_changed')
+  return { accept: reasons.length === 0, reasons }
+}
+
 interface LedgerReconciliationDecision {
   usablePath: string | null
   reason: string | null
@@ -539,6 +561,7 @@ function restoreLedgerIntoController(
   ledgerPath: string | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
+  liveBasis: LedgerBasis,
   log: (event: string, detail?: Record<string, unknown>) => void,
 ): void {
   let derivedSnapshot: GoalQueueSnapshot | null = null
@@ -557,13 +580,31 @@ function restoreLedgerIntoController(
     }
     return
   }
+  const basisDecision = evaluateLedgerRestoreBasis(chosen.snapshot, liveBasis)
+  if (!basisDecision.accept) {
+    log('LEDGER_RESTORE_DISCARDED', {
+      source: chosen.source,
+      reasons: basisDecision.reasons,
+      liveBasis,
+      snapshotBasis: chosen.snapshot.basis ?? null,
+      unfinished: chosen.snapshot.goals.filter((goal) => goal.status === 'active' || goal.status === 'pending').length,
+    })
+    return
+  }
   try {
     const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
     holder.queue.restore(chosen.snapshot)
     const goals = snapshotGoals(chosen.snapshot)
     const done = goals.filter((goal) => goal.status === 'done').length
     const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
-    log('LEDGER_RESTORED', { source: chosen.source, done, total: goals.length, current: current?.description ?? null, reopened: chosen.reopened.length })
+    log('LEDGER_RESTORED', {
+      source: chosen.source,
+      done,
+      total: goals.length,
+      current: current?.description ?? null,
+      reopened: chosen.reopened.length,
+      basis: chosen.snapshot.basis ?? null,
+    })
     if (chosen.reopened.length > 0) {
       log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
     }
@@ -997,7 +1038,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
   installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
-  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, ctx.log)
+  const liveLedgerBasis: LedgerBasis = {
+    worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+    frontierRungId: resume.rungId,
+    frontierRungIndex: resume.rungIndex,
+  }
+  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
   const brain = new PlannerBrain({
     bot,
     world,
@@ -1104,7 +1150,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function proposeLedger(): void {
     try {
       const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
-      ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: holder.queue.snapshot() })
+      const current = deriveResumeRung(inventoryCounts(bot), world)
+      const basis: LedgerBasis = {
+        worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+        frontierRungId: current.rungId,
+        frontierRungIndex: current.rungIndex,
+      }
+      ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: { ...holder.queue.snapshot(), basis } })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'proposeLedger', message })
@@ -1145,6 +1197,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       plannedGoals: ladder.goals.length,
       rungIndex: frontier.rungIndex,
       rungId: frontier.rungId,
+      ledgerBasis: {
+        worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+        frontierRungId: frontier.rungId,
+        frontierRungIndex: frontier.rungIndex,
+      },
       ready,
       contractVersion: CONTRACT_VERSION,
       worldKey: ctx.worldKey,

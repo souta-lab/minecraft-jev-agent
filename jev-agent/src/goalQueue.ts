@@ -261,6 +261,19 @@ export interface GoalQueueSnapshot {
   counter: number
   goals: QueuedGoal[]
   revision?: number
+  /**
+   * Live semantic frontier at the time this durable queue was committed.
+   * Missing basis means a legacy snapshot whose unfinished semantic state is
+   * not safe to restore across a fresh generation.
+   */
+  basis?: LedgerBasis
+}
+
+/** Minimal live context used to validate a durable semantic queue on restore. */
+export interface LedgerBasis {
+  worldKey: string
+  frontierRungId: string
+  frontierRungIndex: number
 }
 
 /**

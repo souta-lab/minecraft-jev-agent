@@ -15,7 +15,7 @@
 // This file is imported with `import type` only, so the host's native TypeScript
 // stripping removes it completely (no runtime import, no cycle).
 import type { Bot } from 'mineflayer'
-import type { GoalQueueSnapshot, GoalQueueState } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
@@ -334,6 +334,8 @@ export interface GenerationStatus {
   rungIndex: number
   /** id of that rung */
   rungId: string
+  /** live basis attached to host heartbeat ledger commits */
+  ledgerBasis?: LedgerBasis
   /** true once start() has run and no irreversible action can happen before the lease */
   ready: boolean
   contractVersion: number

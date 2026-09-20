@@ -1540,7 +1540,7 @@ setInterval(() => {
       action: status.currentAction?.kind ?? 'idle',
       inv: shortInv(truth.inventory),
     })
-    commitHostLedger(goalQueueSnapshotFromState(status.queue), 'heartbeat')
+    commitHostLedger(goalQueueSnapshotFromState(status.queue, status.ledgerBasis), 'heartbeat')
   }
 }, OBSERVE_MS)
 
