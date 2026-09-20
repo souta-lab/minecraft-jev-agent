@@ -209,6 +209,22 @@ addCase('allowed goal sets are disjoint and non-empty', () => {
   }
 })
 
+addCase('portal prerequisite capabilities are exposed without exposing frame semantics', () => {
+  const flint = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'flint', count: 1 }], reason: 'portal ignition' })
+  const steel = validateMercuryPlan({
+    op: 'patch',
+    goals: [{ kind: 'craft', item: 'flint_and_steel', count: 1 }],
+    reason: 'portal ignition',
+  })
+  const obsidian = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'collect', item: 'obsidian', count: 10 }], reason: 'portal frame' })
+  const frame = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'place', item: 'nether_portal', count: 1 }], reason: 'portal frame' })
+  const pass = flint.ok && steel.ok && obsidian.ok && !frame.ok
+  return {
+    pass,
+    detail: `flint=${flint.ok} steel=${steel.ok} obsidian=${obsidian.ok} frame=${frame.ok ? 'accepted' : frame.error}`,
+  }
+})
+
 addCase('retries only abort/timeout errors, never schema errors', () => {
   const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
   const wrapper = new Error('outer', { cause: timeout })
