@@ -6,7 +6,7 @@
 // are missing.
 import { GoalQueue } from './src/goalQueue.ts'
 import type { PlannedGoal } from './src/goalQueue.ts'
-import { MIRRORED_MARKERS } from './src/controller.ts'
+import { MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
 import { compilePlannedGoal, validateOptionSpec } from './src/optionSpec.ts'
 import {
   DIAMOND_PICKAXE,
@@ -330,9 +330,10 @@ addCase('every emitted PlannedGoal keeps an explicit typed goal kind that compil
 addCase('portal acceptance markers reach the host event sink with typed details', () => {
   const required = ['PORTAL_BLOCK_PLACED', 'PORTAL_FRAME_READY', 'PORTAL_LIT', 'PORTAL_VERIFIED']
   const mirrored = required.filter((marker) => MIRRORED_MARKERS.has(marker))
+  const verifiedToken = mirroredEventToken('PORTAL_VERIFIED=true detail=typed')
   return {
-    pass: mirrored.length === required.length,
-    detail: `mirrored=[${mirrored.join(',')}] required=[${required.join(',')}]`,
+    pass: mirrored.length === required.length && verifiedToken === 'PORTAL_VERIFIED',
+    detail: `mirrored=[${mirrored.join(',')}] verifiedToken=${verifiedToken ?? 'none'} required=[${required.join(',')}]`,
   }
 })
 

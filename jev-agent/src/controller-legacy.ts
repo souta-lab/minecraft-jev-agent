@@ -964,6 +964,19 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * Return the canonical host-event name for a marker-prefixed log message.
+ * `PORTAL_VERIFIED=true` is a value-bearing marker in the human-readable line,
+ * but the host recorder owns the boolean in `detail.verified` and must receive
+ * the stable semantic event name `PORTAL_VERIFIED`.
+ */
+export function mirroredEventToken(message: string): string | null {
+  const token = message.split(' ')[0]
+  if (token === undefined) return null
+  if (token.startsWith('PORTAL_VERIFIED=')) return 'PORTAL_VERIFIED'
+  return MIRRORED_MARKERS.has(token) ? token : null
+}
+
+/**
  * Starvation marker: the candidate set offered to the policy has no productive
  * option, so the only possible answers are WAIT/ESCALATE. `NO_PRODUCTIVE_CANDIDATE`
  * already warned about this, but it was not a mirrored marker, so it never
@@ -1237,8 +1250,8 @@ class MirroringEventLogger extends EventLogger {
     tick: number | null = null,
   ): void {
     super.log(source, level, message, detail, tick)
-    const token = message.split(' ')[0]
-    if (token !== undefined && MIRRORED_MARKERS.has(token)) this.sink(token, detail)
+    const token = mirroredEventToken(message)
+    if (token !== null) this.sink(token, detail)
   }
 }
 
