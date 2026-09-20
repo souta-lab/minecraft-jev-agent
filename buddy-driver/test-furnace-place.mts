@@ -553,6 +553,29 @@ addCase('(live) craft 1 x furnace + a held table places it instead of walking to
   return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
+addCase('(live) exhausted strict table spots fall through to an unfailed sensed standable cell', () => {
+  const failed: Vec3Json = { x: 38, y: 10, z: 34 }
+  const fallback: Vec3Json = { x: 37, y: 10, z: 34 }
+  const state = worldState({
+    position: { x: 39, y: 10, z: 34 },
+    inventory: inventory({ cobblestone: 119, crafting_table: 1 }),
+    placementSpots: [failed],
+    signals: signals({ failedCandidates: { 'PLACE:crafting_table:p38_10_34': 2 } }),
+    current: craftCurrent('furnace'),
+  })
+  state.terrain.standable = [state.self.position, fallback]
+
+  const candidates = generateCandidates(state, craftOptions)
+  const place = candidates.find((candidate) => candidate.id.startsWith('PLACE:crafting_table'))
+  const pass =
+    place !== undefined &&
+    place.kind === 'PLACE' &&
+    place.target?.x === fallback.x &&
+    place.target?.y === fallback.y &&
+    place.target?.z === fallback.z
+  return { pass, detail: `candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
+})
+
 addCase('(live) craft 1 x furnace + blacklisted remembered table emits no doomed RETRIEVE', () => {
   const state = worldState({
     position: { x: 39, y: 10, z: 34 },
