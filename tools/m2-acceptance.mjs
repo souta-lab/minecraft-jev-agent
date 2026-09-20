@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// m2-acceptance: read-only M2/M3 exit-criteria check against the live resident
-// control socket. Prints PASS/FAIL per criterion with observed numbers.
+// m2-acceptance: historical iron-age compatibility check against the live
+// resident control socket. Prints PASS/FAIL per criterion with observed
+// numbers. It is retained for regression/evidence replay only; the current M2
+// definition is the diamond-to-Nether-gate contract in MILESTONE-CONTRACT.json.
 // Exit 0 = PASS, 1 = FAIL, 2 = socket/scope unreadable (never fabricates a value).
 //
-// M2 CONTRACT (authoritative, this is the single source of truth):
+// HISTORICAL IRON-AGE CONTRACT (not the current M2 source of truth):
 //   charcoal >= 1 / iron_ingot >= 3 / iron_pickaxe >= 1
 // joined within ONE resident run by the ordered causal chain
 //   PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE
@@ -77,10 +79,11 @@ export const EVIDENCE_SOURCES = Object.freeze(['live-socket', 'run-scoped-snapsh
 export const M2_CONTROL_TIMEOUT_MS = 10_000
 
 /**
- * The M2 acceptance contract, exactly as ruled: charcoal, iron_ingot and
+ * The historical iron-age acceptance contract: charcoal, iron_ingot and
  * iron_pickaxe. Each rung's `requires` names the rung that must already have
- * happened in the same run. This is the single source of the M2 criteria;
- * `diamond_pickaxe` is deliberately absent (it lives in M3_CRITERIA below).
+ * happened in the same run. The current M2 portal criteria are not evaluated
+ * by this compatibility tool; `diamond_pickaxe` remains in the historical
+ * separate M3 fixture below for backwards-compatible replay tests.
  */
 export const M2_CRITERIA = [
   { item: 'charcoal', need: 1, requires: null },

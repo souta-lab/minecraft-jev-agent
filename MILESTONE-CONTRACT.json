@@ -13,14 +13,18 @@
       "evaluator": { "type": "manual", "reason": "Historical M1 PASS exists, but no current run-scoped M1 artifact gate is wired yet." }
     },
     "M2": {
-      "title": "Iron-age closed loop",
-      "requires": ["run_scoped_prereq_option", "furnace_ready", "smelt_done:iron_ingot", "iron_pickaxe_inventory", "current_main_live_inventory"],
-      "evaluator": { "type": "command", "script": "tools/m2-live-gate.mjs", "scopeArg": "--run" }
+      "title": "Diamond-to-Nether-gate closed loop",
+      "stages": [
+        { "id": "diamond_ready", "requires": ["diamond>=3", "diamond_pickaxe_inventory"] },
+        { "id": "portal_materials_ready", "requires": ["flint_and_steel_inventory", "obsidian>=10"] },
+        { "id": "portal_built", "requires": ["portal_frame_verified"] },
+        { "id": "portal_lit", "requires": ["portal_lit_verified", "portal_verified", "dimension=minecraft:overworld"] }
+      ],
+      "evaluator": { "type": "manual", "reason": "The current M2 is the diamond-to-Nether-gate milestone. The old tools/m2-live-gate.mjs evaluates historical iron-age evidence and is not a current M2 gate." }
     },
     "M3": {
-      "title": "Nether progression",
+      "title": "Nether progression after the gate",
       "stages": [
-        { "id": "portal_built", "requires": ["portal_frame_verified", "portal_lit_verified"] },
         { "id": "nether_entered", "requires": ["dimension=minecraft:the_nether"] },
         { "id": "blaze_progression", "requires": ["blaze_rod>=7"] },
         { "id": "eyes_ready", "requires": ["ender_pearl>=12", "eye_of_ender>=12"] }

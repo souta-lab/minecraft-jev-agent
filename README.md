@@ -57,8 +57,8 @@ when it has a genuinely distinct acceptance boundary.
 
 - **M0** — closed loop PASS.
 - **M1** — verified Jev-only plan with `llm.called == false`.
-- **M2** — in progress.
-- **M3/M4** — later milestones; M4 remains the final game objective.
+- **M2** — diamond-to-Nether-gate (diamond pickaxe, flint-and-steel, obsidian, frame, light, verify); live gate UNKNOWN.
+- **M3/M4** — Nether progression after the gate, then the Ender Dragon; M4 remains the final game objective.
 - **Resident mode** — persistent Mineflayer connection, generation hot reload, control socket, durable
   state and an actuation lease are implemented.
 
