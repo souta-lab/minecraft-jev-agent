@@ -25,6 +25,7 @@
     "bootstrap-preserve-test": "tsx test-bootstrap-preserve.mts",
     "reachability-test": "tsx test-reachability.mts",
     "candidate-starvation-test": "tsx test-candidate-starvation.mts",
+    "candidate-starvation-furnace-place-test": "tsx test-candidate-starvation-furnace-place.mts",
     "place-spot-test": "tsx test-place-spot.mts",
     "perception-test": "tsx test-perception.mts",
     "pit-escape-test": "tsx test-pit-escape.mts",
