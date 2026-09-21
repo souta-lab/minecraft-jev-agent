@@ -124,6 +124,9 @@ export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWor
 }
 
 /** The gateway System2 model is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
+/** At most one drained-queue semantic consultation per interval (budget guard). */
+const EMPTY_QUEUE_CONSULT_INTERVAL_MS = 5 * 60_000
+
 const MERCURY_INTENT_TTL_MS = 10 * 60_000
 const MERCURY_INTENT_MAX_USES = 3
 
@@ -243,6 +246,8 @@ export class PlannerBrain implements System2Brain {
   private lastMercuryPlan: System2Plan | null = null
   private lastMercuryPlanAtMs = 0
   private lastMercuryPlanUses = 0
+  /** last drained-queue semantic consultation (EMPTY_QUEUE_CONSULT_INTERVAL_MS) */
+  private lastEmptyQueueConsultAtMs = 0
   /** dedupe for the SYSTEM2_PLAN_REQUEST_REASON diagnosis (#359) */
   private lastLoggedPlanReason: string | null = null
   private readonly legacy: LegacyPlannerBrain
@@ -347,7 +352,22 @@ export class PlannerBrain implements System2Brain {
       this.log('SYSTEM2_PLAN_REQUEST_REASON', { reason: reasonValue })
     }
     let mercuryTrigger = mercuryTriggerFor(request)
-    if (this.mercury !== undefined && (mercuryTrigger === 'wait_limit' || mercuryTrigger === 'no_candidate')) {
+    if (this.mercury !== undefined && mercuryTrigger === 'no_candidate') {
+      // A drained queue is a fresh planning moment, not a repeated stall. Keying it
+      // on the wait-limit stall identity silenced it entirely: the same-stall rule
+      // read every empty queue as one stall, so the semantic layer was asked once
+      // and then muted while the ladder menu refilled the queue (measured live
+      // #359: reason=queue_empty present, trigger=no_candidate never consulted).
+      // Bound it by a plain interval instead, chosen to stay far under the hourly
+      // semantic budget.
+      const now = Date.now()
+      if (now - this.lastEmptyQueueConsultAtMs < EMPTY_QUEUE_CONSULT_INTERVAL_MS) {
+        mercuryTrigger = null
+      } else {
+        this.lastEmptyQueueConsultAtMs = now
+      }
+    }
+    if (this.mercury !== undefined && mercuryTrigger === 'wait_limit') {
       // The `wait_limit` trigger is counter-shaped: an unchanged stall keeps
       // incrementing the trailing WAIT streak, so a consultation that produced
       // no plan would otherwise re-fire identically and spend the hourly
