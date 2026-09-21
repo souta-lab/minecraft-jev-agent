@@ -22,6 +22,7 @@ import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '..
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
+import { HUMAN_INTENT_MAX_COUNT, parseHumanIntentCommand, parseQuantityReply } from './human-intent.ts'
 import { M2SnapshotRecorder } from './m2-snapshot.ts'
 import { OptionCompilingSystem2, optionSnapshotFromBot } from './option-brain.ts'
 import {
@@ -1899,9 +1900,118 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   let stopped: string | null = null
   let runPromise: Promise<void> | null = null
   let ready = false
+  let humanIntentAttached = false
+  const pendingHumanCounts = new Map<string, { item: string }>()
+
+  const replyToHuman = (username: string, message: string): void => {
+    if (!ctx.lease.isActive(id)) return
+    bot.chat(`/tell ${username} ${message}`)
+    ctx.log('HUMAN_INTENT_REPLY', { username, message })
+  }
+
+  const submitHumanCollect = (username: string, item: string, count: number): void => {
+    const added = controller.submitHumanPlan(
+      [
+        {
+          kind: 'collect',
+          description: `collect ${count} x ${item}`,
+          targetItem: item,
+          requiredCount: count,
+          semanticOptionIntent: `human: collect ${count} x ${item}`,
+          semanticOptionTemplateId: `human:collect:${item}`,
+          semanticOptionInstanceId: `human:collect:${item}:count=${count}`,
+        },
+      ],
+      username,
+    )
+    ctx.log('HUMAN_INTENT_COMMAND', {
+      username,
+      command: 'collect',
+      item,
+      count,
+      accepted: added.length > 0,
+    })
+    replyToHuman(
+      username,
+      added.length > 0 ? `${item} を ${count} 個集めます。` : `${item} x${count} はすでに依頼済みです。`,
+    )
+  }
+
+  const onHumanMessage = (username: string, message: string): void => {
+    if (!ctx.lease.isActive(id) || username === bot.username) return
+
+    const pending = pendingHumanCounts.get(username)
+    if (pending !== undefined) {
+      const count = parseQuantityReply(message)
+      if (count !== null) {
+        pendingHumanCounts.delete(username)
+        submitHumanCollect(username, pending.item, count)
+        return
+      }
+    }
+
+    const command = parseHumanIntentCommand(message, bot.username)
+    if (command === null) return
+
+    if (command.kind === 'collect') {
+      if (command.count === null) {
+        pendingHumanCounts.set(username, { item: command.item })
+        ctx.log('HUMAN_INTENT_CLARIFY', { username, item: command.item })
+        replyToHuman(username, `${command.item} は何個？ 数字だけで答えてください。`)
+        return
+      }
+      pendingHumanCounts.delete(username)
+      submitHumanCollect(username, command.item, command.count)
+      return
+    }
+
+    if (command.kind === 'status') {
+      const queue = controller.goalQueueState
+      const current = queue.current
+      const action = controller.agent.current
+      replyToHuman(
+        username,
+        current === null
+          ? `待機中。human queue=0 / total=${queue.depth}`
+          : `goal=${current.description} origin=${current.origin} action=${action?.kind ?? 'none'} phase=${action?.phase ?? 'none'} queue=${queue.depth}`,
+      )
+      ctx.log('HUMAN_INTENT_COMMAND', { username, command: 'status', currentGoal: current?.id ?? null })
+      return
+    }
+
+    if (command.kind === 'stop' || command.kind === 'free') {
+      pendingHumanCounts.delete(username)
+      const cleared = controller.clearHumanPlan(username, command.kind)
+      ctx.log('HUMAN_INTENT_COMMAND', { username, command: command.kind, cleared: cleared.length })
+      replyToHuman(
+        username,
+        cleared.length > 0
+          ? `human task を ${cleared.length} 件解除しました。自律ミッションへ戻ります。`
+          : '解除する human task はありません。',
+      )
+      return
+    }
+
+    if (command.reason === 'count_out_of_range') {
+      replyToHuman(username, `数量は 1〜${HUMAN_INTENT_MAX_COUNT} で指定してください。`)
+      return
+    }
+    replyToHuman(username, 'M0: collect/mine/get/fetch、status、stop、free を使えます。')
+  }
+
+  const onHumanChat = (username: string, message: string): void => onHumanMessage(username, message)
+  const onHumanWhisper = (username: string, message: string): void => onHumanMessage(username, message)
 
   function attach(): void {
-    // The controller registers its own bot listeners in start(); nothing to do.
+    if (humanIntentAttached) return
+    bot.on('chat', onHumanChat)
+    bot.on('whisper', onHumanWhisper)
+    humanIntentAttached = true
+    ctx.log('HUMAN_INTENT_READY', {
+      agent: bot.username,
+      commands: ['collect', 'status', 'stop', 'free'],
+      llm: false,
+    })
   }
 
   function start(): void {
@@ -2066,6 +2176,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     start,
     quiesce,
     dispose: () => {
+      if (humanIntentAttached) {
+        bot.removeListener('chat', onHumanChat)
+        bot.removeListener('whisper', onHumanWhisper)
+        humanIntentAttached = false
+      }
+      pendingHumanCounts.clear()
       try {
         controller.stop()
       } catch {
