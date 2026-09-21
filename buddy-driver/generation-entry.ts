@@ -35,7 +35,13 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
-import { countSensedPortalFrameBlocks, detectLivePortalVerification } from '../jev-agent/src/state.ts'
+import { portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
+import {
+  NETHER_STRUCTURE_BLOCK_NAMES,
+  countSensedPortalFrameBlocks,
+  detectLivePortalVerification,
+  sensedVerifiedPortalSites,
+} from '../jev-agent/src/state.ts'
 import {
   PlannerBrain,
   RUNGS,
@@ -58,17 +64,24 @@ import type {
   GenerationContext,
   GenerationResources,
   GenerationStatus,
+  KnownPortalSiteJson,
   KnownResourceJson,
   KnownStation,
+  KnownStructureSiteJson,
+  KnownTraversalJson,
   MissionPreflightResult,
   ResidentGeneration,
   ResidentWorldMemory,
   ServerTruth,
   StationKind,
   StructuralSmokeResult,
+  TraversalBlockReason,
+  TraversalKind,
+  TraversalResult,
   Vec3Json,
   WorldMemoryDelta,
 } from './resident-types.ts'
+import { KNOWN_RESOURCE_CAP, mergeKnownResourcesInto, mergeKnownTraversalsInto } from './resident-types.ts'
 import { worldCacheNamespace } from './world-epoch.ts'
 import {
   applyStationFailure,
@@ -231,41 +244,24 @@ const LOG_BLOCK_NAMES = [
   'warped_stem',
 ] as const
 
-const KNOWN_RESOURCE_CAP = 256
-
+// The store bound and the capacity-eviction rule are owned by the durable
+// contract (resident-types.ts) so the generation scan and the HOST delta merge
+// cannot drift onto different caps or different eviction orders.
+export { KNOWN_RESOURCE_CAP }
+/**
+ * Scan-side merge into the generation's replica of the durable store. Delegates
+ * to the ONE bounded merge: at the cap an old redundant coordinate is evicted first
+ * (`KNOWN_RESOURCE_EVICTED`), preserving the last anchor per resource identity when possible instead of the
+ * sighting being dropped for the lifetime of the world key. Returns the number
+ * of INSERTS (`added`), unchanged.
+ */
 export function mergeKnownResources(
   target: KnownResourceJson[],
   found: KnownResourceJson[],
   log?: (event: string, detail?: Record<string, unknown>) => void,
   worldEpoch?: number,
 ): number {
-  const seen = new Set(target.map((resource) => `${resource.name}@${resource.x},${resource.y},${resource.z}`))
-  let added = 0
-  for (const resource of found) {
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (seen.has(key)) continue
-    if (target.length >= KNOWN_RESOURCE_CAP) break
-    seen.add(key)
-    const stored = {
-      name: resource.name,
-      kind: resource.kind,
-      x: Math.round(resource.x),
-      y: Math.round(resource.y),
-      z: Math.round(resource.z),
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    }
-    target.push(stored)
-    log?.('KNOWN_RESOURCE', {
-      item: stored.name,
-      kind: stored.kind,
-      at: `${stored.x},${stored.y},${stored.z}`,
-      ...(worldEpoch === undefined ? {} : { worldEpoch }),
-    })
-    added += 1
-  }
-  return added
+  return mergeKnownResourcesInto(target, found, { log, worldEpoch, emitInsertMarker: true }).added
 }
 
 export const KNOWN_RESOURCE_STALENESS_RADIUS = 24
@@ -283,6 +279,14 @@ export function resourceStillPresent(
 
 function resourceKey(resource: { name: string; x: number; y: number; z: number }): string {
   return `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+/**
+ * Dimension identity for comparing a remembered resource against the active
+ * world key. `the_nether` and `minecraft:the_nether` are the same dimension.
+ */
+function normalizeDimensionId(dimension: string): string {
+  return dimension.replace(/^minecraft:/, '').toLowerCase()
 }
 
 function resourceAt(resource: { x: number; y: number; z: number }): string {
@@ -314,6 +318,25 @@ export function evictStaleKnownResources(
       log?.('KNOWN_RESOURCE_STALE', { item: resource.name, at: resourceAt(resource), reason: 'worldEpoch' })
       continue
     }
+    // Dimension re-anchoring: a remembered coordinate only means anything in the
+    // dimension it was scanned in. A portal transfer changes the dimension while
+    // the worldEpoch stays the same, so a same-epoch entry from another
+    // dimension must be evicted instead of live-probed at this coordinate.
+    if (
+      resource.dimension !== undefined &&
+      resource.dimension.length > 0 &&
+      normalizeDimensionId(resource.dimension) !== normalizeDimensionId(worldKey.dimension)
+    ) {
+      stale.push(resource)
+      staleKeys.add(resourceKey(resource))
+      log?.('KNOWN_RESOURCE_STALE', {
+        item: resource.name,
+        at: resourceAt(resource),
+        reason: 'dimension',
+        dimension: resource.dimension,
+      })
+      continue
+    }
     const distance = Math.hypot(resource.x - position.x, resource.y - position.y, resource.z - position.z)
     if (distance > KNOWN_RESOURCE_STALENESS_RADIUS) continue
     let live: string | null = null
@@ -338,6 +361,488 @@ export function evictStaleKnownResources(
     if (resource !== undefined && staleKeys.has(resourceKey(resource))) known.splice(index, 1)
   }
   return stale
+}
+
+/**
+ * #80: proof distance for the durable portal site. A remembered site within this
+ * radius was loaded while the bot stood there, so a live re-check that finds no
+ * lit portal at the site is proof the record is stale. Outside the radius,
+ * absence proves nothing and the entry is left alone (same rule as #14).
+ */
+export const PORTAL_SITE_PROOF_DISTANCE = 8
+
+export interface PortalSiteSyncResult {
+  /** the durable list after record + refresh + eviction */
+  known: KnownPortalSiteJson[]
+  /** newly verified sites to merge into durable memory */
+  added: KnownPortalSiteJson[]
+  /** disproved / foreign-epoch sites to drop from durable memory */
+  removed: KnownPortalSiteJson[]
+}
+
+function portalOriginKey(site: { x: number; y: number; z: number }): string {
+  return `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+}
+
+function normalizePortalDimension(dimension: string): string {
+  return dimension.replace(/^minecraft:/, '').toLowerCase()
+}
+
+/**
+ * #80 pure durable-site lifecycle. It records live-verified portal sites, keeps
+ * existing records fresh, drops records the live re-check disproved while the bot
+ * is close enough to trust the absence, and drops records from a previous world
+ * epoch or dimension. It never decides "go there": it only maintains the CAN
+ * fact "a verified portal exists at P".
+ */
+export function syncKnownPortalSites(input: {
+  known: readonly KnownPortalSiteJson[]
+  liveVerified: readonly {
+    origin: Vec3Json
+    widthAxis: 'x' | 'z'
+    frame?: readonly Vec3Json[]
+    interior?: readonly Vec3Json[]
+  }[]
+  worldKey: { dimension: string; worldEpoch: number }
+  position: Vec3Json
+  now?: number
+  proofDistance?: number
+}): PortalSiteSyncResult {
+  const now = input.now ?? Date.now()
+  const proofDistance = input.proofDistance ?? PORTAL_SITE_PROOF_DISTANCE
+  const liveKeys = new Set(input.liveVerified.map((site) => portalOriginKey(site.origin)))
+  const added: KnownPortalSiteJson[] = []
+  const removed: KnownPortalSiteJson[] = []
+  const kept: KnownPortalSiteJson[] = []
+  const seen = new Set<string>()
+  for (const site of input.known) {
+    const key = portalOriginKey(site)
+    if (seen.has(key)) continue
+    // World-epoch / dimension re-anchoring: a coordinate is only meaningful in
+    // the world it was verified in, so a stale record is dropped, never probed.
+    if (site.worldEpoch !== undefined && site.worldEpoch !== input.worldKey.worldEpoch) {
+      removed.push(site)
+      continue
+    }
+    if (
+      site.dimension !== undefined &&
+      site.dimension.length > 0 &&
+      normalizePortalDimension(site.dimension) !== normalizePortalDimension(input.worldKey.dimension)
+    ) {
+      removed.push(site)
+      continue
+    }
+    if (liveKeys.has(key)) {
+      seen.add(key)
+      kept.push({
+        ...site,
+        lastVerifiedAt: now,
+        ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+        ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+      })
+      continue
+    }
+    const distance = Math.hypot(site.x - input.position.x, site.y - input.position.y, site.z - input.position.z)
+    // The bot is close enough that a still-lit portal would have been sensed. The
+    // live re-check returned nothing at this site, so the record is disproved.
+    if (distance <= proofDistance) {
+      removed.push(site)
+      continue
+    }
+    seen.add(key)
+    kept.push({ ...site })
+  }
+  for (const site of input.liveVerified) {
+    const key = portalOriginKey(site.origin)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const record: KnownPortalSiteJson = {
+      x: Math.round(site.origin.x),
+      y: Math.round(site.origin.y),
+      z: Math.round(site.origin.z),
+      widthAxis: site.widthAxis,
+      dimension: input.worldKey.dimension,
+      worldEpoch: input.worldKey.worldEpoch,
+      lastVerifiedAt: now,
+      ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+      ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+    }
+    added.push(record)
+    kept.push(record)
+  }
+  return { known: kept, added, removed }
+}
+
+/**
+ * #80: expose durable portal sites as CAN-only known-resource entries. The
+ * `'portal'` kind is inert to the ore/log/station retrieval matches; the sensor
+ * projects it back into `portalFrameSites` so the existing portal grounding
+ * machinery gets the route to the site. It never asserts the portal is lit.
+ */
+export function portalSiteKnownResources(
+  known: readonly KnownPortalSiteJson[],
+): {
+  name: string
+  kind: 'portal'
+  position: Vec3Json
+  widthAxis: 'x' | 'z'
+  dimension?: string
+  worldEpoch?: number
+  frameCells?: Vec3Json[]
+}[] {
+  return known.map((site) => ({
+    name: 'nether_portal',
+    kind: 'portal' as const,
+    position: { x: site.x, y: site.y, z: site.z },
+    widthAxis: site.widthAxis,
+    ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+    ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+    ...(site.frame === undefined ? {} : { frameCells: site.frame.map((cell) => ({ ...cell })) }),
+  }))
+}
+
+/**
+ * #342: expose durable Nether fortress sites through the same CAN-only
+ * known-resource envelope as the portal sites above. `structure` is distinct
+ * from `ore` for observability; the candidate layer matches it by block name
+ * (`NETHER_STRUCTURE_BLOCK_NAMES`), so a `blaze_rod` goal gets the grounded
+ * route to the remembered body. It never asserts the body yields a blaze rod.
+ */
+export function structureSiteKnownResources(
+  known: readonly KnownStructureSiteJson[],
+): {
+  name: string
+  kind: 'structure'
+  position: Vec3Json
+  dimension?: string
+  worldEpoch?: number
+}[] {
+  return known.map((site) => ({
+    name: 'nether_bricks',
+    kind: 'structure' as const,
+    position: { x: site.x, y: site.y, z: site.z },
+    ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+    ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// #354 traversal memory: producer (observed outcome -> durable fact) and
+// consumer (durable fact -> grounded candidate envelope)
+// ---------------------------------------------------------------------------
+
+/** Cardinal/vertical bearing of an observed leg (`D` = down, `U` = up). */
+export type TraversalDirection = 'E' | 'W' | 'N' | 'S' | 'U' | 'D'
+
+/** Rounded cell key, the same `x,y,z` identity the durable merges use. */
+export function traversalCellKey(cell: Vec3Json): string {
+  return `${Math.round(cell.x)},${Math.round(cell.y)},${Math.round(cell.z)}`
+}
+
+/**
+ * Bearing of an observed leg, from the dominant axis of the displacement. `+z`
+ * is south in Minecraft coordinates, matching the E/W/N/S/down convention the
+ * descent planner already uses.
+ */
+export function traversalDirection(from: Vec3Json, to: Vec3Json): TraversalDirection {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const dz = to.z - from.z
+  const ax = Math.abs(dx)
+  const ay = Math.abs(dy)
+  const az = Math.abs(dz)
+  if (ay > ax && ay > az) return dy < 0 ? 'D' : 'U'
+  if (ax >= az) return dx >= 0 ? 'E' : 'W'
+  return dz >= 0 ? 'S' : 'N'
+}
+
+/** Geometric traversal family of an observed leg. */
+export function traversalKindFromDelta(from: Vec3Json, to: Vec3Json): TraversalKind {
+  const dy = to.y - from.y
+  if (dy <= -1) return 'descend'
+  if (dy >= 1) return 'climb'
+  return 'step'
+}
+
+/**
+ * `moveFailureKey` is `<dimension>:<round(x)>,<round(y)>,<round(z)>`. The
+ * dimension may itself contain `:` (`minecraft:overworld`), so the cell is
+ * parsed from the end. Pure and total: anything unparseable yields null.
+ */
+export function parseMoveFailureCell(key: string): Vec3Json | null {
+  const match = /:(-?\d+),(-?\d+),(-?\d+)$/.exec(key)
+  if (match === null) return null
+  return { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) }
+}
+
+/**
+ * #354 producer, pure half: translate ONE existing controller/executor outcome
+ * event into a durable traversal fact, or null when the event carries no
+ * traversal outcome.
+ *
+ * The events are the controller's own settled-outcome stream, already wired to
+ * the generation through `eventSink`:
+ *   - `PATH_CALLBACK` `completed`/`failed` - the executor's path outcome with the
+ *     destination cell and the typed failure `outcome`;
+ *   - `MOVE_FAILMEM` - the controller refused a tracked move to a cell;
+ *   - `MOVE_FAILMEM_RESET` - the controller observed a tracked move reaching a cell.
+ *
+ * `fromPosition` is the live body cell sampled before the outcome (server truth,
+ * never a new sensor). `reasonAt` maps a known death hazard at the destination to
+ * a typed reason; anything unmapped is the generic `wall` terrain refusal.
+ */
+export function traversalFactFromEvent(input: {
+  event: string
+  detail: Record<string, unknown>
+  fromPosition: Vec3Json
+  worldEpoch: number
+  now?: number
+  reasonAt?: (to: Vec3Json) => TraversalBlockReason | undefined
+}): KnownTraversalJson | null {
+  const from: Vec3Json = {
+    x: Math.round(input.fromPosition.x),
+    y: Math.round(input.fromPosition.y),
+    z: Math.round(input.fromPosition.z),
+  }
+  let to: Vec3Json | null = null
+  let result: TraversalResult | null = null
+  let kind: TraversalKind | null = null
+  if (input.event === 'PATH_CALLBACK') {
+    const target = asVec3Json(input.detail.target)
+    if (target === null) return null
+    to = { x: Math.round(target.x), y: Math.round(target.y), z: Math.round(target.z) }
+    if (input.detail.phase === 'completed') result = 'ok'
+    else if (input.detail.phase === 'failed') result = 'blocked'
+    else return null
+  } else if (input.event === 'MOVE_FAILMEM' || input.event === 'MOVE_FAILMEM_RESET') {
+    const key = typeof input.detail.key === 'string' ? input.detail.key : null
+    to = key === null ? null : parseMoveFailureCell(key)
+    if (to === null) return null
+    result = input.event === 'MOVE_FAILMEM' ? 'blocked' : 'ok'
+    // A descent candidate's own kind is authoritative over the raw delta (a
+    // level-mode tunnel step does not change y).
+    if (input.detail.kind === 'DESCEND') kind = 'descend'
+  } else {
+    return null
+  }
+  if (kind === null) kind = traversalKindFromDelta(from, to)
+  // A completed leg that starts and ends in the same cell proves nothing; it is
+  // also the duplicate arrival event (`PATH_CALLBACK completed` fires alongside
+  // `MOVE_FAILMEM_RESET`), so never store it. A refusal in place is still a fact.
+  if (result === 'ok' && traversalCellKey(from) === traversalCellKey(to)) return null
+  const reason = result === 'blocked' ? (input.reasonAt?.(to) ?? 'wall') : undefined
+  return {
+    from,
+    to,
+    kind,
+    result,
+    ...(reason === undefined ? {} : { reason }),
+    worldEpoch: input.worldEpoch,
+    lastSeenAt: input.now ?? Date.now(),
+  }
+}
+
+/**
+ * #354 consumer, pure half: suppress a waypoint the candidate layer would
+ * otherwise re-offer when a remembered `blocked` traversal covers it from where
+ * the body is NOW. "Covered" means the remembered leg ended at the waypoint cell
+ * and departed from the bot's current neighbourhood, so a blocked-west fact does
+ * not suppress an unrelated west waypoint on the other side of the map. Pure.
+ */
+export const TRAVERSAL_LOCAL_RADIUS = 4
+
+export interface TraversalSuppression {
+  waypoint: Vec3Json
+  fact: KnownTraversalJson
+  direction: TraversalDirection
+}
+
+export function traversalIsLocal(from: Vec3Json, position: Vec3Json, radius = TRAVERSAL_LOCAL_RADIUS): boolean {
+  return Math.hypot(from.x - position.x, from.y - position.y, from.z - position.z) <= radius
+}
+
+export function filterBlockedTraversalWaypoints<T extends { position: Vec3Json }>(
+  waypoints: readonly T[],
+  traversals: readonly KnownTraversalJson[],
+  position: Vec3Json,
+  worldEpoch: number,
+  radius = TRAVERSAL_LOCAL_RADIUS,
+): { kept: T[]; blocked: TraversalSuppression[] } {
+  const blockedFacts = traversals.filter(
+    (fact) =>
+      fact.result === 'blocked' &&
+      (fact.worldEpoch === undefined || fact.worldEpoch === worldEpoch) &&
+      traversalIsLocal(fact.from, position, radius),
+  )
+  const kept: T[] = []
+  const blocked: TraversalSuppression[] = []
+  for (const waypoint of waypoints) {
+    const key = traversalCellKey(waypoint.position)
+    const fact = blockedFacts.find((candidate) => traversalCellKey(candidate.to) === key)
+    if (fact === undefined) {
+      kept.push(waypoint)
+      continue
+    }
+    blocked.push({ waypoint: waypoint.position, fact, direction: traversalDirection(fact.from, fact.to) })
+  }
+  return { kept, blocked }
+}
+
+/**
+ * #354 consumer, offer half: a waypoint already in the grounded envelope that a
+ * remembered SUCCESSFUL traversal from the bot's neighbourhood actually reached.
+ * The fact corroborates reachability; the candidate layer still chooses and the
+ * executor still re-validates the cell. Pure.
+ */
+export function traversalHintsForWaypoints<T extends { position: Vec3Json }>(
+  waypoints: readonly T[],
+  traversals: readonly KnownTraversalJson[],
+  position: Vec3Json,
+  worldEpoch: number,
+  radius = TRAVERSAL_LOCAL_RADIUS,
+): { waypoint: Vec3Json; fact: KnownTraversalJson }[] {
+  const okFacts = traversals.filter(
+    (fact) =>
+      fact.result === 'ok' &&
+      (fact.worldEpoch === undefined || fact.worldEpoch === worldEpoch) &&
+      traversalIsLocal(fact.from, position, radius),
+  )
+  const hints: { waypoint: Vec3Json; fact: KnownTraversalJson }[] = []
+  for (const waypoint of waypoints) {
+    const key = traversalCellKey(waypoint.position)
+    const fact = okFacts.find((candidate) => traversalCellKey(candidate.to) === key)
+    if (fact !== undefined) hints.push({ waypoint: waypoint.position, fact })
+  }
+  return hints
+}
+
+/** One entry of the grounded known-resource envelope generation-entry hands to Jev. */
+export interface KnownResourceEnvelopeEntry {
+  name: string
+  kind: 'ore' | 'log' | 'station' | 'portal' | 'structure'
+  position: Vec3Json
+  dimension?: string
+  worldEpoch?: number
+  widthAxis?: 'x' | 'z'
+  frameCells?: Vec3Json[]
+}
+
+/** `the_nether` dimension id, normalized (no `minecraft:` prefix). */
+export const NETHER_DIMENSION_ID = 'the_nether'
+
+/**
+ * M3: Nether-only world truth. A Nether fortress can only exist in the Nether,
+ * so a structure record may only be minted there; the same id spellings
+ * (`the_nether` / `minecraft:the_nether`) are one dimension.
+ */
+export function isNetherDimension(dimension: string): boolean {
+  return normalizeDimensionId(dimension) === NETHER_DIMENSION_ID
+}
+
+/**
+ * M3: proof distance for a durable Nether-structure site record. A remembered
+ * anchor within this radius was loaded while the bot stood there, so a live scan
+ * that senses no structure fabric near the anchor is proof the record is stale.
+ * Outside the radius, absence proves nothing (same rule as #14 / #80).
+ */
+export const STRUCTURE_SITE_PROOF_DISTANCE = 8
+
+export interface StructureSiteSyncResult {
+  /** the durable list after record + refresh + eviction */
+  known: KnownStructureSiteJson[]
+  /** newly sensed sites to merge into durable memory */
+  added: KnownStructureSiteJson[]
+  /** foreign-epoch/dimension or disproved sites to drop from durable memory */
+  removed: KnownStructureSiteJson[]
+}
+
+function structureSiteKey(site: { x: number; y: number; z: number }): string {
+  return `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+}
+
+/**
+ * M3 pure durable Nether-structure-site lifecycle, mirroring
+ * `syncKnownPortalSites`. It records structure body cells sensed in the Nether,
+ * keeps existing records fresh, drops records the live scan disproved while the
+ * bot is close enough to trust the absence, and drops records from a previous
+ * world epoch or dimension.
+ *
+ * ADMISSION IS NETHER-ONLY: `nether_bricks` is a real block in any dimension
+ * (a player can place it anywhere), but only a Nether sighting can be fortress
+ * fabric. A non-Nether `worldKey.dimension` therefore mints nothing, so
+ * overworld sensing can never produce a Nether structure record. It never decides
+ * "go there": it only maintains the CAN fact "fortress fabric is at P".
+ */
+export function syncKnownStructureSites(input: {
+  known: readonly KnownStructureSiteJson[]
+  liveSensed: readonly { position: Vec3Json; kind: 'nether_fortress'; blocks: readonly string[] }[]
+  worldKey: { dimension: string; worldEpoch: number }
+  position: Vec3Json
+  now?: number
+  proofDistance?: number
+}): StructureSiteSyncResult {
+  const now = input.now ?? Date.now()
+  const proofDistance = input.proofDistance ?? STRUCTURE_SITE_PROOF_DISTANCE
+  const liveSensed = isNetherDimension(input.worldKey.dimension) ? input.liveSensed : []
+  const liveKeys = new Set(liveSensed.map((site) => structureSiteKey(site.position)))
+  const added: KnownStructureSiteJson[] = []
+  const removed: KnownStructureSiteJson[] = []
+  const kept: KnownStructureSiteJson[] = []
+  const seen = new Set<string>()
+  for (const site of input.known) {
+    const key = structureSiteKey(site)
+    if (seen.has(key)) continue
+    // World-epoch / dimension re-anchoring: a coordinate is only meaningful in
+    // the world it was sensed in, so a stale record is dropped, never probed.
+    if (site.worldEpoch !== undefined && site.worldEpoch !== input.worldKey.worldEpoch) {
+      removed.push(site)
+      continue
+    }
+    if (
+      site.dimension !== undefined &&
+      site.dimension.length > 0 &&
+      normalizeDimensionId(site.dimension) !== normalizeDimensionId(input.worldKey.dimension)
+    ) {
+      removed.push(site)
+      continue
+    }
+    if (liveKeys.has(key)) {
+      seen.add(key)
+      kept.push({
+        ...site,
+        lastSeenAt: now,
+        ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+      })
+      continue
+    }
+    const distance = Math.hypot(site.x - input.position.x, site.y - input.position.y, site.z - input.position.z)
+    // The bot is close enough that any fortress fabric at this anchor would have
+    // been sensed. The live scan found none, so the record is disproved.
+    if (distance <= proofDistance) {
+      removed.push(site)
+      continue
+    }
+    seen.add(key)
+    kept.push({ ...site, ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }) })
+  }
+  for (const site of liveSensed) {
+    const key = structureSiteKey(site.position)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const record: KnownStructureSiteJson = {
+      x: Math.round(site.position.x),
+      y: Math.round(site.position.y),
+      z: Math.round(site.position.z),
+      kind: site.kind,
+      blocks: [...new Set(site.blocks)].sort(),
+      dimension: input.worldKey.dimension,
+      worldEpoch: input.worldKey.worldEpoch,
+      lastSeenAt: now,
+    }
+    added.push(record)
+    kept.push(record)
+  }
+  return { known: kept, added, removed }
 }
 
 function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] {
@@ -699,17 +1204,123 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mined: { ...ctx.worldMemory.mined },
     discoveredOres: [...ctx.worldMemory.discoveredOres],
     knownResources: (ctx.worldMemory.knownResources ?? []).map((resource) => ({ ...resource })),
+    knownPortalSites: (ctx.worldMemory.knownPortalSites ?? []).map((site) => ({ ...site })),
+    knownStructureSites: (ctx.worldMemory.knownStructureSites ?? []).map((site) => ({
+      ...site,
+      ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+    })),
+    knownTraversals: (ctx.worldMemory.knownTraversals ?? []).map((traversal) => ({
+      ...traversal,
+      from: { ...traversal.from },
+      to: { ...traversal.to },
+    })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
     portalVerified: detectLivePortalVerification(ctx.bot),
+    dimension: String(ctx.bot.game?.dimension ?? ''),
+  }
+  /**
+   * #80: maintain the durable verified-portal-site record from live truth. The
+   * verdict itself stays live (`portalVerified`); this only records where a
+   * verified portal was, and drops the record when the live re-check disproves it
+   * at close range or the world epoch/dimension changed.
+   */
+  const syncPortalSiteMemory = (reason: string): { origin: Vec3Json; widthAxis: 'x' | 'z' }[] => {
+    const liveVerified = sensedVerifiedPortalSites(ctx.bot).map((site) => ({
+      origin: { x: site.origin.x, y: site.origin.y, z: site.origin.z },
+      widthAxis: site.widthAxis,
+      ...(site.existingFrame === undefined ? {} : { frame: site.existingFrame.map((cell) => ({ ...cell })) }),
+      interior: portalFrameLayout(site.origin, site.widthAxis).interior.map((cell) => ({ ...cell })),
+    }))
+    const entity = ctx.bot.entity
+    if (entity === undefined) return liveVerified
+    const result = syncKnownPortalSites({
+      known: world.knownPortalSites,
+      liveVerified,
+      worldKey: ctx.worldKey,
+      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    })
+    world.knownPortalSites = result.known
+    if (result.added.length === 0 && result.removed.length === 0) return liveVerified
+    ctx.proposeWorldMemory({
+      ...(result.added.length === 0 ? {} : { knownPortalSites: result.added }),
+      ...(result.removed.length === 0 ? {} : { removeKnownPortalSites: result.removed }),
+    })
+    ctx.log('PORTAL_SITE_MEMORY', {
+      reason,
+      source: 'live-world',
+      added: result.added.length,
+      removed: result.removed.length,
+      known: result.known.length,
+      removedSites: result.removed.map((site) => `${site.x},${site.y},${site.z}`),
+    })
+    return liveVerified
+  }
+  /**
+   * M3: maintain the durable Nether-structure-site record from live perception.
+   * The record is CAN-only ("fortress fabric sensed at P"): it never decides "go
+   * there" and never sets a goal. Admission is Nether-only, so an overworld
+   * `nether_bricks` sighting mints nothing (see `syncKnownStructureSites`). Mirrors
+   * `syncPortalSiteMemory` including the generation-start write, so the record is
+   * durable before the bot wanders out of sensor range.
+   */
+  const syncStructureSiteMemory = (
+    reason: string,
+  ): { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] => {
+    const entity = ctx.bot.entity
+    if (entity === undefined) return []
+    const liveSensed: { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] = []
+    for (const position of scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)) {
+      const name = liveBlockNameAt(ctx.bot, position)
+      if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
+      liveSensed.push({ position, kind: 'nether_fortress', blocks: [name] })
+    }
+    const result = syncKnownStructureSites({
+      known: world.knownStructureSites,
+      liveSensed,
+      worldKey: ctx.worldKey,
+      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    })
+    world.knownStructureSites = result.known
+    if (result.added.length === 0 && result.removed.length === 0) return liveSensed
+    ctx.proposeWorldMemory({
+      ...(result.added.length === 0 ? {} : { knownStructureSites: result.added }),
+      ...(result.removed.length === 0 ? {} : { removeKnownStructureSites: result.removed }),
+    })
+    ctx.log('STRUCTURE_SITE_MEMORY', {
+      reason,
+      source: 'live-world',
+      kind: 'nether_fortress',
+      dimension: ctx.worldKey.dimension,
+      added: result.added.length,
+      removed: result.removed.length,
+      known: result.known.length,
+      removedSites: result.removed.map((site) => `${site.x},${site.y},${site.z}`),
+    })
+    return liveSensed
   }
   const refreshLiveFacts = (reason: string): void => {
-    const next = detectLivePortalVerification(ctx.bot)
+    const nextDimension = String(ctx.bot.game?.dimension ?? '')
+    if (nextDimension !== world.dimension) {
+      world.dimension = nextDimension
+      ctx.log('DIMENSION_TRUTH', { dimension: nextDimension, reason, source: 'live-world' })
+    }
+    // One live scan supplies both the durable site record and the live-only
+    // verdict: `sensedVerifiedPortalSites` is the per-site form of
+    // `detectLivePortalVerification`, so a non-empty result IS the verdict.
+    const liveVerified = syncPortalSiteMemory(reason)
+    syncStructureSiteMemory(reason)
+    const next = liveVerified.length > 0
     if (next === world.portalVerified) return
     world.portalVerified = next
     ctx.log('PORTAL_TRUTH', { verified: next, reason, source: 'live-world' })
   }
+  // Record a portal that was already verified at generation start (e.g. after a
+  // hot reload) so it is durable before the bot can wander out of sensor range.
+  syncPortalSiteMemory('generation-start')
+  // Same for a Nether-structure site already in scan range at generation start.
+  syncStructureSiteMemory('generation-start')
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const m2Snapshot =
     ctx.runId === undefined || ctx.m2SnapshotDir === undefined
@@ -893,6 +1504,31 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       lastSeenAt: seenAt,
     })
   }
+  // M3: Nether fortress body cells also become remembered resource coordinates,
+  // so the existing `RETRIEVE:known` machinery has a grounded route to the
+  // fortress after it leaves live sensor range (the `blaze_rods` step's target).
+  // Dimension-gated exactly like the durable structure record: `nether_bricks`
+  // placed in the overworld is a real block but not a fortress landmark, so it is
+  // never recorded as a blaze_rod route there.
+  if (isNetherDimension(ctx.worldKey.dimension)) {
+    for (const position of scanBlockPositions(bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)) {
+      const name = liveBlockNameAt(bot, position)
+      if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
+      foundResources.push({
+        name,
+        // Same name-scanned-resource bucket as obsidian: this records the
+        // fortress landmark cell, it does NOT assert that nether bricks yield
+        // blaze_rod (see DIRECT_BLOCK_SOURCES in state.ts).
+        kind: 'ore',
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        dimension: ctx.worldKey.dimension,
+        worldEpoch: ctx.worldKey.worldEpoch,
+        lastSeenAt: seenAt,
+      })
+    }
+  }
   const staleRemovals = evictStaleKnownResources(bot, world.knownResources, ctx.worldKey, (event, detail) => ctx.log(event, detail))
   const newKnownResources = mergeKnownResources(
     world.knownResources,
@@ -907,6 +1543,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres,
     knownResources: foundResources,
     removeKnownResources: staleRemovals,
+    knownTraversals: world.knownTraversals,
     traversalFailures: world.traversalFailures,
     moveFailures: world.moveFailures,
   }
@@ -921,6 +1558,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: world.discoveredOres,
     knownResources: world.knownResources.length,
     newKnownResources,
+    knownTraversals: world.knownTraversals.length,
     moveFailures: world.moveFailures.length,
     removedStations: removedStations.length,
   })
@@ -933,7 +1571,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     placedFurnacesNear: furnaces.length,
     knownFurnaces: world.furnaces.length,
     resumeRungIndex: resume.rungIndex,
-    portalFrameBlocks: countSensedPortalFrameBlocks(ctx.bot),
+    // #80: a durable verified portal site is a complete 10-block frame. Feeding
+    // its coverage makes the portal rung re-verify the existing lit portal instead
+    // of planning a second obsidian collection/build after a respawn.
+    portalFrameBlocks: Math.max(countSensedPortalFrameBlocks(ctx.bot), world.knownPortalSites.length > 0 ? 10 : 0),
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
@@ -1012,6 +1653,127 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       })
     : undefined
 
+  /**
+   * #354 producer (the ONLY one): route a settled controller/executor locomotion
+   * outcome from the existing `eventSink` stream into the durable traversal
+   * store. No new sensor: `from` is the body cell sampled from server truth at
+   * the previous observed outcome (so a completion records the leg it actually
+   * traversed, not the arrival cell).
+   */
+  const traversalReasonAt = (to: Vec3Json): TraversalBlockReason | undefined => {
+    const hazard = world.hazards.find(
+      (h) => Math.round(h.x) === to.x && Math.round(h.y) === to.y && Math.round(h.z) === to.z,
+    )
+    if (hazard === undefined) return undefined
+    if (hazard.reason === 'lava') return 'lava'
+    if (hazard.reason === 'fall') return 'fall'
+    if (hazard.reason === 'void') return 'void'
+    return undefined
+  }
+  const liveCell = (): Vec3Json | null => {
+    const position = ctx.bot.entity?.position
+    if (position === undefined || position === null) return null
+    return { x: Math.round(position.x), y: Math.round(position.y), z: Math.round(position.z) }
+  }
+  let traversalFromCell: Vec3Json | null = liveCell()
+  const recordTraversalOutcome = (event: string, detail: Record<string, unknown>): void => {
+    const from = traversalFromCell ?? liveCell()
+    if (from === null) return
+    const fact = traversalFactFromEvent({
+      event,
+      detail,
+      fromPosition: from,
+      worldEpoch: ctx.worldKey.worldEpoch,
+      reasonAt: traversalReasonAt,
+    })
+    if (fact !== null) {
+      mergeKnownTraversalsInto(world.knownTraversals, [fact], { log: (e, d) => ctx.log(e, d) })
+      ctx.proposeWorldMemory({ knownTraversals: [fact] })
+      ctx.log('TRAVERSAL_RECORDED', {
+        from: traversalCellKey(fact.from),
+        to: traversalCellKey(fact.to),
+        kind: fact.kind,
+        result: fact.result,
+        ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+      })
+    }
+    const next = liveCell()
+    if (next !== null) traversalFromCell = next
+  }
+
+  /**
+   * #354 consumer (the ONLY one): project durable traversal facts into the SAME
+   * grounded known-resource envelope the candidate layer already reads, instead
+   * of adding a candidate-layer hook. A remembered `blocked` leg from the bot's
+   * neighbourhood removes the waypoint cell it covers, so the candidate layer
+   * cannot re-offer that direction; a remembered `ok` leg only corroborates a
+   * reachable waypoint (TRAVERSAL_HINT). Both are envelope-level facts: Jev still
+   * chooses, the executor still re-validates the cell, and no ranking is added.
+   */
+  const knownResourceEnvelope: KnownResourceEnvelopeEntry[] = [
+    ...world.knownResources
+      .filter((resource) => {
+        if (resource.kind !== 'station') return true
+        // Holding a station makes PLACE the preferred prerequisite path, but
+        // it does not make remembered world stations disappear.  In a cave
+        // with no valid placement spot, hiding every known furnace/table
+        // collapses the prerequisite ladder to WAIT even though retrieval is
+        // still a grounded fallback.
+        return !unusableStationKeys.has(`${resource.name}:${stationKey(resource)}`)
+      })
+      .map((resource) => ({
+        name: resource.name,
+        kind: resource.kind,
+        position: { x: resource.x, y: resource.y, z: resource.z },
+        ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+        ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      })),
+    // Keep durable stations in the controller envelope even when the same
+    // item is held.  `planPrereqOptions` still ranks a valid held placement
+    // first; these entries are the fallback when placement geometry refuses.
+    ...world.furnaces.map((furnace) => ({
+      name: 'furnace',
+      kind: 'station' as const,
+      position: { x: furnace.x, y: furnace.y, z: furnace.z },
+    })),
+    ...world.craftingTables.map((table) => ({
+      name: 'crafting_table',
+      kind: 'station' as const,
+      position: { x: table.x, y: table.y, z: table.z },
+    })),
+    // #80: durable verified-portal sites ride the same known-resource envelope.
+    // The `portal` kind is CAN-only: it is the grounded route back to a site the
+    // live detector already verified, never a claim that the portal is lit now.
+    ...portalSiteKnownResources(world.knownPortalSites),
+    // #342: durable Nether fortress sites ride the same envelope so the
+    // `blaze_rods` goal gets a grounded route to the remembered body.
+    ...structureSiteKnownResources(world.knownStructureSites ?? []),
+  ]
+  const traversalProjectionCell = liveCell() ?? { x: 0, y: 0, z: 0 }
+  const traversalProjection = filterBlockedTraversalWaypoints(
+    knownResourceEnvelope,
+    world.knownTraversals,
+    traversalProjectionCell,
+    ctx.worldKey.worldEpoch,
+  )
+  const groundedWaypoints = traversalProjection.kept
+  for (const suppression of traversalProjection.blocked) {
+    ctx.log('TRAVERSAL_BLOCKED', {
+      from: traversalCellKey(suppression.fact.from),
+      dir: suppression.direction,
+      reason: suppression.fact.reason ?? 'wall',
+      waypoint: traversalCellKey(suppression.waypoint),
+    })
+  }
+  for (const hint of traversalHintsForWaypoints(
+    groundedWaypoints,
+    world.knownTraversals,
+    traversalProjectionCell,
+    ctx.worldKey.worldEpoch,
+  )) {
+    ctx.log('TRAVERSAL_HINT', { waypoint: traversalCellKey(hint.waypoint), source: 'memory' })
+  }
+
   const options: Partial<JevAgentOptions> = {
     goalItem: ctx.goalItem,
     goalCount: ctx.goalCount,
@@ -1055,44 +1817,16 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       const status = typeof detail.status === 'string' ? detail.status : null
       if (actionId !== null && status !== null) m2Snapshot?.recordTerminal(actionId, { verified, status })
       handleStationEvent(event, detail)
+      // #354: the ONE traversal producer. The executor/controller outcome stream
+      // is already mirrored here; no extra listener or sensor is added.
+      recordTraversalOutcome(event, detail)
     },
     moveFailureEntries: world.moveFailures,
     onMoveFailureMemoryChange: (entries) => {
       world.moveFailures = entries.map((entry) => ({ ...entry }))
       ctx.proposeWorldMemory({ moveFailures: world.moveFailures })
     },
-    knownResources: [
-      ...world.knownResources
-        .filter((resource) => {
-          if (resource.kind !== 'station') return true
-          // Holding a station makes PLACE the preferred prerequisite path, but
-          // it does not make remembered world stations disappear.  In a cave
-          // with no valid placement spot, hiding every known furnace/table
-          // collapses the prerequisite ladder to WAIT even though retrieval is
-          // still a grounded fallback.
-          return !unusableStationKeys.has(`${resource.name}:${stationKey(resource)}`)
-        })
-        .map((resource) => ({
-          name: resource.name,
-          kind: resource.kind,
-          position: { x: resource.x, y: resource.y, z: resource.z },
-          ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-          ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-        })),
-      // Keep durable stations in the controller envelope even when the same
-      // item is held.  `planPrereqOptions` still ranks a valid held placement
-      // first; these entries are the fallback when placement geometry refuses.
-      ...world.furnaces.map((furnace) => ({
-        name: 'furnace',
-        kind: 'station' as const,
-        position: { x: furnace.x, y: furnace.y, z: furnace.z },
-      })),
-      ...world.craftingTables.map((table) => ({
-        name: 'crafting_table',
-        kind: 'station' as const,
-        position: { x: table.x, y: table.y, z: table.z },
-      })),
-    ],
+    knownResources: groundedWaypoints,
   }
 
   const controller = new JevController(bot, options)
@@ -1152,7 +1886,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     plannerModel: brain.model,
     plannerCache: cachePath,
     advisor: mercuryEnablement.enabled
-      ? `mercury:${mercury?.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT}`
+      ? `${mercury?.provider ?? 'gateway-system2'}:${mercury?.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT}`
       : resolveAdvisorMode(plannerMode),
     advisorSource: mercuryEnablement.source,
     optionCompiler: optionCompilerEnabled,

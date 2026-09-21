@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { classifyActionOutcome, truthfulActionOutcome } from '../jev-agent/src/actionPostcondition.ts'
 import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-legacy.ts'
+import { DEFAULT_JEV_MODEL } from '../jev-agent/src/jev.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, currentOptionContextForQueuedGoal, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { buildAuthorityQuestions } from '../jev-agent/src/jev-authority.ts'
@@ -289,6 +290,18 @@ assert.deepEqual(
 )
 assert.deepEqual(
   evaluateCandidateStarvationBoundary({
+    activeOption: true,
+    blockedBy: 'no_productive_action',
+    missing: [],
+    semanticExhausted: false,
+    semanticInvalid: false,
+    semanticAbandoned: false,
+    localRecoveryExhausted: true,
+  }),
+  { wake: true, reason: 'semantic_boundary' },
+)
+assert.deepEqual(
+  evaluateCandidateStarvationBoundary({
     activeOption: false,
     blockedBy: 'no_productive_action',
     missing: [],
@@ -401,7 +414,7 @@ const reportBrain = new PlannerBrain({
   log: () => undefined,
   cachePath: join(mkdtempSync(join(tmpdir(), 'system2-authority-report-')), 'cache.json'),
   mode: 'llm',
-  mercury: { model: 'inception/mercury-2.5' } as never,
+  mercury: { model: 'inception/mercury-2.5', provider: 'mercury' } as never,
 })
 
 const liveStationWorld = augmentPlannerWorldWithLiveStations(
@@ -415,9 +428,16 @@ assert.equal(liveStationWorld.craftingTables.length, 1)
 assert.equal(liveStationWorld.furnaces.length, 1)
 assert.equal(reportBrain.provider, 'none')
 assert.equal(reportBrain.authorityModel, 'none')
+// #11 role split: the planner authority is the LLM side and defaults to
+// DEFAULT_LLM_MODEL (Jev's own model is unchanged and only Jev's policy uses it).
+// Reference the constant so a model change cannot silently drift this fixture.
 assert.deepEqual(reportBrain.authorityStack, {
   provider: 'hybrid',
-  model: 'typesafe-ai:typesafe-ai/jev|mercury:inception/mercury-2.5',
+  // The planner authority asks an evaluation question, and the gateway only
+  // serves that API for evaluation models (verified: muse is rejected with
+  // "is a language model, not an evaluation model"), so the planner keeps
+  // DEFAULT_JEV_MODEL while the language-generation roles use DEFAULT_LLM_MODEL.
+  model: `typesafe-ai:${DEFAULT_JEV_MODEL}|mercury:inception/mercury-2.5`,
 })
 
 console.log('system2-causal-authority: PASS (causal authority regressions)')

@@ -27,6 +27,7 @@ import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
+import { defaultCandidateOptions } from '../jev-agent/src/candidates.ts'
 import {
   PlannerBrain as LegacyPlannerBrain,
   buildPlanOptions,
@@ -125,9 +126,10 @@ export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWor
   }
 }
 
-/** Mercury is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
+/** The sparse System2 repair path; Jev remains the normal grounded selector. */
 function mercuryTriggerFor(request: System2PlanRequest, mercury?: MercurySystem2): MercuryTriggerReason | null {
   if (mercury?.postDeathRecoveryPending === true) return 'post_death'
+
   let waitStreak = 0
   for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
     const outcome = request.recentOutcomes[i]
@@ -140,6 +142,25 @@ function mercuryTriggerFor(request: System2PlanRequest, mercury?: MercurySystem2
     return 'no_progress'
   }
   return null
+}
+
+/**
+ * Stable identity of the stalled semantic Option/objective, NOT the WAIT counter
+ * that keeps incrementing. The durable `wait_limit` backoff is keyed on this, so
+ * a genuine Option change (or progress, via the request authority epoch) re-arms
+ * immediately while the same stall cannot re-ask once per WAIT.
+ */
+function waitLimitStallKey(request: System2PlanRequest): string {
+  const current = request.goalQueueState.current
+  const identity =
+    current?.semanticOptionInstanceId ??
+    current?.optionInstanceId ??
+    current?.semanticOptionTemplateId ??
+    current?.optionTemplateId ??
+    current?.id ??
+    current?.description ??
+    `${request.objective.targetItem}:${request.objective.requiredCount}`
+  return `${identity}|objective:${request.objective.targetItem}:${request.objective.requiredCount}`
 }
 
 function compactPlan(option: PlanOption): Record<string, unknown> {
@@ -230,6 +251,10 @@ export class PlannerBrain implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
     this.refreshLiveFacts = options.refreshLiveFacts
+    // The normal planner authority uses experimental_evaluate and therefore
+    // keeps the evaluation-capable Jev default. Language-generation System2 is
+    // owned by MercurySystem2; local-mercury intentionally reports that model.
+
     this.mercury = options.mercury
     const configuredPlannerModel = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.model = this.mode === 'local-mercury' && this.mercury !== undefined ? this.mercury.model : configuredPlannerModel
@@ -265,7 +290,7 @@ export class PlannerBrain implements System2Brain {
       return { provider: 'local-mercury', model: `deterministic|mercury:${this.mercury!.model}` }
     }
     if (this.mercury === undefined) return { provider: 'typesafe-ai', model: this.model }
-    return { provider: 'hybrid', model: `typesafe-ai:${this.model}|mercury:${this.mercury.model}` }
+    return { provider: 'hybrid', model: `typesafe-ai:${this.model}|${this.mercury.provider}:${this.mercury.model}` }
   }
 
   async plan(request: System2PlanRequest): Promise<System2Plan> {
@@ -286,6 +311,10 @@ export class PlannerBrain implements System2Brain {
       knownFurnaces: planningWorld.furnaces.length,
       resumeRungIndex: rung.adoptedRungIndex,
       portalFrameBlocks,
+      // Hunger is live server truth the rung predicates cannot see; pass it so
+      // the survival `food` option is offered only when it is actually needed.
+      foodLevel: this.bot.food ?? null,
+      eatBelowFood: defaultCandidateOptions.eatBelowFood,
       log: this.log,
     })
 
@@ -327,7 +356,7 @@ export class PlannerBrain implements System2Brain {
     mercuryTrigger: MercuryTriggerReason,
   ): Promise<System2Plan> {
     if (this.mercury === undefined) return this.fatal('mercury-unavailable', `no Mercury configured for trigger=${mercuryTrigger}`)
-    this.lastAuthorityProvider = 'mercury'
+    this.lastAuthorityProvider = this.mode === 'local-mercury' ? 'mercury' : this.mercury.provider
     this.lastAuthorityModel = this.mercury.model
     this.log('SYSTEM2_AUTHORITY_INPUT', {
       provider: this.provider,
@@ -362,9 +391,18 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
-    const mercuryTrigger = mercuryTriggerFor(request, this.mercury)
+    let mercuryTrigger = mercuryTriggerFor(request, this.mercury)
+    if (this.mercury !== undefined && mercuryTrigger === 'wait_limit') {
+      const gate = this.mercury.evaluateWaitLimitTrigger({
+        request,
+        stallKey: waitLimitStallKey(request),
+        authorityEpoch: request.requestContext?.authorityEpoch ?? null,
+      })
+      if (!gate.allow) mercuryTrigger = null
+    }
     if (this.mercury !== undefined && mercuryTrigger !== null) {
       return this.planWithMercuryAuthority(request, mercuryTrigger)
+
     }
     this.lastAuthorityProvider = 'typesafe-ai'
     this.lastAuthorityModel = this.model

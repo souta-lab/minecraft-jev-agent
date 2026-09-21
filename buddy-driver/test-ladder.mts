@@ -152,14 +152,20 @@ addCase('a live verified portal closes the rung without an inventory portal item
   const resume = deriveResumeRung(counts, live)
   const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
   const frontier = computeFrontier(counts, live).rungId
-  const portalGoal = ladder.goals.some((goal) => goal.targetItem === 'obsidian' || goal.targetItem === 'nether_portal')
+  // A portal *build/light* goal must be gone; the `enter_nether` goal legitimately
+  // targets `nether_portal` with the `portal_entered` predicate (dimension transfer).
+  const portalGoal = ladder.goals.some(
+    (goal) =>
+      goal.targetItem === 'obsidian' ||
+      (goal.targetItem === 'nether_portal' && goal.targetPredicate !== 'portal_entered'),
+  )
   return {
-    // The portal rung is closed. With the Nether-first M3 order the next executable
-    // rung is blaze_rods (the Nether supplies blaze rods and ender pearls).
+    // The portal rung is closed. The next executable rung is the dimension
+    // transfer (`enter_nether`), which is satisfied by live dimension truth.
     pass:
-      resume.rungId === 'blaze_rods' &&
-      ladder.rungId === 'blaze_rods' &&
-      frontier === 'blaze_rods' &&
+      resume.rungId === 'enter_nether' &&
+      ladder.rungId === 'enter_nether' &&
+      frontier === 'enter_nether' &&
       !portalGoal,
     detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} frontier=${frontier} goals=${ladder.goals.length} portalGoal=${portalGoal}`,
   }
@@ -169,7 +175,7 @@ addCase('M3 ender_pearls is an executable rung with a 12-pearl collect goal', ()
   // Nether-first order: after the portal is verified and the blaze rods are held,
   // the pearl rung is the next executable M3 rung.
   const counts = { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, blaze_rod: 7 }
-  const live = world({ portalVerified: true })
+  const live = world({ portalVerified: true, dimension: 'minecraft:the_nether' })
   const resume = deriveResumeRung(counts, live)
   const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
   const pearlGoal = ladder.goals.find((goal) => goal.targetItem === 'ender_pearl')
@@ -194,7 +200,7 @@ addCase('M3 terminal ender_eyes is an executable rung with a 12-eye craft goal',
     blaze_rod: 7,
     ender_pearl: 12,
   }
-  const live = world({ portalVerified: true })
+  const live = world({ portalVerified: true, dimension: 'minecraft:the_nether' })
   const resume = deriveResumeRung(counts, live)
   const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
   const eyeGoal = ladder.goals.find((goal) => goal.targetItem === 'ender_eye')

@@ -24,8 +24,10 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions } from './candidates.ts'
+import { formatArmorRefusal } from './gearPlan.ts'
+import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -47,11 +49,14 @@ import {
   reconcileProtection,
 } from './protectionConflict.ts'
 import {
+  ACTION_COMMIT,
+  ACTION_PREEMPT,
   CANDIDATE_COMMIT_RELEASED,
   CANDIDATE_FLAP,
+  evaluateActionCommitment,
   evaluateCandidateFlap,
 } from './candidateCommitment.ts'
-import type { CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
+import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -66,8 +71,8 @@ import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, isPortalIgnitionPostconditionMet, portalFrameLayout } from './netherPortalPlan.ts'
-import type { PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -82,7 +87,7 @@ import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, W
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
-import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
@@ -98,7 +103,7 @@ import {
   StateFingerprintMemory,
 } from './moveFailMemory.ts'
 import type { MoveFailEntry, MoveFailureReason } from './moveFailMemory.ts'
-import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
+import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatAscentRefused, formatKnownResourceUnreachable, formatRetrieveStalled, pillarColumnUnsafeFromBlocks, planRetrievalEscalation, planVerticalApproachDetailed, resolveRetrievalStallTicks, selectPlaceableBlock } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
 import { DigMemory } from './worldMemory.ts'
@@ -202,6 +207,7 @@ export function filterFurnacePrerequisiteCandidates(
     if (
       candidate.kind === 'ATTACK' ||
       candidate.kind === 'EAT' ||
+      candidate.kind === 'EQUIP' ||
       candidate.kind === 'RETREAT' ||
       candidate.kind === 'WAIT' ||
       candidate.kind === 'ESCALATE'
@@ -316,6 +322,38 @@ export interface JevAgentOptions {
   /** #44: position delta in blocks that counts as new information. */
   replanPositionDelta: number
   /**
+   * #78: consecutive zero-progress (`no_new_info`) throttled replan cycles for
+   * the same (reason, goal, stateHash) after which the local recovery is
+   * declared exhausted and System2 is woken (`LOCAL_RECOVERY_EXHAUSTED`).
+   * `BUDDY_REPLAN_NO_INFO_ESCALATE_CYCLES` overrides it.
+   */
+  replanNoInfoEscalateCycles: number
+  /**
+   * Issue #78 follow-up: consecutive identical typed ACTION failures for the
+   * same `(plan, actionId, failureReason)` after which the local recovery is
+   * declared exhausted and System2 is woken (`ACTION_FAILURE_EXHAUSTED`).
+   * `BUDDY_ACTION_FAILURE_ESCALATE_CYCLES` overrides it. Distinct from the
+   * replan-throttle bound above: that one counts suppressed replans, this one
+   * counts the same action failing the same way inside the executor.
+   */
+  actionFailureEscalateCycles: number
+  /**
+   * Issue #327 follow-up: consecutive chosen WAIT decisions while real
+   * actionable candidates exist, after which the local recovery is declared
+   * exhausted and System2 is woken (`WAIT_EXHAUSTED`).
+   * `BUDDY_WAIT_STREAK_ESCALATE_CYCLES` overrides it.
+   */
+  waitStreakEscalateCycles: number
+  /**
+   * Control-action abandon-deferral bound (live defect, d428d1c/m3-live): a
+   * beta abandon requested above threshold while the only action is a control
+   * action (WAIT/ESCALATE) is deferred at most this many consecutive times for
+   * the same `(plan, action, reason)` before it is honored. Verified progress or
+   * a plan change resets the streak.
+   * `BUDDY_BETA_ABANDON_DEFER_CYCLES` overrides it.
+   */
+  betaAbandonDeferCycles: number
+  /**
    * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
    * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
@@ -366,6 +404,10 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   actuation: 'pathfinder',
   replanThrottleMs: resolveReplanThrottleMs(),
   replanPositionDelta: resolveReplanPositionDelta(),
+  replanNoInfoEscalateCycles: resolveReplanNoInfoEscalateCycles(),
+  actionFailureEscalateCycles: resolveActionFailureEscalateCycles(),
+  waitStreakEscalateCycles: resolveWaitStreakEscalateCycles(),
+  betaAbandonDeferCycles: resolveBetaAbandonDeferCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
   worldEpoch: 0,
 }
@@ -716,6 +758,25 @@ export function decideRetrieveMemory(
  * preserved. An empty queue (fresh bootstrap) keeps the requested op unchanged,
  * and an explicit `abort` is never overridden.
  */
+/**
+ * Pure decision behind the orphaned-smelt prerequisite retirement. A
+ * `smelt:iron_ingot` row exists only to feed a craft that consumes the ingot, so
+ * it is obsolete once that craft's product is held (`held`) and nothing live
+ * wants an iron ingot (`stillWanted`). Returns the audit reason, or null to keep
+ * the normal #55 protection. Exported so the decision is fixture-testable
+ * without a bot.
+ */
+export function orphanedSmeltPrerequisiteReason(input: {
+  kind: string
+  item: string | null
+  held: number
+  stillWanted: boolean
+}): string | null {
+  if (input.kind !== 'smelt' || input.item !== IRON_INGOT) return null
+  if (input.stillWanted || input.held < 1) return null
+  return `orphaned smelt prerequisite: ${FLINT_AND_STEEL}=${input.held} and no live row or incoming goal requires ${IRON_INGOT}`
+}
+
 export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | undefined): PlanOp {
   const op = requested ?? 'replace'
   if (op === 'replace' && queue.current !== null) return 'continue'
@@ -960,6 +1021,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   PROTECTION_ABANDON_CONFLICT,
   CANDIDATE_FLAP,
   CANDIDATE_COMMIT_RELEASED,
+  ACTION_COMMIT,
+  ACTION_PREEMPT,
+  WAIT_STREAK_MARKER,
+  WAIT_EXHAUSTED_MARKER,
+  BETA_ABANDON_DEFERRED_MARKER,
+  BETA_ABANDON_RELEASED_MARKER,
   'BETA_DEFERRED',
 ])
 
@@ -1272,6 +1339,25 @@ export function canAuthoritativelyAbandonOption(optionId: string | null): option
   return typeof optionId === 'string' && optionId.length > 0
 }
 
+/**
+ * Verified goal/body/search progress observed for the current decision. Used
+ * only to reset the bounded beta-abandon deferral (a productive in-flight action
+ * keeps its deferral); it never selects an action.
+ */
+export function betaAbandonProgressObserved(reason: string, outcome: System2Outcome | null): boolean {
+  if (reason === 'body_or_search_progress') return true
+  if (outcome === null) return false
+  const kinds = outcome.progressKinds ?? []
+  return (
+    outcome.progress === 'goal' ||
+    outcome.progress === 'body' ||
+    outcome.progress === 'search' ||
+    kinds.includes('goal') ||
+    kinds.includes('body') ||
+    kinds.includes('search')
+  )
+}
+
 export class JevController {
   private readonly bot: Bot
   private options: JevAgentOptions
@@ -1354,6 +1440,10 @@ export class JevController {
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastLogRouteSignature = ''
+  /** Dedupe key for FOOD_LOW/EAT_REFUSED/FOOD_ROUTE so a stable food state is one auditable line. */
+  private lastFoodMarkerSignature = ''
+  /** Food-item counts at the previous decision tick, for FOOD_ACQUIRED; null until the first tick. */
+  private lastFoodCounts: Map<string, number> | null = null
   private lastProgress = 0
   private lastProgressAt = Date.now()
 
@@ -1372,6 +1462,28 @@ export class JevController {
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
+  /**
+   * Issue #78 follow-up: bounded counter for the SAME typed action failure being
+   * re-offered for the same plan. Separate instance and separate streak from
+   * `replanThrottle`'s #44/#78 no-progress counter by construction.
+   */
+  private readonly actionFailureEscalation: ActionFailureEscalation
+  /** #327 follow-up: bounded chosen-WAIT streak while real actions exist. */
+  private readonly waitStreakEscalation: WaitStreakEscalation
+  /**
+   * Bounded control-action abandon deferral (d428d1c/m3-live): `WAIT` must not
+   * be able to suppress its own beta abandon indefinitely. See
+   * `BetaAbandonDeferral` for the reset conditions and the authority boundary.
+   */
+  private readonly betaAbandonDeferral: BetaAbandonDeferral
+  /** Plan revision the current `betaTerminationBoundary` decision belongs to. */
+  private betaAbandonPlanId: string | null = null
+  /**
+   * Set for exactly one decision after an actionable WAIT streak is exhausted,
+   * so WAIT is removed from the offered set and the policy must choose a real
+   * candidate. Cleared at the next candidate build; never a standing filter.
+   */
+  private waitSuppressed = false
   private readonly loggedStaleResources = new Set<string>()
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
@@ -1389,6 +1501,16 @@ export class JevController {
   private capabilityGapActive = false
   private capabilityGapSignature: string | null = null
   private ascendRefusedSinceObservation = false
+  /**
+   * Previous tick's sensor state, used only to re-derive the pure vertical plan
+   * for the capability target. `observeCapabilityGap` runs before this tick's
+   * sensor build, so the plan fact is one tick old; the tick guard rejects a
+   * stale/disconnected snapshot.
+   */
+  private lastWorldState: WorldState | null = null
+  private lastWorldStateTick = -1
+  /** last logged `ASCENT_REFUSED` line, so one dead end is one line. */
+  private lastAscentRefusalKey: string | null = null
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
@@ -1408,6 +1530,10 @@ export class JevController {
   private lastPlacementRefusalKey: string | null = null
   /** last logged PORTAL_LIGHT_REFUSED signature, so one ignition dead end is one line. */
   private lastIgnitionRefusalKey: string | null = null
+  /** last logged PORTAL_ENTER_REFUSED signature, so one transfer dead end is one line. */
+  private lastEntryRefusalKey: string | null = null
+  /** last logged EQUIP_ARMOR_REFUSED signature set, so "nothing better is held" is one line. */
+  private lastArmorRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
@@ -1452,6 +1578,13 @@ export class JevController {
   private readonly abandonedOptions = new AbandonmentLedger()
   /** #11 v2 §7: anti-thrash commitment - one candidate until a fact changes. */
   private commitmentState: CandidateFlapState | null = null
+  /**
+   * Action-lifecycle commitment: the in-flight chosen action is held for a
+   * bounded window so the next decision cannot replace it before it settles.
+   * Released on completion/failure (`onActionComplete`), a plan/goal change, a
+   * deterministic invalidation, or the bounded window/budget.
+   */
+  private actionCommitmentState: ActionCommitmentState | null = null
   /** verified-outcome counter; a change clears the flap window and the commitment. */
   private progressEpoch = 0
   private commitmentProgressEpoch = 0
@@ -1490,7 +1623,14 @@ export class JevController {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
     this.moveFailMemory = this.createMoveFailMemory()
-    this.replanThrottle = new ReplanThrottle(this.options.replanThrottleMs, this.options.replanPositionDelta)
+    this.replanThrottle = new ReplanThrottle(
+      this.options.replanThrottleMs,
+      this.options.replanPositionDelta,
+      this.options.replanNoInfoEscalateCycles,
+    )
+    this.actionFailureEscalation = new ActionFailureEscalation(this.options.actionFailureEscalateCycles)
+    this.waitStreakEscalation = new WaitStreakEscalation(this.options.waitStreakEscalateCycles)
+    this.betaAbandonDeferral = new BetaAbandonDeferral(this.options.betaAbandonDeferCycles)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.recipeIndex = createRecipeIndex(bot.registry)
@@ -1920,7 +2060,10 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
-      this.signals.knownResources = filterKnownResources(this.knownResourcesForSensor(), this.unreachableResources)
+      this.signals.knownResources = filterKnownResources(
+        this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.currentDimension())),
+        this.unreachableResources,
+      )
       this.updateStallSignal()
       this.observeRetrievalStall()
       this.observeCapabilityGap()
@@ -1984,6 +2127,11 @@ export class JevController {
       this.logStaleKnownResources(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
       this.lastStateFingerprint = this.stateFingerprint(state)
+      // Retain the sensor facts the pure vertical-plan refusal needs (step cuts,
+      // terrain, inventory). `observeCapabilityGap` runs before the sensor build,
+      // so it reads the previous tick's snapshot through the tick guard.
+      this.lastWorldState = state
+      this.lastWorldStateTick = this.tickCounter
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -1992,6 +2140,7 @@ export class JevController {
 
       const unreachableStations = this.unreachableStationKeys(state)
       const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
+      const portalEntry = this.portalEntryPlan(state)
       const groundingOptions = candidateOptions(
         this.options,
         this.recipeIndex,
@@ -2000,12 +2149,15 @@ export class JevController {
         blacklistedMoveTargets,
         state.portalFrame,
         this.searchedSurfaceTargets,
+        portalEntry,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
+      this.logEntryRefusal(grounded.entryRefusal)
+      this.logArmorRefusal(grounded.armorRefusals)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
@@ -2046,15 +2198,44 @@ export class JevController {
       if (this.queue.current?.kind === 'descend' && candidates.some((candidate) => candidate.kind !== 'WAIT')) {
         candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
       }
+      // #327 follow-up: an exhausted actionable-WAIT streak removes the no-op for
+      // exactly one decision, so the policy must choose a real candidate. This is
+      // a control bound on the no-op, never a ranking of the real candidates: it
+      // only filters WAIT, and the flag is cleared here.
+      if (this.waitSuppressed) {
+        this.waitSuppressed = false
+        if (candidates.some((candidate) => candidate.kind !== 'WAIT')) {
+          candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
+          this.logger.warn(
+            'agent',
+            `WAIT_FORCED goal="${this.currentGoalKey()}" reason=wait_streak_exhausted`,
+            { goal: this.currentGoalKey() },
+            this.tickCounter,
+          )
+        }
+      }
       this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
+      this.logFoodState(candidates, state, groundingOptions)
       this.logLogRoute(candidates)
       this.logFuelSatisfaction(state)
 
       const actionable = candidates.filter(
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
       ).length
+      // #11: Jev owns the action choice, so a set with nothing to choose between
+      // is not a decision but a forced move — which makes live behaviour look
+      // deterministic no matter how often Jev is invoked. Kept separate from
+      // CANDIDATE_STARVATION (that one is about goal progress): a set can be
+      // starved yet offer several real choices, and non-starved yet collapse to
+      // a single action.
+      if (actionable <= 1) {
+        this.logger.info(
+          'agent',
+          `CANDIDATE_SET_DEGENERATE goal=${this.currentGoalKey()} presented=${candidates.length} actionable=${actionable}`,
+        )
+      }
       const noProductive = actionable === 0 && !state.goal.complete
       this.noProductiveThisTick = noProductive
       if (noProductive) {
@@ -2104,12 +2285,21 @@ export class JevController {
             semanticExhausted: false,
             semanticInvalid: false,
             semanticAbandoned: false,
+            // `noProductiveRepeats` only advances while goal + rounded position
+            // + inventory are unchanged (`noProductiveSignature`). Reaching the
+            // bounded waitLimit is therefore code-owned proof that local CAN is
+            // exhausted, not a hand-written choice of the replacement WHAT.
+            localRecoveryExhausted: true,
           })
           if (boundary.wake) {
             this.escalate(
               'all_candidates_invalid',
-              `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x after semantic boundary on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
+              `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x; local recovery exhausted on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
             )
+            // There is literally no executable local action to ask pi to choose.
+            // Do not burn another Jev call on WAIT; System2 now owns the next
+            // semantic decision (or the replan throttle holds it bounded).
+            return
           } else {
             this.logger.warn(
               'agent',
@@ -2151,9 +2341,11 @@ export class JevController {
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
       const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
+      const heldId = this.applyActionCommitment(committedId, candidates, state)
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(committedId, dangerGate, candidates)
+      const gated = this.applyDangerGate(heldId, dangerGate, candidates)
       const chosenId = gated.chosenId
+      this.noteWaitStreak(chosenId, actionable)
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
 
@@ -2207,6 +2399,7 @@ export class JevController {
                 this.blacklistedMoveTargets(freshState),
                 freshState.portalFrame,
                 this.searchedSurfaceTargets,
+                this.portalEntryPlan(freshState),
               ),
             ).candidates,
             freshState,
@@ -2380,16 +2573,68 @@ export class JevController {
    * A beta vote is semantic, but a control tick, a local route miss, or recent
    * body/search progress is not semantic abandonment. Keep this boundary pure
    * and auditable; it never selects the next Option.
+   *
+   * The pure gate cannot distinguish ONE control tick from a STARVED plan whose
+   * only action is WAIT: in both cases `decisionActionId` is WAIT, so the gate
+   * returns `control_action` and refuses to cross the lifecycle boundary. Left
+   * unbounded that is circular — WAIT suppresses the abandon, and suppressing
+   * the abandon keeps WAIT (live d428d1c, `attempts=74`,
+   * `CANDIDATE_STARVATION presented=1 productive=0`). The controller therefore
+   * bounds the DEFERRAL here: N consecutive deferrals for the same
+   * `(plan, action, reason)` release beta's own vote instead of suppressing it
+   * again. Verified progress resets the streak, so a genuinely productive
+   * in-flight action keeps its deferral; this never selects an Option.
    */
   private betaTerminationBoundary(decision: JevResult, optionId: string | null): BetaTerminationBoundaryDecision {
-    return evaluateBetaTerminationBoundary({
+    const outcome = this.recentOutcomes.at(-1) ?? null
+    const boundary = evaluateBetaTerminationBoundary({
       optionId,
       requested: abandonRequested(decision),
       decisionActionId: decisionIdFrom(decision),
-      latestOutcome: this.recentOutcomes.at(-1) ?? null,
+      latestOutcome: outcome,
       semanticExhausted: false,
       semanticInvalid: false,
     })
+    if (!abandonRequested(decision) || boundary.adopt) {
+      // A vote that is honored (or not requested) ends the deferred streak.
+      this.betaAbandonDeferral.reset()
+      return boundary
+    }
+    const action = decisionIdFrom(decision) ?? 'WAIT'
+    const progressed = betaAbandonProgressObserved(boundary.reason, outcome)
+    const bounded = this.betaAbandonDeferral.note({
+      plan: this.betaAbandonPlanId,
+      action,
+      reason: boundary.reason,
+      progressed,
+    })
+    if (bounded.defer) {
+      this.logger.info(
+        'heads',
+        formatBetaAbandonDeferred(bounded),
+        {
+          count: bounded.count,
+          limit: bounded.limit,
+          planId: bounded.plan,
+          action: bounded.action,
+          reason: bounded.reason,
+          progressed,
+        },
+        this.tickCounter,
+      )
+      return boundary
+    }
+    const probability = decision.answers.abandon_option?.probability ?? null
+    this.logger.warn(
+      'heads',
+      formatBetaAbandonReleased(bounded.plan, bounded.action, bounded.reason, probability),
+      { planId: bounded.plan, action: bounded.action, reason: bounded.reason, beta: probability },
+      this.tickCounter,
+    )
+    // Beta already voted to end the Option; the deferral budget is spent, so
+    // honor that vote. The released abandon still runs through the ordinary
+    // `markOptionAbandoned` + System2 handoff — this layer never picks WHAT next.
+    return { adopt: true, wake: true, reason: 'semantic_abandon' }
   }
 
   /**
@@ -2401,6 +2646,9 @@ export class JevController {
   private abandonVerdict(decision: JevResult, optionId: string | null, planId: string | null): AbandonVerdict {
     const requested = abandonRequested(decision)
     const now = Date.now()
+    // The wrapper calls this immediately before `betaTerminationBoundary`, so the
+    // deferral bound below is keyed on the same plan revision this verdict used.
+    this.betaAbandonPlanId = planId
     if (!canAuthoritativelyAbandonOption(optionId)) {
       const classification = classifyAbandonRequest({
         abandonRequested: requested,
@@ -2853,6 +3101,104 @@ export class JevController {
   }
 
   /**
+   * Action-lifecycle commitment: hold the action the executor is ALREADY running
+   * for a bounded window instead of letting this decision cancel it via
+   * `Executor.claim` (which cancels any different in-flight action first).
+   *
+   * This is the same authority invariant as the flap commitment: it can only
+   * keep the action Jev already chose, or release to the raw choice - code never
+   * substitutes a different candidate. `ACTION_COMMIT` is logged when a switch is
+   * suppressed; `ACTION_PREEMPT` when the held action is released and replaced.
+   */
+  private applyActionCommitment(
+    chosenId: string,
+    candidates: readonly Candidate[],
+    state: WorldState,
+  ): string {
+    const running = this.executor.current
+    const invalid = running === null ? null : this.deterministicInvalid(candidates, state)
+    const decision = evaluateActionCommitment({
+      previous: this.actionCommitmentState,
+      inFlight:
+        running === null
+          ? null
+          : { id: running.id, epoch: running.epoch, startedAtMs: running.startedAt },
+      chosenId,
+      planKey: this.actionCommitmentPlanKey(state),
+      nowMs: Date.now(),
+      inFlightInvalid: running !== null && invalid !== null && invalid.has(running.id),
+      inFlightOffered: running !== null && candidates.some((candidate) => candidate.id === running.id),
+    })
+    this.actionCommitmentState = decision.state
+    if (decision.line !== null) {
+      this.logger.warn(
+        'policy',
+        decision.line,
+        { chosenId, heldId: decision.chosenId, planKey: this.actionCommitmentPlanKey(state) },
+        this.tickCounter,
+      )
+    }
+    if (decision.releaseLine !== null) {
+      this.logger.warn(
+        'policy',
+        decision.releaseLine,
+        { chosenId, heldId: null, planKey: this.actionCommitmentPlanKey(state) },
+        this.tickCounter,
+      )
+    }
+    return decision.chosenId
+  }
+
+  /** Plan/goal identity for the action commitment; a change resets it. */
+  private actionCommitmentPlanKey(state: WorldState): string {
+    const current = state.goalQueue?.current
+    return `${this.currentGoalKey()}|plan=${current?.id ?? 'none'}|rev=${state.goalQueue?.revision ?? this.queue.revision}`
+  }
+
+  /**
+   * #327 follow-up: bound the chosen no-op WAIT while real actionable candidates
+   * are offered. The policy model itself can keep choosing WAIT with several real
+   * actions on the table; no existing counter sees that (`LOCAL_RECOVERY_*` only
+   * advance on suppressed replans, `ACTION_FAILURE_*` only on typed action
+   * failures, and the #43 WAIT wedge is suppressed when the junk-inventory
+   * fingerprint churns every tick).
+   *
+   * On the Nth consecutive actionable WAIT the local recovery is exhausted:
+   * `WAIT_EXHAUSTED` is logged, `progress_stall` wakes System2 through the same
+   * `escalate()` path #326/#337 use, and WAIT is removed for exactly one decision
+   * so the policy must choose a real candidate. The streak clears on any non-WAIT
+   * choice, on `actionable === 0`, on a goal/plan change (inside the counter), on
+   * progress (in `onActionComplete`), and on the Nth decision - so the next
+   * escalation needs N fresh WAITs and no hot wake loop is possible. Its
+   * fingerprint is exposed through `replanInputs()` so the #44 throttle cannot
+   * swallow this one wake as `no_new_info`.
+   */
+  private noteWaitStreak(chosenId: string, actionable: number): void {
+    const goalKey = this.currentGoalKey()
+    const decision = this.waitStreakEscalation.noteChoice(chosenId, actionable, goalKey)
+    if (decision.count === 0) return
+    const detail = {
+      goal: goalKey,
+      actionable,
+      count: decision.count,
+      limit: decision.limit,
+    }
+    if (!decision.escalate) {
+      this.logger.warn('policy', formatWaitStreak(decision), detail, this.tickCounter)
+      return
+    }
+    this.logger.warn('policy', formatWaitExhausted(decision), { ...detail, boundary: 'semantic_boundary' }, this.tickCounter)
+    // Force the next decision to choose a real candidate, then reset so the
+    // bound cannot hot-loop: N fresh WAITs are required before the next wake.
+    this.waitSuppressed = true
+    this.escalate(
+      'progress_stall',
+      `WAIT_EXHAUSTED count=${decision.count}/${decision.limit} goal=${goalKey} actionable=${actionable}`,
+    )
+    this.waitStreakEscalation.reset()
+  }
+
+  /**
    * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
    * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
    * and only give up after PLACE_RETRY_LIMIT attempts.
@@ -3058,6 +3404,16 @@ export class JevController {
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+    // A settled action (done / failed / cancelled) releases the in-flight
+    // commitment immediately, so the next decision is free to choose again. The
+    // epoch match keeps a stale completion from clearing a newer action's hold.
+    if (
+      this.actionCommitmentState !== null &&
+      this.actionCommitmentState.actionId === result.actionId &&
+      this.actionCommitmentState.epoch === result.epoch
+    ) {
+      this.actionCommitmentState = null
+    }
     const moved =
       this.actionStart === null
         ? 0
@@ -3106,6 +3462,11 @@ export class JevController {
       this.semanticStateGeneration += 1
       this.lastProgress += 1
       this.lastProgressAt = Date.now()
+      // Observed progress (body/search/goal) resets the typed-action-failure
+      // streak: the same action failing again is no longer one unbroken run.
+      this.actionFailureEscalation.reset()
+      // Real progress also ends any actionable-WAIT streak (#327 follow-up).
+      this.waitStreakEscalation.reset()
     }
     this.recentOutcomes.push({
       actionId: result.actionId,
@@ -3199,6 +3560,8 @@ export class JevController {
     } else if (truth.status === 'done' && truth.verified) {
       const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
       if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
+      // A verified success ends the run of typed failures for this plan/action.
+      this.actionFailureEscalation.reset()
     }
 
     if (completedOptionId !== null) {
@@ -3352,6 +3715,13 @@ export class JevController {
         this.noteCandidateFailure(result.actionId)
         this.recordMoveFailure(candidate, moveFailureReason(result.failure))
         this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
+        // #78 follow-up: bound the OTHER loop - the same plan re-offered with its
+        // action failing the same typed way. `onUnverifiedAction` owns unverified
+        // postconditions with its own budget, and a PLACE retry was handled above,
+        // so neither reaches here as an unhandled typed failure.
+        if (result.unverifiedPostcondition === undefined && result.failure !== null) {
+          this.noteTypedActionFailure(result.failure, result.actionId, pending)
+        }
       } else {
         this.logger.info(
           'agent',
@@ -3518,6 +3888,9 @@ export class JevController {
       position: positionKey(position),
       signature: this.oscillationSignature(),
       previous: this.oscillationState,
+      // The goal key is passed separately so junk pickups (which change the
+      // inventory part of the signature) cannot re-arm the loop detector.
+      goal: this.currentGoalKey(),
     })
     this.oscillationState = decision.state
     if (!decision.detected || decision.line === null) return
@@ -3841,7 +4214,9 @@ export class JevController {
       const complete =
         current.targetPredicate === PORTAL_LIT_PREDICATE
           ? this.portalLitTruth(current)
-          : current.targetItem !== null && this.countItem(current.targetItem) <= 0
+          : current.targetPredicate === PORTAL_ENTERED_PREDICATE
+            ? this.portalEnteredTruth(current)
+            : current.targetItem !== null && this.countItem(current.targetItem) <= 0
       if (complete) {
         const beforeId = current.id
         const beforeDescription = current.description
@@ -3974,6 +4349,82 @@ export class JevController {
     })
   }
 
+  /**
+   * Ground the dimension-transfer plan for the active `portal_entered` goal from
+   * LIVE world truth only: the interior must currently be `nether_portal` and a
+   * passable, supported, in-reach stand must exist beside it. Returns null when
+   * the active goal does not request entry. Never silent: a requested entry with
+   * no lit/reachable portal returns the pure module's typed refusal.
+   */
+  private portalEntryPlan(state: WorldState): PortalEntryPlan | null {
+    const current = state.goalQueue?.current ?? null
+    if (current === null) return null
+    if (current.kind !== 'place' || current.targetPredicate !== PORTAL_ENTERED_PREDICATE) return null
+    const entity = this.bot.entity
+    if (entity === undefined) return null
+    const scratch = entity.position.clone()
+    const blockAt = (cell: { x: number; y: number; z: number }): string | null =>
+      this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
+    const probe = {
+      passable: (x: number, y: number, z: number): boolean => {
+        const block = this.bot.blockAt(scratch.set(x, y, z))
+        return block !== null && block.boundingBox !== 'block'
+      },
+      solidSupport: (x: number, y: number, z: number): boolean =>
+        this.bot.blockAt(scratch.set(x, y, z))?.boundingBox === 'block',
+    }
+    const sites = state.portalFrameSites ?? []
+    const dimension = current.dimension ?? NETHER
+    const self = {
+      x: Math.floor(state.self.position.x),
+      y: Math.floor(state.self.position.y),
+      z: Math.floor(state.self.position.z),
+    }
+    let refusal: PortalEntryPlan | null = null
+    for (const site of sites) {
+      const plan = planPortalEntry({
+        site,
+        self,
+        blockAt,
+        probe,
+        reach: this.options.reach,
+        fromDimension: state.self.dimension,
+        dimension,
+      })
+      if (plan.ok) return plan
+      if (refusal === null) refusal = plan
+    }
+    return (
+      refusal ?? {
+        ok: false,
+        refused: true,
+        reason: 'portal_not_lit',
+        line: `${PRECONDITION_MISSING} portal=lit`,
+      }
+    )
+  }
+
+  /**
+   * World truth for the dimension-transfer predicate. The row is complete ONLY
+   * when the bot's own live dimension equals the goal's target; no inventory
+   * count can substitute for it (`nether_portal` is not an item).
+   */
+  private portalEnteredTruth(goal: QueuedGoal): boolean {
+    if (goal.targetPredicate !== PORTAL_ENTERED_PREDICATE) return false
+    const actual = this.bot.game?.dimension ?? null
+    if (actual === null) return false
+    const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
+    return normalize(actual) === normalize(goal.dimension ?? NETHER)
+  }
+
+  private logEntryRefusal(refusal: PortalEntryRefusal | null): void {
+    const key = refusal === null ? null : refusal.line
+    if (key === this.lastEntryRefusalKey) return
+    this.lastEntryRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn('agent', refusal.line, { reason: refusal.reason }, this.tickCounter)
+  }
+
   private effectiveHave(): number {
     const current = this.queue.current
     if (current === null || current.targetItem === null) return 0
@@ -4047,10 +4498,16 @@ export class JevController {
     if (current.targetItem === null) return
     const have = this.effectiveHave()
     if (current.kind === 'place') {
-      // Ordinary PLACE goals are inverse inventory goals. A portal ignition is
-      // different: `nether_portal` is a world block, never an inventory item,
-      // so zero inventory must not masquerade as a completed predicate.
-      const placed = current.targetPredicate === PORTAL_LIT_PREDICATE ? this.portalLitTruth(current) : have <= 0
+      // Ordinary PLACE goals are inverse inventory goals. A portal ignition or
+      // dimension transfer is different: `nether_portal` is a world block, never
+      // an inventory item, so zero inventory must not masquerade as a completed
+      // predicate. Each portal predicate owns its own live-world truth.
+      const placed =
+        current.targetPredicate === PORTAL_LIT_PREDICATE
+          ? this.portalLitTruth(current)
+          : current.targetPredicate === PORTAL_ENTERED_PREDICATE
+            ? this.portalEnteredTruth(current)
+            : have <= 0
       this.goal = { ...subgoalState(current, placed ? current.requiredCount : 0), haveCount: placed ? current.requiredCount : have }
       return
     }
@@ -4150,12 +4607,38 @@ export class JevController {
   }
 
   /**
-   * Retire only the stale obsidian acquisition prerequisite that a live partial
-   * frame has already made unnecessary. This is a world-truth/lifecycle
-   * reconciliation, not a semantic preference: every other protected goal keeps
-   * the normal #55 reinsertion guarantee.
+   * Retire a stale protected prerequisite that world truth has already made
+   * unnecessary. This is a world-truth/lifecycle reconciliation, not a semantic
+   * preference: every other protected goal keeps the normal #55 reinsertion
+   * guarantee.
    */
   private protectedGoalRetireReason(goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null {
+    // An `smelt:iron_ingot` row exists only to feed a craft that consumes the
+    // ingot. Once that craft is resolved — the bot holds the flint_and_steel it
+    // produced — and nothing live still wants an iron ingot, the row can only
+    // re-run a smelt with no consumer, while its own station precondition (a
+    // furnace) blocks the queue head indefinitely. Observed live: the queue head
+    // was `smelt 1 x iron_ingot` with
+    // `CANDIDATE_STARVATION blockedBy=precondition:station:furnace repeat=36`
+    // while the real next step, `collect 10 x obsidian`, sat behind it.
+    if (goal.kind === 'smelt' && goal.targetItem === IRON_INGOT) {
+      const stillWanted =
+        incoming.some((planned) => planned.targetItem === IRON_INGOT) ||
+        this.queue.state.goals.some(
+          (row) =>
+            row.id !== goal.id &&
+            row.status !== 'done' &&
+            row.status !== 'impossible' &&
+            row.targetItem === IRON_INGOT,
+        )
+      const reason = orphanedSmeltPrerequisiteReason({
+        kind: goal.kind,
+        item: goal.targetItem,
+        held: this.countItem(FLINT_AND_STEEL),
+        stillWanted,
+      })
+      if (reason !== null) return reason
+    }
     if (goal.kind !== 'collect' || goal.targetItem !== OBSIDIAN) return null
     const continuesPortalFrame = incoming.some(
       (planned) =>
@@ -4273,7 +4756,51 @@ export class JevController {
           { reason, ageMs: throttle.ageMs, stateHash: throttle.stateHash, because: throttle.kind },
           this.tickCounter,
         )
+        if (throttle.kind === 'no_new_info') {
+          // #78 counter: this local recovery has now been suppressed for
+          // `count` consecutive zero-progress cycles with an unchanged
+          // fingerprint. Bounded by `noInfoLimit`; see the exhausted branch.
+          this.logger.warn(
+            'agent',
+            formatLocalRecoveryNoProgress(this.currentGoalKey(), reason, throttle),
+            {
+              reason,
+              goal: this.currentGoalKey(),
+              stateHash: throttle.stateHash,
+              noInfoStreak: throttle.noInfoStreak,
+              noInfoLimit: throttle.noInfoLimit,
+            },
+            this.tickCounter,
+          )
+        }
         return { triggered: false, reason, detail: message }
+      }
+      if (throttle.kind === 'exhausted') {
+        // #78 escalation: N consecutive zero-progress cycles prove the local
+        // recovery is itself stuck, which is a semantic boundary. The throttle
+        // released the replan above, so the System2 call below is the explicit
+        // escalation instead of an unbounded `REPLAN_THROTTLED no_new_info`.
+        this.logger.warn(
+          'agent',
+          formatLocalRecoveryExhausted(this.currentGoalKey(), reason, throttle),
+          {
+            reason,
+            goal: this.currentGoalKey(),
+            stateHash: throttle.stateHash,
+            noInfoStreak: throttle.noInfoStreak,
+            noInfoLimit: throttle.noInfoLimit,
+            boundary: 'semantic_boundary',
+          },
+          this.tickCounter,
+        )
+        // Same escalation vocabulary the rest of the controller uses, recorded
+        // inline because `escalate()` would re-enter this throttle and
+        // re-suppress the replan exhaustion just released. The throttle's own
+        // N-cycle bound rate-limits this, so a cooldown is not needed.
+        this.escalations.push('progress_stall')
+        this.lastEscalationAt.set('progress_stall', now)
+        this.lastEscalationMs = now
+        this.signals.escalationRecommended = true
       }
     } else if (now - last < this.options.llmCooldownMs) {
       this.logger.info(
@@ -4517,6 +5044,66 @@ export class JevController {
     }
   }
 
+  /**
+   * Issue #78 follow-up: bounded escalation for a typed ACTION failure that
+   * repeats identically. `recordFailure` charges every typed failure, but the
+   * local-recovery route failures (`path_stuck`, `path_no_path`, ...) are
+   * deliberately excluded from `same_failure_3x`, and the #44/#78 replan
+   * throttle only advances on suppressed replans. Nothing therefore bounded the
+   * loop where the SAME plan is re-offered and its action fails the SAME way.
+   *
+   * Counts consecutive identical `(plan, actionId, reason)` failures. On the Nth
+   * the failure is reclassified as a semantic boundary: `ACTION_FAILURE_EXHAUSTED`
+   * is logged and the existing `same_failure_3x -> action_impossible` escalation
+   * vocabulary is used. The pending streak is exposed through `replanInputs()`
+   * so the #44 throttle cannot suppress this one wake as `no_new_info`; that
+   * keeps it "exactly like #326" rather than a parallel wake path.
+   *
+   * The counter resets on a different plan/action/reason (in the counter), on
+   * any observed progress (in `onActionComplete`), and here after the escalation
+   * is handed off, so it cannot hot-loop. Failures already owned by another
+   * handler (a verified/done action, a scheduled PLACE retry, or an unverified
+   * postcondition handled by `onUnverifiedAction`) never reach this method.
+   */
+  private noteTypedActionFailure(reason: string, actionId: string, pending: PendingDecision | undefined): void {
+    const planKey = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? this.currentGoalKey()
+    const decision = this.actionFailureEscalation.noteFailure(planKey, actionId, reason)
+    this.logger.warn(
+      'agent',
+      formatActionFailureRepeat(decision),
+      {
+        planId: planKey,
+        actionId,
+        reason,
+        count: decision.count,
+        limit: decision.limit,
+      },
+      this.tickCounter,
+    )
+    if (!decision.escalate) return
+    this.logger.warn(
+      'agent',
+      formatActionFailureExhausted(decision),
+      {
+        planId: planKey,
+        actionId,
+        reason,
+        count: decision.count,
+        limit: decision.limit,
+        boundary: 'semantic_boundary',
+      },
+      this.tickCounter,
+    )
+    // Reuse the existing escalation vocabulary. `replanInputs()` carries the
+    // exhausted streak, so the throttle releases this one wake; #78's own bound
+    // remains the backstop if the throttle still refuses it.
+    this.escalate(
+      'same_failure_3x',
+      `ACTION_FAILURE_EXHAUSTED plan=${planKey} action=${actionId} reason=${reason} count=${decision.count}/${decision.limit}`,
+    )
+    this.actionFailureEscalation.reset()
+  }
+
   private failureSnapshot(): Record<string, number> {
     const now = Date.now()
     const snapshot: Record<string, number> = {}
@@ -4614,8 +5201,14 @@ export class JevController {
 
   /**
    * The remembered target the ascent trap is measured against: the active
-   * retrieval when one exists, else the highest remembered resource still above
-   * the bot. Pure lookup; the trap predicate itself is `evaluateCapabilityGap`.
+   * retrieval when one exists, else the active surface-recovery goal's own
+   * `targetY`, else the highest remembered resource still above the bot. Pure
+   * lookup; the trap predicate itself is `evaluateCapabilityGap`.
+   *
+   * The surface goal is included because the planner's capability-gap handling
+   * forces exactly that goal (`buddy-driver/planner-legacy.ts`), and its
+   * `targetY` is the Y the body must actually reach. Without it, a shaft with no
+   * remembered upper feature had no target at all, so the trap could not fire.
    */
   private capabilityTarget(): { y: number; key: string } | null {
     const active = this.activeRetrieval
@@ -4627,8 +5220,51 @@ export class JevController {
       if (resource.position.y <= entity.position.y) continue
       if (best === null || resource.position.y > best.position.y) best = resource
     }
+    const current = this.queue.current
+    const surfaceTargetY =
+      current?.kind === 'surface' && typeof current.targetY === 'number' && Number.isFinite(current.targetY)
+        ? current.targetY
+        : null
+    if (surfaceTargetY !== null && surfaceTargetY > entity.position.y && (best === null || surfaceTargetY > best.position.y)) {
+      return { y: surfaceTargetY, key: `surface:${current?.id ?? 'surface'}:${surfaceTargetY}` }
+    }
     if (best === null) return null
     return { y: best.position.y, key: `known:${best.name}@${best.position.x},${best.position.y},${best.position.z}` }
+  }
+
+  /**
+   * Pure plan fact for the capability target: is an upward gap with no grounded
+   * plan? Reuses the same `planVerticalApproachDetailed` the candidate layer
+   * offers with, so the controller's refusal is exactly the plan the executor
+   * would have been given. A `plan` (pillar or staircase-up) or a level/downward
+   * target is not a refusal; only a typed `ascentRefusal` is. Logs the typed
+   * `ASCENT_REFUSED` line once per signature so the dead end is observable
+   * without spamming one line per tick.
+   */
+  private ascentRefusedByPlan(target: { y: number } | null): boolean {
+    const state = this.lastWorldState
+    const entity = this.bot.entity
+    if (state === null || entity === undefined || target === null) return false
+    if (this.lastWorldStateTick !== this.tickCounter - 1) return false
+    const decision = planVerticalApproachDetailed({
+      selfFeetY: entity.position.y,
+      selfPosition: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+      target: { x: entity.position.x, y: target.y, z: entity.position.z },
+      tunnel: state.signals.lastTunnel ?? null,
+      descent: state.descent,
+      stepCuts: state.stepCuts,
+      placeable: selectPlaceableBlock(state.inventory.counts),
+      columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
+      inventory: state.inventory.counts,
+    })
+    const refusal = decision.ascentRefusal
+    if (decision.plan !== null || refusal === null) return false
+    const line = formatAscentRefused(refusal)
+    if (line !== this.lastAscentRefusalKey) {
+      this.lastAscentRefusalKey = line
+      this.logger.warn('agent', line, { ...refusal, goal: this.currentGoalKey() }, this.tickCounter)
+    }
+    return true
   }
 
   /**
@@ -4641,11 +5277,18 @@ export class JevController {
     const entity = this.bot.entity
     if (entity === undefined) return
     const target = this.capabilityTarget()
+    // A refused ascent is either an executed pillar that did not verify (the
+    // executor path) OR the pure plan layer proving there is no grounded up
+    // plan at all. The second is what the measured `recover_vertical_access`
+    // y>=80 stretch hit: no pillar was ever offered, so no executed refusal was
+    // ever recorded and the trap never fired while the body paced between two
+    // cells. Both are deterministic facts, so both feed the same predicate.
+    const planRefused = this.ascentRefusedByPlan(target)
     const decision = evaluateCapabilityGap(this.capabilityGapState, {
       y: entity.position.y,
       targetY: target === null ? null : target.y,
       targetKey: target === null ? null : target.key,
-      ascendRefused: this.ascendRefusedSinceObservation,
+      ascendRefused: this.ascendRefusedSinceObservation || planRefused,
     })
     this.capabilityGapState = decision.state
     this.ascendRefusedSinceObservation = false
@@ -5171,6 +5814,14 @@ export class JevController {
       knownResources: (this.signals.knownResources ?? []).length,
       failureSignature,
       capabilityGap: this.capabilityGapActive ? this.capabilityGapSignature : null,
+      goalKey: this.currentGoalKey(),
+      // The Nth identical typed action failure is proof the local recovery is
+      // exhausted, so it is genuine new information for the replan gate even
+      // though the cheap world inputs are identical. Null at every count < N.
+      actionFailureExhausted: this.actionFailureEscalation.pendingKey(),
+      // The Nth actionable WAIT is proof the no-op selection itself is the loop,
+      // so it is genuine new information for the replan gate.
+      waitStreakExhausted: this.waitStreakEscalation.pendingKey(),
     }
   }
 
@@ -5664,6 +6315,90 @@ export class JevController {
   }
 
   /**
+   * Hunger observability. The eat mechanic itself is deterministic and already
+   * works when food is held; the live failure was a body with `food=0` and no
+   * edible item and no grounded route to one. These markers make each state
+   * greppable:
+   *
+   *   FOOD_LOW food=<n> threshold=<n>            hunger is at/below the eat gate
+   *   EAT_REFUSED reason=full|no_food            why no EAT candidate was offered
+   *   FOOD_ROUTE kind=animal target=<entity>     a grounded hunt route is on offer
+   *   FOOD_ACQUIRED item=<name> count=<n>        a food item count rose this tick
+   *
+   * Deduped by (food, threshold, held food, offered routes) so a stable food
+   * state is one auditable line, matching the LOG_ROUTE convention.
+   */
+  private logFoodState(candidates: readonly Candidate[], state: WorldState, options: CandidateOptions): void {
+    const threshold = options.eatBelowFood
+    const food = state.self.food
+    const held = pickFood(state)
+    const routes = candidates.filter((candidate) => typeof candidate.meta.foodRoute === 'string')
+    const signature = [
+      food,
+      threshold,
+      held ?? 'none',
+      routes
+        .map((candidate) => `${String(candidate.meta.foodRoute)}:${String(candidate.meta.foodTarget)}`)
+        .sort()
+        .join(','),
+    ].join('|')
+    if (signature !== this.lastFoodMarkerSignature) {
+      this.lastFoodMarkerSignature = signature
+      if (food <= threshold) {
+        this.logger.info(
+          'food',
+          `FOOD_LOW food=${food} threshold=${threshold}`,
+          { food, threshold, heldFood: held },
+          this.tickCounter,
+        )
+      }
+      if (held !== null && food > threshold) {
+        this.logger.info(
+          'food',
+          'EAT_REFUSED reason=full',
+          { food, threshold, heldFood: held },
+          this.tickCounter,
+        )
+      }
+      if (held === null && food <= threshold) {
+        this.logger.info('food', 'EAT_REFUSED reason=no_food', { food, threshold }, this.tickCounter)
+      }
+      for (const candidate of routes) {
+        this.logger.info(
+          'food',
+          `FOOD_ROUTE kind=${String(candidate.meta.foodRoute)} target=${String(candidate.meta.foodTarget)}`,
+          {
+            candidate: candidate.id,
+            kind: candidate.meta.foodRoute,
+            target: candidate.meta.foodTarget,
+            distance: candidate.meta.distance ?? null,
+          },
+          this.tickCounter,
+        )
+      }
+    }
+
+    // FOOD_ACQUIRED is an inventory delta, not a route fact. The first observed
+    // tick only seeds the baseline; a pre-existing stack is not an acquisition.
+    const current = new Map<string, number>()
+    for (const [name, count] of Object.entries(state.inventory.counts)) {
+      if (!isFoodItem(name)) continue
+      current.set(name, count)
+      if (this.lastFoodCounts === null) continue
+      const previous = this.lastFoodCounts.get(name) ?? 0
+      if (count > previous) {
+        this.logger.info(
+          'food',
+          `FOOD_ACQUIRED item=${name} count=${count}`,
+          { item: name, count, previous },
+          this.tickCounter,
+        )
+      }
+    }
+    this.lastFoodCounts = current
+  }
+
+  /**
    * The `LOG_ROUTE` marker: which log route the policy has on offer this tick
    * (`mode=mine_sensed|retrieve_known|ascend_then_mine|explore`), so a frozen
    * non-yield MINE can never again pass as progress. Deduped by
@@ -5766,6 +6501,21 @@ export class JevController {
       { reason: refusal.reason, cell: refusal.cell, item: refusal.item },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Surface every carried armor piece that was NOT offered because it is not
+   * strictly better than what is worn (`EQUIP_ARMOR_REFUSED slot=... item=...
+   * worn=... reason=not_better`), once per distinct refusal set. This is the
+   * explicit "nothing better is held" fact, never a silent churn.
+   */
+  private logArmorRefusal(refusals: readonly ArmorRefusal[]): void {
+    const key = refusals.length === 0 ? null : refusals.map(formatArmorRefusal).join('|')
+    if (key === this.lastArmorRefusalKey) return
+    this.lastArmorRefusalKey = key
+    for (const refusal of refusals) {
+      this.logger.warn('agent', formatArmorRefusal(refusal), { ...refusal }, this.tickCounter)
+    }
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */
@@ -6281,6 +7031,7 @@ function candidateOptions(
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
   portalFrame: PortalFrameValidation | null = null,
   searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
+  portalEntry: PortalEntryPlan | null = null,
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -6291,6 +7042,7 @@ function candidateOptions(
     searchedSurfaceTargets,
     reachability,
     portalFrame,
+    portalEntry,
     prereqRankPolicy: options.prereqRankPolicy,
   }
 }

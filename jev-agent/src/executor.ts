@@ -12,26 +12,29 @@
 // guarded `bot.dig()` on the block the policy actually selected.
 import pathfinderModule from 'mineflayer-pathfinder'
 import type { PartiallyComputedPath } from 'mineflayer-pathfinder'
-import type { Bot } from 'mineflayer'
+import type { Bot, EquipmentDestination } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
 import type { Candidate, CandidateKind } from './candidates.ts'
+import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
 import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, isBreakableSolidBlock } from './state.ts'
-import { interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
+import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
+import { ARMOR_DESTINATION, ARMOR_SLOT_INDEX, bestWeaponOffer, formatArmorEquip, formatWeaponEquip, formatWeaponRefusal } from './gearPlan.ts'
+import type { ArmorSlot } from './gearPlan.ts'
 import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalLit, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalEntered, formatPortalLit, normalizePortalDimension, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -125,6 +128,7 @@ export type FailureCode =
   | 'protected_station'
   | 'dig_error'
   | 'dig_timeout'
+  | 'dig_down_refused'
   | 'craft_error'
   | 'place_error'
   | 'smelt_error'
@@ -240,6 +244,12 @@ export interface ExecutorOptions {
   smeltTimeoutMs: number
   goalItem: string
   /**
+   * Bounded window for the dimension transfer: walk into the lit portal and
+   * wait for the server-side dimension change. A transfer that does not appear
+   * within it is a hard `verify_failed`, never a silent success.
+   */
+  portalEnterTimeoutMs?: number
+  /**
    * STOCK-FIRST. 'pathfinder' is the primary MOVE path: `bot.pathfinder.setGoal`
    * lets the stock pathfinder drive `setControlState` and Mineflayer physics tick.
    * Live evidence on this Leaf 26.1 server: stock traverses a 1-block pit with
@@ -290,6 +300,12 @@ const PLACED_NUDGE_TOTAL_MS = 5000
 const PLACED_MAX_STEP_CUTS = 3
 /** #79: bounded settle for the PLACE post-condition (client world is one tick behind the server). */
 const PLACE_VERIFY_SETTLE_MS = 500
+/**
+ * Bounded window to walk into a lit portal and observe the server-side
+ * dimension change. Long enough for a short approach + the respawn round trip,
+ * short enough that a portal which never transfers fails loud.
+ */
+const PORTAL_ENTER_TIMEOUT_MS = 8000
 /** A server/client inventory update can lag the equip transaction by a tick. */
 const PLACE_EQUIP_RETRIES = 4
 const PLACE_EQUIP_SETTLE_MS = 50
@@ -1364,8 +1380,12 @@ export class Executor {
           return await this.runPlace(candidate, epoch, signal, startedAt)
         case 'IGNITE':
           return await this.runIgnite(candidate, epoch, signal, startedAt)
+        case 'ENTER_PORTAL':
+          return await this.runEnterPortal(candidate, epoch, signal, startedAt)
         case 'EAT':
           return await this.runEat(candidate, epoch, signal, startedAt)
+        case 'EQUIP':
+          return await this.runEquip(candidate, epoch, signal, startedAt)
         case 'ATTACK':
           return await this.runAttack(candidate, epoch, signal, startedAt)
         case 'WAIT':
@@ -1410,6 +1430,17 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'MINE candidate has no coordinates')
+
+    // Owner vertical-safety rule, shared with the candidate generator: a MINE
+    // must never remove the block the bot is standing on. `mineCandidates` no
+    // longer offers that cell; this is the execution-time truth for any stale or
+    // foreign MINE, and it emits the greppable DIG_DOWN_REFUSED marker instead of
+    // silently dropping the bot. Checked before the phase is set to `digging` so
+    // a refused dig is never logged as an active dig.
+    const digDown = digsBotSupport(this.bot.entity.position, target)
+    if (digDown !== null) {
+      throw new ExecutorError('dig_down_refused', formatDigDownRefused(digDown))
+    }
 
     const inReachNow = this.distanceToEyes(target) <= this.options.reach
     if (!candidate.inReach && !inReachNow) {
@@ -1799,6 +1830,38 @@ export class Executor {
       )
     }
     this.ensureOwned(epoch, signal)
+    // LEG TRAVEL (#352): a direct arrival path to a target beyond the path
+    // probe's range rarely exists, and failing outright leaves a far goal
+    // unreachable forever. Live: `RETRIEVE:known:obsidian:b28_67_9` was chosen
+    // every tick from (195.6, 68, -14.5) with all seven remembered obsidian cells
+    // 169-172m away, the body never moved and `obsidian=0`, so the M2 portal frame
+    // could never be built. When the arrival approach failed and the target is
+    // still far, walk ONE committed leg with a wider radius toward it and let the
+    // next tick re-plan from the new position. The leg is progress, never arrival:
+    // the arrival post-condition stays owned by later ticks, and a leg that does
+    // not close distance keeps the original typed failure (no false progress).
+    if (approachError !== null && before > 24) {
+      try {
+        await this.pathToNear(target, 16, epoch, signal)
+      } catch (error) {
+        if (error instanceof ActionCancelled) throw error
+      }
+      const legAfter = this.distanceToFeet(target)
+      if (legAfter < before - 4) {
+        this.logger.info(
+          'executor',
+          `LEG_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(legAfter)} delta=${round2(before - legAfter)}`,
+          { actionId: candidate.id },
+        )
+        approachError = null
+      } else {
+        this.logger.warn(
+          'executor',
+          `LEG_NO_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(legAfter)}`,
+          { actionId: candidate.id },
+        )
+      }
+    }
     const after = this.distanceToFeet(target)
     const endY = this.bot.entity.position.y
     const approach = classifyRetrieveApproach({
@@ -3285,6 +3348,103 @@ export class Executor {
     })
   }
 
+  /**
+   * Armor-equip action: put a carried armor piece on its slot destination and
+   * require the live armor slot to name it. The post-condition is asserted here
+   * and surfaced as the greppable `EQUIP_ARMOR ...` marker; an equip that did
+   * not stick is a `verify_failed`, never a silent success.
+   */
+  private async runEquip(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const itemName = candidate.itemName
+    if (itemName === null) throw new ExecutorError('target_gone', 'EQUIP candidate has no item')
+    const slot = readMetaString(candidate, 'slot')
+    if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
+      throw new ExecutorError('target_gone', `EQUIP candidate names no valid armor slot (${slot ?? 'none'})`)
+    }
+    const armorSlot: ArmorSlot = slot
+    const replaced = readMetaString(candidate, 'replaced')
+    let observed = this.wornArmorName(armorSlot)
+    for (let attempt = 1; attempt <= PLACE_EQUIP_RETRIES; attempt += 1) {
+      const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
+      if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
+      if (observed !== itemName) {
+        this.setPhase(candidate, epoch, 'equipping')
+        await this.equipItemTo(item, ARMOR_DESTINATION[armorSlot], epoch, signal)
+      }
+      observed = this.wornArmorName(armorSlot)
+      if (observed === itemName) {
+        this.logger.info('executor', formatArmorEquip({ slot: armorSlot, itemName, replaced }), {
+          actionId: candidate.id,
+          slot: armorSlot,
+          itemName,
+          replaced,
+          attempt,
+        })
+        return this.buildResult(candidate, epoch, startedAt, 'done', 'equipped', `wore ${itemName} on ${armorSlot}`, null, {
+          verified: true,
+          dropObserved: false,
+          blockRemoved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+        })
+      }
+      if (attempt < PLACE_EQUIP_RETRIES) await delay(PLACE_EQUIP_SETTLE_MS, signal)
+    }
+    throw new ExecutorError(
+      'verify_failed',
+      `equip ${itemName} was not reflected in the ${armorSlot} armor slot (found ${observed ?? 'empty'})`,
+    )
+  }
+
+  /**
+   * The worn item name in one armor destination, read from the live player
+   * window (slot 5=head .. 8=feet). `null` when the slot is empty.
+   */
+  private wornArmorName(slot: ArmorSlot): string | null {
+    const slots = (this.bot.inventory as { slots?: ReadonlyArray<{ name?: string } | null> }).slots
+    const item = slots?.[ARMOR_SLOT_INDEX[slot]]
+    return item !== undefined && item !== null && typeof item.name === 'string' ? item.name : null
+  }
+
+  /**
+   * Weapon-in-hand condition for combat. An ATTACK is a real melee lease: the
+   * damage actually dealt is the HELD item's. Before the lease starts, put the
+   * best carried sword/axe in the main hand when it out-damages what is held,
+   * through the same leased equip path as every other equip. Nothing better in
+   * the inventory is an explicit refusal marker, and the attack proceeds with
+   * whatever is in hand - this never blocks or replaces the Jev-chosen ATTACK.
+   */
+  private async equipCombatWeapon(candidate: Candidate, epoch: number, signal: AbortSignal): Promise<void> {
+    const held = this.bot.heldItem?.name ?? null
+    const offer = bestWeaponOffer(held, this.inventoryCounts())
+    if (offer === null) {
+      this.logger.info('executor', formatWeaponRefusal(held), { actionId: candidate.id, heldItem: held })
+      return
+    }
+    const item = this.bot.inventory.items().find((entry) => entry.name === offer.itemName)
+    if (item === undefined) {
+      this.logger.warn('executor', formatWeaponRefusal(held), {
+        actionId: candidate.id,
+        heldItem: held,
+        missing: offer.itemName,
+      })
+      return
+    }
+    this.setPhase(candidate, epoch, 'equipping')
+    await this.equipItemTo(item, 'hand', epoch, signal)
+    this.logger.info('executor', formatWeaponEquip(offer), {
+      actionId: candidate.id,
+      itemName: offer.itemName,
+      replaced: held,
+      damage: offer.damage,
+    })
+  }
+
   private async runAttack(
     candidate: Candidate,
     epoch: number,
@@ -3293,6 +3453,7 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const entityId = candidate.targetEntityId
     if (entityId === null) throw new ExecutorError('target_gone', 'ATTACK candidate has no entity id')
+    await this.equipCombatWeapon(candidate, epoch, signal)
     let attacks = 0
     let following = false
     const deadline = Date.now() + ATTACK_LEASE_MS
@@ -3726,6 +3887,26 @@ export class Executor {
     })
   }
 
+  /**
+   * The single equip mechanism. The leased allowlist port (#38) owns the side
+   * effect when the resident provides one; standalone runs fall back to the
+   * raw bot. Every equip (placement, armor, combat weapon) goes through here so
+   * the lease assertion and destination spelling live in exactly one place.
+   */
+  private async equipItemTo(
+    item: Item,
+    destination: EquipmentDestination,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.options.actuationPort !== undefined) {
+      await this.options.actuationPort.equip(item, destination)
+    } else {
+      await this.bot.equip(item, destination)
+    }
+    this.ensureOwned(epoch, signal)
+  }
+
   /** One post-condition-gated placement at an already-near cell. */
   private async equipPlacementItem(
     candidate: Candidate,
@@ -3738,12 +3919,7 @@ export class Executor {
       const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
       if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
       if (observed !== itemName) {
-        if (this.options.actuationPort !== undefined) {
-          await this.options.actuationPort.equip(item, 'hand')
-        } else {
-          await this.bot.equip(item, 'hand')
-        }
-        this.ensureOwned(epoch, signal)
+        await this.equipItemTo(item, 'hand', epoch, signal)
       }
       observed = this.bot.heldItem?.name ?? null
       if (observed === itemName) {
@@ -4213,6 +4389,113 @@ export class Executor {
     return observed
   }
 
+  /**
+   * Dimension transfer: walk INTO the lit `nether_portal` and require the bot's
+   * own dimension to become the target (`minecraft:the_nether`) before claiming
+   * success. Body motion is not completion: if the dimension does not change
+   * within the bounded window the action FAILS with `verify_failed`, so a lit
+   * portal the server never transfers through can never look done.
+   *
+   * The portal must still be lit at the moment of entry (live world truth), not
+   * merely lit when the candidate was generated.
+   */
+  private async runEnterPortal(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const approach = candidate.target
+    if (approach === null) throw new ExecutorError('target_gone', 'ENTER_PORTAL candidate has no approach cell')
+    const expectedCells = parsePortalCells(readMetaString(candidate, 'portalCells') ?? '')
+    if (expectedCells.length === 0) {
+      throw new ExecutorError('place_error', 'ENTER_PORTAL candidate carries no portal cells')
+    }
+    const dimension = readMetaString(candidate, 'dimension') ?? NETHER
+    const enterCell = {
+      x: readMetaNumber(candidate, 'enterX', approach.x),
+      y: readMetaNumber(candidate, 'enterY', approach.y),
+      z: readMetaNumber(candidate, 'enterZ', approach.z),
+    }
+
+    // Hard world truth at entry time: the interior must still be nether_portal.
+    if (!isIgnitePostconditionMet(expectedCells.map((cell) => this.currentBlockAt(cell)?.name ?? null))) {
+      throw new ExecutorError('place_error', `${PRECONDITION_MISSING} portal=lit`)
+    }
+    if (this.dimensionMatches(dimension)) {
+      return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+    }
+
+    this.setPhase(candidate, epoch, 'entering')
+    const timeoutMs = this.options.portalEnterTimeoutMs ?? PORTAL_ENTER_TIMEOUT_MS
+    // The approach is a real, supported stand; path there first so the final
+    // step into the portal is a short direct walk. A transfer that happens
+    // during the approach is already the postcondition, so it is not an error.
+    if (this.distanceToFeet(approach) > 1.5) {
+      this.setPhase(candidate, epoch, 'pathing')
+      try {
+        await this.pathTo(approach, epoch, signal, 'GoalBlock', { requireLevel: true })
+      } catch (error) {
+        if (this.dimensionMatches(dimension)) {
+          return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+        }
+        throw error
+      }
+      this.ensureOwned(epoch, signal)
+    }
+
+    this.setPhase(candidate, epoch, 'entering')
+    const transferred = await this.walkByControls(enterCell, epoch, signal, {
+      bearingTarget: { x: enterCell.x, z: enterCell.z },
+      directBearing: true,
+      budgetMs: timeoutMs,
+      arrivedAt: () => this.dimensionMatches(dimension),
+    })
+    if (!transferred || !this.dimensionMatches(dimension)) {
+      throw new ExecutorError(
+        'verify_failed',
+        `dimension did not become ${dimension} within ${timeoutMs}ms of entering the portal`,
+      )
+    }
+    return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+  }
+
+  private enteredResult(
+    candidate: Candidate,
+    epoch: number,
+    startedAt: number,
+    enterCell: Vec3Json,
+    dimension: string,
+  ): ExecutionResult {
+    this.logger.info('agent', formatPortalEntered(enterCell, dimension), {
+      actionId: candidate.id,
+      target: enterCell,
+      dimension,
+    })
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'entered',
+      `transferred to ${dimension} through the portal at (${enterCell.x},${enterCell.y},${enterCell.z})`,
+      null,
+      {
+        verified: true,
+        dropObserved: false,
+        blockRemoved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+      },
+    )
+  }
+
+  private dimensionMatches(dimension: string): boolean {
+    const current = this.bot.game?.dimension
+    if (typeof current !== 'string' || current.length === 0) return false
+    return normalizePortalDimension(current) === normalizePortalDimension(dimension)
+  }
+
   // -------------------------------------------------------------------------
   // primitives
   // -------------------------------------------------------------------------
@@ -4361,6 +4644,27 @@ export class Executor {
     const stands = this.interactionStands(block)
     const alreadyAt = this.standAt(block, stands)
     if (alreadyAt !== null) return alreadyAt
+    // An interaction stand is not limited to the four orthogonal neighbours the
+    // search enumerates: vanilla interaction is an eye->block-AABB reach test
+    // from one of the block's three stand levels, so a DIAGONAL feet cell can
+    // already interact. Accepting it here is the smallest fix for the live
+    // d8d53c2 SMELT wedge - the resident at (8.7,65,-9.3) held raw_iron x3 and
+    // faced a real furnace at (10,65,-9): the exact-cell test rejected the
+    // feet cell (8,65,-10), the stock `GoalNear` for the 0.42 m-away orthogonal
+    // stand (9,65,-9) was already satisfied and reported `reached` WITHOUT
+    // moving, and the control nudge pivoted on the same exact-cell predicate, so
+    // the approach could only repeat `reason=stuck` (81 attempts) and never open
+    // the furnace. When the live face is genuinely in reach, no path is needed.
+    const liveStand = this.standAtCurrentFeet(block)
+    if (liveStand !== null) {
+      const eye = this.bot.entity.position.offset(0, 1.62, 0)
+      this.logger.info(
+        'executor',
+        `approach ${label}: already in reach from (${liveStand.x},${liveStand.y},${liveStand.z}) face=${round2(faceDistanceFromEye({ x: eye.x, y: eye.y, z: eye.z }, block))}m; no path needed`,
+        { block },
+      )
+      return liveStand
+    }
     if (stands.length === 0) {
       this.notifyPathFailed(block, 'stuck')
       throw new ExecutorError(
@@ -4482,6 +4786,34 @@ export class Executor {
       if (sameBlockCell(feet, stand)) return stand
     }
     return null
+  }
+
+  /**
+   * The block's face as seen from the body's LIVE position, when the feet
+   * already sit on a valid interaction stance that is not one of the orthogonal
+   * `interactionStandCandidates` cells: the feet cell is at one of the block's
+   * `INTERACTION_STAND_DY` levels, passable with a passable head cell and solid
+   * support, and the live eyes are within `reach` of the block AABB. Returns
+   * that feet cell, or null when the body must still move to a stand.
+   *
+   * This is the same geometry the stand search uses, evaluated from where the
+   * body actually is instead of from the four enumerated neighbours, so a
+   * diagonal-but-interactable station needs no path at all.
+   */
+  private standAtCurrentFeet(block: Vec3Json): Vec3Json | null {
+    const position = this.bot.entity.position
+    const cell = {
+      x: Math.floor(position.x + 1e-3),
+      y: Math.floor(position.y + 1e-3),
+      z: Math.floor(position.z + 1e-3),
+    }
+    if (!INTERACTION_STAND_DY.includes(cell.y - block.y)) return null
+    if (!this.passableAt(cell.x, cell.y, cell.z)) return null
+    if (!this.passableAt(cell.x, cell.y + 1, cell.z)) return null
+    if (!this.solidSupportAt(cell.x, cell.y - 1, cell.z)) return null
+    const eye = position.offset(0, 1.62, 0)
+    if (faceDistanceFromEye({ x: eye.x, y: eye.y, z: eye.z }, block) > this.options.reach) return null
+    return cell
   }
 
   private findApproachStepCut(block: Vec3Json): Vec3Json | null {

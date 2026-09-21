@@ -115,6 +115,473 @@ export interface KnownResourceJson {
   lastSeenAt?: number
 }
 
+/**
+ * Bounded size of the durable known-resource store. The generation scan and the
+ * HOST delta merge all honour this same cap through `mergeKnownResourcesInto`,
+ * so memory stays bounded while it keeps learning.
+ */
+export const KNOWN_RESOURCE_CAP = 256
+
+/** Exact-coordinate identity of a remembered cell: `name@round(x),round(y),round(z)`. */
+function knownResourceKey(resource: { name: string; x: number; y: number; z: number }): string {
+  return `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+function knownResourceAt(resource: { x: number; y: number; z: number }): string {
+  return `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+/** A resource identity whose LAST coordinate is a durable route anchor. */
+function knownResourceIdentity(resource: KnownResourceJson): string {
+  const dimension = (resource.dimension ?? '').replace(/^minecraft:/, '').toLowerCase()
+  const epoch = resource.worldEpoch ?? 'legacy'
+  return `${resource.name}|${dimension}|${epoch}`
+}
+
+/**
+ * Recency-of-proof victim selection for a bounded durable store.
+ *
+ * The store is a bounded "where things are / how they connect" memory, not a
+ * ranked plan: when it is full a newly observed fact must displace the
+ * remembered fact that is cheapest to re-derive, rather than be dropped for the
+ * lifetime of the world key. The value proxy is recency of PROOF (`lastSeenAt`),
+ * which every scan/refresh path maintains:
+ *
+ *  - the OLDEST proof is evicted first;
+ *  - entries with no `seenAt` predate the bookkeeping field (legacy durable
+ *    JSON) and are treated as the oldest, so they are evicted first;
+ *  - ties break toward the earliest array position (stable and deterministic).
+ *
+ * Returns the victim index, or -1 when nothing can be evicted. Pure.
+ */
+function selectBoundedLruVictim<T>(list: readonly T[], seenAtOf: (entry: T) => number | undefined): number {
+  let victim = -1
+  let victimSeenAt = Number.NEGATIVE_INFINITY
+  for (let index = 0; index < list.length; index += 1) {
+    const entry = list[index]
+    if (entry === undefined) continue
+    const raw = seenAtOf(entry)
+    const seenAt = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number.NEGATIVE_INFINITY
+    if (victim < 0 || seenAt < victimSeenAt) {
+      victim = index
+      victimSeenAt = seenAt
+    }
+  }
+  return victim
+}
+
+/**
+ * Issue #14 follow-up: capacity-eviction rule for the durable known-resource
+ * store. Expressed ON TOP of `selectBoundedLruVictim`: choose the victim from
+ * the MOST ABUNDANT identity class (`knownResourceIdentity`), and within that
+ * class the oldest proof; only when every identity is a singleton (or nothing
+ * matches) does it fall back to the generic global-oldest victim.
+ *
+ * The store is a bounded "where things are" memory, not a ranked plan. A dense
+ * vein can contribute dozens of adjacent coal/copper cells while a rare route
+ * may have only one remembered coordinate. Pure oldest-first eviction therefore
+ * destroys information diversity: live, the ten remembered `obsidian` cells were
+ * both duplicated and the oldest sightings, so a flood of nearby coal_ore /
+ * copper_ore / oak_log (`KNOWN_RESOURCE_EVICTED item=obsidian ... reason=capacity`
+ * x10) destroyed the M2 route to the portal frame. Rarity is the signal: a class
+ * with one or two remembered cells is far more expensive to re-acquire than one
+ * with dozens, so the abundant class pays for the new sighting.
+ *
+ * This is retention/compression truth only: it does not know the active goal or
+ * rank resources by mission value. Returns the victim index, or -1 when nothing
+ * can be evicted.
+ */
+export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): number {
+  if (known.length === 0) return -1
+  const counts = new Map<string, number>()
+  for (const entry of known) {
+    const identity = knownResourceIdentity(entry)
+    counts.set(identity, (counts.get(identity) ?? 0) + 1)
+  }
+
+  let abundant: string | null = null
+  let abundantCount = 0
+  for (const [identity, count] of counts) {
+    if (count > abundantCount) {
+      abundant = identity
+      abundantCount = count
+    }
+  }
+
+  // Evict from the MOST ABUNDANT class first, and only from among that class's
+  // oldest cells. The generic primitive supplies the age semantics (missing
+  // `lastSeenAt` counts as oldest) and the stable earliest-index tie break, so
+  // the class rule and the fallback cannot drift onto different orders.
+  if (abundant !== null && abundantCount > 1) {
+    const indices: number[] = []
+    for (let index = 0; index < known.length; index += 1) {
+      const entry = known[index]
+      if (entry !== undefined && knownResourceIdentity(entry) === abundant) indices.push(index)
+    }
+    const relative = selectBoundedLruVictim(
+      indices.map((index) => known[index] as KnownResourceJson),
+      (entry) => entry.lastSeenAt,
+    )
+    const victimIndex = relative < 0 ? undefined : indices[relative]
+    if (victimIndex !== undefined) return victimIndex
+  }
+
+  // Every identity is already a singleton (or nothing matched): fall back to the
+  // generic global-oldest victim so the bounded store can still learn a genuinely
+  // new identity.
+  return selectBoundedLruVictim(known, (entry) => entry.lastSeenAt)
+}
+
+/**
+ * The ONE bounded-LRU merge used by every durable "remembered facts" store.
+ * `mergeKnownResourcesInto` and `mergeKnownTraversalsInto` are thin typed
+ * wrappers over this; there is no second merge implementation.
+ *
+ * Contracts:
+ *  - dedupe is exact-key `keyOf`;
+ *  - a re-observation REFRESHES the existing entry via `refresh` instead of
+ *    inserting or spending an eviction;
+ *  - at the cap the store's victim rule is applied (generic oldest-proof LRU by
+ *    default; see `selectBoundedLruVictim`) or, when nothing is evictable, the
+ *    sighting is refused and counted in `dropped` - never silently;
+ *  - `normalize` stamps/copies the stored DTO (rounded coordinates etc.).
+ */
+interface BoundedLruStore<T> {
+  cap: number
+  keyOf: (entry: T) => string
+  seenAtOf: (entry: T) => number | undefined
+  /** Store-specific victim rule; defaults to the generic oldest-proof LRU. The
+   * known-resource store overrides it with `selectKnownResourceEvictionVictim`
+   * so abundance-aware compression stays the one capacity rule. */
+  selectVictim?: (list: T[]) => number
+  normalize: (entry: T) => T
+  refresh: (existing: T, observed: T) => void
+  log?: (event: string, detail?: Record<string, unknown>) => void
+  now: number
+  evictedEvent: string
+  evictionDetail: (victim: T, now: number) => Record<string, unknown>
+  fullEvent: string
+}
+
+function mergeBoundedLruInto<T>(
+  target: T[],
+  found: readonly T[],
+  store: BoundedLruStore<T>,
+): { added: number; evicted: T[]; dropped: number; inserted: T[] } {
+  const byKey = new Map<string, T>()
+  for (const entry of target) {
+    const key = store.keyOf(entry)
+    if (!byKey.has(key)) byKey.set(key, entry)
+  }
+  const evicted: T[] = []
+  const inserted: T[] = []
+  let added = 0
+  let dropped = 0
+  for (const entry of found) {
+    const key = store.keyOf(entry)
+    const existing = byKey.get(key)
+    if (existing !== undefined) {
+      store.refresh(existing, entry)
+      continue
+    }
+    if (target.length >= store.cap) {
+      const victimIndex = store.selectVictim?.(target) ?? selectBoundedLruVictim(target, store.seenAtOf)
+      const victim = victimIndex < 0 ? undefined : target[victimIndex]
+      if (victim === undefined) {
+        dropped += 1
+        continue
+      }
+      target.splice(victimIndex, 1)
+      byKey.delete(store.keyOf(victim))
+      evicted.push(victim)
+      store.log?.(store.evictedEvent, store.evictionDetail(victim, store.now))
+    }
+    const stored = store.normalize(entry)
+    target.push(stored)
+    byKey.set(key, stored)
+    added += 1
+    inserted.push(stored)
+  }
+  if (dropped > 0) store.log?.(store.fullEvent, { cap: store.cap, dropped })
+  return { added, evicted, dropped, inserted }
+}
+
+export interface MergeKnownResourcesOptions {
+  log?: (event: string, detail?: Record<string, unknown>) => void
+  /** worldEpoch stamped onto the `KNOWN_RESOURCE` insert marker */
+  worldEpoch?: number
+  /** store bound; defaults to `KNOWN_RESOURCE_CAP` */
+  cap?: number
+  /** Emit the `KNOWN_RESOURCE` insert marker. The generation scan owns that
+   * marker; the HOST delta merge only reports capacity evictions/drops. */
+  emitInsertMarker?: boolean
+}
+
+export interface MergeKnownResourcesResult {
+  /** inserts, unchanged meaning (duplicates/refreshes are not inserts) */
+  added: number
+  evicted: KnownResourceJson[]
+  /** sightings refused because the store was full and nothing was evictable */
+  dropped: number
+}
+
+/**
+ * Insert observed cells into a bounded durable known-resource store.
+ *
+ * Contracts preserved from the original scan merge:
+ *  - dedupe is exact-coordinate `name@round(x),round(y),round(z)`;
+ *  - a re-observation REFRESHES `lastSeenAt` instead of inserting or evicting;
+ *  - inserts stamp rounded coordinates, `dimension` and `worldEpoch`;
+ *  - the array never exceeds `cap`.
+ *
+ * Capacity (`KNOWN_RESOURCE_EVICTED name=<n> at=<x,y,z> reason=capacity ageMs=<n>`):
+ * at the cap a redundant coordinate is evicted before the last anchor of a
+ * resource identity (then global-oldest only if every identity is a singleton;
+ * see `selectKnownResourceEvictionVictim`). If no victim exists the sighting is
+ * refused with `KNOWN_RESOURCE_FULL cap=<n> dropped=<n>` - never silently.
+ */
+export function mergeKnownResourcesInto(
+  target: KnownResourceJson[],
+  found: KnownResourceJson[],
+  options: MergeKnownResourcesOptions = {},
+): MergeKnownResourcesResult {
+  const cap = options.cap ?? KNOWN_RESOURCE_CAP
+  const log = options.log
+  const emitInsertMarker = options.emitInsertMarker ?? false
+  const result = mergeBoundedLruInto(target, found, {
+    cap,
+    keyOf: knownResourceKey,
+    seenAtOf: (resource) => resource.lastSeenAt,
+    // Capacity truth for resources is abundance-aware (721377e): a dense local
+    // class pays for the new sighting before the last anchor of a rare class.
+    selectVictim: selectKnownResourceEvictionVictim,
+    normalize: (resource) => ({
+      name: resource.name,
+      kind: resource.kind,
+      x: Math.round(resource.x),
+      y: Math.round(resource.y),
+      z: Math.round(resource.z),
+      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
+    }),
+    // Re-observation is free proof the cell is still valuable: refresh recency
+    // instead of inserting a duplicate or spending an eviction on it.
+    refresh: (existing, resource) => {
+      if (typeof resource.lastSeenAt === 'number' && Number.isFinite(resource.lastSeenAt)) {
+        existing.lastSeenAt = resource.lastSeenAt
+      }
+    },
+    log,
+    now: Date.now(),
+    evictedEvent: 'KNOWN_RESOURCE_EVICTED',
+    fullEvent: 'KNOWN_RESOURCE_FULL',
+    evictionDetail: (victim, now) => ({
+      item: victim.name,
+      name: victim.name,
+      at: knownResourceAt(victim),
+      reason: 'capacity',
+      ageMs:
+        typeof victim.lastSeenAt === 'number' && Number.isFinite(victim.lastSeenAt) ? now - victim.lastSeenAt : null,
+    }),
+  })
+  if (emitInsertMarker) {
+    for (const stored of result.inserted) {
+      log?.('KNOWN_RESOURCE', {
+        item: stored.name,
+        kind: stored.kind,
+        at: knownResourceAt(stored),
+        ...(options.worldEpoch === undefined ? {} : { worldEpoch: options.worldEpoch }),
+      })
+    }
+  }
+  return { added: result.added, evicted: result.evicted, dropped: result.dropped }
+}
+
+// ---------------------------------------------------------------------------
+// durable traversal memory (issue #354)
+// ---------------------------------------------------------------------------
+
+/** The observed traversal family. `tunnel` is reserved for a dug tunnel leg. */
+export type TraversalKind = 'step' | 'descend' | 'tunnel' | 'climb'
+export type TraversalResult = 'ok' | 'blocked'
+/** The typed cause of a refusal; `wall` is the generic terrain/geometry refusal. */
+export type TraversalBlockReason = 'lava' | 'fall' | 'wall' | 'void'
+
+/**
+ * Issue #354: a durable, world-keyed TRAVERSAL FACT observed from a real
+ * locomotion outcome - which leg actually opened a route, which leg was refused.
+ *
+ * It is world truth recorded from an observed outcome (a move/dig that completed
+ * or was refused), never a semantic preference and never a route decision:
+ *  - `from`/`to` are the rounded cells of the observed leg;
+ *  - `kind` is geometric (`step`/`descend`/`climb`; `tunnel` for a dug tunnel);
+ *  - `result` is `ok` when the body completed the leg, `blocked` when it was
+ *    refused, with the typed `reason` when known;
+ *  - `worldEpoch` namespaces the fact exactly like `KnownResourceJson`.
+ *
+ * The newest observation of a `(kind, from, to)` leg SUPERSEDES the previous
+ * one, so a route that was blocked and later opened stops being suppressed. The
+ * store is bounded (`KNOWN_TRAVERSAL_CAP`, oldest-proof LRU eviction) and is
+ * dropped with its world key on a `worldEpoch` change, exactly like
+ * `knownResources`.
+ */
+export interface KnownTraversalJson {
+  from: Vec3Json
+  to: Vec3Json
+  kind: TraversalKind
+  result: TraversalResult
+  reason?: TraversalBlockReason
+  worldEpoch?: number
+  /** epoch ms the outcome was observed */
+  lastSeenAt?: number
+}
+
+/** Bounded size of the durable traversal store (same LRU rule as KNOWN_RESOURCE_CAP). */
+export const KNOWN_TRAVERSAL_CAP = 128
+
+function traversalCell(cell: Vec3Json): string {
+  return `${Math.round(cell.x)},${Math.round(cell.y)},${Math.round(cell.z)}`
+}
+
+/** Leg identity: the latest observed outcome for a (kind, from, to) supersedes. */
+function knownTraversalKey(traversal: KnownTraversalJson): string {
+  return `${traversal.kind}@${traversalCell(traversal.from)}->${traversalCell(traversal.to)}`
+}
+
+export interface MergeKnownTraversalsOptions {
+  log?: (event: string, detail?: Record<string, unknown>) => void
+  /** store bound; defaults to `KNOWN_TRAVERSAL_CAP` */
+  cap?: number
+}
+
+export interface MergeKnownTraversalsResult {
+  added: number
+  evicted: KnownTraversalJson[]
+  /** observations refused because the store was full and nothing was evictable */
+  dropped: number
+}
+
+/**
+ * Insert observed traversal facts into the bounded durable store. Thin wrapper
+ * over the ONE `mergeBoundedLruInto` primitive (same eviction order, same
+ * refusal semantics as the known-resource store).
+ *
+ * Capacity: `TRAVERSAL_EVICTED from=<cell> to=<cell> kind=<...> result=<...> reason=capacity ageMs=<n>`;
+ * a full store with nothing evictable refuses with `TRAVERSAL_FULL cap=<n> dropped=<n>`.
+ */
+export function mergeKnownTraversalsInto(
+  target: KnownTraversalJson[],
+  found: readonly KnownTraversalJson[],
+  options: MergeKnownTraversalsOptions = {},
+): MergeKnownTraversalsResult {
+  const result = mergeBoundedLruInto(target, found, {
+    cap: options.cap ?? KNOWN_TRAVERSAL_CAP,
+    keyOf: knownTraversalKey,
+    seenAtOf: (traversal) => traversal.lastSeenAt,
+    normalize: (traversal) => ({
+      from: { x: Math.round(traversal.from.x), y: Math.round(traversal.from.y), z: Math.round(traversal.from.z) },
+      to: { x: Math.round(traversal.to.x), y: Math.round(traversal.to.y), z: Math.round(traversal.to.z) },
+      kind: traversal.kind,
+      result: traversal.result,
+      ...(traversal.reason === undefined ? {} : { reason: traversal.reason }),
+      ...(traversal.worldEpoch === undefined ? {} : { worldEpoch: traversal.worldEpoch }),
+      ...(traversal.lastSeenAt === undefined ? {} : { lastSeenAt: traversal.lastSeenAt }),
+    }),
+    // The newest observed outcome for a leg is the truth: a leg that was blocked
+    // and later opened must stop being suppressed.
+    refresh: (existing, observed) => {
+      existing.result = observed.result
+      if (observed.reason === undefined) delete existing.reason
+      else existing.reason = observed.reason
+      if (observed.worldEpoch !== undefined) existing.worldEpoch = observed.worldEpoch
+      if (typeof observed.lastSeenAt === 'number' && Number.isFinite(observed.lastSeenAt)) {
+        existing.lastSeenAt = observed.lastSeenAt
+      }
+    },
+    log: options.log,
+    now: Date.now(),
+    evictedEvent: 'TRAVERSAL_EVICTED',
+    fullEvent: 'TRAVERSAL_FULL',
+    evictionDetail: (victim, now) => ({
+      from: traversalCell(victim.from),
+      to: traversalCell(victim.to),
+      kind: victim.kind,
+      result: victim.result,
+      reason: 'capacity',
+      ageMs:
+        typeof victim.lastSeenAt === 'number' && Number.isFinite(victim.lastSeenAt) ? now - victim.lastSeenAt : null,
+    }),
+  })
+  return { added: result.added, evicted: result.evicted, dropped: result.dropped }
+}
+
+/**
+ * Issue #80: a durable, world-keyed record that a VERIFIED lit nether portal
+ * frame exists at these overworld coordinates. It is deliberately NOT a verdict:
+ * `portalVerified` stays a live server-truth projection re-observed after every
+ * generation/world change. This record only says "a verified portal exists at P"
+ * (CAN fact), so the resident can route back and re-verify instead of rebuilding
+ * a second frame after a death/respawn took it out of sensor range. The entry is
+ * dropped when the live re-check at the site finds nothing while the bot is
+ * there, and when the world epoch changes.
+ */
+export interface KnownPortalSiteJson {
+  /** frame origin cell (the layout's lowest corner) */
+  x: number
+  y: number
+  z: number
+  /** the axis the 4-wide side spans */
+  widthAxis: 'x' | 'z'
+  /** dimension the site was verified in; a coordinate is only valid there */
+  dimension?: string
+  /** world epoch the site was verified in; a reset invalidates the coordinate */
+  worldEpoch?: number
+  /** epoch ms the lit portal was last observed at this site */
+  lastVerifiedAt?: number
+  /**
+   * The frame edge cells the detector observed when it verified the portal. It
+   * is stored so the sensor can re-project the site as a grounded
+   * `PortalFrameSite` (route/geometry), never as a lit verdict: `portalVerified`
+   * is still re-read from live block truth.
+   */
+  frame?: Vec3Json[]
+  /** The interior cells the detector computed (live `nether_portal` at record time). */
+  interior?: Vec3Json[]
+}
+
+/**
+ * M3: a durable, world-keyed record that a Nether structure body was SENSED at
+ * these coordinates. Like `KnownPortalSiteJson` it is a CAN fact ("Nether
+ * fortress fabric exists at P"), never a verdict and never a route decision: the
+ * consumer re-grounds on live block truth before acting.
+ *
+ * Admission is NETHER-ONLY (`syncKnownStructureSites`). `nether_bricks` is a
+ * real block anywhere, including a player-placed overworld decoration, so an
+ * overworld sighting must never mint a fortress record. The entry survives
+ * generation/reload through the staged commit path and is dropped on a
+ * world-epoch or dimension change, exactly like a portal site.
+ */
+export interface KnownStructureSiteJson {
+  /** the sensed structure body cell (rounded): the durable route anchor */
+  x: number
+  y: number
+  z: number
+  /** structure class; only the Nether fortress body is produced today */
+  kind: 'nether_fortress'
+  /**
+   * Distinct structure body block names sensed over the site (corroboration:
+   * `nether_bricks` plus the fence/stair variants when present). Evidence only.
+   */
+  blocks?: string[]
+  /** dimension the site was sensed in; a coordinate is only valid there */
+  dimension?: string
+  /** world epoch the site was sensed in; a reset invalidates the coordinate */
+  worldEpoch?: number
+  /** epoch ms the structure body was last observed at this cell */
+  lastSeenAt?: number
+}
+
 /** The two station kinds the resident remembers coordinates for. */
 export type StationKind = 'crafting_table' | 'furnace'
 
@@ -146,19 +613,75 @@ export interface KnownStation extends Vec3Json {
 
 export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | 'invalidated'
 
+/**
+ * Durable "where things are" memory that must survive reloads/respawns/host
+ * restarts. Inventory and position are NOT mirrored here - they are SERVER TRUTH,
+ * live on the bot, and are re-observed from sensors after every reload/reconnect,
+ * never restored from JSON. All coordinates are DTOs.
+ *
+ * WRITE PATHS (audited in `test-longterm-memory.mts`, task/longterm-memory):
+ *   craftingTables     generation-entry scan validation + STATION runtime events
+ *   furnaces           generation-entry scan validation + STATION runtime events
+ *   discoveredOres     generation-entry ore scan (names only, per world key)
+ *   knownResources     generation-entry ore/log/obsidian scan + #14 stale eviction
+ *   knownPortalSites   generation-entry `syncPortalSiteMemory` (#80, CAN-only)
+ *   knownStructureSites generation-entry `syncStructureSiteMemory` (M3, CAN-only,
+ *                      Nether-only fortress body)
+ *   knownTraversals    generation-entry `recordTraversalOutcome` from the
+ *                      controller/executor locomotion outcome stream (#354)
+ *   moveFailures       controller `onMoveFailureMemoryChange`
+ *   hazards            HOST `registerDeathHazard` on a production death (#26)
+ *   mined              NO runtime producer: merge/persist machinery exists, but no
+ *                      caller emits a `mined` delta (depletion model never wired)
+ *   traversalFailures  NO runtime producer: same as `mined` (the thin P4 wall
+ *                      memory was never wired to the current controller)
+ * `mined`/`traversalFailures` round-trip correctly but stay empty in live state.
+ *
+ * Every field is namespaced by `serverId|dimension|worldEpoch` and every write is
+ * merged through the single `mergeWorldMemoryDelta`, so the staged commit point
+ * and the live runtime delta path cannot diverge.
+ */
 export interface ResidentWorldMemory {
   /** placed crafting_table stations discovered by scanning the loaded world (#31: validated records) */
   craftingTables: KnownStation[]
   /** placed furnace stations discovered by scanning the loaded world (#31: validated records) */
   furnaces: KnownStation[]
-  /** "x,y,z:block" -> times mined (depletion model, best-effort) */
+  /** "x,y,z:block" -> times mined (depletion model, best-effort). No runtime
+   * producer yet - see the interface doc; always empty in live state. */
   mined: Record<string, number>
   /** ore block names seen at least once in the world state */
   discoveredOres: string[]
   /** remembered coordinates of known resources (issue #43): ores and trees, so a
    * retrieval skill can navigate back when the resource is out of scan range */
   knownResources: KnownResourceJson[]
-  /** thin 2-block-wall / stuck memory; suppress repeat attempts */
+  /**
+   * Issue #80: durable, world-keyed verified nether-portal sites. A CAN fact
+   * ("a verified portal exists at P"), never a verdict: it supplies a re-approach
+   * route only and is re-verified from live world truth on arrival. Survives
+   * generation reload/respawn; dropped on a failed live re-check at the site and
+   * on a world-epoch change.
+   */
+  knownPortalSites: KnownPortalSiteJson[]
+  /**
+   * M3: durable, world-keyed Nether-structure sites (fortress body cells). A CAN
+   * fact ("fortress fabric exists at P"), admitted only while the world key is
+   * the Nether and re-grounded from live block truth by the consumer. Survives
+   * generation reload/respawn; dropped on a failed live re-check at the site and
+   * on a world-epoch/dimension change.
+   */
+  knownStructureSites: KnownStructureSiteJson[]
+  /**
+   * Issue #354: durable, world-keyed traversal facts observed from real
+   * locomotion outcomes ("this leg opened a route" / "this leg was refused").
+   * It supplies the connectivity half that coordinates alone cannot: a
+   * remembered `blocked` leg suppresses a waypoint the candidate layer would
+   * otherwise re-offer, and a remembered `ok` leg corroborates a reachable
+   * waypoint. It is never a live check: the executor re-validates the cell, and
+   * the whole store is dropped with its world key on a `worldEpoch` change.
+   */
+  knownTraversals: KnownTraversalJson[]
+  /** thin 2-block-wall / stuck memory; suppress repeat attempts. No runtime
+   * producer yet - see the interface doc; always empty in live state. */
   traversalFailures: TraversalFailure[]
   /** coordinate-level movement failure memory; survives generation recovery (#12) */
   moveFailures: MoveFailEntry[]
@@ -169,6 +692,14 @@ export interface ResidentWorldMemory {
    * re-observed after every generation/world change.
    */
   portalVerified?: boolean
+  /**
+   * Live server-truth projection of the bot's current dimension, with the same
+   * contract as `portalVerified` above: deliberately absent from
+   * WorldMemoryDelta and re-observed after every generation/world change. It is
+   * server truth, never durable memory. The `enter_nether` rung reads it so the
+   * ladder never plans Nether-only goals while the bot is still in the overworld.
+   */
+  dimension?: string
 }
 
 export function emptyWorldMemory(): ResidentWorldMemory {
@@ -178,6 +709,9 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     mined: {},
     discoveredOres: [],
     knownResources: [],
+    knownPortalSites: [],
+    knownStructureSites: [],
+    knownTraversals: [],
     traversalFailures: [],
     moveFailures: [],
     hazards: [],
@@ -193,6 +727,9 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.mined = memory.mined ?? {}
   memory.discoveredOres = Array.isArray(memory.discoveredOres) ? memory.discoveredOres : []
   memory.knownResources = Array.isArray(memory.knownResources) ? memory.knownResources : []
+  memory.knownPortalSites = Array.isArray(memory.knownPortalSites) ? memory.knownPortalSites : []
+  memory.knownStructureSites = Array.isArray(memory.knownStructureSites) ? memory.knownStructureSites : []
+  memory.knownTraversals = Array.isArray(memory.knownTraversals) ? memory.knownTraversals : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
@@ -232,6 +769,16 @@ export interface WorldMemoryDelta {
   knownResources?: KnownResourceJson[]
   /** cells proven gone (mined/replaced); the host drops them from the durable store (#14) */
   removeKnownResources?: KnownResourceJson[]
+  /** verified portal sites to remember; the host merges them by origin (#80) */
+  knownPortalSites?: KnownPortalSiteJson[]
+  /** portal sites whose live re-check failed / epoch changed; the host drops them (#80) */
+  removeKnownPortalSites?: KnownPortalSiteJson[]
+  /** Nether-structure sites to remember; the host merges them by cell (M3) */
+  knownStructureSites?: KnownStructureSiteJson[]
+  /** structure sites whose live re-check failed / epoch changed; the host drops them (M3) */
+  removeKnownStructureSites?: KnownStructureSiteJson[]
+  /** observed traversal facts to remember; the host merges them by leg (#354) */
+  knownTraversals?: KnownTraversalJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   moveFailures?: MoveFailEntry[]

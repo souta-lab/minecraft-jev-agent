@@ -17,6 +17,8 @@ import {
   mercuryStrategyLabel,
   mercuryTransportMode,
   MUSE_SPARK_MODEL,
+  SYSTEM2_MODEL_DEFAULT,
+  SYSTEM2_TIMEOUT_DEFAULT_MS,
   MercuryPlanValidationError,
   MercurySystem2,
   normalizeMercuryPlan,
@@ -203,6 +205,19 @@ addCase('config file { mercury: true } enables it', () => {
   return { pass: result.enabled, detail: result.source }
 })
 
+
+addCase('config file { system2: true } enables the generic System2 gateway', () => {
+  const previous = process.env.BUDDY_SYSTEM2
+  delete process.env.BUDDY_SYSTEM2
+  const dir = mkdtempSync(join(tmpdir(), 'system2-test-'))
+  const configPath = join(dir, 'system2.config.json')
+  writeFileSync(configPath, '{"system2":true}\n')
+  const result = resolveMercuryEnablement('llm', configPath)
+  if (previous === undefined) delete process.env.BUDDY_SYSTEM2
+  else process.env.BUDDY_SYSTEM2 = previous
+  return { pass: result.enabled, detail: result.source }
+})
+
 addCase('allowed goal sets are disjoint and non-empty', () => {
   const collect = new Set(MERCURY_ALLOWED_GOALS.collect)
   const craft = new Set(MERCURY_ALLOWED_GOALS.craft)
@@ -229,6 +244,90 @@ addCase('portal prerequisite capabilities are exposed without exposing frame sem
   return {
     pass,
     detail: `flint=${flint.ok} steel=${steel.ok} obsidian=${obsidian.ok} frame=${frame.ok ? 'accepted' : frame.error}`,
+  }
+})
+
+
+addCase('Muse Spark is the real default model id and uses the JSON-text transport', () => {
+  const pass =
+    SYSTEM2_MODEL_DEFAULT === 'meta/muse-spark-1.3-contributor' &&
+    MUSE_SPARK_MODEL === SYSTEM2_MODEL_DEFAULT &&
+    mercuryTransportMode(SYSTEM2_MODEL_DEFAULT) === 'json-text' &&
+    mercuryTransportMode('muse-spark-1.3-contributor') === 'json-text'
+  return { pass, detail: `default=${SYSTEM2_MODEL_DEFAULT} mode=${mercuryTransportMode(SYSTEM2_MODEL_DEFAULT)}` }
+})
+
+addCase('generic System2 default passes a 60s timeout to the transport', async () => {
+  const previous = process.env.BUDDY_SYSTEM2_TIMEOUT_MS
+  delete process.env.BUDDY_SYSTEM2_TIMEOUT_MS
+  const dir = mkdtempSync(join(tmpdir(), 'system2-timeout-'))
+  let observedTimeout = -1
+  try {
+    const system2 = new MercurySystem2({
+      summarize: () => mercurySummary(),
+      log: () => undefined,
+      callsPath: join(dir, 'system2-calls.jsonl'),
+      cachePath: join(dir, 'system2-cache.json'),
+      resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+      transport: ({ timeoutMs }) => {
+        observedTimeout = timeoutMs
+        return Promise.resolve({
+          toolCalls: [{ input: { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 1 }], reason: 'test' } }],
+          usage: null,
+        })
+      },
+    })
+    await system2.tryRepair(planRequest(), 'no_candidate')
+    return {
+      pass: SYSTEM2_TIMEOUT_DEFAULT_MS === 60_000 && observedTimeout === SYSTEM2_TIMEOUT_DEFAULT_MS,
+      detail: `default=${SYSTEM2_TIMEOUT_DEFAULT_MS} observed=${observedTimeout}`,
+    }
+  } finally {
+    if (previous === undefined) delete process.env.BUDDY_SYSTEM2_TIMEOUT_MS
+    else process.env.BUDDY_SYSTEM2_TIMEOUT_MS = previous
+  }
+})
+
+addCase('Muse Spark default does not inherit the old Mercury 20/h self-budget', async () => {
+  const previousSystem2Model = process.env.BUDDY_SYSTEM2_MODEL
+  const previousMercuryModel = process.env.BUDDY_MERCURY_MODEL
+  const previousBudget = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+  delete process.env.BUDDY_SYSTEM2_MODEL
+  delete process.env.BUDDY_MERCURY_MODEL
+  delete process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+  const dir = mkdtempSync(join(tmpdir(), 'muse-unbounded-'))
+  let transportCalls = 0
+  try {
+    const system2 = new MercurySystem2({
+      summarize: (request) => ({ ...mercurySummary(), recentFailures: [`tick:${request.tick}`] }),
+      log: () => undefined,
+      callsPath: join(dir, 'system2-calls.jsonl'),
+      cachePath: join(dir, 'system2-cache.json'),
+      resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+      transport: () => {
+        transportCalls += 1
+        return Promise.resolve({
+          toolCalls: [{ input: { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 1 }], reason: 'test' } }],
+          usage: null,
+        })
+      },
+    })
+    for (let tick = 1; tick <= 21; tick += 1) {
+      const request = planRequest()
+      request.tick = tick
+      await system2.tryRepair(request, 'no_candidate')
+    }
+    return {
+      pass: system2.model === SYSTEM2_MODEL_DEFAULT && system2.provider === 'muse-spark' && transportCalls === 21,
+      detail: `model=${system2.model} provider=${system2.provider} calls=${transportCalls}`,
+    }
+  } finally {
+    if (previousSystem2Model === undefined) delete process.env.BUDDY_SYSTEM2_MODEL
+    else process.env.BUDDY_SYSTEM2_MODEL = previousSystem2Model
+    if (previousMercuryModel === undefined) delete process.env.BUDDY_MERCURY_MODEL
+    else process.env.BUDDY_MERCURY_MODEL = previousMercuryModel
+    if (previousBudget === undefined) delete process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+    else process.env.BUDDY_SYSTEM2_MAX_PER_HOUR = previousBudget
   }
 })
 

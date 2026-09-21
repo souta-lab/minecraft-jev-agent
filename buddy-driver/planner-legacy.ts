@@ -39,7 +39,7 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta, parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
-import { netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
+import { netherPortalEntryGoal, netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
 import {
@@ -291,6 +291,14 @@ export interface Rung {
    * affordance boundary, not a deterministic reordering.
    */
   optional?: boolean
+  /**
+   * A self-contained OPTIONAL affordance is not a milestone and inherits no
+   * milestone prerequisites when it is offered as an Option. `iron_gear` is an
+   * optional rung that still sits inside the iron-age chain, so its Option
+   * legitimately carries its mandatory predecessors; a survival affordance like
+   * `food` must not imply "finish the whole remaining ladder first".
+   */
+  selfContained?: boolean
   satisfied: (c: Counts, w: ResidentWorldMemory) => boolean
   goals: (c: Counts, w: ResidentWorldMemory) => PlannedGoal[]
 }
@@ -310,6 +318,29 @@ function climb(ingotsNeeded: number, counts: Counts, crafts: Array<[string, numb
     out.push({ kind: 'craft', description: 'craft 1 x iron_chestplate', targetItem: 'iron_chestplate', requiredCount: 1 })
   }
   return out
+}
+
+const FOOD_RUNG_COUNT = 3
+/**
+ * Collect anchor for the food rung. `food` is the shared resource class (like
+ * the existing `log` anchor for the wood rung), so the goal is satisfied by ANY
+ * edible item -- beef, porkchop, chicken, fish, berries. The candidate layer
+ * grounds the route for whatever passive food animal the sensor sees; Jev owns
+ * which animal/action.
+ */
+const FOOD_RUNG_ANCHOR = 'food'
+
+/**
+ * Total edible items held, using the shared `food` resource class. Raw
+ * passive-animal drops count: they are edible without a furnace, which is the
+ * whole point of a survival food route.
+ */
+function heldFoodCount(c: Counts): number {
+  let total = 0
+  for (const [name, count] of Object.entries(c)) {
+    if (matchesResourceClass(name, 'food')) total += count
+  }
+  return total
 }
 
 /** The ordered capability ladder. Each rung states its own completion in inventory/world terms. */
@@ -384,7 +415,20 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'iron_ingot',
-    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3,
+    // The rung's ingots have exactly two consumers: the iron pickaxe and the
+    // flint_and_steel. When BOTH purposes are already fulfilled — an
+    // iron-or-better pickaxe is held AND the flint_and_steel it was smelted for
+    // is held — re-smelting 3 ingots is a dominated mid-step detour of the same
+    // class as `iron_gear` below. Measured live (`run-mub35qdr-1e1dh`): the bot
+    // held `flint_and_steel=1` and `diamond_pickaxe=1` while `iron_ingot=0`, so
+    // this rung stayed "unsatisfied" and its `smelt 1 x iron_ingot`
+    // prerequisite re-entered the durable queue and blocked `collect:obsidian`
+    // behind a furnace it could not reach.
+    //
+    // Honest requirement: if either consumer is still unfulfilled (no
+    // iron-or-better pickaxe, or no flint_and_steel), more iron IS genuinely
+    // needed and the rung stays unsatisfied.
+    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3 || (bestPickaxeRank(c) >= 3 && has(c, 'flint_and_steel')),
     // Same total-vs-shortfall bug as the raw_iron rung: with 2 ingots held this
     // compiled a required count of 1, so the third smelt was skipped entirely.
     goals: () => [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }],
@@ -452,6 +496,17 @@ export const RUNGS: readonly Rung[] = [
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
+  // --- M2 -> M3 transition: step through the lit portal into the Nether. ---
+  // Satisfied by the code-owned dimension truth (`dimensionIs`), never by an
+  // inventory count: the executor's `runEnterPortal` walks into the lit interior
+  // and the postcondition is `bot.game.dimension == minecraft:the_nether`.
+  // Without this rung the ladder jumped straight to Nether-only goals
+  // (`blaze_rods`) while the bot was still in the overworld.
+  {
+    id: 'enter_nether',
+    satisfied: (_c, w) => w.dimension === 'minecraft:the_nether',
+    goals: () => [netherPortalEntryGoal()],
+  },
   // --- M3 continued: Nether blaze rods -> pearls -> Eyes of Ender. ---
   {
     id: 'blaze_rods',
@@ -485,6 +540,31 @@ export const RUNGS: readonly Rung[] = [
     future: true,
     satisfied: () => false,
     goals: () => [{ kind: 'recover', description: 'defeat the ender dragon', targetItem: 'ender_dragon', requiredCount: 1 }],
+  },
+  // --- Survival affordance (NOT an M2/M3 milestone). ---
+  // A body at food=0 loses health and cannot regenerate, and the eat mechanic
+  // works only while an edible item is held. This rung is the planner's grounded
+  // route to food: it is OPTIONAL, so it never gates diamond/portal/Nether, and
+  // self-contained, so choosing it does not inherit the mandatory ladder. The
+  // candidate layer offers the hunt ATTACK for whatever passive food animal the
+  // sensor sees; Jev owns which animal/action. Appended last so every existing
+  // rung keeps its index.
+  {
+    id: 'food',
+    optional: true,
+    selfContained: true,
+    satisfied: (c) => heldFoodCount(c) >= FOOD_RUNG_COUNT,
+    goals: (c) =>
+      heldFoodCount(c) >= FOOD_RUNG_COUNT
+        ? []
+        : [
+            {
+              kind: 'collect',
+              description: `collect ${FOOD_RUNG_COUNT} x food (hunt passive animals)`,
+              targetItem: FOOD_RUNG_ANCHOR,
+              requiredCount: FOOD_RUNG_COUNT,
+            },
+          ],
   },
 ]
 
@@ -1192,6 +1272,14 @@ export function buildPlanOptions(
     knownFurnaces?: number
     resumeRungIndex?: number
     portalFrameBlocks?: number
+    /**
+     * Live hunger bar. Supplied by the caller because `satisfied(counts, world)`
+     * cannot see it. The survival `food` option is offered only when hunger is at
+     * or below `eatBelowFood`, so it can never crowd the M2/M3 road when fed.
+     */
+    foodLevel?: number | null
+    /** The eat gate the candidate layer uses (candidates.ts default 18). */
+    eatBelowFood?: number
     log?: (event: string, detail?: Record<string, unknown>) => void
   },
 ): PlanOption[] {
@@ -1232,6 +1320,17 @@ export function buildPlanOptions(
   if (first !== undefined) {
     options.push({ id: `front_${first.id}`, title: `next milestone: ${first.id}`, goals: planGoals(first) })
   }
+  // Survival affordance: offered only while the body is hungry, and before the
+  // long-horizon options, because the option list is bounded to four. It is
+  // optional (never gates diamond/portal/Nether) and self-contained (inherits no
+  // milestone goals), so it cannot dominate the M2/M3 road when the body is fed.
+  const eatBelowFood = opts?.eatBelowFood ?? 18
+  const foodLevel = opts?.foodLevel ?? null
+  const foodRung = optionalUnsat.find((rung) => rung.id === 'food')
+  if (foodRung !== undefined && foodLevel !== null && foodLevel <= eatBelowFood) {
+    const foodGoals = planGoals(foodRung)
+    if (foodGoals.length > 0) options.push({ id: 'food', title: 'optional: get food (survival)', goals: foodGoals })
+  }
   const two = mandatory.slice(0, 2).flatMap((rung) => planGoals(rung))
   if (two.length > 0) options.push({ id: 'two_rungs', title: `next two milestones (${mandatory.slice(0, 2).map((r) => r.id).join(' + ')})`, goals: two })
   const ironIndex = mandatory.findIndex((rung) => rung.id === 'iron_pickaxe')
@@ -1240,14 +1339,18 @@ export function buildPlanOptions(
     if (iron.length > 0) options.push({ id: 'finish_iron_age', title: 'finish the iron age (raw_iron -> iron_ingot -> iron_pickaxe)', goals: iron })
   }
   for (const rung of optionalUnsat) {
+    // `food` is handled above: it is hunger-gated and deliberately short.
+    if (rung.id === 'food') continue
     const optionalIndex = rungIndexById(rung.id)
     // Mandatory predecessors follow the resume cursor (no re-planning rungs the
     // live inventory already put behind the resident); the optional rung itself
     // is appended so it stays selectable even when the cursor has moved past it.
-    const gear = [
-      ...unsat.filter((candidate) => candidate.optional !== true && rungIndexById(candidate.id) <= optionalIndex),
-      rung,
-    ].flatMap((candidate) => planGoals(candidate))
+    // A self-contained affordance (survival `food`) inherits no predecessors.
+    const predecessors =
+      rung.selfContained === true
+        ? []
+        : unsat.filter((candidate) => candidate.optional !== true && rungIndexById(candidate.id) <= optionalIndex)
+    const gear = [...predecessors, rung].flatMap((candidate) => planGoals(candidate))
     if (gear.length > 0) options.push({ id: rung.id, title: `optional: ${rung.id}`, goals: gear })
   }
   const diamondIndex = mandatory.findIndex((rung) => rung.id === 'diamond_pickaxe')

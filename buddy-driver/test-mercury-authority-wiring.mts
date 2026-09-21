@@ -97,18 +97,18 @@ assert.equal(planner.provider, 'none')
 assert.equal(planner.authorityModel, 'none')
 assert.deepEqual(planner.authorityStack, {
   provider: 'hybrid',
-  model: `typesafe-ai:${planner.model}|mercury:${MUSE_SPARK_MODEL}`,
+  model: `typesafe-ai:${planner.model}|muse-spark:${MUSE_SPARK_MODEL}`,
 })
 
 const plan = await planner.plan(request)
 assert.equal(mercury.model, MUSE_SPARK_MODEL)
-assert.equal(planner.provider, 'mercury')
+assert.equal(planner.provider, 'muse-spark')
 assert.equal(planner.authorityModel, MUSE_SPARK_MODEL)
 assert.equal(plan.goals[0]?.targetItem, 'raw_iron')
 assert.match(plan.note, /mercury/i)
 assert.equal(logs.some((entry) => entry.event === 'MERCURY_ATTEMPT'), true)
 assert.equal(
-  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.source === 'mercury'),
+  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.source === 'muse-spark'),
   true,
 )
 assert.equal(

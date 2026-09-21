@@ -33,6 +33,18 @@ const FOOD_ITEMS = new Set([
   'cooked_mutton',
   'cooked_cod',
   'cooked_salmon',
+  'cooked_rabbit',
+  // Raw passive-animal drops are edible without a furnace; a hunting-only
+  // survival route would be useless if the raw drop could not be eaten. This is
+  // the single food truth table (candidates.ts `pickFood`/`isFoodItem` delegate
+  // here) so hunger and the ladder agree on what counts as food.
+  'beef',
+  'porkchop',
+  'chicken',
+  'mutton',
+  'rabbit',
+  'cod',
+  'salmon',
   'apple',
   'baked_potato',
   'golden_apple',

@@ -18,7 +18,7 @@ import { dirname } from 'node:path'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
-import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
+import { DEFAULT_LLM_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 
@@ -262,7 +262,7 @@ export class Advisor {
     this.log = options.log
     this.cachePath = options.cachePath
     this.mode = options.mode
-    this.model = options.model ?? process.env.BUDDY_ADVISOR_MODEL ?? DEFAULT_JEV_MODEL
+    this.model = options.model ?? process.env.BUDDY_ADVISOR_MODEL ?? DEFAULT_LLM_MODEL
     this.minIntervalMs = options.minIntervalMs ?? Number(process.env.BUDDY_ADVISOR_MIN_INTERVAL_MS ?? 30000)
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_ADVISOR_TIMEOUT_MS ?? 8000)
     this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_ADVISOR_MAX_ATTEMPTS ?? 3)

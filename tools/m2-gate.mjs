@@ -20,6 +20,14 @@
 // never attributed to R, so a run's facts can never be combined with another
 // run's. Missing/unbound evidence is UNKNOWN and NEVER PASS. A known portal
 // failure (shape=bad, PORTAL_LIGHT_REFUSED, PORTAL_VERIFIED=false) is FAIL.
+//
+// A run that merely INHERITS a pre-existing portal is a distinct UNKNOWN case,
+// never a PASS: when R carries a positive portal-truth observation
+// (`PORTAL_TRUTH verified=true source=live-world`, i.e. the live world / durable
+// memory already held a verified portal) or a chainless `PORTAL_VERIFIED=true`,
+// and R has no placed-block -> validated-frame chain of its own, the verdict is
+// UNKNOWN with the explicit reason `inherited_portal`. The missing stages stay
+// visible in the facts so that reason never hides a real stage gap.
 // A gameplay-complete run is still UNKNOWN unless that same run proves Jev
 // decisions, typesafe policy, planner=llm with deterministic fallback disabled,
 // and at least one model-authored System2 portal plan.
@@ -46,14 +54,23 @@ export const M2_REQUIRED_STAGES = Object.freeze([
   'portal_lit',
 ])
 
-/** Marker names emitted by the portal runtime (netherPortalPlan.ts:37-45). */
+/**
+ * Marker names emitted by the portal runtime (netherPortalPlan.ts:37-45) plus
+ * `PORTAL_TRUTH`, the resident's live-world / durable-memory portal verdict
+ * (buddy-driver/generation-entry.ts). PORTAL_TRUTH carries NO build chain: it
+ * only ever reports that a verified portal already existed.
+ */
 export const PORTAL_MARKERS = Object.freeze([
   'PORTAL_BLOCK_PLACED',
   'PORTAL_FRAME_READY',
   'PORTAL_LIT',
   'PORTAL_VERIFIED',
   'PORTAL_LIGHT_REFUSED',
+  'PORTAL_TRUTH',
 ])
+
+/** Explicit UNKNOWN reason for a run that inherited a portal instead of making one. */
+export const INHERITED_PORTAL_REASON = 'inherited_portal'
 
 /** A valid obsidian frame needs at least the 10 edge blocks (corners optional). */
 export const PORTAL_OBSIDIAN_REQUIRED = 10
@@ -83,6 +100,12 @@ export const M2_GATE_CONTROL_SOCK =
 const POS_RE = /pos=(-?\d+),(-?\d+),(-?\d+)/
 
 const INVENTORY_RE = /\b(?:items|inventory)=(\{[^{}]*\})/
+
+/**
+ * `dimension=<id>` observations inside a run-bound line. Additive: the M3 gate
+ * reports the dimension it observed, while the M2 stages ignore this field.
+ */
+const DIMENSION_RE = /\bdimension=(minecraft:[a-z_]+|[a-z_]+)\b/
 
 /** Read-only current-run binding used only to bound live policy evidence. */
 export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, timeoutMs = 1500) {
@@ -140,6 +163,18 @@ export function parsePortalMarker(line) {
   if (typeof line !== 'string') return null
   const verified = /\bPORTAL_VERIFIED=(true|false)\b/.exec(line)
   if (verified !== null) return { name: 'PORTAL_VERIFIED', verified: verified[1] === 'true' }
+  const truth = /\bPORTAL_TRUTH\b/.exec(line)
+  if (truth !== null) {
+    const truthVerified = /\bverified=(true|false)\b/.exec(line)
+    const reason = /\breason=(\S+)/.exec(line)
+    const source = /\bsource=(\S+)/.exec(line)
+    return {
+      name: 'PORTAL_TRUTH',
+      verified: truthVerified === null ? null : truthVerified[1] === 'true',
+      ...(reason === null ? {} : { reason: reason[1] }),
+      ...(source === null ? {} : { source: source[1] }),
+    }
+  }
   const frame = /\bPORTAL_FRAME_READY\b/.exec(line)
   if (frame !== null) {
     const blocks = /\bblocks=(\d+)/.exec(line)
@@ -244,6 +279,26 @@ export function detectPortalFailure(events) {
   return null
 }
 
+/**
+ * A positive portal observation in R that is NOT backed by R's own build chain,
+ * or null. `PORTAL_TRUTH verified=true` is the resident's live-world / durable
+ * memory verdict: the world already held a verified portal. A `PORTAL_VERIFIED=true`
+ * with `chain.frameVerified !== true` is the same "already exists" claim straight
+ * from the runtime verifier. This never produces a PASS by itself; the caller
+ * combines it with `!framePass` and reports `inherited_portal`.
+ */
+export function detectInheritedPortal(events, chain = null) {
+  if (chain?.frameVerified === true) return null
+  const seq = Array.isArray(events) ? events : []
+  const truth = seq.find((event) => event?.name === 'PORTAL_TRUTH' && event.verified === true)
+  if (truth !== undefined) {
+    return { kind: 'live_world_truth', source: truth.source ?? null, reason: truth.reason ?? null }
+  }
+  const verified = seq.find((event) => event?.name === 'PORTAL_VERIFIED' && event.verified === true)
+  if (verified !== undefined) return { kind: 'runtime_verified_without_build_chain', source: null, reason: null }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // the four stage conditions (facts are joined only inside ONE runId)
 // ---------------------------------------------------------------------------
@@ -309,12 +364,16 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
   const diamond = evaluateDiamondReady(samples)
   const materials = evaluateMaterialsReady(samples)
 
-  const perSource = sources.map((source) => ({
-    name: source.name,
-    path: source.path,
-    chain: evaluatePortalChain(source.portalEvents),
-    failure: detectPortalFailure(source.portalEvents),
-  }))
+  const perSource = sources.map((source) => {
+    const chain = evaluatePortalChain(source.portalEvents)
+    return {
+      name: source.name,
+      path: source.path,
+      chain,
+      failure: detectPortalFailure(source.portalEvents),
+      inherited: detectInheritedPortal(source.portalEvents, chain),
+    }
+  })
   const framePass = perSource.some((source) => source.chain.frameVerified)
   const litPass = perSource.some(
     (source) => source.chain.litVerified && normalizeDimension(source.chain.litDimension) === normalizeDimension(OVERWORLD),
@@ -322,6 +381,11 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
   const frameFail = !framePass && perSource.some((source) => source.failure === 'portal_frame_shape_bad')
   const litFail =
     !litPass && perSource.some((source) => source.failure === 'portal_light_refused' || source.failure === 'portal_verify_false')
+  // Inherited: R observed an already-verified portal but built no chain of its own.
+  const inheritedObservations = perSource
+    .filter((source) => source.inherited !== null)
+    .map((source) => ({ source: source.name, ...source.inherited }))
+  const inheritedPortal = !framePass && inheritedObservations.length > 0
 
   const conditions = {
     diamond_ready: diamond.ready ? 'PASS' : 'UNKNOWN',
@@ -329,7 +393,16 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
     portal_built: framePass ? 'PASS' : frameFail ? 'FAIL' : 'UNKNOWN',
     portal_lit: litPass ? 'PASS' : litFail ? 'FAIL' : 'UNKNOWN',
   }
-  const facts = { diamond, materials, framePass, litPass, policy: policy?.facts ?? null }
+  const missing = M2_REQUIRED_STAGES.filter((stage) => conditions[stage] !== 'PASS')
+  const facts = {
+    diamond,
+    materials,
+    framePass,
+    litPass,
+    missing,
+    inheritedPortal: { detected: inheritedPortal, observations: inheritedObservations },
+    policy: policy?.facts ?? null,
+  }
   const allPass = Object.values(conditions).every((value) => value === 'PASS')
   const failureReason = conditions.portal_built === 'FAIL'
     ? 'portal_frame_shape_bad'
@@ -369,7 +442,19 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
       facts,
     })
   }
-  const missing = M2_REQUIRED_STAGES.filter((stage) => conditions[stage] !== 'PASS')
+  // Inherited-portal case (b): R saw an already-verified portal but produced no
+  // build chain of its own. Never PASS; report the explicit reason.
+  if (inheritedPortal) {
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: INHERITED_PORTAL_REASON,
+      runId: expectedRunId,
+      conditions,
+      sources: perSource,
+      facts,
+    })
+  }
   return verdict({
     status: 'UNKNOWN',
     code: 2,
@@ -403,6 +488,7 @@ function isBootLine(line) {
 export function scanRunLines(runId, lines) {
   const portalEvents = []
   const inventorySamples = []
+  const dimensionObservations = []
   const foreignRuns = new Set()
   let activeRunId = null
   let bootSeen = false
@@ -425,9 +511,19 @@ export function scanRunLines(runId, lines) {
     if (portal !== null) portalEvents.push(portal)
     const inventory = parseInventoryMarker(line)
     if (inventory !== null) inventorySamples.push(inventory)
+    const dimension = DIMENSION_RE.exec(line)
+    if (dimension !== null) dimensionObservations.push(dimension[1])
   }
-  if (!bootSeen) return { status: 'unknown', reason: `run_boundary_missing runId=${runId}`, portalEvents: [], inventorySamples: [] }
-  return { status: 'valid', portalEvents, inventorySamples, foreignRuns: [...foreignRuns] }
+  if (!bootSeen) {
+    return {
+      status: 'unknown',
+      reason: `run_boundary_missing runId=${runId}`,
+      portalEvents: [],
+      inventorySamples: [],
+      dimensionObservations: [],
+    }
+  }
+  return { status: 'valid', portalEvents, inventorySamples, dimensionObservations, foreignRuns: [...foreignRuns] }
 }
 
 /** Read and scan the resident log for run R's markers. */
@@ -520,13 +616,27 @@ export async function readRunScopedM2Evidence(runId, { logPath = M2_GATE_LOG, sn
   const mismatches = []
   const snapshot = readM2Snapshot(runId, { snapshotDir })
   if (snapshot.status === 'valid' && (snapshot.portalEvents.length > 0 || snapshot.inventorySamples.length > 0)) {
-    sources.push({ name: 'snapshot', path: snapshot.path, portalEvents: snapshot.portalEvents, inventorySamples: snapshot.inventorySamples })
+    sources.push({
+      name: 'snapshot',
+      path: snapshot.path,
+      portalEvents: snapshot.portalEvents,
+      inventorySamples: snapshot.inventorySamples,
+      // Dimension is only recorded on portal markers; the M3 gate reports it as
+      // an intermediate fact without requiring a portal chain.
+      dimensionObservations: snapshot.portalEvents.map((event) => event.dimension).filter((value) => typeof value === 'string'),
+    })
   } else if (snapshot.status === 'unknown') {
     mismatches.push(snapshot.reason)
   }
   const log = await readM2Log(runId, { logPath })
   if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0)) {
-    sources.push({ name: 'log', path: log.path, portalEvents: log.portalEvents, inventorySamples: log.inventorySamples })
+    sources.push({
+      name: 'log',
+      path: log.path,
+      portalEvents: log.portalEvents,
+      inventorySamples: log.inventorySamples,
+      dimensionObservations: log.dimensionObservations ?? [],
+    })
   } else if (log.status === 'unknown') {
     mismatches.push(log.reason)
   }
@@ -607,6 +717,7 @@ export async function runM2Gate({
         conditions: result.conditions,
         evidence: evidence === null ? null : { status: evidence.status, sources: (evidence.sources ?? []).map((s) => s.name) },
         policy: policy === null ? null : { status: policy.status, reason: policy.reason },
+        inheritedPortal: result.facts?.inheritedPortal ?? null,
         facts: result.facts ?? null,
       }),
     )
@@ -627,6 +738,13 @@ export async function runM2Gate({
         `flint_and_steel=${result.facts.materials.hasFlintAndSteel} obsidian=${result.facts.materials.hasObsidian} ` +
         `frame=${result.facts.framePass} lit=${result.facts.litPass}`,
     )
+    if (result.facts.inheritedPortal?.detected) {
+      write(
+        `m2_inherited_portal: true observations=${result.facts.inheritedPortal.observations.length} ` +
+          `kinds=${result.facts.inheritedPortal.observations.map((observation) => observation.kind).join(',')}`,
+      )
+    }
+    write(`m2_missing: ${result.facts.missing.length > 0 ? result.facts.missing.join(',') : 'none'}`)
   }
   write(
     `${M2_RUN_RESULT} status=${result.status} reason=${result.reason} runId=${expectedRunId ?? 'none'} ` +

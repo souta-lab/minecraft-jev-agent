@@ -26,6 +26,8 @@ import {
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
+import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
+import type { ArmorSlot } from './gearPlan.ts'
 
 export type Vec3Json = {
   x: number
@@ -75,7 +77,16 @@ export function isSensedStation(station: StationEntry): boolean {
  */
 export type KnownResource = {
   name: string
-  kind: 'ore' | 'log' | 'station'
+  /**
+   * Broad class. `portal` (issue #80) is a durable verified-portal site: it is
+   * inert to the ore/log/station retrieval matches and is consumed by
+   * `rememberedPortalFrameSites` so the existing portal grounding/entry
+   * machinery gets a grounded route back to the site. `structure` (#342) is a
+   * durable Nether fortress site: the candidate layer matches it by block name
+   * (`NETHER_STRUCTURE_BLOCK_NAMES`), giving a `blaze_rod` goal a route to the
+   * remembered body without asserting the body yields a blaze rod.
+   */
+  kind: 'ore' | 'log' | 'station' | 'portal' | 'structure'
   position: Vec3Json
   /**
    * Issue #14: the coordinate is only meaningful in the world it was scanned in.
@@ -85,6 +96,15 @@ export type KnownResource = {
    */
   dimension?: string
   worldEpoch?: number
+  /** #80: frame width axis for a `portal` entry (defaults to 'x'). */
+  widthAxis?: PortalWidthAxis
+  /**
+   * #80: frame edge cells recorded with a `portal` entry. They let the sensor
+   * re-project the durable site as a grounded `PortalFrameSite` so the existing
+   * frame/light/entry grounding routes back to it. Geometry only, never a lit
+   * verdict: `portalVerified` is still re-read from live block truth.
+   */
+  frameCells?: readonly Vec3Json[]
 }
 
 export type HeldItemState = {
@@ -92,6 +112,17 @@ export type HeldItemState = {
   count: number
   slot: number
 }
+
+/**
+ * Worn armor per destination. Built from the mineflayer player-window armor
+ * slots (5-8), which `bot.inventory.items()` deliberately excludes: a WORN
+ * piece is not a carried item, so `inventory.counts` never double-counts it.
+ * `null` means nothing is worn in that slot.
+ */
+export type ArmorState = Record<ArmorSlot, HeldItemState | null>
+
+/** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
+export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
 
 export type SelfState = {
   username: string
@@ -106,6 +137,12 @@ export type SelfState = {
   dimension: string
   isDay: boolean
   heldItem: HeldItemState | null
+  /**
+   * Worn armor per destination. Optional so pure fixtures that predate the
+   * armor affordance need not restate it; `buildWorldState` always populates it
+   * and consumers treat an absent value as all slots empty.
+   */
+  armor?: ArmorState
 }
 
 export type InventorySlotState = {
@@ -433,6 +470,34 @@ export const ORE_SOURCES: Readonly<Record<string, readonly string[]>> = {
 export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_SOURCES).flat())]
 
 /**
+ * M3: the Nether-structure body blocks worth name-scanning so a sensed Nether
+ * fortress becomes representable truth. Fortresses are built from nether brick
+ * blocks; the fence and stair variants are corroboration, not evidence of a
+ * completed structure on their own.
+ *
+ * Verified against the PINNED minecraft-data (1.21.11) loaded by mineflayer:
+ *   nether_bricks       id 380, diggable, hardness 2.0
+ *   nether_brick_fence  id 381, diggable, hardness 2.0
+ *   nether_brick_stairs id 382, diggable, hardness 2.0
+ * `blaze_spawner` does NOT exist in this data version — the only spawner names
+ * are `spawner` and `trial_spawner`. A generic `spawner` block would also match
+ * overworld dungeons, so it is deliberately NOT used here: the fortress body
+ * blocks are the grounded signal. (`nether_brick_slab`/`nether_brick_wall` also
+ * exist and can be added as corroboration later; they are left out to keep the
+ * scan set at the three names that most reliably mark fortress fabric.)
+ *
+ * The list is perception truth only. Whether a sensed body belongs to a real
+ * fortress is a dimension question owned by the durable structure record
+ * (`syncKnownStructureSites` in buddy-driver/generation-entry.ts), never a goal
+ * or ranking decision made here.
+ */
+export const NETHER_STRUCTURE_BLOCK_NAMES: readonly string[] = [
+  'nether_bricks',
+  'nether_brick_fence',
+  'nether_brick_stairs',
+]
+
+/**
  * Blocks whose primary drop is a directly collectible item that is neither an
  * `_ore` nor a log. Obsidian is the M2 case: the typed portal plan emits
  * `collect:obsidian`, but the block name carries no `_ore` suffix and is not in
@@ -442,17 +507,37 @@ export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_S
  *
  * This is perception truth only: it names what to scan when the active goal
  * targets the item. The MINE/MOVE/DESCEND and known-retrieval machinery still
- * owns reach, pickup adjacency and the diamond-pickaxe harvest gate, and no goal
- * or action is chosen or ranked here.
+ * owns reach, pickup adjacency and the harvest gate, and no goal or action is
+ * chosen or ranked here.
  */
 export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> = {
   obsidian: ['obsidian'],
+  // M2 needs `flint` for flint_and_steel, and its only block source is gravel.
+  // Without this entry `collect flint (from gravel)` had no scanned source at
+  // all, so the generator produced `presented=2 productive=0`
+  // (CANDIDATE_STARVATION) while the body wandered and dug exploratory DESCEND
+  // shafts — the live "tunnelling for nothing" stall. Mining gravel only *may*
+  // drop flint, which is fine: the route exists, and pickup/repeat stay with the
+  // existing machinery.
+  flint: ['gravel'],
+  // M3's `blaze_rods` rung collects 7 x blaze_rod. A blaze_rod is a mob drop, so
+  // there is no block whose yield is blaze_rod; what exists is the fortress body
+  // that hosts the blazes. Mapping the focus item to the structure fabric is the
+  // same "the block is the grounded affordance, the drop stays with the existing
+  // machinery" precedent as `flint -> gravel`: the name scan makes a sensed
+  // fortress visible (and durable via the Nether structure site record), and
+  // MINE/RETRIEVE/pickup keep their own gates. `syncKnownStructureSites`
+  // additionally refuses to mint a record outside the Nether, so a
+  // player-placed `nether_bricks` block in the overworld cannot masquerade as a
+  // fortress.
+  blaze_rod: NETHER_STRUCTURE_BLOCK_NAMES,
 }
 
 /**
  * The block names to name-scan for a collect goal, from ore drops plus direct
- * (non-ore, non-log) drops. Returns undefined when the focus item has no
- * name-scanned source, so callers keep their existing behaviour.
+ * (non-ore, non-log) drops and structure-landmark routes. Returns undefined when
+ * the focus item has no name-scanned source, so callers keep their existing
+ * behaviour.
  */
 export function scannedBlockNames(focusItem: string | null): readonly string[] | undefined {
   if (focusItem === null) return undefined
@@ -565,7 +650,26 @@ function buildSelf(bot: Bot): SelfState {
     dimension: bot.game.dimension,
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
+    armor: buildArmor(bot),
   }
+}
+
+/**
+ * Read the four armor destinations from the live player window. Mineflayer
+ * window 0 slots 5-8 are armor head->feet; a fake bot without `slots` reports
+ * every slot empty rather than throwing.
+ */
+function buildArmor(bot: Bot): ArmorState {
+  const slots = (bot.inventory as { slots?: ReadonlyArray<{ name?: string; count?: number; slot?: number } | null> })
+    .slots
+  const armor = { ...EMPTY_ARMOR }
+  for (const slot of ARMOR_SLOTS) {
+    const index = ARMOR_SLOT_INDEX[slot]
+    const item = slots?.[index]
+    if (item === undefined || item === null || typeof item.name !== 'string') continue
+    armor[slot] = { name: item.name, count: item.count ?? 1, slot: item.slot ?? index }
+  }
+  return armor
 }
 
 function buildInventory(bot: Bot): InventoryState {
@@ -1473,6 +1577,59 @@ export function detectLivePortalVerification(bot: Bot): boolean {
   )
 }
 
+/**
+ * #80: the live frame sites whose interior is currently a lit nether portal.
+ * This is the same live truth `detectLivePortalVerification` reads, returned per
+ * site so the caller can record WHERE the verified portal is. It is never a
+ * durable verdict by itself.
+ */
+export function sensedVerifiedPortalSites(bot: Bot): PortalFrameSite[] {
+  const dimension = String(bot.game?.dimension ?? 'minecraft:overworld')
+  if (dimension !== 'minecraft:overworld' && dimension !== 'overworld') return []
+  return sensedPortalFrameSites(bot).filter((site) =>
+    detectPortalVerification(
+      dimension,
+      [site],
+      (position) => bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null,
+    ),
+  )
+}
+
+/**
+ * #80: turn durable remembered portal entries into the same `PortalFrameSite`
+ * shape the live sensor emits. The record supplies the route/geometry only; the
+ * interior is NOT claimed lit here, so every consumer still re-reads live block
+ * truth before acting (the frame site is an affordance, never a verdict).
+ */
+export function rememberedPortalFrameSites(remembered: readonly KnownResource[] | undefined): PortalFrameSite[] {
+  const sites: PortalFrameSite[] = []
+  for (const resource of remembered ?? []) {
+    if (resource.kind !== 'portal') continue
+    const frame = (resource.frameCells ?? []).map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+    sites.push({
+      origin: { x: resource.position.x, y: resource.position.y, z: resource.position.z },
+      widthAxis: resource.widthAxis ?? 'x',
+      safe: true,
+      reachable: true,
+      ...(frame.length === 0 ? {} : { existingFrame: frame }),
+    })
+  }
+  return sites
+}
+
+/** Deduplicate live and remembered frame sites by origin+axis; live wins. */
+function mergePortalFrameSites(live: readonly PortalFrameSite[], remembered: readonly PortalFrameSite[]): PortalFrameSite[] {
+  const seen = new Set<string>()
+  const merged: PortalFrameSite[] = []
+  for (const site of [...live, ...remembered]) {
+    const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(site)
+  }
+  return merged
+}
+
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const found: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
@@ -1500,7 +1657,10 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
   const self = buildSelf(bot)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
-  const portalFrameSites = buildPortalFrameSites(bot, options, self)
+  const portalFrameSites = mergePortalFrameSites(
+    buildPortalFrameSites(bot, options, self),
+    rememberedPortalFrameSites(rememberedStations),
+  )
   const portalFrame =
     portalFrameSites
       .map((site) => {

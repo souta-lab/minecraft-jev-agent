@@ -34,22 +34,18 @@ import type {
   GenerationResourceCounts,
   GenerationStatus,
   HazardSource,
-  KnownResourceJson,
-  KnownStation,
   ResidentGeneration,
   ResidentWorldMemory,
-  StationKind,
   StructuralSmokeResult,
   Vec3Json,
   WorldKey,
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
-import { normalizeStation, stationKey } from './station-memory.ts'
+import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
   createPreLossInventoryTracker,
-  partitionHazardsBySource,
   parseRehearsalMode,
   recordRehearsalHazard,
   shouldRegisterHazard,
@@ -58,6 +54,7 @@ import {
 } from './simdeath.ts'
 import {
   commitPendingProposals,
+  mergeWorldMemoryDelta,
   newPendingProposals,
   stageLedgerProposal,
   stageLedgerReconciliation,
@@ -194,6 +191,22 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     mined: { ...normal.mined },
     discoveredOres: [...normal.discoveredOres],
     knownResources: normal.knownResources.map((resource) => ({ ...resource })),
+    knownPortalSites: normal.knownPortalSites.map((site) => ({ ...site })),
+    // M3: the live path must carry structure sites too. This one-line omission is
+    // exactly how `knownPortalSites` was silently dropped on every reload before
+    // #80 — a field the canonical merge handled but the generation seed forgot.
+    knownStructureSites: normal.knownStructureSites.map((site) => ({
+      ...site,
+      ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+    })),
+    // #354: the durable traversal facts must ride the generation seed too, or the
+    // candidate consumer never sees the remembered connectivity (the #80 omission
+    // class this clone exists to prevent).
+    knownTraversals: normal.knownTraversals.map((traversal) => ({
+      ...traversal,
+      from: { ...traversal.from },
+      to: { ...traversal.to },
+    })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
@@ -322,44 +335,20 @@ function commitHostLedger(ledger: GoalQueueSnapshot, source: string): void {
   saveState(`ledger-host:${source}`)
 }
 
+/**
+ * Live world-memory delta from the active (non-speculative) generation. The
+ * world-key guard rejects a proposal stamped with a superseded key, then the
+ * single canonical merge (`mergeWorldMemoryDelta`) is applied and committed. The
+ * staged commit point uses the SAME merge, so a field added to `WorldMemoryDelta`
+ * can never be persisted on one path and dropped on the other (#80 regression).
+ */
 function applyWorldMemoryDelta(delta: WorldMemoryDelta, sourceWorldKey: WorldKey): void {
   const currentKey = currentWorldKey()
   if (!acceptsWorldMemoryProposal(sourceWorldKey, currentKey)) {
     log('WORLDMEMORY_REJECTED', { reason: 'world-key-mismatch', sourceWorldKey, currentWorldKey: currentKey })
     return
   }
-  const memory = keyedMemory()
-  if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables, 'crafting_table')
-  if (delta.furnaces !== undefined) mergeStationDtos(memory.furnaces, delta.furnaces, 'furnace')
-  if (delta.removeStations !== undefined) {
-    removeStationDtos(memory.craftingTables, delta.removeStations, 'crafting_table')
-    removeStationDtos(memory.furnaces, delta.removeStations, 'furnace')
-  }
-  if (delta.discoveredOres !== undefined) {
-    for (const ore of delta.discoveredOres) {
-      if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
-    }
-  }
-  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
-  if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
-  if (delta.mined !== undefined) {
-    for (const [key, count] of Object.entries(delta.mined)) {
-      memory.mined[key] = (memory.mined[key] ?? 0) + count
-    }
-  }
-  if (delta.traversalFailures !== undefined) {
-    memory.traversalFailures = delta.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } }))
-  }
-  if (delta.moveFailures !== undefined) {
-    memory.moveFailures = delta.moveFailures.map((entry) => ({ ...entry }))
-  }
-  if (delta.hazards !== undefined) {
-    const { production, simulation } = partitionHazardsBySource(delta.hazards)
-    for (const hazard of production) mergeHazard(memory.hazards, hazard)
-    for (const hazard of simulation) {
-      log('HAZARD_SKIPPED', { source: 'simulation', reason: hazard.reason, pos: `${hazard.x},${hazard.y},${hazard.z}`, where: 'world-memory-delta' })
-    }
-  }
+  mergeWorldMemoryDelta(keyedMemory(), delta, log)
   saveState('world-memory')
 }
 
@@ -434,75 +423,6 @@ function mergeHazard(target: DeathHazard[], found: DeathHazard): DeathHazard {
   existing.reason = found.reason
   existing.lastSeenAt = found.lastSeenAt || Date.now()
   return existing
-}
-
-function mergeStationDtos(target: KnownStation[], found: readonly KnownStation[], kind: StationKind): number {
-  let changed = 0
-  for (const station of found) {
-    const key = stationKey(station)
-    const existing = target.find((current) => stationKey(current) === key)
-    if (existing === undefined) {
-      target.push(normalizeStation(station, kind))
-      changed += 1
-      continue
-    }
-    Object.assign(existing, normalizeStation({ ...existing, ...station }, kind))
-    changed += 1
-  }
-  return changed
-}
-
-function removeStationDtos(target: KnownStation[], gone: readonly KnownStation[], kind: StationKind): number {
-  let removed = 0
-  for (const station of gone) {
-    if ((station.kind ?? kind) !== kind) continue
-    const key = stationKey(station)
-    for (let index = target.length - 1; index >= 0; index -= 1) {
-      const current = target[index]
-      if (current !== undefined && stationKey(current) === key) {
-        target.splice(index, 1)
-        removed += 1
-      }
-    }
-  }
-  return removed
-}
-
-function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[]): number {
-  const seen = new Set(target.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
-  let added = 0
-  for (const resource of found) {
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (seen.has(key)) continue
-    if (target.length >= 256) break
-    seen.add(key)
-    target.push({
-      name: resource.name,
-      kind: resource.kind,
-      x: Math.round(resource.x),
-      y: Math.round(resource.y),
-      z: Math.round(resource.z),
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    })
-    added += 1
-  }
-  return added
-}
-
-function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourceJson[]): number {
-  const keys = new Set(gone.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
-  let removed = 0
-  for (let index = target.length - 1; index >= 0; index -= 1) {
-    const resource = target[index]
-    if (resource === undefined) continue
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (!keys.has(key)) continue
-    target.splice(index, 1)
-    removed += 1
-  }
-  return removed
 }
 
 /** Drop a rejected/superseded generation's staged proposals without writing. */
@@ -1979,6 +1899,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
         furnaces: memory.furnaces.length,
         discoveredOres: memory.discoveredOres,
         traversalFailures: memory.traversalFailures.length,
+        knownTraversals: memory.knownTraversals.length,
         hazards: memory.hazards.length,
         hardHazards: memory.hazards.filter((h) => h.count >= 2).length,
       },

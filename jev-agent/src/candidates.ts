@@ -24,8 +24,8 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
-import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
@@ -37,7 +37,7 @@ import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
-import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
+import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
@@ -47,11 +47,15 @@ import {
   FLINT_AND_STEEL,
   NETHER_PORTAL,
   OBSIDIAN,
+  PORTAL_ENTERED_PREDICATE,
+  PORTAL_LIT_PREDICATE,
   groundPortalFrame,
   planPortalIgnition,
   serializePortalCells,
 } from './netherPortalPlan.ts'
-import type { PortalFrameValidation } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
+import { armorEquipOffers, armorEquipRefusals } from './gearPlan.ts'
+import type { ArmorRefusal } from './gearPlan.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -60,11 +64,13 @@ export type CandidateKind =
   | 'PLACE'
   | 'SMELT'
   | 'IGNITE'
+  | 'ENTER_PORTAL'
   | 'DESCEND'
   | 'STEP'
   | 'RETRIEVE'
   | 'ATTACK'
   | 'EAT'
+  | 'EQUIP'
   | 'RETREAT'
   | 'WAIT'
   | 'ESCALATE'
@@ -176,6 +182,15 @@ export interface CandidateOptions {
   maxAttackCandidates: number
   /** below this food level the bot is willing to eat */
   eatBelowFood: number
+  /**
+   * furthest distance (m) at which a sensed passive food animal is offered as a
+   * hunt route. The sensor only reports entities inside `SensorOptions.entityRadius`
+   * (default 24m, see state.ts) and the ATTACK executor already paths to the
+   * entity with `GoalFollow`, so this is the CAN boundary of the hunt affordance.
+   * It must NOT be the 8m melee `COMBAT_CANDIDATE_RANGE`: a hungry resident
+   * standing 9m from a cow was offered no way to obtain food at all.
+   */
+  foodHuntRange?: number
   /** nearest distance (m) at which an out-of-reach block earns a MOVE candidate */
   moveMinDistance?: number
   /** furthest distance (m) at which a walk-up MOVE is offered (chained moves) */
@@ -226,6 +241,14 @@ export interface CandidateOptions {
    * the ONLY way an IGNITE candidate is offered (issue lane: live ignition).
    */
   portalFrame?: PortalFrameValidation | null
+  /**
+   * The grounded dimension-transfer plan for an `enter:nether_portal` goal,
+   * computed by the controller from live world truth (lit interior cells + a
+   * safe, supported, in-reach stand) and evaluated by the pure
+   * `planPortalEntry`. Null when no entry goal is active. The plan carries its
+   * own typed refusal so a lit-but-unapproachable portal is never silent.
+   */
+  portalEntry?: PortalEntryPlan | null
 }
 
 /** Stable key for a surface-search waypoint in one dimension/world view. */
@@ -279,6 +302,19 @@ export interface GroundedCandidatesResult {
    * requested this cycle (never when one was requested and withheld).
    */
   ignitionRefusal: IgnitionRefusal | null
+  /**
+   * Typed dimension-transfer refusal (`PORTAL_ENTER_REFUSED` /
+   * `PRECONDITION_MISSING`) when an entry goal's lit portal could not be
+   * entered. Null when no entry was requested this cycle (never when one was
+   * requested and withheld).
+   */
+  entryRefusal: PortalEntryRefusal | null
+  /**
+   * Carried armor pieces that produce no EQUIP offer because they are not
+   * strictly better than what is worn. Non-empty means "nothing better is
+   * held" was surfaced explicitly instead of silently churning.
+   */
+  armorRefusals: ArmorRefusal[]
 }
 
 /**
@@ -306,6 +342,54 @@ export function formatPlaceRefusal(refusal: PlaceRefusal): string {
 }
 
 /**
+ * Vertical-safety truth for the MINE layer (owner rule: never dig the block you
+ * are standing on).
+ *
+ * The DESCEND own-column (`dir === 'D'`) step is already gated in `state.ts`
+ * (`no solid support at feet-2` / `floor already open (uncontrolled fall)`), but
+ * the plain MINE path had no equivalent check. `buildStoneBlocks` walks every
+ * column from the surface down and keeps the topmost air-exposed stone-like
+ * block; for the bot's own column the feet cell is air, so the support block at
+ * `feet.y - 1` is recorded as a normal `stone` BlockState. It is pickup-adjacent
+ * (`horizontal ~0`, `vertical 1.0 <= PICKUP_MINE_VERTICAL`), so `mineCandidates`
+ * emitted `MINE:<feet-1>` and removing it dropped the bot one block with no
+ * support check - the uncontrolled straight-down dig the owner reported.
+ *
+ * This is feasibility/safety truth, not ranking: the support cell is refused as
+ * a MINE and the controlled DESCEND step (which requires solid support at
+ * feet-2) owns it instead. The marker reuses the existing
+ * `DIG_DOWN_REFUSED reason=<...> cell=x,y,z` convention.
+ */
+export type DigDownRefusalReason = 'bot_support'
+
+export interface DigDownRefusal {
+  reason: DigDownRefusalReason
+  /** the support cell the dig would remove (the bot's own floor) */
+  cell: Vec3Json
+}
+
+/** The block cell directly beneath the bot's feet, from a (possibly fractional) position. */
+export function botSupportCell(position: Vec3Json): Vec3Json {
+  return { x: Math.floor(position.x), y: Math.floor(position.y) - 1, z: Math.floor(position.z) }
+}
+
+/**
+ * Non-null when `target` is the block directly beneath the bot's feet. Pure, so
+ * the candidate generator and the executor share the exact same truth.
+ */
+export function digsBotSupport(position: Vec3Json, target: Vec3Json | null): DigDownRefusal | null {
+  if (target === null) return null
+  const support = botSupportCell(position)
+  if (target.x !== support.x || target.y !== support.y || target.z !== support.z) return null
+  return { reason: 'bot_support', cell: support }
+}
+
+/** The exact `DIG_DOWN_REFUSED` observability line for a refused dig-down MINE. */
+export function formatDigDownRefused(refusal: DigDownRefusal): string {
+  return `DIG_DOWN_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+}
+
+/**
  * Why an ignition was not offered: a malformed frame (`PORTAL_LIGHT_REFUSED`)
  * or a missing flint_and_steel (`PRECONDITION_MISSING`). Surfaced instead of
  * silence, so a portal goal can never look "starved" for no reason.
@@ -329,6 +413,12 @@ export function ignitionCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   if (focusItem !== NETHER_PORTAL) return { candidates: [], refusal: null }
+  // A `nether_portal` goal under the entry predicate is the DIMENSION TRANSFER,
+  // not the ignition: offering flint_and_steel there would be a different
+  // semantic action. Only the ignition goal (explicit `portal_lit`, or a legacy
+  // row with no predicate) may be offered IGNITE.
+  const predicate = current?.targetPredicate ?? null
+  if (predicate !== null && predicate !== PORTAL_LIT_PREDICATE) return { candidates: [], refusal: null }
   const frame = options.portalFrame ?? null
   if (frame === null) return { candidates: [], refusal: null }
 
@@ -359,6 +449,69 @@ export function ignitionCandidates(
           lightZ: ignition.lightPosition.z,
           dimension: ignition.dimension,
           portalCells: serializePortalCells(ignition.portalCells),
+        },
+      },
+    ],
+    refusal: null,
+  }
+}
+
+/**
+ * Why entry was refused: the exact `planPortalEntry` reason and line. Surfaced
+ * instead of silence so a `portal_entered` goal can never look starved while the
+ * lit portal is unreachable or not actually lit.
+ */
+export interface PortalEntryRefusal {
+  reason: string
+  line: string
+}
+
+/**
+ * The grounded dimension-transfer candidate for the active goal. Offered ONLY
+ * while the goal targets the `nether_portal` place operation under the
+ * `portal_entered` predicate; the transfer itself is then a single deterministic
+ * body action with a `dimension == <target>` postcondition. The controller
+ * supplies the live plan (lit interior + safe approach); this never chooses WHEN
+ * to enter.
+ */
+export function entryCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+): { candidates: Candidate[]; refusal: PortalEntryRefusal | null } {
+  const current = state.goalQueue?.current ?? null
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem !== NETHER_PORTAL) return { candidates: [], refusal: null }
+  if (current?.targetPredicate !== PORTAL_ENTERED_PREDICATE) return { candidates: [], refusal: null }
+  const plan = options.portalEntry ?? null
+  if (plan === null) return { candidates: [], refusal: null }
+  if (!plan.ok) return { candidates: [], refusal: { reason: plan.reason, line: plan.line } }
+  const entry = plan.candidate
+  return {
+    candidates: [
+      {
+        id: entry.id,
+        kind: 'ENTER_PORTAL',
+        label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
+        targetName: NETHER_PORTAL,
+        // The approach is the locomotion target; the interior cell is where the
+        // body must end up and is carried explicitly so the executor walks in.
+        target: entry.approachCell,
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: distance(entry.approachCell, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          enterX: entry.enterCell.x,
+          enterY: entry.enterCell.y,
+          enterZ: entry.enterCell.z,
+          approachX: entry.approachCell.x,
+          approachY: entry.approachCell.y,
+          approachZ: entry.approachCell.z,
+          dimension: entry.dimension,
+          portalCells: serializePortalCells(entry.portalCells),
         },
       },
     ],
@@ -449,6 +602,15 @@ const DEFAULT_MAX_MOVE_CANDIDATES = 6
 const DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT = 4
 const DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT = 3
 const DEFAULT_PLACE_SPOT_RETRY_LIMIT = 2
+/**
+ * Widest distance at which a sensed passive food animal can be a hunt route.
+ * This equals the sensor's default `entityRadius` (24m, state.ts
+ * `defaultSensorOptions`): `buildEntities` drops anything farther, so no hunt
+ * candidate can be grounded beyond it. The ATTACK executor's `GoalFollow` arm
+ * already walks the body to the entity, so the old 8m melee gate was a
+ * candidate-generation cap, not a physical one.
+ */
+const DEFAULT_FOOD_HUNT_RANGE = 24
 /** Block within this horizontal distance of the bot counts as pickup-adjacent. */
 const PICKUP_MINE_HORIZONTAL = 2.75
 /** Vertical band (relative to the feet) in which a drop still lands in reach. */
@@ -459,6 +621,7 @@ export const defaultCandidateOptions: CandidateOptions = {
   maxMineCandidates: 12,
   maxAttackCandidates: 4,
   eatBelowFood: 18,
+  foodHuntRange: DEFAULT_FOOD_HUNT_RANGE,
   moveMinDistance: DEFAULT_MOVE_MIN_DISTANCE,
   moveMaxDistance: DEFAULT_MOVE_MAX_DISTANCE,
   tunnelMaxDistance: DEFAULT_TUNNEL_MAX_DISTANCE,
@@ -469,37 +632,11 @@ export const defaultCandidateOptions: CandidateOptions = {
   recipes: null,
 }
 
-const FOOD_ITEMS = new Set([
-  'bread',
-  'cooked_beef',
-  'cooked_porkchop',
-  'cooked_chicken',
-  'cooked_mutton',
-  'cooked_rabbit',
-  'cooked_cod',
-  'cooked_salmon',
-  // Raw drops are edible without a furnace. M3 needs a working health-regen path
-  // (endermen and blazes deal damage), and a hunting-only fix would be useless if
-  // the raw drop could not be eaten.
-  'beef',
-  'porkchop',
-  'chicken',
-  'mutton',
-  'rabbit',
-  'cod',
-  'salmon',
-  'apple',
-  'golden_apple',
-  'carrot',
-  'baked_potato',
-  'melon_slice',
-  'sweet_berries',
-])
-
 /**
- * Passive animals whose drop is an edible item in FOOD_ITEMS. They are not
- * `hostile`, so the hostile-only combat filter never offers them; without this
- * list the resident has no way to acquire food and cannot regenerate health.
+ * Passive animals whose drop is an edible item in the shared food class. They
+ * are not `hostile`, so the hostile-only combat filter never offers them;
+ * without this list the resident has no way to acquire food and cannot
+ * regenerate health.
  */
 const FOOD_ANIMALS = new Set([
   'cow',
@@ -579,7 +716,75 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal)
+  return applyReachabilityGate(
+    raw.candidates,
+    state,
+    options,
+    raw.placeRefusal,
+    raw.ignitionRefusal,
+    raw.entryRefusal,
+    raw.armorRefusals,
+  )
+}
+
+/**
+ * True when a candidate is an actual ROUTE for the active focus: a sensed
+ * MINE/MOVE/dig-access, a remembered RETRIEVE, a craft/smelt/place/portal step,
+ * or a DESCEND the world grounds (a sensed/tunnel target, a remembered stone
+ * level below, a stone-class focus, or an explicit `descend_to` predicate).
+ *
+ * A blind DESCEND carries none of those facts: it exists only because the focus
+ * item has a declared scanned source, which is perception truth rather than a
+ * route. Non-goal reactions (WAIT/ESCALATE/ATTACK/RETREAT/EAT) and clearance
+ * MINEs are never routes either.
+ */
+function hasAdvancingGoalRoute(candidate: Candidate): boolean {
+  if (candidate.meta.clearance === true) return false
+  switch (candidate.kind) {
+    case 'WAIT':
+    case 'ESCALATE':
+    case 'ATTACK':
+    case 'RETREAT':
+    case 'EAT':
+    case 'EQUIP':
+      return false
+    case 'DESCEND':
+      return candidate.meta.grounded === true
+    default:
+      return true
+  }
+}
+
+/**
+ * Armor-equip affordance. For every carried armor piece that is STRICTLY better
+ * than what is worn in its slot, offer one EQUIP candidate to that slot's
+ * destination. This is CAN enumeration: the generator reports the mechanically
+ * possible equips and Jev chooses whether to take one; a piece that is only
+ * equal-or-worse than what is worn yields no candidate (no churn). The executor
+ * owns the post-condition (the piece is actually worn).
+ */
+function armorEquipCandidates(state: WorldState): Candidate[] {
+  return armorEquipOffers(state.self.armor, state.inventory.counts).map((offer) => ({
+    id: `EQUIP:${offer.slot}:${offer.itemName}`,
+    kind: 'EQUIP' as const,
+    label: `equip ${offer.itemName} to ${offer.slot} (currently worn: ${offer.replaced ?? 'none'})`,
+    targetName: offer.itemName,
+    target: null,
+    targetEntityId: null,
+    itemName: offer.itemName,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      slot: offer.slot,
+      itemName: offer.itemName,
+      replaced: offer.replaced ?? 'none',
+      itemTier: offer.itemTier,
+      wornTier: offer.wornTier,
+    },
+  }))
 }
 
 function generateRawCandidates(
@@ -589,6 +794,8 @@ function generateRawCandidates(
   let candidates: Candidate[] = []
   let placeRefusal: PlaceRefusal | null = null
   let ignitionRefusal: IgnitionRefusal | null = null
+  let entryRefusal: PortalEntryRefusal | null = null
+  const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -637,6 +844,9 @@ function generateRawCandidates(
       const ignition = ignitionCandidates(state, options)
       candidates.push(...ignition.candidates)
       ignitionRefusal = ignition.refusal
+      const entry = entryCandidates(state, options)
+      candidates.push(...entry.candidates)
+      entryRefusal = entry.refusal
       break
     }
     default:
@@ -684,19 +894,24 @@ function generateRawCandidates(
   const hostiles = state.entities.filter(
     (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
   )
-  // Food acquisition: when the resident is hungry and holds no food, offer the
-  // grounded ATTACK affordance for nearby passive food animals so Jev can choose to
-  // hunt. Code only reports CAN (a real entity, in range, reachable); the choice of
-  // WHICH action stays with Jev.
+  // Food acquisition: when the resident is hungry (at or below `eatBelowFood`)
+  // and holds no food, offer the grounded ATTACK affordance for every sensed
+  // passive food animal so Jev can choose to hunt. Code only reports CAN (a real
+  // sensed entity); the choice of WHICH action/target stays with Jev. The range
+  // is the sensor's entity radius, not the 8m melee range, because the ATTACK
+  // executor already paths to the entity with GoalFollow.
   const heldFood = pickFood(state)
+  const hungry = state.self.food <= options.eatBelowFood
+  const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
   const huntTargets =
-    heldFood === null && state.self.food < options.eatBelowFood
+    heldFood === null && hungry
       ? state.entities.filter(
-          (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= COMBAT_CANDIDATE_RANGE,
+          (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
         )
       : []
   const attackTargets = [...hostiles, ...huntTargets].slice(0, options.maxAttackCandidates)
   for (const entity of attackTargets) {
+    const isFoodTarget = huntTargets.includes(entity)
     candidates.push({
       id: `ATTACK:e${entity.id}`,
       kind: 'ATTACK',
@@ -713,13 +928,16 @@ function generateRawCandidates(
         tick: state.tick,
         entityId: entity.id,
         distance: entity.distance,
-        ...(huntTargets.includes(entity) ? { foodAnimal: true } : {}),
+        // Typed CAN fact: this ATTACK is the grounded route to food, and which
+        // animal it targets. The marker reader/log must not infer it from the
+        // entity name alone (a hostile and a food animal can share no name).
+        ...(isFoodTarget ? { foodAnimal: true, foodRoute: 'animal', foodTarget: entity.name } : {}),
       },
     })
   }
 
   const foodName = heldFood
-  if (foodName !== null && state.self.food < options.eatBelowFood) {
+  if (foodName !== null && hungry) {
     candidates.push({
       id: `EAT:${foodName}`,
       kind: 'EAT',
@@ -735,6 +953,11 @@ function generateRawCandidates(
       meta: { tick: state.tick, food: state.self.food },
     })
   }
+
+  // Armor-equip affordance: offered alongside the other local self-care actions
+  // (EAT/ATTACK/RETREAT), independent of the active goal. The generator reports
+  // CAN; Jev owns whether the body puts on better armor this tick.
+  candidates.push(...armorEquipCandidates(state))
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
   const hostile = nearestHostile(state, IMMEDIATE_HOSTILE_RANGE)
@@ -776,30 +999,33 @@ function generateRawCandidates(
       candidate.kind !== 'ESCALATE' &&
       candidate.kind !== 'ATTACK' &&
       candidate.kind !== 'RETREAT' &&
-      candidate.kind !== 'EAT',
+      candidate.kind !== 'EAT' &&
+      candidate.kind !== 'EQUIP',
   )
   if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
 
-  if (candidates.length === 0) {
-    const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
-    const explore = pickExplore(
-      state,
-      state.terrain.standable,
-      focusItem,
-      moveFailureLimit,
-      options.blacklistedMoveTargets,
-    )
-    if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < moveFailureLimit) {
-      candidates.push(
-        exploreMoveCandidate(
-          state,
-          options,
-          explore,
-          moveLabel(explore, 'walk toward unexplored terrain', state.self.position),
-          focusWantsLog(goalKind, focusItem) ? 'explore' : null,
-        ),
-      )
-    }
+  // #339 follow-up: a source declared in a static table (`flint -> gravel`) is
+  // perception truth ("which block do I scan"), never a route. A lone blind
+  // DESCEND produced only from that declaration (no sensed block, no tunnel
+  // target, no remembered coordinate, no predicate) must not suppress the
+  // grounded exploration alternatives. The DESCEND stays on offer; this only
+  // stops it from hiding the multi-cell search #339 intends when the world
+  // offers neither a sensed source nor a remembered coordinate.
+  //
+  // Scoped to collect goals over a DIRECT (non-ore) block source: an ORE source
+  // generates underground, so a blind DESCEND is itself a grounded search for
+  // it, and resource-class (`log`/`planks`) and `descend_to` goals keep their
+  // historical candidate sets.
+  const hasAdvancingRoute = candidates.some(hasAdvancingGoalRoute)
+  const declaredSourceNeedsExploration =
+    goalKind === 'collect' &&
+    descendTargetY === null &&
+    focusItem !== null &&
+    !isResourceClass(focusItem) &&
+    DIRECT_BLOCK_SOURCES[focusItem] !== undefined &&
+    retrievalWant(focusItem)?.kind === 'ore'
+  if (candidates.length === 0 || (declaredSourceNeedsExploration && !hasAdvancingRoute)) {
+    candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
 
   candidates.push({
@@ -834,7 +1060,7 @@ function generateRawCandidates(
     })
   }
 
-  return { candidates, placeRefusal, ignitionRefusal }
+  return { candidates, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals }
 }
 
 /** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
@@ -934,6 +1160,94 @@ function digAccessRetirement(state: WorldState, block: BlockState, refusal: DigA
 }
 
 /**
+ * Bounds the recipe-closure walk used by {@link mineDropAdvancesFocus}. The real
+ * chains are <10 items; the cap only stops a malformed recipe graph.
+ */
+const MAX_FOCUS_CHAIN_ITEMS = 64
+
+/** True when `material` appears anywhere in `root`'s bounded recipe closure. */
+function recipeChainContains(recipes: RecipeIndex, root: string, material: string): boolean {
+  const seen = new Set<string>()
+  const queue: string[] = [root]
+  while (queue.length > 0) {
+    const item = queue.shift() as string
+    if (seen.has(item)) continue
+    seen.add(item)
+    if (seen.size > MAX_FOCUS_CHAIN_ITEMS) return false
+    for (const variant of recipes.recipesFor(item)) {
+      for (const ingredient of variant.ingredients) {
+        if (ingredient.item === material) return true
+        if (!seen.has(ingredient.item)) queue.push(ingredient.item)
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Feasibility (CAN) rule for a MINE candidate against the active focus item.
+ *
+ * Mining a block whose drop is `dropItem` can advance the goal only when the
+ * drop IS the focus item (or satisfies its resource class), or when it is a
+ * material in the focus item's achievable recipe dependency chain: a furnace or
+ * a stone tool genuinely needs cobblestone, so plain stone serves those goals.
+ * Plain stone when the focus is `flint`/`gravel`/`raw_iron` cannot advance it and
+ * must not be offered.
+ *
+ * This is a WITHHOLDING rule, not a ranking: it removes provably non-advancing
+ * MINEs and never reorders or re-scores the remaining candidates. A resource
+ * class (`log`, `stone`, `planks`, `fuel`, `pickaxe`) and the null focus keep
+ * the historical behaviour (every producer stays offered), which preserves
+ * generic early-game goals. Without a recipe index the closure cannot be proven
+ * either way, so the candidate is kept (withhold only on proof).
+ *
+ * The withholding is a pure function of the active focus, so it is durable for
+ * the goal and resets the moment the goal/focus changes; no mutable memory is
+ * added (the generator stays a pure function of the state).
+ */
+function mineDropAdvancesFocus(
+  focusItem: string | null,
+  dropItem: string | null,
+  recipes: RecipeIndex | null,
+): boolean {
+  if (focusItem === null) return true
+  if (dropItem === null || dropItem.length === 0) return true
+  if (resourceMatches(dropItem, focusItem)) return true
+  if (isResourceClass(focusItem)) return true
+  if (recipes === null) return true
+  return recipeChainContains(recipes, focusItem, dropItem)
+}
+
+/**
+ * The item a MINE candidate's target yields. A regular MINE carries its block
+ * drop in `meta.yieldItem`. A clearance MINE targets a ceiling cell that may not
+ * be in `state.blocks`; resolve the sensed block's drop when present, else the
+ * canonical mechanics table (#54) using the cut's block name.
+ */
+function mineCandidateDrop(state: WorldState, candidate: Candidate): string | null {
+  const metaYield = candidate.meta?.yieldItem
+  if (candidate.meta?.clearance !== true && typeof metaYield === 'string' && metaYield.length > 0) {
+    return metaYield
+  }
+  const target = candidate.target
+  if (target !== null) {
+    const sensed = state.blocks.find(
+      (block) =>
+        block.position.x === target.x && block.position.y === target.y && block.position.z === target.z,
+    )
+    if (sensed !== undefined && typeof sensed.yield === 'string' && sensed.yield.length > 0) return sensed.yield
+  }
+  const name =
+    typeof candidate.targetName === 'string' && candidate.targetName.length > 0
+      ? candidate.targetName
+      : typeof metaYield === 'string'
+        ? metaYield
+        : ''
+  if (name.length === 0) return null
+  return resolveHarvest(loadGameData(), name).yield ?? name
+}
+
+/**
  * MINE/MOVE/DESCEND candidates for the current collect subgoal only.
  *
  *  - a block is mined in place only when the bot is already standing next to it
@@ -964,7 +1278,21 @@ function mineCandidates(
       (block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore') &&
       (blockFilter === null || blockFilter(block)),
   )
-  const matching = mineable.filter((block) => focusItem === null || resourceMatches(block.yield, focusItem))
+  // The declared scanned source names the blocks that carry the focus item
+  // (`flint -> gravel`). Mining gravel only *may* drop flint, and minecraft-data
+  // reports gravel's primary drop as gravel, so a drop-name match alone never
+  // reaches the declared source. Match the source block by name as well; this is
+  // the same perception-truth mapping the scanner used to sense it. Structure
+  // fabric is excluded (`want.kind !== 'ore'`): `nether_bricks` is a landmark
+  // that hosts blazes, never a source that yields `blaze_rod`.
+  const want = focusItem === null ? null : retrievalWant(focusItem)
+  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+  const matching = mineable.filter(
+    (block) =>
+      focusItem === null ||
+      resourceMatches(block.yield, focusItem) ||
+      (sourceNames?.includes(block.name) ?? false),
+  )
   const fallback =
     focusItem === null && matching.length === 0 ? mineable.filter((block) => block.kind === 'log') : matching
   const pool = fallback
@@ -978,6 +1306,14 @@ function mineCandidates(
   for (const block of pool) {
     if (mineActions.length + moveActions.length + accessActions.length >= options.maxMineCandidates) break
     if (!block.diggable) continue
+    // Owner vertical-safety rule: never offer the block the bot is standing on as
+    // a MINE. The sensor records the air-exposed support block at feet.y - 1
+    // (buildStoneBlocks), and because it is pickup-adjacent the stock MINE branch
+    // would remove it and drop the bot uncontrolled. The controlled DESCEND
+    // own-column step owns that cell instead (state.ts requires solid support at
+    // feet-2). Feasibility truth only: this removes an unsafe affordance, it does
+    // not rank or replace the remaining candidates.
+    if (digsBotSupport(state.self.position, block.position) !== null) continue
     const harvestTool = block.harvestTool ?? null
     const tier = block.harvestTier ?? null
     if (!hasTool(state, harvestTool, tier)) continue
@@ -1141,7 +1477,33 @@ function mineCandidates(
     // deterministic preference: no MOVE is replaced or selected here.
     candidates.push(...descent)
   }
-  return candidates
+  // Feasibility (CAN) filter: a MINE whose drop cannot advance the active focus
+  // is withheld. The focused pool already satisfies this, so the rule bites on
+  // the clearance/headroom MINEs that bypass it: with `collect 1 x flint (from
+  // gravel)`, a ceiling stone clearance MINE completes with progressDelta=0 and
+  // is re-offered forever. This removes only provably non-advancing MINEs; the
+  // remaining candidates keep their order (no ranking).
+  return candidates.filter(
+    (candidate) =>
+      candidate.kind !== 'MINE' ||
+      mineDropAdvancesFocus(focusItem, mineCandidateDrop(state, candidate), options.recipes ?? null) ||
+      mineSourceAdvancesFocus(focusItem, candidate),
+  )
+}
+
+/**
+ * A MINE whose target block NAME is a declared scanned source of the focus
+ * advances the goal even when the block's own drop name differs: `flint` is
+ * sourced from `gravel`, and gravel drops gravel (flint only probabilistically).
+ * This mirrors {@link scannedBlockNames} — the same mapping the scanner used to
+ * sense the block — and is CAN/TRUE only: it never ranks among actions and it
+ * excludes structure fabric (`nether_bricks` does not yield `blaze_rod`).
+ */
+function mineSourceAdvancesFocus(focusItem: string | null, candidate: Candidate): boolean {
+  if (focusItem === null) return true
+  const want = retrievalWant(focusItem)
+  if (want === null || want.kind !== 'ore') return false
+  return typeof candidate.targetName === 'string' && want.blockNames.includes(candidate.targetName)
 }
 
 /**
@@ -1310,6 +1672,20 @@ function descendCandidates(
   const goalIsUnderground =
     focusItem !== null && (STONE_YIELDS.has(focusItem) || scannedBlockNames(focusItem) !== undefined)
   const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
+
+  // Feasibility (CAN) rule for a SPECIFIC focus item whose source is not
+  // underground and has no sensed/tunnel target: a staircase or level tunnel
+  // step cannot reach that source, so it is withheld instead of being re-offered
+  // forever (live `collect 1 x flint (from gravel)` carved a tunnel network while
+  // the goal never moved). Descending stays legitimate for underground resources
+  // (`goalIsUnderground`: ore/obsidian/stone goals), for an explicit
+  // `descend_to:Y` predicate (vertical recovery), for a sensed/tunnel target, and
+  // for resource-class goals (early-game `log`/`planks` keep the historical
+  // behaviour). Withholding only; the remaining candidates keep their order.
+  const focusIsSpecific = focusItem !== null && !isResourceClass(focusItem)
+  const hasGoalTarget = target !== null || tunnelTargets.length > 0
+  if (focusIsSpecific && descendTargetY === null && !goalIsUnderground && !hasGoalTarget) return []
+
   const targetBelow = target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
   // #41: an explicit descend predicate is positive evidence for a downward step
@@ -1353,6 +1729,11 @@ function descendCandidates(
   if (best === null) return []
 
   const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
+  // A DESCEND is a ROUTE only when the world grounds it: a sensed/tunnel target,
+  // an explicit predicate, a remembered stone level below (for an underground
+  // source), or a stone-class focus. Otherwise it is a blind search step, and
+  // the declared-source exploration fallback may run beside it.
+  const grounded = descendToY || hasGoalTarget || knownStoneBelow || stoneGoal
   const choice = selectDigTool(
     {
       name: best.digName ?? '',
@@ -1410,6 +1791,7 @@ function descendCandidates(
         digZ: primary.z,
         diggable: true,
         safe: best.safe,
+        grounded,
       },
     },
   ]
@@ -1611,6 +1993,23 @@ function heldStationPlacement(
 }
 
 /**
+ * The absolute copy count the recipe planner must satisfy for `focusItem`.
+ *
+ * A `craft N x item` goal is only done once N copies are held, so the planner's
+ * top-level requirement is `requiredCount`, not 1. The still-outstanding amount
+ * is `requiredCount - haveCount`, and `planNextCraftStep` measures it against the
+ * live inventory (`held >= want`), so the absolute count that the outstanding
+ * amount is measured from is the correct argument. Anything that is not the
+ * active goal item (a tool or a prerequisite craft) keeps the single-item
+ * default.
+ */
+function craftGoalRequirement(state: WorldState, focusItem: string): number {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'craft' || current.targetItem !== focusItem) return 1
+  return Math.max(1, Math.floor(current.requiredCount))
+}
+
+/**
  * CRAFT/PLACE candidates driven by the pure recipe planner: exactly one grounded
  * step toward the current craft subgoal, or nothing when no step is executable
  * in this world state.
@@ -1625,7 +2024,8 @@ function craftCandidates(
   if (recipes === null || focusItem === null) return none
   // #58 keeps sensed-only semantics and is focus-aware; placespot supplied the result shape.
   const tableAvailable = sensedCraftingTableAvailable(state, options, focusItem)
-  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
+  const want = craftGoalRequirement(state, focusItem)
+  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable, want)
   const op = plan.op
 
   // M2 craft deadlock: a recipe whose chosen variant needs a 3x3 station must
@@ -1634,7 +2034,7 @@ function craftCandidates(
   // falling through keeps (c) the existing craft-a-table-from-planks step.
   // #craft-ingredient-prereq: a missing ingredient route is merged in, so a
   // withheld station retrieval cannot starve a craft that still needs a log.
-  if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
+  if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts, want)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
     const route = craftIngredientRoute(state, options, focusItem)
     const merged = route === null ? [...acquisition.candidates] : [...acquisition.candidates, ...route.candidates]
@@ -1643,7 +2043,7 @@ function craftCandidates(
     // step as a second grounded candidate so the reachability gate can withdraw
     // only the bad retrieval route instead of collapsing the craft Option to
     // MOVE/WAIT. Jev still chooses between every surviving semantic action.
-    const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false)
+    const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false, want)
     if (fallbackPlan.op !== null) {
       const fallback = craftPlanStepCandidate(state, options, fallbackPlan.op, focusItem).candidate
       if (fallback !== null && !merged.some((candidate) => candidate.id === fallback.id)) merged.push(fallback)
@@ -1799,7 +2199,13 @@ export function craftIngredientPrereq(state: WorldState, options: CandidateOptio
   if (item === null) return null
   const recipes = options.recipes ?? null
   if (recipes === null || recipes.recipesFor(item).length === 0) return null
-  const plan = planNextCraftStep(recipes, item, state.inventory.counts, sensedCraftingTableAvailable(state, options, item))
+  const plan = planNextCraftStep(
+    recipes,
+    item,
+    state.inventory.counts,
+    sensedCraftingTableAvailable(state, options, item),
+    craftGoalRequirement(state, item),
+  )
   if (plan.op !== null) {
     if (plan.op.type !== 'craft') return null
     return { item, missing: plan.op.item, producer: `craft ${plan.op.item}`, depthBoundHit: false }
@@ -1831,6 +2237,9 @@ interface RawCandidatesResult {
   candidates: Candidate[]
   placeRefusal: PlaceRefusal | null
   ignitionRefusal: IgnitionRefusal | null
+  entryRefusal: PortalEntryRefusal | null
+  /** carried armor pieces that are not better than what is worn (no churn) */
+  armorRefusals: ArmorRefusal[]
 }
 
 /**
@@ -1897,7 +2306,13 @@ export function selfContainedCraftCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   if (recipes === null || focusItem === null || (current?.kind ?? 'collect') !== 'craft') return []
-  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, sensedCraftingTableAvailable(state, options, focusItem))
+  const plan = planNextCraftStep(
+    recipes,
+    focusItem,
+    state.inventory.counts,
+    sensedCraftingTableAvailable(state, options, focusItem),
+    craftGoalRequirement(state, focusItem),
+  )
   if (plan.op === null) return []
   const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
   return step.candidate === null ? [] : [step.candidate]
@@ -2437,14 +2852,17 @@ function craftingTableSource(
  * True when the recipe variant `planNextCraftStep` selected for this goal needs
  * a placed crafting_table. Re-planning with an assumed station (only the
  * `tableAvailable` flag changes) reports the chosen variant's own
- * `requiresTable`, so this never guesses from a second recipe lookup.
+ * `requiresTable`, so this never guesses from a second recipe lookup. `want` is
+ * forwarded so a partially-held `craft N x item` goal still reports the station
+ * requirement instead of looking already satisfied.
  */
 function planRequiresTable(
   recipes: RecipeIndex,
   focusItem: string,
   counts: Readonly<Record<string, number>>,
+  want = 1,
 ): boolean {
-  const op = planNextCraftStep(recipes, focusItem, counts, true).op
+  const op = planNextCraftStep(recipes, focusItem, counts, true, want).op
   return op !== null && op.type === 'craft' && op.requiresTable
 }
 
@@ -2792,10 +3210,20 @@ function knownStationRetrievalCandidate(
 }
 
 function nearestResource(state: WorldState, focusItem: string | null): BlockState | null {
+  // Match the declared scanned source by block name as well as by drop, so the
+  // nearest `gravel` block is the bearing for a `flint` goal even though gravel's
+  // own drop is `gravel` (flint is only a probabilistic drop).
+  const want = focusItem === null ? null : retrievalWant(focusItem)
+  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
   let best: BlockState | null = null
   for (const block of state.blocks) {
     if (block.kind === 'hazard') continue
-    if (focusItem !== null && !resourceMatches(block.yield, focusItem)) continue
+    if (
+      focusItem !== null &&
+      !resourceMatches(block.yield, focusItem) &&
+      !(sourceNames?.includes(block.name) ?? false)
+    )
+      continue
     if (best === null || block.distance < best.distance) best = block
   }
   return best
@@ -2828,14 +3256,36 @@ function explorationResourcePosition(
 
 interface RetrievalWant {
   item: string
-  kind: 'ore' | 'log'
+  kind: 'ore' | 'log' | 'structure'
   blockNames: readonly string[]
+}
+
+/**
+ * M3: the name-scanned source of a focus item can be structure FABRIC rather
+ * than a block that drops the item. `blaze_rod` is a blaze mob drop; the only
+ * grounded affordance is the Nether-fortress body (`NETHER_STRUCTURE_BLOCK_NAMES`)
+ * that hosts the blazes. A want whose scanned source is entirely structure
+ * fabric is therefore a STRUCTURE ROUTE: it is a trip to the fortress, and the
+ * kill/pickup machinery still owns the actual rod. It is never a claim that
+ * `nether_bricks` yields `blaze_rod` (`resourceMatches` stays exact), so the
+ * MINE arm keeps withholding the body blocks for a `blaze_rod` focus.
+ */
+const STRUCTURE_FABRIC_NAMES: ReadonlySet<string> = new Set(NETHER_STRUCTURE_BLOCK_NAMES)
+
+function isStructureFabricSource(blockNames: readonly string[]): boolean {
+  return blockNames.length > 0 && blockNames.every((name) => STRUCTURE_FABRIC_NAMES.has(name))
 }
 
 function retrievalWant(focusItem: string | null): RetrievalWant | null {
   if (focusItem === null) return null
   const blocks = scannedBlockNames(focusItem)
-  if (blocks !== undefined) return { item: focusItem, kind: 'ore', blockNames: blocks }
+  if (blocks !== undefined) {
+    return {
+      item: focusItem,
+      kind: isStructureFabricSource(blocks) ? 'structure' : 'ore',
+      blockNames: blocks,
+    }
+  }
   if (
     focusItem === 'charcoal' ||
     focusItem === 'log' ||
@@ -2923,13 +3373,40 @@ function fuelGoalCountReached(state: WorldState, goal: { requiredCount?: number 
 }
 
 /**
- * Issue #14: the ordered list of items the body actually needs next - the
- * current subgoal first, then the queued goals. A `collect cobblestone (descend
- * toward ore levels)` proxy must not hide the real need (raw_iron) when a
- * remembered ore coordinate exists, so callers consult the queue, not only
- * `focusItem`. An active smelt is a prerequisite barrier, however: future
- * queue retrievals must not steal the body while its furnace/input path is
- * unresolved (#73). Pure.
+ * A queued future row may cross the active-goal retrieval boundary only when
+ * the CURRENT row explicitly represents the historical descent proxy.  That
+ * proxy is execution scaffolding for a later ore goal, so exposing the next
+ * unresolved ore coordinate is part of the proxy's declared meaning.  Ordinary
+ * collect/craft/place rows are not proxies: their later queue siblings are a
+ * different semantic objective and must stay invisible to local pi.
+ */
+function allowsQueuedRetrievalProxy(current: { kind?: string; targetItem?: string | null; description?: string } | null): boolean {
+  if (current === null) return false
+  if (current.kind === 'descend') return true
+  return (
+    current.kind === 'collect' &&
+    current.targetItem === 'cobblestone' &&
+    typeof current.description === 'string' &&
+    current.description.includes('descend toward ore levels')
+  )
+}
+
+/**
+ * Ordered retrieval needs for the ACTIVE execution row.  The active focus is
+ * always first.  `state.goal.targetItem` is only a legacy fallback when there
+ * is no queue current; while a queue row is active it is mission-level state
+ * and may describe a later target (the live #341 flint -> obsidian leak).
+ *
+ * Future queue rows are NOT a generic fallback.  The sole compatibility
+ * exception is the explicit descent proxy above, and even there only the first
+ * unresolved row after the current proxy is exposed.  Resolved rows never
+ * contribute candidates. Pure.
+ *
+ * A `craft` goal's missing ingredient is therefore NOT sourced here: that is
+ * `craftIngredientRoute`'s job, and it proves the need from the recipe index
+ * (the same producer `completeStartablePrerequisites` names). A caller that
+ * omits `options.recipes` gets no craft-prerequisite retrieval on purpose; the
+ * queue row is not a substitute for the recipe-owned expansion.
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueued = true): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
@@ -2952,10 +3429,16 @@ function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueu
     needs.push({ item, fuel, countReached })
   }
   push(focusItem, goalWantsFuel(current), current)
-  if (current?.kind !== 'smelt') {
-    push(state.goal.targetItem, goalWantsFuel(current), current)
-    if (includeQueued) {
-      for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued), queued)
+  if (current === null) {
+    push(state.goal.targetItem, false, null)
+  } else if (current.kind !== 'smelt' && includeQueued && allowsQueuedRetrievalProxy(current)) {
+    const rows = state.goalQueue.goals
+    const currentIndex = rows.findIndex((queued) => queued.id === current.id)
+    if (currentIndex >= 0) {
+      const next = rows
+        .slice(currentIndex + 1)
+        .find((queued) => queued.status !== 'done' && queued.status !== 'impossible')
+      if (next !== undefined) push(next.targetItem, goalWantsFuel(next), next)
     }
   }
   const wants: RetrievalWant[] = []
@@ -2985,10 +3468,22 @@ function mineableNow(block: BlockState): boolean {
  * surface trees, and left the clearance MINE as the only action.
  */
 function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
+  if (want.kind === 'structure') {
+    // A structure route's target is the fortress body, not the wanted item: the
+    // body block does not drop `blaze_rod` (`resourceMatches` is exact), so it
+    // can never satisfy the want in place. Returning null keeps the remembered
+    // site as the offered route instead of letting a sensed `nether_bricks`
+    // block suppress it. Route only (CAN); the blaze kill and the rod pickup
+    // stay with the existing combat/pickup machinery.
+    return null
+  }
   if (want.kind === 'ore') {
     return (
       state.blocks.find(
-        (block) => block.kind === 'ore' && resourceMatches(block.yield, want.item) && mineableNow(block),
+        (block) =>
+          block.kind === 'ore' &&
+          (resourceMatches(block.yield, want.item) || want.blockNames.includes(block.name)) &&
+          mineableNow(block),
       ) ?? null
     )
   }
@@ -3003,7 +3498,15 @@ function knownResourceFor(
   const known = state.signals.knownResources ?? []
   let best: KnownResource | null = null
   for (const resource of known) {
-    const matches = want.kind === 'ore' ? want.blockNames.includes(resource.name) : resource.name.endsWith('_log')
+    if (!resourceDimensionMatches(resource, state.self.dimension)) continue
+    // `ore` and `structure` routes both match the remembered cell by block name
+    // from `scannedBlockNames(focusItem)`; only the log route matches by suffix.
+    // A durable fortress site (kind `structure` at injection) and the
+    // `nether_bricks` cells #342 also records as `ore` both land here, so the
+    // site-anchor route does not depend on the entry's own kind. Dimension
+    // re-anchoring above is what keeps an overworld sighting out (see (b) in
+    // test-fortress-route.mts): a Nether site never routes from the overworld.
+    const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
     if (!matches) continue
     if (resourceDepleted(state, resource)) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
@@ -3042,8 +3545,25 @@ export function staleKnownResources(
   proofDistance = KNOWN_RESOURCE_PROOF_DISTANCE,
 ): KnownResource[] {
   return (state.signals.knownResources ?? []).filter(
-    (resource) => (resource.kind === 'ore' || resource.kind === 'log') && resourceDepleted(state, resource, proofDistance),
+    (resource) =>
+      resourceDimensionMatches(resource, state.self.dimension) &&
+      (resource.kind === 'ore' || resource.kind === 'log') &&
+      resourceDepleted(state, resource, proofDistance),
   )
+}
+
+/**
+ * Issue #14 dimension re-anchoring: a remembered coordinate is only meaningful
+ * in the dimension it was scanned in. Entries written before the field existed
+ * carry no dimension and remain valid (backwards compatible); an entry whose
+ * recorded dimension differs from the bot's current one is NEVER offered as a
+ * retrieval target. This is a world-truth filter, not a preference: the cell is
+ * a different place in a different dimension.
+ */
+export function resourceDimensionMatches(resource: KnownResource, dimension: string): boolean {
+  if (resource.dimension === undefined || resource.dimension.length === 0) return true
+  const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
+  return normalize(resource.dimension) === normalize(dimension)
 }
 
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
@@ -3136,6 +3656,35 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
 }
 
 /**
+ * Feasibility (CAN) rule for the known-resource RETRIEVE arm, mirroring
+ * {@link mineDropAdvancesFocus} for MINEs.
+ *
+ * A remembered-coordinate trip is a real body change (it walks/pillars/digs to
+ * the cell), so offering one for an item that cannot advance the ACTIVE focus is
+ * a live zero-progress loop: `planId=g3:collect:flint` had Jev select
+ * `RETRIEVE:known:obsidian:b28_67_9` (obsidian sits at y=67), pillar up to it,
+ * then a DESCEND step pulled the body back down -- a depth oscillation that never
+ * reached the gravel the flint goal needed. The MINE arm already withholds
+ * non-advancing drops; the RETRIEVE arm did not.
+ *
+ * Same reasoning and the same proof obligation as the MINE rule: keep the trip
+ * when the needed item IS the focus (or satisfies its class), when it is a
+ * material in the focus's achievable recipe chain (`ender_eye` -> blaze_powder
+ * -> blaze_rod), or when the focus is a resource class / absent / has no recipe
+ * index. Withhold only on proof that the trip cannot advance the focus. This is
+ * a withholding rule, never a ranking: the remaining candidates keep their
+ * order, and if the only retrieval is withheld the exploration fallback for the
+ * focus is still generated.
+ */
+function retrievalWantAdvancesFocus(
+  focusItem: string | null,
+  want: RetrievalWant,
+  recipes: RecipeIndex | null,
+): boolean {
+  return mineDropAdvancesFocus(focusItem, want.item, recipes)
+}
+
+/**
  * Issue #14: offer a grounded return-to-known candidate for the earliest need
  * in the queue that has a remembered coordinate but no visible block. Returns
  * only the first satisfiable need so the probe stays bounded.
@@ -3146,7 +3695,13 @@ function retrievalCandidates(
   focusItem: string | null,
   includeQueued = true,
 ): Candidate[] {
+  const recipes = options.recipes ?? null
+  const queuedProxy = allowsQueuedRetrievalProxy(state.goalQueue?.current ?? null)
   for (const want of retrievalNeeds(state, focusItem, includeQueued)) {
+    // The explicit descent proxy intentionally exposes the next unresolved
+    // prerequisite even though its item differs from the proxy's cobblestone
+    // focus.  Every ordinary row remains focus-bounded.
+    if (!queuedProxy && !retrievalWantAdvancesFocus(focusItem, want, recipes)) continue
     const candidates = retrievalCandidatesForWant(state, options, want)
     if (candidates.length > 0) return candidates
   }
@@ -3180,11 +3735,21 @@ export function surfaceSpot(
   return best
 }
 
-function pickFood(state: WorldState): string | null {
+/** True when an item name is edible (the shared `food` resource class). */
+export function isFoodItem(name: string): boolean {
+  return matchesResourceClass(name, 'food')
+}
+
+/**
+ * The food item the bot would eat, or null when it holds no edible item. Exported
+ * so the controller's FOOD_LOW/EAT_REFUSED markers read the same truth table the
+ * EAT candidate is grounded on instead of re-listing item names.
+ */
+export function pickFood(state: WorldState): string | null {
   let best: string | null = null
   let bestCount = 0
   for (const [name, count] of Object.entries(state.inventory.counts)) {
-    if (!FOOD_ITEMS.has(name)) continue
+    if (!matchesResourceClass(name, 'food')) continue
     if (count > bestCount) {
       best = name
       bestCount = count
@@ -3336,6 +3901,79 @@ function exploreMoveCandidate(
 }
 
 /**
+ * Grounded exploration alternatives for a state whose subgoal produced no route.
+ *
+ * The stock fallback offered a single `pickExplore` MOVE, so Jev saw
+ * `presented=2` (WAIT + one action) or `presented=1` (WAIT only) and its choice
+ * carried no information: live `collect 1 x flint (from gravel)` logged
+ * `CANDIDATE_STARVATION presented=2 productive=0` x21 and `presented=1` x6 while
+ * Jev was invoked 120x. Enumerate up to `maxMoveCandidates` DISTINCT,
+ * mechanically grounded frontier cells (the nearest-first `pickExplore` pick
+ * first, then the remaining nearest frontier cells with a deterministic
+ * coordinate tie-break) so Jev pi has a real decision.
+ *
+ * Enumeration only: this adds valid actions, it does not rank, replace or
+ * suppress any existing candidate. The reachability gate still withholds any
+ * cell the body cannot actually reach, so "grounded" stays code-owned.
+ */
+function exploreFallbackCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+  goalKind: string,
+): Candidate[] {
+  const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const limit = Math.max(1, options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES)
+  const best = pickExplore(
+    state,
+    state.terrain.standable,
+    focusItem,
+    moveFailureLimit,
+    options.blacklistedMoveTargets,
+  )
+  if (best === null) return []
+  const logRoute = focusWantsLog(goalKind, focusItem) ? 'explore' : null
+  const out = [
+    exploreMoveCandidate(
+      state,
+      options,
+      best,
+      moveLabel(best, 'walk toward unexplored terrain', state.self.position),
+      logRoute,
+    ),
+  ]
+  const bestKey = blockId('p', best)
+  const alternatives = state.terrain.standable
+    .filter(
+      (spot) =>
+        blockId('p', spot) !== bestKey &&
+        distance(spot, state.self.position) > 1.5 &&
+        !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot) &&
+        failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < moveFailureLimit,
+    )
+    .sort(
+      (a, b) =>
+        distance(a, state.self.position) - distance(b, state.self.position) ||
+        a.x - b.x ||
+        a.y - b.y ||
+        a.z - b.z,
+    )
+  for (const spot of alternatives) {
+    if (out.length >= limit) break
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        spot,
+        moveLabel(spot, 'walk toward unexplored terrain', state.self.position),
+        logRoute,
+      ),
+    )
+  }
+  return out
+}
+
+/**
  * The `explore` leg of a log route: the nearest standable frontier that reduces
  * the distance to the nearest sensed/remembered log bearing. Used by the gate
  * when every log MINE/MOVE/RETRIEVE this tick was withheld, so the policy still
@@ -3343,12 +3981,18 @@ function exploreMoveCandidate(
  */
 function logExploreCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
   const currentFocus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
-  // A prerequisite log can sit behind a craft goal in the queue. Focus the
-  // exploration heuristic on the resource class that the fallback can
-  // actually find, rather than asking it to match blocks against
-  // `wooden_pickaxe`/`charcoal`/`planks`.
-  const logNeed = retrievalNeeds(state, currentFocus).find((want) => want.kind === 'log')
-  const focusItem = logNeed === undefined ? currentFocus : 'log'
+  // A prerequisite log can sit behind a craft goal (`craft wooden_pickaxe`
+  // needs a log), so the active focus is often not log-class. Bias the
+  // exploration heuristic on the resource class the fallback can actually find
+  // instead of asking it to match blocks against `wooden_pickaxe`.
+  //
+  // #341 made `retrievalNeeds` active-row-only, so the queued prerequisite no
+  // longer appears there and must NOT be recovered from the queue (that was the
+  // leak #341 removed). This fallback is only reached for a log need
+  // (`logCollectGoal` or a withheld log route), so the class is already known:
+  // aim at the log bearing directly. Search-direction only - it never
+  // authorizes a retrieval for another item.
+  const focusItem = retrievalWant(currentFocus)?.kind === 'log' ? currentFocus : 'log'
   const spot = pickExplore(
     state,
     state.terrain.standable,
@@ -3393,6 +4037,9 @@ const LOCOMOTION_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind
  *                        own recipe/input/station requirement is satisfiable
  *                        NOW, so they must never inherit a sibling's tool need.
  */
+/** Beyond this range a `no_path` probe is not evidence of a local blockage. */
+export const FAR_LEG_PROBE_RADIUS = 24
+
 const REACHABILITY_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'MINE',
   ...LOCOMOTION_GATED_KINDS,
@@ -3419,6 +4066,8 @@ export function applyReachabilityGate(
   options: CandidateOptions = defaultCandidateOptions,
   placeRefusal: PlaceRefusal | null = null,
   ignitionRefusal: IgnitionRefusal | null = null,
+  entryRefusal: PortalEntryRefusal | null = null,
+  armorRefusals: ArmorRefusal[] = [],
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -3479,8 +4128,15 @@ export function applyReachabilityGate(
 
   // Last-resort candidate-local ladder: one unreachable remembered station must
   // not starve a craft goal whose own recipe inputs are all held - the step that
-  // crafts/places the station from those inputs is satisfiable NOW.
-  if (presented.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')) {
+  // crafts/places the station from those inputs is satisfiable NOW. EQUIP is a
+  // local self-care action like WAIT/ESCALATE here: offering it must never hide
+  // the inputs-held craft step from Jev.
+  if (
+    presented.every(
+      (candidate) =>
+        candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE' || candidate.kind === 'EQUIP',
+    )
+  ) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
     run(selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
   }
@@ -3502,6 +4158,7 @@ export function applyReachabilityGate(
       candidate.kind !== 'ATTACK' &&
       candidate.kind !== 'RETREAT' &&
       candidate.kind !== 'EAT' &&
+      candidate.kind !== 'EQUIP' &&
       candidate.meta.capabilityAcquisition !== true &&
       candidate.meta.clearance !== true,
   )
@@ -3525,7 +4182,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
@@ -3579,7 +4236,21 @@ function evaluateCandidate(
   const probe = hasVerticalPlan(candidate)
     ? 'unknown'
     : context.options.reachability?.pathProbe?.(position) ?? 'unknown'
-  const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, probe)
+  // A `no_path` verdict from the path probe is a fact about the probe's search
+  // range as much as about the world. For a target far beyond that range it does
+  // not prove a local blockage, and treating it as one deletes the only
+  // progress-making action. Live (source 5ac2617): the active M2 obsidian goal
+  // had a remembered cell ~167m west while the body sat in a surface pocket, the
+  // retrieval was withheld as `RETRIEVE:known:obsidian:b28_68_9:open_path`, and
+  // the policy was left searching locally in place
+  // (`resource=obsidian progressDelta=0 ... progress=search`, east/west pacing).
+  // Keep such a target as a travel leg: the executor still pathfinds and its
+  // post-condition and failure memory bound the attempt. Close targets keep the
+  // refusal, because there `no_path` really does mean the adjacent route is
+  // blocked (live: `MOVE:p193_67_-15 reachable=false reason=no_path`).
+  const farTarget = distance(position, context.state.self.position) > FAR_LEG_PROBE_RADIUS
+  const effectiveProbe: PathProbeResult = probe === 'no_path' && farTarget ? 'unknown' : probe
+  const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, effectiveProbe)
   return reachabilityRecord(candidate, target, world, result, context)
 }
 
@@ -4041,6 +4712,59 @@ function routeOpeningCandidates(
     )
   }
   if (blockedTarget === null) return out
+  // `pickExplore` picks the NEAREST standable frontier, which is frequently
+  // behind the body when the withheld locomotion target is far away. The
+  // `moveAdvancesTowardTarget` filter below then removes every MOVE and Jev is
+  // left with WAIT/ESCALATE only. Observed live with the active M2 obsidian
+  // goal:
+  //   CANDIDATE_STARVATION presented=2 productive=0 goal=collect:obsidian:10
+  //     blockedBy=no_path missing=["RETRIEVE:known:obsidian:b28_67_9:open_path"]
+  //   body frozen at x=199.5 while the remembered cell is ~175m west, so the
+  //   goal could never be satisfied. Add the standable spot closest to the
+  //   withheld target as one more grounded MOVE fact: still a plain locomotion
+  //   candidate, no ranking, no coordinate special-casing.
+  // The refused target's own neighbourhood is exactly where the body cannot go
+  // (live: `MOVE:p193_67_-15 reachable=false reason=no_path` with lava adjacent),
+  // so aiming the waypoint at it just re-creates the refusal. Prefer a standable
+  // spot that is *away* from that neighbourhood: a detour the body can actually
+  // take, still chosen for closeness to the withheld target.
+  const nearRefused = (spot: Vec3Json): boolean =>
+    Math.abs(spot.x - blockedTarget.x) <= 3 &&
+    Math.abs(spot.y - blockedTarget.y) <= 1 &&
+    Math.abs(spot.z - blockedTarget.z) <= 3
+  const candidatesForWaypoint = state.terrain.standable
+    .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
+    .filter((spot) => distance(spot, state.self.position) > 1)
+  // The waypoint must make real progress toward the withheld target. Offering the
+  // closest spot while ignoring distance produced an east/west oscillation at the
+  // same spot (operator: "it keeps pacing left and right"; live `pos` cycled
+  // 195.5 <-> 199) because lateral spots are no worse than forward ones under a
+  // pure closeness sort. Require the spot to be strictly closer to the target
+  // than the body is (>= 1 block), which is the same grounding the
+  // `moveAdvancesTowardTarget` filter already applies to plain MOVEs.
+  const selfDistance = distance(state.self.position, blockedTarget)
+  const detours = candidatesForWaypoint
+    .filter((spot) => !nearRefused(spot))
+    .filter((spot) => distance(spot, blockedTarget) <= selfDistance - 1)
+  const toward = detours.sort((a, b) => distance(a, blockedTarget) - distance(b, blockedTarget))[0]
+  if (toward !== undefined) {
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        toward,
+        moveLabel(toward, 'walk toward the unreachable target', state.self.position),
+        null,
+      ),
+    )
+  }
+  // REVERTED (da7d66e): returning the unfiltered family when the advancing set is
+  // empty stopped the WAIT wedge but produced a pacing loop - the operator watched
+  // the body walk east/west at the same spot (live `pos` cycled 195.5 <-> 199) for
+  // minutes, which burns time and tool durability without progress and hides the
+  // stall. A barren set is the honest signal that no grounded progress exists; the
+  // remaining work is to produce a real multi-leg route (walk a committed leg
+  // toward the target, then re-plan) rather than to offer lateral wandering.
   return out.filter(
     (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, blockedTarget),
   )

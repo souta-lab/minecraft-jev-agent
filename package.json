@@ -37,6 +37,9 @@
     "m2-acceptance": "bun tools/m2-acceptance.mjs",
     "m2-live-gate": "bun tools/m2-live-gate.mjs",
     "m2-gate": "bun tools/m2-gate.mjs",
+    "m3-live-gate": "bun tools/m3-live-gate.mjs",
+    "m3-gate": "bun tools/m3-gate.mjs",
+    "milestone-run-artifact": "bun tools/milestone-run-artifact.mjs",
     "lane-guard-test": "bun tools/test-lane-guard.mjs",
     "issue-graph-test": "bun tools/test-issue-graph.mjs",
     "current-status-test": "bun tools/test-current-status.mjs",
@@ -49,11 +52,15 @@
     "m2-gate-test": "bun tools/test-m2-gate.mjs",
     "m2-policy-evidence-test": "bun tools/test-m2-policy-evidence.mjs",
     "m2-snapshot-evidence-test": "bun tools/test-m2-snapshot-evidence.mjs",
+    "m3-gate-test": "bun tools/test-m3-gate.mjs",
+    "milestone-run-artifact-test": "bun tools/test-milestone-run-artifact.mjs",
     "run-artifacts-test": "bun tools/test-run-artifacts.mjs",
     "issue13-evidence-test": "bun tools/test-issue13-evidence.mjs",
     "world-state": "bun tools/world-player-state.mjs",
     "world-state-test": "bun tools/test-world-player-state.mjs",
-    "resident-supervisor-test": "bun tools/test-resident-supervisor.mjs"
+    "resident-supervisor-test": "bun tools/test-resident-supervisor.mjs",
+    "resident-watchdog": "bun tools/resident-watchdog.mjs",
+    "resident-watchdog-test": "bun tools/test-resident-watchdog.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

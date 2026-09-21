@@ -86,6 +86,8 @@ export const DEFAULTS = {
   maxRestarts: 5,
   baseDelayMs: 2000,
   maxDelayMs: 60_000,
+  // Budget exhaustion needs the hourly window to refill, not a 60s retry.
+  budgetDelayMs: 1_800_000,
   resetAfterMs: 60_000,
   preflight: true,
   json: false,
@@ -107,6 +109,11 @@ const MARKER_PATTERNS = [
 ]
 const HARD_STOP_RE = /\bBOOT_REFUSED\b|HOST_LOCK\s+held-by/
 const MODEL_UNAVAILABLE_RE = /MODEL_UNAVAILABLE/
+// A self-imposed hourly MODEL budget is NOT a transient gateway blip: the
+// call-time budget is persisted, so an immediate retry restarts into the same
+// exhausted budget (observed: 9 consecutive 60s restarts, all dying on
+// `FATAL ... error=budget_exhausted`).
+const MODEL_BUDGET_EXHAUSTED_RE = /budget_exhausted|hourly budget exhausted/i
 const MAX_MARKERS = 20
 const MAX_CAPTURED_LINES = 2000
 
@@ -139,6 +146,9 @@ export function classifyExit({ code, signalCode = null, markers = [] } = {}) {
   }
   if (code === 0 && signalCode === null) {
     return { classification: 'clean', reason: 'exit-0' }
+  }
+  if (MODEL_BUDGET_EXHAUSTED_RE.test(joined)) {
+    return { classification: 'budget', reason: 'model-budget-exhausted' }
   }
   if (MODEL_UNAVAILABLE_RE.test(joined)) {
     return { classification: 'transient', reason: 'model-unavailable' }
@@ -264,6 +274,7 @@ Options:
   --base-delay-ms N     first backoff delay (default ${DEFAULTS.baseDelayMs})
   --max-delay-ms N      backoff ceiling (default ${DEFAULTS.maxDelayMs})
   --reset-after-ms N    a run alive at least this long resets the failure streak
+  --budget-delay-ms <ms>  backoff for a model-budget exit (default 1800000)
                         (default ${DEFAULTS.resetAfterMs})
   --root PATH           shared tree root (default ${MC_AI_ROOT})
   --driver-dir PATH     directory the host runs from (default <root>/buddy-driver)
@@ -305,6 +316,7 @@ export function parseArgs(argv) {
     else if (a === '--base-delay-ms') opts.baseDelayMs = num(a, next())
     else if (a === '--max-delay-ms') opts.maxDelayMs = num(a, next())
     else if (a === '--reset-after-ms') opts.resetAfterMs = num(a, next())
+    else if (a === '--budget-delay-ms') opts.budgetDelayMs = num(a, next())
     else if (a === '--root') opts.root = next()
     else if (a === '--driver-dir') opts.driverDir = next()
     else if (a === '--child-script') opts.childScript = next()
@@ -554,7 +566,12 @@ export async function supervise(options, deps = {}) {
         break
       }
 
-      const delayMs = backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs)
+      // 'budget' is retryable but only after the hourly window can refill;
+      // everything else keeps the bounded exponential backoff.
+      const delayMs =
+        verdict.classification === 'budget'
+          ? Math.max(options.budgetDelayMs, backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs))
+          : backoffDelayMs(consecutiveFailures, options.baseDelayMs, options.maxDelayMs)
       restarts += 1
       emit({
         type: 'restart_scheduled',

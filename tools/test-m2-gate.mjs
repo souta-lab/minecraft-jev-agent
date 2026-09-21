@@ -9,14 +9,19 @@
 //   portal_lit             <- PORTAL_LIT(overworld) -> PORTAL_VERIFIED=true
 //
 // The negative direction is the point of this suite: evidence combined across
-// two runs, or any missing stage, must be UNKNOWN and can NEVER be PASS.
+// two runs, or any missing stage, must be UNKNOWN and can NEVER be PASS. A run
+// that only INHERITS an already-verified portal (PORTAL_TRUTH verified=true from
+// the live world / durable memory, or a chainless PORTAL_VERIFIED=true) is a
+// named UNKNOWN (`inherited_portal`), not a PASS and not an anonymous gap.
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  INHERITED_PORTAL_REASON,
   M2_REQUIRED_STAGES,
   M2_RUN_RESULT,
+  detectInheritedPortal,
   evaluateM2Gate,
   parseInventoryMarker,
   readM2Snapshot,
@@ -62,6 +67,11 @@ const PORTAL_CHAIN = [
   '[2026-09-20T10:00:05.000Z] PORTAL_LIT pos=11,65,20 dimension=minecraft:overworld',
   '[2026-09-20T10:00:06.000Z] PORTAL_VERIFIED=true',
 ]
+
+/** The resident's live-world / durable-memory verdict: a portal already existed. */
+const PORTAL_TRUTH_LIVE = '[2026-09-20T10:00:07.000Z] PORTAL_TRUTH verified=true reason=status source=live-world'
+/** System2 grounding sees the inherited frame but that is not a run-scoped build. */
+const PORTAL_FRAME_PROGRESS_10 = '[2026-09-20T10:00:07.500Z] PORTAL_FRAME_PROGRESS blocks=10 source=system2-grounding'
 
 const FULL_RUN = [boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN]
 
@@ -301,6 +311,83 @@ for (const [label, marker] of [
   assert.equal(parsed.status, 'PASS')
   assert.equal(parsed.conditions.portal_lit, 'PASS')
   ok('--json emits the structured verdict')
+}
+
+// ---------------------------------------------------------------------------
+// 9. RED: case (a) full chain PASSes; case (b) inherited portal is a named UNKNOWN
+// ---------------------------------------------------------------------------
+{
+  assert.deepEqual(detectInheritedPortal(scanRunLines(RUN, [boot(RUN), PORTAL_TRUTH_LIVE]).portalEvents), {
+    kind: 'live_world_truth',
+    source: 'live-world',
+    reason: 'status',
+  })
+  assert.equal(detectInheritedPortal([], null), null)
+  assert.equal(
+    detectInheritedPortal(scanRunLines(RUN, [boot(RUN), ...PORTAL_CHAIN]).portalEvents, { frameVerified: true }),
+    null,
+  )
+  ok('detectInheritedPortal reads the live-world truth claim and ignores a real build chain')
+}
+
+{
+  // Case (b): the world/memory already held a verified portal; R only observed it.
+  const lines = [boot(RUN), DIAMOND_READY, MATERIALS_READY, PORTAL_TRUTH_LIVE]
+  const { code, text } = await judge({ lines })
+  assert.equal(code, 2, text)
+  assert.match(text, /portal_built: UNKNOWN/, text)
+  assert.match(text, /portal_lit: UNKNOWN/, text)
+  assert.match(text, new RegExp(`${M2_RUN_RESULT} status=UNKNOWN reason=${INHERITED_PORTAL_REASON} runId=${RUN}`), text)
+  assert.match(text, /m2_inherited_portal: true observations=1 kinds=live_world_truth/, text)
+  assert.doesNotMatch(text, /status=PASS/, text)
+  ok('an inherited live-world verified portal -> UNKNOWN reason=inherited_portal (never PASS)')
+}
+
+{
+  // The exact live-run shape: PORTAL_TRUTH plus the grounding's frame progress,
+  // still with no PORTAL_BLOCK_PLACED -> PORTAL_FRAME_READY chain of its own.
+  const lines = [boot(RUN), DIAMOND_READY, MATERIALS_READY, PORTAL_TRUTH_LIVE, PORTAL_FRAME_PROGRESS_10]
+  const { code, text } = await judge({ lines })
+  assert.equal(code, 2, text)
+  assert.match(text, /reason=inherited_portal/, text)
+  assert.match(text, /m2_missing: portal_built,portal_lit/, text)
+  assert.doesNotMatch(text, /status=PASS/, text)
+  ok('PORTAL_TRUTH + PORTAL_FRAME_PROGRESS without a placed block -> inherited_portal')
+}
+
+{
+  // A chainless PORTAL_VERIFIED=true is the same "already exists" claim.
+  const lines = [boot(RUN), DIAMOND_READY, MATERIALS_READY, '[2026-09-20T10:00:06.000Z] PORTAL_VERIFIED=true']
+  const { code, text } = await judge({ lines })
+  assert.equal(code, 2, text)
+  assert.match(text, /reason=inherited_portal/, text)
+  assert.match(text, /kinds=runtime_verified_without_build_chain/, text)
+  ok('PORTAL_VERIFIED=true with no build chain -> inherited_portal')
+}
+
+{
+  // Case (a): a run that builds/lights/verifies its OWN chain still PASSes even
+  // when an inherited truth line is present. Inheritance never blocks a real chain.
+  const { code, text } = await judge({ lines: [...FULL_RUN, PORTAL_TRUTH_LIVE] })
+  assert.equal(code, 0, text)
+  assert.match(text, /status=PASS reason=diamond_to_nether_gate_verified/, text)
+  assert.doesNotMatch(text, /m2_inherited_portal: true/, text)
+  ok('a real same-run chain PASSes even when an inherited truth line is present')
+}
+
+{
+  // A negative truth check is not an inheritance claim.
+  const lines = [
+    boot(RUN),
+    DIAMOND_READY,
+    MATERIALS_READY,
+    '[2026-09-20T10:00:07.000Z] PORTAL_TRUTH verified=false reason=status source=live-world',
+  ]
+  const { code, text } = await judge({ lines })
+  assert.equal(code, 2, text)
+  assert.match(text, /reason=m2_stages_incomplete:portal_built,portal_lit/, text)
+  assert.doesNotMatch(text, /m2_inherited_portal/, text)
+  ok('PORTAL_TRUTH verified=false is not an inherited-portal claim')
 }
 
 console.log(`m2-gate-test ${checks}/${checks} PASS`)

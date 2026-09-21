@@ -9,7 +9,7 @@
 // HARD RULES (mirrors AGENTS.md):
 //   * The LLM returns ONLY plan data: { op, goals: [{item,count}], reason }.
 //     System One remains the sole action authority - no action ids, no coordinates.
-//   * Enabling Mercury is EXPLICIT config (BUDDY_SYSTEM2=mercury or
+//   * Enabling System2 is EXPLICIT config (BUDDY_SYSTEM2=on/system2; legacy mercury spelling or
 //     system2.config.json { "mercury": true }). The mere presence of a Gateway key
 //     never enables it (issue #4). The planner-mode `deterministic` always wins.
 //   * Every call is written to logs/jev/mercury-calls.jsonl with the SAME schema
@@ -50,6 +50,16 @@ import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } fr
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
+import {
+  evaluateMercuryWaitLimitBackoff,
+  mercuryWaitLimitBackoffDelayMs,
+  resolveMercuryWaitLimitBackoffBaseMs,
+  resolveMercuryWaitLimitBackoffMaxMs,
+} from '../jev-agent/src/system2Escalation.ts'
+import type {
+  MercuryWaitLimitBackoffDecision,
+  MercuryWaitLimitBackoffState,
+} from '../jev-agent/src/system2Escalation.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
@@ -63,10 +73,11 @@ import {
   MERCURY_ALLOWED_GOALS,
   MERCURY_EXPLORE_MODES,
   MERCURY_MODEL_DEFAULT,
+  SYSTEM2_MODEL_DEFAULT,
   MERCURY_TYPED_GOAL_KINDS,
 } from './mercury-capabilities.ts'
 
-export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS }
+export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS, SYSTEM2_MODEL_DEFAULT }
 
 /** Why Mercury was consulted. Exception-driven, never per-tick. */
 export type MercuryTriggerReason =
@@ -83,6 +94,24 @@ export const MERCURY_TRIGGER_REASONS: readonly MercuryTriggerReason[] = [
   'action_impossible',
   'post_death',
 ]
+
+/** Greppable marker: a no-plan `wait_limit` consultation raised the next-ask bar. */
+export const MERCURY_TRIGGER_BACKOFF_MARKER = 'MERCURY_TRIGGER_BACKOFF'
+/** Greppable marker: a `wait_limit` trigger was suppressed by an active backoff. */
+export const MERCURY_TRIGGER_SUPPRESSED_MARKER = 'MERCURY_TRIGGER_SUPPRESSED'
+
+/**
+ * Input to the durable `wait_limit` trigger gate. `stallKey` identifies the
+ * stalled semantic Option/objective (never the WAIT counter itself);
+ * `authorityEpoch` is the request's monotonic progress counter, used only to
+ * re-arm the gate after real progress.
+ */
+export interface MercuryWaitLimitTriggerInput {
+  request: System2PlanRequest
+  stallKey: string
+  authorityEpoch?: number | null
+  now?: number
+}
 
 /**
  * The strict plan schema (issue #19). A goal is EITHER a legacy item goal
@@ -120,9 +149,71 @@ export const MERCURY_PLAN_SCHEMA = z
 export type MercuryPlanGoalJson = z.infer<typeof MERCURY_PLAN_SCHEMA>['goals'][number]
 export type MercuryPlanJson = z.infer<typeof MERCURY_PLAN_SCHEMA>
 
+/**
+ * A mechanically-filled optional field (MERCURY_DEFAULT_COUNT today). Reported
+ * instead of silently rewritten so `MERCURY_FIELD_DEFAULT` can show exactly what
+ * code supplied and on whose authority.
+ */
+export interface MercuryFieldDefault {
+  readonly path: string
+  readonly value: string
+  readonly why: string
+}
+
+/**
+ * Structured form of the FIRST rejection. The corrective retry and the
+ * `MERCURY_SCHEMA_REJECT` marker both read this, so the model is told the exact
+ * field path and expectation instead of a bare Zod message.
+ */
+export interface MercuryPlanReject {
+  /** schema field path, `<root>` when the whole plan object was absent, or `goals.N` for grounding. */
+  readonly path: string
+  /** what the schema/grounding expected at that path. */
+  readonly expected: string
+  readonly stage: 'schema' | 'capability' | 'plan'
+}
+
 export type MercuryValidation =
-  | { ok: true; plan: MercuryPlanJson }
-  | { ok: false; error: string }
+  | { ok: true; plan: MercuryPlanJson; repairs: readonly MercuryFieldDefault[] }
+  | { ok: false; error: string; reject: MercuryPlanReject; repairs: readonly MercuryFieldDefault[] }
+
+/**
+ * Turn the first Zod issue into a path + expectation. A missing plan object is
+ * reported by Zod as an empty-path `invalid_type` on `object` with the message
+ * `Required`; that is exactly the live `schema:  Required` rejection (the model's
+ * text response contained no parseable plan object at all), so it is reported as
+ * `<root>` with an explicit "no plan object was produced" expectation instead of
+ * an empty field path the model cannot act on.
+ */
+export function describeMercurySchemaIssue(
+  issue:
+    | { path: readonly (string | number)[]; code: string; expected?: unknown; received?: unknown; message: string }
+    | undefined,
+): MercuryPlanReject {
+  const path = (issue?.path ?? []).map((segment) => String(segment)).join('.')
+  if (path.length > 0) {
+    const expected = issue?.expected === undefined ? (issue?.code ?? 'a valid value') : String(issue.expected)
+    return { path, expected, stage: 'schema' }
+  }
+  if (issue?.code === 'invalid_type' && issue.received === 'undefined') {
+    return {
+      path: '<root>',
+      expected: 'a JSON plan object { op, goals, reason } (no plan object was produced)',
+      stage: 'schema',
+    }
+  }
+  const expected = issue?.expected === undefined ? (issue?.code ?? 'a valid plan') : String(issue.expected)
+  return { path: '<root>', expected, stage: 'schema' }
+}
+
+/** Render the exact corrective text fed back to the model for a rejection. */
+export function describeMercuryReject(reject: MercuryPlanReject, issueMessage: string | undefined): string {
+  if (reject.path === '<root>' && reject.expected.includes('no plan object was produced')) {
+    return `schema: ${reject.path} expected ${reject.expected}`
+  }
+  const detail = issueMessage === undefined || issueMessage.length === 0 ? '' : ` (${issueMessage})`
+  return `schema: ${reject.path} expected ${reject.expected}${detail}`
+}
 
 function collectableItems(): ReadonlySet<string> {
   return new Set(MERCURY_ALLOWED_GOALS.collect)
@@ -194,13 +285,32 @@ export function normalizeMercuryGoal(goal: MercuryPlanGoalJson): MercuryPlanGoal
 
 /** Normalize every goal in a parsed plan; returns the same object when nothing changed. */
 export function normalizeMercuryPlan(plan: MercuryPlanJson): MercuryPlanJson {
+  return normalizeMercuryPlanDetailed(plan).plan
+}
+
+/**
+ * Normalize and REPORT every mechanically-filled field. The plan is never
+ * reordered, invented or dropped; only a missing optional count is supplied.
+ */
+export function normalizeMercuryPlanDetailed(plan: MercuryPlanJson): {
+  plan: MercuryPlanJson
+  repairs: readonly MercuryFieldDefault[]
+} {
+  const repairs: MercuryFieldDefault[] = []
   let changed = false
-  const goals = plan.goals.map((goal) => {
+  const goals = plan.goals.map((goal, index) => {
     const normalized = normalizeMercuryGoal(goal)
-    if (normalized !== goal) changed = true
+    if (normalized !== goal) {
+      changed = true
+      repairs.push({
+        path: `goals.${index}.count`,
+        value: String(normalized.count),
+        why: 'mechanical-minimum (MERCURY_DEFAULT_COUNT); omission is already schema-valid',
+      })
+    }
     return normalized
   })
-  return changed ? { ...plan, goals } : plan
+  return { plan: changed ? { ...plan, goals } : plan, repairs }
 }
 
 function validateItemGoal(
@@ -309,31 +419,47 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
   const parsed = MERCURY_PLAN_SCHEMA.safeParse(value)
   if (!parsed.success) {
     const issue = parsed.error.issues[0]
-    return { ok: false, error: `schema: ${issue?.path.join('.') ?? '?'} ${issue?.message ?? 'invalid'}` }
+    const reject = describeMercurySchemaIssue(issue)
+    return { ok: false, error: describeMercuryReject(reject, issue?.message), reject, repairs: [] }
   }
-  const plan = normalizeMercuryPlan(parsed.data)
+  const normalized = normalizeMercuryPlanDetailed(parsed.data)
+  const plan = normalized.plan
   if ((plan.op === 'abort' || plan.op === 'complete') && plan.goals.length !== 0) {
-    return { ok: false, error: `${plan.op} plans must not contain goals` }
+    return {
+      ok: false,
+      error: `${plan.op} plans must not contain goals`,
+      reject: { path: 'goals', expected: `no goals for op=${plan.op}`, stage: 'plan' },
+      repairs: normalized.repairs,
+    }
   }
   for (let index = 0; index < plan.goals.length; index += 1) {
     const goal = plan.goals[index]
     if (goal === undefined) continue
     const error = validateMercuryGoal(index, goal)
-    if (error !== null) return { ok: false, error }
+    if (error !== null) {
+      return {
+        ok: false,
+        error,
+        reject: { path: `goals.${index}`, expected: 'a grounded kind x target pair from allowedGoals', stage: 'capability' },
+        repairs: normalized.repairs,
+      }
+    }
   }
-  return { ok: true, plan }
+  return { ok: true, plan, repairs: normalized.repairs }
 }
 
 /** A rejected plan that is retryable WHEN the exact rejection is fed back to the model. */
 export class MercuryPlanValidationError extends Error {
   readonly validationError: string
   readonly rawPlan: unknown
+  readonly reject: MercuryPlanReject | null
 
-  constructor(validationError: string, rawPlan: unknown) {
+  constructor(validationError: string, rawPlan: unknown, reject: MercuryPlanReject | null = null) {
     super(`invalid plan: ${validationError}`)
     this.name = 'MercuryPlanValidationError'
     this.validationError = validationError
     this.rawPlan = rawPlan
+    this.reject = reject
   }
 }
 
@@ -361,6 +487,21 @@ export function isRetryableMercuryAttempt(error: unknown): boolean {
 export const MERCURY_SCHEMA_CORRECTIVE_HINT =
   "Every collect/craft/smelt goal MUST name a real allowed item AND include an integer count in [1,64]; a legacy item goal must be exactly { item, count }."
 
+/**
+ * The transport could not find a plan object in the model's text response (the
+ * live `schema:  Required` rejection). The generic count hint is useless here:
+ * the model must emit one bare JSON object before any field can be corrected.
+ */
+export const MERCURY_NO_PLAN_OBJECT_HINT =
+  'Your response text contained NO parseable JSON plan object. Return exactly ONE JSON object in the response text (no prose, no markdown fence, no tool call) with keys op, goals and reason.'
+
+/** Select the corrective hint that matches the exact rejection. */
+export function mercuryCorrectiveHint(validationError: string): string {
+  return validationError.includes('no plan object was produced')
+    ? MERCURY_NO_PLAN_OBJECT_HINT
+    : MERCURY_SCHEMA_CORRECTIVE_HINT
+}
+
 /** Append the exact validation rejection + a repair instruction to the next attempt's prompt. */
 export function buildCorrectivePrompt(basePrompt: string, validationError: string): string {
   return [
@@ -368,7 +509,7 @@ export function buildCorrectivePrompt(basePrompt: string, validationError: strin
     '',
     'CORRECTION REQUIRED: your previous emitPlan call was rejected by local validation:',
     `  ${validationError}`,
-    `Fix exactly that problem and re-emit the emitPlan tool call. ${MERCURY_SCHEMA_CORRECTIVE_HINT}`,
+    `Fix exactly that problem and re-emit the emitPlan tool call. ${mercuryCorrectiveHint(validationError)}`,
     'Do not repeat the rejected goal unchanged.',
   ].join('\n')
 }
@@ -660,6 +801,8 @@ export function mercuryStrategyLabel(plan: MercuryPlanJson): string {
 // ---------------------------------------------------------------------------
 
 export interface MercuryConfigFile {
+  system2?: boolean
+  /** Legacy compatibility key from the old Mercury-only adapter. */
   mercury?: boolean
 }
 
@@ -669,11 +812,11 @@ export interface MercuryEnablement {
 }
 
 /**
- * Resolve whether Mercury is enabled. Precedence:
- *   1. BUDDY_SYSTEM2=off|none|fallback|deterministic  -> disabled
- *   2. BUDDY_SYSTEM2=mercury|on|llm                    -> enabled (unless planner=deterministic)
- *   3. config file { "mercury": true }                 -> enabled (unless planner=deterministic)
- *   4. otherwise                                       -> disabled
+ * Resolve whether the sparse System2 gateway is enabled. Precedence:
+ *   1. BUDDY_SYSTEM2=off|none|fallback|deterministic -> disabled
+ *   2. BUDDY_SYSTEM2=on|llm|system2|muse             -> enabled
+ *   3. config file { "system2": true }              -> enabled
+ *   4. legacy `mercury` env/config spellings remain accepted for compatibility
  * The Gateway key is NEVER consulted here.
  */
 export function resolveMercuryEnablement(
@@ -684,13 +827,13 @@ export function resolveMercuryEnablement(
   if (raw === 'off' || raw === 'none' || raw === 'fallback' || raw === 'deterministic') {
     return { enabled: false, source: 'env:BUDDY_SYSTEM2=off' }
   }
-  const explicitOn = raw === 'mercury' || raw === 'on' || raw === 'llm'
+  const explicitOn = raw === 'on' || raw === 'llm' || raw === 'system2' || raw === 'muse' || raw === 'mercury'
   let configured = explicitOn
   if (!configured) {
     try {
       if (existsSync(configPath)) {
         const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as MercuryConfigFile
-        configured = parsed.mercury === true
+        configured = parsed.system2 === true || parsed.mercury === true
       }
     } catch {
       configured = false
@@ -698,7 +841,7 @@ export function resolveMercuryEnablement(
   }
   if (!configured) return { enabled: false, source: 'default-off' }
   if (plannerMode === 'deterministic') return { enabled: false, source: 'deterministic-planner-override' }
-  return { enabled: true, source: explicitOn ? 'env:BUDDY_SYSTEM2=mercury' : `config:${configPath}` }
+  return { enabled: true, source: explicitOn ? `env:BUDDY_SYSTEM2=${raw}` : `config:${configPath}` }
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +971,14 @@ interface MercuryCacheFile {
   callTimes: number[]
   consecutiveStrategy?: string | null
   consecutiveCount?: number
+  /**
+   * Durable `wait_limit` trigger backoff. Persisted in the same file as the
+   * call-time budget ON PURPOSE: the measured burn happened across repeated
+   * generation restarts, so an in-memory-only guard would reset with the
+   * process and re-burn the window. Optional so a pre-existing version-3 cache
+   * still loads (the budget `callTimes` must never be silently refilled).
+   */
+  triggerBackoff?: MercuryWaitLimitBackoffState | null
 }
 
 const MAX_CACHE_ENTRIES = 60
@@ -849,6 +1000,30 @@ function emptyCache(identity: MercuryCacheIdentity): MercuryCacheFile {
     callTimes: [],
     consecutiveStrategy: null,
     consecutiveCount: 0,
+    triggerBackoff: null,
+  }
+}
+
+/** Validate the durable wait_limit backoff record; anything malformed is dropped. */
+function parseTriggerBackoff(value: unknown): MercuryWaitLimitBackoffState | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  if (typeof record.stallKey !== 'string' || record.stallKey.length === 0) return null
+  if (typeof record.consultations !== 'number' || !Number.isFinite(record.consultations) || record.consultations < 0) {
+    return null
+  }
+  if (typeof record.lastAt !== 'number' || !Number.isFinite(record.lastAt)) return null
+  if (typeof record.lastWaitStreak !== 'number' || !Number.isFinite(record.lastWaitStreak)) return null
+  const lastAuthorityEpoch =
+    typeof record.lastAuthorityEpoch === 'number' && Number.isFinite(record.lastAuthorityEpoch)
+      ? record.lastAuthorityEpoch
+      : null
+  return {
+    stallKey: record.stallKey,
+    consultations: Math.floor(record.consultations),
+    lastAt: record.lastAt,
+    lastWaitStreak: record.lastWaitStreak,
+    lastAuthorityEpoch,
   }
 }
 
@@ -920,6 +1095,14 @@ export interface MercurySystem2Options {
   model?: string
   maxPerHour?: number
   timeoutMs?: number
+  /**
+   * Bounded backoff for the counter-shaped `wait_limit` trigger: base wait
+   * before the 2nd consecutive consultation on one unchanged stall, doubling
+   * up to `waitLimitBackoffMaxMs`. Keeps per-provider-call budget accounting
+   * intact while stopping a single stall from spending the window linearly.
+   */
+  waitLimitBackoffBaseMs?: number
+  waitLimitBackoffMaxMs?: number
   /** Extra attempts after a timeout/abort (1 = one retry). */
   retries?: number
   maxOutputTokens?: number
@@ -956,6 +1139,19 @@ export interface MercuryTransportToolCall {
 export interface MercuryTransportResult {
   readonly toolCalls: readonly MercuryTransportToolCall[]
   readonly usage: unknown
+  /**
+   * Transport-level shape repairs applied while obtaining the tool call
+   * (json-text path only). Reported so `MERCURY_JSON_TEXT_REPAIRED` /
+   * `MERCURY_JSON_TEXT_UNPARSED` make the recovery observable instead of silent.
+   */
+  readonly repairs?: readonly MercuryTransportRepair[]
+}
+
+export interface MercuryTransportRepair {
+  readonly kind: 'json-text'
+  readonly shape: MercuryJsonTextShape
+  readonly objects: number
+  readonly chars: number
 }
 
 export type MercuryTransport = (request: MercuryTransportRequest) => Promise<MercuryTransportResult>
@@ -966,12 +1162,28 @@ export type MercuryTransport = (request: MercuryTransportRequest) => Promise<Mer
  * emits only a high-level plan, and the exact same local schema/capability
  * validation remains authoritative after transport parsing.
  */
-export const MUSE_SPARK_MODEL = 'muse-spark-1.3-contributor'
+export const MUSE_SPARK_MODEL = SYSTEM2_MODEL_DEFAULT
+/** Generic sparse-System2 provider timeout; not model-specific. */
+export const SYSTEM2_TIMEOUT_DEFAULT_MS = 60_000
+
+/**
+ * Model ids arrive either bare (`muse-spark-1.3-contributor`) or with the
+ * gateway provider prefix (`meta/muse-spark-1.3-contributor`). The live config
+ * uses the prefixed form, so an exact-string comparison silently sent muse down
+ * the forced tool-choice path — which it rejects
+ * (`GatewayInternalServerError: only "auto" is supported for tool_choice`), so
+ * every Mercury consultation failed 3/3 and the resident terminated fail-loud.
+ */
+export function isMuseSparkModel(model: string): boolean {
+  const id = model.trim().toLowerCase()
+  const leaf = 'muse-spark-1.3-contributor'
+  return id === MUSE_SPARK_MODEL || id === leaf || id.endsWith(`/${leaf}`)
+}
 
 export type MercuryTransportMode = 'tool-call' | 'json-text'
 
 export function mercuryTransportMode(model: string): MercuryTransportMode {
-  return model === MUSE_SPARK_MODEL ? 'json-text' : 'tool-call'
+  return isMuseSparkModel(model) ? 'json-text' : 'tool-call'
 }
 
 // ---------------------------------------------------------------------------
@@ -987,19 +1199,11 @@ export interface MercuryLocalEndpoint {
   readonly baseUrl: string
   /** Bearer token; llama.cpp accepts any non-empty value, so it defaults to 'local'. */
   readonly apiKey: string
-  /**
-   * Extra chat_template_kwargs forwarded to the server. Reasoning models
-   * (Qwen3/Bonsai family) otherwise spend the whole output budget on hidden
-   * thinking and return empty content; BUDDY_MERCURY_LOCAL_NO_THINK=1 sets
-   * { enable_thinking: false }.
-   */
+  /** Optional chat-template controls understood by local reasoning servers. */
   readonly chatTemplateKwargs?: Record<string, unknown>
 }
 
-/**
- * Resolve the local endpoint. `BUDDY_MERCURY_BASE_URL` is the explicit opt-in;
- * when it is absent, Mercury keeps using the AI Gateway and its key resolution.
- */
+/** BUDDY_MERCURY_BASE_URL is the explicit opt-in for local System2 transport. */
 export function resolveMercuryLocalEndpoint(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): MercuryLocalEndpoint | null {
@@ -1013,25 +1217,116 @@ export function resolveMercuryLocalEndpoint(
   }
 }
 
-/** Extract one JSON object from a model's text response without repairing it. */
-export function parseMercuryJsonText(text: string): unknown | null {
-  const trimmed = text.trim()
-  if (trimmed.length === 0) return null
-  const candidates: string[] = [trimmed]
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]
-  if (fenced !== undefined) candidates.push(fenced.trim())
-  const first = trimmed.indexOf('{')
-  const last = trimmed.lastIndexOf('}')
-  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1))
-  for (const candidate of candidates) {
-    try {
-      const parsed: unknown = JSON.parse(candidate)
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
-    } catch {
-      // The caller turns null into the normal schema rejection/corrective retry.
+/**
+ * How a json-text response yielded its plan object.
+ * The parser repairs only the response envelope; schema/capability grounding
+ * still decides whether the object is admissible.
+ */
+export type MercuryJsonTextShape = 'exact' | 'fenced' | 'embedded' | 'multi-final' | 'none'
+
+export interface MercuryJsonTextParse {
+  readonly value: unknown | null
+  readonly shape: MercuryJsonTextShape
+  /** number of balanced top-level `{...}` objects seen in the text */
+  readonly objects: number
+}
+
+/** All balanced top-level `{...}` substrings, string-literal aware. */
+function balancedJsonObjects(text: string): string[] {
+  const found: string[] = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (depth > 0 && inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"' && depth > 0) {
+      inString = true
+      continue
+    }
+    if (char === '{') {
+      if (depth === 0) start = index
+      depth += 1
+      continue
+    }
+    if (char === '}') {
+      if (depth === 0) continue
+      depth -= 1
+      if (depth === 0 && start >= 0) {
+        found.push(text.slice(start, index + 1))
+        start = -1
+      }
+
     }
   }
-  return null
+  return found
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseJsonObject(candidate: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(candidate)
+    return isPlainObject(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function fencedBlocks(text: string): string[] {
+  const blocks: string[] = []
+  const pattern = /```(?:json)?\s*([\s\S]*?)\s*```/gi
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    const body = match[1]
+    if (body !== undefined && body.trim().length > 0) blocks.push(body.trim())
+  }
+  return blocks
+}
+
+/**
+ * Extract one plan object from a reasoning model's text response. This is a
+ * transport-shape repair only: it never edits the object, and the same strict
+ * `MERCURY_PLAN_SCHEMA` + capability grounding validate the result. It exists
+ * because the live failure was `schema:  Required` with an EMPTY field path:
+ * the response contained no object the old first-`{`..last-`}` extractor could
+ * parse, so the model was told nothing actionable and burned all 3 attempts.
+ */
+export function parseMercuryJsonTextDetailed(text: string): MercuryJsonTextParse {
+  const raw = typeof text === 'string' ? text : ''
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return { value: null, shape: 'none', objects: 0 }
+  const objects = balancedJsonObjects(trimmed)
+  const exact = parseJsonObject(trimmed)
+  if (exact !== null) return { value: exact, shape: 'exact', objects: objects.length }
+  for (const block of fencedBlocks(trimmed)) {
+    const fenced = parseJsonObject(block)
+    if (fenced !== null) return { value: fenced, shape: 'fenced', objects: objects.length }
+  }
+  const parsedObjects = objects.map(parseJsonObject).filter((value): value is Record<string, unknown> => value !== null)
+  if (parsedObjects.length === 0) return { value: null, shape: 'none', objects: objects.length }
+  const withOp = parsedObjects.filter((value) => 'op' in value)
+  if (withOp.length > 1) {
+    // Several candidates look like a plan envelope: take the model's LAST
+    // emission (reasoning models narrate drafts before the final answer).
+    return { value: withOp[withOp.length - 1] ?? null, shape: 'multi-final', objects: objects.length }
+  }
+  if (withOp.length === 1) return { value: withOp[0] ?? null, shape: 'embedded', objects: objects.length }
+  const fallback = parsedObjects[parsedObjects.length - 1] ?? null
+  return { value: fallback, shape: objects.length > 1 ? 'multi-final' : 'embedded', objects: objects.length }
+}
+
+/** Backward-compatible value-only view of {@link parseMercuryJsonTextDetailed}. */
+export function parseMercuryJsonText(text: string): unknown | null {
+  return parseMercuryJsonTextDetailed(text).value
 }
 
 // AI SDK 7.0.107 exposes a deeply recursive FlexibleSchema type. Keeping the
@@ -1042,7 +1337,7 @@ type MercuryPlanTool = Tool<MercuryPlanJson, never, never>
 const MERCURY_PLAN_TOOL_SCHEMA = MERCURY_PLAN_SCHEMA as unknown as MercuryPlanTool['inputSchema']
 
 const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
-  'This model cannot use a named tool choice. Prefer one emitPlan tool call when supported; otherwise return exactly one JSON object in the response text, with no prose or markdown. ' +
+  'Return exactly one JSON object in the response text, with no prose, markdown, or tool call. ' +
   'The top-level op must be exactly one of continue, patch, replace, abandon, complete, or abort. ' +
   'Use goals for the typed goal objects; never use a goal kind as op. For complete and abort, goals MUST be empty; abandon may carry the replacement plan. ' +
   'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
@@ -1052,12 +1347,7 @@ interface LocalChatCompletion {
   usage?: { prompt_tokens?: number; completion_tokens?: number } | null
 }
 
-/**
- * Direct OpenAI-compatible chat-completions transport for local servers.
- * The endpoint is asked for plain JSON text (no named tool choice); parsing
- * failures surface as an empty tool-call list, which the caller turns into
- * the normal schema rejection / corrective retry path.
- */
+/** Direct OpenAI-compatible chat-completions transport for local servers. */
 export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpoint): MercuryTransport {
   return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
     const response = await fetch(`${endpoint.baseUrl}/chat/completions`, {
@@ -1085,7 +1375,7 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
     }
     const payload = (await response.json()) as LocalChatCompletion
     const content = payload.choices?.[0]?.message?.content
-    const parsed = typeof content === 'string' ? parseMercuryJsonText(content) : null
+    const parsed = typeof content === 'string' ? parseMercuryJsonTextDetailed(content) : { value: null, shape: 'none' as const, objects: 0 }
     const usage =
       payload.usage == null
         ? null
@@ -1093,42 +1383,63 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
             inputTokens: payload.usage.prompt_tokens ?? null,
             outputTokens: payload.usage.completion_tokens ?? null,
           }
-    return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage }
+    const repair: MercuryTransportRepair = {
+      kind: 'json-text',
+      shape: parsed.shape,
+      objects: parsed.objects,
+      chars: typeof content === 'string' ? content.length : 0,
+    }
+    if (parsed.value === null) return { toolCalls: [], usage, repairs: [repair] }
+    return {
+      toolCalls: [{ input: parsed.value }],
+      usage,
+      repairs: parsed.shape === 'exact' ? [] : [repair],
+    }
   }
 }
+
+const TOOL_CALL_TRANSPORT_INSTRUCTIONS =
+  'Return ONLY via the emitPlan tool. Do not answer in response text.'
+
 
 function defaultMercuryTransport(model: string): MercuryTransport {
   const local = resolveMercuryLocalEndpoint()
   if (local !== null) return localMercuryTransport(model, local)
   if (mercuryTransportMode(model) === 'json-text') {
     return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+      // Muse Spark is the default System2 model. Do not route it through the
+      // old Mercury-specific named-tool contract: the gateway rejects named
+      // tool_choice for this model. Ask for strict JSON text and keep the same
+      // local schema/capability validator as the authority boundary.
       const result = await generateText({
         model,
         system: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
         prompt,
-        tools: {
-          emitPlan: tool({
-            description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
-            inputSchema: MERCURY_PLAN_TOOL_SCHEMA,
-          }),
-        },
-        // muse rejects a named tool choice but accepts the provider-neutral
-        // auto mode. If it spends its output budget reasoning without a tool
-        // call, the strict JSON-text parser below is the non-semantic fallback.
-        toolChoice: 'auto',
         maxOutputTokens,
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(timeoutMs),
       })
-      if (result.toolCalls.length > 0) return { toolCalls: result.toolCalls, usage: result.usage }
-      const parsed = parseMercuryJsonText(result.text)
-      return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage: result.usage }
+      const parsed = parseMercuryJsonTextDetailed(result.text)
+      const repair: MercuryTransportRepair = {
+        kind: 'json-text',
+        shape: parsed.shape,
+        objects: parsed.objects,
+        chars: result.text.length,
+      }
+      if (parsed.value === null) {
+        return { toolCalls: [], usage: result.usage, repairs: [repair] }
+      }
+      return {
+        toolCalls: [{ input: parsed.value }],
+        usage: result.usage,
+        repairs: parsed.shape === 'exact' ? [] : [repair],
+      }
     }
   }
   return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
     const result = await generateText({
       model,
-      system,
+      system: `${system}\n\n${TOOL_CALL_TRANSPORT_INSTRUCTIONS}`,
       prompt,
       tools: {
         emitPlan: tool({
@@ -1148,7 +1459,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
 const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
-Return ONLY via the emitPlan tool, matching its schema exactly: op, goals, reason.
+Produce exactly one high-level plan matching this schema: op, goals, reason.
 A goal is EITHER a legacy item goal { item, count } (the verb is inferred locally) OR an explicit typed goal. Use an explicit kind when the same noun needs different operations (e.g. craft furnace vs place furnace):
 - { kind: 'collect', item, count }   allowed items: allowedGoals.collect
 - { kind: 'craft', item, count }     allowed items: allowedGoals.craft
@@ -1309,8 +1620,28 @@ export interface MercuryAttemptOptions<T> {
   readonly call: (context: MercuryAttemptContext) => Promise<T>
   readonly isRetryable: (error: unknown) => boolean
   readonly onRetry: (detail: MercuryRetryDetail) => void
-  /** Turn a failed attempt into corrective feedback for the next attempt; null when none applies. */
+  /**
+   * Turn a failed attempt into corrective feedback for the next attempt. A
+   * non-null result replaces the pending correction; null/undefined keeps the
+   * previous one, so a transport/rate-limit failure cannot erase a schema
+   * correction and leave the next attempt to guess.
+   */
   readonly feedbackFor?: (error: unknown) => string | null
+  /**
+   * Backoff before a retryable failure is retried. Mirrors the planner-authority
+   * backoff (ec5b92c): the gateway returns bursts of `Service temporarily
+   * unavailable`, and immediate retries spent every attempt inside one burst and
+   * then terminated the resident (`FATAL context=mercury:<trigger>`).
+   */
+  readonly retryDelayMs?: (attempt: number) => number
+}
+
+/** Bounded backoff between Mercury retries (see retryDelayMs above). */
+const MERCURY_RETRY_BASE_MS = Number(process.env.BUDDY_MERCURY_RETRY_BASE_MS ?? 1500)
+const MERCURY_RETRY_MAX_MS = Number(process.env.BUDDY_MERCURY_RETRY_MAX_MS ?? 15000)
+
+function mercurySleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Run attempts with accounting at the boundary immediately before each provider call. */
@@ -1340,7 +1671,16 @@ export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): 
       }
       previousError = error
       hasPreviousError = true
-      feedback = options.feedbackFor?.(error) ?? null
+      // Only a NEW correction replaces the pending one. A transport/rate-limit
+      // failure carries none, and erasing the last schema correction there would
+      // make the next attempt repeat the shape mistake blind. That is the live
+      // `mercury-1-mub33nuq` sequence: attempt 1 schema reject, attempt 2 gateway
+      // 5xx (corrective=false), attempt 3 re-emitted an unparseable response and
+      // the resident terminated fail-loud.
+      const nextFeedback = options.feedbackFor?.(error)
+      if (nextFeedback !== null && nextFeedback !== undefined) feedback = nextFeedback
+      const delay = options.retryDelayMs?.(attempt) ?? 0
+      if (delay > 0) await mercurySleep(delay)
     }
   }
   return { ok: false, error: new Error('mercury: retry loop produced no result'), attempts, failures }
@@ -1369,13 +1709,12 @@ function trailingWaitStreak(outcomes: readonly System2Outcome[]): number {
 }
 
 /**
- * A real System2Brain over the AI Gateway (Mercury 2.5). `plan()` throws when the
- * model is unavailable; the integrated PlannerBrain uses `tryRepair()` instead,
- * which never throws and always falls back to the deterministic ladder.
+ * A real sparse System2Brain over the AI Gateway. Muse Spark is the default model.
+ * `plan()` fails loud when the model is unavailable; no deterministic semantic
+ * fallback is introduced by this adapter.
  */
 export class MercurySystem2 implements System2Brain {
   readonly model: string
-  readonly provider = 'mercury'
   readonly authorityModel: string
   private readonly summarize: MercurySystem2Options['summarize']
   private readonly log: MercurySystem2Options['log']
@@ -1383,6 +1722,8 @@ export class MercurySystem2 implements System2Brain {
   private readonly cachePath: string
   private readonly cacheIdentity: MercuryCacheIdentity
   private readonly maxPerHour: number
+  private readonly waitLimitBackoffBaseMs: number
+  private readonly waitLimitBackoffMaxMs: number
   private readonly timeoutMs: number
   private readonly maxAttempts: number
   private readonly maxOutputTokens: number
@@ -1403,24 +1744,28 @@ export class MercurySystem2 implements System2Brain {
     this.log = options.log
     this.callsPath = options.callsPath
     this.cachePath = options.cachePath
-    this.model = options.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT
+    this.model = options.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? SYSTEM2_MODEL_DEFAULT
     this.authorityModel = this.model
     this.localEndpoint = options.localEndpoint !== undefined ? options.localEndpoint : resolveMercuryLocalEndpoint()
-    const envMaxPerHour = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+    const configuredMaxPerHour = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
     this.maxPerHour =
       options.maxPerHour ??
-      (envMaxPerHour === undefined || envMaxPerHour.trim() === ''
-        ? this.localEndpoint === null
-          ? REMOTE_MERCURY_MAX_PER_HOUR_DEFAULT
-          : LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT
-        : Number(envMaxPerHour))
-    // Mercury is a reasoning model: a correct plan routinely takes several seconds
-    // of hidden reasoning, so the timeout must comfortably exceed that. The
-    // observed failure mode was an abort at ~50ms, so we also retry once.
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 25000)
+      (configuredMaxPerHour !== undefined && configuredMaxPerHour.trim() !== ''
+        ? Number(configuredMaxPerHour)
+        : this.localEndpoint !== null
+          ? LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT
+          : mercuryTransportMode(this.model) === 'json-text'
+            ? Number.POSITIVE_INFINITY
+            : REMOTE_MERCURY_MAX_PER_HOUR_DEFAULT)
+    this.waitLimitBackoffBaseMs = options.waitLimitBackoffBaseMs ?? resolveMercuryWaitLimitBackoffBaseMs()
+    this.waitLimitBackoffMaxMs = options.waitLimitBackoffMaxMs ?? resolveMercuryWaitLimitBackoffMaxMs()
+    this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? SYSTEM2_TIMEOUT_DEFAULT_MS)
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
-    this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
-    this.transport = options.transport ?? (this.localEndpoint === null ? defaultMercuryTransport(this.model) : localMercuryTransport(this.model, this.localEndpoint))
+    this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 4096)
+    this.transport =
+      options.transport ??
+      (this.localEndpoint === null ? defaultMercuryTransport(this.model) : localMercuryTransport(this.model, this.localEndpoint))
+
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.isCurrent = options.isCurrent ?? (() => true)
@@ -1442,10 +1787,17 @@ export class MercurySystem2 implements System2Brain {
       version: MERCURY_CACHE_SCHEMA_VERSION,
       maxReplays: MAX_CACHE_REPLAYS,
       maxConsecutive: MAX_CONSECUTIVE_CACHED,
-      source: 'mercury',
+      source: this.provider,
       world: this.cacheIdentity.worldKey,
       epoch: this.cacheIdentity.worldEpoch,
     })
+  }
+
+  /** Runtime authority label reflects the selected model, not the legacy class name. */
+  get provider(): string {
+    if (mercuryTransportMode(this.model) === 'json-text') return 'muse-spark'
+    if (this.model.toLowerCase().includes('mercury')) return 'mercury'
+    return 'gateway-system2'
   }
 
   get callCount(): number {
@@ -1464,7 +1816,8 @@ export class MercurySystem2 implements System2Brain {
     return this.isCurrent()
   }
 
-  /** Standalone System2Brain entry point. Fatals when Mercury cannot answer. */
+  /** Standalone System2Brain entry point. Fatals when the configured model cannot answer. */
+
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const trigger = this.deriveTrigger(request)
     const started = Date.now()
@@ -1485,6 +1838,67 @@ export class MercurySystem2 implements System2Brain {
       return 'no_progress'
     }
     return 'no_progress'
+  }
+
+  /**
+   * Gate the counter-shaped `wait_limit` trigger with a durable per-stall
+   * backoff. Called by the planner BEFORE `tryRepair`; when `allow` is false the
+   * caller must not consult Mercury at all (no provider call, no budget slot).
+   *
+   * Budget accounting is unchanged: this only stops TRIGGERING so many calls
+   * (the documented "accounting at the boundary immediately before each provider
+   * call" rule still owns every attempt). `baseMs = 0` disables the time gate.
+   */
+  evaluateWaitLimitTrigger(input: MercuryWaitLimitTriggerInput): MercuryWaitLimitBackoffDecision {
+    const state = this.summarize(input.request, 'wait_limit')
+    const waitStreak = trailingWaitStreak(input.request.recentOutcomes)
+    const decision = evaluateMercuryWaitLimitBackoff(this.cache.triggerBackoff ?? null, {
+      stallKey: input.stallKey,
+      waitStreak,
+      authorityEpoch: input.authorityEpoch ?? input.request.requestContext?.authorityEpoch ?? null,
+      now: input.now ?? Date.now(),
+      baseMs: this.waitLimitBackoffBaseMs,
+      maxMs: this.waitLimitBackoffMaxMs,
+    })
+    this.cache.triggerBackoff = decision.state
+    this.saveCache()
+    const nextWaitMs = mercuryWaitLimitBackoffDelayMs(
+      decision.state.consultations,
+      this.waitLimitBackoffBaseMs,
+      this.waitLimitBackoffMaxMs,
+    )
+    if (decision.allow) {
+      // Announce the raised bar as soon as a consultation is recorded, so the
+      // next identical ask is observably suppressed rather than equally likely.
+      if (nextWaitMs > 0) {
+        this.log(MERCURY_TRIGGER_BACKOFF_MARKER, {
+          trigger: 'wait_limit',
+          reason: decision.reason,
+          consecutiveNoPlan: decision.state.consultations,
+          waitMs: nextWaitMs,
+          stallKey: input.stallKey,
+          stateHash: this.hashState(state),
+          waitStreak,
+        })
+      }
+    } else {
+      this.log(MERCURY_TRIGGER_SUPPRESSED_MARKER, {
+        trigger: 'wait_limit',
+        reason: decision.reason,
+        consecutiveNoPlan: decision.consecutiveNoPlan,
+        waitMs: decision.waitMs,
+        stallKey: input.stallKey,
+        stateHash: this.hashState(state),
+        waitStreak,
+      })
+    }
+    return decision
+  }
+
+  /** Clear the durable `wait_limit` backoff (world/epoch change, tests). */
+  resetWaitLimitTriggerBackoff(): void {
+    this.cache.triggerBackoff = null
+    this.saveCache()
   }
 
   /**
@@ -1509,7 +1923,7 @@ export class MercurySystem2 implements System2Brain {
 
     const cached = this.cache.entries[stateHash]
     this.log('PLANNER_CACHE', {
-      source: 'mercury',
+      source: this.provider,
       key: stateHash,
       world: this.cacheIdentity.worldKey,
       epoch: this.cacheIdentity.worldEpoch,
@@ -1533,7 +1947,7 @@ export class MercurySystem2 implements System2Brain {
         const goals = plannedGoalsFromMercury(plan, state)
         const ms = Date.now() - started
         this.log('ADVISOR', {
-          source: 'mercury',
+          source: this.provider,
           reason: trigger,
           strategy: cached.strategy,
           cost: 0,
@@ -1594,10 +2008,50 @@ export class MercurySystem2 implements System2Brain {
         timeoutMs: this.timeoutMs,
       })
       if (!this.isCurrent()) throw new StaleMercuryGenerationError()
+      for (const repair of result.repairs ?? []) {
+        if (repair.shape === 'none') {
+          this.log('MERCURY_JSON_TEXT_UNPARSED', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            shape: repair.shape,
+            objects: repair.objects,
+            chars: repair.chars,
+            model: this.model,
+          })
+        } else {
+          this.log('MERCURY_JSON_TEXT_REPAIRED', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            shape: repair.shape,
+            objects: repair.objects,
+          })
+        }
+      }
+
       const toolCall = result.toolCalls[0]
       const raw = toolCall === undefined ? undefined : toolCall.input
       const validated = validateMercuryPlan(raw)
+      for (const repair of validated.repairs) {
+        this.log('MERCURY_FIELD_DEFAULT', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          path: repair.path,
+          value: repair.value,
+          why: repair.why,
+        })
+      }
       if (!validated.ok) {
+        this.log('MERCURY_SCHEMA_REJECT', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          stage: validated.reject.stage,
+          path: validated.reject.path,
+          expected: validated.reject.expected,
+        })
         rejectedAttempts.push({
           attempt: context.attempt,
           prompt,
@@ -1606,14 +2060,14 @@ export class MercurySystem2 implements System2Brain {
           error: `invalid plan: ${validated.error}`,
         })
         this.log('PLAN_REJECTED', {
-          source: 'mercury',
+          source: this.provider,
           reason: validated.error,
           stage: trigger,
           callId,
           attempt: context.attempt,
           corrective: context.feedback !== null,
         })
-        throw new MercuryPlanValidationError(validated.error, raw ?? null)
+        throw new MercuryPlanValidationError(validated.error, raw ?? null, validated.reject)
       }
       const groundingError = validateMercuryPlanAgainstState(validated.plan, state)
       if (groundingError !== null) {
@@ -1647,24 +2101,28 @@ export class MercurySystem2 implements System2Brain {
         reserveAttempt: (attempt) => {
           if (!this.isCurrent()) throw new StaleMercuryGenerationError()
           const now = Date.now()
-          this.cache.callTimes = this.cache.callTimes.filter((time) => now - time < HOUR_MS)
-          if (this.cache.callTimes.length >= this.maxPerHour) {
-            throw new Error(`hourly budget exhausted (${this.maxPerHour}/h)`)
+          const budgeted = Number.isFinite(this.maxPerHour)
+          if (budgeted) {
+            this.cache.callTimes = this.cache.callTimes.filter((time) => now - time < HOUR_MS)
+            if (this.cache.callTimes.length >= this.maxPerHour) {
+              throw new Error(`hourly budget exhausted (${this.maxPerHour}/h)`)
+            }
+            this.cache.callTimes.push(now)
+            this.saveCache()
           }
-          this.cache.callTimes.push(now)
-          this.saveCache()
           this.log('MERCURY_ATTEMPT', {
             callId,
             attempt,
             maxAttempts: this.maxAttempts,
             trigger,
-            budgetUsed: this.cache.callTimes.length,
-            budgetMax: this.maxPerHour,
+            budgetUsed: budgeted ? this.cache.callTimes.length : null,
+            budgetMax: budgeted ? this.maxPerHour : 'unbounded',
           })
         },
         call: callOnce,
         isRetryable: isRetryableMercuryAttempt,
         feedbackFor: mercuryRetryFeedback,
+        retryDelayMs: (attempt) => Math.min(MERCURY_RETRY_BASE_MS * 2 ** (attempt - 1), MERCURY_RETRY_MAX_MS),
         onRetry: ({ attempt, nextAttempt, error, feedback }) => {
           this.log('MERCURY_RETRY', {
             callId,
@@ -1772,7 +2230,7 @@ export class MercurySystem2 implements System2Brain {
           reason: grounded.refused.reason,
           goal: grounded.refused.goal,
           replacement: grounded.refused.replacement,
-          source: 'mercury',
+          source: this.provider,
         })
       }
       const strategy = mercuryStrategyLabel(plan)
@@ -1813,7 +2271,7 @@ export class MercurySystem2 implements System2Brain {
       })
 
       this.log('ADVISOR', {
-        source: 'mercury',
+        source: this.provider,
         reason: trigger,
         strategy,
         cost: Number(costUsd.toFixed(6)),
@@ -1982,7 +2440,7 @@ export class MercurySystem2 implements System2Brain {
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as Partial<MercuryCacheFile>
       if (parsed.version !== MERCURY_CACHE_FILE_VERSION) {
         this.log('PLANNER_CACHE_INVALIDATED', {
-          source: 'mercury',
+          source: this.provider,
           reason: 'schema',
           cachedVersion: parsed.version ?? null,
           version: MERCURY_CACHE_FILE_VERSION,
@@ -1991,7 +2449,7 @@ export class MercurySystem2 implements System2Brain {
       }
       if (parsed.schemaVersion !== identity.schemaVersion) {
         this.log('PLANNER_CACHE_INVALIDATED', {
-          source: 'mercury',
+          source: this.provider,
           reason: 'schema',
           cachedSchema: parsed.schemaVersion ?? null,
           schemaVersion: identity.schemaVersion,
@@ -2000,7 +2458,7 @@ export class MercurySystem2 implements System2Brain {
       }
       if (parsed.worldKey !== identity.worldKey || parsed.worldEpoch !== identity.worldEpoch) {
         this.log('PLANNER_CACHE_INVALIDATED', {
-          source: 'mercury',
+          source: this.provider,
           reason: 'world',
           cachedWorld: parsed.worldKey ?? null,
           world: identity.worldKey,
@@ -2019,6 +2477,7 @@ export class MercurySystem2 implements System2Brain {
         callTimes: Array.isArray(parsed.callTimes) ? parsed.callTimes.filter((time) => typeof time === 'number') : [],
         consecutiveStrategy: typeof parsed.consecutiveStrategy === 'string' ? parsed.consecutiveStrategy : null,
         consecutiveCount: typeof parsed.consecutiveCount === 'number' ? parsed.consecutiveCount : 0,
+        triggerBackoff: parseTriggerBackoff(parsed.triggerBackoff),
       }
     } catch {
       return emptyCache(identity)

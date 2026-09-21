@@ -376,7 +376,7 @@ addCase('#33: Mercury cache is world-namespaced (hit same world, miss on epoch b
   writeFileSync(
     cachePath,
     `${JSON.stringify({
-      version: 3,
+      version: MERCURY_CACHE_SCHEMA_VERSION,
       worldKey: identity.worldKey,
       worldEpoch: identity.worldEpoch,
       schemaVersion: MERCURY_CACHE_SCHEMA_VERSION,

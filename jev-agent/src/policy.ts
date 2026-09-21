@@ -111,6 +111,8 @@ export function guardCandidate(
       return guardPlace(candidate, state, context)
     case 'IGNITE':
       return guardIgnite(candidate, state, context)
+    case 'ENTER_PORTAL':
+      return guardEnterPortal(candidate, state, context)
     case 'SMELT':
       return guardSmelt(candidate, state, context)
     case 'DESCEND':
@@ -123,6 +125,8 @@ export function guardCandidate(
       return guardAttack(candidate, state)
     case 'EAT':
       return guardEat(candidate, state)
+    case 'EQUIP':
+      return guardEquip(candidate, state)
     case 'WAIT':
     case 'ESCALATE':
       return { ok: true, candidate }
@@ -422,6 +426,26 @@ function guardEat(candidate: Candidate, state: WorldState): GuardResult {
   return { ok: true, candidate }
 }
 
+/**
+ * EQUIP is mechanically valid only while the carried piece is still in the
+ * inventory and the candidate names one of the four armor destinations. Which
+ * slot wins is Jev's choice; this guard only refuses a stale/foreign candidate.
+ */
+function guardEquip(candidate: Candidate, state: WorldState): GuardResult {
+  const itemName = candidate.itemName
+  if (itemName === null) {
+    return deny(candidate.id, 'EMPTY_HAND', 'EQUIP candidate carries no item name')
+  }
+  if ((state.inventory.counts[itemName] ?? 0) <= 0) {
+    return deny(candidate.id, 'EMPTY_HAND', `${itemName} is not in the inventory`)
+  }
+  const slot = readMetaString(candidate, 'slot')
+  if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
+    return deny(candidate.id, 'TARGET_GONE', `EQUIP candidate names no valid armor slot (${slot ?? 'none'})`)
+  }
+  return { ok: true, candidate }
+}
+
 function guardCraft(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
   const craftItem = candidate.itemName
   if (craftItem === null) {
@@ -446,6 +470,23 @@ function guardCraft(candidate: Candidate, state: WorldState, context: GuardConte
       'OUT_OF_REACH',
       `crafting_table is ${round2(distance(target, state.self.eyePosition))}m from the eyes (reach ${context.reach})`,
     )
+  }
+  return { ok: true, candidate }
+}
+
+/**
+ * The dimension transfer carries no item: the only hard safety facts are that it
+ * has a grounded approach cell and that no hazard sits at it. Its DONE truth is
+ * the executor's dimension postcondition, never this guard.
+ */
+function guardEnterPortal(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
+  const target = candidate.target
+  if (target === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'ENTER_PORTAL candidate carries no approach cell')
+  }
+  const hazard = nearestHazardTo(state, target)
+  if (hazard !== null) {
+    return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the portal approach`)
   }
   return { ok: true, candidate }
 }
@@ -721,8 +762,10 @@ export const ACTING_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'CRAFT',
   'PLACE',
   'IGNITE',
+  'ENTER_PORTAL',
   'ATTACK',
   'EAT',
+  'EQUIP',
   'RETREAT',
   'STEP',
   'RETRIEVE',

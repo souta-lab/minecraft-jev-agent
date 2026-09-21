@@ -290,10 +290,11 @@ addCase('C1: active raw_iron route does not admit an unrelated queued log retrie
   }
 })
 
-addCase('C2: queued log retrieval remains available when the active raw_iron route has no candidate', () => {
+addCase('C2: no active raw_iron route does not authorize unrelated future log work', () => {
   const found = rawIronCandidates(false)
   const logRoute = found.find((candidate) => candidate.id.startsWith('RETRIEVE:known:log:'))
-  const pass = logRoute !== undefined
+  const activeRecovery = found.some((candidate) => candidate.kind === 'MOVE' || candidate.kind === 'DESCEND' || candidate.kind === 'WAIT')
+  const pass = logRoute === undefined && activeRecovery
   return {
     pass,
     detail: `candidates=${JSON.stringify(found.map((candidate) => ({ id: candidate.id, kind: candidate.kind, resource: candidate.meta.resource ?? null })))}`,

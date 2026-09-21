@@ -813,29 +813,79 @@ function selectUpStep(input: VerticalInput, fromY: number, targetY: number): Ver
   }
 }
 
-function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: number): VerticalPlan | null {
+/**
+ * Why an upward gap > VERTICAL_GAP has no grounded plan. A typed refusal is the
+ * non-repeating failure a caller can act on (re-plan / abandon / acquire the
+ * missing block) instead of re-issuing the same unreachable `y>=N` goal.
+ */
+export type UpwardRefusalReason = 'no_placeable' | 'unsafe_column'
+
+export interface UpwardAscentRefusal {
+  reason: UpwardRefusalReason
+  /** feet Y the ascent would have started from */
+  fromY: number
+  /** requested target Y (the gap's far side) */
+  toY: number
+  /** the own-column feet cell the refused ascent belongs to */
+  cell: Vec3Json
+}
+
+interface UpwardPlanDecision {
+  plan: VerticalPlan | null
+  refusal: UpwardAscentRefusal | null
+}
+
+function planUpward(input: VerticalInput, fromY: number, targetY: number, dy: number): UpwardPlanDecision {
+  const cell = { x: Math.floor(input.selfPosition.x), y: fromY, z: Math.floor(input.selfPosition.z) }
   const upStep = selectUpStep(input, fromY, targetY)
-  if (upStep !== null) return upStep
-  if (input.columnSafe === false) return null
-  const placeable = input.placeable ?? null
-  if (placeable === null || placeable.count < 1) return null
-  const budget = decidePillarStepBudget(dy)
-  const steps = budget.steps
-  if (steps < 1) return null
-  return {
-    kind: 'pillar',
-    fromY,
-    toY: fromY + steps,
-    steps,
-    placeName: placeable.name,
-    placeCount: placeable.count,
+  if (upStep !== null) return { plan: upStep, refusal: null }
+  if (input.columnSafe === false) {
+    return { plan: null, refusal: { reason: 'unsafe_column', fromY, toY: targetY, cell } }
   }
+  const placeable = input.placeable ?? null
+  if (placeable === null || placeable.count < 1) {
+    return { plan: null, refusal: { reason: 'no_placeable', fromY, toY: targetY, cell } }
+  }
+  const budget = decidePillarStepBudget(dy)
+  // Never emit a step that needs more placements than the bot actually holds: a
+  // 17-block plan backed by 1 dirt promised a climb the executor cannot finish
+  // and then broke mid-action with `no_placeable`, which read as a movement
+  // failure. The bounded chunk is `min(gap, stepCap, heldCount)`; the next
+  // decision re-plans from the new Y and re-acquires blocks if it must.
+  const steps = Math.min(budget.steps, placeable.count)
+  if (steps < 1) {
+    return { plan: null, refusal: { reason: 'no_placeable', fromY, toY: targetY, cell } }
+  }
+  return {
+    plan: {
+      kind: 'pillar',
+      fromY,
+      toY: fromY + steps,
+      steps,
+      placeName: placeable.name,
+      placeCount: placeable.count,
+    },
+    refusal: null,
+  }
+}
+
+/** The exact log line emitted when an upward gap has no grounded plan. */
+export function formatAscentRefused(refusal: UpwardAscentRefusal): string {
+  return `ASCENT_REFUSED reason=${refusal.reason} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
 }
 
 export interface VerticalApproachDecision {
   plan: VerticalPlan | null
   /** set when a remembered tunnel was offered but its entry was not usable */
   tunnelRefusal: TunnelEntryRefusal | null
+  /**
+   * set when an upward gap > VERTICAL_GAP has NO grounded plan. `plan: null`
+   * alone cannot distinguish "no vertical leg needed" (level/downward, or a
+   * one-block drop) from "the requested ascent is impossible right now", which
+   * let a caller re-issue an unreachable `y>=N` goal forever. The typed cause is
+   * the non-repeating failure the caller turns into a re-plan/abandon.
+   */
+  ascentRefusal: UpwardAscentRefusal | null
 }
 
 type TunnelResolution =
@@ -902,34 +952,36 @@ export function planVerticalApproachDetailed(input: VerticalInput): VerticalAppr
   const fromY = Math.floor(input.selfFeetY)
   const targetY = input.target.y
   const dy = targetY - fromY
-  if (dy === 0) return { plan: null, tunnelRefusal: null }
+  if (dy === 0) return { plan: null, tunnelRefusal: null, ascentRefusal: null }
 
   const tunnel = input.tunnel ?? null
 
   if (dy > 0) {
     const resolution = tunnel !== null ? resolveTunnelEntry(input, tunnel, targetY, fromY, dy) : { kind: 'skip' as const }
     if (resolution.kind === 'reuse') {
-      return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null }
+      return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null, ascentRefusal: null }
     }
+    const upward = planUpward(input, fromY, targetY, dy)
     return {
-      plan: planUpward(input, fromY, targetY, dy),
+      plan: upward.plan,
       tunnelRefusal: resolution.kind === 'refused' ? resolution.refusal : null,
+      ascentRefusal: upward.refusal,
     }
   }
 
   // A one-block drop needs no vertical leg (the horizontal path steps down it).
-  if (Math.abs(dy) <= VERTICAL_GAP) return { plan: null, tunnelRefusal: null }
+  if (Math.abs(dy) <= VERTICAL_GAP) return { plan: null, tunnelRefusal: null, ascentRefusal: null }
 
   const resolution = tunnel !== null ? resolveTunnelEntry(input, tunnel, targetY, fromY, dy) : { kind: 'skip' as const }
   if (resolution.kind === 'reuse') {
-    return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null }
+    return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null, ascentRefusal: null }
   }
   const tunnelRefusal = resolution.kind === 'refused' ? resolution.refusal : null
 
   const steps = (input.descent ?? []).filter(
     (step) => step.mode === 'down' && step.safe && step.diggable === true,
   )
-  if (steps.length === 0) return { plan: null, tunnelRefusal }
+  if (steps.length === 0) return { plan: null, tunnelRefusal, ascentRefusal: null }
 
   const tdx = input.target.x - input.selfPosition.x
   const tdz = input.target.z - input.selfPosition.z
@@ -948,7 +1000,7 @@ export function planVerticalApproachDetailed(input: VerticalInput): VerticalAppr
       best = step
     }
   }
-  if (best === null) return { plan: null, tunnelRefusal }
+  if (best === null) return { plan: null, tunnelRefusal, ascentRefusal: null }
 
   const dig = best.mode === 'down' ? (best.floorSolid ? best.floor : best.wall) : best.wall
   return {
@@ -964,6 +1016,7 @@ export function planVerticalApproachDetailed(input: VerticalInput): VerticalAppr
       harvestTier: best.digHarvestTier ?? null,
     },
     tunnelRefusal,
+    ascentRefusal: null,
   }
 }
 

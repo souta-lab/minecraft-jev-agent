@@ -21,7 +21,10 @@ import { partitionHazardsBySource } from './simdeath.ts'
 import type {
   AgentSnapshot,
   DeathHazard,
+  KnownPortalSiteJson,
   KnownResourceJson,
+  KnownStructureSiteJson,
+  KnownTraversalJson,
   LedgerProposalEnvelope,
   LedgerReconciliationProposal,
   KnownStation,
@@ -30,6 +33,7 @@ import type {
   WorldMemoryDelta,
   WorldKey,
 } from './resident-types.ts'
+import { mergeKnownResourcesInto, mergeKnownTraversalsInto } from './resident-types.ts'
 import { normalizeStation, stationKey } from './station-memory.ts'
 import { acceptsWorldMemoryProposal } from './world-epoch.ts'
 
@@ -234,27 +238,15 @@ function removeStationDtos(target: KnownStation[], gone: KnownStation[], kind: '
   }
 }
 
-export function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[]): number {
-  const seen = new Set(target.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
-  let added = 0
-  for (const resource of found) {
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (seen.has(key)) continue
-    if (target.length >= 256) break
-    seen.add(key)
-    target.push({
-      name: resource.name,
-      kind: resource.kind,
-      x: Math.round(resource.x),
-      y: Math.round(resource.y),
-      z: Math.round(resource.z),
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    })
-    added += 1
-  }
-  return added
+/**
+ * HOST-authoritative known-resource merge. Delegates to the ONE bounded merge in
+ * resident-types.ts: at the cap an old redundant coordinate is evicted first
+ * (`KNOWN_RESOURCE_EVICTED`), preserving the last anchor per resource identity when possible instead of the
+ * sighting being dropped for the lifetime of the world key. The insert marker
+ * stays owned by the generation scan, so this path emits only capacity events.
+ */
+export function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[], log?: ProposalLog): number {
+  return mergeKnownResourcesInto(target, found, { log }).added
 }
 
 export function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourceJson[]): number {
@@ -272,8 +264,112 @@ export function removeKnownResourceDtos(target: KnownResourceJson[], gone: Known
 }
 
 /**
- * Merge ONE staged world-memory delta into the live memory. This is the only
- * merge implementation; it mutates `memory` and never writes a file.
+ * #80: durable verified-portal sites merge/remove by origin x,y,z (widthAxis is
+ * part of the record). Coordinates are rounded exactly like the other durable
+ * merges so a re-observed site dedups instead of duplicating.
+ */
+export function mergeKnownPortalSiteDtos(target: KnownPortalSiteJson[], found: KnownPortalSiteJson[]): number {
+  const key = (site: KnownPortalSiteJson): string => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+  const seen = new Set(target.map(key))
+  let added = 0
+  for (const site of found) {
+    const siteKey = key(site)
+    if (seen.has(siteKey)) continue
+    seen.add(siteKey)
+    target.push({
+      x: Math.round(site.x),
+      y: Math.round(site.y),
+      z: Math.round(site.z),
+      widthAxis: site.widthAxis === 'z' ? 'z' : 'x',
+      ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+      ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+      ...(site.lastVerifiedAt === undefined ? {} : { lastVerifiedAt: site.lastVerifiedAt }),
+      ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+      ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+    })
+    added += 1
+  }
+  return added
+}
+
+export function removeKnownPortalSiteDtos(target: KnownPortalSiteJson[], gone: KnownPortalSiteJson[]): number {
+  const keys = new Set(gone.map((site) => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`))
+  let removed = 0
+  for (let index = target.length - 1; index >= 0; index -= 1) {
+    const site = target[index]
+    if (site === undefined) continue
+    if (!keys.has(`${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`)) continue
+    target.splice(index, 1)
+    removed += 1
+  }
+  return removed
+}
+
+/**
+ * M3: durable Nether-structure sites merge/remove by anchor cell x,y,z (the
+ * structure kind is part of the record). Coordinates are rounded exactly like the
+ * other durable merges so a re-sensed cell dedups instead of duplicating. The cap
+ * is a safety bound against an unbounded host list, not a filter: a fortress has
+ * far fewer sensed body cells than this within one scan.
+ */
+export const KNOWN_STRUCTURE_SITE_CAP = 64
+
+export function mergeKnownStructureSiteDtos(target: KnownStructureSiteJson[], found: KnownStructureSiteJson[]): number {
+  const key = (site: KnownStructureSiteJson): string => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+  const seen = new Set(target.map(key))
+  let added = 0
+  for (const site of found) {
+    const siteKey = key(site)
+    if (seen.has(siteKey)) continue
+    if (target.length >= KNOWN_STRUCTURE_SITE_CAP) break
+    seen.add(siteKey)
+    target.push({
+      x: Math.round(site.x),
+      y: Math.round(site.y),
+      z: Math.round(site.z),
+      kind: site.kind,
+      ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+      ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+      ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+      ...(site.lastSeenAt === undefined ? {} : { lastSeenAt: site.lastSeenAt }),
+    })
+    added += 1
+  }
+  return added
+}
+
+export function removeKnownStructureSiteDtos(target: KnownStructureSiteJson[], gone: KnownStructureSiteJson[]): number {
+  const keys = new Set(gone.map((site) => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`))
+  let removed = 0
+  for (let index = target.length - 1; index >= 0; index -= 1) {
+    const site = target[index]
+    if (site === undefined) continue
+    if (!keys.has(`${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`)) continue
+    target.splice(index, 1)
+    removed += 1
+  }
+  return removed
+}
+
+/**
+ * #354: HOST-authoritative traversal-fact merge. Delegates to the ONE bounded
+ * merge in resident-types.ts (same cap/eviction order as known resources), so
+ * the staged commit point and the live runtime delta path cannot diverge. A
+ * re-observed leg refreshes/supersedes the remembered outcome.
+ */
+export function mergeKnownTraversalDtos(
+  target: KnownTraversalJson[],
+  found: readonly KnownTraversalJson[],
+  log?: ProposalLog,
+): number {
+  return mergeKnownTraversalsInto(target, found, { log }).added
+}
+
+/**
+ * Merge ONE world-memory delta into the live memory. This is the only merge
+ * implementation: the staged commit point AND the live `proposeWorldMemory`
+ * runtime path both route through it, so the two paths can never diverge. It
+ * mutates `memory` and never writes a file.
  */
 export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldMemoryDelta, log: ProposalLog): void {
   if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables, 'crafting_table')
@@ -287,8 +383,24 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
       if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
     }
   }
-  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
+  // Remove proven-gone cells BEFORE merging fresh sightings. The generation
+  // replica does evictStaleKnownResources then mergeKnownResources, so matching
+  // that order keeps the authoritative store and the replica converged: a cell
+  // re-anchored across dimension/worldEpoch (same name@x,y,z key, new stamp) is
+  // dropped first and then re-inserted, instead of being suppressed as a
+  // duplicate and then deleted. It also makes the capacity victim the same in
+  // both stores.
   if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
+  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources, log)
+  if (delta.knownPortalSites !== undefined) mergeKnownPortalSiteDtos(memory.knownPortalSites, delta.knownPortalSites)
+  if (delta.removeKnownPortalSites !== undefined) {
+    removeKnownPortalSiteDtos(memory.knownPortalSites, delta.removeKnownPortalSites)
+  }
+  if (delta.knownStructureSites !== undefined) mergeKnownStructureSiteDtos(memory.knownStructureSites, delta.knownStructureSites)
+  if (delta.removeKnownStructureSites !== undefined) {
+    removeKnownStructureSiteDtos(memory.knownStructureSites, delta.removeKnownStructureSites)
+  }
+  if (delta.knownTraversals !== undefined) mergeKnownTraversalDtos(memory.knownTraversals, delta.knownTraversals, log)
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {
       memory.mined[key] = (memory.mined[key] ?? 0) + count
