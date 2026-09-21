@@ -173,12 +173,135 @@ const transport: MercuryTransport = async ({ system, prompt, maxOutputTokens, ti
     objects: parsed.objects,
     chars: result.text.length,
   }
-  if (parsed.value === null) return { toolCalls: [], usage: result.usage, repairs: [repair] }
+  if (parsed.value === null) return { toolCalls: [], usage: result.usage, text: result.text, repairs: [repair] }
   return {
     toolCalls: [{ input: parsed.value }],
     usage: result.usage,
+    text: result.text,
     repairs: parsed.shape === 'exact' ? [] : [repair],
   }
+}
+
+// ---------------------------------------------------------------------------
+// --recorded: replay the RECORDED live failure answers through the real
+// MercurySystem2 path with no network. This isolates the contract change from
+// provider flakiness: the same inputs are fatal schema rejections under the old
+// JSON schema and grounded/typed-ungrounded outcomes under the natural-language
+// contract.
+// ---------------------------------------------------------------------------
+interface RecordedAnswer {
+  name: string
+  text: string
+  expectation: string
+}
+
+const RECORDED_ANSWERS: RecordedAnswer[] = [
+  {
+    name: 'fenced-json-with-provider-aliases',
+    expectation: 'grounded (enrichment coerced)',
+    text: [
+      'Here is my plan.',
+      '```json',
+      '{"op":"replace","reason":"start the portal horizon with obsidian collection",',
+      ' "goals":[{"kind":"collect","item":"obsidian","targetItem":"obsidian","count":10,"requiredCount":10},',
+      '          {"kind":"build_portal_frame"},{"kind":"light_portal"},{"kind":"verify_portal"}]}',
+      '```',
+    ].join('\n'),
+  },
+  {
+    name: 'prose-plus-blob-without-reason',
+    expectation: 'grounded (reason defaulted from intent)',
+    text:
+      'Surface dig timeouts block mining, so a cave route should expose lava. ' +
+      '{"op":"patch","goals":[{"kind":"explore","mode":"cave"},{"kind":"collect","targetItem":"obsidian"}]}',
+  },
+  {
+    name: 'prose-only-names-grounded-step',
+    expectation: 'grounded (intent mapping)',
+    text: 'The obsidian route has no path, so exploring a cave should expose a new approach to the obsidian.',
+  },
+  {
+    name: 'reasoning-then-final-answer',
+    expectation: 'grounded (last envelope)',
+    text: [
+      'Draft: {"op":"patch","goals":[{"kind":"collect","item":"stone","count":8}]}',
+      'Final answer: {"op":"patch","reason":"craft and place a furnace","goals":[{"kind":"craft","item":"crafting_table","count":1},{"kind":"place","item":"crafting_table"}]}',
+    ].join('\n'),
+  },
+  {
+    name: 'empty-answer',
+    expectation: 'typed ungrounded (no FATAL)',
+    text: '',
+  },
+  {
+    name: 'prose-names-nothing-grounded',
+    expectation: 'typed ungrounded (no FATAL)',
+    text: 'I am not sure what to do next; the situation is unclear right now.',
+  },
+]
+
+async function runRecorded(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'muse-recorded-'))
+  const lines: string[] = []
+  let grounded = 0
+  let ungrounded = 0
+  let fatal = 0
+  for (const [index, answer] of RECORDED_ANSWERS.entries()) {
+    const logs: string[] = []
+    const mercury = new MercurySystem2({
+      summarize: (_request, trigger) => ({ ...scenario(index, `rec-${index}`).state, trigger }),
+      log: (event, detail) => logs.push(`${event} ${JSON.stringify(detail ?? {})}`),
+      callsPath: join(dir, `calls-${index}.jsonl`),
+      cachePath: join(dir, `cache-${index}.json`),
+      model: 'recorded-fixture',
+      timeoutMs: 5_000,
+      maxPerHour: 10,
+      retries: 0,
+      resolveKey: () => ({ key: 'fixture', origin: 'fixture' }),
+      // Emulate the transport exactly: parse the text and hand the object on.
+      transport: () => {
+        const parsed = parseMercuryJsonTextDetailed(answer.text)
+        const repair: MercuryTransportRepair = {
+          kind: 'json-text',
+          shape: parsed.shape,
+          objects: parsed.objects,
+          chars: answer.text.length,
+        }
+        if (parsed.value === null) return Promise.resolve({ toolCalls: [], usage: null, text: answer.text, repairs: [repair] })
+        return Promise.resolve({ toolCalls: [{ input: parsed.value }], usage: null, text: answer.text, repairs: [repair] })
+      },
+    })
+    let kind = 'unknown'
+    let detail = ''
+    try {
+      const result = await mercury.tryRepair(scenario(index, `rec-${index}`).request, 'no_candidate')
+      if (result === null) {
+        kind = 'fatal'
+        detail = 'tryRepair null'
+      } else if (result.ungrounded !== undefined) {
+        kind = 'ungrounded'
+        detail = result.ungrounded.reason
+      } else {
+        kind = 'grounded'
+        detail = result.goals.map((goal) => `${goal.kind}:${goal.targetItem ?? goal.description}`).join(',')
+      }
+    } catch (error) {
+      kind = error instanceof Error ? error.name : 'fatal'
+      detail = error instanceof Error ? error.message.slice(0, 90) : String(error)
+    }
+    if (kind === 'grounded') grounded += 1
+    else if (kind === 'ungrounded') ungrounded += 1
+    else fatal += 1
+    const rejected = logs.some((line) => line.includes('MERCURY_SCHEMA_REJECT') || line.startsWith('PLAN_REJECTED'))
+    lines.push(`  ${answer.name.padEnd(34)} ${kind.padEnd(10)} rejected=${rejected ? 'yes' : 'no '} ${detail.slice(0, 80)}`)
+  }
+  process.stdout.write(`recorded-answers=${RECORDED_ANSWERS.length} grounded=${grounded} ungrounded=${ungrounded} fatal=${fatal}\n`)
+  process.stdout.write(`${lines.join('\n')}\n`)
+}
+
+if (process.argv.includes('--recorded')) {
+  await runRecorded()
+  process.exit(0)
 }
 
 const key = resolveJevApiKey()
