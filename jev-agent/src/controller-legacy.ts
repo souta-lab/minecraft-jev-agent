@@ -4288,15 +4288,31 @@ export class JevController {
     const sites = sensedPortalFrameSites(this.bot, sensorOptions(this.options))
     const scratch = this.bot.entity?.position?.clone()
     if (scratch === undefined) return false
-    return sites.some((site) => {
-      if ((site.existingFrame?.length ?? 0) < PORTAL_OBSIDIAN_REQUIRED) return false
+    const samples: string[] = []
+    const lit = sites.some((site) => {
+      const blocks = site.existingFrame?.length ?? 0
+      if (blocks < PORTAL_OBSIDIAN_REQUIRED) {
+        samples.push(`origin=${site.origin.x},${site.origin.y},${site.origin.z} blocks=${blocks} <required`)
+        return false
+      }
       const layout = portalFrameLayout(site.origin, site.widthAxis)
-      return isPortalIgnitionPostconditionMet(
-        layout.interior,
-        (cell) => this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null,
-        NETHER_PORTAL,
+      const interior = layout.interior.map(
+        (cell) => this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? 'null',
       )
+      const ok = isPortalIgnitionPostconditionMet(layout.interior, (cell) => this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null, NETHER_PORTAL)
+      samples.push(`origin=${site.origin.x},${site.origin.y},${site.origin.z} blocks=${blocks} interior=[${interior.join(',')}] ok=${ok}`)
+      return ok
     })
+    // Live diagnosis for the M2 hand-off: the portal is `PORTAL_VERIFIED` yet the
+    // queue's light row kept re-igniting hundreds of times, so the queue never
+    // emptied and the ladder never advanced to `enter_nether`. This records the
+    // exact world truth the predicate saw (dimension, sites, interior cells).
+    this.logger.info(
+      'agent',
+      `PORTAL_LIT_TRUTH goal=${goal.id} dimension=${actualDimension} expected=${expectedDimension} sites=${sites.length} lit=${lit} ${samples.join(' | ')}`,
+      { actionId: goal.id },
+    )
+    return lit
   }
 
   /**
