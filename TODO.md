@@ -14,7 +14,7 @@
    （b26217f: jump grounding 修正 / 2ec6124: 壁ポケットの relocation を決定論化）
 3. 脱出後: pickaxe 再取得（#7 道具選択 / #14 既知資源）→ 掘削再開
    （TOOL_CHOICE / DIG_PATH / JUMP_ATTEMPT / DESCEND_LIMIT / STAIRCASE の実効確認）
-4. M2 完走: furnace→charcoal→raw_iron→iron_ingot×3→iron_pickaxe を在庫で証明
+4. M2 完走: furnace→charcoal→raw_iron→iron_ingot×3→iron_pickaxe を在庫で証明  → **PASS 扱い（2026-09-21 ユーザー判断）**: 点灯済みネザーゲートが live で転送し、現 run で往復3回成立。以降は M3 に集中する。
    （smelt 系 #73/#78/#79 はこの区間）
 5. #15 アドバイザ・キャッシュループは恒久修正が main で検証済み（02:44 verify-mercury PASS 5/5）。
    close 判定は live acceptance の証拠が出てから（再発時のみクリティカルパスに戻す）

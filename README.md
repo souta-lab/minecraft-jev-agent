@@ -57,7 +57,7 @@ when it has a genuinely distinct acceptance boundary.
 
 - **M0** — closed loop PASS.
 - **M1** — verified Jev-only plan with `llm.called == false`.
-- **M2** — diamond-to-Nether-gate (diamond pickaxe, flint-and-steel, obsidian, frame, light, verify); live gate UNKNOWN.
+- **M2** — diamond-to-Nether-gate (diamond pickaxe, flint-and-steel, obsidian, frame, light, verify); **PASS** — a lit Nether gate exists on the live world and transfers: the resident entered and returned from the Nether three times in the current run (dimension transitions observed in `buddy.log`). The run-scoped `tools/m2-gate.mjs` fresh-build path stays available for a from-scratch rebuild, but the milestone is satisfied by the working gate (operator decision 2026-09-21).
 - **Bun foundation** — clean-checkout PASS: frozen install, typecheck, build, and all 125 repository tests pass under Bun.
 - **M3** — **12 Eyes of Ender** (`ender_eye`×12 = ender pearls + blaze powder).
 - **M4** — stronghold → the End → the Ender Dragon (final game objective).
