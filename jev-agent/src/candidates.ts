@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
@@ -3076,14 +3076,36 @@ function explorationResourcePosition(
 
 interface RetrievalWant {
   item: string
-  kind: 'ore' | 'log'
+  kind: 'ore' | 'log' | 'structure'
   blockNames: readonly string[]
+}
+
+/**
+ * M3: the name-scanned source of a focus item can be structure FABRIC rather
+ * than a block that drops the item. `blaze_rod` is a blaze mob drop; the only
+ * grounded affordance is the Nether-fortress body (`NETHER_STRUCTURE_BLOCK_NAMES`)
+ * that hosts the blazes. A want whose scanned source is entirely structure
+ * fabric is therefore a STRUCTURE ROUTE: it is a trip to the fortress, and the
+ * kill/pickup machinery still owns the actual rod. It is never a claim that
+ * `nether_bricks` yields `blaze_rod` (`resourceMatches` stays exact), so the
+ * MINE arm keeps withholding the body blocks for a `blaze_rod` focus.
+ */
+const STRUCTURE_FABRIC_NAMES: ReadonlySet<string> = new Set(NETHER_STRUCTURE_BLOCK_NAMES)
+
+function isStructureFabricSource(blockNames: readonly string[]): boolean {
+  return blockNames.length > 0 && blockNames.every((name) => STRUCTURE_FABRIC_NAMES.has(name))
 }
 
 function retrievalWant(focusItem: string | null): RetrievalWant | null {
   if (focusItem === null) return null
   const blocks = scannedBlockNames(focusItem)
-  if (blocks !== undefined) return { item: focusItem, kind: 'ore', blockNames: blocks }
+  if (blocks !== undefined) {
+    return {
+      item: focusItem,
+      kind: isStructureFabricSource(blocks) ? 'structure' : 'ore',
+      blockNames: blocks,
+    }
+  }
   if (
     focusItem === 'charcoal' ||
     focusItem === 'log' ||
@@ -3233,6 +3255,15 @@ function mineableNow(block: BlockState): boolean {
  * surface trees, and left the clearance MINE as the only action.
  */
 function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | null {
+  if (want.kind === 'structure') {
+    // A structure route's target is the fortress body, not the wanted item: the
+    // body block does not drop `blaze_rod` (`resourceMatches` is exact), so it
+    // can never satisfy the want in place. Returning null keeps the remembered
+    // site as the offered route instead of letting a sensed `nether_bricks`
+    // block suppress it. Route only (CAN); the blaze kill and the rod pickup
+    // stay with the existing combat/pickup machinery.
+    return null
+  }
   if (want.kind === 'ore') {
     return (
       state.blocks.find(
@@ -3252,7 +3283,14 @@ function knownResourceFor(
   let best: KnownResource | null = null
   for (const resource of known) {
     if (!resourceDimensionMatches(resource, state.self.dimension)) continue
-    const matches = want.kind === 'ore' ? want.blockNames.includes(resource.name) : resource.name.endsWith('_log')
+    // `ore` and `structure` routes both match the remembered cell by block name
+    // from `scannedBlockNames(focusItem)`; only the log route matches by suffix.
+    // A durable fortress site (kind `structure` at injection) and the
+    // `nether_bricks` cells #342 also records as `ore` both land here, so the
+    // site-anchor route does not depend on the entry's own kind. Dimension
+    // re-anchoring above is what keeps an overworld sighting out (see (b) in
+    // test-fortress-route.mts): a Nether site never routes from the overworld.
+    const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
     if (!matches) continue
     if (resourceDepleted(state, resource)) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
