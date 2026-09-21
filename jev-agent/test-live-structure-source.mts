@@ -366,7 +366,10 @@ function rememberedFrameState(invalidate: boolean): WorldState {
   const bot = fakeBot({}, { diamond_pickaxe: 1 }, KNOWN_BOT)
   const modelled = new Map(cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, 'obsidian']))
   modelled.set(`${KNOWN_OUTSIDE.x},${KNOWN_OUTSIDE.y},${KNOWN_OUTSIDE.z}`, 'obsidian')
-  const sensedBlockAt = bot.blockAt.bind(bot)
+  // The override below is called with a plain {x,y,z} probe cell, so the bound
+  // original is typed with that same call shape (runtime is unchanged: mineflayer
+  // reads x/y/z only).
+  const sensedBlockAt = bot.blockAt.bind(bot) as unknown as (p: { x: number; y: number; z: number }) => unknown
   ;(bot as unknown as { blockAt: (p: { x: number; y: number; z: number }) => unknown }).blockAt = (p) => {
     const name = modelled.get(`${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`)
     if (name !== undefined) return { name, boundingBox: 'block', diggable: true }

@@ -26,7 +26,7 @@
 // must not reduce the policy to WAIT; the exploration fallback is aimed at the
 // log bearing rather than at the craft item.
 
-import { defaultCandidateOptions, generateGroundedCandidates, logRouteOf } from './src/candidates.ts'
+import { craftStationGap, defaultCandidateOptions, formatCraftStationGap, generateGroundedCandidates, logRouteOf } from './src/candidates.ts'
 import { createRequire } from 'node:module'
 import { createRecipeIndex } from './src/crafting.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
@@ -199,24 +199,33 @@ function world(
 }
 
 // (0) A remembered table below the current level is not allowed to starve a
-// craft goal when the same inventory can make a table in the 2x2 grid. The
-// retrieval is withheld by the affordance gate, while the prerequisite craft
-// remains available for Jev to choose.
+// craft goal. OPERATOR RULE (station-use-before-craft, superseding the earlier
+// "craft a local table anyway" fallback): the world model already holds that
+// station, so crafting a duplicate table is NOT a route - the retrieval is
+// offered and the reachability gate withholds it with its own typed reason
+// (`needs_descend`), while `CRAFT_STATION_ALREADY_KNOWN` names the withheld
+// station craft and the route the generator offered instead.
 {
   const grounded = generateGroundedCandidates(
     world({ birch_planks: 4, stick: 2 }),
     { ...defaultCandidateOptions, recipes },
   )
-  const fallback = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+  const duplicateCraft = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
   const withheldStation = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'station')
+  const gap = craftStationGap(world({ birch_planks: 4, stick: 2 }), { ...defaultCandidateOptions, recipes })
+  const gapLine = gap === null ? 'none' : formatCraftStationGap(gap)
   const pass =
-    fallback?.kind === 'CRAFT' &&
+    duplicateCraft === undefined &&
     withheldStation !== undefined &&
-    withheldStation.result.reason === 'needs_descend'
+    withheldStation.result.reason === 'needs_descend' &&
+    gap !== null &&
+    gap.next === 'use_known_station' &&
+    gapLine.startsWith('CRAFT_STATION_ALREADY_KNOWN') &&
+    gapLine.includes('station=crafting_table')
   process.stdout.write(
-    `craft station fallback (unreachable remembered table): ${pass ? 'PASS' : 'FAIL'} ` +
+    `craft station duplicate withheld (unreachable remembered table): ${pass ? 'PASS' : 'FAIL'} ` +
       `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] ` +
-      `withheld=${withheldStation?.result.reason ?? 'none'}\n`,
+      `withheld=${withheldStation?.result.reason ?? 'none'} duplicate=${duplicateCraft?.id ?? 'none'} gap=${gapLine}\n`,
   )
   if (!pass) process.exitCode = 1
 }

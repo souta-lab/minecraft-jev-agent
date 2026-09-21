@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -1054,6 +1054,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SMELT_DONE',
   'SMELT_INPUT_PREREQ',
   'CRAFT_INGREDIENT_PREREQ',
+  CRAFT_STATION_ALREADY_KNOWN,
   // Portal milestones are run-scoped acceptance evidence as well as human
   // diagnostics. Keep them on the same mirrored event path so the host-owned
   // M2 snapshot recorder receives the structured detail object; reconstructing
@@ -1664,6 +1665,8 @@ export class JevController {
   private lastSmeltStationRetryLine: string | null = null
   /** Last mirrored `CRAFT_INGREDIENT_PREREQ` line, so a stable state logs it once. */
   private lastCraftIngredientPrereqLine: string | null = null
+  /** Last mirrored `CRAFT_STATION_ALREADY_KNOWN` line, so a stable state logs it once. */
+  private lastCraftStationGapLine: string | null = null
   /** #58: the last scored furnace-prerequisite plan and its selected path. */
   private prereqPlan: PrereqDecision | null = null
   private prereqForcedPath: PrereqPath | null = null
@@ -2335,6 +2338,7 @@ export class JevController {
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logSmeltRouteGap(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
+      this.logCraftStationGap(state, groundingOptions)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
       candidates = this.filterMoveCandidates(candidates, state)
@@ -7164,6 +7168,25 @@ export class JevController {
     this.lastCraftIngredientPrereqLine = line
     if (entry === null || line === null) return
     this.logger.warn('agent', line, { ...entry }, this.tickCounter)
+  }
+
+  /**
+   * Mirror the typed station fact for a station-requiring CRAFT goal once per
+   * distinct line. OPERATOR RULE (station-use-before-craft; measured live
+   * 2026-09-21): while 26 crafting tables and 17 furnaces were known, the queue
+   * crafted a table and then a furnace. A station craft is withheld whenever the
+   * world model already holds that station, so the state must SAY why the craft
+   * disappeared: `CRAFT_STATION_ALREADY_KNOWN ... reason=... next=...` names the
+   * known cells, the retired ones, and the route the generator offered instead
+   * (`use_known_station` / `place_held` / the typed `capability_gap`).
+   */
+  private logCraftStationGap(state: WorldState, options: CandidateOptions): void {
+    const gap = craftStationGap(state, options)
+    const line = gap === null ? null : formatCraftStationGap(gap)
+    if (line === this.lastCraftStationGapLine) return
+    this.lastCraftStationGapLine = line
+    if (gap === null || line === null) return
+    this.logger.warn('agent', line, { ...gap }, this.tickCounter)
   }
 
   /**

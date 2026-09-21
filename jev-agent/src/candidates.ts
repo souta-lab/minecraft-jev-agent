@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { bodyIsOutOfAir, DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { bodyIsOutOfAir, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
@@ -2694,6 +2694,21 @@ function craftCandidates(
   const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable, want)
   const op = plan.op
 
+  // OPERATOR RULE (station-use-before-craft; measured live 2026-09-21):
+  // `craft furnace` was queued while 26 crafting tables and 17 furnaces were
+  // known, and the goal's own product was then CRAFTED. A station item the world
+  // model already knows (or the bot holds) is never a craft target: the correct
+  // route is the station-source ladder - place the held one, walk to a known one,
+  // and, when every known cell was retired, the typed `craftStationGap` fact.
+  // See `stationWorldTruth` for the rule and `craftStationGap` for the marker.
+  const productStation = stationKindOfItem(focusItem)
+  if (productStation !== null) {
+    const truth = stationWorldTruth(state, options, productStation, focusItem)
+    if (!stationCraftAllowed(truth)) {
+      return stationAcquisitionCandidates(state, options, focusItem, productStation, `craft ${focusItem}`)
+    }
+  }
+
   // M2 craft deadlock: a recipe whose chosen variant needs a 3x3 station must
   // not collapse to WAIT while a usable table is held or remembered. Offer the
   // same station ladder the smelt prerequisite path uses before the plan;
@@ -2709,8 +2724,12 @@ function craftCandidates(
     // step as a second grounded candidate so the reachability gate can withdraw
     // only the bad retrieval route instead of collapsing the craft Option to
     // MOVE/WAIT. Jev still chooses between every surviving semantic action.
+    //
+    // OPERATOR RULE: that 2x2 step is the 2x2 CRAFT OF THE STATION ITSELF. When
+    // the world model already holds a crafting_table the step is a duplicate and
+    // is withheld - the ladder above (or the typed gap) is the whole answer.
     const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false, want)
-    if (fallbackPlan.op !== null) {
+    if (fallbackPlan.op !== null && !planStepCraftsKnownStation(state, options, fallbackPlan.op)) {
       const fallback = craftPlanStepCandidate(state, options, fallbackPlan.op, focusItem).candidate
       if (fallback !== null && !merged.some((candidate) => candidate.id === fallback.id)) merged.push(fallback)
     }
@@ -2721,6 +2740,14 @@ function craftCandidates(
   // (the live shape: 2 planks < 3 and no log). Offer the deterministic producer
   // route for the missing ingredient instead of starving to a WAIT-only set.
   if (op === null) return { candidates: craftIngredientRoute(state, options, focusItem)?.candidates ?? [], placeRefusal: null }
+
+  // OPERATOR RULE: when the ladder above had nothing to offer (every known
+  // station retired) the plan's own step is the station craft itself. It is a
+  // duplicate route and is withheld; the caller reports the typed gap.
+  if (planStepCraftsKnownStation(state, options, op)) {
+    const acquisition = tableAcquisitionCandidates(state, options, focusItem)
+    return { candidates: acquisition.candidates, placeRefusal: acquisition.placeRefusal }
+  }
 
   if (op.type === 'craft') {
     const nearestTable = state.craftingTables.find(isSensedStation) ?? null
@@ -2967,6 +2994,12 @@ function craftPlanStepCandidate(
  * station were available. Its every input comes from the live inventory, so it
  * is executable NOW whenever it exists at all - the gate offers it before
  * declaring starvation.
+ *
+ * OPERATOR RULE (station-use-before-craft): the last-resort step must obey the
+ * same station rule as `craftCandidates`. A step that would craft a station the
+ * world model already knows is a duplicate route, so it is not offered here
+ * either - the ladder (`stationAcquisitionCandidates`) or the typed
+ * `craftStationGap` fact is the answer instead.
  */
 export function selfContainedCraftCandidates(
   state: WorldState,
@@ -2984,6 +3017,7 @@ export function selfContainedCraftCandidates(
     craftGoalRequirement(state, focusItem),
   )
   if (plan.op === null) return []
+  if (planStepCraftsKnownStation(state, options, plan.op)) return []
   const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
   return step.candidate === null ? [] : [step.candidate]
 }
@@ -3729,6 +3763,257 @@ function knownFurnaces(
 }
 
 /**
+ * A placed-station kind the world model tracks (`state.ts`: the `craftingTables`
+ * / `furnaces` projections).
+ */
+export type StationKind = 'crafting_table' | 'furnace'
+
+interface StationKindProjection {
+  kind: StationKind
+  /** block names the sensor projects into this kind's station list */
+  names: ReadonlySet<string>
+  /** projected station cells (sensed near-field first, then remembered) */
+  project: (state: WorldState) => readonly StationEntry[]
+}
+
+/**
+ * Station item -> world-model projection, resolved through the SAME name sets
+ * the sensor builds the projections from (`CRAFT_STATIONS` / `FURNACE_STATIONS`).
+ * There is deliberately no second station list here.
+ */
+const STATION_KIND_PROJECTIONS: readonly StationKindProjection[] = [
+  { kind: 'crafting_table', names: CRAFT_STATIONS, project: (state) => state.craftingTables },
+  { kind: 'furnace', names: FURNACE_STATIONS, project: (state) => state.furnaces ?? [] },
+]
+
+/**
+ * The world-model station kind an item name belongs to, or null when the item is
+ * not a placed station the world model tracks. Data-driven (the sensor's own
+ * name sets), so no station item is special-cased at a call site.
+ */
+export function stationKindOfItem(item: string): StationKind | null {
+  const normalized = item.includes(':') ? item.slice(item.lastIndexOf(':') + 1) : item
+  for (const projection of STATION_KIND_PROJECTIONS) {
+    if (projection.names.has(normalized)) return projection.kind
+  }
+  return null
+}
+
+/** What the world model knows about one station kind right now. */
+export interface StationWorldTruth {
+  /** every station cell the world model holds, nearest first (blacklist NOT applied) */
+  cells: KnownStationLike[]
+  /**
+   * the DURABLE cells of `cells`: projection entries the host remembered plus
+   * `signals.knownResources` records. These are the cells that block a duplicate
+   * station craft (see `stationCraftAllowed`).
+   */
+  remembered: KnownStationLike[]
+  /** the cells of `cells` the explicit reachability blacklist retired */
+  unreachable: KnownStationLike[]
+  /** stations of this kind the near-field sensor can see this tick */
+  sensed: number
+  /** how many of the station ITEM the bot holds */
+  held: number
+}
+
+/**
+ * OPERATOR RULE (station-use-before-craft; measured live 2026-09-21): while 26
+ * crafting tables and 17 furnaces were known, the queue crafted a crafting table
+ * (wasted planks) and then a furnace (wasted cobblestone). A station that already
+ * exists in the world model must be USED or WALKED TO before that station is
+ * crafted; crafting a station item is correct only when no station of that kind
+ * exists anywhere in the world model and none is held.
+ *
+ * What counts as "already exists" is the DURABLE world knowledge only
+ * (`remembered`, plus a held copy): those cells are real station coordinates the
+ * retrieval ladder can be sent to, and a blacklisted one still EXISTS - it is
+ * exactly the case the rule must not answer with a duplicate craft, so it is
+ * reported as the typed `craftStationGap` instead.
+ *
+ * #58 SENSED-ONLY SEMANTICS ARE KEPT LOAD-BEARING HERE: a near-field sensed cell
+ * is deliberately NOT part of `remembered`. In-place station availability and the
+ * "a sensed station that already failed a pathing craft is re-planned as
+ * unavailable, so the ladder may craft/place a local station" re-plan are owned by
+ * `sensedCraftingTableAvailable` / `sensedTableUsable` and stay exactly as they
+ * were (pinned by buddy-driver/test-furnace-place: a sensed table that failed
+ * pathing, or that the controller explicitly blacklisted, must still keep the
+ * local station craft). A remembered coordinate, by contrast, is durable
+ * knowledge that the body must reach - it is never satisfied in place.
+ *
+ * This is world truth (TRUE), not a preference: the count comes from the same
+ * per-kind projection (`state.craftingTables` / `state.furnaces`) and the same
+ * remembered records (`signals.knownResources`, kind `station`) the existing
+ * station-source machinery already reads, so this introduces no second station
+ * model.
+ */
+export function stationWorldTruth(
+  state: WorldState,
+  options: CandidateOptions,
+  kind: StationKind,
+  item: string = kind,
+): StationWorldTruth {
+  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const projection = STATION_KIND_PROJECTIONS.find((entry) => entry.kind === kind)
+  const cells = new Map<string, KnownStationLike>()
+  const remembered = new Map<string, KnownStationLike>()
+  let sensed = 0
+  if (projection !== undefined) {
+    for (const entry of projection.project(state)) {
+      const station: KnownStationLike = {
+        name: projection.kind,
+        position: { x: entry.x, y: entry.y, z: entry.z },
+      }
+      const key = knownStationKey(station)
+      if (isSensedStation(entry)) {
+        sensed += 1
+      } else {
+        remembered.set(key, station)
+      }
+      if (!cells.has(key)) cells.set(key, station)
+    }
+  }
+  for (const known of knownStations(state, kind)) {
+    const key = knownStationKey(known)
+    remembered.set(key, known)
+    if (!cells.has(key)) cells.set(key, known)
+  }
+  const nearestFirst = (entries: Iterable<KnownStationLike>): KnownStationLike[] =>
+    [...entries].sort(
+      (a, b) => distance(a.position, state.self.position) - distance(b.position, state.self.position),
+    )
+  const all = nearestFirst(cells.values())
+  return {
+    cells: all,
+    remembered: nearestFirst(remembered.values()),
+    unreachable: all.filter((station) => unreachableStations.has(knownStationKey(station))),
+    sensed,
+    held: state.inventory.counts[item] ?? 0,
+  }
+}
+
+/**
+ * Crafting a station item is a correct route only when the world model holds no
+ * DURABLE station of that kind and none is held (see `stationWorldTruth` for why
+ * a sensed cell is not part of that decision).
+ */
+export function stationCraftAllowed(truth: StationWorldTruth): boolean {
+  return truth.remembered.length === 0 && truth.held === 0
+}
+
+/**
+ * The typed fact behind a withheld station craft: the current craft goal needs
+ * (or would produce) a station kind the world model already knows, so the craft
+ * step was replaced by the station-source ladder - use/walk-to when a route
+ * exists, and this typed gap when every known cell was retired.
+ *
+ * Derived from the SAME truth and the SAME ladder the generator used, so the
+ * marker can never disagree with the offered set (mirror of `smeltRouteGap`).
+ */
+export interface CraftStationGap {
+  /** the craft goal's item (for example `furnace`) */
+  item: string
+  /** the station kind the craft needs or would produce */
+  station: StationKind
+  reason: 'station_held' | 'known_station' | 'known_station_unreachable'
+  /** how many of the station item the bot holds */
+  held: number
+  /** stations of this kind the sensor can see */
+  sensed: number
+  /** known station cells, nearest first */
+  knownStations: string[]
+  /** known station cells the move-failure memory / reachability gate retired */
+  unreachableStations: string[]
+  /** the grounded step the generator offered instead of the craft */
+  next: 'use_known_station' | 'place_held' | 'capability_gap'
+}
+
+export const CRAFT_STATION_ALREADY_KNOWN = 'CRAFT_STATION_ALREADY_KNOWN'
+
+export function formatCraftStationGap(gap: CraftStationGap): string {
+  const known = gap.knownStations.slice(0, MAX_GAP_STATIONS)
+  return [
+    CRAFT_STATION_ALREADY_KNOWN,
+    `item=${gap.item}`,
+    `station=${gap.station}`,
+    `reason=${gap.reason}`,
+    `held=${gap.held}`,
+    `sensed=${gap.sensed}`,
+    `known_stations=[${known.join(';')}]`,
+    `unreachable_stations=[${gap.unreachableStations.slice(0, MAX_GAP_STATIONS).join(';')}]`,
+    `next=${gap.next}`,
+  ].join(' ')
+}
+
+/** The station requirement the current craft goal would satisfy by crafting. */
+function craftStationRequirement(
+  state: WorldState,
+  options: CandidateOptions,
+): { item: string; station: StationKind; stationItem: string; purpose: string } | null {
+  const recipes = options.recipes ?? null
+  const current = state.goalQueue?.current ?? null
+  if (recipes === null || current === null || current.kind !== 'craft') return null
+  const item = current.targetItem
+  if (item === null) return null
+  // (1) the goal's own product is a station item the world model already knows
+  //     (this is the branch `craftCandidates` takes first)
+  const productKind = stationKindOfItem(item)
+  if (productKind !== null && !stationCraftAllowed(stationWorldTruth(state, options, productKind, item))) {
+    return { item, station: productKind, stationItem: item, purpose: `craft ${item}` }
+  }
+  // (2) the recipe needs a placed 3x3 station the world model already knows
+  if (sensedCraftingTableAvailable(state, options, item)) return null
+  if (!planRequiresTable(recipes, item, state.inventory.counts, craftGoalRequirement(state, item))) return null
+  const table = stationWorldTruth(state, options, 'crafting_table', 'crafting_table')
+  if (stationCraftAllowed(table)) return null
+  return { item, station: 'crafting_table', stationItem: 'crafting_table', purpose: `craft ${item}` }
+}
+
+/**
+ * `CRAFT_STATION_ALREADY_KNOWN`: the craft goal's station requirement is already
+ * satisfied by a station the world model holds, so no `CRAFT:<station>` step is
+ * offered. Null whenever the craft path is a correct route (no station known and
+ * none held) or the goal is not a station-requiring craft.
+ */
+export function craftStationGap(state: WorldState, options: CandidateOptions): CraftStationGap | null {
+  const requirement = craftStationRequirement(state, options)
+  if (requirement === null) return null
+  const truth = stationWorldTruth(state, options, requirement.station, requirement.stationItem)
+  if (stationCraftAllowed(truth)) return null
+  const ladder = stationAcquisitionCandidates(
+    state,
+    options,
+    requirement.stationItem,
+    requirement.station,
+    requirement.purpose,
+  )
+  const whatHappens: CraftStationGap['next'] =
+    truth.held > 0 && ladder.candidates.some((candidate) => candidate.kind === 'PLACE')
+      ? 'place_held'
+      : ladder.candidates.some((candidate) => candidate.kind === 'RETRIEVE' || candidate.kind === 'MOVE')
+        ? 'use_known_station'
+        : 'capability_gap'
+  const reason: CraftStationGap['reason'] =
+    truth.held > 0
+      ? 'station_held'
+      : whatHappens === 'capability_gap'
+        ? 'known_station_unreachable'
+        : 'known_station'
+  const describe = (station: KnownStationLike): string =>
+    `${station.position.x},${station.position.y},${station.position.z}`
+  return {
+    item: requirement.item,
+    station: requirement.station,
+    reason,
+    held: truth.held,
+    sensed: truth.sensed,
+    knownStations: truth.remembered.map(describe),
+    unreachableStations: truth.unreachable.map(describe),
+    next: whatHappens,
+  }
+}
+
+/**
  * A sensed station is not automatically a grounded route (mirror of
  * `sensedCraftingTableAvailable` for craft goals): once the exact `CRAFT:furnace`
  * step failed with a path failure, re-plan as if that table were absent so the
@@ -3812,47 +4097,79 @@ function planRequiresTable(
 }
 
 /**
- * M2 craft deadlock: the station ladder for a table-requiring CRAFT goal,
- * mirroring the smelt prerequisite path (`craftFurnaceCandidate`):
+ * The station-source ladder for one station ITEM, mirroring the smelt
+ * prerequisite path (`furnaceAcquisitionCandidates`):
  *
- *   (a) place a held crafting_table at a grounded spot (inventory first, #78);
- *   (b) walk to a remembered table the move-failure blacklist has not excluded;
- *   (c) else nothing - when the materials are held, `planNextCraftStep` already
- *       returns the 2x2 craft-table step and the caller falls through to it.
+ *   (a) place a held station at a grounded spot (inventory first, #78);
+ *   (b) walk to a DURABLE (remembered/registered) station the move-failure
+ *       blacklist has not excluded;
+ *   (c) else nothing - the caller still owns the in-place CRAFT at a sensed
+ *       station and the material route.
  *
  * `heldStationPlacement` is the same mechanical solve the place branch uses, so
- * a held table the known terrain can host is placed even when the strict live
+ * a held station the known terrain can host is placed even when the strict live
  * spot scan is empty; a genuine geometry dead end is refused with its typed
  * reason and the grounded alternative instead of collapsing to nothing.
+ *
+ * Walk targets come from the DURABLE cells (the `state` projection's remembered
+ * entries + `signals.knownResources`), the same union the smelt ladder reads, so
+ * the host withholding a station from the filtered signal envelope cannot hide a
+ * station from the craft path. A merely SENSED cell is deliberately not a walk
+ * target: its availability is `sensedCraftingTableAvailable`'s decision, and a
+ * sensed table that just failed a pathing craft must not be re-offered as a fresh
+ * walk (#58, pinned by buddy-driver/test-furnace-place).
  */
-function tableAcquisitionCandidates(
+function stationAcquisitionCandidates(
   state: WorldState,
   options: CandidateOptions,
-  focusItem: string,
+  item: string,
+  station: StationKind,
+  purpose: string,
 ): CraftCandidatesResult {
-  const holdsTable = (state.inventory.counts.crafting_table ?? 0) > 0
   const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
-  const remembered = knownStations(state, 'crafting_table').find(
-    (station) => !unreachableStations.has(knownStationKey(station)),
-  )
-  if (holdsTable) {
-    const placement = heldStationPlacement(state, options, 'crafting_table', `craft ${focusItem}`)
+  const truth = stationWorldTruth(state, options, station, item)
+  const known = truth.remembered.find((cell) => !unreachableStations.has(knownStationKey(cell)))
+  if (truth.held > 0) {
+    const placement = heldStationPlacement(state, options, item, purpose)
     if (placement.spot !== null) {
-      return {
-        candidates: [placeStationCandidate(state, options, 'crafting_table', placement.spot, `craft ${focusItem}`)],
-        placeRefusal: null,
-      }
+      return { candidates: [placeStationCandidate(state, options, item, placement.spot, purpose)], placeRefusal: null }
     }
-    if (remembered !== undefined) {
-      return { candidates: [knownStationRetrievalCandidate(state, options, remembered)], placeRefusal: null }
+    if (known !== undefined) {
+      return { candidates: [knownStationRetrievalCandidate(state, options, known)], placeRefusal: null }
     }
     return {
       candidates: placement.alternative === null ? [] : [placement.alternative],
       placeRefusal: placement.refusal,
     }
   }
-  if (remembered !== undefined) return { candidates: [knownStationRetrievalCandidate(state, options, remembered)], placeRefusal: null }
+  if (known !== undefined) return { candidates: [knownStationRetrievalCandidate(state, options, known)], placeRefusal: null }
   return { candidates: [], placeRefusal: null }
+}
+
+/**
+ * M2 craft deadlock: the station ladder for a table-requiring CRAFT goal. This
+ * is `stationAcquisitionCandidates` for the 3x3 table, kept as the named entry
+ * point the craft path and its fixtures already use.
+ */
+function tableAcquisitionCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string,
+): CraftCandidatesResult {
+  return stationAcquisitionCandidates(state, options, 'crafting_table', 'crafting_table', `craft ${focusItem}`)
+}
+
+/**
+ * True when this plan step would craft a station ITEM the world model already
+ * knows or the bot already holds. Such a step is never a route (operator rule,
+ * see `stationWorldTruth`): the station-source ladder answers instead. A `place`
+ * step is the held-station route and is deliberately not withheld here.
+ */
+function planStepCraftsKnownStation(state: WorldState, options: CandidateOptions, op: CraftOp): boolean {
+  if (op.type !== 'craft') return false
+  const station = stationKindOfItem(op.item)
+  if (station === null) return false
+  return !stationCraftAllowed(stationWorldTruth(state, options, station, op.item))
 }
 
 /**

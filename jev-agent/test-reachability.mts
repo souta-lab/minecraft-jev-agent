@@ -9,7 +9,7 @@
 //
 // Run: bun test-reachability.mts  (wired as `bun run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, blockId, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, formatCraftIngredientPrereq, formatCraftStationGap, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { MIRRORED_MARKERS, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
@@ -768,8 +768,13 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   const tableAbove: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 20, y: 65, z: 27 } }
   const feet = { x: Math.floor(bot.x), y: Math.floor(bot.y), z: Math.floor(bot.z) }
 
-  // (a) planks + sticks held: the craft is PRODUCTIVE even when the only
-  // remembered table is unreachable (below and above).
+  // (a) planks + sticks held, and the ONLY remembered table is unreachable (below
+  // and above). OPERATOR RULE (station-use-before-craft) supersedes the dc54ff4
+  // "craft a local table anyway" fallback: the world model already holds that
+  // station, so a duplicate `CRAFT:crafting_table` is never offered. The station
+  // route keeps its own typed withholding (needs_descend / needs_ascend) and the
+  // state carries the typed `CRAFT_STATION_ALREADY_KNOWN` fact instead of a
+  // silent craft.
   {
     const held = inventory({ birch_planks: 7, stick: 2 })
     const scenarios: Array<{ label: string; known: KnownResource; descent?: DescentOption[]; standable?: Vec3Json[] }> = [
@@ -790,22 +795,22 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       const productive = grounded.candidates.filter(
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
       )
-      const craft = productive.find((candidate) => candidate.kind === 'CRAFT')
-      const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
-      const missing = candidateStarvationMissing(grounded.withheld)
-      const line = candidateStarvationLine(grounded.candidates, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
+      const duplicateTable = productive.find((candidate) => candidate.id === 'CRAFT:crafting_table')
+      const gap = craftStationGap(state, craftOptions)
       check(
-        `(a) craft:wooden_pickaxe with planks+sticks held is PRODUCTIVE with the table ${scenario.label}`,
-        craft !== undefined && craft.id === 'CRAFT:crafting_table' && line === null,
-        `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`,
+        `(a) no duplicate station craft while the world model holds the table ${scenario.label}`,
+        duplicateTable === undefined &&
+          gap !== null &&
+          gap.reason === 'known_station' &&
+          gap.next === 'use_known_station',
+        `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] duplicate=${duplicateTable?.id ?? 'none'} gap=${gap === null ? 'none' : formatCraftStationGap(gap)}`,
       )
       const withheldCraft = grounded.withheld.find((entry) => entry.candidate.kind === 'CRAFT')
+      const duplicateWithheld = grounded.withheld.find((entry) => entry.candidate.id === 'CRAFT:crafting_table')
       check(
-        `(a) the craft candidate carries no missing capability of its own (table ${scenario.label})`,
-        withheldCraft === undefined &&
-          craft !== undefined &&
-          (craft.affordance?.missingCapabilities.length ?? -1) === 0,
-        `withheldCraft=${withheldCraft?.candidate.id ?? 'none'} craft=${craft === undefined ? 'none' : JSON.stringify(craft.affordance)}`,
+        `(a) the withheld route is the STATION, not a duplicate craft (table ${scenario.label})`,
+        withheldCraft === undefined && duplicateWithheld === undefined,
+        `withheldCraft=${withheldCraft?.candidate.id ?? 'none'} duplicateWithheld=${duplicateWithheld?.candidate.id ?? 'none'}`,
       )
       const withheldTable = grounded.withheld.find((entry) => entry.candidate.id.includes('station:crafting_table'))
       check(
@@ -847,9 +852,11 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   }
 
   // (e) live-shape regression: a reachable station retrieve is offered, then the
-  // controller's own move-fail filter removes it. The local 2x2 prerequisite step
-  // must survive that filter so the craft Option does not collapse to WAIT, and
-  // the controller backfill must still restore the step if it is absent entirely.
+  // controller's own move-fail filter removes it. OPERATOR RULE
+  // (station-use-before-craft): the local 2x2 step here would be a duplicate of
+  // the station the world model already holds, so it must NOT be restored - the
+  // Option reports the typed station fact and the starvation evidence carries the
+  // withheld station route instead.
   {
     const state = worldState({
       position: bot,
@@ -859,30 +866,26 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: { x: 32, y: 48, z: 37 } }] }),
     })
     const grounded = generateGroundedCandidates(state, craftOptions)
+    const retrieve = grounded.candidates.find((candidate) => candidate.id.includes('station:crafting_table'))
+    const gap = craftStationGap(state, craftOptions)
+    check(
+      '(e) a reachable known table is the route and the duplicate local table craft is not offered',
+      retrieve !== undefined &&
+        !grounded.candidates.some((candidate) => candidate.id === 'CRAFT:crafting_table') &&
+        gap !== null &&
+        gap.next === 'use_known_station',
+      `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] gap=${gap === null ? 'none' : formatCraftStationGap(gap)}`,
+    )
     // simulate the controller pruning every locomotion candidate (move-fail memory);
-    // CRAFT is not a locomotion candidate, so it must survive here.
+    // the duplicate-craft backfill must NOT resurrect the withheld station craft.
     const afterControllerFilters = grounded.candidates.filter(
       (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE',
     )
-    const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
-    const missing = candidateStarvationMissing(grounded.withheld)
-    const survivedLine = candidateStarvationLine(afterControllerFilters, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
+    const restored = ensureCraftStepActionable(state, afterControllerFilters, craftOptions)
     check(
-      '(e) the grounded craft step survives the controller move-fail filter with no starvation line',
-      afterControllerFilters.some((candidate) => candidate.id === 'CRAFT:crafting_table') && survivedLine === null,
-      `surviving=[${afterControllerFilters.map((candidate) => candidate.id).join(',')}] starvation=${survivedLine ?? 'none'}`,
-    )
-    // The backfill stays the last-resort guarantee: if a later candidate
-    // transformation dropped the step, it must be restored before the Option can
-    // be judged starved.
-    const withoutCraft = afterControllerFilters.filter((candidate) => candidate.id !== 'CRAFT:crafting_table')
-    const restored = ensureCraftStepActionable(state, withoutCraft, craftOptions)
-    const productive = restored.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
-    const restoredLine = candidateStarvationLine(restored, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
-    check(
-      '(e) the controller backfill restores an absent craft step with no starvation line',
-      productive.some((candidate) => candidate.id === 'CRAFT:crafting_table') && restoredLine === null,
-      `before=[${withoutCraft.map((candidate) => candidate.id).join(',')}] after=[${restored.map((candidate) => candidate.id).join(',')}] starvation=${restoredLine ?? 'none'}`,
+      '(e) the controller backfill never restores a duplicate station craft',
+      !restored.some((candidate) => candidate.id === 'CRAFT:crafting_table'),
+      `before=[${afterControllerFilters.map((candidate) => candidate.id).join(',')}] after=[${restored.map((candidate) => candidate.id).join(',')}]`,
     )
   }
 

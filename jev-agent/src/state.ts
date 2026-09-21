@@ -665,8 +665,14 @@ const STONE_LIKE = new Set([
   'granite',
   'tuff',
 ])
-const CRAFT_STATIONS = new Set(['crafting_table'])
-const FURNACE_STATIONS = new Set(['furnace', 'blast_furnace', 'smoker'])
+/**
+ * The block names the two placed-station projections are built from
+ * (`craftingTables` / `furnaces`). Exported so the candidate layer's
+ * station-use-before-craft rule resolves a station ITEM to the world-model
+ * projection by the SAME name sets the sensor uses - never a second list.
+ */
+export const CRAFT_STATIONS: ReadonlySet<string> = new Set(['crafting_table'])
+export const FURNACE_STATIONS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
 export const STONE_YIELDS = new Set(['cobblestone', 'cobbled_deepslate'])
 
 /**

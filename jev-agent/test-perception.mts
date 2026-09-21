@@ -299,7 +299,7 @@ addCase('(1) a near placeable producer below a buried column cell remains sensed
 
 const rememberedInReach: StationEntry = { x: 29, y: 48, z: 34, source: 'remembered' }
 
-addCase('(2) an in-reach remembered table does not produce an in-place CRAFT candidate', () => {
+addCase('(2) an in-reach remembered table never produces an in-place CRAFT candidate', () => {
   const base = perceive([], { crafting_table: [], furnace: [] })
   const state = withInventory(
     { ...base, goalQueue: { ...emptyGoalQueueState(), current: craftGoal('furnace') }, craftingTables: [rememberedInReach] },
@@ -307,8 +307,16 @@ addCase('(2) an in-reach remembered table does not produce an in-place CRAFT can
   )
   const candidates = generateCandidates(state, craftOptions)
   const crafts = candidates.filter((candidate) => candidate.kind === 'CRAFT')
+  const retrieve = candidates.find((candidate) => candidate.id.startsWith('RETRIEVE:known:station:crafting_table'))
   const eyeDistance = Math.hypot(rememberedInReach.x - state.self.eyePosition.x, rememberedInReach.y - state.self.eyePosition.y, rememberedInReach.z - state.self.eyePosition.z)
-  const pass = eyeDistance <= defaultSensorOptions.reach && crafts.length === 0 && candidates.every((candidate) => candidate.kind === 'WAIT')
+  // OPERATOR RULE (station-use-before-craft): a remembered station the world model
+  // holds is WALKED TO - it is never satisfied in place and never answered with a
+  // duplicate craft, even when the projection is the only place it exists.
+  const pass =
+    eyeDistance <= defaultSensorOptions.reach &&
+    crafts.length === 0 &&
+    retrieve !== undefined &&
+    retrieve.meta.tableSource === 'remembered'
   return { pass, detail: `eyeDistance=${eyeDistance.toFixed(2)} candidates=[${candidates.map((candidate) => candidate.id).join(',')}]` }
 })
 
@@ -342,7 +350,7 @@ addCase('(2) the same remembered table routes to a RETRIEVE walk, never an in-pl
 addCase('(3) a 1-element candidate set emits the mirrored CANDIDATE_STARVATION marker', () => {
   const base = perceive([], { crafting_table: [], furnace: [] })
   const state = withInventory(
-    { ...base, goalQueue: { ...emptyGoalQueueState(), current: craftGoal('furnace') }, craftingTables: [rememberedInReach] },
+    { ...base, goalQueue: { ...emptyGoalQueueState(), current: craftGoal('furnace') } },
     { cobblestone: 42 },
   )
   const candidates = generateCandidates(state, craftOptions)
