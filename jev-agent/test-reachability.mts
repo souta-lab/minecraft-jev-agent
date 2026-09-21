@@ -859,9 +859,10 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: { x: 32, y: 48, z: 37 } }] }),
     })
     const grounded = generateGroundedCandidates(state, craftOptions)
-    // simulate the controller pruning every locomotion candidate (move-fail memory)
+    // simulate the controller pruning every locomotion candidate (move-fail memory);
+    // CRAFT is not a locomotion candidate, so it must survive here.
     const afterControllerFilters = grounded.candidates.filter(
-      (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE' && candidate.kind !== 'CRAFT',
+      (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE',
     )
     const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
     const missing = candidateStarvationMissing(grounded.withheld)
