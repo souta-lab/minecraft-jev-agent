@@ -48,7 +48,12 @@ export interface ProtectableGoal {
 
 /** A goal is protected when the deterministic compiler marked it protected or core. */
 export function isProtectedGoal(goal: ProtectableGoal): boolean {
-  return goal.protected === true || goal.core === true
+  // Food is an optional, self-contained recovery goal. Older resident snapshots
+  // may still carry `core=true` from the rung compiler; preserve explicit
+  // prerequisites, but let a proven no-frontier replan retire this stale row.
+  if (goal.protected === true) return true
+  if (goal.kind === 'collect' && goal.targetItem === 'food') return false
+  return goal.core === true
 }
 
 /**

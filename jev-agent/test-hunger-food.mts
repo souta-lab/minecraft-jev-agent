@@ -29,6 +29,7 @@ import {
 } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { isProtectedGoal } from './src/protectedGoals.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
 import { buildPlanOptions, computeFrontier, RUNGS, rungIndexById } from '../buddy-driver/planner.ts'
@@ -310,6 +311,15 @@ addCase('(d2b) optional food goals are replaceable by a semantic recovery plan',
   return {
     pass: option !== undefined && foodGoals.length > 0 && foodGoals.every((goal) => goal.core !== true),
     detail: `foodGoals=${foodGoals.length} core=[${foodGoals.map((goal) => String(goal.core === true)).join(',')}]`,
+  }
+})
+ 
+addCase('(d2c) persisted core food rows remain replaceable but prerequisites stay protected', () => {
+  const food = { kind: 'collect', targetItem: 'food', core: true, protected: false }
+  const prerequisite = { kind: 'collect', targetItem: 'obsidian', core: true, protected: false }
+  return {
+    pass: !isProtectedGoal(food) && isProtectedGoal(prerequisite),
+    detail: `foodProtected=${isProtectedGoal(food)} prerequisiteProtected=${isProtectedGoal(prerequisite)}`,
   }
 })
 
