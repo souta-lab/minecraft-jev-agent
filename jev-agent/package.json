@@ -61,6 +61,7 @@
     "fuel-guard-test": "bun test ./test-fuel-guard.mts",
     "vertical-plan-test": "bun test ./test-vertical-plan.mts",
     "surface-ascent-test": "bun test ./test-surface-ascent.mts",
+    "ascend-exec-test": "bun test ./test-ascend-exec.mts",
     "vertical-recovery-shaft-test": "bun test ./test-vertical-recovery-shaft.mts",
     "log-route-test": "bun test ./test-log-route.mts",
     "craft-log-route-test": "bun test ./test-craft-log-route.mts",

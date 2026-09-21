@@ -252,16 +252,19 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
     return guardWalkToBlock(candidate, state, context, target, { x: blockX, y: blockY, z: blockZ })
   }
 
-  // A vertical route (the executor's own pillar / staircase-up / reuse meta) targets a
-  // cell ABOVE the body, which the flat terrain scan (dy -1..+1) can never list as
-  // standable. Denying it here is what silently dropped every selected ASCEND: with
-  // d1 (#360) the route is enumerated and Jev selects it, the guard rejected it as
-  // NO_SUPPORT, the guard category is not mirrored, and the body stayed at y=67 for 48
-  // minutes while `ACTION` showed only WAIT. The executor owns vertical feasibility
-  // (column-unless-unsafe, placeable held, step cap), so the flat-support gate must not
-  // apply to a route that carries that meta.
-  const vertical = readMetaString(candidate, 'vertical')
-  if (vertical === null) {
+  // A generated vertical-plan MOVE declares the cell the route CREATES, not a
+  // cell the sensor already saw standable: a pillar apex is air until the
+  // executor places the column, and the flat terrain scan (dy -1..+1) can never
+  // list it. The vertical leg IS the path for this candidate, exactly as
+  // `unreachableMove` and `guardWalkToBlock` already treat it; the ordinary
+  // horizontal standable lookup AND the canDig=false GoalBlock probe would both
+  // reject the only route the goal has before `Executor.runMove` can run it
+  // (measured live: the 48-minute `ASCEND:surface:p3_86_18` pillar was
+  // generated, selected by Jev and dropped here with NO_SUPPORT 72+ times while
+  // the body never rose). The executor owns vertical feasibility
+  // (column-unless-unsafe, placeable held, step cap).
+  const verticalPlan = hasVerticalPlan(candidate)
+  if (!verticalPlan) {
     const standable = state.terrain.standable.some((spot) => samePosition(spot, target))
     if (!standable) {
       return deny(
@@ -274,6 +277,14 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
   const hazard = nearestHazardTo(state, target)
   if (hazard !== null) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the movement target`)
+  }
+  // The column/step route was already proven safe by its own planner; only the
+  // hard void floor remains a deterministic fact this guard still owns.
+  if (verticalPlan) {
+    if (target.y < VOID_FLOOR) {
+      return deny(candidate.id, 'NO_SUPPORT', `(${target.x},${target.y},${target.z}) is below the world floor (void)`)
+    }
+    return { ok: true, candidate }
   }
   return guardPathComputable(candidate, context, target)
 }
@@ -331,6 +342,24 @@ export const MOVE_VERTICAL_GAP_LIMIT = 4
 /** The exact log line emitted when a body-change target is dropped as unreachable. */
 export function formatMoveUnreachable(target: Vec3Json, dy: number): string {
   return `MOVE_UNREACHABLE target=${target.x},${target.y},${target.z} dy=${dy}`
+}
+
+/**
+ * `ACTION_REJECTED id=<candidate> code=<GuardCode> reason=<why>`.
+ *
+ * This guard is the last deterministic boundary between a Jev selection and the
+ * executor. Before this marker the rejection existed only on the un-mirrored
+ * `guard` log category, so a selected candidate that never executed was
+ * indistinguishable from a silent drop (measured live: `JEV_HEADS
+ * action=ASCEND:surface:p3_86_18` alternated with WAIT for 48 minutes with zero
+ * `ACTION` lines, zero `PILLAR_*` markers and no typed cause). Every rejection
+ * now names the candidate and the deterministic code on the mirrored event path,
+ * so the loop can act on the cause.
+ */
+export const ACTION_REJECTED = 'ACTION_REJECTED'
+
+export function formatActionRejected(candidateId: string, code: GuardCode, reason: string): string {
+  return `${ACTION_REJECTED} id=${candidateId} code=${code} reason=${reason}`
 }
 
 /**

@@ -78,7 +78,7 @@ import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
 import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
-import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
+import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
@@ -1033,6 +1033,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
+  ACTION_REJECTED,
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -3465,6 +3466,23 @@ export class JevController {
       'guard',
       `REJECTED ${guarded.candidateId} code=${guarded.code} :: ${guarded.reason}`,
       { code: guarded.code, policy: decision.policy, callId: decision.callId, chainId: record.chainId },
+      this.tickCounter,
+    )
+    // The `guard` category is not part of the mirrored agent stream, so without
+    // this line a selected candidate that the guard drops leaves no diagnosable
+    // trace at all (see ACTION_REJECTED in policy.ts). Emit the typed cause on
+    // the mirrored path with the same candidate id, code and reason.
+    this.logger.warn(
+      'agent',
+      formatActionRejected(guarded.candidateId, guarded.code, guarded.reason),
+      {
+        actionId: guarded.candidateId,
+        code: guarded.code,
+        reason: guarded.reason,
+        policy: decision.policy,
+        callId: decision.callId,
+        chainId: record.chainId,
+      },
       this.tickCounter,
     )
     this.recentEvents.push(`guard ${guarded.code} on ${guarded.candidateId}`)
