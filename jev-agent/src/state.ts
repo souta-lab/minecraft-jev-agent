@@ -158,6 +158,49 @@ export type ArmorState = Record<ArmorSlot, HeldItemState | null>
 /** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
 export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
 
+/**
+ * The vanilla player air supply (bubbles). Mineflayer reports the server's
+ * `air_supply` entity metadata as `bot.oxygenLevel`
+ * (`node_modules/mineflayer/lib/plugins/entities.js`), so the remaining breath
+ * is world truth the sensor can READ instead of inferring from damage.
+ */
+export const MAX_AIR = 20
+
+/**
+ * Air at or below which the body's own survival preempts other work.
+ *
+ * Measured 2026-09-21T16:59:34.792Z: the body drowned at (67.5,58.3,28.5) after
+ * ~35s of `ATTACK:e4698 phase=closing-to-melee-range` chasing a salmon down a
+ * water column (y 62 -> 57). No layer read the air supply at all - it was not
+ * in `SelfState`, so no guard, executor or scheduler could see the body losing
+ * breath. Vanilla drowning damage starts at air 0 and 20 HP is gone ~10s later,
+ * so half the supply is the SAFE boundary: below it, surfacing must win over
+ * whatever the body is doing. Code owns WHEN the body must resurface; WHICH
+ * route surfaces it stays with Jev.
+ */
+export const LOW_AIR_LEVEL = 10
+
+/** `dry` = body not in a fluid; `out_of_air` = breath at/below `LOW_AIR_LEVEL`. */
+export type SubmersionState = 'dry' | 'submerged' | 'out_of_air'
+
+/** The body's live water/breath facts, all mechanically sensed (no inference). */
+export interface BodySubmersion {
+  /** remaining breath, 0..`MAX_AIR` */
+  air: number
+  /** the cell the feet occupy holds a fluid */
+  feetInWater: boolean
+  /** the cell the eyes occupy holds a fluid - the head is underwater */
+  eyesInWater: boolean
+  state: SubmersionState
+}
+
+/** Typed survival fact line; mirrored so a submerging body is never silent. */
+export const BODY_SUBMERGED = 'BODY_SUBMERGED'
+
+export function formatBodySubmerged(submersion: BodySubmersion, at: Vec3Json): string {
+  return `${BODY_SUBMERGED} state=${submersion.state} air=${submersion.air}/${MAX_AIR} feetWet=${submersion.feetInWater} headWet=${submersion.eyesInWater} at=${at.x},${at.y},${at.z}`
+}
+
 export type SelfState = {
   username: string
   position: Vec3Json
@@ -172,11 +215,56 @@ export type SelfState = {
   isDay: boolean
   heldItem: HeldItemState | null
   /**
+   * Remaining breath (vanilla bubbles) and the two fluid cells that decide
+   * whether the body is underwater. Optional so pure fixtures that predate the
+   * submersion facts need not restate them: `buildWorldState` always populates
+   * them and consumers treat an absent value as "full air, dry body".
+   */
+  air?: number
+  feetInWater?: boolean
+  eyesInWater?: boolean
+  /**
    * Worn armor per destination. Optional so pure fixtures that predate the
    * armor affordance need not restate it; `buildWorldState` always populates it
    * and consumers treat an absent value as all slots empty.
    */
   armor?: ArmorState
+}
+
+/**
+ * The body's submersion state, derived from the three sensed facts. Pure, so
+ * the guard, the executor and the fixtures all read the same answer; absent
+ * facts mean "full air, dry body", which keeps pre-submersion fixtures
+ * behaviourally unchanged.
+ */
+export function bodySubmersion(
+  self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>,
+): BodySubmersion {
+  const air = typeof self.air === 'number' && Number.isFinite(self.air) ? self.air : MAX_AIR
+  const feetInWater = self.feetInWater === true
+  const eyesInWater = self.eyesInWater === true
+  const state: SubmersionState =
+    air <= LOW_AIR_LEVEL ? 'out_of_air' : feetInWater || eyesInWater ? 'submerged' : 'dry'
+  return { air, feetInWater, eyesInWater, state }
+}
+
+/** true when the body is in a fluid (either the feet or the eyes cell). */
+export function bodyIsSubmerged(self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>): boolean {
+  const submersion = bodySubmersion(self)
+  return submersion.feetInWater || submersion.eyesInWater
+}
+
+/**
+ * true when breath is at/below `LOW_AIR_LEVEL`: the SAFE boundary where
+ * surfacing must preempt the current mechanical action.
+ */
+export function bodyIsOutOfAir(self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>): boolean {
+  return bodySubmersion(self).state === 'out_of_air'
+}
+
+/** Stable `x_y_z` key for a placement spot, shared by the sensor fact, guard and generator. */
+export function placementSpotKey(spot: Vec3Json): string {
+  return `${spot.x}_${spot.y}_${spot.z}`
 }
 
 export type InventorySlotState = {
@@ -460,6 +548,15 @@ export type WorldState = {
   furnaces?: StationEntry[]
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
+  /**
+   * The subset of `placementSpots` whose only body access is a fluid column:
+   * placing there means the body stands in water. A station must not be placed
+   * from a submerged body position while a dry alternative exists, so the
+   * candidate layer withholds these spots when any dry-access spot is offered.
+   * Absent in old replay fixtures means "none known", which keeps them
+   * behaviourally unchanged.
+   */
+  submergedPlacementSpots?: Vec3Json[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
@@ -781,6 +878,8 @@ function buildSelf(bot: Bot): SelfState {
   const position = vecJson(bot.entity.position)
   const eye = bot.entity.position.offset(0, EYE_HEIGHT, 0)
   const held = bot.heldItem
+  const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+  const eyes = { x: Math.floor(eye.x), y: Math.floor(eye.y), z: Math.floor(eye.z) }
   return {
     username: bot.username,
     position,
@@ -795,7 +894,26 @@ function buildSelf(bot: Bot): SelfState {
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
     armor: buildArmor(bot),
+    air: readAir(bot),
+    feetInWater: fluidAt(bot, feet),
+    eyesInWater: fluidAt(bot, eyes),
   }
+}
+
+/**
+ * The remaining breath. Mineflayer sets `bot.oxygenLevel` from the server's
+ * `air_supply` metadata; a bot/version that never reports it has no drowning
+ * signal to read, so the honest default is full air rather than a fake alarm.
+ */
+function readAir(bot: Bot): number {
+  const air = (bot as { oxygenLevel?: number }).oxygenLevel
+  return typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR
+}
+
+/** true when the loaded cell holds a fluid (`null` = unloaded, so not a fluid). */
+function fluidAt(bot: Bot, cell: Vec3Json): boolean {
+  const block = bot.blockAt(toVec3(bot, cell))
+  return block !== null && PROBE_FLUIDS.has(block.name)
 }
 
 /**
@@ -1747,6 +1865,43 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
   return out
 }
 
+/**
+ * The cells a placing body could stand in to use the spot: the 4 cardinal
+ * neighbours at the spot's own level plus the 4 diagonal ones. `isStandable`
+ * accepts a fluid cell (water has an empty bounding box), which is exactly how a
+ * placement can be executed from a submerged body position - so the dry/fluid
+ * verdict is computed here instead of being inferred from standability.
+ */
+function placementAccessCells(spot: Vec3Json): Vec3Json[] {
+  const offsets: Array<[number, number]> = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [-1, 1],
+    [1, -1],
+    [-1, -1],
+  ]
+  return offsets.map(([dx, dz]) => ({ x: spot.x + dx, y: spot.y, z: spot.z + dz }))
+}
+
+/**
+ * true when EVERY standable access to the spot is a fluid column, i.e. the body
+ * can only place there while standing in water. A spot with no standable access
+ * at all is not marked (unknown access keeps the historical behaviour).
+ */
+function placementAccessSubmerged(bot: Bot, spot: Vec3Json): boolean {
+  let sawStandable = false
+  for (const access of placementAccessCells(spot)) {
+    if (!isStandable(bot, access)) continue
+    sawStandable = true
+    const head = { x: access.x, y: access.y + 1, z: access.z }
+    if (!fluidAt(bot, access) && !fluidAt(bot, head)) return false
+  }
+  return sawStandable
+}
+
 function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const base = {
     x: Math.floor(self.position.x),
@@ -1783,6 +1938,11 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
   }
   spots.sort((a, b) => distance(a, self.position) - distance(b, self.position))
   return spots.slice(0, options.maxPlacementSpots)
+}
+
+/** The subset of `spots` whose only body access is a fluid column. */
+function submergedPlacementSpots(bot: Bot, spots: readonly Vec3Json[]): Vec3Json[] {
+  return spots.filter((spot) => placementAccessSubmerged(bot, spot))
 }
 
 /**
@@ -2283,6 +2443,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
         return blocks.length >= 10 ? validatePortalFrame({ blocks, widthAxis: site.widthAxis }) : null
       })
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
+  const placementSpots = buildPlacementSpots(bot, options, self)
   return {
     schemaVersion: 1,
     tick: input.tick,
@@ -2294,7 +2455,8 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     terrain: { standable: buildTerrain(bot, options, self) },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
-    placementSpots: buildPlacementSpots(bot, options, self),
+    placementSpots,
+    submergedPlacementSpots: submergedPlacementSpots(bot, placementSpots),
     portalFrameSites,
     portalFrame,
     liveStructureMembers: mergeLiveStructureMembers(
