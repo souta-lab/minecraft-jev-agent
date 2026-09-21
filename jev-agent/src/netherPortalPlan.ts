@@ -45,6 +45,10 @@ export const PORTAL_LIT = 'PORTAL_LIT'
 export const PORTAL_VERIFIED = 'PORTAL_VERIFIED'
 /** The portal could not be lit (precondition or bad frame). */
 export const PORTAL_LIGHT_REFUSED = 'PORTAL_LIGHT_REFUSED'
+/** The bot entered the lit portal and the server moved it to the Nether. */
+export const PORTAL_ENTERED = 'PORTAL_ENTERED'
+/** Entry was refused before any movement (no lit portal / no safe approach). */
+export const PORTAL_ENTER_REFUSED = 'PORTAL_ENTER_REFUSED'
 
 /**
  * The queue-level predicate that names the ignition operation. Both the
@@ -53,6 +57,15 @@ export const PORTAL_LIGHT_REFUSED = 'PORTAL_LIGHT_REFUSED'
  * into ONE ignition action whose executor post-condition IS the verification.
  */
 export const PORTAL_LIT_PREDICATE = 'portal_lit'
+
+/**
+ * The queue-level predicate that names the dimension-transfer operation. An
+ * `enter:nether_portal` step compiles to a `place nether_portal` goal carrying
+ * this predicate and the target dimension, so the GoalQueue completion check is
+ * the SAME code-owned `dimensionIs` truth (never an inventory count, which
+ * `nether_portal` can never satisfy).
+ */
+export const PORTAL_ENTERED_PREDICATE = 'portal_entered'
 
 /** The portal frame is a 4-wide x 5-tall obsidian rectangle. */
 export const PORTAL_FRAME_WIDTH = 4
@@ -78,6 +91,7 @@ export const IRON_INGOT = 'iron_ingot'
 export const RAW_IRON = 'raw_iron'
 export const NETHER_PORTAL = 'nether_portal'
 export const OVERWORLD = 'minecraft:overworld'
+export const NETHER = 'minecraft:the_nether'
 
 /** Runtime rank of a diamond pickaxe (PICKAXE_TIER0: diamond=4). */
 export const DIAMOND_PICKAXE_RANK = 4
@@ -118,6 +132,15 @@ function normalizeDimension(dimension: string): string {
   return dimension.replace(/^minecraft:/, '').toLowerCase()
 }
 
+/**
+ * Normalize a dimension id for comparison (`the_nether` and
+ * `minecraft:the_nether` are the same dimension). Exported so the executor's
+ * transfer postcondition and the queue's predicate use ONE normalizer.
+ */
+export function normalizePortalDimension(dimension: string): string {
+  return normalizeDimension(dimension)
+}
+
 function formatPos(pos: PortalBlockPosition): string {
   return `${pos.x},${pos.y},${pos.z}`
 }
@@ -142,6 +165,7 @@ export type PortalCapabilityId =
   | 'build:nether_portal_frame'
   | 'light:nether_portal'
   | 'verify:nether_portal'
+  | 'enter:nether_portal'
 
 /** The typed plan kind of a portal step. */
 export type PortalStepKind =
@@ -151,6 +175,7 @@ export type PortalStepKind =
   | 'build_portal_frame'
   | 'light_portal'
   | 'verify_portal'
+  | 'enter_portal'
 
 /**
  * A post-condition is DATA evaluated by deterministic code (#79). A step is only
@@ -162,6 +187,8 @@ export type PortalPostcondition =
   | { readonly kind: 'frameShapeOk' }
   | { readonly kind: 'portalLit'; readonly dimension: string }
   | { readonly kind: 'portalVerified' }
+  /** The bot's own dimension is `dimension` (the transfer postcondition). */
+  | { readonly kind: 'dimensionIs'; readonly dimension: string }
 
 interface PortalStepCommon {
   readonly capabilityId: PortalCapabilityId
@@ -213,6 +240,12 @@ export interface PortalVerifyStep extends PortalStepCommon {
   readonly dimension: string
 }
 
+export interface PortalEnterStep extends PortalStepCommon {
+  readonly kind: 'enter_portal'
+  /** destination dimension the transfer must produce */
+  readonly dimension: string
+}
+
 export type PortalStep =
   | PortalCollectStep
   | PortalCraftStep
@@ -220,6 +253,7 @@ export type PortalStep =
   | PortalBuildFrameStep
   | PortalLightStep
   | PortalVerifyStep
+  | PortalEnterStep
 
 export function isPortalStep(value: unknown): value is PortalStep {
   if (typeof value !== 'object' || value === null) return false
@@ -231,7 +265,8 @@ export function isPortalStep(value: unknown): value is PortalStep {
       record.kind === 'smelt' ||
       record.kind === 'build_portal_frame' ||
       record.kind === 'light_portal' ||
-      record.kind === 'verify_portal') &&
+      record.kind === 'verify_portal' ||
+      record.kind === 'enter_portal') &&
     typeof record.capabilityId === 'string' &&
     typeof record.postcondition === 'object' &&
     record.postcondition !== null
@@ -245,6 +280,8 @@ export interface PortalPostconditionSnapshot {
   readonly lit: boolean
   readonly litDimension: string | null
   readonly verified: boolean
+  /** the bot's own live dimension, for the `dimensionIs` transfer predicate */
+  readonly dimension?: string | null
 }
 
 /** Evaluate one post-condition against a plain snapshot. Pure and total. */
@@ -267,6 +304,12 @@ export function evaluatePortalPostcondition(
       )
     case 'portalVerified':
       return snapshot.verified
+    case 'dimensionIs':
+      return (
+        snapshot.dimension !== undefined &&
+        snapshot.dimension !== null &&
+        normalizeDimension(snapshot.dimension) === normalizeDimension(postcondition.dimension)
+      )
   }
 }
 
@@ -782,6 +825,193 @@ export function formatPortalLit(position: PortalBlockPosition, dimension: string
 }
 
 // ---------------------------------------------------------------------------
+// dimension transfer: walk into the lit portal and verify the dimension change
+// ---------------------------------------------------------------------------
+
+/**
+ * Why entry was refused. Each is a mechanical fact read from the live world,
+ * never a preference:
+ *   - `portal_not_lit`      no interior cell currently holds `nether_portal`;
+ *   - `no_safe_approach`    no passable, supported, in-reach stand beside the
+ *                           portal exists, so walking in is not mechanically
+ *                           feasible;
+ *   - `already_in_dimension` the bot is already in the target dimension.
+ */
+export type PortalEntryRefusalReason = 'portal_not_lit' | 'no_safe_approach' | 'already_in_dimension'
+
+/** A grounded entry: the stand to walk from and the interior cell to occupy. */
+export interface PortalEntryCandidate {
+  readonly id: string
+  /** the 2x3 interior cells that must all currently be `nether_portal` */
+  readonly portalCells: PortalBlockPosition[]
+  /** the interior cell the bot must occupy to trigger the server transfer */
+  readonly enterCell: PortalBlockPosition
+  /** a passable, supported stand beside the portal the bot walks from */
+  readonly approachCell: PortalBlockPosition
+  readonly dimension: string
+  readonly line: string
+}
+
+export type PortalEntryPlan =
+  | { readonly ok: true; readonly candidate: PortalEntryCandidate }
+  | { readonly ok: false; readonly refused: true; readonly reason: PortalEntryRefusalReason; readonly line: string }
+
+/** Read-only world probe the safe-approach search needs. */
+export interface PortalStandProbe {
+  passable(x: number, y: number, z: number): boolean
+  solidSupport(x: number, y: number, z: number): boolean
+}
+
+export interface PortalEntryInput {
+  readonly site: PortalFrameSite
+  readonly self: PortalBlockPosition
+  readonly blockAt: PortalBlockLookup
+  readonly probe: PortalStandProbe
+  readonly reach?: number
+  readonly fromDimension?: string
+  readonly dimension?: string
+}
+
+/** The exact refusal line. Never silent. */
+export function formatPortalEnterRefused(reason: PortalEntryRefusalReason, detail: string = ''): string {
+  const suffix = detail.length === 0 ? '' : ` ${detail}`
+  return `${PORTAL_ENTER_REFUSED} reason=${reason}${suffix}`
+}
+
+/** The exact `PORTAL_ENTERED` line. */
+export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: string = NETHER): string {
+  return `${PORTAL_ENTERED} pos=${formatPos(enterCell)} dimension=${dimension}`
+}
+
+/**
+ * Decide whether the lit portal at `site` may be entered RIGHT NOW. Every
+ * precondition is a live-world fact and every failure is a typed refusal:
+ *   * a portal whose 2x3 interior is not fully `nether_portal` is refused with
+ *     `PRECONDITION_MISSING portal=lit` - the bot must never walk at a frame
+ *     that is not actually lit;
+ *   * a lit portal with no passable, supported, in-reach stand beside an
+ *     interior cell is refused with `PRECONDITION_MISSING approach=safe_stand`;
+ *   * a bot already in the destination dimension is refused as
+ *     `already_in_dimension` (nothing to transfer).
+ * Only then is an entry candidate emitted. Geometry only: this never chooses
+ * WHEN to enter and never ranks one portal against another.
+ */
+export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
+  const dimension = input.dimension ?? NETHER
+  const fromDimension = input.fromDimension ?? OVERWORLD
+  if (normalizeDimension(fromDimension) === normalizeDimension(dimension)) {
+    return {
+      ok: false,
+      refused: true,
+      reason: 'already_in_dimension',
+      line: formatPortalEnterRefused('already_in_dimension', `dimension=${fromDimension}`),
+    }
+  }
+  const layout = portalFrameLayout(input.site.origin, input.site.widthAxis)
+  const portalCells = layout.interior
+  const lit = portalCells.every((cell) => input.blockAt(cell) === NETHER_PORTAL)
+  if (!lit) {
+    return {
+      ok: false,
+      refused: true,
+      reason: 'portal_not_lit',
+      line: `${PRECONDITION_MISSING} portal=lit`,
+    }
+  }
+
+  const reach = input.reach ?? DEFAULT_PORTAL_ENTRY_REACH
+  const approaches: PortalBlockPosition[] = []
+  for (const cell of portalCells) {
+    // The bot must stand beside the portal at the same level (or one below/above)
+    // and then walk horizontally into the interior cell.
+    for (const offset of PORTAL_ENTRY_STAND_OFFSETS) {
+      for (const dy of PORTAL_ENTRY_STAND_DY) {
+        const stand = { x: cell.x + offset.x, y: cell.y + dy, z: cell.z + offset.z }
+        if (!isSafeEntryStand(stand, input.probe)) continue
+        if (entryFaceDistance(stand, cell) > reach) continue
+        approaches.push(stand)
+      }
+    }
+  }
+  if (approaches.length === 0) {
+    return {
+      ok: false,
+      refused: true,
+      reason: 'no_safe_approach',
+      line: `${PRECONDITION_MISSING} approach=safe_stand`,
+    }
+  }
+  approaches.sort((a, b) => {
+    const da = standDistance(a, input.self)
+    const db = standDistance(b, input.self)
+    if (da !== db) return da - db
+    if (a.y !== b.y) return a.y - b.y
+    if (a.x !== b.x) return a.x - b.x
+    return a.z - b.z
+  })
+  // Prefer a stand at the portal floor level so the final step is horizontal.
+  const enterCell = layout.lightPosition
+  const sameLevel = approaches.filter((stand) => stand.y === enterCell.y)
+  const approachCell = (sameLevel.length > 0 ? sameLevel : approaches)[0]
+  if (approachCell === undefined) {
+    return {
+      ok: false,
+      refused: true,
+      reason: 'no_safe_approach',
+      line: `${PRECONDITION_MISSING} approach=safe_stand`,
+    }
+  }
+  return {
+    ok: true,
+    candidate: {
+      id: `ENTER:${formatPos(enterCell)}`,
+      portalCells: [...portalCells],
+      enterCell,
+      approachCell,
+      dimension,
+      line: formatPortalEntered(enterCell, dimension),
+    },
+  }
+}
+
+/** Bounded interaction reach for the entry stand search (the executor's reach). */
+export const DEFAULT_PORTAL_ENTRY_REACH = 4.5
+
+/** The horizontal offsets the entry-stand search examines around each interior cell. */
+const PORTAL_ENTRY_STAND_OFFSETS: readonly PortalBlockPosition[] = [
+  { x: 1, y: 0, z: 0 },
+  { x: -1, y: 0, z: 0 },
+  { x: 0, y: 0, z: 1 },
+  { x: 0, y: 0, z: -1 },
+]
+
+/** Feet levels (relative to the interior cell) a valid entry stand may occupy. */
+const PORTAL_ENTRY_STAND_DY: readonly number[] = [0, -1, 1]
+
+function isSafeEntryStand(stand: PortalBlockPosition, probe: PortalStandProbe): boolean {
+  return (
+    probe.passable(stand.x, stand.y, stand.z) &&
+    probe.passable(stand.x, stand.y + 1, stand.z) &&
+    probe.solidSupport(stand.x, stand.y - 1, stand.z)
+  )
+}
+
+function standDistance(stand: PortalBlockPosition, self: PortalBlockPosition): number {
+  return Math.hypot(stand.x + 0.5 - self.x, stand.y - self.y, stand.z + 0.5 - self.z)
+}
+
+/** Eye-AABB horizontal distance from a stand to the interior cell's face. */
+function entryFaceDistance(stand: PortalBlockPosition, cell: PortalBlockPosition): number {
+  const eyeX = stand.x + 0.5
+  const eyeY = stand.y + 1.62
+  const eyeZ = stand.z + 0.5
+  const x = Math.max(cell.x, Math.min(eyeX, cell.x + 1))
+  const y = Math.max(cell.y, Math.min(eyeY, cell.y + 1))
+  const z = Math.max(cell.z, Math.min(eyeZ, cell.z + 1))
+  return Math.hypot(eyeX - x, eyeY - y, eyeZ - z)
+}
+
+// ---------------------------------------------------------------------------
 // typed plan -> PlannedGoal compiler (#19 compatibility)
 // ---------------------------------------------------------------------------
 
@@ -835,6 +1065,19 @@ export function portalStepToPlannedGoal(step: PortalStep): PlannedGoal {
         targetItem: NETHER_PORTAL,
         requiredCount: 1,
         targetPredicate: PORTAL_LIT_PREDICATE,
+        dimension: step.dimension,
+        ...flags,
+      }
+    case 'enter_portal':
+      // The transfer is a `place nether_portal` goal under a DIFFERENT predicate
+      // than ignition: the queue's completion check is the `dimensionIs` truth,
+      // never an item count (`nether_portal` cannot be carried).
+      return {
+        kind: 'place',
+        description: step.description,
+        targetItem: NETHER_PORTAL,
+        requiredCount: 1,
+        targetPredicate: PORTAL_ENTERED_PREDICATE,
         dimension: step.dimension,
         ...flags,
       }
@@ -1069,6 +1312,23 @@ export function netherPortalRungGoals(
   existingFrameBlocks: number = 0,
 ): PlannedGoal[] {
   return planNetherPortal({ inventory, toolRank, dimension, existingFrameBlocks }).goals
+}
+
+/**
+ * The typed goal for the dimension transfer, exposed beside the other portal
+ * operations so a ladder/planner can request it. This does NOT append entry to
+ * `planNetherPortal`'s operation order: when to enter stays a caller decision
+ * (root AGENTS.md section 8: code owns CAN/TRUE/SAFE/DONE, not WHAT NEXT).
+ */
+export function netherPortalEntryGoal(dimension: string = NETHER): PlannedGoal {
+  return portalStepToPlannedGoal({
+    kind: 'enter_portal',
+    capabilityId: 'enter:nether_portal',
+    description: `enter the lit nether portal and transfer to ${dimension}`,
+    dimension,
+    postcondition: { kind: 'dimensionIs', dimension },
+    core: true,
+  })
 }
 
 // ---------------------------------------------------------------------------

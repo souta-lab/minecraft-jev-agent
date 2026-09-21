@@ -199,6 +199,8 @@ export function describeActionPostcondition(kind: string): string {
       return 'block exists at the target'
     case 'IGNITE':
       return 'the nether_portal block exists at every expected portal cell after flint_and_steel activation'
+    case 'ENTER_PORTAL':
+      return "the bot's own dimension equals the target dimension after walking into the lit portal"
     case 'CRAFT':
       return 'output item count increased'
     case 'MINE':
@@ -271,6 +273,7 @@ const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
   'SMELT',
   'PLACE',
   'IGNITE',
+  'ENTER_PORTAL',
   'DESCEND',
   'STEP',
   'EAT',

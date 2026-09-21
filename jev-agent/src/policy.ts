@@ -111,6 +111,8 @@ export function guardCandidate(
       return guardPlace(candidate, state, context)
     case 'IGNITE':
       return guardIgnite(candidate, state, context)
+    case 'ENTER_PORTAL':
+      return guardEnterPortal(candidate, state, context)
     case 'SMELT':
       return guardSmelt(candidate, state, context)
     case 'DESCEND':
@@ -450,6 +452,23 @@ function guardCraft(candidate: Candidate, state: WorldState, context: GuardConte
   return { ok: true, candidate }
 }
 
+/**
+ * The dimension transfer carries no item: the only hard safety facts are that it
+ * has a grounded approach cell and that no hazard sits at it. Its DONE truth is
+ * the executor's dimension postcondition, never this guard.
+ */
+function guardEnterPortal(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
+  const target = candidate.target
+  if (target === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'ENTER_PORTAL candidate carries no approach cell')
+  }
+  const hazard = nearestHazardTo(state, target)
+  if (hazard !== null) {
+    return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the portal approach`)
+  }
+  return { ok: true, candidate }
+}
+
 function guardPlace(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
   const itemName = candidate.itemName
   if (itemName === null) {
@@ -721,6 +740,7 @@ export const ACTING_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'CRAFT',
   'PLACE',
   'IGNITE',
+  'ENTER_PORTAL',
   'ATTACK',
   'EAT',
   'RETREAT',

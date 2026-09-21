@@ -284,6 +284,14 @@ function resourceKey(resource: { name: string; x: number; y: number; z: number }
   return `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
 }
 
+/**
+ * Dimension identity for comparing a remembered resource against the active
+ * world key. `the_nether` and `minecraft:the_nether` are the same dimension.
+ */
+function normalizeDimensionId(dimension: string): string {
+  return dimension.replace(/^minecraft:/, '').toLowerCase()
+}
+
 function resourceAt(resource: { x: number; y: number; z: number }): string {
   return `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
 }
@@ -311,6 +319,25 @@ export function evictStaleKnownResources(
       stale.push(resource)
       staleKeys.add(resourceKey(resource))
       log?.('KNOWN_RESOURCE_STALE', { item: resource.name, at: resourceAt(resource), reason: 'worldEpoch' })
+      continue
+    }
+    // Dimension re-anchoring: a remembered coordinate only means anything in the
+    // dimension it was scanned in. A portal transfer changes the dimension while
+    // the worldEpoch stays the same, so a same-epoch entry from another
+    // dimension must be evicted instead of live-probed at this coordinate.
+    if (
+      resource.dimension !== undefined &&
+      resource.dimension.length > 0 &&
+      normalizeDimensionId(resource.dimension) !== normalizeDimensionId(worldKey.dimension)
+    ) {
+      stale.push(resource)
+      staleKeys.add(resourceKey(resource))
+      log?.('KNOWN_RESOURCE_STALE', {
+        item: resource.name,
+        at: resourceAt(resource),
+        reason: 'dimension',
+        dimension: resource.dimension,
+      })
       continue
     }
     const distance = Math.hypot(resource.x - position.x, resource.y - position.y, resource.z - position.z)

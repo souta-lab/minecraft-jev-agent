@@ -31,7 +31,7 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalLit, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalEntered, formatPortalLit, normalizePortalDimension, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -240,6 +240,12 @@ export interface ExecutorOptions {
   smeltTimeoutMs: number
   goalItem: string
   /**
+   * Bounded window for the dimension transfer: walk into the lit portal and
+   * wait for the server-side dimension change. A transfer that does not appear
+   * within it is a hard `verify_failed`, never a silent success.
+   */
+  portalEnterTimeoutMs?: number
+  /**
    * STOCK-FIRST. 'pathfinder' is the primary MOVE path: `bot.pathfinder.setGoal`
    * lets the stock pathfinder drive `setControlState` and Mineflayer physics tick.
    * Live evidence on this Leaf 26.1 server: stock traverses a 1-block pit with
@@ -290,6 +296,12 @@ const PLACED_NUDGE_TOTAL_MS = 5000
 const PLACED_MAX_STEP_CUTS = 3
 /** #79: bounded settle for the PLACE post-condition (client world is one tick behind the server). */
 const PLACE_VERIFY_SETTLE_MS = 500
+/**
+ * Bounded window to walk into a lit portal and observe the server-side
+ * dimension change. Long enough for a short approach + the respawn round trip,
+ * short enough that a portal which never transfers fails loud.
+ */
+const PORTAL_ENTER_TIMEOUT_MS = 8000
 /** A server/client inventory update can lag the equip transaction by a tick. */
 const PLACE_EQUIP_RETRIES = 4
 const PLACE_EQUIP_SETTLE_MS = 50
@@ -1364,6 +1376,8 @@ export class Executor {
           return await this.runPlace(candidate, epoch, signal, startedAt)
         case 'IGNITE':
           return await this.runIgnite(candidate, epoch, signal, startedAt)
+        case 'ENTER_PORTAL':
+          return await this.runEnterPortal(candidate, epoch, signal, startedAt)
         case 'EAT':
           return await this.runEat(candidate, epoch, signal, startedAt)
         case 'ATTACK':
@@ -4211,6 +4225,113 @@ export class Executor {
       observed = read()
     }
     return observed
+  }
+
+  /**
+   * Dimension transfer: walk INTO the lit `nether_portal` and require the bot's
+   * own dimension to become the target (`minecraft:the_nether`) before claiming
+   * success. Body motion is not completion: if the dimension does not change
+   * within the bounded window the action FAILS with `verify_failed`, so a lit
+   * portal the server never transfers through can never look done.
+   *
+   * The portal must still be lit at the moment of entry (live world truth), not
+   * merely lit when the candidate was generated.
+   */
+  private async runEnterPortal(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const approach = candidate.target
+    if (approach === null) throw new ExecutorError('target_gone', 'ENTER_PORTAL candidate has no approach cell')
+    const expectedCells = parsePortalCells(readMetaString(candidate, 'portalCells') ?? '')
+    if (expectedCells.length === 0) {
+      throw new ExecutorError('place_error', 'ENTER_PORTAL candidate carries no portal cells')
+    }
+    const dimension = readMetaString(candidate, 'dimension') ?? NETHER
+    const enterCell = {
+      x: readMetaNumber(candidate, 'enterX', approach.x),
+      y: readMetaNumber(candidate, 'enterY', approach.y),
+      z: readMetaNumber(candidate, 'enterZ', approach.z),
+    }
+
+    // Hard world truth at entry time: the interior must still be nether_portal.
+    if (!isIgnitePostconditionMet(expectedCells.map((cell) => this.currentBlockAt(cell)?.name ?? null))) {
+      throw new ExecutorError('place_error', `${PRECONDITION_MISSING} portal=lit`)
+    }
+    if (this.dimensionMatches(dimension)) {
+      return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+    }
+
+    this.setPhase(candidate, epoch, 'entering')
+    const timeoutMs = this.options.portalEnterTimeoutMs ?? PORTAL_ENTER_TIMEOUT_MS
+    // The approach is a real, supported stand; path there first so the final
+    // step into the portal is a short direct walk. A transfer that happens
+    // during the approach is already the postcondition, so it is not an error.
+    if (this.distanceToFeet(approach) > 1.5) {
+      this.setPhase(candidate, epoch, 'pathing')
+      try {
+        await this.pathTo(approach, epoch, signal, 'GoalBlock', { requireLevel: true })
+      } catch (error) {
+        if (this.dimensionMatches(dimension)) {
+          return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+        }
+        throw error
+      }
+      this.ensureOwned(epoch, signal)
+    }
+
+    this.setPhase(candidate, epoch, 'entering')
+    const transferred = await this.walkByControls(enterCell, epoch, signal, {
+      bearingTarget: { x: enterCell.x, z: enterCell.z },
+      directBearing: true,
+      budgetMs: timeoutMs,
+      arrivedAt: () => this.dimensionMatches(dimension),
+    })
+    if (!transferred || !this.dimensionMatches(dimension)) {
+      throw new ExecutorError(
+        'verify_failed',
+        `dimension did not become ${dimension} within ${timeoutMs}ms of entering the portal`,
+      )
+    }
+    return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+  }
+
+  private enteredResult(
+    candidate: Candidate,
+    epoch: number,
+    startedAt: number,
+    enterCell: Vec3Json,
+    dimension: string,
+  ): ExecutionResult {
+    this.logger.info('agent', formatPortalEntered(enterCell, dimension), {
+      actionId: candidate.id,
+      target: enterCell,
+      dimension,
+    })
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      'entered',
+      `transferred to ${dimension} through the portal at (${enterCell.x},${enterCell.y},${enterCell.z})`,
+      null,
+      {
+        verified: true,
+        dropObserved: false,
+        blockRemoved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+      },
+    )
+  }
+
+  private dimensionMatches(dimension: string): boolean {
+    const current = this.bot.game?.dimension
+    if (typeof current !== 'string' || current.length === 0) return false
+    return normalizePortalDimension(current) === normalizePortalDimension(dimension)
   }
 
   // -------------------------------------------------------------------------

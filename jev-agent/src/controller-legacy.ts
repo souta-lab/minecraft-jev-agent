@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -66,8 +66,8 @@ import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, isPortalIgnitionPostconditionMet, portalFrameLayout } from './netherPortalPlan.ts'
-import type { PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
+import { NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -1406,6 +1406,8 @@ export class JevController {
   private lastPlacementRefusalKey: string | null = null
   /** last logged PORTAL_LIGHT_REFUSED signature, so one ignition dead end is one line. */
   private lastIgnitionRefusalKey: string | null = null
+  /** last logged PORTAL_ENTER_REFUSED signature, so one transfer dead end is one line. */
+  private lastEntryRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
@@ -1918,7 +1920,10 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
-      this.signals.knownResources = filterKnownResources(this.knownResourcesForSensor(), this.unreachableResources)
+      this.signals.knownResources = filterKnownResources(
+        this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.currentDimension())),
+        this.unreachableResources,
+      )
       this.updateStallSignal()
       this.observeRetrievalStall()
       this.observeCapabilityGap()
@@ -1990,6 +1995,7 @@ export class JevController {
 
       const unreachableStations = this.unreachableStationKeys(state)
       const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
+      const portalEntry = this.portalEntryPlan(state)
       const groundingOptions = candidateOptions(
         this.options,
         this.recipeIndex,
@@ -1998,12 +2004,14 @@ export class JevController {
         blacklistedMoveTargets,
         state.portalFrame,
         this.searchedSurfaceTargets,
+        portalEntry,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
       this.logReachability(grounded.reachability, grounded.withheld)
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
+      this.logEntryRefusal(grounded.entryRefusal)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
@@ -2205,6 +2213,7 @@ export class JevController {
                 this.blacklistedMoveTargets(freshState),
                 freshState.portalFrame,
                 this.searchedSurfaceTargets,
+                this.portalEntryPlan(freshState),
               ),
             ).candidates,
             freshState,
@@ -3791,7 +3800,9 @@ export class JevController {
       const complete =
         current.targetPredicate === PORTAL_LIT_PREDICATE
           ? this.portalLitTruth(current)
-          : current.targetItem !== null && this.countItem(current.targetItem) <= 0
+          : current.targetPredicate === PORTAL_ENTERED_PREDICATE
+            ? this.portalEnteredTruth(current)
+            : current.targetItem !== null && this.countItem(current.targetItem) <= 0
       if (complete) {
         const beforeId = current.id
         const beforeDescription = current.description
@@ -3924,6 +3935,82 @@ export class JevController {
     })
   }
 
+  /**
+   * Ground the dimension-transfer plan for the active `portal_entered` goal from
+   * LIVE world truth only: the interior must currently be `nether_portal` and a
+   * passable, supported, in-reach stand must exist beside it. Returns null when
+   * the active goal does not request entry. Never silent: a requested entry with
+   * no lit/reachable portal returns the pure module's typed refusal.
+   */
+  private portalEntryPlan(state: WorldState): PortalEntryPlan | null {
+    const current = state.goalQueue?.current ?? null
+    if (current === null) return null
+    if (current.kind !== 'place' || current.targetPredicate !== PORTAL_ENTERED_PREDICATE) return null
+    const entity = this.bot.entity
+    if (entity === undefined) return null
+    const scratch = entity.position.clone()
+    const blockAt = (cell: { x: number; y: number; z: number }): string | null =>
+      this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
+    const probe = {
+      passable: (x: number, y: number, z: number): boolean => {
+        const block = this.bot.blockAt(scratch.set(x, y, z))
+        return block !== null && block.boundingBox !== 'block'
+      },
+      solidSupport: (x: number, y: number, z: number): boolean =>
+        this.bot.blockAt(scratch.set(x, y, z))?.boundingBox === 'block',
+    }
+    const sites = state.portalFrameSites ?? []
+    const dimension = current.dimension ?? NETHER
+    const self = {
+      x: Math.floor(state.self.position.x),
+      y: Math.floor(state.self.position.y),
+      z: Math.floor(state.self.position.z),
+    }
+    let refusal: PortalEntryPlan | null = null
+    for (const site of sites) {
+      const plan = planPortalEntry({
+        site,
+        self,
+        blockAt,
+        probe,
+        reach: this.options.reach,
+        fromDimension: state.self.dimension,
+        dimension,
+      })
+      if (plan.ok) return plan
+      if (refusal === null) refusal = plan
+    }
+    return (
+      refusal ?? {
+        ok: false,
+        refused: true,
+        reason: 'portal_not_lit',
+        line: `${PRECONDITION_MISSING} portal=lit`,
+      }
+    )
+  }
+
+  /**
+   * World truth for the dimension-transfer predicate. The row is complete ONLY
+   * when the bot's own live dimension equals the goal's target; no inventory
+   * count can substitute for it (`nether_portal` is not an item).
+   */
+  private portalEnteredTruth(goal: QueuedGoal): boolean {
+    if (goal.targetPredicate !== PORTAL_ENTERED_PREDICATE) return false
+    const actual = this.bot.game?.dimension ?? null
+    if (actual === null) return false
+    const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
+    return normalize(actual) === normalize(goal.dimension ?? NETHER)
+  }
+
+  private logEntryRefusal(refusal: PortalEntryRefusal | null): void {
+    const key = refusal === null ? null : refusal.line
+    if (key === this.lastEntryRefusalKey) return
+    this.lastEntryRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn('agent', refusal.line, { reason: refusal.reason }, this.tickCounter)
+  }
+
   private effectiveHave(): number {
     const current = this.queue.current
     if (current === null || current.targetItem === null) return 0
@@ -3997,10 +4084,16 @@ export class JevController {
     if (current.targetItem === null) return
     const have = this.effectiveHave()
     if (current.kind === 'place') {
-      // Ordinary PLACE goals are inverse inventory goals. A portal ignition is
-      // different: `nether_portal` is a world block, never an inventory item,
-      // so zero inventory must not masquerade as a completed predicate.
-      const placed = current.targetPredicate === PORTAL_LIT_PREDICATE ? this.portalLitTruth(current) : have <= 0
+      // Ordinary PLACE goals are inverse inventory goals. A portal ignition or
+      // dimension transfer is different: `nether_portal` is a world block, never
+      // an inventory item, so zero inventory must not masquerade as a completed
+      // predicate. Each portal predicate owns its own live-world truth.
+      const placed =
+        current.targetPredicate === PORTAL_LIT_PREDICATE
+          ? this.portalLitTruth(current)
+          : current.targetPredicate === PORTAL_ENTERED_PREDICATE
+            ? this.portalEnteredTruth(current)
+            : have <= 0
       this.goal = { ...subgoalState(current, placed ? current.requiredCount : 0), haveCount: placed ? current.requiredCount : have }
       return
     }
@@ -6212,6 +6305,7 @@ function candidateOptions(
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
   portalFrame: PortalFrameValidation | null = null,
   searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
+  portalEntry: PortalEntryPlan | null = null,
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -6222,6 +6316,7 @@ function candidateOptions(
     searchedSurfaceTargets,
     reachability,
     portalFrame,
+    portalEntry,
     prereqRankPolicy: options.prereqRankPolicy,
   }
 }

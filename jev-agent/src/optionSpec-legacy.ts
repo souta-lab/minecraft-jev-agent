@@ -934,6 +934,12 @@ function successForGoal(goal: PlannedGoal): Predicate[] {
         ? [{ kind: 'custom', id: `done:${goal.kind}` }]
         : [{ kind: 'inventoryAtLeast', item, count }]
     case 'place':
+      // A dimension transfer (`enter:nether_portal`) is complete when the bot's
+      // own dimension is the target - a typed `dimensionIs` predicate, never the
+      // non-item `station:nether_portal` custom token.
+      if (goal.targetPredicate === 'portal_entered' && typeof goal.dimension === 'string' && goal.dimension.length > 0) {
+        return [{ kind: 'dimensionIs', dimension: goal.dimension }]
+      }
       if (item === 'furnace') return [{ kind: 'stationKnown', station: 'furnace' }]
       if (item === 'crafting_table') return [{ kind: 'stationKnown', station: 'crafting_table' }]
       return [{ kind: 'custom', id: `station:${item ?? 'unknown'}` }]
