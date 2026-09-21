@@ -4531,12 +4531,32 @@ export class Executor {
     }
 
     this.setPhase(candidate, epoch, 'entering')
-    const transferred = await this.walkByControls(enterCell, epoch, signal, {
+    let transferred = await this.walkByControls(enterCell, epoch, signal, {
       bearingTarget: { x: enterCell.x, z: enterCell.z },
       directBearing: true,
       budgetMs: timeoutMs,
       arrivedAt: () => this.dimensionMatches(dimension),
     })
+    if (!transferred && !this.dimensionMatches(dimension)) {
+      // A straight bearing cannot climb a solid frame edge. Live (M2 hand-off):
+      // the body pressed forward at (26.3, 66, 8.7) against the obsidian bottom
+      // edge of the frame while the interior stood one block above at (26,67,9),
+      // jumping in place without ever entering, so the transfer timed out. The
+      // planned walk owns the hop recovery (free/pinned hop recipe), so retry
+      // through it before failing the entry.
+      this.logger.info(
+        'agent',
+        `PORTAL_ENTRY_RETRY planned enterCell=${enterCell.x},${enterCell.y},${enterCell.z}`,
+        { actionId: candidate.id, target: enterCell },
+      )
+      transferred = await this.walkByControls(enterCell, epoch, signal, {
+        anchorIsGoal: true,
+        anchor: enterCell,
+        range: 0,
+        budgetMs: timeoutMs,
+        arrivedAt: () => this.dimensionMatches(dimension),
+      })
+    }
     if (!transferred || !this.dimensionMatches(dimension)) {
       throw new ExecutorError(
         'verify_failed',
