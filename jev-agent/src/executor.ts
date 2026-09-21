@@ -25,6 +25,15 @@ import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PRO
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
+import {
+  correctDigSpeedMaterials,
+  formatDigBudget,
+  formatDigFailed,
+  formatDigSpeedRepaired,
+  planDigTime,
+  runBoundedDig,
+} from './digTruth.ts'
+import type { DigMechanism, DigTimePlan } from './digTruth.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
@@ -129,6 +138,7 @@ export type FailureCode =
   | 'protected_station'
   | 'dig_error'
   | 'dig_timeout'
+  | 'dig_no_tool'
   | 'dig_down_refused'
   | 'craft_error'
   | 'place_error'
@@ -1288,11 +1298,23 @@ export class Executor {
   private movementsReady = false
   private lastResultValue: ExecutionResult | null = null
   private pathStatus: PathStatus = 'idle'
+  /** the last dig's mechanism schedule/budget, for the typed `DIG_FAILED` marker */
+  private lastDigPlan: DigTimePlan | null = null
+  private digStartedAt = 0
 
   constructor(bot: Bot, logger: EventLogger, options: ExecutorOptions = defaultExecutorOptions) {
     this.bot = bot
     this.logger = logger
     this.options = options
+    // The dig mechanism reads its break speed from `registry.materials`. On 1.21
+    // the `incorrect_for_wooden_tool` entries name only the wooden tools, so the
+    // client prices obsidian at 75000ms instead of 9375ms and every dig is
+    // cancelled by the (now schedule-derived) budget. Repair the data once per
+    // Executor; the marker makes the repair visible in the mirrored log.
+    const repaired = correctDigSpeedMaterials(this.bot.registry)
+    if (repaired > 0) {
+      this.logger.info('executor', formatDigSpeedRepaired(repaired))
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1577,19 +1599,33 @@ export class Executor {
     if (block === null || block.name !== candidate.targetName) {
       throw new ExecutorError('target_gone', `block at (${target.x},${target.y},${target.z}) is gone before the dig`)
     }
-    if (this.distanceToEyes(target) > this.options.reach) {
-      // pathing claimed to finish but we are still too far to legally mine
-      throw new ExecutorError(
-        'out_of_reach',
-        `target is ${round2(this.distanceToEyes(target))}m from the eyes (reach ${this.options.reach})`,
-      )
-    }
 
     const yieldItem = readMetaString(candidate, 'yieldItem') ?? candidate.targetName
     const clearance = candidate.meta.clearance === true
     const beforeCount = this.countItem(yieldItem)
-    await this.equipTool(candidate, epoch, signal)
-    await this.digBlock(block, epoch, signal)
+    // Every failure on the dig path is mirrored as a typed DIG_FAILED line: the
+    // measured M3 stall had no cause in the mirrored stream at all, only
+    // `verified=false status=failed progressDelta=0`.
+    this.lastDigPlan = null
+    this.digStartedAt = Date.now()
+    try {
+      if (this.distanceToEyes(target) > this.options.reach) {
+        // pathing claimed to finish but we are still too far to legally mine
+        throw new ExecutorError(
+          'out_of_reach',
+          `target is ${round2(this.distanceToEyes(target))}m from the eyes (reach ${this.options.reach})`,
+        )
+      }
+      await this.equipTool(candidate, epoch, signal)
+      await this.digBlock(block, epoch, signal)
+    } catch (error) {
+      // A supersede/dispose is a cancellation, not a dig failure.
+      if (error instanceof ActionCancelled) throw error
+      this.logDigFailed(candidate, block, target, error)
+      throw error
+    } finally {
+      this.digStartedAt = 0
+    }
     this.ensureOwned(epoch, signal)
 
     this.setPhase(candidate, epoch, 'collecting')
@@ -5398,33 +5434,82 @@ export class Executor {
     // corrects for its jump gate: this server reports false while a solid block
     // is underfoot, so the outgoing packet advertises an airborne body and the
     // server charges the vanilla /5 penalty. Obsidian is ~9.4s grounded but
-    // ~46.9s airborne, which the flat budget below then aborts as `dig_timeout`
-    // (live MINE:b26_66_9). `withDigGroundCorrection` keeps the flag corrected
-    // from the block grid for the whole dig and names the corrected dig.
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      this.bot.stopDigging()
-    }, this.options.digTimeoutMs)
-    try {
-      await withDigGroundCorrection(
-        this.bot,
-        (x, y, z) => this.solidSupportAt(x, y, z),
-        () => this.bot.dig(block, 'ignore'),
-        () => {
-          this.logger.info('executor', formatDigGroundCorrected(block), {
+    // ~46.9s airborne. `withDigGroundCorrection` keeps the flag corrected from
+    // the block grid for the whole dig and names the corrected dig.
+    //
+    // The budget is then sized from the mechanism's OWN schedule (`bot.digTime`,
+    // already repaired at construction) instead of the flat number: a dig the
+    // mechanism prices longer than `digTimeoutMs` gets its schedule + slack, so a
+    // legitimately slow block can never be charged as a stall. The typed
+    // `DIG_BUDGET` marker records any extension.
+    const mechanism: DigMechanism = {
+      digTime: () => this.bot.digTime(block),
+      dig: () => this.bot.dig(block, 'ignore'),
+      stopDigging: () => this.bot.stopDigging(),
+    }
+    this.digStartedAt = Date.now()
+    await withDigGroundCorrection(
+      this.bot,
+      (x, y, z) => this.solidSupportAt(x, y, z),
+      async () => {
+        const plan = planDigTime(this.bot.digTime(block), this.options.digTimeoutMs)
+        this.lastDigPlan = plan
+        if (plan.extended) {
+          this.logger.info('executor', formatDigBudget(plan), {
             actionId: this.action?.id ?? 'unknown',
             block: block.name,
             position: block.position,
           })
-        },
-      )
-    } catch (error) {
-      if (timedOut) throw new ExecutorError('dig_timeout', `dig timed out after ${this.options.digTimeoutMs}ms`)
-      throw new ExecutorError('dig_error', error instanceof Error ? error.message : String(error))
-    } finally {
-      clearTimeout(timer)
-    }
+        }
+        const race = await runBoundedDig(mechanism, plan.budgetMs)
+        if (race.outcome === 'timeout') {
+          throw new ExecutorError(
+            'dig_timeout',
+            `dig timed out after ${plan.budgetMs}ms (client schedule ${plan.libraryMs}ms)`,
+          )
+        }
+        if (race.outcome === 'error') {
+          throw new ExecutorError('dig_error', race.error ?? `dig failed for ${block.name}`)
+        }
+      },
+      () => {
+        this.logger.info('executor', formatDigGroundCorrected(block), {
+          actionId: this.action?.id ?? 'unknown',
+          block: block.name,
+          position: block.position,
+        })
+      },
+    )
+  }
+
+  /**
+   * The typed, mirrored dig failure. Every failure on the dig path (no tool,
+   * out of reach, abort/timeout) is named here with the block, the live held
+   * tool and tier, and the mechanism's own schedule, so a resource the plan
+   * depends on can never again fail every cycle without a diagnosable cause.
+   */
+  private logDigFailed(candidate: Candidate, block: Block, target: Vec3Json, error: unknown): void {
+    const code = error instanceof ExecutorError ? error.code : 'unknown_event'
+    const plan = this.lastDigPlan
+    const elapsed = this.digStartedAt === 0 ? 0 : Date.now() - this.digStartedAt
+    this.logger.warn(
+      'executor',
+      formatDigFailed({
+        reason: code,
+        tool: this.bot.heldItem?.name ?? null,
+        tier: candidate.toolTier ?? null,
+        block: target,
+        expectedMs: plan === null ? null : plan.libraryMs,
+        elapsedMs: elapsed,
+      }),
+      {
+        actionId: candidate.id,
+        block: block.name,
+        position: target,
+        code,
+        detail: error instanceof Error ? error.message : String(error),
+      },
+    )
   }
 
   /**
@@ -5720,7 +5805,7 @@ export class Executor {
           { actionId: candidate.id },
         )
         if (candidate.requiresTool) {
-          throw new ExecutorError('dig_error', `no ${toolName} in the inventory`)
+          throw new ExecutorError('dig_no_tool', `no ${toolName} in the inventory`)
         }
       } else {
         await this.bot.equip(tool, 'hand')
