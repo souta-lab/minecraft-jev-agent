@@ -21,6 +21,7 @@ import {
   detectPortalVerification,
   isPortalIgnitionPostconditionMet,
   NETHER_PORTAL,
+  OBSIDIAN,
   portalFrameCoreLiveStructureMembers,
   portalFrameLayout,
   portalFrameLiveStructureMembers,
@@ -1983,6 +1984,51 @@ function mergePortalFrameSites(live: readonly PortalFrameSite[], remembered: rea
  * controller's in-memory frame memory) can recompute the same fact instead of
  * leaving a stale membership set behind.
  */
+/**
+ * Membership for a structure the ACTIVE plan is building, derived from the sensed
+ * frame sites regardless of whether that structure is lit or complete.
+ *
+ * Why this exists: a shell item and its construction are the same goal chain (the
+ * M2 frame needs ten obsidian and the frame is made of obsidian). With only
+ * live-structure membership the sourcing layer kept offering the cells the build
+ * had just placed, so the agent mined its own construction and re-placed it -
+ * measured live as pacing around a half-built frame while `PLACE` reported
+ * `verify_failed`. A structure under construction is not a resource source.
+ *
+ * This is the same generic fact as every other membership: a plain cell set the
+ * sourcing layer refuses. The portal module contributes only its footprint, and a
+ * site that is neither lit nor complete contributes nothing once the build goal is
+ * gone, so legitimate deconstruction still works.
+ */
+export function underConstructionMembers(
+  sites: readonly PortalFrameSite[],
+  goal: { kind?: string; targetItem?: string | null } | null | undefined,
+): LiveStructureMember[] {
+  if (goal == null || goal.kind !== 'place' || goal.targetItem !== OBSIDIAN) return []
+  const out: LiveStructureMember[] = []
+  for (const site of sites) {
+    out.push(...portalFrameCoreLiveStructureMembers(site.origin, site.widthAxis))
+  }
+  return out
+}
+
+/** Union membership facts, deduped by cell key so a cell is never counted twice. */
+function mergeLiveStructureMembers(
+  ...groups: readonly (readonly LiveStructureMember[])[]
+): LiveStructureMember[] {
+  const seen = new Set<string>()
+  const out: LiveStructureMember[] = []
+  for (const group of groups) {
+    for (const member of group) {
+      const key = liveStructureCellKey(member.position)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(member)
+    }
+  }
+  return out
+}
+
 export function liveStructureMembersForSites(sites: readonly PortalFrameSite[]): LiveStructureMember[] {
   const members: LiveStructureMember[] = []
   const seen = new Set<string>()
@@ -2093,7 +2139,10 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     placementSpots: buildPlacementSpots(bot, options, self),
     portalFrameSites,
     portalFrame,
-    liveStructureMembers: liveStructureMembersForSites(portalFrameSites),
+    liveStructureMembers: mergeLiveStructureMembers(
+      liveStructureMembersForSites(portalFrameSites),
+      underConstructionMembers(portalFrameSites, input.goalQueue?.current ?? null),
+    ),
     knownResourceEvidence,
     descent: buildDescent(bot, options, self),
     stepCuts: buildStepCuts(bot, options, self),
