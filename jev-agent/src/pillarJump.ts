@@ -179,6 +179,31 @@ export function installGroundCorrection(
   }
 }
 
+/**
+ * The ground correction for a bounded CLIMB (`PILLAR_UP`): the same grounding
+ * rule as the takeoff, suppressed for the whole flight. `isJumping()` is true
+ * from the moment a pillar step starts until that step lands.
+ *
+ * Why the suppression is required: the plain correction re-grounds ANY body
+ * that has a solid cell at or below its feet cell, even one that is 0.42 blocks
+ * above its support mid-jump. `onGround = true` while airborne is a lie to the
+ * engine's grounded branches (jump gate, friction, step-up) and lets a
+ * clientbound reset re-arm the takeoff gate; the flight must be integrated by
+ * physics, not held by the correction. Live PILLAR_UP kept the plain correction
+ * for the whole climb, so every tick re-grounded the launched body
+ * (`PILLAR_TAKEOFF rise=0.42 endOnGround=true`) and the apex window observed
+ * `PILLAR_FAIL step=apex reason=no_rise` (10x) in a cramped shaft. The takeoff
+ * window is unaffected: `jumpWithGroundCorrection` installs its own (ungated)
+ * correction for the launch, and the per-step initial grounding is unchanged.
+ */
+export function installClimbGroundCorrection(
+  bot: JumpBotLike,
+  isSolid: SolidAt,
+  isJumping: () => boolean,
+): () => void {
+  return installGroundCorrection(bot, (x, y, z) => (isJumping() ? false : isSolid(x, y, z)))
+}
+
 export interface PillarJumpDeps {
   isSolid: SolidAt
   /** bounded takeoff window */

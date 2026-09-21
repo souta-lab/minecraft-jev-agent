@@ -33,6 +33,7 @@
     "perception-test": "bun test ./test-perception.mts",
     "pit-escape-test": "bun test ./test-pit-escape.mts",
     "pillar-jump-test": "bun test ./test-pillar-jump.mts",
+    "pillar-shaft-takeoff-test": "bun test ./test-pillar-shaft-takeoff.mts",
     "pillar-apex-test": "bun test ./test-pillar-apex.mts",
     "demo": "bun demo.mts",
     "guard-test": "bun test ./test-guard.mts",

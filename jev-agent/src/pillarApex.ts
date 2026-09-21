@@ -290,26 +290,58 @@ export async function pillarStepUp(
   let apexSamples = 0
   let apexRise = takeoffObservedRise(jump.trace)
   let atApex = false
-  while (deps.now() < apexDeadline) {
-    deps.ensureOwned?.()
-    apexSamples += 1
-    const vy = bot.entity.velocity.y
-    const rise = bot.entity.position.y - launchY
-    if (rise > apexRise) apexRise = rise
-    if (rise >= requiredRise && vy <= PILLAR_APEX_VY_MAX && vy >= PILLAR_APEX_FALL_VY) {
-      atApex = true
-      break
-    }
-    if (vy < PILLAR_APEX_FALL_VY) {
-      // Already past the vertex: placing now puts the block wherever the body
-      // happens to be, which is exactly the "no level gained" live failure.
-      // `apexRise` (including the takeoff-observed peak) only names whether the
-      // arc ever cleared the cell; it never authorises a below-clearance place.
-      return fail('apex', apexRise >= requiredRise ? 'apex_missed' : 'falling_before_place', apexSamples, undefined, jump.trace)
-    }
-    await deps.sleep(deps.pollMs)
+  // Why the apex never arrived, as live facts rather than "no_rise":
+  //   * an idle physics loop (dead/dying body, stalled doPhysics) never
+  //     integrates the arc - the live run at health 1 / food 0 observed
+  //     `traceTicks=1` and the body frozen at the launch height;
+  //   * a clientbound position packet storm (a server reset/teleport, counted
+  //     by `forcedMove`) zeroes the velocity and restarts the flight, so the
+  //     measured rise is not the column's ceiling.
+  // Both are transient environment facts and must not be read as "this column
+  // cannot be climbed" (`no_rise`), which is what drives relocation.
+  let apexTicks = 0
+  let apexForcedMoves = 0
+  const onApexTick = (): void => {
+    apexTicks += 1
   }
-  if (!atApex) return fail('apex', apexRise >= requiredRise ? 'apex_timeout' : 'no_rise', apexSamples, undefined, jump.trace)
+  const onApexForcedMove = (): void => {
+    apexForcedMoves += 1
+  }
+  bot.on('physicsTick', onApexTick)
+  bot.on('forcedMove', onApexForcedMove)
+  try {
+    while (deps.now() < apexDeadline) {
+      deps.ensureOwned?.()
+      apexSamples += 1
+      const vy = bot.entity.velocity.y
+      const rise = bot.entity.position.y - launchY
+      if (rise > apexRise) apexRise = rise
+      if (rise >= requiredRise && vy <= PILLAR_APEX_VY_MAX && vy >= PILLAR_APEX_FALL_VY) {
+        atApex = true
+        break
+      }
+      if (vy < PILLAR_APEX_FALL_VY) {
+        // Already past the vertex: placing now puts the block wherever the body
+        // happens to be, which is exactly the "no level gained" live failure.
+        // `apexRise` (including the takeoff-observed peak) only names whether the
+        // arc ever cleared the cell; it never authorises a below-clearance place.
+        return fail('apex', apexRise >= requiredRise ? 'apex_missed' : 'falling_before_place', apexSamples, undefined, jump.trace)
+      }
+      await deps.sleep(deps.pollMs)
+    }
+  } finally {
+    bot.removeListener('physicsTick', onApexTick)
+    bot.removeListener('forcedMove', onApexForcedMove)
+  }
+  if (!atApex) {
+    if (apexForcedMoves > 0) {
+      return fail('apex', 'flight_reset', apexSamples, `forcedMoves=${apexForcedMoves}`, jump.trace)
+    }
+    if (apexTicks === 0) {
+      return fail('apex', 'physics_stalled', apexSamples, `apexTicks=0 forcedMoves=${apexForcedMoves}`, jump.trace)
+    }
+    return fail('apex', apexRise >= requiredRise ? 'apex_timeout' : 'no_rise', apexSamples, undefined, jump.trace)
+  }
 
   let placeSamples = 0
   try {

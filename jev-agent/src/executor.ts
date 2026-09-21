@@ -97,6 +97,7 @@ import {
 import {
   correctStandingOnGround,
   formatPillarUpStep,
+  installClimbGroundCorrection,
   installGroundCorrection,
   PILLAR_TAKEOFF_BUDGET_MS,
   PILLAR_TAKEOFF_POLL_MS,
@@ -2588,10 +2589,14 @@ export class Executor {
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
     const solidAt: SolidAt = (x, y, z) => this.solidSupportAt(x, y, z)
-    // Exactly the control-walk mechanism, kept for the whole climb: physics on
-    // and the stale onGround flag patched from the block grid on every tick.
+    // Physics on, and the stale onGround flag patched from the block grid -
+    // but ONLY while the body is settled. Re-grounding a body that is mid-jump
+    // freezes it at the launch height (see `installClimbGroundCorrection`), so
+    // the correction is suppressed for the whole flight of each pillar step.
+    // The step's own `jumpWithGroundCorrection` still grounds the launch.
+    let jumping = false
     const savedPhysics = this.bot.physicsEnabled
-    const uninstallGroundCorrection = installGroundCorrection(this.bot, solidAt)
+    const uninstallGroundCorrection = installClimbGroundCorrection(this.bot, solidAt, () => jumping)
     this.bot.physicsEnabled = true
     try {
       let climbed = 0
@@ -2767,6 +2772,10 @@ export class Executor {
         // every sub-step is injected and unit-testable without a server. The
         // old code placed on a `velocity.y <= 0.01` predicate (also true while
         // standing or falling) and never verified the block had landed.
+        // Suppress the persistent climb grounding for the whole flight: the
+        // takeoff's own correction handles the launch, and re-grounding the
+        // airborne body would freeze the arc at the launch height.
+        jumping = true
         const climb = await pillarStepUp(
           this.bot,
           {
@@ -2784,6 +2793,7 @@ export class Executor {
           },
           { feetCell: feet, placeCell, support: footing.position },
         )
+        jumping = false
         this.ensureOwned(epoch, signal)
         // Read the forced-reposition count once for the whole attempt: it is
         // both the takeoff telemetry field and the evidence that a position
