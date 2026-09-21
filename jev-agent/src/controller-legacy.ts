@@ -1539,6 +1539,8 @@ export class JevController {
   private lastArmorRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
+  /** the previous tracked move target (for oscillation suppression) */
+  private previousMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
   private lastOscillationAt = 0
   /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
@@ -6732,6 +6734,8 @@ export class JevController {
 
   private rememberMoveTarget(candidate: Candidate): void {
     if (candidate.target === null || !isTrackedMoveKind(candidate.kind)) return
+    const previous = this.lastMoveTarget
+    if (previous !== null) this.previousMoveTarget = previous
     this.lastMoveTarget = { dimension: this.currentDimension(), position: { ...candidate.target } }
   }
 
@@ -6838,7 +6842,15 @@ export class JevController {
     // immediately choose A after B was retired and keep walking A<->B.
     const dimension = this.currentDimension()
     const seen = new Set<string>()
-    for (const position of [detection.from, detection.to]) {
+    // #360 §6: the detector reports the two BODY positions the bot swapped between,
+    // while the candidate identities are the TARGET cells it stepped to
+    // (live evidence: MOVE:p3_67_17/p3_67_18 looped while the escape blacklisted
+    // overworld:4,67,18 and :4,67,19 - different cells, so nothing was suppressed).
+    // Suppress the targets the body actually moved to as well.
+    const trackedTargets: Vec3Json[] = []
+    if (this.lastMoveTarget !== null && this.lastMoveTarget.dimension === dimension) trackedTargets.push(this.lastMoveTarget.position)
+    if (this.previousMoveTarget !== null && this.previousMoveTarget.dimension === dimension) trackedTargets.push(this.previousMoveTarget.position)
+    for (const position of [...trackedTargets, detection.from, detection.to]) {
       if (position === null) continue
       const key = moveFailureKey(dimension, position)
       if (seen.has(key)) continue
