@@ -3940,6 +3940,9 @@ const LOCOMOTION_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind
  *                        own recipe/input/station requirement is satisfiable
  *                        NOW, so they must never inherit a sibling's tool need.
  */
+/** Beyond this range a `no_path` probe is not evidence of a local blockage. */
+export const FAR_LEG_PROBE_RADIUS = 24
+
 const REACHABILITY_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'MINE',
   ...LOCOMOTION_GATED_KINDS,
@@ -4127,7 +4130,21 @@ function evaluateCandidate(
   const probe = hasVerticalPlan(candidate)
     ? 'unknown'
     : context.options.reachability?.pathProbe?.(position) ?? 'unknown'
-  const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, probe)
+  // A `no_path` verdict from the path probe is a fact about the probe's search
+  // range as much as about the world. For a target far beyond that range it does
+  // not prove a local blockage, and treating it as one deletes the only
+  // progress-making action. Live (source 5ac2617): the active M2 obsidian goal
+  // had a remembered cell ~167m west while the body sat in a surface pocket, the
+  // retrieval was withheld as `RETRIEVE:known:obsidian:b28_68_9:open_path`, and
+  // the policy was left searching locally in place
+  // (`resource=obsidian progressDelta=0 ... progress=search`, east/west pacing).
+  // Keep such a target as a travel leg: the executor still pathfinds and its
+  // post-condition and failure memory bound the attempt. Close targets keep the
+  // refusal, because there `no_path` really does mean the adjacent route is
+  // blocked (live: `MOVE:p193_67_-15 reachable=false reason=no_path`).
+  const farTarget = distance(position, context.state.self.position) > FAR_LEG_PROBE_RADIUS
+  const effectiveProbe: PathProbeResult = probe === 'no_path' && farTarget ? 'unknown' : probe
+  const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, effectiveProbe)
   return reachabilityRecord(candidate, target, world, result, context)
 }
 
