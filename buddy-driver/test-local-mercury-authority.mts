@@ -117,6 +117,51 @@ assert.equal(repaired.goals[0]?.targetItem, 'raw_iron')
 assert.equal(logs.some((entry) => entry.event === 'MERCURY_ATTEMPT'), true)
 assert.equal(logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_DECISION' && entry.detail.model === 'qwen3.5-9b-local'), true)
 
+let postDeathCalls = 0
+const postDeathMercury = new MercurySystem2({
+  model: 'qwen3.5-9b-local',
+  summarize,
+  log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
+  callsPath: join(dir, 'post-death-mercury-calls.jsonl'),
+  cachePath: join(dir, 'post-death-mercury-cache.json'),
+  postDeathRecovery: true,
+  resolveKey: () => ({ key: 'fixture-only', origin: 'fixture' }),
+  transport: async () => {
+    postDeathCalls += 1
+    return {
+      toolCalls: [{ input: { op: 'patch', goals: [{ kind: 'collect', item: 'raw_iron', count: 1 }], reason: 'recover after death' } }],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }
+  },
+})
+const postDeathPlanner = new PlannerBrain({
+  bot,
+  world: emptyWorldMemory(),
+  log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
+  cachePath: join(dir, 'post-death-planner-cache.json'),
+  mode: 'local-mercury',
+  mercury: postDeathMercury,
+  maxAttempts: 1,
+  resolveKey: () => {
+    externalPlannerKeyLookups += 1
+    return null
+  },
+})
+
+await postDeathPlanner.plan({ ...queueEmpty, tick: 3, detail: 'first plan after respawn' })
+assert.equal(postDeathPlanner.provider, 'mercury')
+assert.equal(postDeathCalls, 1, 'post-death queue_empty must call local Mercury exactly once')
+assert.equal(
+  logs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_INPUT' && entry.detail.trigger === 'post_death'),
+  true,
+  'post-death recovery must be attributable as trigger=post_death',
+)
+
+await postDeathPlanner.plan({ ...queueEmpty, tick: 4, detail: 'ordinary queue after post-death repair' })
+assert.equal(postDeathPlanner.provider, 'deterministic')
+assert.equal(postDeathCalls, 1, 'post-death recovery must be consumed once; later queue_empty stays deterministic')
+assert.equal(externalPlannerKeyLookups, 0, 'post-death local Mercury must not touch the TypeSafe planner key')
+
 assert.throws(
   () => new PlannerBrain({
     bot,

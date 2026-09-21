@@ -44,6 +44,6 @@ exec env \
   BUDDY_MERCURY_LOCAL_NO_THINK="${BUDDY_MERCURY_LOCAL_NO_THINK:-1}" \
   BUDDY_SYSTEM2_TIMEOUT_MS="${BUDDY_SYSTEM2_TIMEOUT_MS:-240000}" \
   BUDDY_POLICY="${BUDDY_POLICY:-fallback}" \
-  BUDDY_PLANNER="${BUDDY_PLANNER:-local-mercury}" \
-  BUDDY_SYSTEM2="${BUDDY_SYSTEM2:-mercury}" \
+  BUDDY_PLANNER="local-mercury" \
+  BUDDY_SYSTEM2="mercury" \
   bun buddy-driver/agent-runner.mts

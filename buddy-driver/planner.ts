@@ -126,7 +126,8 @@ export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWor
 }
 
 /** Mercury is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
-function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | null {
+function mercuryTriggerFor(request: System2PlanRequest, mercury?: MercurySystem2): MercuryTriggerReason | null {
+  if (mercury?.postDeathRecoveryPending === true) return 'post_death'
   let waitStreak = 0
   for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
     const outcome = request.recentOutcomes[i]
@@ -298,7 +299,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async planWithLocalMercury(request: System2PlanRequest): Promise<System2Plan> {
-    const mercuryTrigger = mercuryTriggerFor(request)
+    const mercuryTrigger = mercuryTriggerFor(request, this.mercury)
     if (mercuryTrigger !== null) return this.planWithMercuryAuthority(request, mercuryTrigger)
 
     this.lastAuthorityProvider = 'deterministic'
@@ -350,7 +351,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
-    const mercuryTrigger = mercuryTriggerFor(request)
+    const mercuryTrigger = mercuryTriggerFor(request, this.mercury)
     if (this.mercury !== undefined && mercuryTrigger !== null) {
       return this.planWithMercuryAuthority(request, mercuryTrigger)
     }
