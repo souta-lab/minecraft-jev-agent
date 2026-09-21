@@ -2105,6 +2105,18 @@ export class JevController {
       const actionable = candidates.filter(
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
       ).length
+      // #11: Jev owns the action choice, so a set with nothing to choose between
+      // is not a decision but a forced move — which makes live behaviour look
+      // deterministic no matter how often Jev is invoked. Kept separate from
+      // CANDIDATE_STARVATION (that one is about goal progress): a set can be
+      // starved yet offer several real choices, and non-starved yet collapse to
+      // a single action.
+      if (actionable <= 1) {
+        this.logger.info(
+          'agent',
+          `CANDIDATE_SET_DEGENERATE goal=${this.currentGoalKey()} presented=${candidates.length} actionable=${actionable}`,
+        )
+      }
       const noProductive = actionable === 0 && !state.goal.complete
       this.noProductiveThisTick = noProductive
       if (noProductive) {

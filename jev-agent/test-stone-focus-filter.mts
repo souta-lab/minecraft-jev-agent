@@ -325,10 +325,22 @@ addCase('(c) collect log still offers the sensed log MINE', () => {
 // (2) flint/gravel: a level/down tunnel step cannot reach the source, so the
 // repeating zero-progress DESCEND the live run carved tunnels with is withheld.
 addCase('(2) collect flint withholds the purposeless DESCEND step', () => {
-  const state = build('collect', 'flint', 'collect 1 x flint (from gravel)', [stoneBlock({ x: 5, y: 61, z: 5 })], null, true)
+  // Since `flint` gained a scanned source (`gravel`, state.ts DIRECT_BLOCK_SOURCES)
+  // it is treated like any item whose source can be underground, so the withhold
+  // case is pinned with a focus that has NO block source at all.
+  const state = build('collect', 'string', 'collect 1 x string', [stoneBlock({ x: 5, y: 61, z: 5 })], null, true)
   const descends = descendsOf(state)
   return {
     pass: descends.length === 0,
+    detail: `focus=string descends=${describeIds(descends)}`,
+  }
+})
+
+addCase('(2) collect flint keeps DESCEND because gravel has a scanned source', () => {
+  const state = build('collect', 'flint', 'collect 1 x flint (from gravel)', [stoneBlock({ x: 5, y: 61, z: 5 })], null, true)
+  const descends = descendsOf(state)
+  return {
+    pass: descends.length > 0,
     detail: `focus=flint descends=${describeIds(descends)}`,
   }
 })
@@ -379,7 +391,7 @@ addCase('(2) collect log keeps the DESCEND step unchanged (class focus)', () => 
 // gravel but several grounded frontier cells must present >= 3 distinct non-WAIT
 // actions (not WAIT + one), so Jev pi carries information.
 addCase('(1) no goal route still presents >=3 distinct grounded alternatives', () => {
-  const state = build('collect', 'flint', 'collect 1 x flint (from gravel)', [], null, true)
+  const state = build('collect', 'string', 'collect 1 x string', [], null, true)
   state.terrain = {
     standable: [
       SELF,
