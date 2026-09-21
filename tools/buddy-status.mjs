@@ -4,26 +4,47 @@
 // Reads: process table, control socket (report), buddy.log markers, git log.
 // Read-only. Safe to run anytime. No secrets are printed.
 import { execSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import net from 'node:net'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const DIR = '/home/s0u7a/mc-ai/buddy-driver'
-const LOG = `${DIR}/buddy.log`
-const SOCK = `${DIR}/data/resident/control.sock`
+const HERE = dirname(fileURLToPath(import.meta.url))
+const REPO = resolve(HERE, '..')
+const DIR = resolve(process.env.BUDDY_STATUS_RUNTIME_DIR ?? join(REPO, 'buddy-driver'))
+const LOG = join(DIR, 'buddy.log')
+const SOCK = join(DIR, 'data', 'resident', 'control.sock')
 const JSON_OUT = process.argv.includes('--json')
 
-const sh = (c) => {
-  try { return execSync(c, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return '' }
+const sh = (c, cwd = undefined) => {
+  try { return execSync(c, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return '' }
 }
 
 function hosts() {
-  const out = sh("pgrep -af 'bun agent-runner.mts'")
+  const out = sh("pgrep -af 'agent-runner\\.mts'")
   if (!out) return []
   // Only real Bun processes: exclude bash -c wrappers whose command line merely
   // contains the pgrep pattern (a known false-positive trap).
   return out.split('\n')
-    .filter((l) => /\d+\s+\S*bun\s+agent-runner\.mts/.test(l) && !/\bbash\b|\/bin\/sh\b/.test(l))
+    .filter((l) => /^\d+\s+\S*bun\s+(?:\S*\/)?agent-runner\.mts(?:\s|$)/.test(l) && !/\bbash\b|\/bin\/sh\b/.test(l))
     .map((l) => l.trim().split(/\s+/)[0])
+}
+
+function latestFile(dir, prefix, suffix = '.json') {
+  if (!existsSync(dir)) return ''
+  let latest = ''
+  let latestMtime = -1
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue
+    const path = join(dir, name)
+    let mtime = -1
+    try { mtime = statSync(path).mtimeMs } catch { continue }
+    if (mtime > latestMtime) {
+      latest = path
+      latestMtime = mtime
+    }
+  }
+  return latest
 }
 
 function callSock(cmd, args = {}) {
@@ -67,14 +88,13 @@ const report = await callSock('report')
 const d = report?.ok ? report.data : null
 const ps = hosts()
 const counts = markerCounts()
-const acceptance = existsSync(`${DIR}/data/resident`)
-  ? sh(`ls -t ${DIR}/data/resident/acceptance-run-*.json 2>/dev/null | head -1`)
-  : ''
-const freezes = sh(`ls -t ${DIR}/logs/resident/freeze-*.json 2>/dev/null | head -1`)
-const lastCommit = sh('cd /home/s0u7a/mc-ai && git log --oneline -1')
+const acceptance = latestFile(join(DIR, 'data', 'resident'), 'acceptance-run-')
+const freezes = latestFile(join(DIR, 'logs', 'resident'), 'freeze-')
+const lastCommit = sh('git log --oneline -1', REPO)
 const logAge = existsSync(LOG) ? Math.round((Date.now() - statSync(LOG).mtimeMs) / 1000) : null
 
 const summary = {
+  runtimeDir: DIR,
   hosts: ps,
   hostCount: ps.length,
   singleInstanceOk: ps.length === 1,
