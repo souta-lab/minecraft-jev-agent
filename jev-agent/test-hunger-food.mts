@@ -1,0 +1,348 @@
+// test-hunger-food.mts - hunger survival regression.
+//
+// Live incident (operator report): the resident "was about to die of hunger".
+//
+//   /data get entity AI_Buddy foodLevel  -> 0            (starving, losing health)
+//   after 16 steak were handed over:
+//   /data get entity AI_Buddy foodLevel  -> 20           (EAT works when food is held)
+//
+// So the eat mechanic was fine, but the body had no route to food and no rung
+// that cared about hunger. Root causes pinned here:
+//
+//   * EAT was gated on `food < eatBelowFood` (default 18), so hunger exactly AT
+//     the sane threshold was already refused, and nothing surfaced why;
+//   * the passive-food-animal hunt used the 8m melee COMBAT_CANDIDATE_RANGE even
+//     though the ATTACK executor already paths to the entity, so a hungry body
+//     9m from a cow had no grounded food route at all;
+//   * the ladder had no optional `food` affordance.
+//
+// This fixture FAILS before the fix (case a: food=18 gets no EAT; case c: a cow
+// at 12m is no route) and PASSES after it. It also pins that existing M2/M3
+// mandatory rungs/predicates and their indices are unchanged.
+//
+// Run: bun test-hunger-food.mts
+import { createRequire } from 'node:module'
+import {
+  defaultCandidateOptions,
+  generateCandidates,
+  generateGroundedCandidates,
+} from './src/candidates.ts'
+import { emptyGoalQueueState } from './src/goalQueue.ts'
+import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
+import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
+import { buildPlanOptions, computeFrontier, RUNGS, rungIndexById } from '../buddy-driver/planner.ts'
+import { emptyWorldMemory } from '../buddy-driver/resident-types.ts'
+
+const require = createRequire(import.meta.url)
+const Vec3 = require('vec3')
+const registry = require('minecraft-data')('1.21.11')
+
+interface Case {
+  name: string
+  run: () => { pass: boolean; detail: string }
+}
+
+const cases: Case[] = []
+const addCase = (name: string, run: Case['run']): void => {
+  cases.push({ name, run })
+}
+
+type Bot = Parameters<typeof buildWorldState>[0]
+
+const ORIGIN: Vec3Json = { x: 0, y: 64, z: 0 }
+const THRESHOLD = defaultCandidateOptions.eatBelowFood
+
+/** A passive animal at a horizontal distance from ORIGIN; the sensor sees 24m. */
+function animal(name: string, distance: number, id = 42): Record<string, unknown> {
+  return {
+    id,
+    name,
+    kind: 'PassiveMob',
+    username: undefined,
+    position: new Vec3(ORIGIN.x + distance, ORIGIN.y, ORIGIN.z),
+    isValid: true,
+  }
+}
+
+/**
+ * Sensor double: `counts` is the live inventory, `food` the live hunger bar,
+ * `entities` the sensed mobs. The real minecraft-data registry is attached so
+ * hostile classification uses genuine entity kinds.
+ */
+function fakeBot(counts: Record<string, number>, food: number, entities: Record<string, unknown>[]): Bot {
+  const position = new Vec3(ORIGIN.x, ORIGIN.y, ORIGIN.z)
+  const items = Object.entries(counts).map(([name, count], slot) => ({ name, count, slot }))
+  const mobs = new Map<string, unknown>()
+  for (const entity of entities) {
+    const record = entity as { id: number }
+    mobs.set(String(record.id), entity)
+  }
+  return {
+    username: 'AI_HUNGER',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 20,
+    food,
+    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: -64, height: 384 },
+    time: { isDay: true },
+    registry,
+    entities: Object.fromEntries(mobs),
+    inventory: { items: () => items },
+    blockAt: () => ({ name: 'air', boundingBox: 'empty', diggable: false }),
+    canSeeBlock: () => true,
+    findBlocks: () => [],
+  } as never
+}
+
+function signals(overrides: Partial<AgentSignals> = {}): AgentSignals {
+  return {
+    consecutiveFailures: 0,
+    lastFailureCode: null,
+    lastPathStatus: 'idle',
+    stalledMs: 0,
+    lastPolicyConfidence: null,
+    maxConcurrentActions: 0,
+    escalationRecommended: false,
+    failedCandidates: {},
+    knownResources: [],
+    ...overrides,
+  }
+}
+
+function foodGoal(): QueuedGoal {
+  return {
+    id: 'g1:collect:food',
+    kind: 'collect',
+    description: 'collect 3 x food (hunt passive animals)',
+    targetItem: 'food',
+    requiredCount: 3,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
+function queueWith(current: QueuedGoal): GoalQueueState {
+  return { ...emptyGoalQueueState(), depth: 1, current, empty: false, goals: [current] }
+}
+
+function perceive(
+  counts: Record<string, number>,
+  food: number,
+  entities: Record<string, unknown>[] = [],
+): WorldState {
+  return buildWorldState(
+    fakeBot(counts, food, entities),
+    {
+      tick: 1,
+      goal: makeGoal('food', 3),
+      goalQueue: queueWith(foodGoal()),
+      focusItem: 'beef',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+}
+
+/** Candidate ids the generator offers AND withholds (marker facts are pure too). */
+function offered(state: WorldState): { ids: string[]; candidates: ReturnType<typeof generateCandidates> } {
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const candidates = grounded.candidates
+  return { ids: candidates.map((candidate) => candidate.id), candidates }
+}
+
+// --- (a) proactive eating: at or below the threshold, not only near death ------
+
+addCase('(a) food held and hunger AT the threshold (18) offers EAT', () => {
+  const state = perceive({ cooked_beef: 3 }, THRESHOLD)
+  const { candidates } = offered(state)
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: state.self.food === THRESHOLD && eat !== undefined && eat.id === 'EAT:cooked_beef',
+    detail: `food=${state.self.food} threshold=${THRESHOLD} eat=${eat?.id ?? 'none'}`,
+  }
+})
+
+addCase('(a2) food held and hunger below the threshold offers EAT', () => {
+  const state = perceive({ cooked_beef: 3 }, THRESHOLD - 8)
+  const { candidates } = offered(state)
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: eat !== undefined && eat.id === 'EAT:cooked_beef',
+    detail: `food=${state.self.food} eat=${eat?.id ?? 'none'}`,
+  }
+})
+
+// --- (b) full hunger: no EAT, no hunt route ------------------------------------
+
+addCase('(b) food held at full hunger (20) offers no EAT and no hunt route', () => {
+  const state = perceive({ cooked_beef: 3 }, 20, [animal('cow', 12)])
+  const { candidates } = offered(state)
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  const route = candidates.find((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass: state.self.food === 20 && eat === undefined && route === undefined,
+    detail: `food=20 eat=${eat?.id ?? 'none'} route=${route?.id ?? 'none'} (EAT_REFUSED reason=full)`,
+  }
+})
+
+// --- (c) food acquisition: a sensed animal beyond melee range is a route -------
+
+addCase('(c) no food held and hunger low: a sensed passive animal at 12m is a grounded food route', () => {
+  const state = perceive({}, 0, [animal('cow', 12)])
+  const route = state.entities.find((entity) => entity.name === 'cow')
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass:
+      route !== undefined &&
+      route.hostile === false &&
+      hunt !== undefined &&
+      hunt.kind === 'ATTACK' &&
+      hunt.targetEntityId === route.id &&
+      hunt.meta.foodTarget === 'cow',
+    detail: `sensedCow=${route !== undefined} route=${hunt?.id ?? 'none'} target=${String(hunt?.meta.foodTarget)} (FOOD_ROUTE kind=animal target=cow)`,
+  }
+})
+
+addCase('(c2) no food held and hunger low: no EAT is offered (reason=no_food)', () => {
+  const state = perceive({}, 0, [animal('cow', 12)])
+  const { candidates } = offered(state)
+  const eat = candidates.find((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: state.self.food <= THRESHOLD && eat === undefined,
+    detail: `food=0 threshold=${THRESHOLD} eat=${eat?.id ?? 'none'} (FOOD_LOW + EAT_REFUSED reason=no_food)`,
+  }
+})
+
+addCase('(c3) an animal outside the sensor radius is not invented as a route', () => {
+  const state = perceive({}, 0, [animal('cow', 40)])
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass: state.entities.length === 0 && hunt === undefined,
+    detail: `sensed=${state.entities.length} route=${hunt?.id ?? 'none'} (CAN boundary = sensor radius)`,
+  }
+})
+
+addCase('(c4) a hostile-only world still offers no fake food route', () => {
+  const zombie = { id: 7, name: 'zombie', kind: 'HostileMob', username: undefined, position: new Vec3(12, 64, 0), isValid: true }
+  const state = perceive({}, 0, [zombie])
+  const { candidates } = offered(state)
+  const hunt = candidates.find((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass: hunt === undefined,
+    detail: `route=${hunt?.id ?? 'none'} hostileSensed=${state.entities.filter((e) => e.hostile).length}`,
+  }
+})
+
+// --- (d) ladder: food is an OPTIONAL, self-contained rung; M2/M3 unchanged ------
+
+const M2_M3_RUNG_INDICES: ReadonlyArray<readonly [string, number]> = [
+  ['wood', 0],
+  ['crafting_table', 1],
+  ['wooden_pickaxe', 2],
+  ['cobblestone', 3],
+  ['furnace', 4],
+  ['stone_pickaxe', 5],
+  ['charcoal', 6],
+  ['raw_iron', 7],
+  ['iron_ingot', 8],
+  ['iron_pickaxe', 9],
+  ['iron_gear', 10],
+  ['diamond', 11],
+  ['diamond_pickaxe', 12],
+  ['nether_portal', 13],
+  ['enter_nether', 14],
+  ['blaze_rods', 15],
+  ['ender_pearls', 16],
+  ['ender_eyes', 17],
+]
+
+const M2_M3_MANDATORY = M2_M3_RUNG_INDICES.map(([id]) => id).filter((id) => id !== 'iron_gear')
+
+addCase('(d) the existing M2/M3 rungs keep their ids and historical indices', () => {
+  const indicesUnchanged = M2_M3_RUNG_INDICES.every(([id, index]) => rungIndexById(id) === index)
+  const mandatory = M2_M3_MANDATORY.every((id) => {
+    const rung = RUNGS.find((entry) => entry.id === id)
+    return rung !== undefined && rung.optional !== true && rung.future !== true
+  })
+  const gearOptional = RUNGS.find((rung) => rung.id === 'iron_gear')?.optional === true
+  // The live M2 frontier for the incident inventory is unchanged by a survival rung.
+  const frontier = computeFrontier({ diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 3 }, emptyWorldMemory())
+  return {
+    pass: indicesUnchanged && mandatory && gearOptional && frontier.rungId === 'nether_portal',
+    detail: `indicesUnchanged=${indicesUnchanged} ironIngotIndex=${rungIndexById('iron_ingot')} mandatory=${mandatory} gearOptional=${gearOptional} frontier=${frontier.rungId}`,
+  }
+})
+
+addCase('(d2) the food rung is OPTIONAL, SELF-CONTAINED, and only offered while hungry', () => {
+  const food = RUNGS.find((rung) => rung.id === 'food')
+  const world = emptyWorldMemory()
+  const hungry = buildPlanOptions({}, world, { foodLevel: 0, eatBelowFood: THRESHOLD }).find((entry) => entry.id === 'food')
+  const fed = buildPlanOptions({}, world, { foodLevel: 20, eatBelowFood: THRESHOLD }).find((entry) => entry.id === 'food')
+  const unknownHunger = buildPlanOptions({}, world).find((entry) => entry.id === 'food')
+  const items = (hungry?.goals ?? []).map((goal) => goal.targetItem)
+  const noMilestones = !items.some((item) => item === 'diamond' || item === 'obsidian' || item === 'raw_iron' || item === 'log')
+  return {
+    pass:
+      food?.optional === true &&
+      food.selfContained === true &&
+      hungry !== undefined &&
+      noMilestones &&
+      items.includes('food') &&
+      fed === undefined &&
+      unknownHunger === undefined,
+    detail: `optional=${food?.optional === true} selfContained=${food?.selfContained === true} hungry=[${items.join(',')}] fed=${fed?.id ?? 'none'} noHungerFact=${unknownHunger?.id ?? 'none'}`,
+  }
+})
+
+addCase('(d3) holding any edible item satisfies the food rung and stops offering it', () => {
+  const food = RUNGS.find((rung) => rung.id === 'food')
+  const world = emptyWorldMemory()
+  const hungryOpts = { foodLevel: 0, eatBelowFood: THRESHOLD }
+  const byBeef = food?.satisfied({ beef: 3 }, world) === true
+  const byPorkchop = food?.satisfied({ porkchop: 3 }, world) === true
+  const byCooked = food?.satisfied({ cooked_beef: 3 }, world) === true
+  const offeredWhenEmpty = buildPlanOptions({}, world, hungryOpts).some((entry) => entry.id === 'food')
+  const offeredWhenFull = buildPlanOptions({ beef: 3 }, world, hungryOpts).some((entry) => entry.id === 'food')
+  return {
+    pass: byBeef && byPorkchop && byCooked && offeredWhenEmpty && !offeredWhenFull,
+    detail: `beef=${byBeef} porkchop=${byPorkchop} cooked=${byCooked} offeredEmpty=${offeredWhenEmpty} offeredFull=${offeredWhenFull}`,
+  }
+})
+
+addCase('(d4) the M2 nether_portal predicate still requires the lit portal block', () => {
+  const portal = RUNGS.find((rung) => rung.id === 'nether_portal')
+  const empty = portal?.satisfied({}, emptyWorldMemory()) === true
+  const held = portal?.satisfied({ nether_portal: 1 }, emptyWorldMemory()) === true
+  const flintOnly = portal?.satisfied({ flint_and_steel: 1 }, emptyWorldMemory()) === true
+  return {
+    pass: portal !== undefined && !empty && held && !flintOnly,
+    detail: `empty=${empty} held=${held} flintOnly=${flintOnly}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+
+let failures = 0
+process.stdout.write('hunger survival: proactive eating + grounded food route regression\n')
+process.stdout.write('-'.repeat(72) + '\n')
+for (const testCase of cases) {
+  const observed = testCase.run()
+  if (!observed.pass) failures += 1
+  process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
+  process.stdout.write(`      ${observed.detail}\n`)
+}
+process.stdout.write('-'.repeat(72) + '\n')
+process.stdout.write(`${cases.length - failures}/${cases.length} hunger-food cases passed\n`)
+
+if (failures > 0) {
+  process.exit(1)
+}

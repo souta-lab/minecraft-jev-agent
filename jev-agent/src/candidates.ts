@@ -179,6 +179,15 @@ export interface CandidateOptions {
   maxAttackCandidates: number
   /** below this food level the bot is willing to eat */
   eatBelowFood: number
+  /**
+   * furthest distance (m) at which a sensed passive food animal is offered as a
+   * hunt route. The sensor only reports entities inside `SensorOptions.entityRadius`
+   * (default 24m, see state.ts) and the ATTACK executor already paths to the
+   * entity with `GoalFollow`, so this is the CAN boundary of the hunt affordance.
+   * It must NOT be the 8m melee `COMBAT_CANDIDATE_RANGE`: a hungry resident
+   * standing 9m from a cow was offered no way to obtain food at all.
+   */
+  foodHuntRange?: number
   /** nearest distance (m) at which an out-of-reach block earns a MOVE candidate */
   moveMinDistance?: number
   /** furthest distance (m) at which a walk-up MOVE is offered (chained moves) */
@@ -584,6 +593,15 @@ const DEFAULT_MAX_MOVE_CANDIDATES = 6
 const DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT = 4
 const DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT = 3
 const DEFAULT_PLACE_SPOT_RETRY_LIMIT = 2
+/**
+ * Widest distance at which a sensed passive food animal can be a hunt route.
+ * This equals the sensor's default `entityRadius` (24m, state.ts
+ * `defaultSensorOptions`): `buildEntities` drops anything farther, so no hunt
+ * candidate can be grounded beyond it. The ATTACK executor's `GoalFollow` arm
+ * already walks the body to the entity, so the old 8m melee gate was a
+ * candidate-generation cap, not a physical one.
+ */
+const DEFAULT_FOOD_HUNT_RANGE = 24
 /** Block within this horizontal distance of the bot counts as pickup-adjacent. */
 const PICKUP_MINE_HORIZONTAL = 2.75
 /** Vertical band (relative to the feet) in which a drop still lands in reach. */
@@ -594,6 +612,7 @@ export const defaultCandidateOptions: CandidateOptions = {
   maxMineCandidates: 12,
   maxAttackCandidates: 4,
   eatBelowFood: 18,
+  foodHuntRange: DEFAULT_FOOD_HUNT_RANGE,
   moveMinDistance: DEFAULT_MOVE_MIN_DISTANCE,
   moveMaxDistance: DEFAULT_MOVE_MAX_DISTANCE,
   tunnelMaxDistance: DEFAULT_TUNNEL_MAX_DISTANCE,
@@ -604,37 +623,11 @@ export const defaultCandidateOptions: CandidateOptions = {
   recipes: null,
 }
 
-const FOOD_ITEMS = new Set([
-  'bread',
-  'cooked_beef',
-  'cooked_porkchop',
-  'cooked_chicken',
-  'cooked_mutton',
-  'cooked_rabbit',
-  'cooked_cod',
-  'cooked_salmon',
-  // Raw drops are edible without a furnace. M3 needs a working health-regen path
-  // (endermen and blazes deal damage), and a hunting-only fix would be useless if
-  // the raw drop could not be eaten.
-  'beef',
-  'porkchop',
-  'chicken',
-  'mutton',
-  'rabbit',
-  'cod',
-  'salmon',
-  'apple',
-  'golden_apple',
-  'carrot',
-  'baked_potato',
-  'melon_slice',
-  'sweet_berries',
-])
-
 /**
- * Passive animals whose drop is an edible item in FOOD_ITEMS. They are not
- * `hostile`, so the hostile-only combat filter never offers them; without this
- * list the resident has no way to acquire food and cannot regenerate health.
+ * Passive animals whose drop is an edible item in the shared food class. They
+ * are not `hostile`, so the hostile-only combat filter never offers them;
+ * without this list the resident has no way to acquire food and cannot
+ * regenerate health.
  */
 const FOOD_ANIMALS = new Set([
   'cow',
@@ -823,19 +816,24 @@ function generateRawCandidates(
   const hostiles = state.entities.filter(
     (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
   )
-  // Food acquisition: when the resident is hungry and holds no food, offer the
-  // grounded ATTACK affordance for nearby passive food animals so Jev can choose to
-  // hunt. Code only reports CAN (a real entity, in range, reachable); the choice of
-  // WHICH action stays with Jev.
+  // Food acquisition: when the resident is hungry (at or below `eatBelowFood`)
+  // and holds no food, offer the grounded ATTACK affordance for every sensed
+  // passive food animal so Jev can choose to hunt. Code only reports CAN (a real
+  // sensed entity); the choice of WHICH action/target stays with Jev. The range
+  // is the sensor's entity radius, not the 8m melee range, because the ATTACK
+  // executor already paths to the entity with GoalFollow.
   const heldFood = pickFood(state)
+  const hungry = state.self.food <= options.eatBelowFood
+  const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
   const huntTargets =
-    heldFood === null && state.self.food < options.eatBelowFood
+    heldFood === null && hungry
       ? state.entities.filter(
-          (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= COMBAT_CANDIDATE_RANGE,
+          (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
         )
       : []
   const attackTargets = [...hostiles, ...huntTargets].slice(0, options.maxAttackCandidates)
   for (const entity of attackTargets) {
+    const isFoodTarget = huntTargets.includes(entity)
     candidates.push({
       id: `ATTACK:e${entity.id}`,
       kind: 'ATTACK',
@@ -852,13 +850,16 @@ function generateRawCandidates(
         tick: state.tick,
         entityId: entity.id,
         distance: entity.distance,
-        ...(huntTargets.includes(entity) ? { foodAnimal: true } : {}),
+        // Typed CAN fact: this ATTACK is the grounded route to food, and which
+        // animal it targets. The marker reader/log must not infer it from the
+        // entity name alone (a hostile and a food animal can share no name).
+        ...(isFoodTarget ? { foodAnimal: true, foodRoute: 'animal', foodTarget: entity.name } : {}),
       },
     })
   }
 
   const foodName = heldFood
-  if (foodName !== null && state.self.food < options.eatBelowFood) {
+  if (foodName !== null && hungry) {
     candidates.push({
       id: `EAT:${foodName}`,
       kind: 'EAT',
@@ -3648,11 +3649,21 @@ export function surfaceSpot(
   return best
 }
 
-function pickFood(state: WorldState): string | null {
+/** True when an item name is edible (the shared `food` resource class). */
+export function isFoodItem(name: string): boolean {
+  return matchesResourceClass(name, 'food')
+}
+
+/**
+ * The food item the bot would eat, or null when it holds no edible item. Exported
+ * so the controller's FOOD_LOW/EAT_REFUSED markers read the same truth table the
+ * EAT candidate is grounded on instead of re-listing item names.
+ */
+export function pickFood(state: WorldState): string | null {
   let best: string | null = null
   let bestCount = 0
   for (const [name, count] of Object.entries(state.inventory.counts)) {
-    if (!FOOD_ITEMS.has(name)) continue
+    if (!matchesResourceClass(name, 'food')) continue
     if (count > bestCount) {
       best = name
       bestCount = count

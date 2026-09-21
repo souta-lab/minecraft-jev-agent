@@ -27,6 +27,7 @@ import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
+import { defaultCandidateOptions } from '../jev-agent/src/candidates.ts'
 import {
   PlannerBrain as LegacyPlannerBrain,
   buildPlanOptions,
@@ -303,6 +304,10 @@ export class PlannerBrain implements System2Brain {
       knownFurnaces: planningWorld.furnaces.length,
       resumeRungIndex: rung.adoptedRungIndex,
       portalFrameBlocks,
+      // Hunger is live server truth the rung predicates cannot see; pass it so
+      // the survival `food` option is offered only when it is actually needed.
+      foodLevel: this.bot.food ?? null,
+      eatBelowFood: defaultCandidateOptions.eatBelowFood,
       log: this.log,
     })
 
