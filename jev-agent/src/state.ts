@@ -416,6 +416,13 @@ export type AgentSignals = {
   /** durable known-resource coordinates injected by the host (issue #43) */
   knownResources?: KnownResource[]
   /**
+   * #405: cells the body has recently occupied, maintained by the controller as a
+   * bounded LRU. The generic exploration fallback must not offer a cell the body has
+   * already stood on as "unexplored terrain", otherwise a reached cell immediately
+   * becomes a frontier candidate again and the walk cycles between the same few cells.
+   */
+  exploredCells?: ReadonlySet<string>
+  /**
    * #360: code-owned state-recurrence evidence for the ACTIVE Option. Verified
    * body motion that keeps returning to the same small set of states with zero
    * goal/search progress is strategic non-progress; the semantic layer needs

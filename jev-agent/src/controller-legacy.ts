@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, exploredCellKey, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -543,6 +543,8 @@ const RETRIEVAL_PROGRESS_EPSILON = 0.5
 // Below this windowed locomotion efficiency a verified MOVE is mechanical success
 // without progress, so it must not clear the failure memory (issue #360).
 const MOVE_PROGRESS_EFFICIENCY_FLOOR = resolveEnvPositiveInt('BUDDY_MOVE_PROGRESS_EFFICIENCY_FLOOR', 20)
+/** #405: how many recently occupied cells the exploration fallback treats as visited. */
+const EXPLORED_CELLS_LIMIT = 512
 const MOVE_FAILMEM_LIMIT = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_LIMIT', 3)
 /** Issue #8: how long a blacklisted coordinate stays skipped. */
 const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLDOWN_MS', 30_000)
@@ -1532,6 +1534,12 @@ export class JevController {
   /** Surface waypoints reached without finding the requested resource. */
   /** windowed locomotion efficiency (%) over the last 40 samples; 100 when idle */
   private lastLocomotionEfficiency = 100
+  /**
+   * #405: bounded LRU of cells the body has recently occupied, exposed to the
+   * candidate layer as `signals.exploredCells` so the exploration fallback keeps
+   * offering NEW terrain instead of re-offering a cell the body already reached.
+   */
+  private readonly exploredCells = new Set<string>()
   private readonly searchedSurfaceTargets = new Set<string>()
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
@@ -4075,6 +4083,15 @@ export class JevController {
   private sampleMovement(position: Vec3Json): void {
     this.positionWindow.push({ x: position.x, y: position.y, z: position.z })
     while (this.positionWindow.length > 40) this.positionWindow.shift()
+    const cellKey = exploredCellKey(position)
+    this.exploredCells.delete(cellKey)
+    this.exploredCells.add(cellKey)
+    while (this.exploredCells.size > EXPLORED_CELLS_LIMIT) {
+      const oldest = this.exploredCells.values().next().value
+      if (oldest === undefined) break
+      this.exploredCells.delete(oldest)
+    }
+    this.signals.exploredCells = this.exploredCells
     this.detectOscillation(position)
     if (this.positionWindow.length < 40) return
     const first = this.positionWindow[0]

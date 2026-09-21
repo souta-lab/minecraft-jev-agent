@@ -4776,6 +4776,31 @@ function exploreMoveCandidate(
  * suppress any existing candidate. The reachability gate still withholds any
  * cell the body cannot actually reach, so "grounded" stays code-owned.
  */
+/**
+ * #405: drop standable spots the body has already visited from the exploration
+ * fallback. `exploredCells` is a controller-owned bounded LRU of occupied cells; a
+ * cell the body has stood on is not "unexplored terrain". An empty result is a real
+ * fact (no novel frontier in sensor range) and the caller already has a typed
+ * blocked/exhausted path for it, which is better than an unbounded A-B-A-B walk.
+ */
+export function exploreNoveltySpots(
+  spots: readonly Vec3Json[],
+  exploredCells: ReadonlySet<string> | undefined,
+): Vec3Json[] {
+  if (exploredCells === undefined || exploredCells.size === 0) return [...spots]
+  return spots.filter((spot) => !exploredCells.has(exploredCellKey(spot)))
+}
+
+/**
+ * #405: the ONE identity for "the body occupied this cell", shared by the controller
+ * (which records it) and the exploration filter (which reads it). It floors because a
+ * body position is fractional (`36.5`) while a standable spot is a block cell, so the
+ * identity must not depend on the caller's coordinate form.
+ */
+export function exploredCellKey(position: Vec3Json): string {
+  return `p${Math.floor(position.x)}_${Math.floor(position.y)}_${Math.floor(position.z)}`
+}
+
 function exploreFallbackCandidates(
   state: WorldState,
   options: CandidateOptions,
@@ -4784,9 +4809,10 @@ function exploreFallbackCandidates(
 ): Candidate[] {
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const limit = Math.max(1, options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES)
+  const novel = exploreNoveltySpots(state.terrain.standable, state.signals.exploredCells)
   const best = pickExplore(
     state,
-    state.terrain.standable,
+    novel,
     focusItem,
     moveFailureLimit,
     options.blacklistedMoveTargets,
@@ -4803,7 +4829,7 @@ function exploreFallbackCandidates(
     ),
   ]
   const bestKey = blockId('p', best)
-  const alternatives = state.terrain.standable
+  const alternatives = novel
     .filter(
       (spot) =>
         blockId('p', spot) !== bestKey &&
