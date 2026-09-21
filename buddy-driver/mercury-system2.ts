@@ -1218,6 +1218,15 @@ type MercuryPlanTool = Tool<MercuryPlanJson, never, never>
 const MERCURY_PLAN_TOOL_SCHEMA = MERCURY_PLAN_SCHEMA as unknown as MercuryPlanTool['inputSchema']
 
 const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
+  // The response is consumed by a parser, not a human. Live measurement (M3
+  // hand-off) showed this model spending its answer on analysis and returning no
+  // parseable object, so every repair was rejected with
+  // `MERCURY_SCHEMA_REJECT path=<root> expected a JSON plan object` and the queue
+  // fell back to the deterministic ladder. Border and shape instructions are the
+  // cheap lever for that: they cost nothing when the model already complies.
+  'Your response is consumed by a parser, not a human: the FIRST character must be "{" and the LAST must be "}". ' +
+  'Do not write any analysis, reasoning, summary, or markdown before or after it; any text outside the object makes the whole plan invalid. ' +
+  'Example of a valid response: {"op":"patch","reason":"need obsidian for the frame","goals":[{"kind":"collect","targetItem":"obsidian","requiredCount":10}]}. ' +
   'Return exactly one JSON object in the response text, with no prose, markdown, or tool call. ' +
   'The top-level op must be exactly one of continue, patch, replace, abandon, complete, or abort. ' +
   'Use goals for the typed goal objects; never use a goal kind as op. For complete and abort, goals MUST be empty; abandon may carry the replacement plan. ' +
