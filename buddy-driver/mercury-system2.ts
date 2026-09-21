@@ -1323,7 +1323,13 @@ export class MercurySystem2 implements System2Brain {
     // disabled by default for Muse Spark and remains opt-in via env/options.
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? SYSTEM2_TIMEOUT_DEFAULT_MS)
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
-    this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
+    // `meta/muse-spark-1.3-contributor` is a reasoning model: a trivial probe
+    // (one small JSON object) already spent 796-1599 reasoning tokens before
+    // emitting ~16 tokens of text, and the json-text transport needs the plan
+    // object to reach the output. 3000 was tight for a real prompt, and a
+    // truncated answer costs a schema rejection plus up to two more attempts,
+    // each charged to the hourly budget. A ceiling, not a spend.
+    this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 4096)
     this.transport = options.transport ?? defaultMercuryTransport(this.model)
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
