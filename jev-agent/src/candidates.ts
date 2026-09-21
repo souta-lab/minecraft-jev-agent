@@ -1765,13 +1765,20 @@ function generateRawCandidates(
   // sensed offered only WAIT (live: health=1 at habitat height, `collect:food 0/3`, candidates =
   // ASCEND:habitat + WAIT, no search route). Keeping this in step with `declaredProducerFocus` means
   // the typed explore-blocked fact and the offered set can never disagree.
+  // A focus with a DECLARED producer (a block source, a mob-drop producer, or the food
+  // class) must be able to search for that producer. The previous `!isResourceClass`
+  // guard excluded every resource-class focus, so an ore goal whose remembered ore was
+  // not reachable collapsed to flat MOVEs + WAIT: live, `collect:raw_iron` offered only
+  // MOVE:p7_53_-9 / MOVE:p9_53_-10 / MOVE:p10_54_-7 / MOVE:p9_54_-7 / WAIT for 100+ s
+  // with 21 remembered raw_iron sites and no MINE/RETRIEVE/DESCEND at all. This mirrors
+  // `declaredProducerFocus`, so the typed explore-blocked fact and the offered set agree.
   const declaredProducerNeedsExploration =
     goalKind === 'collect' &&
     descendTargetY === null &&
     focusItem !== null &&
     (focusItem === FOOD_CLASS ||
-      (!isResourceClass(focusItem) &&
-        (DIRECT_BLOCK_SOURCES[focusItem] !== undefined || MOB_DROP_PRODUCERS[focusItem] !== undefined)))
+      DIRECT_BLOCK_SOURCES[focusItem] !== undefined ||
+      MOB_DROP_PRODUCERS[focusItem] !== undefined)
   if (candidates.length === 0 || (declaredProducerNeedsExploration && !hasAdvancingRoute)) {
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
