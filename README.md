@@ -59,7 +59,8 @@ when it has a genuinely distinct acceptance boundary.
 - **M1** — verified Jev-only plan with `llm.called == false`.
 - **M2** — diamond-to-Nether-gate (diamond pickaxe, flint-and-steel, obsidian, frame, light, verify); live gate UNKNOWN.
 - **Bun foundation** — clean-checkout PASS: frozen install, typecheck, build, and all 125 repository tests pass under Bun.
-- **M3/M4** — Nether progression after the gate, then the Ender Dragon; M4 remains the final game objective.
+- **M3** — Nether access → **12 ender pearls** (the pearl half of the 12 Eyes of Ender).
+- **M4** — blaze rods → 12 Eyes of Ender → stronghold → the End → the Ender Dragon (final game objective).
 - **Resident mode** — persistent Mineflayer connection, generation hot reload, control socket, durable
   state and an actuation lease are implemented.
 

@@ -27,8 +27,8 @@ historical M2 evidence として保持するが、現在のM2 acceptanceでは�
 | M0 | 平坦な closed loop（MOVE → walk → MINE → 検証済み dig） | PASS（`logs/m0-final/`） |
 | M1 | Jev-only 4 サブゴール計画（LLM 呼び出し 0 が目標） | PASS（fresh world, `logs/m1-fresh2-console.log`） |
 | M2 | diamond → diamond pickaxe → obsidian → build/light/verify Nether portal | typed plan PASS、live gate UNKNOWN |
-| M3 | enter Nether → blaze rods → ender pearls → eyes of ender | 未着手 |
-| M4 | THE DRAGON | 後回し |
+| M3 | enter Nether → ender_pearl×12 | 未着手 |
+| M4 | blaze rods → eyes of ender×12 → stronghold → End → THE DRAGON | 後回し |
 
 優先順位（ユーザー最終指示、`RESIDENT-MODE.md` §0）: **M2 ラダーの完走より常駐化（resident + hot-reload）を先に着地させる**。バッチ型ループ（接続 → 200 s 走行 → 切断 → 修正 → 再接続 → 状態ゼロ再構築）がボトルネックであり、同一接続を保ったまま方針だけ差し替えるのが本命。
 
@@ -340,7 +340,8 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 7. **Runtime/bundler の決定**。**Bun runtime + Bun.build を既定**。移行済みの一次証拠は `bun run typecheck`、native `Bun.build`、Bun隔離fixture、および `AI_BunVerify` のisolated live SPAWN。M2 live gateと既存known-redの解消は別ゲートとして残す。
 
 8. その後に capability ladder: current M2（diamond → Nether gate）、M3（Nether
-   entry/resources）、… M4。旧charcoal/iron ladderは下位能力とhistorical evidence。
+   entry → ender_pearl×12）、… M4（blaze rods → eyes of ender×12 → stronghold →
+   End → dragon）。旧charcoal/iron ladderは下位能力とhistorical evidence。
 
 ---
 
