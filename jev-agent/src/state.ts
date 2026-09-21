@@ -75,7 +75,13 @@ export function isSensedStation(station: StationEntry): boolean {
  */
 export type KnownResource = {
   name: string
-  kind: 'ore' | 'log' | 'station'
+  /**
+   * Broad class. `portal` (issue #80) is a durable verified-portal site: it is
+   * inert to the ore/log/station retrieval matches and is consumed by
+   * `rememberedPortalFrameSites` so the existing portal grounding/entry
+   * machinery gets a grounded route back to the site.
+   */
+  kind: 'ore' | 'log' | 'station' | 'portal'
   position: Vec3Json
   /**
    * Issue #14: the coordinate is only meaningful in the world it was scanned in.
@@ -85,6 +91,15 @@ export type KnownResource = {
    */
   dimension?: string
   worldEpoch?: number
+  /** #80: frame width axis for a `portal` entry (defaults to 'x'). */
+  widthAxis?: PortalWidthAxis
+  /**
+   * #80: frame edge cells recorded with a `portal` entry. They let the sensor
+   * re-project the durable site as a grounded `PortalFrameSite` so the existing
+   * frame/light/entry grounding routes back to it. Geometry only, never a lit
+   * verdict: `portalVerified` is still re-read from live block truth.
+   */
+  frameCells?: readonly Vec3Json[]
 }
 
 export type HeldItemState = {
@@ -1473,6 +1488,59 @@ export function detectLivePortalVerification(bot: Bot): boolean {
   )
 }
 
+/**
+ * #80: the live frame sites whose interior is currently a lit nether portal.
+ * This is the same live truth `detectLivePortalVerification` reads, returned per
+ * site so the caller can record WHERE the verified portal is. It is never a
+ * durable verdict by itself.
+ */
+export function sensedVerifiedPortalSites(bot: Bot): PortalFrameSite[] {
+  const dimension = String(bot.game?.dimension ?? 'minecraft:overworld')
+  if (dimension !== 'minecraft:overworld' && dimension !== 'overworld') return []
+  return sensedPortalFrameSites(bot).filter((site) =>
+    detectPortalVerification(
+      dimension,
+      [site],
+      (position) => bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null,
+    ),
+  )
+}
+
+/**
+ * #80: turn durable remembered portal entries into the same `PortalFrameSite`
+ * shape the live sensor emits. The record supplies the route/geometry only; the
+ * interior is NOT claimed lit here, so every consumer still re-reads live block
+ * truth before acting (the frame site is an affordance, never a verdict).
+ */
+export function rememberedPortalFrameSites(remembered: readonly KnownResource[] | undefined): PortalFrameSite[] {
+  const sites: PortalFrameSite[] = []
+  for (const resource of remembered ?? []) {
+    if (resource.kind !== 'portal') continue
+    const frame = (resource.frameCells ?? []).map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+    sites.push({
+      origin: { x: resource.position.x, y: resource.position.y, z: resource.position.z },
+      widthAxis: resource.widthAxis ?? 'x',
+      safe: true,
+      reachable: true,
+      ...(frame.length === 0 ? {} : { existingFrame: frame }),
+    })
+  }
+  return sites
+}
+
+/** Deduplicate live and remembered frame sites by origin+axis; live wins. */
+function mergePortalFrameSites(live: readonly PortalFrameSite[], remembered: readonly PortalFrameSite[]): PortalFrameSite[] {
+  const seen = new Set<string>()
+  const merged: PortalFrameSite[] = []
+  for (const site of [...live, ...remembered]) {
+    const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(site)
+  }
+  return merged
+}
+
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const found: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
@@ -1500,7 +1568,10 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
   const self = buildSelf(bot)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
-  const portalFrameSites = buildPortalFrameSites(bot, options, self)
+  const portalFrameSites = mergePortalFrameSites(
+    buildPortalFrameSites(bot, options, self),
+    rememberedPortalFrameSites(rememberedStations),
+  )
   const portalFrame =
     portalFrameSites
       .map((site) => {

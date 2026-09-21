@@ -34,6 +34,7 @@ import type {
   GenerationStatus,
   HazardSource,
   KnownResourceJson,
+  KnownPortalSiteJson,
   KnownStation,
   ResidentGeneration,
   ResidentWorldMemory,
@@ -192,6 +193,7 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     mined: { ...normal.mined },
     discoveredOres: [...normal.discoveredOres],
     knownResources: normal.knownResources.map((resource) => ({ ...resource })),
+    knownPortalSites: normal.knownPortalSites.map((site) => ({ ...site })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
@@ -340,6 +342,10 @@ function applyWorldMemoryDelta(delta: WorldMemoryDelta, sourceWorldKey: WorldKey
   }
   if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
   if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
+  if (delta.knownPortalSites !== undefined) mergeKnownPortalSiteDtos(memory.knownPortalSites, delta.knownPortalSites)
+  if (delta.removeKnownPortalSites !== undefined) {
+    removeKnownPortalSiteDtos(memory.knownPortalSites, delta.removeKnownPortalSites)
+  }
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {
       memory.mined[key] = (memory.mined[key] ?? 0) + count
@@ -497,6 +503,44 @@ function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourc
     if (resource === undefined) continue
     const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
     if (!keys.has(key)) continue
+    target.splice(index, 1)
+    removed += 1
+  }
+  return removed
+}
+
+/** #80: durable portal sites merge/remove by origin x,y,z (widthAxis is part of the record). */
+function mergeKnownPortalSiteDtos(target: KnownPortalSiteJson[], found: KnownPortalSiteJson[]): number {
+  const key = (site: KnownPortalSiteJson): string => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+  const seen = new Set(target.map(key))
+  let added = 0
+  for (const site of found) {
+    const siteKey = key(site)
+    if (seen.has(siteKey)) continue
+    seen.add(siteKey)
+    target.push({
+      x: Math.round(site.x),
+      y: Math.round(site.y),
+      z: Math.round(site.z),
+      widthAxis: site.widthAxis === 'z' ? 'z' : 'x',
+      ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+      ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+      ...(site.lastVerifiedAt === undefined ? {} : { lastVerifiedAt: site.lastVerifiedAt }),
+      ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+      ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+    })
+    added += 1
+  }
+  return added
+}
+
+function removeKnownPortalSiteDtos(target: KnownPortalSiteJson[], gone: KnownPortalSiteJson[]): number {
+  const keys = new Set(gone.map((site) => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`))
+  let removed = 0
+  for (let index = target.length - 1; index >= 0; index -= 1) {
+    const site = target[index]
+    if (site === undefined) continue
+    if (!keys.has(`${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`)) continue
     target.splice(index, 1)
     removed += 1
   }

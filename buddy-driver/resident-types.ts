@@ -100,6 +100,40 @@ export interface KnownResourceJson {
   lastSeenAt?: number
 }
 
+/**
+ * Issue #80: a durable, world-keyed record that a VERIFIED lit nether portal
+ * frame exists at these overworld coordinates. It is deliberately NOT a verdict:
+ * `portalVerified` stays a live server-truth projection re-observed after every
+ * generation/world change. This record only says "a verified portal exists at P"
+ * (CAN fact), so the resident can route back and re-verify instead of rebuilding
+ * a second frame after a death/respawn took it out of sensor range. The entry is
+ * dropped when the live re-check at the site finds nothing while the bot is
+ * there, and when the world epoch changes.
+ */
+export interface KnownPortalSiteJson {
+  /** frame origin cell (the layout's lowest corner) */
+  x: number
+  y: number
+  z: number
+  /** the axis the 4-wide side spans */
+  widthAxis: 'x' | 'z'
+  /** dimension the site was verified in; a coordinate is only valid there */
+  dimension?: string
+  /** world epoch the site was verified in; a reset invalidates the coordinate */
+  worldEpoch?: number
+  /** epoch ms the lit portal was last observed at this site */
+  lastVerifiedAt?: number
+  /**
+   * The frame edge cells the detector observed when it verified the portal. It
+   * is stored so the sensor can re-project the site as a grounded
+   * `PortalFrameSite` (route/geometry), never as a lit verdict: `portalVerified`
+   * is still re-read from live block truth.
+   */
+  frame?: Vec3Json[]
+  /** The interior cells the detector computed (live `nether_portal` at record time). */
+  interior?: Vec3Json[]
+}
+
 /** The two station kinds the resident remembers coordinates for. */
 export type StationKind = 'crafting_table' | 'furnace'
 
@@ -143,6 +177,14 @@ export interface ResidentWorldMemory {
   /** remembered coordinates of known resources (issue #43): ores and trees, so a
    * retrieval skill can navigate back when the resource is out of scan range */
   knownResources: KnownResourceJson[]
+  /**
+   * Issue #80: durable, world-keyed verified nether-portal sites. A CAN fact
+   * ("a verified portal exists at P"), never a verdict: it supplies a re-approach
+   * route only and is re-verified from live world truth on arrival. Survives
+   * generation reload/respawn; dropped on a failed live re-check at the site and
+   * on a world-epoch change.
+   */
+  knownPortalSites: KnownPortalSiteJson[]
   /** thin 2-block-wall / stuck memory; suppress repeat attempts */
   traversalFailures: TraversalFailure[]
   /** coordinate-level movement failure memory; survives generation recovery (#12) */
@@ -171,6 +213,7 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     mined: {},
     discoveredOres: [],
     knownResources: [],
+    knownPortalSites: [],
     traversalFailures: [],
     moveFailures: [],
     hazards: [],
@@ -186,6 +229,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.mined = memory.mined ?? {}
   memory.discoveredOres = Array.isArray(memory.discoveredOres) ? memory.discoveredOres : []
   memory.knownResources = Array.isArray(memory.knownResources) ? memory.knownResources : []
+  memory.knownPortalSites = Array.isArray(memory.knownPortalSites) ? memory.knownPortalSites : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
@@ -225,6 +269,10 @@ export interface WorldMemoryDelta {
   knownResources?: KnownResourceJson[]
   /** cells proven gone (mined/replaced); the host drops them from the durable store (#14) */
   removeKnownResources?: KnownResourceJson[]
+  /** verified portal sites to remember; the host merges them by origin (#80) */
+  knownPortalSites?: KnownPortalSiteJson[]
+  /** portal sites whose live re-check failed / epoch changed; the host drops them (#80) */
+  removeKnownPortalSites?: KnownPortalSiteJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   moveFailures?: MoveFailEntry[]
