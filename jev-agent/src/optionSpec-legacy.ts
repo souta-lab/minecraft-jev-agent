@@ -1699,9 +1699,47 @@ export function rowSatisfiesPredicate(row: QueuePrerequisiteRow, predicate: Pred
 }
 
 /**
- * Ledger rows whose initiation predicates consume `row`'s output. A row is
- * never its own dependent (a `place:furnace` row requires a held furnace as
- * input but IS the furnace producer).
+ * True when `row` is a producer that provably satisfies `predicate` with its OWN
+ * output, not merely as one arbitrary member of a resource class.
+ *
+ * This is the retirement-grade edge. `inventoryClassAtLeast` is deliberately
+ * excluded: a consumer that needs "any fuel" (or any log/stone) can be satisfied
+ * by any class member, so the consumer reaching `done` is NOT evidence that THIS
+ * producer's item was consumed or is no longer needed. Measured live
+ * (`run-mubobiq6-12onv`, m3-live `0c2f363`): a fresh `smelt:charcoal` row was
+ * retired as an orphan because three DONE `smelt:iron_ingot` rows carry the
+ * generic `inventoryClassAtLeast fuel` precondition that `charcoal` happens to
+ * match - even though those smelts burned `oak_planks`, the charcoal was never
+ * produced, and the M3 frontier still wanted it. The queue emptied and the body
+ * was left with `option=None` + flat moves while the ladder still reported
+ * `rung=charcoal`. Exact-item/station/tool edges keep the recorded
+ * `run-mub35qdr-1e1dh` retirement (`smelt:iron_ingot` <- done
+ * `craft:flint_and_steel` with `inventoryAtLeast iron_ingot`) working.
+ */
+function rowSatisfiesPredicateExactly(row: QueuePrerequisiteRow, predicate: Predicate): boolean {
+  const item = row.targetItem
+  if (typeof item !== 'string' || item.length === 0) return false
+  switch (predicate.kind) {
+    case 'inventoryAtLeast':
+      return rowProducesInventoryItem(row) && predicate.item === item
+    case 'oreKnown':
+      return row.kind === 'collect' && predicate.item === item
+    case 'stationKnown':
+      return row.kind === 'place' && predicate.station === item
+    case 'pickaxeRankAtLeast': {
+      const tool = PICKAXE_BY_RANK[predicate.rank]
+      return tool !== undefined && row.kind === 'craft' && item === tool
+    }
+    default:
+      return false
+  }
+}
+
+/**
+ * Ledger rows whose initiation predicates provably consume `row`'s own output
+ * (exact item / station / harvest tier - never a bare resource-class match). A
+ * row is never its own dependent (a `place:furnace` row requires a held furnace
+ * as input but IS the furnace producer).
  */
 export function dependentRows(
   row: QueuePrerequisiteRow,
@@ -1709,7 +1747,7 @@ export function dependentRows(
 ): QueuePrerequisiteRow[] {
   if (typeof row.targetItem !== 'string' || row.targetItem.length === 0) return []
   return ledger.filter(
-    (other) => other !== row && queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicate(row, predicate)),
+    (other) => other !== row && queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicateExactly(row, predicate)),
   )
 }
 
@@ -1731,8 +1769,10 @@ function keepRow(reason: string): OrphanPrerequisiteDecision {
  *
  * A row is retired ONLY when the durable ledger proves it is no longer work:
  *   - it has a target item;
- *   - at least one other row consumes that target (otherwise it is not a
- *     prerequisite and retiring it would drop live work);
+ *   - at least one other row provably consumes that target with its own output
+ *     (an EXACT item/station/tier edge - a bare resource-class match does not
+ *     count, see `dependentRows`), otherwise it is not a prerequisite and
+ *     retiring it would drop live work;
  *   - every consuming row is resolved (done/impossible), so no live row still
  *     requires the target.
  *

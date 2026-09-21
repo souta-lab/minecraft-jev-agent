@@ -219,6 +219,123 @@ addCase('(d) the station rows Mercury patches behind a needed active smelt are o
   }
 })
 
+addCase('(e) the live M3 shape: class-only fuel dependents do NOT retire a still-wanted smelt:charcoal', () => {
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const queue = new GoalQueue()
+  // The exact durable ledger measured live in run-mubobiq6-12onv (m3-live
+  // 0c2f363): three DONE `smelt:iron_ingot` rows whose only relation to charcoal
+  // is the generic `inventoryClassAtLeast fuel` precondition, plus the M3
+  // frontier's own `smelt 1 x charcoal` row. The smelts burned oak_planks, so a
+  // done consumer is NOT evidence that charcoal was consumed or is unwanted.
+  queue.restore({
+    counter: 87,
+    goals: [
+      row({ id: 'g62:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'done', haveCount: 1 }),
+      row({ id: 'g64:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'done', haveCount: 1 }),
+      row({ id: 'g69:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 3, status: 'done', haveCount: 3, core: true }),
+      row({ id: 'g87:smelt:charcoal', kind: 'smelt', targetItem: 'charcoal', requiredCount: 1, status: 'pending', core: true }),
+    ],
+    revision: 9,
+  })
+  const charcoal = queue.state.goals.find((goal) => goal.id === 'g87:smelt:charcoal')
+  const pass =
+    charcoal?.status === 'active' &&
+    marker(lines, PREREQ_RETIRED).length === 0 &&
+    queue.current?.id === 'g87:smelt:charcoal' &&
+    queue.current?.targetItem === 'charcoal' &&
+    queue.state.depth === 1
+  return {
+    pass,
+    detail: `charcoal=${charcoal?.status} current=${queue.current?.id ?? 'none'} depth=${queue.state.depth} retired=${marker(lines, PREREQ_RETIRED).length}`,
+  }
+})
+
+addCase('(f) a fresh charcoal plan survives retired class-only history (no accumulation cascade)', () => {
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const queue = new GoalQueue()
+  // The live ledger accumulated `impossible` charcoal rows whose detail grew
+  // dependents=3 -> 6: each retired charcoal row satisfied the NEXT row's own
+  // `inventoryClassAtLeast fuel` precondition, so the class edge manufactured
+  // fresh "dependents" forever. Neither a retired row nor a class match may feed
+  // the orphan proof.
+  queue.restore({
+    counter: 92,
+    goals: [
+      row({ id: 'g62:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'done', haveCount: 1 }),
+      row({ id: 'g64:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'done', haveCount: 1 }),
+      row({ id: 'g69:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 3, status: 'done', haveCount: 3, core: true }),
+      row({
+        id: 'g89:smelt:charcoal',
+        kind: 'smelt',
+        targetItem: 'charcoal',
+        requiredCount: 1,
+        status: 'impossible',
+        core: true,
+        detail: 'retired prerequisite: reason=all_dependents_resolved dependents=3',
+      }),
+      row({
+        id: 'g90:smelt:charcoal',
+        kind: 'smelt',
+        targetItem: 'charcoal',
+        requiredCount: 1,
+        status: 'impossible',
+        detail: 'retired prerequisite: reason=all_dependents_resolved dependents=4',
+      }),
+    ],
+    revision: 11,
+  })
+  const added = queue.applyPlan(
+    [{ kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1, core: true }],
+    'llm',
+    'replace',
+    { reason: 'queue_empty', onProtection: (line) => lines.push(`[onProtection] ${line}`) },
+  )
+  const fresh = added[0]
+  const pass =
+    added.length === 1 &&
+    fresh?.status === 'active' &&
+    fresh?.detail === null &&
+    queue.current?.id === fresh?.id &&
+    queue.current?.targetItem === 'charcoal' &&
+    queue.state.depth === 1 &&
+    marker(lines, PREREQ_RETIRED).length === 0
+  return {
+    pass,
+    detail: `added=${added.length} status=${fresh?.status} detail=${fresh?.detail ?? 'none'} current=${queue.current?.id ?? 'none'} depth=${queue.state.depth} retired=${marker(lines, PREREQ_RETIRED).length}`,
+  }
+})
+
+addCase('(g) an EXACT done consumer still retires (the class fix does not disable genuine cleanup)', () => {
+  const lines: string[] = []
+  setPrereqAuditSink((line) => lines.push(line))
+  const queue = new GoalQueue()
+  // `craft:flint_and_steel`'s `inventoryAtLeast iron_ingot` is an exact edge, so
+  // the recorded run-mub35qdr-1e1dh retirement must stay intact even though the
+  // iron smelt also carries a class fuel precondition.
+  queue.restore({
+    counter: 4,
+    goals: [
+      row({ id: 'g2:smelt:iron_ingot', kind: 'smelt', targetItem: 'iron_ingot', requiredCount: 1, status: 'active', protected: true, core: true }),
+      row({ id: 'g4:craft:flint_and_steel', kind: 'craft', targetItem: 'flint_and_steel', requiredCount: 1, status: 'done', haveCount: 1 }),
+      row({ id: 'g5:collect:obsidian', kind: 'collect', targetItem: 'obsidian', requiredCount: 10, status: 'pending', core: true }),
+    ],
+    revision: 3,
+  })
+  const smelt = queue.state.goals.find((goal) => goal.id === 'g2:smelt:iron_ingot')
+  const retired = marker(lines, PREREQ_RETIRED)
+  const pass =
+    smelt?.status === 'impossible' &&
+    smelt.detail?.includes('reason=all_dependents_resolved') === true &&
+    retired.some((line) => line.includes('id=g2:smelt:iron_ingot') && line.includes('dependents=1')) &&
+    queue.current?.id === 'g5:collect:obsidian'
+  return {
+    pass,
+    detail: `smelt=${smelt?.status}/${smelt?.detail ?? 'none'} current=${queue.current?.id ?? 'none'} retired=${retired.length}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('prerequisite orphan retirement / ordering\n')
 process.stdout.write('-'.repeat(72) + '\n')
