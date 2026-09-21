@@ -25,10 +25,58 @@ export function summarizeInventory(inv: Record<string, number>): { lostInventory
   return { lostInventory, itemsLost: Object.values(lostInventory).reduce((sum, count) => sum + count, 0) }
 }
 
-/** Snapshot the inventory a death is about to destroy. Call BEFORE tossing. (#34) */
+/**
+ * Snapshot the inventory a loss is about to destroy. Only valid when the caller
+ * truly runs BEFORE the loss (e.g. the operator `simdeath --hard` path, which
+ * captures before it tosses). Do NOT use this inside a Mineflayer `death`
+ * handler: the server has already dropped/cleared the player inventory by then,
+ * so the read is the post-loss set. Use `createPreLossInventoryTracker()` there.
+ * (#34)
+ */
 export function capturePreLossInventory(read: () => Record<string, number>): DeathTelemetry {
   const { lostInventory, itemsLost } = summarizeInventory(read())
   return { lostInventory, itemsLost, capturedBeforeDrop: true }
+}
+
+/**
+ * Rolling pre-loss inventory (#34). The server clears/drops a player's inventory
+ * as it dies and Mineflayer emits `death` from the `update_health` packet, so a
+ * read taken inside the death handler is already the post-loss (usually empty)
+ * set. The host therefore `observe()`s the live inventory while the bot is
+ * known alive and asks `captureAtDeath()` for the lost set when death fires.
+ *
+ * `capturedBeforeDrop` is only true when the returned map provably predates the
+ * drop: either it is a live observation, or the death-time read still contains
+ * items. A death-time read that is already empty cannot distinguish a genuinely
+ * empty bot from a cleared inventory, so it must not claim true.
+ */
+export interface PreLossInventoryTracker {
+  /** Record the live inventory while the bot is known alive (health > 0). */
+  observe(inv: Record<string, number>): void
+  /** Drop the observation on spawn/respawn so one life's items are never
+   * attributed to the next life's death. */
+  reset(): void
+  /** Telemetry for a death that has just been observed. */
+  captureAtDeath(read: () => Record<string, number>): DeathTelemetry
+}
+
+export function createPreLossInventoryTracker(): PreLossInventoryTracker {
+  let observed: { lostInventory: Record<string, number>; itemsLost: number } | null = null
+  return {
+    observe(inv) {
+      observed = summarizeInventory(inv)
+    },
+    reset() {
+      observed = null
+    },
+    captureAtDeath(read) {
+      if (observed !== null) {
+        return { lostInventory: { ...observed.lostInventory }, itemsLost: observed.itemsLost, capturedBeforeDrop: true }
+      }
+      const { lostInventory, itemsLost } = summarizeInventory(read())
+      return { lostInventory, itemsLost, capturedBeforeDrop: itemsLost > 0 }
+    },
+  }
 }
 
 /** Only a real death may touch the durable production hazard set (#26). */

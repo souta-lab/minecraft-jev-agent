@@ -3,6 +3,7 @@
 // no network, no file IO.
 import {
   capturePreLossInventory,
+  createPreLossInventoryTracker,
   parseRehearsalMode,
   partitionHazardsBySource,
   recordRehearsalHazard,
@@ -116,6 +117,54 @@ addCase('#34: post-toss snapshot would be wrong; capture-before proves non-empty
   return {
     pass: before.itemsLost === 8 && afterToss.itemsLost === 0 && before.lostInventory['raw_iron'] === 8,
     detail: `before=${before.itemsLost} afterToss=${afterToss.itemsLost}`,
+  }
+})
+
+// #34 regression (live bug): the production `death` handler read the bot
+// inventory after the server had dropped/cleared it, so the DEATH marker logged
+// `lostInventory={} itemsLost=0 capturedBeforeDrop=true` while the bot was
+// actually holding diamonds/armour. Reproduced offline: observe while alive,
+// then read the cleared inventory at death.
+addCase('#34: a cleared death-time read must not erase the last live inventory', () => {
+  const tracker = createPreLossInventoryTracker()
+  tracker.observe({ diamond: 3, diamond_sword: 1, diamond_pickaxe: 1, diamond_helmet: 1 })
+  const telemetry = tracker.captureAtDeath(() => ({}))
+  const lostNames = Object.keys(telemetry.lostInventory).sort()
+  return {
+    pass:
+      telemetry.capturedBeforeDrop &&
+      telemetry.itemsLost === 6 &&
+      lostNames.join(',') === 'diamond,diamond_helmet,diamond_pickaxe,diamond_sword',
+    detail: `capturedBeforeDrop=${telemetry.capturedBeforeDrop} itemsLost=${telemetry.itemsLost} lost=[${lostNames.join(',')}]`,
+  }
+})
+
+addCase('#34: capturedBeforeDrop is false when only an empty post-loss read is available', () => {
+  const tracker = createPreLossInventoryTracker()
+  const telemetry = tracker.captureAtDeath(() => ({}))
+  return {
+    pass: !telemetry.capturedBeforeDrop && telemetry.itemsLost === 0 && Object.keys(telemetry.lostInventory).length === 0,
+    detail: `capturedBeforeDrop=${telemetry.capturedBeforeDrop} itemsLost=${telemetry.itemsLost}`,
+  }
+})
+
+addCase('#34: a non-empty death-time read proves the snapshot predates the drop', () => {
+  const tracker = createPreLossInventoryTracker()
+  const telemetry = tracker.captureAtDeath(() => ({ raw_iron: 8 }))
+  return {
+    pass: telemetry.capturedBeforeDrop && telemetry.itemsLost === 8 && telemetry.lostInventory['raw_iron'] === 8,
+    detail: `capturedBeforeDrop=${telemetry.capturedBeforeDrop} itemsLost=${telemetry.itemsLost}`,
+  }
+})
+
+addCase('#34: reset drops the previous life so its items are not re-attributed', () => {
+  const tracker = createPreLossInventoryTracker()
+  tracker.observe({ diamond: 3 })
+  tracker.reset()
+  const telemetry = tracker.captureAtDeath(() => ({}))
+  return {
+    pass: !telemetry.capturedBeforeDrop && telemetry.itemsLost === 0 && Object.keys(telemetry.lostInventory).length === 0,
+    detail: `capturedBeforeDrop=${telemetry.capturedBeforeDrop} itemsLost=${telemetry.itemsLost}`,
   }
 })
 

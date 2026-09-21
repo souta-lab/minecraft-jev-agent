@@ -47,6 +47,7 @@ import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './reside
 import { normalizeStation, stationKey } from './station-memory.ts'
 import {
   capturePreLossInventory,
+  createPreLossInventoryTracker,
   partitionHazardsBySource,
   parseRehearsalMode,
   recordRehearsalHazard,
@@ -564,6 +565,9 @@ let pendingResetReason: string | null = null
 let lastDeathAt = 0
 let lastHealth: number | null = null
 let lastSeenDeathPosition: Vec3Json | null = null
+// #34: the last inventory observed while alive. A Mineflayer `death` read is
+// already post-drop, so the DEATH marker uses this instead of reading at death.
+const preLossInventory = createPreLossInventoryTracker()
 
 // #13/#49: one host-owned resource ledger per generation. The generation records
 // every listener/timer it owns; disposal removes exactly those and reports the
@@ -1289,7 +1293,8 @@ function handleBotDeath(b: Bot): void {
   const entity = b.entity
   const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
   const cause = inferDeathCause(b, pos, lastHealth)
-  const telemetry = capturePreLossInventory(() => inventorySummary(b))
+  // #34: capture from the last live observation; `b.inventory` is already cleared.
+  const telemetry = preLossInventory.captureAtDeath(() => inventorySummary(b))
   beginDeathRecovery(b, { cause, source: 'production', telemetry })
 }
 
@@ -1384,6 +1389,9 @@ function connect(): void {
     }
     const wasDeath = deathResetPending
     deathResetPending = false
+    // #34: a new life starts a new inventory; never attribute the previous
+    // life's items to the next death.
+    preLossInventory.reset()
     pendingResetReason = wasDeath ? 'death' : null
     const entity = created.entity
     const game = created.game as unknown as { dimension?: string; levelName?: string } | undefined
@@ -1416,7 +1424,12 @@ function connect(): void {
   })
 
   created.on('health', () => {
-    if (created.health > 0) lastHealth = created.health
+    if (created.health > 0) {
+      lastHealth = created.health
+      // #34: freshest pre-death observation, taken while the bot is still alive
+      // (the fatal update_health carries 0 and is skipped).
+      preLossInventory.observe(inventorySummary(created))
+    }
   })
 
   created.on('death', () => handleBotDeath(created))
@@ -1493,6 +1506,8 @@ setInterval(() => {
 
   lastStatus = status
   const truth = status.truth
+  // #34: keep the live-inventory observation fresh while the bot is alive.
+  if (truth.health !== null && truth.health > 0) preLossInventory.observe(truth.inventory)
   const action = status.currentAction
   if (action !== null && action.id !== lastActionId) {
     lastActionId = action.id
