@@ -137,6 +137,11 @@ function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | 
     if (outcome === undefined || outcome.actionId !== 'WAIT') break
     waitStreak += 1
   }
+  // A drained queue is the more informative moment: it must not be shadowed by the
+  // WAIT-streak branch, whose counter-shaped trigger is then silenced by the durable
+  // stall gate (measured live #359: reason=queue_empty arrived, waitStreak >= 3 turned
+  // it into wait_limit, the gate suppressed it, and the ladder menu answered instead).
+  if (request.reason === 'queue_empty') return 'no_candidate'
   if (waitStreak >= 3) return 'wait_limit'
   // A drained queue is exactly the moment the next WHAT is decided. Without this
   // the summon was answered only from the ladder's fixed rung menu, so goals the
