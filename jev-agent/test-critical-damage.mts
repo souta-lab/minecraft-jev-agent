@@ -45,6 +45,7 @@ import {
   criticalDamageRequiredLimit,
   formatCriticalDamageEvidence,
   formatCriticalDamageExhausted,
+  sampleHealthTransition,
 } from './src/criticalDamage.ts'
 import {
   ANIMAL_HABITAT_SEA_LEVEL,
@@ -79,6 +80,24 @@ function check(label: string, ok: boolean, detail: string): void {
 }
 
 const NOW = 1_700_000_000_000
+
+{
+  const seed = sampleHealthTransition(null, 20)
+  const unchanged = sampleHealthTransition(20, 20)
+  const damage = sampleHealthTransition(20, 5)
+  const recovery = sampleHealthTransition(5, 20)
+  check(
+    '(sample) health fallback observes only real transitions',
+    !seed.observe &&
+      !unchanged.observe &&
+      damage.observe &&
+      damage.previousHealth === 20 &&
+      damage.delta === -15 &&
+      recovery.observe &&
+      recovery.delta === 15,
+    `seed=${JSON.stringify(seed)} unchanged=${JSON.stringify(unchanged)} damage=${JSON.stringify(damage)} recovery=${JSON.stringify(recovery)}`,
+  )
+}
 
 // ---------------------------------------------------------------------------
 // (a) the measured shape: count -> collapse the offer -> escalate ONCE typed

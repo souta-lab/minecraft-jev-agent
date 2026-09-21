@@ -100,6 +100,28 @@ export interface CriticalDamageObservation {
   /** Mineflayer-attributed attacker name, or null for environmental damage */
   sourceName?: string | null
 }
+/** Pure transition used by the controller's per-tick health fallback. */
+export interface HealthSampleTransition {
+  observe: boolean
+  previousHealth: number | null
+  delta: number
+}
+
+/**
+ * Scheduler events are the preferred damage source, but a generation can miss
+ * an `hp_changed` delivery during a hot-reload/respawn boundary. A direct
+ * sample must therefore distinguish the initial seed, unchanged health, and a
+ * real transition without inventing damage.
+ */
+export function sampleHealthTransition(previousHealth: number | null, health: number): HealthSampleTransition {
+  if (!Number.isFinite(health)) return { observe: false, previousHealth, delta: 0 }
+  if (previousHealth === null || !Number.isFinite(previousHealth)) {
+    return { observe: false, previousHealth: null, delta: 0 }
+  }
+  if (health === previousHealth) return { observe: false, previousHealth, delta: 0 }
+  return { observe: true, previousHealth, delta: health - previousHealth }
+}
+
 
 /**
  * The exact code-owned evidence block handed to the candidate layer and logged.

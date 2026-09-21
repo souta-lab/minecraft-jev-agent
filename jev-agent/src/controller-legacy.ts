@@ -172,6 +172,7 @@ import {
   formatCriticalDamageEvidence,
   formatCriticalDamageExhausted,
   resolveCriticalDamageLimit,
+  sampleHealthTransition,
 } from './criticalDamage.ts'
 import { computeShadowMetrics } from './shadowMetrics.ts'
 
@@ -2279,6 +2280,7 @@ export class JevController {
       this.observeCapabilityGap()
       this.observeThreat(trigger, detail)
       this.observeCriticalDamage(trigger, detail)
+      this.sampleHealthFallback()
 
       if (this.bot.entity === undefined) return
 
@@ -5942,6 +5944,28 @@ export class JevController {
       `CRITICAL_DAMAGE_EXHAUSTED goal=${goalKey} health=${evidence.health} food=${evidence.food ?? 'unknown'} damage=${evidence.consecutiveDamage}/${evidence.limit} source=${evidence.sourceName ?? 'environment'}`,
     )
   }
+  /**
+   * Health events are authoritative when delivered. A direct per-tick sample is
+   * the fail-safe for hot-reload/respawn windows where Mineflayer changes
+   * `bot.health` but the scheduler event is not observed by this generation.
+   * The pure transition helper prevents an initial seed or an unchanged sample
+   * from inventing damage; only a real delta enters the existing tracker.
+   */
+  private sampleHealthFallback(): void {
+    const health = this.bot.health
+    const transition = sampleHealthTransition(this.lastObservedHealth, health)
+    if (this.lastObservedHealth === null && Number.isFinite(health)) {
+      this.lastObservedHealth = health
+    }
+    if (!transition.observe) return
+    this.observeCriticalDamage('hp_changed', {
+      health,
+      previousHealth: transition.previousHealth,
+      food: this.bot.food,
+      delta: transition.delta,
+    })
+  }
+
 
   /**
    * M2 capability trap observable. The deterministic predicate decides; this
