@@ -596,6 +596,33 @@ function generateRawCandidates(
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
 
   switch (goalKind) {
+    case 'goto': {
+      const target = current?.targetPosition ?? null
+      if (target !== null) {
+        candidates.push({
+          id: `GOTO:${blockId('p', target)}`,
+          kind: 'MOVE',
+          label: moveLabel(target, 'return to the code-grounded target', state.self.position),
+          targetName: current?.targetPredicate ?? null,
+          target,
+          targetEntityId: null,
+          itemName: null,
+          requiresTool: false,
+          toolName: null,
+          inReach: distance(target, state.self.position) <= options.reach,
+          hasStandableAdjacent: true,
+          meta: {
+            tick: state.tick,
+            x: target.x,
+            y: target.y,
+            z: target.z,
+            groundedGoto: true,
+            ...(current?.targetPredicate === undefined ? {} : { targetPredicate: current.targetPredicate ?? '' }),
+          },
+        })
+      }
+      break
+    }
     case 'craft': {
       const craft = craftCandidates(state, options, focusItem)
       candidates.push(...craft.candidates)

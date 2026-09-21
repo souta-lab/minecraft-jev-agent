@@ -39,6 +39,7 @@
     "mercury-count-budget-test": "bun test ./test-mercury-count-budget.mts",
     "mercury-portal-capabilities-test": "bun test ./test-mercury-portal-capabilities.mts",
     "mercury-local-transport-test": "bun test ./test-mercury-local-transport.mts",
+    "post-death-context-test": "bun test ./test-post-death-context.mts",
     "advisor-cache-test": "bun test ./test-advisor-cache.mts",
     "plan-tail-test": "bun test ./test-plan-tail.mts",
     "m2-snapshot-test": "bun test ./test-m2-snapshot.mts",

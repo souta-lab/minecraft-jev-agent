@@ -162,6 +162,61 @@ assert.equal(postDeathPlanner.provider, 'deterministic')
 assert.equal(postDeathCalls, 1, 'post-death recovery must be consumed once; later queue_empty stays deterministic')
 assert.equal(externalPlannerKeyLookups, 0, 'post-death local Mercury must not touch the TypeSafe planner key')
 
+let staleCurrent = true
+let releaseTransport!: () => void
+let markTransportStarted!: () => void
+const transportStarted = new Promise<void>((resolve) => {
+  markTransportStarted = () => resolve()
+})
+const transportRelease = new Promise<void>((resolve) => {
+  releaseTransport = () => resolve()
+})
+const staleMercury = new MercurySystem2({
+  model: 'qwen3.5-9b-local',
+  summarize,
+  log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
+  callsPath: join(dir, 'stale-mercury-calls.jsonl'),
+  cachePath: join(dir, 'stale-mercury-cache.json'),
+  localEndpoint: null,
+  retries: 0,
+  generationId: 'gen-old',
+  isCurrent: () => staleCurrent,
+  resolveKey: () => ({ key: 'fixture-only', origin: 'fixture' }),
+  transport: async () => {
+    markTransportStarted()
+    await transportRelease
+    return {
+      toolCalls: [{ input: { op: 'replace', goals: [{ kind: 'collect', item: 'raw_iron', count: 1 }], reason: 'late old-generation answer' } }],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }
+  },
+})
+const stalePlanner = new PlannerBrain({
+  bot,
+  world: emptyWorldMemory(),
+  log: (event, detail) => logs.push({ event, detail: detail ?? {} }),
+  cachePath: join(dir, 'stale-planner-cache.json'),
+  mode: 'local-mercury',
+  mercury: staleMercury,
+  maxAttempts: 1,
+})
+const staleLogStart = logs.length
+const stalePlanPromise = stalePlanner.plan({ ...stalled, tick: 5, detail: 'old generation in flight' })
+await transportStarted
+staleCurrent = false
+releaseTransport()
+const stalePlan = await stalePlanPromise
+const staleLogs = logs.slice(staleLogStart)
+assert.equal(stalePlan.op, 'continue')
+assert.equal(stalePlan.goals.length, 0, 'stale Mercury result must not carry goals into the old queue')
+assert.equal(staleLogs.some((entry) => entry.event === 'MERCURY_STALE_DISCARD' && entry.detail.generationId === 'gen-old'), true)
+assert.equal(staleLogs.some((entry) => entry.event === 'SYSTEM2_STALE_DISCARD'), true)
+assert.equal(
+  staleLogs.some((entry) => entry.event === 'SYSTEM2_AUTHORITY_DECISION'),
+  false,
+  'stale answer must not be published as an authority decision',
+)
+
 assert.throws(
   () => new PlannerBrain({
     bot,
