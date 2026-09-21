@@ -359,6 +359,7 @@ export class PlannerBrain implements System2Brain {
       this.lastLoggedPlanReason = reasonValue
       this.log('SYSTEM2_PLAN_REQUEST_REASON', { reason: reasonValue })
     }
+    const drainedQueueConsult = String((request as { reason?: unknown }).reason ?? '') === 'queue_empty'
     let mercuryTrigger = mercuryTriggerFor(request)
     if (this.mercury !== undefined && mercuryTrigger === 'no_candidate') {
       // A drained queue is a fresh planning moment, not a repeated stall. Keying it
@@ -402,23 +403,39 @@ export class PlannerBrain implements System2Brain {
         reason: request.reason,
       })
       const repair = await this.mercury.tryRepair(request, mercuryTrigger)
-      if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
-      // #359: keep the semantic layer's intent so a drained queue continues the
-      // thread instead of immediately re-drawing the ladder menu. Bounded by TTL
-      // and reuse count so a stale plan cannot loop.
-      this.lastMercuryPlan = repair.plan
-      this.lastMercuryPlanAtMs = Date.now()
-      this.lastMercuryPlanUses = 0
-      this.log('SYSTEM2_AUTHORITY_DECISION', {
-        provider: this.provider,
-        model: this.authorityModel,
-        source: this.provider,
-        trigger: mercuryTrigger,
-        op: repair.op,
-        strategy: repair.strategy,
-        goals: repair.goals.map((goal) => goal.description),
-      })
-      return repair.plan
+      if (repair === null) {
+        // A drained queue is a ROUTINE planning moment, not a stall: when the semantic
+        // layer cannot answer, fall back to the grounded option path (code still owns
+        // CAN/TRUE/SAFE/DONE) instead of terminating the resident. Live evidence: in the
+        // Nether every empty queue produced
+        //   MERCURY_SCHEMA_REJECT ... trigger=no_candidate -> MERCURY_ATTEMPT 3/3
+        //   -> MODEL_UNAVAILABLE context=mercury:no_candidate -> FATAL -> terminate-resident
+        // i.e. the queue-empty consultation itself became a crash loop. Genuine stall
+        // triggers keep the fail-loud contract below.
+        if (drainedQueueConsult) {
+          this.log('MERCURY_DEFERRED', { reason: 'queue_empty', trigger: mercuryTrigger })
+          mercuryTrigger = null
+        } else {
+          return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+        }
+      } else {
+        // #359: keep the semantic layer's intent so a drained queue continues the
+        // thread instead of immediately re-drawing the ladder menu. Bounded by TTL
+        // and reuse count so a stale plan cannot loop.
+        this.lastMercuryPlan = repair.plan
+        this.lastMercuryPlanAtMs = Date.now()
+        this.lastMercuryPlanUses = 0
+        this.log('SYSTEM2_AUTHORITY_DECISION', {
+          provider: this.provider,
+          model: this.authorityModel,
+          source: this.provider,
+          trigger: mercuryTrigger,
+          op: repair.op,
+          strategy: repair.strategy,
+          goals: repair.goals.map((goal) => goal.description),
+        })
+        return repair.plan
+      }
     }
     // #359: a drained queue right after a semantic proposal continues that proposal
     // (up to the TTL and reuse bound) rather than replacing the thread with a fresh
