@@ -1913,6 +1913,8 @@ function advisorReasonFor(reason: PlannerReason, waitStreak: number): AdvisorRea
 export class PlannerBrain implements System2Brain {
   readonly model: string
   private readonly bot: Bot
+  /** Live world-truth refresh (dimension / portal verdict) injected by the host. */
+  private readonly refreshLiveFacts?: () => void
   private readonly world: ResidentWorldMemory
   private readonly log: (event: string, detail?: Record<string, unknown>) => void
   private readonly cachePath: string
@@ -1943,6 +1945,7 @@ export class PlannerBrain implements System2Brain {
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
+    this.refreshLiveFacts = options.refreshLiveFacts
     this.world = options.world
     this.log = options.log
     this.cachePath = options.cachePath
@@ -1973,6 +1976,16 @@ export class PlannerBrain implements System2Brain {
 
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const started = Date.now()
+    // Refresh the live world facts BEFORE the rung evaluation and the plan build.
+    // This planner declares `refreshLiveFacts` but never called it (the newer
+    // PlannerBrain does), so `this.world.dimension` / `this.world.portalVerified`
+    // stayed at their pre-transfer values. Live (M3 hand-off): the body stood in
+    // the Nether, the world key was minecraft:the_nether and the plan already
+    // carried the blaze/pearl goals, yet the `nether_portal` rung was still
+    // evaluated as unsatisfied, the frontier stayed on rung 13 and every re-plan
+    // re-issued the light/entry row, so the bot re-ignited an already-lit portal
+    // thousands of times instead of starting the M3 goals.
+    this.refreshLiveFacts?.()
     const counts = inventoryCounts(this.bot)
     this.currentCounts = counts
     this.currentPortalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
