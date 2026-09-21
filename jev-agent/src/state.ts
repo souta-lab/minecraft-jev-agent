@@ -462,6 +462,14 @@ export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_S
  */
 export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> = {
   obsidian: ['obsidian'],
+  // M2 needs `flint` for flint_and_steel, and its only block source is gravel.
+  // Without this entry `collect flint (from gravel)` had no scanned source at
+  // all, so the generator produced `presented=2 productive=0`
+  // (CANDIDATE_STARVATION) while the body wandered and dug exploratory DESCEND
+  // shafts — the live "tunnelling for nothing" stall. Mining gravel only *may*
+  // drop flint, which is fine: the route exists, and pickup/repeat stay with the
+  // existing machinery.
+  flint: ['gravel'],
 }
 
 /**
