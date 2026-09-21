@@ -556,23 +556,21 @@ export function entryCandidates(
         kind: 'ENTER_PORTAL',
         label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
         targetName: NETHER_PORTAL,
-        // The approach is the locomotion target; the interior cell is where the
-        // body must end up and is carried explicitly so the executor walks in.
-        target: entry.approachCell,
+        // The interior cell itself is the locomotion target: the generic MOVE
+        // machinery walks the body in (standing in a portal block is the world
+        // mechanic that transfers). ENTER_PORTAL carries no bespoke approach.
+        target: entry.enterCell,
         targetEntityId: null,
         itemName: null,
         requiresTool: false,
         toolName: null,
-        inReach: distance(entry.approachCell, state.self.eyePosition) <= options.reach,
+        inReach: distance(entry.enterCell, state.self.eyePosition) <= options.reach,
         hasStandableAdjacent: true,
         meta: {
           tick: state.tick,
           enterX: entry.enterCell.x,
           enterY: entry.enterCell.y,
           enterZ: entry.enterCell.z,
-          approachX: entry.approachCell.x,
-          approachY: entry.approachCell.y,
-          approachZ: entry.approachCell.z,
           dimension: entry.dimension,
           portalCells: serializePortalCells(entry.portalCells),
         },

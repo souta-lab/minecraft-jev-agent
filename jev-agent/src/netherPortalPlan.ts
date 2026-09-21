@@ -839,15 +839,18 @@ export function formatPortalLit(position: PortalBlockPosition, dimension: string
  */
 export type PortalEntryRefusalReason = 'portal_not_lit' | 'no_safe_approach' | 'already_in_dimension'
 
-/** A grounded entry: the stand to walk from and the interior cell to occupy. */
+/**
+ * A grounded entry: the interior cell the body must occupy. There is deliberately
+ * no bespoke approach/stand cell here: the walk INTO that cell is the ordinary
+ * generic locomotion move every other destination uses, so this layer owns only
+ * which interior cell is a valid entry (world truth), never how to reach it.
+ */
 export interface PortalEntryCandidate {
   readonly id: string
   /** the 2x3 interior cells that must all currently be `nether_portal` */
   readonly portalCells: PortalBlockPosition[]
-  /** the interior cell the bot must occupy to trigger the server transfer */
+  /** the standable interior cell the bot must occupy to trigger the transfer */
   readonly enterCell: PortalBlockPosition
-  /** a passable, supported stand beside the portal the bot walks from */
-  readonly approachCell: PortalBlockPosition
   readonly dimension: string
   readonly line: string
 }
@@ -856,18 +859,17 @@ export type PortalEntryPlan =
   | { readonly ok: true; readonly candidate: PortalEntryCandidate }
   | { readonly ok: false; readonly refused: true; readonly reason: PortalEntryRefusalReason; readonly line: string }
 
-/** Read-only world probe the safe-approach search needs. */
-export interface PortalStandProbe {
-  passable(x: number, y: number, z: number): boolean
-  solidSupport(x: number, y: number, z: number): boolean
-}
-
 export interface PortalEntryInput {
   readonly site: PortalFrameSite
   readonly self: PortalBlockPosition
   readonly blockAt: PortalBlockLookup
-  readonly probe: PortalStandProbe
-  readonly reach?: number
+  /**
+   * The GENERIC locomotion standability predicate (feet + head passable, block
+   * below solid) applied to a candidate interior cell. Supplied by the caller
+   * from the same rule the terrain sensor and MOVE guard use, so the entry
+   * cannot drift into its own passability/support geometry.
+   */
+  readonly isStandable: (cell: PortalBlockPosition) => boolean
   readonly fromDimension?: string
   readonly dimension?: string
 }
@@ -889,12 +891,17 @@ export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: s
  *   * a portal whose 2x3 interior is not fully `nether_portal` is refused with
  *     `PRECONDITION_MISSING portal=lit` - the bot must never walk at a frame
  *     that is not actually lit;
- *   * a lit portal with no passable, supported, in-reach stand beside an
- *     interior cell is refused with `PRECONDITION_MISSING approach=safe_stand`;
+ *   * a lit portal with no interior cell a 1.8-tall body can stand in (both body
+ *     rows `nether_portal`, solid support below, proven by the generic
+ *     standability rule) is refused with
+ *     `PRECONDITION_MISSING approach=safe_stand`; the body cannot occupy a cell
+ *     it cannot stand in, so no entry is mechanically feasible;
  *   * a bot already in the destination dimension is refused as
  *     `already_in_dimension` (nothing to transfer).
- * Only then is an entry candidate emitted. Geometry only: this never chooses
- * WHEN to enter and never ranks one portal against another.
+ * Only then is an entry candidate emitted. Geometry/precondition only: this
+ * never chooses WHEN to enter, never ranks one portal against another, and never
+ * plans the walk (the executor uses the ordinary generic locomotion move to
+ * `enterCell`; standing in a portal block is the world mechanic that transfers).
  */
 export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
   const dimension = input.dimension ?? NETHER
@@ -919,21 +926,17 @@ export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
     }
   }
 
-  const reach = input.reach ?? DEFAULT_PORTAL_ENTRY_REACH
-  const approaches: PortalBlockPosition[] = []
-  for (const cell of portalCells) {
-    // The bot must stand beside the portal at the same level (or one below/above)
-    // and then walk horizontally into the interior cell.
-    for (const offset of PORTAL_ENTRY_STAND_OFFSETS) {
-      for (const dy of PORTAL_ENTRY_STAND_DY) {
-        const stand = { x: cell.x + offset.x, y: cell.y + dy, z: cell.z + offset.z }
-        if (!isSafeEntryStand(stand, input.probe)) continue
-        if (entryFaceDistance(stand, cell) > reach) continue
-        approaches.push(stand)
-      }
-    }
-  }
-  if (approaches.length === 0) {
+  // The 1.8-tall body occupies two rows: both must be portal blocks, and the
+  // generic locomotion layer must prove the feet cell standable. The lowest
+  // interior row qualifies (its block below is the frame's solid bottom); a
+  // higher row does not, because the block below it is itself portal, not
+  // support. Getting INTO that cell may need one step up from the ground in
+  // front of the frame - that is the generic mover's job, not this layer's.
+  const entryCells = portalCells.filter(
+    (cell) =>
+      input.blockAt({ x: cell.x, y: cell.y + 1, z: cell.z }) === NETHER_PORTAL && input.isStandable(cell),
+  )
+  if (entryCells.length === 0) {
     return {
       ok: false,
       refused: true,
@@ -941,19 +944,16 @@ export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
       line: `${PRECONDITION_MISSING} approach=safe_stand`,
     }
   }
-  approaches.sort((a, b) => {
-    const da = standDistance(a, input.self)
-    const db = standDistance(b, input.self)
+  entryCells.sort((a, b) => {
+    const da = entryDistance(a, input.self)
+    const db = entryDistance(b, input.self)
     if (da !== db) return da - db
     if (a.y !== b.y) return a.y - b.y
     if (a.x !== b.x) return a.x - b.x
     return a.z - b.z
   })
-  // Prefer a stand at the portal floor level so the final step is horizontal.
-  const enterCell = layout.lightPosition
-  const sameLevel = approaches.filter((stand) => stand.y === enterCell.y)
-  const approachCell = (sameLevel.length > 0 ? sameLevel : approaches)[0]
-  if (approachCell === undefined) {
+  const enterCell = entryCells[0]
+  if (enterCell === undefined) {
     return {
       ok: false,
       refused: true,
@@ -967,48 +967,14 @@ export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
       id: `ENTER:${formatPos(enterCell)}`,
       portalCells: [...portalCells],
       enterCell,
-      approachCell,
       dimension,
       line: formatPortalEntered(enterCell, dimension),
     },
   }
 }
 
-/** Bounded interaction reach for the entry stand search (the executor's reach). */
-export const DEFAULT_PORTAL_ENTRY_REACH = 4.5
-
-/** The horizontal offsets the entry-stand search examines around each interior cell. */
-const PORTAL_ENTRY_STAND_OFFSETS: readonly PortalBlockPosition[] = [
-  { x: 1, y: 0, z: 0 },
-  { x: -1, y: 0, z: 0 },
-  { x: 0, y: 0, z: 1 },
-  { x: 0, y: 0, z: -1 },
-]
-
-/** Feet levels (relative to the interior cell) a valid entry stand may occupy. */
-const PORTAL_ENTRY_STAND_DY: readonly number[] = [0, -1, 1]
-
-function isSafeEntryStand(stand: PortalBlockPosition, probe: PortalStandProbe): boolean {
-  return (
-    probe.passable(stand.x, stand.y, stand.z) &&
-    probe.passable(stand.x, stand.y + 1, stand.z) &&
-    probe.solidSupport(stand.x, stand.y - 1, stand.z)
-  )
-}
-
-function standDistance(stand: PortalBlockPosition, self: PortalBlockPosition): number {
-  return Math.hypot(stand.x + 0.5 - self.x, stand.y - self.y, stand.z + 0.5 - self.z)
-}
-
-/** Eye-AABB horizontal distance from a stand to the interior cell's face. */
-function entryFaceDistance(stand: PortalBlockPosition, cell: PortalBlockPosition): number {
-  const eyeX = stand.x + 0.5
-  const eyeY = stand.y + 1.62
-  const eyeZ = stand.z + 0.5
-  const x = Math.max(cell.x, Math.min(eyeX, cell.x + 1))
-  const y = Math.max(cell.y, Math.min(eyeY, cell.y + 1))
-  const z = Math.max(cell.z, Math.min(eyeZ, cell.z + 1))
-  return Math.hypot(eyeX - x, eyeY - y, eyeZ - z)
+function entryDistance(cell: PortalBlockPosition, self: PortalBlockPosition): number {
+  return Math.hypot(cell.x + 0.5 - self.x, cell.y - self.y, cell.z + 0.5 - self.z)
 }
 
 // ---------------------------------------------------------------------------

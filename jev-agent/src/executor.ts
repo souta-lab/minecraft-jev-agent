@@ -4587,17 +4587,17 @@ export class Executor {
     signal: AbortSignal,
     startedAt: number,
   ): Promise<ExecutionResult> {
-    const approach = candidate.target
-    if (approach === null) throw new ExecutorError('target_gone', 'ENTER_PORTAL candidate has no approach cell')
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('target_gone', 'ENTER_PORTAL candidate has no entry cell')
     const expectedCells = parsePortalCells(readMetaString(candidate, 'portalCells') ?? '')
     if (expectedCells.length === 0) {
       throw new ExecutorError('place_error', 'ENTER_PORTAL candidate carries no portal cells')
     }
     const dimension = readMetaString(candidate, 'dimension') ?? NETHER
     const enterCell = {
-      x: readMetaNumber(candidate, 'enterX', approach.x),
-      y: readMetaNumber(candidate, 'enterY', approach.y),
-      z: readMetaNumber(candidate, 'enterZ', approach.z),
+      x: readMetaNumber(candidate, 'enterX', target.x),
+      y: readMetaNumber(candidate, 'enterY', target.y),
+      z: readMetaNumber(candidate, 'enterZ', target.z),
     }
 
     // Hard world truth at entry time: the interior must still be nether_portal.
@@ -4608,52 +4608,61 @@ export class Executor {
       return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
     }
 
-    this.setPhase(candidate, epoch, 'entering')
     const timeoutMs = this.options.portalEnterTimeoutMs ?? PORTAL_ENTER_TIMEOUT_MS
-    // The approach is a real, supported stand; path there first so the final
-    // step into the portal is a short direct walk. A transfer that happens
-    // during the approach is already the postcondition, so it is not an error.
-    if (this.distanceToFeet(approach) > 1.5) {
-      this.setPhase(candidate, epoch, 'pathing')
-      try {
-        await this.pathTo(approach, epoch, signal, 'GoalBlock', { requireLevel: true })
-      } catch (error) {
+    // The body gets in by the SAME generic locomotion move every other MOVE uses:
+    // `pathTo` with an exact `GoalBlock` (stock pathfinder first, then the
+    // planned control-walk fallback) to the standable interior cell. There is no
+    // bespoke approach cell and no direct-bearing walk; the one-block step up
+    // onto the frame floor is an ordinary climb the generic mover already
+    // handles. The earlier `GoalNear(...,1)` retry degenerated into a straight
+    // press because the body already sat within one block of the interior while
+    // one row below it - that is exactly the pacing loop this replaces. The only
+    // entry-specific facts are the live lit check above and the dimension
+    // postcondition below; standing inside a portal block is a world mechanic,
+    // not a skill.
+    this.setPhase(candidate, epoch, 'pathing')
+    // Abort the generic path the moment the server transfers us, so no fallback
+    // keeps steering a body that is already in the other dimension.
+    const transferSignal = new AbortController()
+    const onCallerAbort = (): void => transferSignal.abort()
+    if (signal.aborted) transferSignal.abort()
+    signal.addEventListener('abort', onCallerAbort, { once: true })
+    const watchingTransfer = (async (): Promise<void> => {
+      while (!transferSignal.signal.aborted) {
         if (this.dimensionMatches(dimension)) {
-          return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+          transferSignal.abort()
+          return
         }
-        throw error
+        try {
+          await delay(50, transferSignal.signal)
+        } catch {
+          return
+        }
       }
-      this.ensureOwned(epoch, signal)
+    })()
+    try {
+      await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
+    } catch (error) {
+      // A transfer during the path is already the postcondition; anything else
+      // (including a caller abort) is a real failure.
+      if (!this.dimensionMatches(dimension)) throw error
+    } finally {
+      transferSignal.abort()
+      signal.removeEventListener('abort', onCallerAbort)
+      await watchingTransfer
     }
-
-    this.setPhase(candidate, epoch, 'entering')
-    let transferred = await this.walkByControls(enterCell, epoch, signal, {
-      bearingTarget: { x: enterCell.x, z: enterCell.z },
-      directBearing: true,
-      budgetMs: timeoutMs,
-      arrivedAt: () => this.dimensionMatches(dimension),
-    })
-    if (!transferred && !this.dimensionMatches(dimension)) {
-      // A straight bearing cannot climb a solid frame edge. Live (M2 hand-off):
-      // the body pressed forward at (26.3, 66, 8.7) against the obsidian bottom
-      // edge of the frame while the interior stood one block above at (26,67,9),
-      // jumping in place without ever entering, so the transfer timed out. The
-      // planned walk owns the hop recovery (free/pinned hop recipe), so retry
-      // through it before failing the entry.
-      this.logger.info(
-        'agent',
-        `PORTAL_ENTRY_RETRY planned enterCell=${enterCell.x},${enterCell.y},${enterCell.z}`,
-        { actionId: candidate.id, target: enterCell },
-      )
-      transferred = await this.walkByControls(enterCell, epoch, signal, {
-        anchorIsGoal: true,
-        anchor: enterCell,
-        range: 0,
-        budgetMs: timeoutMs,
-        arrivedAt: () => this.dimensionMatches(dimension),
-      })
+    this.ensureOwned(epoch, signal)
+    if (!this.dimensionMatches(dimension)) {
+      // Standing in the lit portal block is the transfer trigger; wait out the
+      // server-side portal delay under a bounded deadline.
+      this.setPhase(candidate, epoch, 'entering')
+      const deadline = Date.now() + timeoutMs
+      while (!this.dimensionMatches(dimension) && Date.now() < deadline) {
+        await delay(100, signal)
+        this.ensureOwned(epoch, signal)
+      }
     }
-    if (!transferred || !this.dimensionMatches(dimension)) {
+    if (!this.dimensionMatches(dimension)) {
       throw new ExecutorError(
         'verify_failed',
         `dimension did not become ${dimension} within ${timeoutMs}ms of entering the portal`,

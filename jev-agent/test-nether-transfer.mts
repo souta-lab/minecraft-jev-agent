@@ -53,7 +53,9 @@ import type { CandidateOptions } from './src/candidates.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import { Executor } from './src/executor.ts'
-import { defaultExecutorOptions } from './src/executor.ts'
+import { classifyMoveArrival, defaultExecutorOptions } from './src/executor.ts'
+import { guardCandidate } from './src/policy.ts'
+import type { Candidate } from './src/candidates.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 
 const require = createRequire(import.meta.url)
@@ -69,7 +71,10 @@ const ORIGIN: Vec3Json = { x: 10, y: 64, z: 0 }
 const WIDTH_AXIS = 'x' as const
 const LAYOUT = portalFrameLayout(ORIGIN, WIDTH_AXIS)
 const ENTER_CELL = LAYOUT.lightPosition
-const APPROACH: Vec3Json = { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 1 }
+// The live geometry: the ground in front of the frame is ONE ROW BELOW the portal
+// floor (the frame's solid bottom row is the step up), so the entry is a generic
+// one-block climb into the interior cell.
+const APPROACH: Vec3Json = { x: ENTER_CELL.x, y: ENTER_CELL.y - 1, z: ENTER_CELL.z - 1 }
 const key = (p: Vec3Json): string => `${p.x},${p.y},${p.z}`
 
 // ---------------------------------------------------------------------------
@@ -124,7 +129,7 @@ const key = (p: Vec3Json): string => `${p.x},${p.y},${p.z}`
 }
 
 // ---------------------------------------------------------------------------
-// (3) planPortalEntry: lit + safe-approach preconditions and typed refusals
+// (3) planPortalEntry: lit + standable-entry preconditions and typed refusals
 // ---------------------------------------------------------------------------
 function litBlockAt(site: PortalFrameSite, lit: boolean) {
   const interior = new Set(portalFrameLayout(site.origin, site.widthAxis).interior.map(key))
@@ -132,17 +137,17 @@ function litBlockAt(site: PortalFrameSite, lit: boolean) {
 }
 
 const SITE: PortalFrameSite = { origin: ORIGIN, widthAxis: WIDTH_AXIS, safe: true, reachable: true, existingFrame: LAYOUT.frame }
-/** Every cell has solid support and clear feet/head: a fully walkable approach. */
-const OPEN_PROBE = { passable: () => true, solidSupport: () => true }
-/** Nothing is passable: no stand exists beside the portal. */
-const BLOCKED_PROBE = { passable: () => false, solidSupport: () => false }
+/** The generic locomotion rule proves every cell standable (feet+head clear, support below). */
+const STANDABLE = (): boolean => true
+/** Nothing is standable: no interior cell the body can occupy. */
+const NOT_STANDABLE = (): boolean => false
 
 {
   const notLit = planPortalEntry({
     site: SITE,
     self: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 2 },
     blockAt: litBlockAt(SITE, false),
-    probe: OPEN_PROBE,
+    isStandable: STANDABLE,
     fromDimension: OVERWORLD,
     dimension: NETHER,
   })
@@ -150,7 +155,7 @@ const BLOCKED_PROBE = { passable: () => false, solidSupport: () => false }
     site: SITE,
     self: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 2 },
     blockAt: litBlockAt(SITE, true),
-    probe: BLOCKED_PROBE,
+    isStandable: NOT_STANDABLE,
     fromDimension: OVERWORLD,
     dimension: NETHER,
   })
@@ -158,7 +163,7 @@ const BLOCKED_PROBE = { passable: () => false, solidSupport: () => false }
     site: SITE,
     self: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 2 },
     blockAt: litBlockAt(SITE, true),
-    probe: OPEN_PROBE,
+    isStandable: STANDABLE,
     fromDimension: NETHER,
     dimension: NETHER,
   })
@@ -166,7 +171,7 @@ const BLOCKED_PROBE = { passable: () => false, solidSupport: () => false }
     site: SITE,
     self: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 2 },
     blockAt: litBlockAt(SITE, true),
-    probe: OPEN_PROBE,
+    isStandable: STANDABLE,
     fromDimension: OVERWORLD,
     dimension: NETHER,
   })
@@ -186,9 +191,9 @@ const BLOCKED_PROBE = { passable: () => false, solidSupport: () => false }
     grounded.candidate.portalCells.length === LAYOUT.interior.length &&
     key(grounded.candidate.enterCell) === key(ENTER_CELL) &&
     grounded.candidate.line === formatPortalEntered(ENTER_CELL, NETHER)
-  const detail = `unlit=[${notLit.ok ? 'ok' : notLit.line}] approach=[${noApproach.ok ? 'ok' : noApproach.line}] already=[${alreadyThere.ok ? 'ok' : alreadyThere.line}] ok=${grounded.ok}`
+  const detail = `unlit=[${notLit.ok ? 'ok' : notLit.line}] entry=[${noApproach.ok ? 'ok' : noApproach.line}] already=[${alreadyThere.ok ? 'ok' : alreadyThere.line}] ok=${grounded.ok}`
   check(
-    '(3) planPortalEntry refuses unlit / unapproachable portals and grounds a lit one',
+    '(3) planPortalEntry refuses unlit / unstandable portals and grounds a lit one',
     pass,
     detail,
   )
@@ -302,7 +307,7 @@ function entryPlan(): PortalEntryPlan {
     site: SITE,
     self: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 2 },
     blockAt: litBlockAt(SITE, true),
-    probe: OPEN_PROBE,
+    isStandable: STANDABLE,
     fromDimension: OVERWORLD,
     dimension: NETHER,
   })
@@ -340,7 +345,7 @@ function entryPlan(): PortalEntryPlan {
     site: SITE,
     self: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z - 2 },
     blockAt: litBlockAt(SITE, false),
-    probe: OPEN_PROBE,
+    isStandable: STANDABLE,
     fromDimension: OVERWORLD,
     dimension: NETHER,
   })
@@ -354,16 +359,20 @@ function entryPlan(): PortalEntryPlan {
     enter !== undefined &&
     enter.kind === 'ENTER_PORTAL' &&
     enter.target !== null &&
-    key(enter.target) === key(APPROACH) &&
+    // The locomotion target is the interior cell itself (no bespoke approach).
+    key(enter.target) === key(ENTER_CELL) &&
     enter.meta.dimension === NETHER &&
     enter.meta.enterX === ENTER_CELL.x &&
     enter.meta.enterY === ENTER_CELL.y &&
     enter.meta.enterZ === ENTER_CELL.z &&
+    enter.meta.approachX === undefined &&
+    enter.meta.approachY === undefined &&
+    enter.meta.approachZ === undefined &&
     strayEnter === undefined &&
     refusalGrounded.entryRefusal !== null &&
     refusalGrounded.entryRefusal.line === 'PRECONDITION_MISSING portal=lit'
   check(
-    '(4) ENTER_PORTAL is offered only for the entry goal, with typed refusal',
+    '(4) ENTER_PORTAL targets the interior cell and is offered only for the entry goal',
     pass,
     `enter=${enter?.id ?? 'none'} target=${JSON.stringify(enter?.target)} stray=${strayEnter?.id ?? 'none'} refusal=${refusalGrounded.entryRefusal?.line ?? 'none'}`,
   )
@@ -457,7 +466,8 @@ function enterCandidate() {
     kind: 'ENTER_PORTAL' as const,
     label: 'walk into the lit nether portal',
     targetName: NETHER_PORTAL,
-    target: { ...APPROACH },
+    // The interior cell is the locomotion target now: no bespoke approach cell.
+    target: { ...ENTER_CELL },
     targetEntityId: null,
     itemName: null,
     requiresTool: false,
@@ -469,9 +479,6 @@ function enterCandidate() {
       enterX: ENTER_CELL.x,
       enterY: ENTER_CELL.y,
       enterZ: ENTER_CELL.z,
-      approachX: APPROACH.x,
-      approachY: APPROACH.y,
-      approachZ: APPROACH.z,
       dimension: NETHER,
       portalCells: LAYOUT.interior.map(key).join(';'),
     },
@@ -483,27 +490,25 @@ async function runEnter(transfer: boolean) {
   const dir = mkdtempSync(join(tmpdir(), 'nether-transfer-'))
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
-  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet', portalEnterTimeoutMs: 2000 })
-  // The locomotion is the fake: step the body into the portal interior cell and
-  // (for the success case) let the server-side transfer change the dimension.
+  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet', portalEnterTimeoutMs: 400 })
+  // The GENERIC locomotion stub: record the target the entry asked the ordinary
+  // mover for, step the body into that interior cell, and (for the success case)
+  // let the server-side transfer change the dimension. Nothing portal-specific
+  // is injected: the entry path is `pathTo`, exactly like a MOVE.
+  const calls: Vec3Json[] = []
   ;(executor as unknown as {
-    walkByControls: (
-      target: Vec3Json,
-      epoch: number,
-      signal: AbortSignal,
-      options: { arrivedAt?: () => boolean },
-    ) => Promise<boolean>
-  }).walkByControls = async (target, _epoch, _signal, options) => {
+    pathTo: (target: Vec3Json, epoch: number, signal: AbortSignal, goalKind: string, fallback?: unknown) => Promise<void>
+  }).pathTo = async (target) => {
+    calls.push({ ...target })
     fixture.position.set(ENTER_CELL.x + 0.5, ENTER_CELL.y, ENTER_CELL.z + 0.5)
     if (transfer) fixture.bot.game.dimension = 'the_nether'
-    return options.arrivedAt !== undefined && options.arrivedAt()
   }
   const result = await executor.claim(enterCandidate()).completion
   const messages = (await Bun.file(logPath).text())
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => (JSON.parse(line) as { message?: string }).message ?? '')
-  return { result, messages }
+  return { result, messages, calls }
 }
 
 {
@@ -514,6 +519,10 @@ async function runEnter(transfer: boolean) {
     success.result.status === 'done' &&
     success.result.verified === true &&
     success.result.failure === null &&
+    // Fixture (a): the entry movement target is the interior cell, reached by
+    // the generic locomotion path (no bespoke approach / direct-bearing walk).
+    success.calls.length === 1 &&
+    key(success.calls[0] ?? { x: -1, y: -1, z: -1 }) === key(ENTER_CELL) &&
     enteredLines.length === 1 &&
     enteredLines[0] === formatPortalEntered(ENTER_CELL, NETHER) &&
     failure.result.status === 'failed' &&
@@ -522,7 +531,7 @@ async function runEnter(transfer: boolean) {
   check(
     '(5) executor reports done/entered only after dimension == the_nether',
     pass,
-    `success=${success.result.status}/${success.result.failure ?? 'none'} verified=${success.result.verified} marker=[${enteredLines[0] ?? 'none'}] noTransfer=${failure.result.status}/${failure.result.failure ?? 'none'}`,
+    `success=${success.result.status}/${success.result.failure ?? 'none'} verified=${success.result.verified} pathTo=${JSON.stringify(success.calls[0])} marker=[${enteredLines[0] ?? 'none'}] noTransfer=${failure.result.status}/${failure.result.failure ?? 'none'}`,
   )
 }
 
@@ -554,6 +563,59 @@ async function runEnter(transfer: boolean) {
     '(6) a remembered resource from another dimension is never a retrieval target',
     pass,
     `stale=${stale.map((resource) => `${resource.name}@${resource.dimension ?? 'legacy'}`).join(',') || 'none'}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (7) the generic MOVE machinery is not portal-specific: a NON-PORTAL, non-solid
+//     standable cell is an ordinary movement target (guard + arrival)
+// ---------------------------------------------------------------------------
+{
+  const CELL: Vec3Json = { x: 5, y: 70, z: 5 }
+  const state = worldState({
+    position: { x: CELL.x, y: CELL.y, z: CELL.z - 1 },
+    goalQueue: queueWith(queuedPlace(PORTAL_ENTERED_PREDICATE, NETHER)),
+  })
+  // The generic sensor lists a non-solid cell (e.g. short_grass over stone) as
+  // standable; nothing portal-specific is involved. `isStandable` itself is
+  // pinned in test-portal-entry-generic.mts; here the MOVE machinery must accept
+  // that cell exactly like any other.
+  state.terrain = { standable: [CELL, { x: CELL.x, y: CELL.y, z: CELL.z - 1 }] }
+  const move: Candidate = {
+    id: `MOVE:p${CELL.x}_${CELL.y}_${CELL.z}`,
+    kind: 'MOVE',
+    label: 'walk to a standable spot',
+    targetName: null,
+    target: { ...CELL },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 9 },
+  }
+  const guard = guardCandidate(move, state, {
+    phase: 'decision',
+    candidateIds: new Set([move.id]),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 100,
+  })
+  const arrival = classifyMoveArrival({
+    end: { x: CELL.x + 0.5, y: CELL.y, z: CELL.z + 0.5 },
+    target: CELL,
+    anchor: null,
+    anchorBefore: null,
+    anchorDistance: 0,
+    reach: 4.5,
+    pinned: false,
+  })
+  const pass = guard.ok === true && arrival.verified === true
+  check(
+    '(7) a non-portal, non-solid standable cell is an ordinary MOVE target (generic locomotion)',
+    pass,
+    `guard=${guard.ok ? 'ok' : guard.reason} arrival=${arrival.verified}`,
   )
 }
 

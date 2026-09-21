@@ -516,17 +516,18 @@ function guardCraft(candidate: Candidate, state: WorldState, context: GuardConte
 
 /**
  * The dimension transfer carries no item: the only hard safety facts are that it
- * has a grounded approach cell and that no hazard sits at it. Its DONE truth is
- * the executor's dimension postcondition, never this guard.
+ * has a grounded entry cell (the standable interior cell the generic mover walks
+ * to) and that no hazard sits at it. Its DONE truth is the executor's dimension
+ * postcondition, never this guard.
  */
 function guardEnterPortal(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
   const target = candidate.target
   if (target === null) {
-    return deny(candidate.id, 'TARGET_GONE', 'ENTER_PORTAL candidate carries no approach cell')
+    return deny(candidate.id, 'TARGET_GONE', 'ENTER_PORTAL candidate carries no entry cell')
   }
   const hazard = nearestHazardTo(state, target)
   if (hazard !== null) {
-    return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the portal approach`)
+    return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the portal entry cell`)
   }
   return { ok: true, candidate }
 }

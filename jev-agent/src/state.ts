@@ -612,8 +612,16 @@ function isReplaceableAir(block: { name: string } | null): boolean {
   return block !== null && REPLACEABLE_AIR.has(block.name)
 }
 
-/** True when `feet` is walkable: feet + head passable and the block below solid. */
-function isStandable(bot: Bot, feet: Vec3Json): boolean {
+/**
+ * True when a 1.8-tall body can occupy the feet cell `feet`: feet + head
+ * passable and the block below solid. This is the ONE standability rule the
+ * generic locomotion layer uses (terrain sensing, MOVE guard, reachability);
+ * it is exported so other deterministic layers reuse it instead of inventing
+ * their own passability/support geometry. It says nothing portal-specific: a
+ * cell holding any non-solid block (grass, leaf litter, a nether_portal) over
+ * solid support is standable.
+ */
+export function isStandable(bot: Bot, feet: Vec3Json): boolean {
   const feetBlock = bot.blockAt(toVec3(bot, feet))
   const headBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z }))
   const belowBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z }))

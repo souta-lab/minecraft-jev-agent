@@ -82,7 +82,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { buildWorldState, defaultSensorOptions, isSensedStation, isStandable, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -4499,10 +4499,11 @@ export class JevController {
 
   /**
    * Ground the dimension-transfer plan for the active `portal_entered` goal from
-   * LIVE world truth only: the interior must currently be `nether_portal` and a
-   * passable, supported, in-reach stand must exist beside it. Returns null when
-   * the active goal does not request entry. Never silent: a requested entry with
-   * no lit/reachable portal returns the pure module's typed refusal.
+   * LIVE world truth only: the interior must currently be `nether_portal` and at
+   * least one interior cell must be standable by the GENERIC locomotion rule
+   * (the same `isStandable` the terrain sensor and MOVE guard use). Returns null
+   * when the active goal does not request entry. Never silent: a requested entry
+   * with no lit/standable portal returns the pure module's typed refusal.
    */
   private portalEntryPlan(state: WorldState): PortalEntryPlan | null {
     const current = state.goalQueue?.current ?? null
@@ -4513,14 +4514,6 @@ export class JevController {
     const scratch = entity.position.clone()
     const blockAt = (cell: { x: number; y: number; z: number }): string | null =>
       this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
-    const probe = {
-      passable: (x: number, y: number, z: number): boolean => {
-        const block = this.bot.blockAt(scratch.set(x, y, z))
-        return block !== null && block.boundingBox !== 'block'
-      },
-      solidSupport: (x: number, y: number, z: number): boolean =>
-        this.bot.blockAt(scratch.set(x, y, z))?.boundingBox === 'block',
-    }
     const sites = state.portalFrameSites ?? []
     const dimension = current.dimension ?? NETHER
     const self = {
@@ -4534,8 +4527,7 @@ export class JevController {
         site,
         self,
         blockAt,
-        probe,
-        reach: this.options.reach,
+        isStandable: (cell) => isStandable(this.bot, cell),
         fromDimension: state.self.dimension,
         dimension,
       })
