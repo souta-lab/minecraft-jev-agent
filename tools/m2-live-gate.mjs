@@ -5,14 +5,18 @@
 //
 // An exact resident runId is mandatory. `--since` is accepted as a diagnostic
 // annotation only; without `--run R` (or M2_RUN_ID=R) this command cannot PASS.
-// The delegated gate reads only R-bound evidence, so inventory and the ordered
-// portal chain cannot be borrowed from different resident lifetimes.
+// The delegated gate reads only R-bound evidence, so inventory, the ordered
+// portal chain, and model-authority facts cannot be borrowed from different
+// resident lifetimes. Deterministic/fallback authority is UNKNOWN, never PASS.
 //
 // Exit: 0 = PASS, 1 = known current-M2 failure, 2 = UNKNOWN.
 import { pathToFileURL } from 'node:url'
 import {
   M2_GATE_LOG,
   M2_GATE_SNAPSHOT_DIR,
+  M2_GATE_DECISIONS,
+  M2_GATE_RUNNER_OUT,
+  M2_GATE_CONTROL_SOCK,
   M2_RUN_RESULT,
   RUN_ID_RE,
   runM2Gate,
@@ -45,6 +49,9 @@ export function gateOptions(argv = []) {
   return {
     logPath: optionValue(argv, '--log') ?? M2_GATE_LOG,
     snapshotDir: optionValue(argv, '--snapshot-dir') ?? M2_GATE_SNAPSHOT_DIR,
+    decisionsPath: optionValue(argv, '--decisions') ?? M2_GATE_DECISIONS,
+    runnerOutPath: optionValue(argv, '--runner-out') ?? M2_GATE_RUNNER_OUT,
+    controlSocketPath: optionValue(argv, '--control-socket') ?? M2_GATE_CONTROL_SOCK,
     json: argv.includes('--json'),
   }
 }
@@ -57,6 +64,8 @@ export async function runGate({
   argv = process.argv.slice(2),
   env = process.env,
   readEvidence = null,
+  policyEvidence = null,
+  policySocket = undefined,
   write = (line) => process.stdout.write(`${line}\n`),
 } = {}) {
   const runId = exactRunId(argv, env)
@@ -76,8 +85,13 @@ export async function runGate({
   const code = await runM2Gate({
     expectedRunId: runId,
     readEvidence,
+    policyEvidence,
+    policySocket,
     logPath: options.logPath,
     snapshotDir: options.snapshotDir,
+    decisionsPath: options.decisionsPath,
+    runnerOutPath: options.runnerOutPath,
+    controlSocketPath: options.controlSocketPath,
     json: options.json,
     write: (line) => {
       delegateResult = String(line)

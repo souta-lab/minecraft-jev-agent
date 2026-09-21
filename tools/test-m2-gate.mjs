@@ -39,6 +39,16 @@ function capture() {
 const RUN = 'run-m2-a'
 const OTHER_RUN = 'run-m2-b'
 
+const VERIFIED_POLICY = {
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 3, fallbackCount: 0, otherCount: 0 },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: 'llm', deterministicFallbackEnabled: false },
+  system2: { runId: RUN, source: 'fixture:runner', count: 1, modelCount: 1, portalPlanCount: 1 },
+}
+const FALLBACK_POLICY = {
+  decisions: { runId: RUN, source: 'fixture:decisions', jevCount: 0, fallbackCount: 3, otherCount: 0 },
+  generation: { runId: RUN, source: 'fixture:generation', policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: 'deterministic', deterministicFallbackEnabled: true },
+}
+
 const boot = (runId) => `[2026-09-20T10:00:00.000Z] BOOT pid=1 runId=${runId} bundle=none source=abc123 worldEpoch=1`
 const inv = (counts, pos = '10,64,20') => `[2026-09-20T10:00:01.000Z] INVENTORY items=${JSON.stringify(counts)} pos=${pos}`
 
@@ -69,13 +79,14 @@ function evidenceFrom(lines, runId = RUN) {
   }
 }
 
-async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json = false } = {}) {
+async function judge({ lines = FULL_RUN, expectedRunId = RUN, readEvidence, json = false, policyEvidence = VERIFIED_POLICY } = {}) {
   const out = capture()
   const code = await runM2Gate({
     expectedRunId,
     readEvidence: readEvidence ?? (async () => evidenceFrom(lines, expectedRunId)),
     write: out.write,
     json,
+    policyEvidence,
   })
   return { code, text: out.text(), lines: out.lines }
 }
@@ -135,6 +146,19 @@ ok('parseInventoryMarker reads the flat counts map and rejects prose')
   for (const stage of M2_REQUIRED_STAGES) assert.match(text, new RegExp(`${stage}: PASS`), text)
   assert.match(text, new RegExp(`${M2_RUN_RESULT} status=PASS reason=diamond_to_nether_gate_verified runId=${RUN}`), text)
   ok('full same-run diamond+materials+frame+ignition -> PASS/exit 0')
+}
+
+
+// ---------------------------------------------------------------------------
+// 2b. RED: deterministic fallback can never satisfy milestone acceptance
+// ---------------------------------------------------------------------------
+{
+  const { code, text } = await judge({ policyEvidence: FALLBACK_POLICY })
+  assert.equal(code, 2, `fallback policy must be UNKNOWN, never PASS:
+${text}`)
+  assert.match(text, /policy: UNKNOWN reason=decisions_fallback_only/, text)
+  assert.match(text, /status=UNKNOWN/, text)
+  ok('full gameplay markers under deterministic fallback -> UNKNOWN/exit 2')
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +256,7 @@ for (const [label, marker] of [
     readEvidence: null,
     logPath: join(dir, 'absent.log'),
     snapshotDir: dir,
+    policyEvidence: VERIFIED_POLICY,
     write: out.write,
   })
   assert.equal(code, 0, out.text())

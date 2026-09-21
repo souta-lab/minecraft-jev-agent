@@ -14,8 +14,10 @@ import {
   REQUIRED_POLICY_MODEL,
   countDecisionSources,
   evaluatePolicyEvidence,
+  evaluateCurrentM2AuthorityEvidence,
   loadPolicyEvidence,
   parseGenerationLine,
+  parseSystem2AuthorityLine,
   resolveRunWindow,
   scanRunnerOut,
 } from './m2-policy-evidence.mjs'
@@ -41,7 +43,8 @@ try {
       line('2026-09-18T09:00:01.000Z', 'GENERATION_READY id=g-a policy=fallback model=deterministic-local-fallback+descend-aware'),
       line('2026-09-18T09:00:05.000Z', 'HOST_LOCK released pid=1'),
       line('2026-09-18T09:10:00.000Z', 'BOOT pid=2 runId=run-b bundle=b'),
-      line('2026-09-18T09:10:01.000Z', 'GENERATION_READY id=g-b policy=typesafe model=typesafe-ai/jev'),
+      line('2026-09-18T09:10:01.000Z', 'GENERATION_READY id=g-b policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false'),
+      line('2026-09-18T09:10:02.000Z', 'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev reason=queue_empty chosen=front_nether_portal goals=["build portal","light portal"]'),
       line('2026-09-18T09:10:05.000Z', 'HOST_LOCK released pid=2'),
       line('2026-09-18T09:20:00.000Z', 'BOOT pid=3 runId=run-c bundle=c'),
       // Alternate structured spelling must be accepted as well.
@@ -63,10 +66,15 @@ try {
 
   {
     const parsed = parseGenerationLine('GENERATION_READY id=g policyKind=typesafe policyModel=typesafe-ai/jev')
-    assert.deepEqual(parsed, { policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' })
+    assert.deepEqual(parsed, { policyKind: 'typesafe', policyModel: 'typesafe-ai/jev', plannerMode: null, deterministicFallbackEnabled: null })
     const fallback = parseGenerationLine('GENERATION_READY id=g policy=fallback model=deterministic-local-fallback')
-    assert.deepEqual(fallback, { policyKind: 'fallback', policyModel: 'deterministic-local-fallback' })
-    ok('parseGenerationLine accepts both policy=/model= and policyKind=/policyModel= spellings')
+    assert.deepEqual(fallback, { policyKind: 'fallback', policyModel: 'deterministic-local-fallback', plannerMode: null, deterministicFallbackEnabled: null })
+    const rich = parseGenerationLine('GENERATION_READY policy=typesafe model=typesafe-ai/jev planner=llm deterministicFallbackEnabled=false')
+    assert.equal(rich.plannerMode, 'llm')
+    assert.equal(rich.deterministicFallbackEnabled, false)
+    const system2 = parseSystem2AuthorityLine('SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal goals=["build portal"]')
+    assert.deepEqual(system2, { provider: 'typesafe-ai', model: 'typesafe-ai/jev', chosen: 'front_nether_portal', portalPlan: true })
+    ok('parseGenerationLine/System2 parser retain planner and authority facts')
   }
 
   {
@@ -90,11 +98,18 @@ try {
     assert.equal(evidence.generation.runId, 'run-b')
     assert.equal(evidence.generation.policyKind, 'typesafe')
     assert.equal(evidence.generation.source, runnerOut)
+    assert.equal(evidence.generation.plannerMode, 'llm')
+    assert.equal(evidence.generation.deterministicFallbackEnabled, false)
+    assert.equal(evidence.system2.modelCount, 1)
+    assert.equal(evidence.system2.portalPlanCount, 1)
     const verdict = evaluatePolicyEvidence({ expectedRunId: 'run-b', ...evidence })
     assert.equal(verdict.code, 0)
     assert.equal(verdict.status, 'VERIFIED')
     assert.equal(verdict.reason, 'real_policy_evidence_verified')
-    ok('run-b (typesafe, source=jev) is VERIFIED and never borrows run-a evidence')
+    const current = evaluateCurrentM2AuthorityEvidence({ expectedRunId: 'run-b', ...evidence })
+    assert.equal(current.code, 0)
+    assert.equal(current.reason, 'current_m2_authority_verified')
+    ok('run-b proves Jev plus model-authored System2 portal authority without borrowing run-a evidence')
   }
 
   {
@@ -152,6 +167,7 @@ try {
     assert.equal(scanned.boots.length, 3)
     assert.equal(scanned.releases.length, 2)
     assert.equal(scanned.generations.length, 3)
+    assert.equal(scanned.system2Decisions.length, 1)
     const windowB = resolveRunWindow(scanned.boots, scanned.releases, 'run-b')
     assert.equal(windowB.startMs, Date.parse('2026-09-18T09:10:00.000Z'))
     assert.equal(windowB.endMs, Date.parse('2026-09-18T09:10:05.000Z'))
@@ -202,9 +218,37 @@ try {
       }).reason,
       /^generation_run_mismatch/,
     )
+    assert.equal(
+      evaluatePolicyEvidence({
+        expectedRunId: 'run-x',
+        decisions: { runId: 'run-x', jevCount: 3, fallbackCount: 1 },
+        generation: { runId: 'run-x', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev' },
+      }).reason,
+      'fallback_decisions_present',
+    )
     assert.equal(REQUIRED_POLICY_KIND, 'typesafe')
     assert.equal(REQUIRED_POLICY_MODEL, 'typesafe-ai/jev')
-    ok('pure evaluator refuses missing, mismatched, and non-typesafe evidence')
+    ok('pure evaluator refuses missing, mismatched, mixed-fallback, and non-typesafe evidence')
+  }
+
+  {
+    const base = {
+      expectedRunId: 'run-current',
+      decisions: { runId: 'run-current', source: 'fixture', jevCount: 5, fallbackCount: 0, otherCount: 0 },
+      generation: {
+        runId: 'run-current', source: 'fixture', policyKind: 'typesafe', policyModel: 'typesafe-ai/jev',
+        plannerMode: 'llm', deterministicFallbackEnabled: false,
+      },
+      system2: { runId: 'run-current', source: 'fixture', count: 2, modelCount: 2, portalPlanCount: 1 },
+    }
+    const pass = evaluateCurrentM2AuthorityEvidence(base)
+    assert.equal(pass.code, 0)
+    assert.equal(pass.reason, 'current_m2_authority_verified')
+    assert.equal(evaluateCurrentM2AuthorityEvidence({ ...base, generation: { ...base.generation, plannerMode: 'deterministic' } }).reason, 'planner_not_llm observed=deterministic')
+    assert.equal(evaluateCurrentM2AuthorityEvidence({ ...base, generation: { ...base.generation, deterministicFallbackEnabled: true } }).reason, 'deterministic_fallback_not_disabled observed=true')
+    assert.equal(evaluateCurrentM2AuthorityEvidence({ ...base, system2: { ...base.system2, modelCount: 0 } }).reason, 'no_model_system2_authority_decision')
+    assert.equal(evaluateCurrentM2AuthorityEvidence({ ...base, system2: { ...base.system2, portalPlanCount: 0 } }).reason, 'no_system2_portal_plan_decision')
+    ok('current M2 requires llm planner, fallback disabled, and a model-authored portal plan')
   }
 } finally {
   rmSync(dir, { recursive: true, force: true })

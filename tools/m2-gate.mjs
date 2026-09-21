@@ -2,13 +2,14 @@
 // m2-gate: run-scoped PASS/FAIL/UNKNOWN gate for the CURRENT M2 contract
 // (MILESTONE-CONTRACT.json M2 "Diamond-to-Nether-gate closed loop").
 //
-// The four M2 stages are judged from ONE runId only:
+// The four M2 gameplay stages and the real-policy/System2 authority proof are
+// judged from ONE runId only:
 //   diamond_ready          <- diamond>=3 AND diamond_pickaxe in the inventory
 //   portal_materials_ready <- flint_and_steel held AND obsidian>=10
 //   portal_built           <- a validated 4x5 obsidian frame (portal_frame_verified)
 //   portal_lit             <- PORTAL_LIT in minecraft:overworld then PORTAL_VERIFIED=true
 //
-// Evidence is the runtime's own markers, all bound to the single runId:
+// Gameplay evidence is the runtime's own markers, all bound to the single runId:
 //   * the resident log, bracketed by its BOOT runId boundary: every INVENTORY /
 //     MILESTONE line carries the live item counts, and the portal markers carry
 //     the ordered frame -> light -> verify chain;
@@ -19,14 +20,19 @@
 // never attributed to R, so a run's facts can never be combined with another
 // run's. Missing/unbound evidence is UNKNOWN and NEVER PASS. A known portal
 // failure (shape=bad, PORTAL_LIGHT_REFUSED, PORTAL_VERIFIED=false) is FAIL.
+// A gameplay-complete run is still UNKNOWN unless that same run proves Jev
+// decisions, typesafe policy, planner=llm with deterministic fallback disabled,
+// and at least one model-authored System2 portal plan.
 // The old iron-age markers (PREREQ_OPTION/FURNACE_READY/SMELT_DONE) are NOT
 // required: they are historical M2 evidence, not the current contract.
 //
 // Exit: 0 = PASS, 1 = FAIL (known portal failure), 2 = UNKNOWN.
 import { createReadStream, existsSync, readFileSync } from 'node:fs'
+import net from 'node:net'
 import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { evaluateCurrentM2AuthorityEvidence, loadPolicyEvidence } from './m2-policy-evidence.mjs'
 
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 export const M2_RUN_RESULT = 'M2_RUN_RESULT'
@@ -67,9 +73,59 @@ export const M2_GATE_LOG =
   process.env.M2_GATE_LOG ?? process.env.M2_LOG ?? process.env.BUDDY_LOG ?? join(REPO_ROOT, 'buddy-driver', 'buddy.log')
 export const M2_GATE_SNAPSHOT_DIR =
   process.env.M2_GATE_SNAPSHOT_DIR ?? process.env.M2_SNAPSHOT_DIR ?? join(REPO_ROOT, 'buddy-driver', 'data', 'resident')
+export const M2_GATE_DECISIONS =
+  process.env.M2_DECISIONS ?? join(REPO_ROOT, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl')
+export const M2_GATE_RUNNER_OUT =
+  process.env.M2_RUNNER_OUT ?? join(REPO_ROOT, 'buddy-driver', 'runner.out')
+export const M2_GATE_CONTROL_SOCK =
+  process.env.M2_CONTROL_SOCK ?? join(REPO_ROOT, 'buddy-driver', 'data', 'resident', 'control.sock')
 
 const POS_RE = /pos=(-?\d+),(-?\d+),(-?\d+)/
+
 const INVENTORY_RE = /\b(?:items|inventory)=(\{[^{}]*\})/
+
+/** Read-only current-run binding used only to bound live policy evidence. */
+export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, timeoutMs = 1500) {
+  if (!existsSync(sockPath)) return null
+  return await new Promise((resolve) => {
+    let settled = false
+    let buffer = ''
+    let socket
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      try { socket?.destroy() } catch {}
+      resolve(value)
+    }
+    try {
+      socket = net.createConnection(sockPath)
+    } catch {
+      return finish(null)
+    }
+    socket.setTimeout(timeoutMs, () => finish(null))
+    socket.on('error', () => finish(null))
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8')
+      const newline = buffer.indexOf('\n')
+      if (newline === -1) return
+      try {
+        const reply = JSON.parse(buffer.slice(0, newline))
+        const data = reply?.data ?? reply
+        const runId = typeof data?.runId === 'string' ? data.runId : null
+        if (runId === null) return finish(null)
+        const status = data?.status
+        finish({
+          runId,
+          policyKind: typeof status?.policyKind === 'string' ? status.policyKind : typeof data?.policyKind === 'string' ? data.policyKind : null,
+          policyModel: typeof status?.policyModel === 'string' ? status.policyModel : typeof data?.policyModel === 'string' ? data.policyModel : null,
+        })
+      } catch {
+        finish(null)
+      }
+    })
+    socket.on('connect', () => socket.write(`${JSON.stringify({ id: 'm2-gate', cmd: 'report' })}\n`))
+  })
+}
 
 // ---------------------------------------------------------------------------
 // marker parsing
@@ -226,7 +282,7 @@ function verdict({ status, code, reason, runId, conditions, evidence = null, sou
  * R-bound markers. A known portal failure is FAIL (1). Everything else is
  * UNKNOWN (2) and can never be PASS.
  */
-export function evaluateM2Gate({ expectedRunId = null, evidence = null } = {}) {
+export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy = null } = {}) {
   if (expectedRunId === null || !RUN_ID_RE.test(String(expectedRunId))) {
     return verdict({
       status: 'UNKNOWN',
@@ -273,19 +329,8 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null } = {}) {
     portal_built: framePass ? 'PASS' : frameFail ? 'FAIL' : 'UNKNOWN',
     portal_lit: litPass ? 'PASS' : litFail ? 'FAIL' : 'UNKNOWN',
   }
-  const facts = { diamond, materials, framePass, litPass }
+  const facts = { diamond, materials, framePass, litPass, policy: policy?.facts ?? null }
   const allPass = Object.values(conditions).every((value) => value === 'PASS')
-  if (allPass) {
-    return verdict({
-      status: 'PASS',
-      code: 0,
-      reason: 'diamond_to_nether_gate_verified',
-      runId: expectedRunId,
-      conditions,
-      sources: perSource,
-      facts,
-    })
-  }
   const failureReason = conditions.portal_built === 'FAIL'
     ? 'portal_frame_shape_bad'
     : conditions.portal_lit === 'FAIL'
@@ -296,6 +341,28 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null } = {}) {
       status: 'FAIL',
       code: 1,
       reason: failureReason,
+      runId: expectedRunId,
+      conditions,
+      sources: perSource,
+      facts,
+    })
+  }
+  if (allPass && policy?.code !== 0) {
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: `policy_evidence_unverified:${policy?.reason ?? 'unavailable'}`,
+      runId: expectedRunId,
+      conditions,
+      sources: perSource,
+      facts,
+    })
+  }
+  if (allPass) {
+    return verdict({
+      status: 'PASS',
+      code: 0,
+      reason: 'diamond_to_nether_gate_verified',
       runId: expectedRunId,
       conditions,
       sources: perSource,
@@ -494,15 +561,41 @@ export async function runM2Gate({
   readEvidence = null,
   logPath = M2_GATE_LOG,
   snapshotDir = M2_GATE_SNAPSHOT_DIR,
+  policyEvidence = null,
+  loadPolicy = loadPolicyEvidence,
+  policySocket = undefined,
+  controlSocketPath = M2_GATE_CONTROL_SOCK,
+  decisionsPath = M2_GATE_DECISIONS,
+  runnerOutPath = M2_GATE_RUNNER_OUT,
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   json = false,
 } = {}) {
   const stamp = now().toISOString()
   const resolveEvidence = readEvidence ?? ((runId) => readRunScopedM2Evidence(runId, { logPath, snapshotDir }))
-  const evidence =
-    expectedRunId !== null && RUN_ID_RE.test(String(expectedRunId)) ? await resolveEvidence(expectedRunId) : null
-  const result = evaluateM2Gate({ expectedRunId, evidence })
+  const scoped = expectedRunId !== null && RUN_ID_RE.test(String(expectedRunId))
+  const evidence = scoped ? await resolveEvidence(expectedRunId) : null
+  let rawPolicy = policyEvidence
+  if (scoped && rawPolicy === null) {
+    const socketBinding = policySocket === undefined
+      ? await readPolicySocketBinding(controlSocketPath)
+      : policySocket
+    rawPolicy = await loadPolicy({
+      runId: expectedRunId,
+      socket: socketBinding?.runId === expectedRunId ? socketBinding : null,
+      decisionsPath,
+      runnerOutPath,
+    })
+  }
+  const policy = scoped
+    ? evaluateCurrentM2AuthorityEvidence({
+        expectedRunId,
+        decisions: rawPolicy?.decisions ?? null,
+        generation: rawPolicy?.generation ?? null,
+        system2: rawPolicy?.system2 ?? null,
+      })
+    : null
+  const result = evaluateM2Gate({ expectedRunId, evidence, policy })
 
   if (json) {
     write(
@@ -513,6 +606,7 @@ export async function runM2Gate({
         runId: result.runId,
         conditions: result.conditions,
         evidence: evidence === null ? null : { status: evidence.status, sources: (evidence.sources ?? []).map((s) => s.name) },
+        policy: policy === null ? null : { status: policy.status, reason: policy.reason },
         facts: result.facts ?? null,
       }),
     )
@@ -526,6 +620,7 @@ export async function runM2Gate({
     write(`m2_evidence: ${evidence.status} sources=${sourceNames || 'none'}${evidence.reason ? ` reason=${evidence.reason}` : ''}`)
   }
   for (const stage of M2_REQUIRED_STAGES) write(`${stage}: ${result.conditions[stage]}`)
+  if (policy !== null) write(`policy: ${policy.status} reason=${policy.reason}`)
   if (result.facts !== null) {
     write(
       `m2_facts: diamond=${result.facts.diamond.hasDiamond} diamond_pickaxe=${result.facts.diamond.hasDiamondPickaxe} ` +
@@ -546,12 +641,15 @@ export async function runM2Gate({
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { log: null, snapshotDir: null, json: false }
+  const out = { log: null, snapshotDir: null, decisions: null, runnerOut: null, controlSocket: null, json: false }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--run') i += 1
     else if (arg === '--log') out.log = argv[++i] ?? null
     else if (arg === '--snapshot-dir') out.snapshotDir = argv[++i] ?? null
+    else if (arg === '--decisions') out.decisions = argv[++i] ?? null
+    else if (arg === '--runner-out') out.runnerOut = argv[++i] ?? null
+    else if (arg === '--control-socket') out.controlSocket = argv[++i] ?? null
     else if (arg === '--json') out.json = true
     else throw new Error(`unknown argument: ${arg}`)
   }
@@ -563,7 +661,15 @@ if (isMain) {
   try {
     const args = parseArgs(process.argv.slice(2))
     const expectedRunId = requestedRunId(process.argv.slice(2), process.env)
-    const options = { expectedRunId, json: args.json, logPath: args.log ?? M2_GATE_LOG, snapshotDir: args.snapshotDir ?? M2_GATE_SNAPSHOT_DIR }
+    const options = {
+      expectedRunId,
+      json: args.json,
+      logPath: args.log ?? M2_GATE_LOG,
+      snapshotDir: args.snapshotDir ?? M2_GATE_SNAPSHOT_DIR,
+      decisionsPath: args.decisions ?? M2_GATE_DECISIONS,
+      runnerOutPath: args.runnerOut ?? M2_GATE_RUNNER_OUT,
+      controlSocketPath: args.controlSocket ?? M2_GATE_CONTROL_SOCK,
+    }
     process.exitCode = await runM2Gate(options)
   } catch (error) {
     process.stderr.write(`M2_GATE_ERROR ${error instanceof Error ? error.message : String(error)}\n`)

@@ -62,7 +62,23 @@ function isReleaseLine(line) {
 export function parseGenerationLine(line) {
   const kind = /\bpolicyKind=(\S+)/.exec(line)?.[1] ?? /\bpolicy=(\S+)/.exec(line)?.[1] ?? null
   const model = /\bpolicyModel=(\S+)/.exec(line)?.[1] ?? /\bmodel=(\S+)/.exec(line)?.[1] ?? null
-  return { policyKind: kind, policyModel: model }
+  const plannerMode = /\bplanner=(\S+)/.exec(line)?.[1] ?? null
+  const fallback = /\bdeterministicFallbackEnabled=(true|false)\b/.exec(line)?.[1] ?? null
+  return {
+    policyKind: kind,
+    policyModel: model,
+    plannerMode,
+    deterministicFallbackEnabled: fallback === null ? null : fallback === 'true',
+  }
+}
+
+export function parseSystem2AuthorityLine(line) {
+  if (!/\bSYSTEM2_AUTHORITY_DECISION\b/.test(line)) return null
+  const provider = /\bprovider=(\S+)/.exec(line)?.[1] ?? null
+  const model = /\bmodel=(\S+)/.exec(line)?.[1] ?? null
+  const chosen = /\bchosen=(\S+)/.exec(line)?.[1] ?? null
+  const portalPlan = chosen === 'front_nether_portal' || /\bgoals=\[[^\n]*portal/i.test(line)
+  return { provider, model, chosen, portalPlan }
 }
 
 /**
@@ -75,6 +91,7 @@ export async function scanRunnerOut(runnerOutPath) {
   const boots = []
   const releases = []
   const generations = []
+  const system2Decisions = []
   const rl = createInterface({ input: createReadStream(runnerOutPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
     const tsMs = extractTimestampMs(line)
@@ -89,10 +106,15 @@ export async function scanRunnerOut(runnerOutPath) {
     }
     if (line.includes('GENERATION_READY') && tsMs !== null) {
       const parsed = parseGenerationLine(line)
-      generations.push({ tsMs, policyKind: parsed.policyKind, policyModel: parsed.policyModel })
+      generations.push({ tsMs, ...parsed })
+      continue
+    }
+    if (tsMs !== null) {
+      const system2 = parseSystem2AuthorityLine(line)
+      if (system2 !== null) system2Decisions.push({ tsMs, ...system2 })
     }
   }
-  return { boots, releases, generations }
+  return { boots, releases, generations, system2Decisions }
 }
 
 /** Bracket R's lifetime: [BOOT runId=R, next BOOT | HOST_LOCK released | now-live). */
@@ -176,6 +198,9 @@ export async function loadPolicyEvidence({
   if (window === null) return { decisions: null, generation: null, reason: 'run_boot_boundary_missing' }
   if (!window.bounded) return { decisions: null, generation: null, reason: 'run_window_unbounded' }
 
+  const inWindow = evidence.generations.filter((g) => g.tsMs >= window.startMs && g.tsMs <= window.endMs)
+  const withPolicy = inWindow.filter((g) => typeof g.policyKind === 'string' && g.policyKind.length > 0)
+  const chosen = withPolicy.at(-1) ?? inWindow.at(-1) ?? null
   let generation = null
   if (live && typeof socket.policyKind === 'string' && typeof socket.policyModel === 'string') {
     generation = {
@@ -183,21 +208,36 @@ export async function loadPolicyEvidence({
       source: 'socket_report',
       policyKind: socket.policyKind,
       policyModel: socket.policyModel,
+      plannerMode: chosen?.plannerMode ?? null,
+      deterministicFallbackEnabled: chosen?.deterministicFallbackEnabled ?? null,
       tsMs: now(),
     }
-  } else {
-    const inWindow = evidence.generations.filter((g) => g.tsMs >= window.startMs && g.tsMs <= window.endMs)
-    const withPolicy = inWindow.filter((g) => typeof g.policyKind === 'string' && g.policyKind.length > 0)
-    const chosen = withPolicy.at(-1) ?? inWindow.at(-1) ?? null
-    if (chosen !== null) {
-      generation = {
-        runId,
-        source: runnerOutPath,
-        policyKind: chosen.policyKind,
-        policyModel: chosen.policyModel,
-        tsMs: chosen.tsMs,
-      }
+  } else if (chosen !== null) {
+    generation = {
+      runId,
+      source: runnerOutPath,
+      policyKind: chosen.policyKind,
+      policyModel: chosen.policyModel,
+      plannerMode: chosen.plannerMode ?? null,
+      deterministicFallbackEnabled: chosen.deterministicFallbackEnabled ?? null,
+      tsMs: chosen.tsMs,
     }
+  }
+
+  const system2InWindow = (evidence.system2Decisions ?? []).filter(
+    (entry) => entry.tsMs >= window.startMs && entry.tsMs <= window.endMs,
+  )
+  const system2 = {
+    runId,
+    source: runnerOutPath,
+    count: system2InWindow.length,
+    modelCount: system2InWindow.filter(
+      (entry) => typeof entry.provider === 'string' && entry.provider.length > 0 &&
+        entry.provider !== 'fallback' && entry.provider !== 'deterministic' &&
+        typeof entry.model === 'string' && entry.model.length > 0 && !/deterministic|fallback/i.test(entry.model),
+    ).length,
+    portalPlanCount: system2InWindow.filter((entry) => entry.portalPlan === true).length,
+    decisions: system2InWindow,
   }
 
   const counts = await countDecisionSources(decisionsPath, window.startMs, window.endMs)
@@ -206,7 +246,7 @@ export async function loadPolicyEvidence({
       ? null
       : { runId, source: decisionsPath, window: { startMs: window.startMs, endMs: window.endMs }, ...counts }
 
-  return { decisions, generation, reason: null, window }
+  return { decisions, generation, system2, reason: null, window }
 }
 
 function outcome(code, status, reason, facts) {
@@ -251,6 +291,9 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
       : 'no_jev_decisions'
     return outcome(2, 'UNKNOWN', reason, facts)
   }
+  if (Number.isFinite(decisions.fallbackCount) && decisions.fallbackCount > 0) {
+    return outcome(2, 'UNKNOWN', 'fallback_decisions_present', facts)
+  }
   if (generation === null || typeof generation !== 'object') {
     return outcome(2, 'UNKNOWN', 'generation_status_unavailable', facts)
   }
@@ -264,4 +307,39 @@ export function evaluatePolicyEvidence({ expectedRunId = null, decisions = null,
     return outcome(2, 'UNKNOWN', `policy_model_not_typesafe observed=${generation.policyModel ?? 'unknown'}`, facts)
   }
   return outcome(0, 'VERIFIED', 'real_policy_evidence_verified', facts)
+}
+
+/** Current M2 additionally requires real long-horizon System2 authority. */
+export function evaluateCurrentM2AuthorityEvidence({ expectedRunId = null, decisions = null, generation = null, system2 = null } = {}) {
+  const base = evaluatePolicyEvidence({ expectedRunId, decisions, generation })
+  const facts = {
+    ...base.facts,
+    plannerMode: generation?.plannerMode ?? null,
+    deterministicFallbackEnabled: generation?.deterministicFallbackEnabled ?? null,
+    system2RunId: system2?.runId ?? null,
+    system2Source: system2?.source ?? null,
+    system2Decisions: Number.isFinite(system2?.count) ? system2.count : null,
+    system2ModelDecisions: Number.isFinite(system2?.modelCount) ? system2.modelCount : null,
+    system2PortalPlans: Number.isFinite(system2?.portalPlanCount) ? system2.portalPlanCount : null,
+  }
+  if (base.code !== 0) return outcome(base.code, base.status, base.reason, facts)
+  if (generation?.plannerMode !== 'llm') {
+    return outcome(2, 'UNKNOWN', `planner_not_llm observed=${generation?.plannerMode ?? 'unknown'}`, facts)
+  }
+  if (generation?.deterministicFallbackEnabled !== false) {
+    return outcome(2, 'UNKNOWN', `deterministic_fallback_not_disabled observed=${String(generation?.deterministicFallbackEnabled ?? 'unknown')}`, facts)
+  }
+  if (system2 === null || typeof system2 !== 'object') {
+    return outcome(2, 'UNKNOWN', 'system2_evidence_unavailable', facts)
+  }
+  if (system2.runId !== expectedRunId) {
+    return outcome(2, 'UNKNOWN', `system2_evidence_run_mismatch expected=${expectedRunId} observed=${system2.runId ?? 'unknown'}`, facts)
+  }
+  if (!Number.isFinite(system2.modelCount) || system2.modelCount < 1) {
+    return outcome(2, 'UNKNOWN', 'no_model_system2_authority_decision', facts)
+  }
+  if (!Number.isFinite(system2.portalPlanCount) || system2.portalPlanCount < 1) {
+    return outcome(2, 'UNKNOWN', 'no_system2_portal_plan_decision', facts)
+  }
+  return outcome(0, 'VERIFIED', 'current_m2_authority_verified', facts)
 }
