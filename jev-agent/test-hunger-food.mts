@@ -33,6 +33,7 @@ import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
 import type { AgentSignals, Vec3Json, WorldState } from './src/state.ts'
 import { buildPlanOptions, computeFrontier, RUNGS, rungIndexById } from '../buddy-driver/planner.ts'
 import { emptyWorldMemory } from '../buddy-driver/resident-types.ts'
+import type { ResidentWorldMemory } from '../buddy-driver/resident-types.ts'
 
 const require = createRequire(import.meta.url)
 const Vec3 = require('vec3')
@@ -326,6 +327,122 @@ addCase('(d4) the M2 nether_portal predicate still requires the lit portal block
   return {
     pass: portal !== undefined && !empty && held && !flintOnly,
     detail: `empty=${empty} held=${held} flintOnly=${flintOnly}`,
+  }
+})
+
+// --- (e) underground food goal: habitat route or typed refusal -----------------
+// Live blocker (2026-09-21): HEARTBEAT pos=23.3,53.0,8.9 health=1 rung=enter_nether,
+// ledger active g37:collect:food 0/3, chosen=food, actions WAIT / DESCEND / MOVE at
+// y=52-53 with progressDelta=0. Passive animals do not spawn underground, so a food
+// goal with no sensed animal must either carry a route to animal habitat (the lit
+// surface) or say the dead end - never pace.
+
+function worldWithUpperRegion(y: number): ResidentWorldMemory {
+  const world = emptyWorldMemory()
+  world.knownResources = [{ name: 'oak_log', kind: 'log', x: 0, y, z: 0 }]
+  return world
+}
+
+addCase('(e1) underground + hungry: the food option carries a grounded surface-habitat prerequisite', () => {
+  const option = buildPlanOptions({}, worldWithUpperRegion(70), {
+    foodLevel: 0,
+    eatBelowFood: THRESHOLD,
+    botY: 53,
+  }).find((entry) => entry.id === 'food')
+  const first = option?.goals[0]
+  const second = option?.goals[1]
+  return {
+    pass:
+      option !== undefined &&
+      first?.kind === 'surface' &&
+      typeof first.targetY === 'number' &&
+      first.targetY > 53 &&
+      second?.targetItem === 'food',
+    detail: `first=${first?.kind}@y=${first?.targetY ?? 'none'} second=${second?.targetItem ?? 'none'} goals=[${(option?.goals ?? []).map((g) => `${g.kind}:${g.targetItem ?? '-'}`).join(',')}]`,
+  }
+})
+
+addCase('(e2) not below known habitat: the food option stays a short collect goal (no forced ascent)', () => {
+  const option = buildPlanOptions({}, worldWithUpperRegion(64), {
+    foodLevel: 0,
+    eatBelowFood: THRESHOLD,
+    botY: 64,
+  }).find((entry) => entry.id === 'food')
+  const kinds = (option?.goals ?? []).map((goal) => goal.kind)
+  return {
+    pass:
+      option !== undefined &&
+      !kinds.includes('surface') &&
+      (option?.goals ?? []).some((goal) => goal.targetItem === 'food'),
+    detail: `kinds=[${kinds.join(',')}]`,
+  }
+})
+
+addCase('(e3) no animal sensed on a collect food goal: the tick reports a typed explore refusal (never silent)', () => {
+  const state = perceive({}, 0, [])
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  return {
+    pass: grounded.exploreRouteBlocked !== null && grounded.exploreRouteBlocked.item === 'food',
+    detail:
+      grounded.exploreRouteBlocked === null
+        ? 'blocked=null'
+        : `blocked=item:${grounded.exploreRouteBlocked.item} reason:${grounded.exploreRouteBlocked.reason}`,
+  }
+})
+
+addCase('(e4) a sensed animal is a grounded food route: no explore refusal', () => {
+  const state = perceive({}, 0, [animal('cow', 12)])
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const hunt = grounded.candidates.some((candidate) => candidate.meta.foodRoute === 'animal')
+  return {
+    pass: hunt && grounded.exploreRouteBlocked === null,
+    detail: `hunt=${hunt} blocked=${grounded.exploreRouteBlocked?.reason ?? 'none'}`,
+  }
+})
+
+addCase('(e5) the habitat surface goal resolves to an ASCEND route or a typed SURFACE_ASCENT_REFUSAL', () => {
+  const option = buildPlanOptions({}, worldWithUpperRegion(70), {
+    foodLevel: 0,
+    eatBelowFood: THRESHOLD,
+    botY: 53,
+  }).find((entry) => entry.id === 'food')
+  const surfaceGoal = option?.goals[0]
+  if (surfaceGoal === undefined || surfaceGoal.kind !== 'surface' || typeof surfaceGoal.targetY !== 'number') {
+    return { pass: false, detail: 'food option carries no surface habitat goal' }
+  }
+  const goal: QueuedGoal = {
+    id: 'g-food-habitat',
+    kind: 'surface',
+    description: surfaceGoal.description,
+    targetItem: surfaceGoal.targetItem ?? null,
+    requiredCount: surfaceGoal.requiredCount ?? 1,
+    targetY: surfaceGoal.targetY,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+  const state = buildWorldState(
+    fakeBot({}, 0, []),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: queueWith(goal),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const ascent = grounded.candidates.some((candidate) => candidate.meta.surfaceAscent === true)
+  const refused = grounded.surfaceAscentRefusal !== null
+  return {
+    pass: ascent || refused,
+    detail: `targetY=${surfaceGoal.targetY} ascent=${ascent} refusal=${refused ? String(grounded.surfaceAscentRefusal?.reason) : 'none'}`,
   }
 })
 

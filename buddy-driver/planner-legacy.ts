@@ -1727,6 +1727,14 @@ export function buildPlanOptions(
     foodLevel?: number | null
     /** The eat gate the candidate layer uses (candidates.ts default 18). */
     eatBelowFood?: number
+    /**
+     * Live feet Y. Supplied by the caller because rung predicates cannot see it.
+     * When world memory holds a region ABOVE the body, the body is below known
+     * habitat, so the food option carries the code-owned upper-access recovery
+     * goal: a grounded ascent route (or a typed SURFACE_ASCENT_REFUSED further
+     * down) instead of an unbounded underground hunt.
+     */
+    botY?: number | null
     log?: (event: string, detail?: Record<string, unknown>) => void
   },
 ): PlanOption[] {
@@ -1776,7 +1784,21 @@ export function buildPlanOptions(
   const foodRung = optionalUnsat.find((rung) => rung.id === 'food')
   if (foodRung !== undefined && foodLevel !== null && foodLevel <= eatBelowFood) {
     const foodGoals = planGoals(foodRung)
-    if (foodGoals.length > 0) options.push({ id: 'food', title: 'optional: get food (survival)', goals: foodGoals })
+    // Live blocker (2026-09-21): health=1, `collect:food 0/3`, body underground
+    // where passive animals do not spawn. A food goal with no sensed animal could
+    // not progress, and the food Option carried no vertical leg. When world
+    // memory knows a region above the body, prepend the code-owned upper-access
+    // recovery goal so the chosen food plan actually reaches animal habitat
+    // (surface). The candidate layer answers that `surface` goal with a grounded
+    // ASCEND route or a typed SURFACE_ASCENT_REFUSED - never a zero-progress hunt.
+    // Mechanically necessary prerequisite expansion; no semantic choice is taken.
+    const habitatAbove =
+      typeof opts?.botY === 'number' && Number.isFinite(opts.botY) && rememberedUpperRegionAbove(world, opts.botY)
+    const goals =
+      habitatAbove && typeof opts?.botY === 'number'
+        ? [{ ...upperAccessRecoveryGoal(world, opts.botY), core: true }, ...foodGoals]
+        : foodGoals
+    if (goals.length > 0) options.push({ id: 'food', title: 'optional: get food (survival)', goals })
   }
   const two = mandatory.slice(0, 2).flatMap((rung) => planGoals(rung))
   if (two.length > 0) options.push({ id: 'two_rungs', title: `next two milestones (${mandatory.slice(0, 2).map((r) => r.id).join(' + ')})`, goals: two })
@@ -2010,6 +2032,24 @@ export function upperAccessRecoveryApplies(
   policy: UpperAccessRecoveryPolicy = DEFAULT_UPPER_ACCESS_RECOVERY_POLICY,
 ): boolean {
   return deriveUpperAccessTargetY(world, botY, policy) > botY + policy.minRiseBlocks
+}
+
+/**
+ * True when world memory holds an upper region ABOVE the body: the body is below
+ * a place it already knows, so an ascent is a grounded route rather than a blind
+ * rise. Unlike `upperAccessRecoveryApplies` this is false at the surface (where
+ * the only "upper" target is the bounded-rise default), which is what lets the
+ * food survival option carry an ascent prerequisite only when it is genuinely
+ * underground. Passive animals spawn on the lit surface, so "there is known
+ * world above me" is the code-owned habitat signal.
+ */
+export function rememberedUpperRegionAbove(
+  world: ResidentWorldMemory,
+  botY: number,
+  policy: UpperAccessRecoveryPolicy = DEFAULT_UPPER_ACCESS_RECOVERY_POLICY,
+): boolean {
+  const remembered = highestRememberedUpperRegionY(world)
+  return remembered !== null && remembered > botY + policy.minRiseBlocks
 }
 
 /**
