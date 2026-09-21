@@ -84,6 +84,12 @@ const POS_RE = /pos=(-?\d+),(-?\d+),(-?\d+)/
 
 const INVENTORY_RE = /\b(?:items|inventory)=(\{[^{}]*\})/
 
+/**
+ * `dimension=<id>` observations inside a run-bound line. Additive: the M3 gate
+ * reports the dimension it observed, while the M2 stages ignore this field.
+ */
+const DIMENSION_RE = /\bdimension=(minecraft:[a-z_]+|[a-z_]+)\b/
+
 /** Read-only current-run binding used only to bound live policy evidence. */
 export async function readPolicySocketBinding(sockPath = M2_GATE_CONTROL_SOCK, timeoutMs = 1500) {
   if (!existsSync(sockPath)) return null
@@ -403,6 +409,7 @@ function isBootLine(line) {
 export function scanRunLines(runId, lines) {
   const portalEvents = []
   const inventorySamples = []
+  const dimensionObservations = []
   const foreignRuns = new Set()
   let activeRunId = null
   let bootSeen = false
@@ -425,9 +432,19 @@ export function scanRunLines(runId, lines) {
     if (portal !== null) portalEvents.push(portal)
     const inventory = parseInventoryMarker(line)
     if (inventory !== null) inventorySamples.push(inventory)
+    const dimension = DIMENSION_RE.exec(line)
+    if (dimension !== null) dimensionObservations.push(dimension[1])
   }
-  if (!bootSeen) return { status: 'unknown', reason: `run_boundary_missing runId=${runId}`, portalEvents: [], inventorySamples: [] }
-  return { status: 'valid', portalEvents, inventorySamples, foreignRuns: [...foreignRuns] }
+  if (!bootSeen) {
+    return {
+      status: 'unknown',
+      reason: `run_boundary_missing runId=${runId}`,
+      portalEvents: [],
+      inventorySamples: [],
+      dimensionObservations: [],
+    }
+  }
+  return { status: 'valid', portalEvents, inventorySamples, dimensionObservations, foreignRuns: [...foreignRuns] }
 }
 
 /** Read and scan the resident log for run R's markers. */
@@ -520,13 +537,27 @@ export async function readRunScopedM2Evidence(runId, { logPath = M2_GATE_LOG, sn
   const mismatches = []
   const snapshot = readM2Snapshot(runId, { snapshotDir })
   if (snapshot.status === 'valid' && (snapshot.portalEvents.length > 0 || snapshot.inventorySamples.length > 0)) {
-    sources.push({ name: 'snapshot', path: snapshot.path, portalEvents: snapshot.portalEvents, inventorySamples: snapshot.inventorySamples })
+    sources.push({
+      name: 'snapshot',
+      path: snapshot.path,
+      portalEvents: snapshot.portalEvents,
+      inventorySamples: snapshot.inventorySamples,
+      // Dimension is only recorded on portal markers; the M3 gate reports it as
+      // an intermediate fact without requiring a portal chain.
+      dimensionObservations: snapshot.portalEvents.map((event) => event.dimension).filter((value) => typeof value === 'string'),
+    })
   } else if (snapshot.status === 'unknown') {
     mismatches.push(snapshot.reason)
   }
   const log = await readM2Log(runId, { logPath })
   if (log.status === 'valid' && (log.portalEvents.length > 0 || log.inventorySamples.length > 0)) {
-    sources.push({ name: 'log', path: log.path, portalEvents: log.portalEvents, inventorySamples: log.inventorySamples })
+    sources.push({
+      name: 'log',
+      path: log.path,
+      portalEvents: log.portalEvents,
+      inventorySamples: log.inventorySamples,
+      dimensionObservations: log.dimensionObservations ?? [],
+    })
   } else if (log.status === 'unknown') {
     mismatches.push(log.reason)
   }

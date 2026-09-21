@@ -40,9 +40,39 @@ const m2NoMachineStatus = evaluateMilestone(contract, 'M2', {
 assert.equal(m2NoMachineStatus.status, 'UNKNOWN')
 assert.equal(m2NoMachineStatus.reason, 'gate_emitted_no_machine_status')
 
-// M3 remains manual until its own run-scoped gate is wired.
-const m3 = evaluateMilestone(contract, 'M3')
-assert.equal(m3.status, 'UNKNOWN')
-assert.match(m3.reason, /run-scoped executable gate/)
+// M3 delegates the 12-Eyes terminal predicate to its own run-scoped command gate
+// (tools/m3-gate.mjs, scopeArg --run), mirroring M2. Without an exact runId the
+// contract is UNKNOWN; with one it parses the gate's M3_RUN_RESULT line.
+const m3NoScope = evaluateMilestone(contract, 'M3', { runCommand: () => { throw new Error('M3 gate must not run without --run') } })
+assert.equal(m3NoScope.status, 'UNKNOWN')
+assert.equal(m3NoScope.reason, 'run_scope_required')
 
-process.stdout.write('milestone-status-test 6/6 PASS\n')
+const m3Pass = evaluateMilestone(contract, 'M3', {
+  runId: 'run-m3-a',
+  runCommand: (argv) => {
+    assert.deepEqual(argv.slice(1), ['--run', 'run-m3-a'])
+    return { stdout: 'noise\nM3_RUN_RESULT status=PASS reason=twelve_eyes_of_ender_verified runId=run-m3-a\n', stderr: '', status: 0 }
+  },
+})
+assert.equal(m3Pass.status, 'PASS')
+
+const m3Fail = evaluateMilestone(contract, 'M3', {
+  runId: 'run-m3-a',
+  runCommand: () => ({ stdout: 'M3_RUN_RESULT status=FAIL reason=ender_eyes_short_with_crafting_materials runId=run-m3-a\n', stderr: '', status: 1 }),
+})
+assert.equal(m3Fail.status, 'FAIL')
+
+const m3Unknown = evaluateMilestone(contract, 'M3', {
+  runId: 'run-m3-a',
+  runCommand: () => ({ stdout: 'M3_RUN_RESULT status=UNKNOWN reason=m3_stages_incomplete:ender_eye_ready runId=run-m3-a\n', stderr: '', status: 2 }),
+})
+assert.equal(m3Unknown.status, 'UNKNOWN')
+
+const m3NoMachineStatus = evaluateMilestone(contract, 'M3', {
+  runId: 'run-m3-a',
+  runCommand: () => ({ stdout: 'human prose only\n', stderr: '', status: 0 }),
+})
+assert.equal(m3NoMachineStatus.status, 'UNKNOWN')
+assert.equal(m3NoMachineStatus.reason, 'gate_emitted_no_machine_status')
+
+process.stdout.write('milestone-status-test 10/10 PASS\n')
