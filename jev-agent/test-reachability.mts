@@ -846,9 +846,10 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     )
   }
 
-  // (e) live-shape regression: the gate's self-contained craft step is skipped
-  // when a reachable station retrieve is offered, then the controller's own
-  // move-fail filter removes it. The backfill must still present the craft step.
+  // (e) live-shape regression: a reachable station retrieve is offered, then the
+  // controller's own move-fail filter removes it. The local 2x2 prerequisite step
+  // must survive that filter so the craft Option does not collapse to WAIT, and
+  // the controller backfill must still restore the step if it is absent entirely.
   {
     const state = worldState({
       position: bot,
@@ -862,19 +863,25 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     const afterControllerFilters = grounded.candidates.filter(
       (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE',
     )
-    const beforeProductive = afterControllerFilters.filter(
-      (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
-    )
-    const restored = ensureCraftStepActionable(state, afterControllerFilters, craftOptions)
-    const productive = restored.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
     const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
-    const line = candidateStarvationLine(restored, 'craft:wooden_pickaxe:1', false, blockedBy, candidateStarvationMissing(grounded.withheld))
+    const missing = candidateStarvationMissing(grounded.withheld)
+    const survivedLine = candidateStarvationLine(afterControllerFilters, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
     check(
-      '(e) the controller backfill makes a craftable wooden_pickaxe productive with no starvation line',
-      beforeProductive.length === 0 &&
-        productive.some((candidate) => candidate.id === 'CRAFT:crafting_table') &&
-        line === null,
-      `before=[${afterControllerFilters.map((candidate) => candidate.id).join(',')}] after=[${restored.map((candidate) => candidate.id).join(',')}] starvation=${line ?? 'none'}`,
+      '(e) the grounded craft step survives the controller move-fail filter with no starvation line',
+      afterControllerFilters.some((candidate) => candidate.id === 'CRAFT:crafting_table') && survivedLine === null,
+      `surviving=[${afterControllerFilters.map((candidate) => candidate.id).join(',')}] starvation=${survivedLine ?? 'none'}`,
+    )
+    // The backfill stays the last-resort guarantee: if a later candidate
+    // transformation dropped the step, it must be restored before the Option can
+    // be judged starved.
+    const withoutCraft = afterControllerFilters.filter((candidate) => candidate.id !== 'CRAFT:crafting_table')
+    const restored = ensureCraftStepActionable(state, withoutCraft, craftOptions)
+    const productive = restored.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+    const restoredLine = candidateStarvationLine(restored, 'craft:wooden_pickaxe:1', false, blockedBy, missing)
+    check(
+      '(e) the controller backfill restores an absent craft step with no starvation line',
+      productive.some((candidate) => candidate.id === 'CRAFT:crafting_table') && restoredLine === null,
+      `before=[${withoutCraft.map((candidate) => candidate.id).join(',')}] after=[${restored.map((candidate) => candidate.id).join(',')}] starvation=${restoredLine ?? 'none'}`,
     )
   }
 
