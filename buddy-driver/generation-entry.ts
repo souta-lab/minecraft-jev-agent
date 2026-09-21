@@ -1057,15 +1057,84 @@ export interface LedgerGoalDominated {
   reason: string
 }
 
+export interface LedgerGoalRetirement {
+  id: string
+  description: string
+  rungIds: string[]
+}
+
 export interface LedgerGoalReconciliation {
   snapshot: GoalQueueSnapshot
   reopened: LedgerGoalReopening[]
   dominated: LedgerGoalDominated[]
+  /**
+   * Unfinished rows retired because the world OUTCOME they exist for already
+   * exists (every rung that emits the row is satisfied). Separate from
+   * `dominated` (the inventory-shaped proof, which deliberately excludes `place`
+   * rows) and logged as its own typed marker.
+   */
+  achieved: LedgerGoalRetirement[]
 }
 
 function rungOwnsGoal(rung: Rung, goal: QueuedGoal, counts: Counts, world: ResidentWorldMemory): boolean {
   const target = goal.targetItem ?? null
-  return rung.goals(counts, world).some((planned) => planned.kind === goal.kind && (planned.targetItem ?? null) === target)
+  const predicate = goal.targetPredicate ?? null
+  return rung
+    .goals(counts, world)
+    .some(
+      (planned) =>
+        planned.kind === goal.kind &&
+        (planned.targetItem ?? null) === target &&
+        // A named predicate disambiguates rows that share kind+item: the
+        // `light:nether_portal` row (`portal_lit`) and the `enter:nether_portal`
+        // row (`portal_entered`) are both `place nether_portal`, but only the
+        // first belongs to the nether_portal rung.
+        (predicate === null || (planned.targetPredicate ?? null) === predicate),
+    )
+}
+
+/**
+ * The OUTCOME half of ledger reconciliation: an unfinished row exists to produce
+ * a world outcome (a built/lit/verified portal, a placed station). When EVERY
+ * rung that emits this row is already satisfied by the live inventory/world, the
+ * outcome exists and the row is finished work the ledger never observed as
+ * `done`.
+ *
+ * Measured live (`run-mubhx20x-pie2`): the 17:32:56Z restore reopened the five
+ * construction rows with zero counts, the plan went back to building a gate that
+ * was standing and lit, and the durable ledger then held `g4 collect obsidian`
+ * (active), `g5 place obsidian` and `g6 place nether_portal` (pending) at the
+ * queue head while the body waited underground. This is the mirror of the `done`
+ * rule above and uses the same rung predicates; it is NOT the inventory-shaped
+ * domination proof (`dominatedPrerequisiteReason` deliberately excludes `place`
+ * rows, whose `targetItem` is the material they spend, not the product).
+ */
+function achievedOutcomeRetirement(
+  goal: QueuedGoal,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): { record: LedgerGoalRetirement; detail: string } | null {
+  const target = goal.targetItem
+  if (typeof target !== 'string' || target.length === 0) return null
+  const rungs = RUNGS.filter((rung) => rung.future !== true && rungOwnsGoal(rung, goal, counts, world))
+  if (rungs.length === 0) return null
+  const planned: PlannedGoal = {
+    kind: goal.kind,
+    description: goal.description,
+    targetItem: goal.targetItem,
+    requiredCount: goal.requiredCount,
+  }
+  // The row's own item requirement is already held: that is completion, not
+  // retirement, and the queue resolves it through its normal completion check.
+  if (goalAlreadyMet(planned, counts)) return null
+  // EVERY owning rung must be satisfied: a row shared with an unsatisfied rung is
+  // still live work (a `place nether_portal` entry row keeps its own predicate).
+  if (!rungs.every((rung) => rung.satisfied(counts, world))) return null
+  const rungIds = rungs.map((rung) => rung.id)
+  return {
+    record: { id: goal.id, description: goal.description, rungIds },
+    detail: `retired: outcome already exists (rungs=${rungIds.join(',')})`,
+  }
 }
 
 /**
@@ -1090,6 +1159,7 @@ export function reconcileLedgerGoals(
 ): LedgerGoalReconciliation {
   const reopened: LedgerGoalReopening[] = []
   const dominated: LedgerGoalDominated[] = []
+  const achieved: LedgerGoalRetirement[] = []
   const goals = (snapshot.goals ?? []).map((goal) => {
     if (goal.status === 'active' || goal.status === 'pending') {
       const proof = dominatedPrerequisiteReason(
@@ -1110,6 +1180,11 @@ export function reconcileLedgerGoals(
           status: 'impossible' as const,
           detail: `retired dominated prerequisite: item=${proof.item} held=${proof.held.join(',')} reason=${proof.reason}`,
         }
+      }
+      const outcome = achievedOutcomeRetirement(goal, counts, world)
+      if (outcome !== null) {
+        achieved.push(outcome.record)
+        return { ...goal, status: 'impossible' as const, detail: outcome.detail }
       }
       return { ...goal }
     }
@@ -1136,7 +1211,7 @@ export function reconcileLedgerGoals(
     })
     return { ...goal, status: 'pending' as const, haveCount: Math.min(goal.haveCount, liveHave) }
   })
-  return { snapshot: { ...snapshot, goals }, reopened, dominated }
+  return { snapshot: { ...snapshot, goals }, reopened, dominated, achieved }
 }
 
 export function selectLedgerSnapshot(
@@ -1144,7 +1219,13 @@ export function selectLedgerSnapshot(
   derivedSnapshot: GoalQueueSnapshot | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
-): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot; reopened: LedgerGoalReopening[]; dominated: LedgerGoalDominated[] } | null {
+): {
+  source: 'host-snapshot' | 'derived-file'
+  snapshot: GoalQueueSnapshot
+  reopened: LedgerGoalReopening[]
+  dominated: LedgerGoalDominated[]
+  achieved: LedgerGoalRetirement[]
+} | null {
   if (hostSnapshot !== null) {
     if (!ledgerIsConsistent(hostSnapshot, counts, world)) return null
     return { source: 'host-snapshot', ...reconcileLedgerGoals(hostSnapshot, counts, world) }
@@ -1274,10 +1355,24 @@ function restoreLedgerIntoController(
       current: current?.description ?? null,
       reopened: chosen.reopened.length,
       dominated: chosen.dominated.length,
+      achieved: chosen.achieved.length,
       basis: chosen.snapshot.basis ?? null,
     })
     if (chosen.reopened.length > 0) {
       log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
+    }
+    // The mirror of the reopen above: an unfinished row whose world OUTCOME
+    // already exists is finished work the ledger never observed as `done`, so it
+    // is retired (typed, recorded in the durable ledger) instead of restored at
+    // the queue head. Measured live: this is what kept `place obsidian` /
+    // `place nether_portal` rows alive for a gate that was standing and lit.
+    for (const entry of chosen.achieved) {
+      log('LEDGER_GOAL_RETIRED', {
+        reason: 'outcome_already_satisfied',
+        goal: entry.id,
+        description: entry.description,
+        rungs: entry.rungIds,
+      })
     }
     for (const entry of chosen.dominated) {
       log('PREREQ_DOMINATED', {

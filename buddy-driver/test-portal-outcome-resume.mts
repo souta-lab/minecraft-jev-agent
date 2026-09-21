@@ -47,7 +47,9 @@ import type { LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { GoalQueueSnapshot, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { KnownPortalSiteJson, ResidentWorldMemory } from './resident-types.ts'
-import { portalFrameLayout, PORTAL_OBSIDIAN_REQUIRED } from '../jev-agent/src/netherPortalPlan.ts'
+import { portalFrameLayout, PORTAL_OBSIDIAN_REQUIRED, planPortalEntry } from '../jev-agent/src/netherPortalPlan.ts'
+import { rememberedPortalFrameSites } from '../jev-agent/src/state.ts'
+import { portalSiteKnownResources } from './generation-entry.ts'
 import type { Counts } from './planner.ts'
 
 interface Case {
@@ -133,7 +135,7 @@ function constructionLedger(): GoalQueueSnapshot {
     startCount: 0,
     haveCount: status === 'done' ? requiredCount : 0,
     status,
-    origin: 'ladder',
+    origin: 'llm',
     createdAt: 0,
     updatedAt: 0,
     detail: null,
@@ -299,6 +301,96 @@ addCase('(c) blind-from-below: the durable record survives and still yields the 
   return {
     pass,
     detail: `distance=${distance.toFixed(1)} removed=${synced.removed.length} confirmed=${synced.confirmed.length} resume=${resume.rungId}@${resume.rungIndex} construction=${construction.length}`,
+  }
+})
+
+// (a6) THE PERSISTED SHAPE: the durable ledger the old code actually left behind
+// (an ACTIVE `mine 10 x obsidian` row plus pending `place obsidian` /
+// `place nether_portal` rows, all stamped with the completed
+// `system2:front_nether_portal` Option, committed against basis enter_nether@14).
+// Restoring it must retire those rows instead of putting construction back at
+// the queue head.
+addCase('(a6) restore: persisted pending construction rows are retired, not restored', () => {
+  const world = liveWorld({ knownPortalSites: [{ ...PORTAL_SITE }] })
+  const live = [
+    { ...constructionLedger().goals[0]!, id: 'g4:collect:obsidian', description: 'mine 10 x obsidian with diamond_pickaxe', requiredCount: 10, status: 'active' as const },
+    { ...constructionLedger().goals[3]!, id: 'g5:place:obsidian', status: 'pending' as const },
+    { ...constructionLedger().goals[4]!, id: 'g6:place:nether_portal', status: 'pending' as const, targetPredicate: 'portal_lit' },
+  ]
+  const snapshot: GoalQueueSnapshot = {
+    counter: 30,
+    revision: 9000,
+    goals: live,
+    basis: { worldKey: WORLD_KEY_STRING, frontierRungId: 'enter_nether', frontierRungIndex: 14 },
+  }
+  const reconciled = reconcileLedgerGoals(snapshot, LIVE_INVENTORY, world)
+  const stillUnfinished = reconciled.snapshot.goals.filter(
+    (goal) => goal.status === 'active' || goal.status === 'pending',
+  )
+  const selected = selectLedgerSnapshot(snapshot, null, LIVE_INVENTORY, world)
+  const pass =
+    reconciled.reopened.length === 0 &&
+    reconciled.achieved.length === 3 &&
+    stillUnfinished.length === 0 &&
+    reconciled.snapshot.goals.every((goal) => goal.status === 'impossible') &&
+    selected !== null &&
+    selected.achieved.length === 3
+  return {
+    pass,
+    detail: `achieved=[${reconciled.achieved.map((entry) => `${entry.id}<-${entry.rungIds.join('+')}`).join(' ')}] unfinished=${stillUnfinished.length}`,
+  }
+})
+
+// (a7) A pending ENTRY row (same kind+item as the lighting row, different
+// predicate) is NOT retired by the satisfied nether_portal rung: the predicate
+// disambiguates ownership, so entering the gate stays live work.
+addCase('(a7) a pending entry row survives: predicate disambiguates rung ownership', () => {
+  const world = liveWorld({ knownPortalSites: [{ ...PORTAL_SITE }] })
+  const entryRow: QueuedGoal = {
+    ...constructionLedger().goals[4]!,
+    id: 'g7:place:nether_portal',
+    description: 'enter the lit nether portal and transfer to minecraft:the_nether',
+    dimension: 'minecraft:the_nether',
+    targetPredicate: 'portal_entered',
+    status: 'pending',
+  }
+  const snapshot: GoalQueueSnapshot = {
+    counter: 31,
+    revision: 9001,
+    goals: [entryRow],
+    basis: { worldKey: WORLD_KEY_STRING, frontierRungId: 'enter_nether', frontierRungIndex: 14 },
+  }
+  const reconciled = reconcileLedgerGoals(snapshot, LIVE_INVENTORY, world)
+  const pass = reconciled.achieved.length === 0 && reconciled.snapshot.goals[0]?.status === 'pending'
+  return {
+    pass,
+    detail: `achieved=${reconciled.achieved.length} status=${reconciled.snapshot.goals[0]?.status}`,
+  }
+})
+
+// (a8) Re-verification and entry stay reachable from below: the durable record
+// projects the frame geometry into the sensor (`portalSiteKnownResources` ->
+// `rememberedPortalFrameSites` -> `state.portalFrameSites`), so the entry plan is
+// grounded by DIRECT interior block reads instead of the body-relative window.
+addCase('(a8) the entry route grounds from the record while the body is below the gate', () => {
+  const routes = portalSiteKnownResources([{ ...PORTAL_SITE }])
+  const sites = rememberedPortalFrameSites(routes as unknown as Parameters<typeof rememberedPortalFrameSites>[0])
+  const blockAt = (cell: { x: number; y: number; z: number }): string | null =>
+    PORTAL_LAYOUT.interior.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z)
+      ? 'nether_portal'
+      : 'obsidian'
+  const plan = planPortalEntry({
+    site: sites[0]!,
+    self: { x: Math.floor(BODY_BELOW.x), y: Math.floor(BODY_BELOW.y), z: Math.floor(BODY_BELOW.z) },
+    blockAt,
+    isStandable: (cell) => PORTAL_LAYOUT.interior.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z),
+    fromDimension: 'minecraft:overworld',
+    dimension: 'minecraft:the_nether',
+  })
+  const pass = sites.length === 1 && plan.ok === true
+  return {
+    pass,
+    detail: `sites=${sites.length} ok=${plan.ok} ${plan.ok ? `enterCell=${plan.candidate.enterCell.x},${plan.candidate.enterCell.y},${plan.candidate.enterCell.z}` : plan.line}`,
   }
 })
 
