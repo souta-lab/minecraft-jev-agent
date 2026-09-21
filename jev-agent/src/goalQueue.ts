@@ -128,6 +128,192 @@ export function formatPrereqReordered(prerequisite: QueuedGoal, consumer: Queued
   return `${PREREQ_REORDERED} id=${prerequisite.id} item=${prerequisite.targetItem ?? 'none'} before=${consumer.id} consumer=${consumer.kind}`
 }
 
+// ---------------------------------------------------------------------------
+// #nonprogress-yield: the bounded SEMANTIC-progress watchdog for an OPTIONAL row
+// ---------------------------------------------------------------------------
+//
+// Measured live (m3-live `run-mublvgjx-yldu`, source cc658cb, body 9.7,68,5.3
+// health=20): the head row `g37:collect:food 0/3` (emitted by the OPTIONAL food
+// rung) produced `CANDIDATE_STARVATION presented=1..2 productive=0
+// goal=collect:food:3 missing=["explore_route_blocked:no_frontier"]` for 27
+// minutes while every beta vote said continue (0.20-0.24), so the frontier's own
+// entry goal waited behind it. The row's own MOVEs / WAITs inside one pocket
+// kept it looking active: `progressKinds=["none"]`, zero items gained, zero
+// predicate movement.
+//
+// The missing fact is code-owned and purely mechanical: how many settled
+// decisions in the SAME pocket changed a SEMANTIC fact (`goal`/`search`
+// progress) for the row that holds the queue. `body` motion and `none` (WAIT)
+// must not clear the window - a successful MOVE inside the same pocket is exactly
+// the phenotype that kept the head alive. When the window is full the optional
+// row may no longer occupy the head:
+//
+//   - `yield`: demote the proven-non-progressing row behind the plan's next
+//     unfinished row. The existing plan order decides what runs next - code
+//     never invents a new WHAT (`WHICH goal` stays with System2/Jev);
+//   - `escalate`: with no alternative row, after the row's yield budget is spent,
+//     or while a code-owned critical survival need holds, emit
+//     `NON_PROGRESS_ESCALATED` so the boundary is visible.
+//
+// The rule is scoped by the row's own `optional` marker (never by `core`, which
+// a mandatory frontier row also carries), so a mandatory head is untouched. It
+// is not food/M3-specific. #55 protection is untouched: a yielded row stays
+// `pending` (never dropped, never marked done/impossible).
+
+export const NON_PROGRESS_YIELD = 'NON_PROGRESS_YIELD'
+export const NON_PROGRESS_ESCALATED = 'NON_PROGRESS_ESCALATED'
+
+/** Settled decisions with zero semantic progress in one pocket before a yield. */
+export const NON_PROGRESS_YIELD_LIMIT_DEFAULT = 12
+
+/** Distinct pocket fingerprints allowed inside the window (same as #360). */
+export const NON_PROGRESS_MAX_DISTINCT_STATES_DEFAULT = 3
+
+/** How many times one row may yield before it must escalate instead. */
+export const NON_PROGRESS_MAX_YIELDS_DEFAULT = 2
+
+/** `BUDDY_NON_PROGRESS_YIELD_LIMIT` overrides N; invalid values fall back. */
+export function resolveNonProgressYieldLimit(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_NON_PROGRESS_YIELD_LIMIT ?? NON_PROGRESS_YIELD_LIMIT_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : NON_PROGRESS_YIELD_LIMIT_DEFAULT
+}
+
+/** `BUDDY_NON_PROGRESS_MAX_DISTINCT` overrides N; invalid values fall back. */
+export function resolveNonProgressMaxDistinctStates(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_NON_PROGRESS_MAX_DISTINCT ?? NON_PROGRESS_MAX_DISTINCT_STATES_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : NON_PROGRESS_MAX_DISTINCT_STATES_DEFAULT
+}
+
+/** `BUDDY_NON_PROGRESS_MAX_YIELDS` overrides N; invalid values fall back. */
+export function resolveNonProgressMaxYields(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_NON_PROGRESS_MAX_YIELDS ?? NON_PROGRESS_MAX_YIELDS_DEFAULT)
+  return Number.isInteger(raw) && raw >= 0 ? raw : NON_PROGRESS_MAX_YIELDS_DEFAULT
+}
+
+/** `goal`/`search` are semantic progress; `body`/`none` are body-only motion. */
+export function isSemanticProgressKind(kind: string): boolean {
+  return kind === 'goal' || kind === 'search'
+}
+
+export type NonProgressAction = 'hold' | 'yield' | 'escalate'
+
+export type NonProgressReason =
+  | 'no_current'
+  | 'not_optional'
+  | 'progressing'
+  | 'window_open'
+  | 'yielded'
+  | 'critical_need'
+  | 'no_alternative'
+  | 'yield_budget_exhausted'
+
+export interface NonProgressYieldOptions {
+  /** settled decisions with zero semantic progress before the head yields */
+  limit?: number
+  /** distinct pocket fingerprints allowed inside the window */
+  maxDistinctStates?: number
+  /** how many times one row may yield before it escalates instead */
+  maxYields?: number
+  /** code-owned critical survival fact; while true the head is kept (escalates) */
+  critical?: boolean
+}
+
+export interface NonProgressYieldResult {
+  action: NonProgressAction
+  reason: NonProgressReason
+  goalId: string | null
+  goalKey: string
+  /** consecutive settled decisions with zero semantic progress for the head */
+  decisions: number
+  limit: number
+  /** distinct position fingerprints inside the current window */
+  distinctStates: number
+  maxDistinctStates: number
+  /** yields this row has already spent */
+  yields: number
+  maxYields: number
+  /** the row that took the head when the action was `yield` */
+  nextGoalId: string | null
+}
+
+/** The compact `kind:target:count` goal key the controller logs. */
+export function goalKeyOf(goal: Pick<QueuedGoal, 'kind' | 'targetItem' | 'description' | 'requiredCount'>): string {
+  return `${goal.kind}:${goal.targetItem ?? goal.description}:${goal.requiredCount}`
+}
+
+export function formatNonProgressYield(result: NonProgressYieldResult): string {
+  return (
+    `${NON_PROGRESS_YIELD} id=${result.goalId} goal=${result.goalKey} decisions=${result.decisions}/${result.limit} ` +
+    `distinct=${result.distinctStates}/${result.maxDistinctStates} yields=${result.yields}/${result.maxYields} ` +
+    `next=${result.nextGoalId ?? 'none'} reason=no_semantic_progress action=yield`
+  )
+}
+
+export function formatNonProgressEscalated(result: NonProgressYieldResult): string {
+  return (
+    `${NON_PROGRESS_ESCALATED} id=${result.goalId} goal=${result.goalKey} decisions=${result.decisions}/${result.limit} ` +
+    `distinct=${result.distinctStates}/${result.maxDistinctStates} yields=${result.yields}/${result.maxYields} ` +
+    `reason=${result.reason} action=escalate`
+  )
+}
+
+/** Cap on the retained fingerprint window, independent of the caller's limit. */
+const NON_PROGRESS_WINDOW_CAP = 256
+
+/**
+ * One head's semantic-progress window. Pure and injectable: the caller feeds
+ * settled decisions, the queue asks `windowFor`. `body`/`none` never clear the
+ * window, so successful motion inside one pocket cannot mask zero semantic
+ * progress; a change of head re-arms it.
+ */
+export class NonProgressTracker {
+  private goalId: string | null = null
+  private decisionsWithoutProgress = 0
+  private readonly states: string[] = []
+
+  /** Re-arm when the head changes; idempotent for an unchanged head. */
+  setGoal(goalId: string | null): void {
+    if (goalId === this.goalId) return
+    this.goalId = goalId
+    this.decisionsWithoutProgress = 0
+    this.states.length = 0
+  }
+
+  /** Record one settled decision; returns its zero-semantic-progress window. */
+  note(progressKinds: readonly string[], stateKey: string): number {
+    if (progressKinds.some(isSemanticProgressKind)) {
+      this.decisionsWithoutProgress = 0
+      this.states.length = 0
+      return 0
+    }
+    this.decisionsWithoutProgress += 1
+    this.states.push(stateKey)
+    while (this.states.length > NON_PROGRESS_WINDOW_CAP) this.states.shift()
+    return this.decisionsWithoutProgress
+  }
+
+  windowFor(goalId: string): number {
+    return this.goalId === goalId ? this.decisionsWithoutProgress : 0
+  }
+
+  distinctStatesFor(goalId: string): number {
+    if (this.goalId !== goalId) return 0
+    return new Set(this.states).size
+  }
+
+  reset(): void {
+    this.decisionsWithoutProgress = 0
+    this.states.length = 0
+  }
+}
+
+
 /**
  * Default audit sink for prerequisite reconciliation, mirroring the predicate
  * `PREDICATE_UNKNOWN` sink: production wires the resident logger through
@@ -181,6 +367,16 @@ export interface QueuedGoal {
   protected?: boolean
   /** Issue #55: a core/rung goal that advances the current milestone. */
   core?: boolean
+  /**
+   * #nonprogress-yield: this row was emitted by an OPTIONAL rung (an affordance
+   * that never gates the mandatory road). It stays executable and selectable,
+   * but it may not sit at the queue head forever at zero SEMANTIC progress: the
+   * bounded watchdog demotes it behind the plan's next unfinished row. `core`
+   * cannot carry this fact (a mandatory frontier row and an optional side quest
+   * both read `core=true`), so the rung's own `optional` marker must survive the
+   * compile into the durable row.
+   */
+  optional?: boolean
   kind: GoalKind
   strategy?: GoalStrategy
   description: string
@@ -223,6 +419,13 @@ export interface QueuedGoal {
   updatedAt: number
   /** why the goal was marked impossible, when it was */
   detail: string | null
+  /**
+   * #nonprogress-yield: how many times this row has already been demoted behind
+   * the rest of the plan for making no semantic progress. Persisted with the
+   * durable queue so a restart does not reset the bound; once spent, the
+   * watchdog escalates instead of yielding again.
+   */
+  yieldCount?: number
 }
 
 /** A goal as proposed by the LLM. The queue assigns ids and bookkeeping. */
@@ -256,6 +459,8 @@ export interface PlannedGoal {
   protected?: boolean
   /** Issue #55: core/rung goal; a patch/replace may not drop it. */
   core?: boolean
+  /** #nonprogress-yield: emitted by an OPTIONAL rung; eligible for bounded yield. */
+  optional?: boolean
   /**
    * Set by the readiness compiler (`orderGoalsByReadiness`) when every
    * precondition of this goal held in the snapshot it ordered against. Absent
@@ -384,6 +589,8 @@ export class GoalQueue {
   private goals: QueuedGoal[] = []
   private counter = 0
   private queueRevision = 0
+  /** #nonprogress-yield: semantic-progress watchdog for the current head. */
+  private readonly nonProgress = new NonProgressTracker()
   /** Most recent plan's audit sink, reused by later lifecycle transitions. */
   private lifecycleSink: ((line: string) => void) | undefined
   /**
@@ -702,9 +909,122 @@ export class GoalQueue {
       detail: plan.detail ?? null,
       protected: plan.protected === true,
       core: plan.core === true,
+      ...(plan.optional === true ? { optional: true } : {}),
     }
     this.goals.push(goal)
     return goal
+  }
+
+  /**
+   * #nonprogress-yield: record one settled executor decision against the row that
+   * currently holds the queue. Only `goal`/`search` progress clears the window;
+   * `body` motion and WAIT deliberately do not (see the module comment).
+   * `stateKey` is the caller's compact position fingerprint, so a genuine
+   * journey (many distinct cells) cannot satisfy the "one pocket" bound while a
+   * successful MOVE inside a pocket can never clear the window by itself.
+   * Returns the updated zero-semantic-progress count for diagnostics.
+   */
+  noteSettledDecision(progressKinds: readonly string[], stateKey: string = ''): number {
+    const goal = this.nextRef()
+    this.nonProgress.setGoal(goal?.id ?? null)
+    return this.nonProgress.note(progressKinds, stateKey)
+  }
+
+  /**
+   * #nonprogress-yield: the bounded head-progress reconciliation. The controller
+   * runs it once per tick; it is pure with respect to world state (the caller
+   * supplies the code-owned `critical` survival fact) and directly fixture-
+   * testable.
+   *
+   *   - only a row emitted by an OPTIONAL rung is eligible; a mandatory/frontier
+   *     head is returned unchanged with `reason=not_optional`;
+   *   - `yield` demotes a proven-non-progressing row behind the plan's next
+   *     unfinished row. This is an execution-order transition, not a new WHAT:
+   *     the plan already ordered the alternatives, and System2 still owns them;
+   *   - `escalate` fires when there is no alternative row, when the row's yield
+   *     budget is spent, or while a critical survival need holds - always with
+   *     the typed `NON_PROGRESS_ESCALATED` marker so the boundary is visible.
+   */
+  reconcileNonProgressingHead(options: NonProgressYieldOptions = {}): NonProgressYieldResult {
+    const limit = Math.max(1, Math.floor(options.limit ?? resolveNonProgressYieldLimit()))
+    const maxDistinctStates = Math.max(
+      1,
+      Math.floor(options.maxDistinctStates ?? resolveNonProgressMaxDistinctStates()),
+    )
+    const maxYields = Math.max(0, Math.floor(options.maxYields ?? resolveNonProgressMaxYields()))
+    const current = this.nextRef()
+    if (current === undefined) {
+      return {
+        action: 'hold',
+        reason: 'no_current',
+        goalId: null,
+        goalKey: 'none',
+        decisions: 0,
+        limit,
+        distinctStates: 0,
+        maxDistinctStates,
+        yields: 0,
+        maxYields,
+        nextGoalId: null,
+      }
+    }
+    const decisions = this.nonProgress.windowFor(current.id)
+    const distinctStates = this.nonProgress.distinctStatesFor(current.id)
+    const yields = current.yieldCount ?? 0
+    const base = { goalId: current.id, goalKey: goalKeyOf(current), decisions, limit, distinctStates, maxDistinctStates, yields, maxYields }
+    if (current.optional !== true) {
+      return { ...base, action: 'hold', reason: 'not_optional', nextGoalId: null }
+    }
+    const exhausted = decisions >= limit && distinctStates <= maxDistinctStates
+    if (!exhausted) {
+      return { ...base, action: 'hold', reason: decisions === 0 ? 'progressing' : 'window_open', nextGoalId: null }
+    }
+    const alternative = this.goals.find(
+      (goal) => goal.id !== current.id && (goal.status === 'pending' || goal.status === 'active'),
+    )
+    // A proven-critical survival need keeps the head but is still reported, so a
+    // starving body's optional food row can never sit silent even when it yields
+    // no progress.
+    if (options.critical === true) {
+      this.nonProgress.reset()
+      return { ...base, action: 'escalate', reason: 'critical_need', nextGoalId: alternative?.id ?? null }
+    }
+    if (alternative === undefined) {
+      this.nonProgress.reset()
+      return { ...base, action: 'escalate', reason: 'no_alternative', nextGoalId: null }
+    }
+    if (yields >= maxYields) {
+      this.nonProgress.reset()
+      return { ...base, action: 'escalate', reason: 'yield_budget_exhausted', nextGoalId: alternative.id }
+    }
+    const now = Date.now()
+    current.yieldCount = yields + 1
+    current.status = 'pending'
+    current.updatedAt = now
+    const nextGoalId = this.demoteToBack(current)
+    this.nonProgress.reset()
+    this.queueRevision += 1
+    return { ...base, yields: yields + 1, action: 'yield', reason: 'yielded', nextGoalId }
+  }
+
+  /**
+   * Move one unfinished row after every other unfinished row, preserving the
+   * plan's relative order for the rest. Resolved history keeps its ledger slot.
+   * Returns the row that now holds the queue.
+   */
+  private demoteToBack(current: QueuedGoal): string | null {
+    const unfinished = this.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+    if (unfinished.length <= 1) return null
+    const ordered = [...unfinished.filter((goal) => goal.id !== current.id), current]
+    let cursor = 0
+    this.goals = this.goals.map((goal) => {
+      if (goal.status !== 'pending' && goal.status !== 'active') return goal
+      const replacement = ordered[cursor]
+      cursor += 1
+      return replacement ?? goal
+    })
+    this.activate()
+    return this.nextRef()?.id ?? null
   }
 
   /** Record live progress on the current inventory-counted goal (`collect`/`craft`); completes it if met. */
@@ -858,5 +1178,7 @@ export class GoalQueue {
     this.reconcilePrerequisites()
     const goal = this.nextRef()
     if (goal !== undefined) goal.status = 'active'
+    // #nonprogress-yield: a head change re-arms the semantic-progress window.
+    this.nonProgress.setGoal(goal?.id ?? null)
   }
 }

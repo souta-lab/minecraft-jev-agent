@@ -881,11 +881,27 @@ export function rungGoalsWithPrereq(
     rung.id === 'nether_portal' && existingFrameBlocks !== undefined
       ? netherPortalRungGoals(c, bestPickaxeRank(c), undefined, existingFrameBlocks)
       : rung.goals(c, w)
-  const base = raw.map((goal) => (goal.core === true ? goal : { ...goal, core: true }))
+  // `core` is the #55 "may not be dropped by a patch/replace" marker for the
+  // MANDATORY road. Forcing it onto every goal erased the explicit `optional`
+  // boundary: the live head was `g37:collect:food core=true` even though the
+  // food rung is declared `optional: true` (planner-legacy.ts RUNGS), so an
+  // optional zero-semantic-progress row could hold the queue indefinitely and
+  // the frontier's own entry goal waited behind it. The marker now survives the
+  // compile: optional rungs keep `optional: true` and are NOT core-protected;
+  // mandatory rungs keep the exact previous core-forcing behaviour (the
+  // nether-portal prerequisite chain in test-ladder-floor still requires it).
+  const optional = rung.optional === true
+  const mark = (goal: PlannedGoal): PlannedGoal =>
+    optional
+      ? { ...goal, optional: true, core: goal.core === true }
+      : goal.core === true
+        ? goal
+        : { ...goal, core: true }
+  const base = raw.map(mark)
   if (!needsOreDescent(rung.id, c)) return base
   const oreItem = ORE_RUNG_ITEM[rung.id]
   if (oreItem === undefined) return base
-  return [oreDescentGoal(oreItem, w), ...base]
+  return [mark(oreDescentGoal(oreItem, w)), ...base]
 }
 
 function withOreDescent(goals: PlannedGoal[], counts: Counts, world: ResidentWorldMemory): PlannedGoal[] {
@@ -1796,7 +1812,7 @@ export function buildPlanOptions(
       typeof opts?.botY === 'number' && Number.isFinite(opts.botY) && rememberedUpperRegionAbove(world, opts.botY)
     const goals =
       habitatAbove && typeof opts?.botY === 'number'
-        ? [{ ...upperAccessRecoveryGoal(world, opts.botY), core: true }, ...foodGoals]
+        ? [{ ...upperAccessRecoveryGoal(world, opts.botY), optional: true, core: false }, ...foodGoals]
         : foodGoals
     if (goals.length > 0) options.push({ id: 'food', title: 'optional: get food (survival)', goals })
   }

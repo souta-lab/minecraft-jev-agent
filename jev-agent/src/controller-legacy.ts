@@ -66,7 +66,7 @@ import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } fro
 import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
-import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
+import { formatNonProgressEscalated, formatNonProgressYield, GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
 import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
@@ -2284,6 +2284,11 @@ export class JevController {
       // subgoal and advances it, recording the transition with the trigger.
       this.syncQueue(trigger)
       this.syncGoalToQueue()
+      // #nonprogress-yield: an OPTIONAL row that has made zero semantic progress
+      // for a bounded window in one pocket may not keep holding the head while
+      // the frontier's own goal waits. Runs before the state build so the
+      // demoted order is what candidates are generated against this tick.
+      this.reconcileNonProgressingOptionalHead()
 
       if (
         this.options.singleShotPlanner &&
@@ -2864,6 +2869,39 @@ export class JevController {
         const option = verdict.optionId
         this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
       }
+    }
+  }
+
+  /**
+   * #nonprogress-yield: the controller half of the bounded optional-head yield.
+   * It supplies the two facts the queue cannot see - the code-owned critical
+   * survival predicate (a starving low-health body still prioritises food) and
+   * the goal key for the typed marker - and never selects WHAT runs next: the
+   * plan's own order does, and System2 still owns the repair.
+   */
+  private reconcileNonProgressingOptionalHead(): void {
+    if (this.queue.isEmpty) return
+    const critical = bodyStarving({
+      food: typeof this.bot.food === 'number' ? this.bot.food : Number.NaN,
+      health: this.bot.health,
+    })
+    const result = this.queue.reconcileNonProgressingHead({ critical })
+    const detail = {
+      goalId: result.goalId,
+      goalKey: result.goalKey,
+      decisions: result.decisions,
+      limit: result.limit,
+      distinctStates: result.distinctStates,
+      yields: result.yields,
+      maxYields: result.maxYields,
+      nextGoalId: result.nextGoalId,
+      reason: result.reason,
+      critical,
+    }
+    if (result.action === 'yield') {
+      this.logger.warn('agent', formatNonProgressYield(result), detail, this.tickCounter)
+    } else if (result.action === 'escalate') {
+      this.logger.warn('agent', formatNonProgressEscalated(result), detail, this.tickCounter)
     }
   }
 
@@ -3874,6 +3912,9 @@ export class JevController {
       stateKey: positionKey(this.bot.entity.position),
       progressKinds: taxonomy.progressKinds,
     })
+    // #nonprogress-yield: feed the same settled decision to the optional-head
+    // watchdog. `body`/`none` do not clear its window; a change of head re-arms.
+    this.queue.noteSettledDecision(taxonomy.progressKinds, positionKey(this.bot.entity.position))
 
     writeOutcome(this.jevWriter, {
       callId: decision.callId,

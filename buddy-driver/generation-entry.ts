@@ -1179,6 +1179,18 @@ function achievedOutcomeRetirement(
 }
 
 /**
+ * #nonprogress-yield: is this unfinished row emitted by an OPTIONAL rung? Used
+ * only to re-attach the marker to durable rows written before it survived the
+ * compile. Satisfaction is deliberately not consulted: a row that exists is by
+ * definition still wanted, and the rung's own `goals()` emits it in that state.
+ */
+function rungOwnedByOptionalRung(goal: QueuedGoal, counts: Counts, world: ResidentWorldMemory): boolean {
+  return RUNGS.some(
+    (rung) => rung.future !== true && rung.optional === true && rungOwnsGoal(rung, goal, counts, world),
+  )
+}
+
+/**
  * Reconcile a restored ledger against the LIVE bot.
  *
  * A `done` goal is trusted only when either its own item requirement is already
@@ -1226,6 +1238,14 @@ export function reconcileLedgerGoals(
       if (outcome !== null) {
         achieved.push(outcome.record)
         return { ...goal, status: 'impossible' as const, detail: outcome.detail }
+      }
+      // #nonprogress-yield: a durable row written before the optional marker
+      // survived the compile (live `g37:collect:food core=true`, restored with a
+      // valid basis) is re-attributed here: if any rung that emits this row is
+      // OPTIONAL, the row is eligible for the bounded head yield. `core`
+      // protection is left untouched (#55), only the missing marker is added.
+      if (goal.optional !== true && rungOwnedByOptionalRung(goal, counts, world)) {
+        return { ...goal, optional: true }
       }
       return { ...goal }
     }
