@@ -4174,9 +4174,16 @@ export class JevController {
       return
     }
     if (current.kind === 'place') {
+      // Being in the Nether proves the overworld light row has served its purpose.
+      // `portalLitTruth` is dimension-bound to the row's own dimension (overworld),
+      // so without this the row can never complete after the transfer and the
+      // queue never drains to the M3 goals - live: the body stood in the Nether
+      // with a plan already containing `collect 7 x blaze_rod` / `collect 12 x
+      // ender_pearl` while it WAITed on the light row forever.
+      const inNether = String(this.bot.game?.dimension ?? '') === 'minecraft:the_nether'
       const complete =
         current.targetPredicate === PORTAL_LIT_PREDICATE
-          ? this.portalLitTruth(current)
+          ? this.portalLitTruth(current) || inNether
           : current.targetPredicate === PORTAL_ENTERED_PREDICATE
             ? this.portalEnteredTruth(current)
             : current.targetItem !== null && this.countItem(current.targetItem) <= 0
