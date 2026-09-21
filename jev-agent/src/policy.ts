@@ -252,13 +252,24 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
     return guardWalkToBlock(candidate, state, context, target, { x: blockX, y: blockY, z: blockZ })
   }
 
-  const standable = state.terrain.standable.some((spot) => samePosition(spot, target))
-  if (!standable) {
-    return deny(
-      candidate.id,
-      'NO_SUPPORT',
-      `(${target.x},${target.y},${target.z}) is not a known standable position (no support / unloaded chunk)`,
-    )
+  // A vertical route (the executor's own pillar / staircase-up / reuse meta) targets a
+  // cell ABOVE the body, which the flat terrain scan (dy -1..+1) can never list as
+  // standable. Denying it here is what silently dropped every selected ASCEND: with
+  // d1 (#360) the route is enumerated and Jev selects it, the guard rejected it as
+  // NO_SUPPORT, the guard category is not mirrored, and the body stayed at y=67 for 48
+  // minutes while `ACTION` showed only WAIT. The executor owns vertical feasibility
+  // (column-unless-unsafe, placeable held, step cap), so the flat-support gate must not
+  // apply to a route that carries that meta.
+  const vertical = readMetaString(candidate, 'vertical')
+  if (vertical === null) {
+    const standable = state.terrain.standable.some((spot) => samePosition(spot, target))
+    if (!standable) {
+      return deny(
+        candidate.id,
+        'NO_SUPPORT',
+        `(${target.x},${target.y},${target.z}) is not a known standable position (no support / unloaded chunk)`,
+      )
+    }
   }
   const hazard = nearestHazardTo(state, target)
   if (hazard !== null) {
