@@ -870,7 +870,13 @@ export function syncKnownStructureSites(input: {
   return { known: kept, added, removed }
 }
 
-function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] {
+/**
+ * #377: returns null when the SCAN FAILED, which is a different fact from "the scan
+ * succeeded and found nothing". Callers that treat an empty result as negative proof
+ * (structure memory) must not prune on a failure: a transient `findBlocks` error would
+ * otherwise erase a verified Nether-fortress site.
+ */
+function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] | null {
   const ids: number[] = []
   for (const name of blockNames) {
     const block = bot.registry.blocksByName[name]
@@ -881,7 +887,7 @@ function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance
     const positions = bot.findBlocks({ matching: ids, maxDistance, count: cap })
     return positions.map((pos) => ({ x: pos.x, y: pos.y, z: pos.z }))
   } catch {
-    return []
+    return null
   }
 }
 
@@ -1344,8 +1350,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   ): { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] => {
     const entity = ctx.bot.entity
     if (entity === undefined) return []
+    const scanned = scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64) ?? []
+    if (scanned === null) {
+      // #377: a failed scan is NOT evidence of absence. `syncKnownStructureSites`
+      // treats an empty live set near a remembered site as negative proof, so
+      // pruning here would let one transient chunk error erase a verified fortress.
+      ctx.log('STRUCTURE_SCAN_FAILED', {
+        scope: 'nether_fortress',
+        reason,
+        kept: world.knownStructureSites.length,
+      })
+      return []
+    }
     const liveSensed: { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] = []
-    for (const position of scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)) {
+    for (const position of scanned) {
       const name = liveBlockNameAt(ctx.bot, position)
       if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
       liveSensed.push({ position, kind: 'nether_fortress', blocks: [name] })
@@ -1436,22 +1454,22 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
   }
 
-  const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64)
-  const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32)
+  const tables = scanBlockPositions(bot, ['crafting_table'], 48, 64) ?? []
+  const furnaces = scanBlockPositions(bot, ['furnace', 'blast_furnace', 'smoker'], 48, 32) ?? []
   const ores = scanBlockPositions(
     bot,
     ['iron_ore', 'deepslate_iron_ore', 'diamond_ore', 'deepslate_diamond_ore', 'coal_ore', 'deepslate_coal_ore', 'copper_ore', 'gold_ore'],
     64,
     64,
-  )
-  const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64)
+  ) ?? []
+  const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64) ?? []
   // Obsidian is a non-ore direct drop required by the M2 portal plan
   // (`collect:obsidian`). Keep it in durable known-resource memory so the
   // candidate layer's known-coordinate retrieval survives after the block
   // leaves the live sensor range. It is deliberately NOT added to the `ores`
   // scan: `discoveredOres` stays `_ore`-only and obsidian carries no
   // prospecting semantics.
-  const obsidian = scanBlockPositions(bot, ['obsidian'], 64, 32)
+  const obsidian = scanBlockPositions(bot, ['obsidian'], 64, 32) ?? []
   const stationRuntimeLog = (event: string, detail?: Record<string, unknown>): void => ctx.log(event, detail)
   const tableValidation = validateRememberedStations(bot, 'crafting_table', world.craftingTables, tables, now, stationRuntimeLog)
   const furnaceValidation = validateRememberedStations(bot, 'furnace', world.furnaces, furnaces, now, stationRuntimeLog)
@@ -1585,7 +1603,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // placed in the overworld is a real block but not a fortress landmark, so it is
   // never recorded as a blaze_rod route there.
   if (isNetherDimension(ctx.worldKey.dimension)) {
-    for (const position of scanBlockPositions(bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)) {
+    for (const position of scanBlockPositions(bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64) ?? []) {
       const name = liveBlockNameAt(bot, position)
       if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
       foundResources.push({
