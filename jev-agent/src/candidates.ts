@@ -873,6 +873,33 @@ export function surfaceAscentRouteless(candidates: readonly Candidate[]): boolea
 }
 
 /**
+ * True when at least one offered candidate can raise the body's ALTITUDE toward
+ * a target above it. This is the `surface`/altitude-goal complement of
+ * {@link surfaceAscentRouteless}: a level MOVE keeps the body inside its current
+ * level set, so it is NOT an ascent route even though it changes the body cell.
+ * Live (run-mublvgjx-yldu): a body in a pocket paced between two level cells
+ * while `LOCAL_CAPABILITY_GAP attempts` passed 131 - the level moves masked the
+ * dead end because every body-changing candidate counted. Only when no offer can
+ * change altitude is the goal genuinely routeless and must escalate once.
+ *
+ * Pure and exported so the threshold is testable without a bot.
+ */
+export function altitudeRouteOnOffer(
+  candidates: readonly Candidate[],
+  fromY: number,
+  targetY: number,
+): boolean {
+  if (targetY - fromY <= VERTICAL_GAP) return true
+  return candidates.some((candidate) => {
+    if (candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE' || candidate.kind === 'DESCEND') return false
+    if (typeof candidate.meta.vertical === 'string' && candidate.meta.vertical !== 'none') return true
+    if (candidate.meta.surfaceAscent === true || candidate.meta[COLUMN_DIG_META] === true) return true
+    const target = candidate.target
+    return target !== null && target.y > fromY
+  })
+}
+
+/**
  * Why a collect goal whose item has a declared producer has no grounded route at
  * all: the generic exploration arm could not put a body-changing route on offer.
  *
@@ -1904,6 +1931,120 @@ function digAccessRetirement(state: WorldState, block: BlockState, refusal: DigA
 }
 
 /**
+ * The candidate-meta key that marks a MINE as the reachable BASE of a resource
+ * column: the item is obtained by mining the column from the bottom up, the
+ * drop falling into the pickup volume, rather than by walking to a stand.
+ */
+export const COLUMN_DIG_META = 'columnDig'
+
+/**
+ * The general "obtain a resource whose supporting column is reachable" route.
+ *
+ * A sensed resource cell (log/stone/ore) can be out of walk-up reach while its
+ * own vertical column still has a REACHABLE base: the lowest same-kind cell is
+ * inside the body's interaction reach, and the column below it opens onto a
+ * standable landing the body can occupy, so the mined drop falls into the
+ * pickup volume. That is the ordinary way a trunk, a pillar cap or a wall
+ * resource is harvested with no kit: mine the base, the drop lands on the
+ * floor, the next cell up becomes the base. No tree/pillar special case - the
+ * rule reads only the column at the target's own (x,z), the block kind and the
+ * sensor's standable cells.
+ *
+ * Returns the base cell to MINE now, or null when no such reachable base exists
+ * (the caller keeps its typed refusal / escalation).
+ */
+function columnDigBaseFor(state: WorldState, block: BlockState): BlockState | null {
+  if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') return null
+  const column = state.blocks.filter(
+    (candidate) =>
+      candidate.kind === block.kind &&
+      candidate.position.x === block.position.x &&
+      candidate.position.z === block.position.z,
+  )
+  if (column.length === 0) return null
+  let base: BlockState = column[0] as BlockState
+  for (const cell of column) if (cell.position.y < base.position.y) base = cell
+  if (!base.diggable) return null
+  if (!hasTool(state, base.harvestTool ?? null, base.harvestTier ?? null)) return null
+  // The dig happens from where the body already stands, so the base must be in
+  // interaction reach; the sensor computed this exact eye-reach fact.
+  if (base.inReach !== true) return null
+  const landing = columnLandingFor(state, base)
+  if (landing === null) return null
+  // No sensed block may stand between the landing and the base: a drop would
+  // rest on it instead of falling into pickup range.
+  const blocked = state.blocks.some(
+    (cell) =>
+      cell.position.x === base.position.x &&
+      cell.position.z === base.position.z &&
+      cell.position.y > landing.y &&
+      cell.position.y < base.position.y,
+  )
+  return blocked ? null : base
+}
+
+/**
+ * The standable cell in `base`'s own (x,z) column BELOW it that the body can
+ * occupy: the floor the mined drop falls onto. Bounded to the body's step band
+ * and pickup-adjacent walk band so the offered MINE is collectable.
+ */
+function columnLandingFor(state: WorldState, base: BlockState): Vec3Json | null {
+  const self = state.self.position
+  let best: Vec3Json | null = null
+  let bestScore = Number.POSITIVE_INFINITY
+  for (const spot of state.terrain.standable) {
+    if (Math.floor(spot.x) !== base.position.x || Math.floor(spot.z) !== base.position.z) continue
+    if (spot.y >= base.position.y) continue
+    const vertical = Math.abs(spot.y - self.y)
+    if (vertical > VERTICAL_GAP) continue
+    const horizontal = Math.hypot(Math.floor(spot.x) + 0.5 - self.x, Math.floor(spot.z) + 0.5 - self.z)
+    if (horizontal > PICKUP_MINE_HORIZONTAL + VERTICAL_GAP) continue
+    const score = vertical + horizontal * 0.1
+    if (score < bestScore) {
+      bestScore = score
+      best = spot
+    }
+  }
+  return best
+}
+
+/**
+ * The MINE candidate for a column base. Identical in contract to the ordinary
+ * in-place MINE (same `MINE:<block>` id, same pickup/verify path in the
+ * executor) plus the `columnDig`/`columnTopY` facts that name the column it is
+ * the bottom of.
+ */
+function columnDigMine(state: WorldState, base: BlockState, topY: number, requiresPickup: boolean): Candidate {
+  const harvestTool = base.harvestTool ?? null
+  return {
+    id: `MINE:${blockId('b', base.position)}`,
+    kind: 'MINE',
+    label: `mine the base ${base.name} at (${base.position.x},${base.position.y},${base.position.z}) of the column up to y=${topY} so the drop falls into reach and the body can work upward`,
+    targetName: base.name,
+    target: base.position,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: harvestTool !== null,
+    toolName: harvestTool,
+    toolTier: base.harvestTier ?? null,
+    inReach: true,
+    hasStandableAdjacent: base.hasAdjacentStandable,
+    meta: {
+      tick: state.tick,
+      x: base.position.x,
+      y: base.position.y,
+      z: base.position.z,
+      diggable: base.diggable,
+      yieldItem: base.yield ?? base.name,
+      requiresPickup,
+      [COLUMN_DIG_META]: true,
+      columnTopY: topY,
+      ...(base.kind === 'log' ? { [LOG_ROUTE_META]: 'mine_sensed' } : {}),
+    },
+  }
+}
+
+/**
  * Bounds the recipe-closure walk used by {@link mineDropAdvancesFocus}. The real
  * chains are <10 items; the cap only stops a malformed recipe graph.
  */
@@ -2051,6 +2192,9 @@ function mineCandidates(
   const moveActions: Candidate[] = []
   const accessActions: Candidate[] = []
   const tunnelTargets: BlockState[] = []
+  // Column bases already offered as a MINE this cycle, so a multi-cell column
+  // contributes one base MINE instead of one per cell.
+  const columnDigIds = new Set<string>()
   let moveCount = 0
   const self = state.self.position
 
@@ -2107,6 +2251,7 @@ function mineCandidates(
         hasStandableAdjacent: block.hasAdjacentStandable,
         meta: { ...baseMeta, requiresPickup },
       })
+      columnDigIds.add(`MINE:${blockId('b', block.position)}`)
       continue
     }
 
@@ -2169,6 +2314,25 @@ function mineCandidates(
         },
       })
       continue
+    }
+
+    // No walk-up access. The general "supporting column is reachable" route
+    // comes first: when this resource's own column has a reachable base, mining
+    // that base drops the item onto a floor the body can occupy, and the column
+    // can then be worked upward (a floating trunk/branch, a pillar cap, a wall
+    // resource). CAN enumeration only - the dig-access stand route below stays
+    // on offer too, and Jev owns WHICH. The id is the ordinary `MINE:<base>` so
+    // the executor's dig/pickup/verify contract is unchanged.
+    const columnBase = columnDigBaseFor(state, block)
+    if (columnBase !== null) {
+      const columnId = `MINE:${blockId('b', columnBase.position)}`
+      if (
+        !columnDigIds.has(columnId) &&
+        mineActions.length + moveActions.length + accessActions.length < options.maxMineCandidates
+      ) {
+        columnDigIds.add(columnId)
+        mineActions.push(columnDigMine(state, columnBase, block.position.y, requiresPickup))
+      }
     }
 
     // No walk-up access. The sensor sampled only the 12 immediate neighbours,

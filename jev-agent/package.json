@@ -66,6 +66,7 @@
     "ascend-exec-test": "bun test ./test-ascend-exec.mts",
     "vertical-recovery-shaft-test": "bun test ./test-vertical-recovery-shaft.mts",
     "log-route-test": "bun test ./test-log-route.mts",
+    "column-dig-test": "bun test ./test-column-dig.mts",
     "craft-log-route-test": "bun test ./test-craft-log-route.mts",
     "wedge-guard-test": "bun test ./test-wedge-guard.mts",
     "retrieval-stall-test": "bun test ./test-retrieval-stall.mts",

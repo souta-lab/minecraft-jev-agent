@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -1614,6 +1614,8 @@ export class JevController {
   /** consecutive candidate generations that reported the same refusal signature. */
   private surfaceAscentRefusalStreak = 0
   private surfaceAscentRefusalStreakKey: string | null = null
+  /** last logged candidate-layer `COLUMN_DIG` base (one line per distinct base). */
+  private lastColumnDigKey: string | null = null
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
@@ -2379,6 +2381,7 @@ export class JevController {
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
+      this.noteColumnDig(grounded.candidates)
       this.noteFoodHabitat(grounded.foodHabitatRefusal)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logSmeltRouteGap(state, groundingOptions)
@@ -7199,7 +7202,21 @@ export class JevController {
     this.lastSurfaceAscentRefusal = refusal
     // Pure candidate fact: is any body-changing route on offer at all? A single
     // refused pillar must never erase a real level/mine/step alternative.
-    this.lastSurfaceAscentRouteless = surfaceAscentRouteless(candidates)
+    // For an ALTITUDE goal a level MOVE is not a route: an offer only clears the
+    // dead end when it can actually raise the body toward `targetY`. Otherwise a
+    // pocket with level moves paced forever (LIVE: LOCAL_CAPABILITY_GAP
+    // attempts>131) because every body-changing candidate masked the dead end.
+    const current = this.queue.current
+    const surfaceTargetY =
+      current?.kind === 'surface' && typeof current.targetY === 'number' && Number.isFinite(current.targetY)
+        ? current.targetY
+        : null
+    const feetY = this.bot.entity?.position?.y
+    const altitudeless =
+      surfaceTargetY !== null &&
+      typeof feetY === 'number' &&
+      !altitudeRouteOnOffer(candidates, Math.floor(feetY), surfaceTargetY)
+    this.lastSurfaceAscentRouteless = surfaceAscentRouteless(candidates) || altitudeless
     if (refusal !== null) this.ascendRefusedSinceObservation = true
     const key = refusal === null ? null : formatSurfaceAscentRefused(refusal)
     if (key === null || key !== this.surfaceAscentRefusalStreakKey) {
@@ -7215,6 +7232,30 @@ export class JevController {
       'agent',
       formatSurfaceAscentRefused(refusal),
       { ...refusal, goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Surface the generator's column-dig route (`COLUMN_DIG target=x,y,z top_y=n`)
+   * once per distinct base cell. This is the "obtain a resource whose supporting
+   * column is reachable" capability: the body mines the column from its
+   * reachable base and the drop falls into pickup range, so a floating trunk /
+   * pillar cap / wall resource is obtainable with no kit. Observability only -
+   * the CHOICE of whether to take it stays with Jev.
+   */
+  private noteColumnDig(candidates: readonly Candidate[]): void {
+    const dig = candidates.find((candidate) => candidate.meta.columnDig === true && candidate.target !== null)
+    const key = dig === undefined || dig.target === null
+      ? null
+      : `${blockId('b', dig.target)}|${String(dig.meta.columnTopY ?? '')}`
+    if (key === this.lastColumnDigKey) return
+    this.lastColumnDigKey = key
+    if (key === null || dig === undefined || dig.target === null) return
+    this.logger.warn(
+      'agent',
+      `COLUMN_DIG target=${dig.target.x},${dig.target.y},${dig.target.z} top_y=${String(dig.meta.columnTopY ?? '')}`,
+      { actionId: dig.id },
       this.tickCounter,
     )
   }
