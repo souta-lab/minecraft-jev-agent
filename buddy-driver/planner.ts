@@ -141,7 +141,10 @@ function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | 
   // WAIT-streak branch, whose counter-shaped trigger is then silenced by the durable
   // stall gate (measured live #359: reason=queue_empty arrived, waitStreak >= 3 turned
   // it into wait_limit, the gate suppressed it, and the ladder menu answered instead).
-  if (request.reason === 'queue_empty') return 'no_candidate'
+  // `System2PlanRequest.reason` is typed as the stall reasons only; the drained-queue
+  // summon carries `queue_empty` at runtime (observed in the decision log), so compare
+  // through a widened value instead of narrowing to a union that excludes it.
+  if (String(request.reason) === 'queue_empty') return 'no_candidate'
   if (waitStreak >= 3) return 'wait_limit'
   // A drained queue is exactly the moment the next WHAT is decided. Without this
   // the summon was answered only from the ladder's fixed rung menu, so goals the
