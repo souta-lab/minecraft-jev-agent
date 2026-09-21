@@ -4,12 +4,12 @@
 // No bot, no network.
 //
 // Run: bun test-fuel-guard.mts
-import { defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, generateCandidates, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel } from './src/candidates.ts'
+import { defaultCandidateOptions, formatFuelSatisfied, formatSmeltRouteGap, fuelSatisfaction, generateCandidates, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, smeltRouteGap } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './src/policy.ts'
 import { findInventoryFuel } from './src/resourceClass.ts'
 import type { QueuedGoal } from './src/goalQueue.ts'
-import type { AgentSignals, BlockState, GoalState, InventoryState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, GoalState, InventoryState, StationEntry, Vec3Json, WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -98,6 +98,7 @@ function worldState(overrides: {
   inventory: InventoryState
   standable?: Vec3Json[]
   blocks?: BlockState[]
+  furnaces?: StationEntry[]
   failedCandidates?: Record<string, number>
 }): WorldState {
   return {
@@ -110,7 +111,7 @@ function worldState(overrides: {
     blocks: overrides.blocks ?? [],
     terrain: { standable: overrides.standable ?? [overrides.position] },
     craftingTables: [],
-    furnaces: [],
+    furnaces: overrides.furnaces ?? [],
     placementSpots: [],
     goal: overrides.goal,
     goalQueue: { depth: 1, current: overrides.current, empty: false, hasImpossible: false, done: 0, goals: [overrides.current] },
@@ -346,6 +347,70 @@ addCase('a reachable surface MOVE is still retired at the failure limit', () => 
     pass,
     detail: `generated=${fresh.some((entry) => entry.id === 'MOVE:b33_68_27')} retired=${!retired.some((entry) => entry.id === 'MOVE:b33_68_27')}`,
   }
+})
+
+// --- smelt offerability / typed refusal (live run-mubobiq6-12onv shape) --------
+
+/** The measured live body: a sensed furnace plus oak_log input and oak_planks fuel. */
+function liveSmeltState(overrides: { counts: Record<string, number>; current: QueuedGoal }): WorldState {
+  const position = { x: 15, y: 73, z: -5 }
+  const targetItem = overrides.current.targetItem ?? 'charcoal'
+  return worldState({
+    position,
+    goal: goal({ description: `smelt 1 x ${targetItem}`, targetItem, requiredCount: 1 }),
+    current: overrides.current,
+    inventory: inventory(overrides.counts),
+    standable: [position, { x: 16, y: 73, z: -5 }],
+    furnaces: [{ x: 19, y: 73, z: -6, source: 'sensed' }],
+  })
+}
+
+addCase('(a) charcoal + oak_log input + plank fuel + sensed furnace offers SMELT:charcoal', () => {
+  const current = queuedGoal({ kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 })
+  const state = liveSmeltState({ counts: { oak_log: 3, oak_planks: 3 }, current })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const smelt = candidates.find((candidate) => candidate.id === 'SMELT:charcoal')
+  const pass =
+    smelt !== undefined &&
+    smelt.meta.inputItem === 'oak_log' &&
+    (smelt.meta.fuelItem === 'oak_planks' || smelt.meta.fuelItem === 'oak_log') &&
+    smeltRouteGap(state, defaultCandidateOptions) === null
+  return {
+    pass,
+    detail: `offer=${smelt?.id ?? 'none'} input=${String(smelt?.meta.inputItem ?? 'none')} fuel=${String(smelt?.meta.fuelItem ?? 'none')} gap=${smeltRouteGap(state, defaultCandidateOptions) === null ? 'none' : 'present'}`,
+  }
+})
+
+addCase('(b) charcoal + input but genuinely no fuel: typed SMELT_FUEL_MISSING, never a silent impossible', () => {
+  const current = queuedGoal({ kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 })
+  // One log is input AND the only candidate fuel; it cannot occupy both slots.
+  const state = liveSmeltState({ counts: { oak_log: 1 }, current })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const gap = smeltRouteGap(state, defaultCandidateOptions)
+  const line = gap === null ? '' : formatSmeltRouteGap(gap)
+  const pass =
+    !candidates.some((candidate) => candidate.kind === 'SMELT') &&
+    gap?.missing === 'fuel' &&
+    line.startsWith('SMELT_FUEL_MISSING')
+  return { pass, detail: `offer=${candidates.some((c) => c.kind === 'SMELT')} missing=${gap?.missing ?? 'none'} line=${line}` }
+})
+
+addCase('(c) normal smelt with coal fuel is unchanged (SMELT offered)', () => {
+  const current = queuedGoal({ kind: 'smelt', description: 'smelt 1 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 1 })
+  const state = liveSmeltState({ counts: { raw_iron: 1, coal: 1 }, current })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const smelt = candidates.find((candidate) => candidate.id === 'SMELT:iron_ingot')
+  const pass = smelt !== undefined && smelt.meta.fuelItem === 'coal' && smeltRouteGap(state, defaultCandidateOptions) === null
+  return { pass, detail: `offer=${smelt?.id ?? 'none'} fuel=${String(smelt?.meta.fuelItem ?? 'none')}` }
+})
+
+addCase('(d) smelt with no input is unchanged: typed SMELT_INPUT_MISSING', () => {
+  const current = queuedGoal({ kind: 'smelt', description: 'smelt 1 x charcoal', targetItem: 'charcoal', requiredCount: 1 })
+  const state = liveSmeltState({ counts: { oak_planks: 3 }, current })
+  const gap = smeltRouteGap(state, defaultCandidateOptions)
+  const line = gap === null ? '' : formatSmeltRouteGap(gap)
+  const pass = gap?.missing === 'input' && line.startsWith('SMELT_INPUT_MISSING')
+  return { pass, detail: `missing=${gap?.missing ?? 'none'} line=${line}` }
 })
 
 let failures = 0
