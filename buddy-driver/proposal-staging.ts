@@ -23,6 +23,7 @@ import type {
   DeathHazard,
   KnownPortalSiteJson,
   KnownResourceJson,
+  KnownStructureSiteJson,
   LedgerProposalEnvelope,
   LedgerReconciliationProposal,
   KnownStation,
@@ -315,6 +316,52 @@ export function removeKnownPortalSiteDtos(target: KnownPortalSiteJson[], gone: K
 }
 
 /**
+ * M3: durable Nether-structure sites merge/remove by anchor cell x,y,z (the
+ * structure kind is part of the record). Coordinates are rounded exactly like the
+ * other durable merges so a re-sensed cell dedups instead of duplicating. The cap
+ * is a safety bound against an unbounded host list, not a filter: a fortress has
+ * far fewer sensed body cells than this within one scan.
+ */
+export const KNOWN_STRUCTURE_SITE_CAP = 64
+
+export function mergeKnownStructureSiteDtos(target: KnownStructureSiteJson[], found: KnownStructureSiteJson[]): number {
+  const key = (site: KnownStructureSiteJson): string => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+  const seen = new Set(target.map(key))
+  let added = 0
+  for (const site of found) {
+    const siteKey = key(site)
+    if (seen.has(siteKey)) continue
+    if (target.length >= KNOWN_STRUCTURE_SITE_CAP) break
+    seen.add(siteKey)
+    target.push({
+      x: Math.round(site.x),
+      y: Math.round(site.y),
+      z: Math.round(site.z),
+      kind: site.kind,
+      ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+      ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+      ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+      ...(site.lastSeenAt === undefined ? {} : { lastSeenAt: site.lastSeenAt }),
+    })
+    added += 1
+  }
+  return added
+}
+
+export function removeKnownStructureSiteDtos(target: KnownStructureSiteJson[], gone: KnownStructureSiteJson[]): number {
+  const keys = new Set(gone.map((site) => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`))
+  let removed = 0
+  for (let index = target.length - 1; index >= 0; index -= 1) {
+    const site = target[index]
+    if (site === undefined) continue
+    if (!keys.has(`${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`)) continue
+    target.splice(index, 1)
+    removed += 1
+  }
+  return removed
+}
+
+/**
  * Merge ONE world-memory delta into the live memory. This is the only merge
  * implementation: the staged commit point AND the live `proposeWorldMemory`
  * runtime path both route through it, so the two paths can never diverge. It
@@ -337,6 +384,10 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
   if (delta.knownPortalSites !== undefined) mergeKnownPortalSiteDtos(memory.knownPortalSites, delta.knownPortalSites)
   if (delta.removeKnownPortalSites !== undefined) {
     removeKnownPortalSiteDtos(memory.knownPortalSites, delta.removeKnownPortalSites)
+  }
+  if (delta.knownStructureSites !== undefined) mergeKnownStructureSiteDtos(memory.knownStructureSites, delta.knownStructureSites)
+  if (delta.removeKnownStructureSites !== undefined) {
+    removeKnownStructureSiteDtos(memory.knownStructureSites, delta.removeKnownStructureSites)
   }
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {

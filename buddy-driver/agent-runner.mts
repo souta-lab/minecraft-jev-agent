@@ -190,6 +190,13 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
     discoveredOres: [...normal.discoveredOres],
     knownResources: normal.knownResources.map((resource) => ({ ...resource })),
     knownPortalSites: normal.knownPortalSites.map((site) => ({ ...site })),
+    // M3: the live path must carry structure sites too. This one-line omission is
+    // exactly how `knownPortalSites` was silently dropped on every reload before
+    // #80 — a field the canonical merge handled but the generation seed forgot.
+    knownStructureSites: normal.knownStructureSites.map((site) => ({
+      ...site,
+      ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+    })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
