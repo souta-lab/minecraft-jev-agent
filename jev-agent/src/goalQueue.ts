@@ -92,10 +92,35 @@ export const PREREQ_RETIRED = 'PREREQ_RETIRED'
  */
 export const PREREQ_REORDERED = 'PREREQ_REORDERED'
 
+/**
+ * #prereq-dominated: an unfinished prerequisite row was retired because every
+ * purpose its product serves is already fulfilled by better/alternative items
+ * the bot holds (code-owned capability closure, e.g.
+ * `PREREQ_DOMINATED item=iron_ingot held=diamond_pickaxe,flint_and_steel`).
+ */
+export const PREREQ_DOMINATED = 'PREREQ_DOMINATED'
+
+/** A code-owned proof that a queued prerequisite's purposes are already fulfilled. */
+export interface DominatedPrerequisiteDecision {
+  /** the prerequisite item whose purposes are already fulfilled */
+  item: string
+  /** held items that prove the purpose is fulfilled */
+  held: readonly string[]
+  /** machine reason (`producer_rung_satisfied` / `all_consumers_satisfied`) */
+  reason: string
+}
+
 export function formatPrereqRetired(goal: QueuedGoal, dependents: number): string {
   return (
     `${PREREQ_RETIRED} id=${goal.id} item=${goal.targetItem ?? 'none'} reason=all_dependents_resolved` +
     ` dependents=${dependents} protected=${goal.protected === true} core=${goal.core === true}`
+  )
+}
+
+export function formatPrereqDominated(goal: QueuedGoal, decision: DominatedPrerequisiteDecision): string {
+  return (
+    `${PREREQ_DOMINATED} id=${goal.id} item=${decision.item} held=${decision.held.join(',')}` +
+    ` reason=${decision.reason} protected=${goal.protected === true} core=${goal.core === true}`
   )
 }
 
@@ -361,6 +386,26 @@ export class GoalQueue {
   private queueRevision = 0
   /** Most recent plan's audit sink, reused by later lifecycle transitions. */
   private lifecycleSink: ((line: string) => void) | undefined
+  /**
+   * #prereq-dominated: code-owned prerequisite-domination proof. The resident
+   * wires the deterministic ladder's closure here; absent (unit tests) means no
+   * domination retirement. It receives the goal only - the caller's closure reads
+   * live inventory at call time.
+   */
+  private dominatedPrerequisiteReason:
+    | ((goal: QueuedGoal) => DominatedPrerequisiteDecision | null)
+    | undefined
+
+  /**
+   * Install the #prereq-dominated proof. Kept as an explicit method (not a plan
+   * option) because the reconciliation runs on every lifecycle transition, not
+   * only when a plan is applied.
+   */
+  setDominatedPrerequisiteReason(
+    reason: ((goal: QueuedGoal) => DominatedPrerequisiteDecision | null) | null,
+  ): void {
+    this.dominatedPrerequisiteReason = reason ?? undefined
+  }
 
   get revision(): number {
     return this.queueRevision
@@ -728,6 +773,19 @@ export class GoalQueue {
       guard += 1
       for (const goal of this.goals) {
         if (goal.status !== 'pending' && goal.status !== 'active') continue
+        // #prereq-dominated: a code-owned proof that the purposes this row's
+        // product serves are already fulfilled by better items retires it before
+        // the orphan heuristic (which cannot see a consumer row that was pruned).
+        const dominated = this.dominatedPrerequisiteReason?.(goal)
+        if (dominated !== null && dominated !== undefined) {
+          goal.status = 'impossible'
+          goal.detail = `retired dominated prerequisite: item=${dominated.item} held=${dominated.held.join(',')} reason=${dominated.reason}`
+          goal.updatedAt = now
+          retired.push(goal)
+          sink(formatPrereqDominated(goal, dominated))
+          changed = true
+          continue
+        }
         const decision = orphanedPrerequisiteDecision(goal, this.goals)
         if (!decision.retire) continue
         goal.status = 'impossible'

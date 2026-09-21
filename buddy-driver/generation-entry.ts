@@ -53,6 +53,7 @@ import {
   countResource,
   debugFrontier,
   deriveResumeRung,
+  dominatedPrerequisiteReason,
   goalAlreadyMet,
   goalsForStrategy,
   has,
@@ -948,9 +949,18 @@ export interface LedgerGoalReopening {
   requiredCount: number
 }
 
+export interface LedgerGoalDominated {
+  id: string
+  description: string
+  item: string
+  held: string[]
+  reason: string
+}
+
 export interface LedgerGoalReconciliation {
   snapshot: GoalQueueSnapshot
   reopened: LedgerGoalReopening[]
+  dominated: LedgerGoalDominated[]
 }
 
 function rungOwnsGoal(rung: Rung, goal: QueuedGoal, counts: Counts, world: ResidentWorldMemory): boolean {
@@ -959,12 +969,19 @@ function rungOwnsGoal(rung: Rung, goal: QueuedGoal, counts: Counts, world: Resid
 }
 
 /**
- * Reconcile a restored ledger against the LIVE bot. A `done` goal is trusted
- * only when either its own item requirement is already held, or a capability
- * rung that contains it is satisfied by the live inventory/world (a consumable
- * that was legitimately spent, e.g. raw_iron smelted into iron_ingot). A `done`
- * goal no live rung predicate covers is reopened as `pending`, so it is
- * re-activated ahead of any later-milestone goal. Pure: never mutates the input.
+ * Reconcile a restored ledger against the LIVE bot.
+ *
+ * A `done` goal is trusted only when either its own item requirement is already
+ * held, or a capability rung that contains it is satisfied by the live
+ * inventory/world (a consumable that was legitimately spent, e.g. raw_iron
+ * smelted into iron_ingot). A `done` goal no live rung predicate covers is
+ * reopened as `pending`, so it is re-activated ahead of any later-milestone
+ * goal.
+ *
+ * #prereq-dominated: an UNFINISHED goal whose product only exists to feed rungs
+ * that are all already satisfied by better items is retired (`impossible`) with
+ * the code-owned proof, so a prerequisite the agent has outgrown cannot keep
+ * burning time behind a starved station precondition. Pure: never mutates input.
  */
 export function reconcileLedgerGoals(
   snapshot: GoalQueueSnapshot,
@@ -972,7 +989,30 @@ export function reconcileLedgerGoals(
   world: ResidentWorldMemory,
 ): LedgerGoalReconciliation {
   const reopened: LedgerGoalReopening[] = []
+  const dominated: LedgerGoalDominated[] = []
   const goals = (snapshot.goals ?? []).map((goal) => {
+    if (goal.status === 'active' || goal.status === 'pending') {
+      const proof = dominatedPrerequisiteReason(
+        { kind: goal.kind, targetItem: goal.targetItem, requiredCount: goal.requiredCount },
+        counts,
+        world,
+      )
+      if (proof !== null) {
+        dominated.push({
+          id: goal.id,
+          description: goal.description,
+          item: proof.item,
+          held: [...proof.held],
+          reason: proof.reason,
+        })
+        return {
+          ...goal,
+          status: 'impossible' as const,
+          detail: `retired dominated prerequisite: item=${proof.item} held=${proof.held.join(',')} reason=${proof.reason}`,
+        }
+      }
+      return { ...goal }
+    }
     if (goal.status !== 'done') return { ...goal }
     const target = goal.targetItem
     if (typeof target !== 'string' || target.length === 0) return { ...goal }
@@ -996,7 +1036,7 @@ export function reconcileLedgerGoals(
     })
     return { ...goal, status: 'pending' as const, haveCount: Math.min(goal.haveCount, liveHave) }
   })
-  return { snapshot: { ...snapshot, goals }, reopened }
+  return { snapshot: { ...snapshot, goals }, reopened, dominated }
 }
 
 export function selectLedgerSnapshot(
@@ -1004,7 +1044,7 @@ export function selectLedgerSnapshot(
   derivedSnapshot: GoalQueueSnapshot | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
-): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot; reopened: LedgerGoalReopening[] } | null {
+): { source: 'host-snapshot' | 'derived-file'; snapshot: GoalQueueSnapshot; reopened: LedgerGoalReopening[]; dominated: LedgerGoalDominated[] } | null {
   if (hostSnapshot !== null) {
     if (!ledgerIsConsistent(hostSnapshot, counts, world)) return null
     return { source: 'host-snapshot', ...reconcileLedgerGoals(hostSnapshot, counts, world) }
@@ -1133,10 +1173,20 @@ function restoreLedgerIntoController(
       total: goals.length,
       current: current?.description ?? null,
       reopened: chosen.reopened.length,
+      dominated: chosen.dominated.length,
       basis: chosen.snapshot.basis ?? null,
     })
     if (chosen.reopened.length > 0) {
       log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
+    }
+    for (const entry of chosen.dominated) {
+      log('PREREQ_DOMINATED', {
+        goal: entry.id,
+        description: entry.description,
+        item: entry.item,
+        held: entry.held.join(','),
+        reason: entry.reason,
+      })
     }
   } catch (error) {
     log('ERROR', { where: 'restoreLedgerIntoController', message: error instanceof Error ? error.message : String(error) })
@@ -1863,6 +1913,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       ctx.proposeWorldMemory({ moveFailures: world.moveFailures })
     },
     knownResources: groundedWaypoints,
+    // #prereq-dominated: the deterministic ladder owns the capability closure
+    // (rung `satisfied` + recipe/smelt consumers). A queued prerequisite whose
+    // purposes are already fulfilled by better held items retires mid-generation
+    // instead of starving behind a station precondition until a reload.
+    dominatedGoalReason: (goal, live) => dominatedPrerequisiteReason(goal, { ...live } as Counts, world),
   }
 
   const controller = new JevController(bot, options)

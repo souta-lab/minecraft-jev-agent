@@ -45,8 +45,10 @@ import type { Vec3Json } from '../jev-agent/src/state.ts'
 import {
   PICKAXE_TIER_ORDER,
   loadGameData,
+  preferredRecipe,
   requiredPickaxeRank1,
   requiredPickaxeRankForItem1,
+  smeltInputFor,
 } from '../jev-agent/src/gameData.ts'
 import { formatSkillSelected, formatStrategyBodyDelta, generateSkillPlan, skillSignature } from '../jev-agent/src/skillCandidate.ts'
 import type { SkillCandidate, SkillGenerationInput, SkillGoal } from '../jev-agent/src/skillCandidate.ts'
@@ -61,6 +63,7 @@ import {
 } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
+import { emptyWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
@@ -110,6 +113,19 @@ export function bestPickaxeRank(counts: Counts): number {
     if (name !== undefined && has(counts, name)) rank = Math.max(rank, i + 1)
   }
   return rank
+}
+
+/**
+ * Pickaxes held at or above `rank`, highest tier first. The concrete
+ * "better item" evidence a `satisfied` predicate can only express as a rank.
+ */
+export function heldPickaxesAtLeast(counts: Counts, rank: number): string[] {
+  const out: string[] = []
+  for (let i = PICKAXE_TIER_ORDER.length - 1; i >= Math.max(1, rank) - 1; i -= 1) {
+    const name = PICKAXE_TIER_ORDER[i]
+    if (name !== undefined && has(counts, name)) out.push(name)
+  }
+  return out
 }
 
 /** Count inventory items matching a concrete item id OR a semantic class. */
@@ -301,6 +317,28 @@ export interface Rung {
   selfContained?: boolean
   satisfied: (c: Counts, w: ResidentWorldMemory) => boolean
   goals: (c: Counts, w: ResidentWorldMemory) => PlannedGoal[]
+  /**
+   * The live items that PROVE this rung's purpose is already fulfilled without
+   * producing its own target - strictly better tiers, or a concrete held
+   * consumer product. It must mirror `satisfied`: a rung whose `satisfied`
+   * holds only because the bot holds the rung's own product (which is `DONE`,
+   * not domination) must not list that product here.
+   *
+   * Code-owned prerequisite mechanics (`PREREQ_DOMINATED`), not a ranking: it
+   * answers whether an unfinished queued prerequisite is still work.
+   */
+  substitutes?: (c: Counts) => readonly string[]
+}
+
+/**
+ * The iron chain's only two consumers are an iron-or-better pickaxe and the
+ * flint_and_steel it was smelted for. When BOTH are already held, producing more
+ * iron serves no remaining ladder purpose - the same closure `iron_ingot`'s
+ * `satisfied` encodes, lifted to a named helper so `raw_iron` (whose only
+ * consumer is the smelt) shares it instead of re-deriving a 3-unit quota.
+ */
+function ironPurposesFulfilled(c: Counts): boolean {
+  return bestPickaxeRank(c) >= 3 && has(c, 'flint_and_steel')
 }
 
 function climb(ingotsNeeded: number, counts: Counts, crafts: Array<[string, number]>): PlannedGoal[] {
@@ -405,6 +443,7 @@ export const RUNGS: readonly Rung[] = [
     id: 'stone_pickaxe',
     satisfied: (c) => bestPickaxeRank(c) >= 2,
     goals: () => [{ kind: 'craft', description: 'craft 1 x stone_pickaxe', targetItem: 'stone_pickaxe', requiredCount: 1 }],
+    substitutes: (c) => heldPickaxesAtLeast(c, 2),
   },
   {
     id: 'charcoal',
@@ -421,7 +460,11 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'raw_iron',
-    satisfied: (c) => (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 3,
+    // `raw_iron` has exactly one consumer: the iron_ingot smelt. When that
+    // consumer's purposes are already fulfilled by better items, raw_iron is a
+    // dominated mid-step too (measured live `run-mubg1zz4-mn4b`: a diamond
+    // pickaxe + flint_and_steel were held while this rung re-demanded 3 ore).
+    satisfied: (c) => (c['raw_iron'] ?? 0) + (c['iron_ingot'] ?? 0) >= 3 || ironPurposesFulfilled(c),
     // `requiredCount` is the TOTAL target (3), matching the description and
     // `goalHave`/`successForGoal`. The old `3 - held` shortfall made
     // `goalAlreadyMet` read 2 held against required 1 and skip the goal while the
@@ -450,15 +493,20 @@ export const RUNGS: readonly Rung[] = [
     // Honest requirement: if either consumer is still unfulfilled (no
     // iron-or-better pickaxe, or no flint_and_steel), more iron IS genuinely
     // needed and the rung stays unsatisfied.
-    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3 || (bestPickaxeRank(c) >= 3 && has(c, 'flint_and_steel')),
+    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3 || ironPurposesFulfilled(c),
     // Same total-vs-shortfall bug as the raw_iron rung: with 2 ingots held this
     // compiled a required count of 1, so the third smelt was skipped entirely.
     goals: () => [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }],
+    substitutes: (c) => [
+      ...heldPickaxesAtLeast(c, 3),
+      ...(has(c, 'flint_and_steel') ? ['flint_and_steel'] : []),
+    ],
   },
   {
     id: 'iron_pickaxe',
     satisfied: (c) => bestPickaxeRank(c) >= 3,
     goals: () => [{ kind: 'craft', description: 'craft 1 x iron_pickaxe', targetItem: 'iron_pickaxe', requiredCount: 1 }],
+    substitutes: (c) => heldPickaxesAtLeast(c, 3),
   },
   {
     id: 'iron_gear',
@@ -484,6 +532,13 @@ export const RUNGS: readonly Rung[] = [
         ['iron_boots', 1],
         ['iron_sword', 1],
       ]),
+    substitutes: (c) => [
+      ...(has(c, 'diamond_chestplate') ? ['diamond_chestplate'] : []),
+      ...(has(c, 'diamond_leggings') ? ['diamond_leggings'] : []),
+      ...(has(c, 'diamond_helmet') ? ['diamond_helmet'] : []),
+      ...(has(c, 'diamond_boots') ? ['diamond_boots'] : []),
+      ...(has(c, 'diamond_sword') ? ['diamond_sword'] : []),
+    ],
   },
   {
     id: 'diamond',
@@ -893,6 +948,131 @@ export function rungBehindInventory(rung: Rung, counts: Counts, world: ResidentW
     default:
       return false
   }
+}
+
+/**
+ * The item specs consumed to PRODUCE `goal`: a smelt's input, or a craft's
+ * preferred-recipe ingredients. Code-owned recipe truth (`gameData.ts`), never a
+ * semantic guess.
+ */
+function goalInputItems(goal: Pick<PlannedGoal, 'kind' | 'targetItem'>): string[] {
+  const item = goal.targetItem
+  if (typeof item !== 'string' || item.length === 0) return []
+  if (goal.kind === 'smelt') {
+    const input = smeltInputFor(item)
+    return input === null ? [] : [input]
+  }
+  if (goal.kind === 'craft') {
+    const recipe = preferredRecipe(item)
+    return recipe === null ? [] : recipe.ingredients.map((entry) => entry.item)
+  }
+  return []
+}
+
+/** True when `rung` currently emits the queued goal (same kind and target item). */
+export function rungProducesGoal(
+  rung: Rung,
+  goal: Pick<PlannedGoal, 'kind' | 'targetItem'>,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): boolean {
+  const target = goal.targetItem ?? null
+  return rung.goals(counts, world).some((planned) => planned.kind === goal.kind && (planned.targetItem ?? null) === target)
+}
+
+/** True when `rung`'s own work consumes `item` as a smelt input or craft ingredient. */
+export function rungConsumesItem(
+  rung: Rung,
+  item: string,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): boolean {
+  return rung.goals(counts, world).some((planned) =>
+    goalInputItems(planned).some((spec) => resourceMatches(item, spec)),
+  )
+}
+
+/** Held items that prove the given rungs are satisfied without their own product. */
+function heldSubstitutes(rungs: readonly Rung[], counts: Counts, item: string): string[] {
+  const out = new Set<string>()
+  for (const rung of rungs) {
+    for (const name of rung.substitutes?.(counts) ?? []) {
+      if (name !== item && has(counts, name)) out.add(name)
+    }
+  }
+  return [...out]
+}
+
+export interface DominatedPrerequisite {
+  /** the prerequisite item whose purposes are already fulfilled */
+  item: string
+  /** held items that prove the purpose is fulfilled (audit evidence) */
+  held: string[]
+  /** machine reason: `producer_rung_satisfied` or `all_consumers_satisfied` */
+  reason: string
+}
+
+/**
+ * #prereq-dominated: is an unfinished queued prerequisite still work?
+ *
+ * A producer row (collect/craft/smelt with a target item) whose product exists
+ * only to feed ladder rungs can be retired when every purpose of that product is
+ * already fulfilled - the same "consumers satisfied by better items" closure the
+ * rung `satisfied` predicates already encode. Two code-owned proofs:
+ *
+ *   - producer_rung_satisfied: the rung(s) that emit this exact goal are already
+ *     satisfied while the product is NOT held, so the satisfaction came from a
+ *     strictly better item (`iron_pickaxe` <- diamond pickaxe,
+ *     `iron_ingot` <- iron-or-better pickaxe + flint_and_steel);
+ *   - all_consumers_satisfied: every non-optional rung whose own work consumes
+ *     this item (recipe ingredients / smelt input) is satisfied - the transitive
+ *     predecessor case (`raw_iron` when `iron_ingot` is already satisfied).
+ *
+ * The proof must NAME the held substitute items (a rung can be satisfied by
+ * ordinary accumulation, which is not domination), so `held` is never empty.
+ * Returning null keeps the row exactly as #55/orphan reconciliation left it.
+ * Deliberately conservative: no consumer rung at all means "not a prerequisite I
+ * can prove obsolete", never "retire".
+ */
+export function dominatedPrerequisiteReason(
+  goal: Pick<PlannedGoal, 'kind' | 'targetItem' | 'requiredCount'>,
+  counts: Counts,
+  world: ResidentWorldMemory = emptyWorldMemory(),
+): DominatedPrerequisite | null {
+  const item = goal.targetItem
+  if (typeof item !== 'string' || item.length === 0) return null
+  if (goal.kind !== 'collect' && goal.kind !== 'craft' && goal.kind !== 'smelt') return null
+  // A row whose own product is already complete is `DONE`, not dominated.
+  if (goalAlreadyMet({ kind: goal.kind, description: '', targetItem: item, requiredCount: goal.requiredCount }, counts)) {
+    return null
+  }
+  const rungs = executableRungs()
+  // Optional affordances never keep a mandatory prerequisite alive: `iron_gear`
+  // also emits `collect:raw_iron` / `smelt:iron_ingot` through `climb`, but it is
+  // not on the M2 road. It is still selectable, just not a domination veto.
+  const producers = rungs.filter(
+    (rung) => rung.optional !== true && rungProducesGoal(rung, goal, counts, world),
+  )
+  const producerHeld = heldSubstitutes(producers, counts, item)
+  if (
+    producers.length > 0 &&
+    producerHeld.length > 0 &&
+    producers.every((rung) => rung.satisfied(counts, world))
+  ) {
+    return { item, held: producerHeld, reason: 'producer_rung_satisfied' }
+  }
+  const consumers = rungs.filter(
+    (rung) => rung.optional !== true && rungConsumesItem(rung, item, counts, world),
+  )
+  const consumerHeld = heldSubstitutes(consumers, counts, item)
+  if (
+    consumers.length > 0 &&
+    consumerHeld.length > 0 &&
+    consumers.every((rung) => rung.satisfied(counts, world))
+  ) {
+    return { item, held: consumerHeld, reason: 'all_consumers_satisfied' }
+  }
+  return null
 }
 
 export interface ResumeRung {

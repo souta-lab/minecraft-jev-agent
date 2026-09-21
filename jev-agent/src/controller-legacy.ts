@@ -67,7 +67,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
 import { GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
-import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
@@ -318,6 +318,16 @@ export interface JevAgentOptions {
   eventSink?: (event: string, detail: Record<string, unknown>) => void
   /** durable known-resource coordinates injected by the resident host (issue #43) */
   knownResources?: KnownResource[]
+  /**
+   * #prereq-dominated: code-owned proof that an unfinished queued prerequisite's
+   * purposes are already fulfilled by better items the bot holds. The resident
+   * passes the deterministic ladder closure; returning null keeps the row under
+   * the normal #55 / orphan reconciliation. Absent in standalone tests.
+   */
+  dominatedGoalReason?: (
+    goal: QueuedGoal,
+    counts: Readonly<Record<string, number>>,
+  ) => DominatedPrerequisiteDecision | null
   /** coordinate-level movement failures restored from the resident's class-A memory */
   moveFailureEntries?: readonly MoveFailEntry[]
   /** called after movement failure memory changes so the HOST can persist a DTO snapshot */
@@ -1710,6 +1720,7 @@ export class JevController {
     this.betaAbandonDeferral = new BetaAbandonDeferral(this.options.betaAbandonDeferCycles)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
+    this.installDominatedPrerequisiteReason()
     this.recipeIndex = createRecipeIndex(bot.registry)
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
@@ -1845,6 +1856,7 @@ export class JevController {
     this.semanticStateGeneration = 0
     this.lastStateFingerprint = ''
     this.queue = new GoalQueue()
+    this.installDominatedPrerequisiteReason()
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
     this.decisionWriter = new JsonlWriter(join(this.options.logDir, 'decisions.jsonl'))
@@ -4882,6 +4894,21 @@ export class JevController {
       knownStations: [...knownStations],
       knownOres: [],
     })
+  }
+
+  /**
+   * Wire the resident-injected #prereq-dominated proof into the queue. The
+   * closure reads LIVE inventory at reconciliation time, so a queued
+   * prerequisite retires as soon as the better items exist - not only at a
+   * reload boundary.
+   */
+  private installDominatedPrerequisiteReason(): void {
+    const reason = this.options.dominatedGoalReason
+    if (reason === undefined) {
+      this.queue.setDominatedPrerequisiteReason(null)
+      return
+    }
+    this.queue.setDominatedPrerequisiteReason((goal) => reason(goal, this.inventorySnapshot()))
   }
 
   /**
