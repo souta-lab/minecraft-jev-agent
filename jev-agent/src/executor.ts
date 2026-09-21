@@ -1361,6 +1361,13 @@ export class Executor {
   /** the last dig's mechanism schedule/budget, for the typed `DIG_FAILED` marker */
   private lastDigPlan: DigTimePlan | null = null
   private digStartedAt = 0
+  /**
+   * Why the last executed vertical leg produced no durable step
+   * (`no_rise`/`apex_missed`/`no_footing`/`unsafe_column`/`dig_no_tool`/...).
+   * Naming the obstruction lets the entry route fail with a typed detail
+   * instead of a generic path error. Cleared whenever a vertical contract runs.
+   */
+  private lastVerticalFailureReason: string | null = null
 
   constructor(bot: Bot, logger: EventLogger, options: ExecutorOptions = defaultExecutorOptions) {
     this.bot = bot
@@ -2185,6 +2192,7 @@ export class Executor {
     this.setPhase(candidate, epoch, 'digging')
     const live = this.resolveLiveDigTool(block)
     if (!live.ok) {
+      this.lastVerticalFailureReason = `dig_refused:${live.reason}`
       this.logger.warn(
         'executor',
         `RETRIEVE staircase cannot dig ${block.name} at (${dig.x},${dig.y},${dig.z}): ${live.reason}`,
@@ -2207,6 +2215,7 @@ export class Executor {
       await this.digBlock(block, epoch, signal)
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
+      this.lastVerticalFailureReason = 'dig_failed'
       this.logger.warn('executor', `RETRIEVE staircase dig failed: ${error instanceof Error ? error.message : String(error)}`, {
         actionId: candidate.id,
       })
@@ -2249,6 +2258,7 @@ export class Executor {
     const vertical = readMetaString(candidate, 'vertical') ?? 'none'
     let activeVertical = vertical
     let verticalStep = false
+    this.lastVerticalFailureReason = null
     if (vertical === 'none') return { activeVertical, verticalStep }
     this.setPhase(candidate, epoch, 'vertical')
     if (vertical === 'reuse') {
@@ -2560,10 +2570,12 @@ export class Executor {
     const { placeName, toY, steps: maxSteps } = plan
     const item = this.bot.inventory.items().find((entry) => entry.name === placeName)
     if (item === undefined) {
+      this.lastVerticalFailureReason = 'no_place_item'
       this.logger.warn('executor', `PILLAR_UP refused: ${placeName} is not in the inventory`, { actionId: candidate.id })
       return false
     }
     if (this.pillarColumnUnsafe()) {
+      this.lastVerticalFailureReason = 'unsafe_column'
       this.logger.warn('executor', 'PILLAR_UP refused: liquid or hazard in the bot column', { actionId: candidate.id })
       return false
     }
@@ -2601,6 +2613,7 @@ export class Executor {
         })
         if (placeStack === undefined || pose === null) {
           if (pose === null && placeStack !== undefined) {
+            this.lastVerticalFailureReason = 'no_footing'
             this.logger.warn(
               'executor',
               formatPillarRefused({ reason: 'no_footing', cell: feet, obstacle: null }),
@@ -2639,6 +2652,7 @@ export class Executor {
             }
           }
           if (!(pose === null && placeStack !== undefined)) {
+            this.lastVerticalFailureReason = placeStack === undefined ? 'no_placeable' : 'no_footing'
             this.logger.warn(
               'executor',
               formatPillarRefused({ reason: placeStack === undefined ? 'no_placeable' : 'no_footing', cell: feet, obstacle: null }),
@@ -2659,6 +2673,7 @@ export class Executor {
         if (!step.ok) {
           const blocked = headroom !== null && !headroom.cleared ? headroom : null
           if (step.reason !== 'reached') {
+            this.lastVerticalFailureReason = step.reason
             this.logger.warn(
               'executor',
               formatPillarRefused({
@@ -2824,6 +2839,7 @@ export class Executor {
             climb.fail.step,
             climb.fail.reason,
           )
+          this.lastVerticalFailureReason = climb.fail.reason ?? climb.fail.step
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
@@ -5068,6 +5084,7 @@ export class Executor {
     let pathError: unknown = null
     let progressedChunk = false
     let activeVertical = 'none'
+    let legObstruction: string | null = null
     try {
       await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
     } catch (error) {
@@ -5075,7 +5092,7 @@ export class Executor {
       // (including a caller abort) is a real failure.
       if (!this.dimensionMatches(dimension)) {
         pathError = error
-        let leg: { progressed: boolean; error: ExecutorError | null; activeVertical: string }
+        let leg: { progressed: boolean; error: ExecutorError | null; activeVertical: string; obstruction: string | null }
         try {
           leg = await this.runEntryRouteLeg(candidate, epoch, transferSignal.signal, enterCell, startY)
         } catch (legThrow) {
@@ -5083,10 +5100,11 @@ export class Executor {
           // failure: if the dimension changed, the postcondition is already met;
           // otherwise the cancellation is real and must propagate.
           if (!this.dimensionMatches(dimension)) throw legThrow
-          leg = { progressed: false, error: null, activeVertical: 'none' }
+          leg = { progressed: false, error: null, activeVertical: 'none', obstruction: null }
           pathError = null
         }
         activeVertical = leg.activeVertical
+        legObstruction = leg.obstruction
         if (leg.progressed) {
           // The chunk durably moved the body toward the cell: the same bounded
           // ONE-chunk-per-action policy MOVE uses. Retry the walk once inside
@@ -5148,7 +5166,7 @@ export class Executor {
       // No route and no durable body change: ONE typed failure naming the
       // obstruction, so the option can be abandoned instead of re-arming the
       // same unreachable walk (the live run alternated `noPath`/`stuck`).
-      const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError)
+      const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError, legObstruction)
       this.logger.warn('agent', blocked, {
         actionId: candidate.id,
         failure: pathError instanceof ExecutorError ? pathError.code : 'unknown_event',
@@ -5191,14 +5209,20 @@ export class Executor {
     signal: AbortSignal,
     enterCell: Vec3Json,
     startY: number,
-  ): Promise<{ progressed: boolean; error: ExecutorError | null; activeVertical: string }> {
+  ): Promise<{ progressed: boolean; error: ExecutorError | null; activeVertical: string; obstruction: string | null }> {
     if ((readMetaString(candidate, 'vertical') ?? 'none') === 'none') {
-      return { progressed: false, error: null, activeVertical: 'none' }
+      return { progressed: false, error: null, activeVertical: 'none', obstruction: null }
     }
     try {
       const { activeVertical, verticalStep } = await this.runVerticalContract(candidate, epoch, signal, enterCell, startY)
       const climbed = Math.floor(this.bot.entity.position.y) > Math.floor(startY)
-      return { progressed: verticalStep && climbed, error: null, activeVertical }
+      if (verticalStep && climbed) return { progressed: true, error: null, activeVertical, obstruction: null }
+      return {
+        progressed: false,
+        error: null,
+        activeVertical,
+        obstruction: this.lastVerticalFailureReason ?? `${activeVertical}_no_step`,
+      }
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       return {
@@ -5211,6 +5235,7 @@ export class Executor {
                 `entry route leg failed: ${error instanceof Error ? error.message : String(error)}`,
               ),
         activeVertical: readMetaString(candidate, 'vertical') ?? 'none',
+        obstruction: this.lastVerticalFailureReason ?? (error instanceof ExecutorError ? error.code : null),
       }
     }
   }
@@ -5218,17 +5243,23 @@ export class Executor {
   /**
    * The typed, STABLE reason the entry approach cannot be completed. `reason` is
    * one of `no_route` / `route_blocked` / `budget_exhausted` and `detail` names
-   * the obstruction (the offering layer's ascent refusal, or the failed leg's
-   * own code). A stable line is what bounds the failure: the live run alternated
+   * the obstruction: the offering layer's ascent refusal, the executed leg's own
+   * failure (`no_rise`/`no_footing`/`dig_refused:...`), or the path code. A
+   * stable line is what bounds the failure: the live run alternated
    * `noPath`/`stuck` and the escalation counter reset on every alternation.
    */
-  private portalEntryRouteBlockedLine(candidate: Candidate, enterCell: Vec3Json, pathError: unknown): string {
+  private portalEntryRouteBlockedLine(
+    candidate: Candidate,
+    enterCell: Vec3Json,
+    pathError: unknown,
+    legObstruction: string | null,
+  ): string {
     const refusal = readMetaString(candidate, 'entryRouteRefusal')
     const vertical = readMetaString(candidate, 'vertical') ?? 'none'
     const code = pathError instanceof ExecutorError ? pathError.code : null
     const reason: PortalEntryRouteBlockedReason =
       code === 'path_timeout' ? 'budget_exhausted' : vertical !== 'none' ? 'route_blocked' : 'no_route'
-    const detail = refusal ?? code
+    const detail = refusal ?? legObstruction ?? code
     return formatPortalEntryRouteBlocked({
       reason,
       entryCell: enterCell,

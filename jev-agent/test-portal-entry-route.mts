@@ -103,6 +103,8 @@ interface FixtureBot {
   digs: string[]
   pathCalls: Vec3Json[]
   legs: string[]
+  /** mutable live inventory: a fixture can take the tool away after the plan was built */
+  inventoryItems: Array<{ name: string; type: number; count: number }>
 }
 
 function makeBot(feet: Vec3Json, grid: Map<string, Cell>, hasPickaxe: boolean): FixtureBot {
@@ -176,7 +178,7 @@ function makeBot(feet: Vec3Json, grid: Map<string, Cell>, hasPickaxe: boolean): 
       getPathTo: () => ({ status: 'noPath', path: [] }),
     },
   }
-  return { bot: bot as unknown as Bot, position, grid, digs, pathCalls, legs }
+  return { bot: bot as unknown as Bot, position, grid, digs, pathCalls, legs, inventoryItems }
 }
 
 function canWalkIntoGate(fixture: FixtureBot): boolean {
@@ -447,6 +449,35 @@ const STONE_STEP: StepCut = {
       /PORTAL_ENTRY_ROUTE_BLOCKED reason=\S+/.test(blockedLine) &&
       blockedLine.includes('detail=no_placeable'),
     `status=${result.status} failure=${result.failure ?? 'none'} enterCalls=${enterCalls.length} digs=${fixture.digs.length} marker=[${blockedLine ?? 'none'}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (d) a grounded leg that runs but cannot complete names ITS obstruction: the
+// offering layer held the tool (so the route was offered), the tool is gone at
+// execution time, so the marker carries the executed leg's own refusal instead
+// of a generic path code.
+// ---------------------------------------------------------------------------
+{
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('26,66,8', cell('stone'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], { diamond_pickaxe: 1, cobblestone: 32 })
+  const candidate = enterCandidate(fixture, state)
+  // the route was planned with the pickaxe; execution time has empty hands
+  fixture.inventoryItems.length = 0
+  const result = await runEntry(fixture, candidate, false)
+  const blockedLine = result.messages.find((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED'))
+  check(
+    '(d) a leg that cannot complete reports its own obstruction (dig_refused), not a generic path code',
+    result.status === 'failed' &&
+      blockedLine !== undefined &&
+      blockedLine.includes('reason=route_blocked') &&
+      blockedLine.includes('detail=dig_refused'),
+    `status=${result.status} failure=${result.failure ?? 'none'} marker=[${blockedLine ?? 'none'}]`,
   )
 }
 
