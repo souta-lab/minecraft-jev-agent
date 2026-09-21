@@ -45,7 +45,7 @@ import {
   portalFrameLayout,
 } from './src/netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite } from './src/netherPortalPlan.ts'
-import { defaultCandidateOptions, entryCandidates } from './src/candidates.ts'
+import { defaultCandidateOptions, entryCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { Executor, ExecutorError, defaultExecutorOptions } from './src/executor.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -444,8 +444,58 @@ const STONE_STEP: StepCut = {
       enterCalls.length === 1 &&
       fixture.digs.length === 0 &&
       blockedLine !== undefined &&
-      /PORTAL_ENTRY_ROUTE_BLOCKED reason=\S+/.test(blockedLine),
+      /PORTAL_ENTRY_ROUTE_BLOCKED reason=\S+/.test(blockedLine) &&
+      blockedLine.includes('detail=no_placeable'),
     `status=${result.status} failure=${result.failure ?? 'none'} enterCalls=${enterCalls.length} digs=${fixture.digs.length} marker=[${blockedLine ?? 'none'}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (g) the two halves agree: with a grounded route the reachability gate
+// PRESENTS the entry (the route is its own path fact); with no route the same
+// no_path probe WITHHOLDS it as a typed fact. So `ENTER:26,67,9` reappears in
+// the offered set only when its destination is genuinely reachable.
+// ---------------------------------------------------------------------------
+{
+  const withRoute = (() => {
+    const grid = gateGrid()
+    grid.set('26,64,8', cell('stone'))
+    grid.set('27,64,8', cell('stone'))
+    grid.set('26,65,8', cell('stone'))
+    grid.set('26,66,8', cell('stone'))
+    return {
+      fixture: makeBot({ x: 27, y: 65, z: 8 }, grid, true),
+      state: worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], { diamond_pickaxe: 1, cobblestone: 32 }),
+    }
+  })()
+  const withoutRoute = (() => {
+    const grid = gateGrid()
+    grid.set('26,64,8', cell('stone'))
+    grid.set('27,64,8', cell('stone'))
+    grid.set('26,65,8', cell('stone'))
+    grid.set('26,66,8', cell('bedrock'))
+    return {
+      fixture: makeBot({ x: 27, y: 65, z: 8 }, grid, false),
+      state: worldState({ x: 27.5, y: 65, z: 8.5 }, [], {}),
+    }
+  })()
+  const options = (fixture: FixtureBot): CandidateOptions => ({
+    ...defaultCandidateOptions,
+    portalEntry: entryPlan(fixture),
+    // the live pathfinder fact for the elevated entry cell: no_path
+    reachability: { pathProbe: () => 'no_path' },
+  })
+  const routed = generateGroundedCandidates(withRoute.state, options(withRoute.fixture))
+  const blockedCandidates = generateGroundedCandidates(withoutRoute.state, options(withoutRoute.fixture))
+  const hidden = blockedCandidates.withheld.find((entry) => entry.candidate.kind === 'ENTER_PORTAL')
+  const presented = routed.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL')
+  check(
+    '(g) the gate presents the entry once a grounded route exists and withholds it typed when none does',
+    presented &&
+      hidden !== undefined &&
+      hidden.result.reason === 'no_path' &&
+      !blockedCandidates.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL'),
+    `withRoute presented=${presented} withoutRoute withheld=${hidden !== undefined} reason=${hidden?.result.reason ?? 'none'}`,
   )
 }
 

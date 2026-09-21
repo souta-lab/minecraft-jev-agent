@@ -80,6 +80,7 @@
     "frame-build-test": "bun test ./test-frame-build.mts",
     "portal-ignite-test": "bun test ./test-portal-ignite.mts",
     "nether-transfer-test": "bun ./test-nether-transfer.mts",
+    "portal-entry-route-test": "bun test ./test-portal-entry-route.mts",
     "step-pipeline-test": "bun test ./data/step-pipeline-test.mts",
     "step-cut-test": "bun test ./data/step-cut-test.mts",
     "m1": "bun m1.mts",
