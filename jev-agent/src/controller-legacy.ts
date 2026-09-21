@@ -157,6 +157,13 @@ import {
   shouldWakeSystem2AfterLocalFailure,
 } from './system2Escalation.ts'
 import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
+import {
+  formatStrategicNonProgressExhausted,
+  resolveStrategicStallHorizon,
+  resolveStrategicStallMaxDistinctStates,
+  resolveStrategicStallMinBodyProgress,
+  StrategicStallTracker,
+} from './strategicStall.ts'
 
 export type EscalationReason =
   | 'low_confidence'
@@ -496,6 +503,8 @@ function emptySignals(): AgentSignals {
     descendNoProgress: 0,
     descendLimitReached: false,
     knownResources: [],
+    strategicNonProgress: null,
+    oscillationsDetected: 0,
   }
 }
 
@@ -1573,6 +1582,18 @@ export class JevController {
   private retrieveUnverified: RetrieveUnverifiedState | null = null
   /** #78: last quantized position / swap pair / state signature. */
   private oscillationState: OscillationState | null = null
+  /**
+   * #360: code-owned state-recurrence evidence for the active Option. Verified
+   * body-only MOVEs between a few cells with zero goal/search progress are
+   * strategic non-progress; beta sees the evidence and code proves exhaustion.
+   */
+  private readonly strategicStall = new StrategicStallTracker(
+    resolveStrategicStallHorizon(),
+    resolveStrategicStallMaxDistinctStates(),
+    resolveStrategicStallMinBodyProgress(),
+  )
+  /** #360: Option instance the recurrence evidence is currently armed on. */
+  private strategicStallOptionId: string | null = null
   /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
   private readonly actionUnverified = new Map<string, number>()
   /**
@@ -2589,15 +2610,44 @@ export class JevController {
    * `(plan, action, reason)` release beta's own vote instead of suppressing it
    * again. Verified progress resets the streak, so a genuinely productive
    * in-flight action keeps its deferral; this never selects an Option.
+   *
+   * #360 §11: a state-recurring body-only loop is NOT "one action that failed"
+   * and NOT "recent body progress" in the semantic sense. When the code-owned
+   * recurrence evidence proves exhaustion, that is a semantic boundary and it
+   * must outrank the body-progress deferral, otherwise the deferral resets on
+   * every successful MOVE and the Option survives forever. The evidence is
+   * consumed here (the next window on the same Option must be twice as long);
+   * this still never selects WHAT comes next.
    */
   private betaTerminationBoundary(decision: JevResult, optionId: string | null): BetaTerminationBoundaryDecision {
     const outcome = this.recentOutcomes.at(-1) ?? null
+    const evidence = this.signals?.strategicNonProgress ?? null
+    const semanticExhausted = evidence !== null && evidence.exhausted
+    if (semanticExhausted) {
+      this.logger.warn(
+        'agent',
+        formatStrategicNonProgressExhausted(this.currentGoalKey(), evidence),
+        {
+          option: optionId,
+          windowSize: evidence.windowSize,
+          horizon: evidence.horizon,
+          distinctStates: evidence.distinctStates,
+          bodyProgressDecisions: evidence.bodyProgressDecisions,
+          exhaustedRepeats: evidence.exhaustedRepeats,
+          boundary: 'semantic_exhausted',
+        },
+        this.tickCounter,
+      )
+      // Clear the consumed window but leave `signals.strategicNonProgress` as the
+      // exhausted snapshot for this decision, so the authority facade can see it.
+      this.strategicStall.acknowledgeExhaustion()
+    }
     const boundary = evaluateBetaTerminationBoundary({
       optionId,
       requested: abandonRequested(decision),
       decisionActionId: decisionIdFrom(decision),
       latestOutcome: outcome,
-      semanticExhausted: false,
+      semanticExhausted,
       semanticInvalid: false,
     })
     if (!abandonRequested(decision) || boundary.adopt) {
@@ -3487,6 +3537,14 @@ export class JevController {
     })
     if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
     this.noteAscendOutcome(result, candidate)
+    // #360: feed the settled decision to the state-recurrence evidence. This runs
+    // once per settled action (not per tick), and `body` progress deliberately
+    // does NOT clear the window: a successful MOVE is not semantic progress.
+    this.signals.strategicNonProgress = this.strategicStall.note({
+      optionInstanceId: this.currentOptionContext()?.instanceId ?? null,
+      stateKey: positionKey(this.bot.entity.position),
+      progressKinds: taxonomy.progressKinds,
+    })
 
     writeOutcome(this.jevWriter, {
       callId: decision.callId,
@@ -3900,6 +3958,9 @@ export class JevController {
     })
     this.oscillationState = decision.state
     if (!decision.detected || decision.line === null) return
+    // #360: cumulative detection count for the active Option, so the semantic
+    // layer can see 401 oscillation events that no longer change behaviour.
+    this.signals.oscillationsDetected = (this.signals.oscillationsDetected ?? 0) + 1
     this.logger.warn(
       'agent',
       decision.line,
@@ -5152,6 +5213,15 @@ export class JevController {
   }
 
   private updateStallSignal(): void {
+    // #360: re-arm the recurrence evidence when System2 replaces the active
+    // Option, and refresh the snapshot beta reads this tick.
+    const optionInstanceId = this.currentOptionContext()?.instanceId ?? null
+    if (optionInstanceId !== this.strategicStallOptionId) {
+      this.strategicStallOptionId = optionInstanceId
+      this.signals.oscillationsDetected = 0
+    }
+    this.strategicStall.setOption(optionInstanceId)
+    this.signals.strategicNonProgress = this.strategicStall.evidence()
     const stalledMs = Date.now() - this.lastProgressAt
     this.signals.stalledMs = stalledMs
     if (!this.goal.complete && stalledMs > this.options.stallMs) {

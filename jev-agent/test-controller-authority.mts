@@ -17,7 +17,13 @@ assert.match(facade, /export class JevController extends LegacyJevController/)
 assert.match(facade, /semantic authority=jev_pi/)
 assert.match(facade, /return \[\.\.\.candidates\]/)
 assert.match(facade, /authority=jev_pi_beta/)
-assert.match(facade, /const adopt = abandonRequested\(decision\)/)
+// #360 §11: semantic termination still has one owner. The facade may adopt
+// beta's vote, or a code-owned state-recurrence exhaustion proof; it must not
+// introduce any other termination source (attempt counts, protection ladder,
+// deterministic ranking). The exhaustion proof itself is read from the
+// code-owned evidence block, never recomputed here.
+assert.match(facade, /const semanticExhausted = internals\.signals\?\.strategicNonProgress\?\.exhausted === true/)
+assert.match(facade, /const adopt = \(abandonRequested\(decision\) \|\| semanticExhausted\) && \(boundary\?\.adopt \?\? true\)/)
 assert.match(facade, /if \(!betaIsAuthoritative\(internals\)\) return baseline/)
 assert.match(facade, /if \(optionId === null\) return baseline/)
 assert.match(facade, /betaTerminationBoundary/)

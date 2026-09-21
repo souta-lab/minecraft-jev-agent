@@ -82,6 +82,12 @@ type LegacyInternals = {
   queue?: { current?: { id?: string } | null }
   actionUnverified?: Map<string, number>
   recentEvents?: string[]
+  /**
+   * #360: code-owned state-recurrence evidence. When it proves exhaustion, the
+   * semantic layer is asked again even though beta's own vote stayed below its
+   * abandon threshold; the evidence is still the only proof used.
+   */
+  signals?: { strategicNonProgress?: { exhausted: boolean } | null }
   retrieveUnverified?: unknown
   oscillationState?: unknown
   lastDecisionId?: string | null
@@ -405,7 +411,14 @@ export class JevController extends LegacyJevController {
         // protection ladder and enforced/suppressed classification cannot alter
         // the live decision. Deterministic completion/hard invalidity still live
         // outside beta in the ordinary queue/guard/VERIFY path.
-        const adopt = abandonRequested(decision) && (boundary?.adopt ?? true)
+        //
+        // #360 §11: `semanticExhausted` is code-owned proof (a full recurrence
+        // window of verified body-only decisions with zero goal/search progress),
+        // so it may cross the boundary even when beta's own probability stayed
+        // below threshold. It still only ENDS the Option and hands off to System2
+        // for WHAT; this layer never selects the replacement.
+        const semanticExhausted = internals.signals?.strategicNonProgress?.exhausted === true
+        const adopt = (abandonRequested(decision) || semanticExhausted) && (boundary?.adopt ?? true)
         return {
           ...baseline,
           adopt,

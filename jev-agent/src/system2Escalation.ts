@@ -112,10 +112,16 @@ export function evaluateBetaTerminationBoundary(
   if (input.optionId === null || input.optionId.length === 0) {
     return { adopt: false, wake: false, reason: 'no_current_option' }
   }
-  if (!input.requested) return { adopt: false, wake: false, reason: 'not_requested' }
+  // #360 §11: a code-owned semantic-exhaustion proof (a full state-recurrence
+  // window of verified body-only decisions with zero goal/search progress) is
+  // NOT conditional on beta's own vote. Ordering `requested` first made the
+  // semantic boundary unreachable exactly when beta never crosses its threshold
+  // (live: max beta 0.36 < 0.5 over 2148 votes for 48.5 min), so the Option
+  // survived indefinitely. This still never selects WHAT comes next.
   if (input.semanticExhausted || input.semanticInvalid) {
     return { adopt: true, wake: true, reason: 'semantic_boundary' }
   }
+  if (!input.requested) return { adopt: false, wake: false, reason: 'not_requested' }
   if (input.decisionActionId === 'WAIT' || input.decisionActionId === 'ESCALATE') {
     return { adopt: false, wake: false, reason: 'control_action' }
   }
