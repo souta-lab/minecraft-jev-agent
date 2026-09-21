@@ -358,8 +358,21 @@ function rememberedFrameState(invalidate: boolean): WorldState {
     ...cells.map((position): KnownResource => ({ name: 'obsidian', kind: 'ore', position })),
     { name: 'obsidian', kind: 'ore', position: KNOWN_OUTSIDE },
   ]
+  // The remembered cells are LOADED world cells that the sensor's own scan does not
+  // report (that is what makes them "remembered" rather than "sensed"). Model them
+  // explicitly: since #406 a loaded cell that reads air proves the resource is gone,
+  // so a fixture that leaves them unmodelled would (correctly) falsify the memory
+  // instead of exercising the retrieval route.
+  const bot = fakeBot({}, { diamond_pickaxe: 1 }, KNOWN_BOT)
+  const modelled = new Map(cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, 'obsidian']))
+  modelled.set(`${KNOWN_OUTSIDE.x},${KNOWN_OUTSIDE.y},${KNOWN_OUTSIDE.z}`, 'obsidian')
+  const sensedBlockAt = bot.blockAt.bind(bot)
+  ;(bot as unknown as { blockAt: (p: { x: number; y: number; z: number }) => unknown }).blockAt = (p) => {
+    const name = modelled.get(`${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`)
+    return name === undefined ? sensedBlockAt(p) : { name, boundingBox: 'block', diggable: true }
+  }
   return buildWorldState(
-    fakeBot({}, { diamond_pickaxe: 1 }, KNOWN_BOT),
+    bot,
     {
       tick: 1,
       goal: makeGoal('obsidian', 10),

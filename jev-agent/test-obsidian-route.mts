@@ -64,12 +64,12 @@ function fakeBot(sensed: Record<string, Vec3Json[]>, counts: Record<string, numb
   for (const [name, positions] of Object.entries(sensed)) {
     for (const p of positions) blocks.set(`${p.x},${p.y},${p.z}`, { name, boundingBox: 'block', diggable: true })
   }
+  // Cells this fixture does not model are UNLOADED, not loaded air: Mineflayer
+  // returns null for an unloaded point, and `probeKnownResources` (#406) correctly
+  // treats a loaded air cell as proof that a remembered resource is gone. Claiming
+  // 'air' for an unmodelled cell would assert a world fact the fixture never built.
   const blockAt = (p: { x: number; y: number; z: number }) =>
-    blocks.get(`${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`) ?? {
-      name: 'air',
-      boundingBox: 'empty',
-      diggable: false,
-    }
+    blocks.get(`${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`) ?? null
   const findBlocks = (options: {
     matching: (block: { name: string }) => boolean
     maxDistance: number
