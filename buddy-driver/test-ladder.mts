@@ -118,7 +118,7 @@ addCase('charcoal alone satisfies the charcoal rung', () => {
   }
 })
 
-addCase('a diamond-pickaxe frontier resumes at the current M2 portal rung', () => {
+addCase('a diamond-pickaxe frontier resumes at the M3 ender-pearl rung with M2 still planned', () => {
   const counts = {
     diamond: 3,
     diamond_pickaxe: 1,
@@ -131,13 +131,18 @@ addCase('a diamond-pickaxe frontier resumes at the current M2 portal rung', () =
   const hasHistoricalGoal = ladder.goals.some(
     (goal) => typeof goal.targetItem === 'string' && historicalTargets.has(goal.targetItem),
   )
+  const pearlGoal = ladder.goals.some((goal) => goal.kind === 'collect' && goal.targetItem === 'ender_pearl')
+  const portalGoal = ladder.goals.some((goal) => goal.kind === 'place' || goal.targetItem === 'nether_portal')
   return {
+    // M3 (ender_pearls) is the frontier; the M2 portal rung immediately follows it,
+    // so the portal plan must still be emitted by the same ladder build.
     pass:
-      resume.rungId === 'nether_portal' &&
-      ladder.rungId === 'nether_portal' &&
+      resume.rungId === 'ender_pearls' &&
+      ladder.rungId === 'ender_pearls' &&
       !hasHistoricalGoal &&
-      ladder.goals.some((goal) => goal.kind === 'place' && goal.targetItem === 'obsidian'),
-    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} goals=[${ladder.goals.map((goal) => goal.description).join(' -> ')}]`,
+      pearlGoal &&
+      portalGoal,
+    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} pearl=${pearlGoal} portal=${portalGoal} goals=[${ladder.goals.map((goal) => goal.description).join(' -> ')}]`,
   }
 })
 

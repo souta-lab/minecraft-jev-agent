@@ -152,6 +152,9 @@ addCase('an unmet smelt precondition is expanded in front of the ladder goal', (
 })
 
 addCase('model-authoritative portal grounding preserves sensed partial-frame progress', () => {
+  // M3 (ender_pearls) now precedes the M2 portal rung, so the portal's index is
+  // derived from RUNGS instead of being hardcoded to the old position.
+  const portalRungIndex = RUNGS.findIndex((rung) => rung.id === 'nether_portal')
   const option = buildPlanOptions(
     {
       iron_pickaxe: 1,
@@ -162,7 +165,7 @@ addCase('model-authoritative portal grounding preserves sensed partial-frame pro
       obsidian: 3,
     },
     world(),
-    { resumeRungIndex: 13, portalFrameBlocks: 7 },
+    { resumeRungIndex: portalRungIndex, portalFrameBlocks: 7 },
   ).find((entry) => entry.id === 'front_nether_portal')
   if (option === undefined) return { pass: false, detail: 'front_nether_portal option missing' }
   const descriptions = option.goals.map((goal) => goal.description)

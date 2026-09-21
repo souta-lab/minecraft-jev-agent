@@ -282,7 +282,7 @@ addCase('(k) iron_gear is an explicit optional rung, not a mandatory prerequisit
   }
 })
 
-addCase('(l) the ladder reaches the nether_portal rung and its typed build/light/verify plan', () => {
+addCase('(l) the M3 ender-pearl frontier still supplies the typed nether-portal build/light/verify plan', () => {
   const counts = {
     crafting_table: 1,
     cobblestone: 22,
@@ -315,8 +315,8 @@ addCase('(l) the ladder reaches the nether_portal rung and its typed build/light
   const noArmour = !targetItems(floor.goals).some((item) => ARMOUR_ITEMS.includes(item))
   return {
     pass:
-      resume.rungId === 'nether_portal' &&
-      floor.rungId === 'nether_portal' &&
+      resume.rungId === 'ender_pearls' &&
+      floor.rungId === 'ender_pearls' &&
       floor.supplied &&
       operationKinds === 'build_portal_frame,light_portal,verify_portal' &&
       everyPostcondition &&
