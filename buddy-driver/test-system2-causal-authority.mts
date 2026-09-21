@@ -290,6 +290,18 @@ assert.deepEqual(
 )
 assert.deepEqual(
   evaluateCandidateStarvationBoundary({
+    activeOption: true,
+    blockedBy: 'no_productive_action',
+    missing: [],
+    semanticExhausted: false,
+    semanticInvalid: false,
+    semanticAbandoned: false,
+    localRecoveryExhausted: true,
+  }),
+  { wake: true, reason: 'semantic_boundary' },
+)
+assert.deepEqual(
+  evaluateCandidateStarvationBoundary({
     activeOption: false,
     blockedBy: 'no_productive_action',
     missing: [],

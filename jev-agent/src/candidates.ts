@@ -3286,13 +3286,34 @@ function fuelGoalCountReached(state: WorldState, goal: { requiredCount?: number 
 }
 
 /**
- * Issue #14: the ordered list of items the body actually needs next - the
- * current subgoal first, then the queued goals. A `collect cobblestone (descend
- * toward ore levels)` proxy must not hide the real need (raw_iron) when a
- * remembered ore coordinate exists, so callers consult the queue, not only
- * `focusItem`. An active smelt is a prerequisite barrier, however: future
- * queue retrievals must not steal the body while its furnace/input path is
- * unresolved (#73). Pure.
+ * A queued future row may cross the active-goal retrieval boundary only when
+ * the CURRENT row explicitly represents the historical descent proxy.  That
+ * proxy is execution scaffolding for a later ore goal, so exposing the next
+ * unresolved ore coordinate is part of the proxy's declared meaning.  Ordinary
+ * collect/craft/place rows are not proxies: their later queue siblings are a
+ * different semantic objective and must stay invisible to local pi.
+ */
+function allowsQueuedRetrievalProxy(current: { kind?: string; targetItem?: string | null; description?: string } | null): boolean {
+  if (current === null) return false
+  if (current.kind === 'descend') return true
+  return (
+    current.kind === 'collect' &&
+    current.targetItem === 'cobblestone' &&
+    typeof current.description === 'string' &&
+    current.description.includes('descend toward ore levels')
+  )
+}
+
+/**
+ * Ordered retrieval needs for the ACTIVE execution row.  The active focus is
+ * always first.  `state.goal.targetItem` is only a legacy fallback when there
+ * is no queue current; while a queue row is active it is mission-level state
+ * and may describe a later target (the live #341 flint -> obsidian leak).
+ *
+ * Future queue rows are NOT a generic fallback.  The sole compatibility
+ * exception is the explicit descent proxy above, and even there only the first
+ * unresolved row after the current proxy is exposed.  Resolved rows never
+ * contribute candidates. Pure.
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueued = true): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
@@ -3315,22 +3336,16 @@ function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueu
     needs.push({ item, fuel, countReached })
   }
   push(focusItem, goalWantsFuel(current), current)
-  if (current?.kind !== 'smelt') {
-    push(state.goal.targetItem, goalWantsFuel(current), current)
-    if (includeQueued) {
-      for (const queued of state.goalQueue.goals) {
-        // #341: a resolved row must contribute ZERO candidates. Live, an earlier
-        // `collect:raw_iron` row that was already `done` was resurrected as a
-        // `RETRIEVE:known:raw_iron` want, so `CAUSAL planId=g3:collect:flint`
-        // carried `resource=iron_ore` and the body walked/digged toward a stale
-        // iron coordinate while the flint plan was active.
-        //
-        // Unresolved rows (`pending`/`active`) stay eligible on purpose: the
-        // deliberate cobblestone/descent proxy relies on being able to expose an
-        // unresolved queued retrieval. Only `done`/`impossible` are excluded.
-        if (queued.status === 'done' || queued.status === 'impossible') continue
-        push(queued.targetItem, goalWantsFuel(queued), queued)
-      }
+  if (current === null) {
+    push(state.goal.targetItem, false, null)
+  } else if (current.kind !== 'smelt' && includeQueued && allowsQueuedRetrievalProxy(current)) {
+    const rows = state.goalQueue.goals
+    const currentIndex = rows.findIndex((queued) => queued.id === current.id)
+    if (currentIndex >= 0) {
+      const next = rows
+        .slice(currentIndex + 1)
+        .find((queued) => queued.status !== 'done' && queued.status !== 'impossible')
+      if (next !== undefined) push(next.targetItem, goalWantsFuel(next), next)
     }
   }
   const wants: RetrievalWant[] = []
@@ -3588,8 +3603,12 @@ function retrievalCandidates(
   includeQueued = true,
 ): Candidate[] {
   const recipes = options.recipes ?? null
+  const queuedProxy = allowsQueuedRetrievalProxy(state.goalQueue?.current ?? null)
   for (const want of retrievalNeeds(state, focusItem, includeQueued)) {
-    if (!retrievalWantAdvancesFocus(focusItem, want, recipes)) continue
+    // The explicit descent proxy intentionally exposes the next unresolved
+    // prerequisite even though its item differs from the proxy's cobblestone
+    // focus.  Every ordinary row remains focus-bounded.
+    if (!queuedProxy && !retrievalWantAdvancesFocus(focusItem, want, recipes)) continue
     const candidates = retrievalCandidatesForWant(state, options, want)
     if (candidates.length > 0) return candidates
   }

@@ -446,8 +446,15 @@ function knownOre(name: string, position: Vec3Json): NonNullable<WorldState['sig
 function flintLeakWorld(status: QueuedGoal['status']): WorldState {
   const state = build('collect', 'flint', 'collect 1 x flint (from gravel)', [], null, true)
   const active = statusRow('collect', 'flint', 'collect 1 x flint (from gravel)', 'active')
-  withQueue(state, [statusRow('collect', 'raw_iron', 'collect 1 x raw_iron', status), active])
-  state.signals.knownResources = [knownOre('iron_ore', { x: 9, y: 54, z: -10 })]
+  const futureObsidian = statusRow('collect', 'obsidian', 'mine 10 x obsidian with diamond_pickaxe', 'pending')
+  // Reproduce both live leak sources: an earlier resolved raw-iron row and a
+  // mission/future obsidian target while flint is the actual queue current.
+  withQueue(state, [statusRow('collect', 'raw_iron', 'collect 1 x raw_iron', status), active, futureObsidian])
+  state.goal = { ...state.goal, targetItem: 'obsidian', description: 'prepare the Nether portal' }
+  state.signals.knownResources = [
+    knownOre('iron_ore', { x: 9, y: 54, z: -10 }),
+    knownOre('obsidian', { x: 28, y: 67, z: 9 }),
+  ]
   return state
 }
 
@@ -469,20 +476,21 @@ function flintLeakWorldWithFrontier(status: QueuedGoal['status']): WorldState {
   return state
 }
 
-addCase('#341 a done queue row contributes no retrieval candidate', () => {
+addCase('#341 active flint excludes resolved/future retrievals and keeps real Jev discretion', () => {
   const candidates = generateCandidates(flintLeakWorldWithFrontier('done'), OPTIONS)
   const ids = candidates.map((candidate) => candidate.id)
-  const actionable = ids.filter((id) => !id.startsWith('WAIT'))
-  // The P0 requirement is the leak: no retrieval for the resolved row. The
-  // diversity follow-up is fixed and asserted here: in this exact shape (flint
-  // source known-but-unsensed, nothing sensed) the #339 exploration fallback
-  // (`exploreFallbackCandidates`) now fires, so the set is DESCEND + several
-  // DISTINCT grounded frontier MOVEs + WAIT instead of DESCEND + WAIT. The
-  // declared static source is perception truth, not a route. See
-  // test-known-unsensed-source.mts for the dedicated (a)-(d) contract.
-  const distinct = new Set(actionable)
+  const actionable = candidates.filter((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE')
+  const distinct = new Set(actionable.map((candidate) => candidate.id))
+  // Latest main owns the diversity mechanism: a declared static source is
+  // perception truth, not a route, so blind DESCEND no longer hides #339's
+  // frontier MOVEs. This audit extends the assertion to the causal boundary:
+  // neither the resolved raw-iron row nor future/macro obsidian may leak in.
   return {
-    pass: !ids.some((id) => id.includes('raw_iron')) && actionable.length >= 3 && distinct.size === actionable.length,
+    pass:
+      !ids.some((id) => id.includes('raw_iron')) &&
+      !ids.some((id) => id.includes('obsidian')) &&
+      actionable.length >= 3 &&
+      distinct.size === actionable.length,
     detail: `ids=${ids.join(',')} actionable=${actionable.length} distinct=${distinct.size}`,
   }
 })
@@ -495,21 +503,16 @@ addCase('#341 an impossible queue row contributes no retrieval candidate', () =>
   }
 })
 
-addCase('#341 the resolution filter only removes resolved rows (unresolved path untouched)', () => {
-  // Differential proof that the change is a narrowing, not a behaviour swap: the
-  // candidate-id set for the same world with the row resolved must be a subset of
-  // the unresolved one, and the unresolved set must not be smaller. That is what
-  // "the deliberate cobblestone/descent proxy keeps exposing unresolved queued
-  // work" means for any world shape, without pretending this fixture reproduces
-  // the proxy shape itself.
-  const resolved = generateCandidates(flintLeakWorld('done'), OPTIONS).map((candidate) => candidate.id)
-  const unresolved = generateCandidates(flintLeakWorld('pending'), OPTIONS).map((candidate) => candidate.id)
-  const resolvedSet = new Set(resolved)
-  const unresolvedSet = new Set(unresolved)
-  const subset = [...resolvedSet].every((id) => unresolvedSet.has(id))
+addCase('#341 only the explicit cobblestone descent proxy may expose the next unresolved retrieval', () => {
+  const state = build('collect', 'cobblestone', 'collect 41 x cobblestone (descend toward ore levels)', [], null, false)
+  const proxy = statusRow('collect', 'cobblestone', 'collect 41 x cobblestone (descend toward ore levels)', 'active')
+  const iron = statusRow('collect', 'raw_iron', 'collect 3 x raw_iron', 'pending')
+  withQueue(state, [proxy, iron])
+  state.signals.knownResources = [knownOre('iron_ore', { x: 31, y: 57, z: 34 })]
+  const ids = generateCandidates(state, OPTIONS).map((candidate) => candidate.id)
   return {
-    pass: subset && unresolvedSet.size >= resolvedSet.size,
-    detail: `resolved=[${resolved.join(',')}] unresolved=[${unresolved.join(',')}] subset=${subset}`,
+    pass: ids.some((id) => id.startsWith('RETRIEVE:known:raw_iron:')),
+    detail: `ids=[${ids.join(',')}]`,
   }
 })
 

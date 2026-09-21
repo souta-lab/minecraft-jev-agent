@@ -220,37 +220,38 @@ addCase('(b) collect obsidian still offers the remembered obsidian RETRIEVE', ()
   }
 })
 
-// (b) a genuine prerequisite ingredient stays: the `ender_eye` recipe closure
-// reaches `blaze_rod`, whose only grounded affordance is the Nether-fortress
-// fabric, so the remembered structure-cell trip is not withheld for it.
-addCase('(b) a focus whose recipe chain needs the remembered item keeps the RETRIEVE', () => {
+// A recipe relation does not grant a FUTURE queue sibling authority over the
+// active row. Dependency expansion must make `blaze_rod` active explicitly
+// before its remembered route can enter pi.
+addCase('(c) recipe-related future work does not cross the active queue boundary', () => {
+  const current = queuedGoal('ender_eye')
+  const future = { ...queuedGoal('blaze_rod'), id: 'g4:collect:blaze_rod', status: 'pending' as const }
   const state = build({
-    current: queuedGoal('ender_eye'),
+    current,
     goalTarget: 'ender_eye',
     known: [{ name: 'nether_bricks', kind: 'ore', position: { x: 90, y: 62, z: 40 } }],
-    goals: [queuedGoal('ender_eye'), queuedGoal('blaze_rod')],
+    goals: [current, future],
   })
   const route = offered(state).find((candidate) => candidate.kind === 'RETRIEVE')
   return {
-    pass: route !== undefined,
+    pass: route === undefined,
     detail: `route=${route?.id ?? 'none'} offered=${ids(offered(state))}`,
   }
 })
 
-// (c) no SPECIFIC focus: a resource-class goal is the typed non-specific case
-// (the shared predicate also keeps the null-focus branch), so the queued
-// obsidian need is unchanged. With no other route the queue is consulted.
-addCase('(c) a resource-class focus keeps the queued obsidian RETRIEVE unchanged', () => {
+// Resource-class focus is not a license to execute arbitrary future work.
+addCase('(d) resource-class focus does not admit a future obsidian RETRIEVE', () => {
   const logGoal = queuedGoal('log')
+  const future = { ...queuedGoal('obsidian'), id: 'g4:collect:obsidian', status: 'pending' as const }
   const state = build({
     current: logGoal,
     goalTarget: 'log',
     known: [{ name: 'obsidian', kind: 'ore', position: OBSIDIAN_CELL }],
-    goals: [logGoal, queuedGoal('obsidian')],
+    goals: [logGoal, future],
   })
   const route = offered(state).find((candidate) => candidate.id === retrievalId('obsidian', OBSIDIAN_CELL))
   return {
-    pass: route !== undefined,
+    pass: route === undefined,
     detail: `route=${route?.id ?? 'none'} offered=${ids(offered(state))}`,
   }
 })

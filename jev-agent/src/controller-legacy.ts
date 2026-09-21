@@ -2253,12 +2253,21 @@ export class JevController {
             semanticExhausted: false,
             semanticInvalid: false,
             semanticAbandoned: false,
+            // `noProductiveRepeats` only advances while goal + rounded position
+            // + inventory are unchanged (`noProductiveSignature`). Reaching the
+            // bounded waitLimit is therefore code-owned proof that local CAN is
+            // exhausted, not a hand-written choice of the replacement WHAT.
+            localRecoveryExhausted: true,
           })
           if (boundary.wake) {
             this.escalate(
               'all_candidates_invalid',
-              `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x after semantic boundary on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
+              `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x; local recovery exhausted on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
             )
+            // There is literally no executable local action to ask pi to choose.
+            // Do not burn another Jev call on WAIT; System2 now owns the next
+            // semantic decision (or the replan throttle holds it bounded).
+            return
           } else {
             this.logger.warn(
               'agent',

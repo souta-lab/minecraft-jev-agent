@@ -30,18 +30,21 @@ export interface CandidateStarvationBoundaryInput {
   semanticExhausted: boolean
   semanticInvalid: boolean
   semanticAbandoned: boolean
+  /** Code-owned proof that the identical local affordance envelope stayed empty for its bounded recovery window. */
+  localRecoveryExhausted?: boolean
 }
 
 export function evaluateCandidateStarvationBoundary(
   input: CandidateStarvationBoundaryInput,
 ): System2WakeBoundaryDecision {
   if (!input.activeOption) return { wake: false, reason: 'no_active_option' }
-  if (input.semanticExhausted || input.semanticInvalid || input.semanticAbandoned) {
+  if (input.semanticExhausted || input.semanticInvalid || input.semanticAbandoned || input.localRecoveryExhausted === true) {
     return { wake: true, reason: 'semantic_boundary' }
   }
-  // `blockedBy`/`missing` are retained in the caller's evidence log.  They
-  // describe the local CAN envelope; neither field is a semantic replacement
-  // decision and neither can authorize a System2 wake by repetition alone.
+  // `blockedBy`/`missing` are retained in the caller's evidence log. They
+  // describe the local CAN envelope and cannot choose a replacement WHAT. A
+  // wake becomes legal only after the controller separately proves the same
+  // empty envelope persisted across its bounded, stable-state recovery window.
   return { wake: false, reason: 'local_recovery' }
 }
 
