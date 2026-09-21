@@ -4615,9 +4615,17 @@ function routeOpeningCandidates(
       ),
     )
   }
-  return out.filter(
+  const advancing = out.filter(
     (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, blockedTarget),
   )
+  // Never hand the policy a barren set. When the refused neighbourhood is itself
+  // obstructed or unsafe (live: `presented=2 productive=0 goal=collect:obsidian:10`
+  // with `MOVE:p193_67_-15 reachable=false reason=no_path` and no safe west level
+  // step left), the advancing filter removes every MOVE and the body waits
+  // forever. A plain locomotion fact that changes the body's cell is the minimum
+  // grounded CAN affordance: it may open a different approach, and Jev still owns
+  // WHY/WHICH. Ordering is unchanged - the advancing set is preferred as-is.
+  return advancing.length > 0 ? advancing : out
 }
 
 /**
