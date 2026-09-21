@@ -18,7 +18,7 @@ import type { Bot } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { EventLogger } from './jev.ts'
-import { isHostileEntityName } from './state.ts'
+import { isHostileEntityName, LOW_AIR_LEVEL, MAX_AIR } from './state.ts'
 
 export const DECISION_TRIGGERS = [
   'start',
@@ -28,6 +28,7 @@ export const DECISION_TRIGGERS = [
   'mob_appeared',
   'damage_taken',
   'hp_changed',
+  'low_air',
   'inventory_changed',
   'action_completed',
   'action_timeout',
@@ -75,29 +76,45 @@ export function mobAppearanceIsNear(
 
 /**
  * Triggers that may preempt an in-flight action because they can change the
- * safety calculus mid-action (mob appeared, taken damage, health changed). The
- * rest - arrival, block broken, inventory change, action completion, path
- * failure, a new LLM plan - coalesce and are deferred until the action finishes,
- * which is what stops Jev being re-asked during a long walk.
+ * safety calculus mid-action (mob appeared, taken damage, health changed,
+ * breath running out). The rest - arrival, block broken, inventory change,
+ * action completion, path failure, a new LLM plan - coalesce and are deferred
+ * until the action finishes, which is what stops Jev being re-asked during a
+ * long walk.
+ *
+ * `low_air` is here because drowning is silent to every other trigger: the
+ * measured death (2026-09-21T16:59:34.792Z) followed a salmon into water for
+ * ~35s and only produced a `damage_taken` decision 3s before the body died.
+ * Breath is lost BEFORE damage starts, so the safety calculus changes earlier
+ * and the in-flight action must yield earlier. WHAT to do about it stays with
+ * Jev; this only makes the fact able to interrupt.
  */
 export const PREEMPTIVE_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionTrigger>([
   'mob_appeared',
   'damage_taken',
   'hp_changed',
+  'low_air',
   'action_timeout',
 ])
 
 /**
  * An ATTACK lease is normally non-preemptive so Jev is not re-asked on every
- * hit.  Once health is critical, however, deferring the damage event can keep
- * the executor attacking until death.  This predicate is deliberately small
+ * hit. Once health is critical, however, deferring the damage event can keep
+ * the executor attacking until death. This predicate is deliberately small
  * and pure so the safety exception is observable and testable.
+ *
+ * Running out of breath is the same class of exception and is NOT conditional
+ * on health: the body can be at full health and still drown (measured
+ * `ATTACK:e4698` followed a salmon down from y=62 to y=57 and the body died at
+ * (67.5,58.3,28.5) with health 20 until the last seconds).
  */
 export function shouldInterruptAttackLease(
   trigger: DecisionTrigger,
   health: number,
   criticalHealth = 6,
+  air: number = MAX_AIR,
 ): boolean {
+  if (trigger === 'low_air') return air <= LOW_AIR_LEVEL
   return (
     (trigger === 'damage_taken' || trigger === 'hp_changed') &&
     Number.isFinite(health) &&
@@ -105,10 +122,32 @@ export function shouldInterruptAttackLease(
   )
 }
 
-/** Higher wins when a burst of triggers is coalesced; a critical trigger is never overwritten. */
-export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
+/**
+ * The scheduler-level survival fact. `layer=scheduler` names the owner of the
+ * preemption (the sensor owns the air reading, the guard/executor own refusing
+ * the mechanical action); the semantic response stays Jev's.
+ */
+export const LOW_AIR_PREEMPT = 'LOW_AIR_PREEMPT'
+
+export function formatLowAirPreempt(air: number, position: { x: number; y: number; z: number } | null): string {
+  const at = position === null ? 'unknown' : `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`
+  return `${LOW_AIR_PREEMPT} layer=scheduler air=${air}/${MAX_AIR} threshold=${LOW_AIR_LEVEL} at=${at} -> preempt in-flight action`
+}
+
+/**
+ * Remaining breath from the live bot. A bot/version that never reports
+ * `oxygenLevel` has no drowning signal, so full air is the honest default (the
+ * same rule the sensor uses for `SelfState.air`).
+ */
+function readAir(bot: Bot): number {
+  const air = (bot as { oxygenLevel?: number }).oxygenLevel
+  return typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR
+}
+
+/** Higher wins when a burst of triggers is coalesced; a critical trigger is never overwritten. */export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
   damage_taken: 10,
   hp_changed: 9,
+  low_air: 9,
   mob_appeared: 8,
   path_stuck: 7,
   path_no_path: 7,
@@ -164,6 +203,8 @@ export class DecisionScheduler {
   private started = false
   private lastHealth: number | null = null
   private lastFood: number | null = null
+  /** last low-air band (10/5/0) announced, so the breath trigger stays an edge */
+  private lowAirBand: number | null = null
   /**
    * Whether this scheduler currently observes every world mutation. Both the
    * block-state listener and the chunk-column listeners must be attached before
@@ -230,6 +271,7 @@ export class DecisionScheduler {
     if (this.enabled.has('mob_appeared')) this.bot.on('entitySpawn', this.onEntitySpawn)
     if (this.enabled.has('damage_taken')) this.bot.on('entityHurt', this.onEntityHurt)
     if (this.enabled.has('hp_changed')) this.bot.on('health', this.onHealth)
+    if (this.enabled.has('low_air')) this.bot.on('breath', this.onBreath)
     if (this.enabled.has('inventory_changed')) {
       this.bot.on('playerCollect', this.onPlayerCollect)
       this.bot.inventory.on('updateSlot', this.onInventorySlot)
@@ -252,6 +294,7 @@ export class DecisionScheduler {
     this.bot.removeListener('entitySpawn', this.onEntitySpawn)
     this.bot.removeListener('entityHurt', this.onEntityHurt)
     this.bot.removeListener('health', this.onHealth)
+    this.bot.removeListener('breath', this.onBreath)
     this.bot.removeListener('playerCollect', this.onPlayerCollect)
     this.bot.inventory.removeListener('updateSlot', this.onInventorySlot)
     if (this.heartbeatTimer !== null) {
@@ -325,6 +368,29 @@ export class DecisionScheduler {
     this.lastFood = food
     if (previousHealth === null || health === previousHealth) return
     this.request('hp_changed', { health, previousHealth, food, delta: health - previousHealth })
+  }
+
+  /**
+   * The breath trigger. Mineflayer emits `breath` whenever the server updates
+   * the `air_supply` metadata, i.e. roughly every tick while the head is under
+   * water, so this listener must be an EDGE, not a level: it fires when the
+   * body enters a new low-air band (10, 5, 0) and stays quiet inside the band.
+   * Re-asking Jev every tick would replace "the body is drowning" with a
+   * decision storm, and the executor already stops the mechanical action with a
+   * typed `submerged` failure.
+   */
+  private readonly onBreath = (): void => {
+    const air = readAir(this.bot)
+    if (air > LOW_AIR_LEVEL) {
+      this.lowAirBand = null
+      return
+    }
+    const band = Math.floor(air / 5)
+    if (this.lowAirBand === band) return
+    this.lowAirBand = band
+    const position = this.bot.entity?.position ?? null
+    this.logger.warn('scheduler', formatLowAirPreempt(air, position), { air, threshold: LOW_AIR_LEVEL, trigger: 'low_air' })
+    this.request('low_air', { air, threshold: LOW_AIR_LEVEL })
   }
 
   private readonly onPlayerCollect = (collector: Entity, collected: Entity): void => {

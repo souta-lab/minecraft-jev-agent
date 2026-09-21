@@ -10,8 +10,9 @@
 //   'decision' - validating the chosen candidate before the executor starts
 //   'dig'      - re-validating at the moment of the dig, after pathing moved us
 import type { Candidate, CandidateKind } from './candidates.ts'
+import { dryAwarePlacementSpots } from './candidates.ts'
 import type { Vec3Json, WorldState } from './state.ts'
-import { distance } from './state.ts'
+import { bodyIsOutOfAir, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 
 export type GuardPhase = 'decision' | 'dig'
@@ -26,6 +27,15 @@ export type GuardCode =
   | 'NO_SUPPORT'
   | 'NO_PATH'
   | 'LAVA_RISK'
+  /**
+   * SAFE: the body is out of breath (or the placement would have to be made
+   * from a submerged body position while a dry alternative exists). Code owns
+   * this refusal - the measured drowning was an `ATTACK` lease that kept
+   * `closing-to-melee-range` under water until the body died
+   * (2026-09-21T16:59:34.792Z, (67.5,58.3,28.5)); the response to it (which way
+   * to surface) stays Jev's choice.
+   */
+  | 'SUBMERGED'
   | 'CONFLICT_IN_FLIGHT'
 
 export interface InFlightAction {
@@ -332,6 +342,10 @@ export function guardRejectionChargesOption(code: GuardCode): boolean {
     case 'STALE_COORDS':
     case 'UNKNOWN_CANDIDATE':
     case 'ALREADY_DONE':
+    // A submerged body is an environmental precondition ("surface first"), not
+    // evidence that the option is unproductive: charging it here would abandon a
+    // protected prerequisite because the bot happened to be under water.
+    case 'SUBMERGED':
       return false
   }
 }
@@ -452,6 +466,18 @@ function guardAttack(candidate: Candidate, state: WorldState): GuardResult {
   if (state.self.health <= 0) {
     return deny(candidate.id, 'ALREADY_DONE', 'bot is dead')
   }
+  // SAFE: an attack lease holds the body where it is (or follows the target)
+  // while the breath runs out. The measured death was exactly this: a goal-drop
+  // ATTACK on a salmon kept closing under water until the body drowned, so a
+  // body already out of air may not start or continue one.
+  if (bodyIsOutOfAir(state.self)) {
+    const submersion = bodySubmersion(state.self)
+    return deny(
+      candidate.id,
+      'SUBMERGED',
+      `body is out of air (${submersion.air}/${MAX_AIR}); the attack lease cannot continue under water`,
+    )
+  }
   return { ok: true, candidate }
 }
 
@@ -564,7 +590,42 @@ function guardPlace(candidate: Candidate, state: WorldState, context: GuardConte
   if (hazard !== null) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the placement spot`)
   }
+  const submersion = submergedPlacementRefusal(candidate, state, target)
+  if (submersion !== null) return submersion
   return { ok: true, candidate }
+}
+
+/**
+ * SAFE: a station is not placed by a body that is out of breath, nor from a
+ * body position that is submerged while a dry-access placement spot exists. The
+ * candidate generator already withholds the submerged-access spots, so this is
+ * the execution-side truth for a stale or foreign candidate - it must never be
+ * the only layer, and it must never invent a different semantic choice.
+ */
+function submergedPlacementRefusal(
+  candidate: Candidate,
+  state: WorldState,
+  target: Vec3Json,
+): GuardResult | null {
+  const submersion = bodySubmersion(state.self)
+  if (submersion.state === 'out_of_air') {
+    return deny(
+      candidate.id,
+      'SUBMERGED',
+      `body is out of air (${submersion.air}/${MAX_AIR}); surface before placing`,
+    )
+  }
+  const wet = state.submergedPlacementSpots ?? []
+  if (wet.length === 0) return null
+  const key = placementSpotKey(target)
+  if (!wet.some((spot) => placementSpotKey(spot) === key)) return null
+  const dry = dryAwarePlacementSpots(state)
+  if (dry.length === 0 || dry.some((spot) => placementSpotKey(spot) === key)) return null
+  return deny(
+    candidate.id,
+    'SUBMERGED',
+    `placing at (${target.x},${target.y},${target.z}) means standing in water and a dry placement spot exists`,
+  )
 }
 
 function guardIgnite(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {

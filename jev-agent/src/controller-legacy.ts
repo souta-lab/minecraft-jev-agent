@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -80,9 +80,9 @@ import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -474,6 +474,12 @@ export const CRITICAL_TRIGGERS: ReadonlySet<DecisionTrigger> = new Set<DecisionT
   'damage_taken',
   'hp_changed',
   'mob_appeared',
+  // Breath running out is the same class of safety event as an injury: a
+  // semantic WHAT decision taken before the body started drowning must not
+  // still authorize building/placing. It shares the `injury` family below
+  // because drowning IS injury damage in progress - the air gauge is simply an
+  // earlier, cheaper signal than the first drowning hit.
+  'low_air',
 ])
 
 type CriticalThreatFamily = 'injury' | 'mob'
@@ -1032,6 +1038,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'FRAME_BUILD_BLOCKED',
   'PORTAL_FRAME_SITE_REJECTED',
   'PORTAL_FRAME_CELL_CLEARED',
+  // Drowning is a P1 durability failure (DEATH ... cause=water, 2026-09-21
+  // 16:59:34.792Z). The sensor fact and the scheduler preempt must be on the
+  // mirrored event path so a body losing breath is run-scoped evidence rather
+  // than only a line in the executor log.
+  'BODY_SUBMERGED',
+  'LOW_AIR_PREEMPT',
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
@@ -2115,10 +2127,11 @@ export class JevController {
         // loop.  Keep the selected attack mechanics together and replay the
         // highest-priority threat trigger immediately after the short lease.
         if (inFlight.kind === 'ATTACK') {
-          if (shouldInterruptAttackLease(trigger, this.bot.health, CRITICAL_COMBAT_HEALTH)) {
+          const air = this.liveAir()
+          if (shouldInterruptAttackLease(trigger, this.bot.health, CRITICAL_COMBAT_HEALTH, air)) {
             this.logger.warn(
               'scheduler',
-              `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${this.bot.health}`,
+              `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${this.bot.health} air=${air}`,
               detail,
               this.tickCounter,
             )
@@ -2332,6 +2345,11 @@ export class JevController {
       candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
       candidates = restrictCandidatesDuringImmediateThreat(state, candidates)
       candidates = restrictCandidatesAtCriticalHealth(state, candidates)
+      // SAFE: while the body is out of breath the offer collapses to the routes
+      // that can end the submersion. This is the candidate-side half of the
+      // drowning fix; the guard/executor half refuses stale mechanical actions
+      // and the scheduler makes the fact able to preempt an in-flight lease.
+      candidates = restrictCandidatesDuringSubmersion(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -2431,19 +2449,23 @@ export class JevController {
           const sourceToken = `resource:${grounded.sourceGap.item}:${grounded.sourceGap.reason}`
           if (!missing.includes(sourceToken)) missing.push(sourceToken)
         }
-        // A starved `place obsidian` frame goal must NAME its typed gap. The
-        // live defect reported `missing=[]` for 21 repeats while the agent paced
-        // around the destroyed frame, so the blocker (retired family, no grounded
-        // site, or insufficient obsidian) stayed invisible to the escalation
-        // boundary. `state` is the post-merge world the candidates were built
-        // from, so the frame facts here match the offered set.
+        // A starved `place <item>` goal must NAME its typed gap. The live defect
+        // reported `missing=[]` for 21 repeats while the agent paced around the
+        // destroyed frame, so the blocker stayed invisible to the escalation
+        // boundary. The retired-family token is generic: it is the same
+        // `PlaceRetryLedger` bound that stopped the `PLACE:furnace:p57_59_-3`
+        // loop (count=10 against limit=5, live 2026-09-21T16:30:41.791Z), and a
+        // retired furnace family must be as visible as a retired obsidian one.
         const placeGoal = this.queue.current?.kind === 'place' ? this.queue.current : null
         const placeFocus = placeGoal?.targetItem ?? null
-        if (placeFocus === OBSIDIAN) {
-          if (this.placementRetries.isItemRetired(OBSIDIAN)) {
-            const token = `place_retries_exhausted:${OBSIDIAN}`
-            if (!missing.includes(token)) missing.push(token)
-          } else if (!frameBuildGrounded(state, OBSIDIAN)) {
+        if (placeFocus !== null && this.placementRetries.isItemRetired(placeFocus)) {
+          const token = `place_retries_exhausted:${placeFocus}`
+          if (!missing.includes(token)) missing.push(token)
+        }
+        // The frame-specific tokens only apply while the family is still live: a
+        // retired obsidian family is already named by the generic token above.
+        if (placeFocus === OBSIDIAN && !this.placementRetries.isItemRetired(OBSIDIAN)) {
+          if (!frameBuildGrounded(state, OBSIDIAN)) {
             const token = 'portal_frame_site:none'
             if (!missing.includes(token)) missing.push(token)
             // Name WHY every candidate origin was rejected (origin/axis/rule/
@@ -2596,27 +2618,30 @@ export class JevController {
         sensorOptions(this.options, this.scheduler.worldRevision),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
-      const freshCandidates = restrictCandidatesAtCriticalHealth(
+      const freshCandidates = restrictCandidatesDuringSubmersion(
         freshState,
-        restrictCandidatesDuringImmediateThreat(
+        restrictCandidatesAtCriticalHealth(
           freshState,
-          this.filterMoveCandidates(
-            generateGroundedCandidates(
-              freshState,
-              candidateOptions(
-                this.options,
-                this.recipeIndex,
-                this.unreachableStationKeys(freshState),
-                this.reachabilityGateOptions(),
-                this.blacklistedMoveTargets(freshState),
-                freshState.portalFrame,
-                this.searchedSurfaceTargets,
-                this.portalEntryPlan(freshState),
-                this.placementRetries.retiredItemSet(),
-              ),
-            ).candidates,
+          restrictCandidatesDuringImmediateThreat(
             freshState,
-            false,
+            this.filterMoveCandidates(
+              generateGroundedCandidates(
+                freshState,
+                candidateOptions(
+                  this.options,
+                  this.recipeIndex,
+                  this.unreachableStationKeys(freshState),
+                  this.reachabilityGateOptions(),
+                  this.blacklistedMoveTargets(freshState),
+                  freshState.portalFrame,
+                  this.searchedSurfaceTargets,
+                  this.portalEntryPlan(freshState),
+                  this.placementRetries.retiredItemSet(),
+                ),
+              ).candidates,
+              freshState,
+              false,
+            ),
           ),
         ),
       )
@@ -3196,6 +3221,17 @@ export class JevController {
 
   private placeRetryExhausted(): boolean {
     return this.placementRetries.anyExhausted()
+  }
+
+  /**
+   * The live breath reading, used by the ATTACK-lease safety exception. The
+   * scheduler owns the `low_air` preempt and the sensor owns `SelfState.air`;
+   * this is only the controller's view of the same fact for the interrupt
+   * decision. A version that never reports `oxygenLevel` reads full air.
+   */
+  private liveAir(): number {
+    const air = (this.bot as { oxygenLevel?: number }).oxygenLevel
+    return typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR
   }
 
   private placeRetryCount(item: string | null): number {

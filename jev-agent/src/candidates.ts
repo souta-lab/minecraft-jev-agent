@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { bodyIsOutOfAir, DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
@@ -134,6 +134,19 @@ export const COMBAT_CANDIDATE_RANGE = 8
 export const CRITICAL_COMBAT_HEALTH = 6
 
 /**
+ * The candidate kinds that can end a submersion. Movement carries the
+ * `ASCEND:surface:*` route (kind MOVE); RETREAT is the other grounded escape and
+ * ESCALATE hands the situation to the semantic layer. Everything kept out of
+ * this set mechanically holds the body where it is while the breath runs out.
+ */
+export const SURVIVAL_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'RETREAT',
+  'STEP',
+  'ESCALATE',
+])
+
+/**
  * P1 durability: a hostile that has actually engaged the bot is a
  * response-worthy threat far beyond melee range. A skeleton opens fire at
  * roughly 10-16m, which is inside neither `IMMEDIATE_HOSTILE_RANGE` (3.2m) nor
@@ -214,6 +227,52 @@ export function restrictCandidatesAtCriticalHealth(
   if (!immediateHostile || state.self.health > CRITICAL_COMBAT_HEALTH) return [...candidates]
   const escape = candidates.filter((candidate) => candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE')
   return escape.length > 0 ? escape : [...candidates]
+}
+
+/**
+ * SAFE: while the body is out of air, only routes that can end the submersion
+ * stay selectable - movement (including the `ASCEND:surface:*` route, which is
+ * a MOVE), retreat and an escalate. `PLACE`/`ATTACK`/`MINE`/`CRAFT`/`SMELT`
+ * mechanically keep the body where it is while the breath runs out, which is
+ * the measured `ATTACK:e4698` death shape (2026-09-21T16:59:34.792Z, body at
+ * (67.5,58.3,28.5)).
+ *
+ * This is the same deterministic-restriction pattern as
+ * `restrictCandidatesAtCriticalHealth`, and it keeps Jev's choice: every
+ * grounded way out of the water is offered and WHICH one is taken is still the
+ * model's decision. If perception grounds no rescue at all, the original set is
+ * preserved so the missing affordance stays observable instead of silently
+ * erasing the candidate set.
+ */
+export function restrictCandidatesDuringSubmersion(
+  state: Pick<WorldState, 'self'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  if (!bodyIsOutOfAir(state.self)) return [...candidates]
+  const rescue = candidates.filter((candidate) => SURVIVAL_KINDS.has(candidate.kind))
+  return rescue.length > 0 ? rescue : [...candidates]
+}
+
+/**
+ * SAFE/CAN fact: the placement spots a station may be placed from.
+ *
+ * A spot in `submergedPlacementSpots` has only fluid-column body access, i.e.
+ * the body would place while standing in water (`isStandable` accepts a water
+ * cell, so this cannot be inferred from standability alone). When ANY dry-access
+ * spot exists, the submerged-access spots are NOT offered: a station must not be
+ * built from a submerged body position while a dry alternative exists. When no
+ * dry alternative exists the historical set is returned unchanged, so a
+ * legitimate underwater build is not silently erased and the caller still names
+ * the reason through the normal starvation path.
+ */
+export function dryAwarePlacementSpots(
+  state: Pick<WorldState, 'placementSpots'> & { submergedPlacementSpots?: Vec3Json[] },
+): Vec3Json[] {
+  const submerged = state.submergedPlacementSpots ?? []
+  if (submerged.length === 0) return state.placementSpots
+  const wet = new Set(submerged.map((spot) => placementSpotKey(spot)))
+  const dry = state.placementSpots.filter((spot) => !wet.has(placementSpotKey(spot)))
+  return dry.length > 0 ? dry : state.placementSpots
 }
 
 /**
@@ -2560,7 +2619,9 @@ function heldStationPlacement(
   const retryLimit = options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT
 
   if (state.placementSpots.length > 0) {
-    const spot = state.placementSpots.find((cell) => failureCountFor(cell) < retryLimit)
+    // A station is not placed from a submerged body position while a dry-access
+    // spot exists (SAFE/CAN fact, see dryAwarePlacementSpots).
+    const spot = dryAwarePlacementSpots(state).find((cell) => failureCountFor(cell) < retryLimit)
     if (spot !== undefined) return { spot, refusal: null, alternative: null }
   }
 
@@ -2674,7 +2735,7 @@ function craftCandidates(
     const holdsTable = (state.inventory.counts.crafting_table ?? 0) > 0
     const craftFailed = (state.signals.failedCandidates[`CRAFT:${op.item}`] ?? 0) > 0
     if (op.requiresTable && !tableInReach && holdsTable && craftFailed && state.placementSpots.length > 0) {
-      const spot = state.placementSpots.find(
+      const spot = dryAwarePlacementSpots(state).find(
         (candidate) =>
           (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
           (options.placeSpotRetryLimit ?? DEFAULT_PLACE_SPOT_RETRY_LIMIT),
@@ -2965,7 +3026,7 @@ function leastFailedPlacementSpot(state: WorldState, item: string): Vec3Json | n
   const failed = state.signals.failedCandidates
   let best: Vec3Json | null = null
   let bestCount = Number.POSITIVE_INFINITY
-  for (const spot of state.placementSpots) {
+  for (const spot of dryAwarePlacementSpots(state)) {
     const count = failed[`PLACE:${item}:${blockId('p', spot)}`] ?? 0
     if (count < bestCount) {
       best = spot
@@ -3721,7 +3782,7 @@ function craftingTableSource(
   )
   if (remembered !== undefined) return { kind: 'remembered', station: remembered }
   if ((state.inventory.counts.crafting_table ?? 0) > 0) {
-    const spot = state.placementSpots.find(
+    const spot = dryAwarePlacementSpots(state).find(
       (candidate) =>
         (state.signals.failedCandidates[`PLACE:crafting_table:${blockId('p', candidate)}`] ?? 0) <
         placeSpotRetryLimit,

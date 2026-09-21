@@ -21,7 +21,8 @@ import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, formatBodySubmerged, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, resolveBlockHarvest, toVec3 } from './state.ts'
+import type { BodySubmersion } from './state.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
@@ -154,6 +155,10 @@ export type FailureCode =
   | 'frame_build_incomplete'
   | 'frame_build_ungrounded'
   | 'frame_build_blocked'
+  /** the placement mechanism rejected: the server refused it / never answered */
+  | 'place_refused'
+  /** SAFE: the body is out of breath, so the mechanical action stops */
+  | 'submerged'
   | 'cancelled'
   | 'unknown_event'
 
@@ -3751,6 +3756,13 @@ export class Executor {
         const entity = this.bot.entities[entityId]
         if (entity === undefined) break
         lastTarget = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+        // SAFE: an ATTACK lease is a body-holding action. Following a target into
+        // water is how the measured death happened (2026-09-21T16:59:34.792Z:
+        // `ATTACK:e4698 phase=closing-to-melee-range` chased a salmon down from
+        // y=62 to y=57 and the body drowned at (67.5,58.3,28.5)). Once the breath
+        // is at/below the SAFE threshold the lease stops with a typed
+        // `submerged` outcome; whether to resurface or escalate stays Jev's.
+        this.requireBreath(candidate, lastTarget, 'attacking')
         if (healthBefore === null) {
           healthBefore = readEntityHealth(entity)
           if (healthBefore !== null) healthLast = healthBefore
@@ -4344,6 +4356,13 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<string | null> {
+    // SAFE, checked against the LIVE body immediately before the side effect:
+    // a station is not placed by a body that is out of breath. The candidate
+    // layer withholds submerged/dry-alternative spots and the guard refuses
+    // stale ones, so this is the execution-time truth for the action that was
+    // actually selected - the body must surface (Jev's choice of route), never
+    // keep placing while the breath runs out.
+    this.requireBreath(candidate, target, 'placing')
     const reference = this.findPlaceReference(target)
     if (reference === null) {
       throw new ExecutorError('place_error', `no supporting block adjacent to (${target.x},${target.y},${target.z})`)
@@ -4351,7 +4370,25 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.equipPlacementItem(candidate, itemName, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
-    await this.bot.placeBlock(reference.block, reference.face)
+    try {
+      await this.bot.placeBlock(reference.block, reference.face)
+    } catch (error) {
+      // The placement mechanism's own rejection was previously an untyped
+      // `unknown_event`: mineflayer's `placeBlock` throws a plain `Error`
+      // ("Server refused to place furnace at (57, 59, -3): the block is still
+      // air", `lib/plugins/place_block.js`), which the runAction catch maps to
+      // `unknown_event` because it is not an `ExecutorError`. Measured live
+      // 2026-09-21T16:29:56.736Z: the whole `PLACE:furnace:p57_59_-3` retry run
+      // was `reason=unknown_event` and no layer could tell a server refusal from
+      // a crash. The verdict is read from world truth, not from the message.
+      if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
+      const observed = this.currentBlockAt(target)?.name ?? null
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ExecutorError(
+        'place_refused',
+        `placement mechanism rejected ${itemName} at (${target.x},${target.y},${target.z}); observed block is ${observed ?? 'unknown'} (${message})`,
+      )
+    }
     this.ensureOwned(epoch, signal)
     const placedName = await this.waitForPlacedBlock(target, itemName, epoch, signal)
     if (!isPlacePostconditionMet(placedName, itemName)) {
@@ -4361,6 +4398,51 @@ export class Executor {
       )
     }
     return placedName
+  }
+
+  /**
+   * The live body's breath/water facts. Read at the moment of the mechanical
+   * side effect, so a stale candidate snapshot cannot authorize working under
+   * water. `bot.oxygenLevel` is the server's `air_supply` metadata.
+   */
+  private liveSubmersion(): BodySubmersion {
+    const position = this.bot.entity.position
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+    const eyes = { x: Math.floor(position.x), y: Math.floor(position.y + 1.62), z: Math.floor(position.z) }
+    return bodySubmersion({
+      air: (this.bot as { oxygenLevel?: number }).oxygenLevel,
+      feetInWater: this.fluidCell(feet),
+      eyesInWater: this.fluidCell(eyes),
+    })
+  }
+
+  private fluidCell(cell: Vec3Json): boolean {
+    const block = this.bot.blockAt(toVec3(this.bot, cell))
+    return block !== null && PROBE_FLUIDS.has(block.name)
+  }
+
+  /**
+   * The SAFE stop for any mechanical action that would keep working under
+   * water: emit the typed `BODY_SUBMERGED` survival fact once and fail the
+   * action with `submerged`, which is what makes a low-air retry impossible
+   * instead of silent.
+   */
+  private requireBreath(candidate: Candidate, at: Vec3Json, doing: string): void {
+    const submersion = this.liveSubmersion()
+    if (submersion.state !== 'out_of_air') return
+    this.logger.warn('executor', formatBodySubmerged(submersion, at), {
+      actionId: candidate.id,
+      air: submersion.air,
+      threshold: LOW_AIR_LEVEL,
+      maxAir: MAX_AIR,
+      doing,
+      feetInWater: submersion.feetInWater,
+      eyesInWater: submersion.eyesInWater,
+    })
+    throw new ExecutorError(
+      'submerged',
+      `breath at ${submersion.air}/${MAX_AIR} while ${doing} at (${at.x},${at.y},${at.z}); surface before continuing`,
+    )
   }
 
   /**
