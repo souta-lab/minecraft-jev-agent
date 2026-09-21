@@ -32,6 +32,7 @@ import type {
   WorldMemoryDelta,
   WorldKey,
 } from './resident-types.ts'
+import { mergeKnownResourcesInto } from './resident-types.ts'
 import { normalizeStation, stationKey } from './station-memory.ts'
 import { acceptsWorldMemoryProposal } from './world-epoch.ts'
 
@@ -236,27 +237,15 @@ function removeStationDtos(target: KnownStation[], gone: KnownStation[], kind: '
   }
 }
 
-export function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[]): number {
-  const seen = new Set(target.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`))
-  let added = 0
-  for (const resource of found) {
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (seen.has(key)) continue
-    if (target.length >= 256) break
-    seen.add(key)
-    target.push({
-      name: resource.name,
-      kind: resource.kind,
-      x: Math.round(resource.x),
-      y: Math.round(resource.y),
-      z: Math.round(resource.z),
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    })
-    added += 1
-  }
-  return added
+/**
+ * HOST-authoritative known-resource merge. Delegates to the ONE bounded merge in
+ * resident-types.ts: at the cap the oldest remembered cell is evicted
+ * (`KNOWN_RESOURCE_EVICTED`) to make room for the new sighting instead of the
+ * sighting being dropped for the lifetime of the world key. The insert marker
+ * stays owned by the generation scan, so this path emits only capacity events.
+ */
+export function mergeKnownResourceDtos(target: KnownResourceJson[], found: KnownResourceJson[], log?: ProposalLog): number {
+  return mergeKnownResourcesInto(target, found, { log }).added
 }
 
 export function removeKnownResourceDtos(target: KnownResourceJson[], gone: KnownResourceJson[]): number {
@@ -379,8 +368,15 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
       if (!memory.discoveredOres.includes(ore)) memory.discoveredOres.push(ore)
     }
   }
-  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
+  // Remove proven-gone cells BEFORE merging fresh sightings. The generation
+  // replica does evictStaleKnownResources then mergeKnownResources, so matching
+  // that order keeps the authoritative store and the replica converged: a cell
+  // re-anchored across dimension/worldEpoch (same name@x,y,z key, new stamp) is
+  // dropped first and then re-inserted, instead of being suppressed as a
+  // duplicate and then deleted. It also makes the capacity victim the same in
+  // both stores.
   if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
+  if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources, log)
   if (delta.knownPortalSites !== undefined) mergeKnownPortalSiteDtos(memory.knownPortalSites, delta.knownPortalSites)
   if (delta.removeKnownPortalSites !== undefined) {
     removeKnownPortalSiteDtos(memory.knownPortalSites, delta.removeKnownPortalSites)

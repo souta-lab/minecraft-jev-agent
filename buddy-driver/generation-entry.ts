@@ -76,6 +76,7 @@ import type {
   Vec3Json,
   WorldMemoryDelta,
 } from './resident-types.ts'
+import { KNOWN_RESOURCE_CAP, mergeKnownResourcesInto } from './resident-types.ts'
 import { worldCacheNamespace } from './world-epoch.ts'
 import {
   applyStationFailure,
@@ -238,41 +239,24 @@ const LOG_BLOCK_NAMES = [
   'warped_stem',
 ] as const
 
-const KNOWN_RESOURCE_CAP = 256
-
+// The store bound and the capacity-eviction rule are owned by the durable
+// contract (resident-types.ts) so the generation scan and the HOST delta merge
+// cannot drift onto different caps or different eviction orders.
+export { KNOWN_RESOURCE_CAP }
+/**
+ * Scan-side merge into the generation's replica of the durable store. Delegates
+ * to the ONE bounded merge: at the cap the oldest remembered cell is evicted
+ * (`KNOWN_RESOURCE_EVICTED`) to make room for the new sighting instead of the
+ * sighting being dropped for the lifetime of the world key. Returns the number
+ * of INSERTS (`added`), unchanged.
+ */
 export function mergeKnownResources(
   target: KnownResourceJson[],
   found: KnownResourceJson[],
   log?: (event: string, detail?: Record<string, unknown>) => void,
   worldEpoch?: number,
 ): number {
-  const seen = new Set(target.map((resource) => `${resource.name}@${resource.x},${resource.y},${resource.z}`))
-  let added = 0
-  for (const resource of found) {
-    const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
-    if (seen.has(key)) continue
-    if (target.length >= KNOWN_RESOURCE_CAP) break
-    seen.add(key)
-    const stored = {
-      name: resource.name,
-      kind: resource.kind,
-      x: Math.round(resource.x),
-      y: Math.round(resource.y),
-      z: Math.round(resource.z),
-      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    }
-    target.push(stored)
-    log?.('KNOWN_RESOURCE', {
-      item: stored.name,
-      kind: stored.kind,
-      at: `${stored.x},${stored.y},${stored.z}`,
-      ...(worldEpoch === undefined ? {} : { worldEpoch }),
-    })
-    added += 1
-  }
-  return added
+  return mergeKnownResourcesInto(target, found, { log, worldEpoch, emitInsertMarker: true }).added
 }
 
 export const KNOWN_RESOURCE_STALENESS_RADIUS = 24
