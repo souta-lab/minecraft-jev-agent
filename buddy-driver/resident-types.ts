@@ -908,6 +908,16 @@ export interface GenerationStatus {
   rungIndex: number
   /** id of that rung */
   rungId: string
+  /**
+   * Legacy root goal projected from the LIVE frontier's own goals
+   * (`compatibilityRootGoal` of the rung's emitted goals). The control socket's
+   * `milestone` reply serves this instead of the host's static M2 default, so a
+   * satisfied rung (`iron_ingot` with a diamond pickaxe + flint_and_steel held)
+   * can never advertise outstanding work. Absent on a generation that cannot
+   * project one; the host then falls back to its static default.
+   */
+  goalItem?: string
+  goalCount?: number
   /** live basis attached to host heartbeat ledger commits */
   ledgerBasis?: LedgerBasis
   /** true once start() has run and no irreversible action can happen before the lease */

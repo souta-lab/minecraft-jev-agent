@@ -42,6 +42,7 @@ import type {
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
+import { milestoneReport } from './milestone-report.ts'
 import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
@@ -1502,8 +1503,14 @@ setInterval(() => {
     // Frontier advance, NOT completion: `status.rungId` is the first UNSATISFIED
     // rung, so labelling it `done=true` claimed a rung was complete while its
     // items were still absent (observed live: `MILESTONE name=ender_pearls
-    // done=true` with zero ender_pearl). The generation's own emitMilestones()
-    // logs the truthful `done=true` for the rung it has just advanced past.
+    // done=true` with zero ender_pearl). This HOST marker stays frontier
+    // telemetry. Completion claims come from the planner's milestone evidence
+    // stream (#392), which records `done=true` only when the rung's OWN predicate
+    // holds at that observation (`reason=predicate_satisfied`); otherwise it
+    // records the typed `reason=frontier_advanced_without_predicate` /
+    // `frontier_regressed_without_predicate` with the rung's own facts. Since
+    // #392 that stream is on the planner side, so this marker needs no
+    // compensation and must not be read as a completion.
     log('MILESTONE', { name: status.rungId, frontier: true, index: status.rungIndex, queueDone: status.queue.done, inventory: shortInv(truth.inventory) })
     saveState('milestone')
   }
@@ -2075,13 +2082,22 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'milestone' || cmd === 'goal') {
-    controlReply(socket, request, true, {
-      milestone: state.milestone,
-      milestoneIndex: state.milestoneIndex,
-      goalItem: GOAL_ITEM,
-      goalCount: GOAL_COUNT,
-      ledgerMirror: state.ledger,
-    })
+    // The live frontier owns what is outstanding work: serve the generation's
+    // projection, and fall back to the static M2 seed only until a generation has
+    // reported one (measured live `run-mubhn83u`: the frontier was `blaze_rods`
+    // while this reply still advertised the satisfied `iron_ingot x3` rung).
+    controlReply(
+      socket,
+      request,
+      true,
+      milestoneReport({
+        milestone: state.milestone,
+        milestoneIndex: state.milestoneIndex,
+        ledgerMirror: state.ledger,
+        status: lastStatus,
+        fallback: { goalItem: GOAL_ITEM, goalCount: GOAL_COUNT },
+      }),
+    )
     return
   }
   if (cmd === 'quit') {
