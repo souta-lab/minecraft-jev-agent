@@ -1029,6 +1029,11 @@ export interface MercurySystem2Options {
   postDeathRecovery?: boolean
   /** transport seam for tests; defaults to the AI SDK `generateText` tool call. */
   transport?: MercuryTransport
+  /**
+   * Local OpenAI-compatible endpoint seam. `undefined` resolves from
+   * BUDDY_MERCURY_BASE_URL; an explicit null forces the AI Gateway path.
+   */
+  localEndpoint?: MercuryLocalEndpoint | null
 }
 
 export interface MercuryTransportRequest {
@@ -1090,6 +1095,35 @@ export type MercuryTransportMode = 'tool-call' | 'json-text'
 
 export function mercuryTransportMode(model: string): MercuryTransportMode {
   return isMuseSparkModel(model) ? 'json-text' : 'tool-call'
+}
+
+// ---------------------------------------------------------------------------
+// local OpenAI-compatible endpoint (llama.cpp / Ollama / vLLM)
+// ---------------------------------------------------------------------------
+
+export const MERCURY_LOCAL_BASE_URL_ENV = 'BUDDY_MERCURY_BASE_URL'
+export const MERCURY_LOCAL_API_KEY_ENV = 'BUDDY_MERCURY_API_KEY'
+
+export interface MercuryLocalEndpoint {
+  /** OpenAI-compatible base URL without a trailing slash, e.g. http://127.0.0.1:8080/v1 */
+  readonly baseUrl: string
+  /** Bearer token; local servers commonly accept any non-empty value. */
+  readonly apiKey: string
+}
+
+/**
+ * Resolve the local endpoint. BUDDY_MERCURY_BASE_URL is the explicit opt-in;
+ * when it is absent, Mercury keeps using the AI Gateway and its key resolution.
+ */
+export function resolveMercuryLocalEndpoint(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): MercuryLocalEndpoint | null {
+  const raw = (env[MERCURY_LOCAL_BASE_URL_ENV] ?? '').trim()
+  if (raw === '') return null
+  return {
+    baseUrl: raw.replace(/\/+$/, ''),
+    apiKey: (env[MERCURY_LOCAL_API_KEY_ENV] ?? '').trim() || 'local',
+  }
 }
 
 
@@ -1234,6 +1268,65 @@ const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
 
 const TOOL_CALL_TRANSPORT_INSTRUCTIONS =
   'Return ONLY via the emitPlan tool. Do not answer in response text.'
+
+interface LocalChatCompletion {
+  choices?: Array<{ message?: { content?: string | null } | null } | null>
+  usage?: { prompt_tokens?: number; completion_tokens?: number } | null
+}
+
+/**
+ * Direct OpenAI-compatible chat-completions transport for local servers.
+ * Local output is parsed through the same JSON envelope parser and then the
+ * existing strict schema/capability validation path.
+ */
+export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpoint): MercuryTransport {
+  return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+    const response = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${endpoint.apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}` },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: maxOutputTokens,
+        temperature: 0,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`local mercury endpoint HTTP ${response.status}: ${detail.slice(0, 200)}`)
+    }
+    const payload = (await response.json()) as LocalChatCompletion
+    const content = payload.choices?.[0]?.message?.content
+    const parsed = typeof content === 'string' ? parseMercuryJsonTextDetailed(content) : null
+    const usage =
+      payload.usage == null
+        ? null
+        : {
+            inputTokens: payload.usage.prompt_tokens ?? null,
+            outputTokens: payload.usage.completion_tokens ?? null,
+          }
+    if (parsed === null || parsed.value === null) return { toolCalls: [], usage }
+    const repair: MercuryTransportRepair = {
+      kind: 'json-text',
+      shape: parsed.shape,
+      objects: parsed.objects,
+      chars: content?.length ?? 0,
+    }
+    return {
+      toolCalls: [{ input: parsed.value }],
+      usage,
+      repairs: parsed.shape === 'exact' ? [] : [repair],
+    }
+  }
+}
 
 function defaultMercuryTransport(model: string): MercuryTransport {
   if (mercuryTransportMode(model) === 'json-text') {
@@ -1548,6 +1641,7 @@ export class MercurySystem2 implements System2Brain {
   private readonly maxAttempts: number
   private readonly maxOutputTokens: number
   private readonly transport: MercuryTransport
+  private readonly localEndpoint: MercuryLocalEndpoint | null
   private readonly terminate: (() => never) | undefined
   private readonly resolveKey: () => KeyResolution | null
   private cache: MercuryCacheFile
@@ -1585,12 +1679,25 @@ export class MercurySystem2 implements System2Brain {
     // truncated answer costs a schema rejection plus up to two more attempts,
     // each charged to the hourly budget. A ceiling, not a spend.
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 4096)
-    this.transport = options.transport ?? defaultMercuryTransport(this.model)
+    this.localEndpoint = options.localEndpoint !== undefined ? options.localEndpoint : resolveMercuryLocalEndpoint()
+    this.transport =
+      options.transport ??
+      (this.localEndpoint === null
+        ? defaultMercuryTransport(this.model)
+        : localMercuryTransport(this.model, this.localEndpoint))
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.postDeathPending = options.postDeathRecovery === true
     this.cacheIdentity = mercuryCacheIdentity(options.worldKey)
     this.cache = this.loadCache()
+    if (this.localEndpoint !== null) {
+      this.log('ADVISOR_TRANSPORT', {
+        source: 'mercury',
+        transport: 'local-openai-compatible',
+        baseUrl: this.localEndpoint.baseUrl,
+        model: this.model,
+      })
+    }
     this.log('ADVISOR_CACHE_GUARD', {
       active: true,
       version: MERCURY_CACHE_SCHEMA_VERSION,
@@ -1770,10 +1877,12 @@ export class MercurySystem2 implements System2Brain {
       this.saveCache()
     }
 
-    const key = this.resolveKey()
-    if (key === null) return this.modelFailure(trigger, started, state, 'no gateway key resolved')
-    // The gateway provider reads this at request time; the value is never logged.
-    process.env.AI_GATEWAY_API_KEY = key.key
+    if (this.localEndpoint === null) {
+      const key = this.resolveKey()
+      if (key === null) return this.modelFailure(trigger, started, state, 'no gateway key resolved')
+      // The gateway provider reads this at request time; the value is never logged.
+      process.env.AI_GATEWAY_API_KEY = key.key
+    }
 
     const userPrompt = JSON.stringify(state)
     const callId = `mercury-${++this.callCounter}-${started.toString(36)}`
