@@ -63,6 +63,20 @@ const FAR = { x: 0, y: 64, z: 0 }
 /** The bot standing at the site: a failing live re-check is proof. */
 const AT_SITE = { x: ORIGIN.x + 2, y: ORIGIN.y, z: ORIGIN.z }
 
+/** Exact live world truth for the recorded cells: frame obsidian, interior lit. */
+function litProbe(cell: { x: number; y: number; z: number }): string | null {
+  if (LAYOUT.interior.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z)) return 'nether_portal'
+  if (LAYOUT.frame.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z)) return 'obsidian'
+  return 'air'
+}
+/** Every recorded cell read back as air: the frame the record was minted from is gone. */
+const goneProbe = (): string | null => 'air'
+/** The frame still stands but its interior is no longer lit. */
+function unlitProbe(cell: { x: number; y: number; z: number }): string | null {
+  if (LAYOUT.frame.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z)) return 'obsidian'
+  return 'air'
+}
+
 function sync(overrides: {
   known: readonly KnownPortalSiteJson[]
   liveVerified?: readonly {
@@ -73,6 +87,7 @@ function sync(overrides: {
   }[]
   worldKey?: { dimension: string; worldEpoch: number }
   position?: { x: number; y: number; z: number }
+  probe?: (cell: { x: number; y: number; z: number }) => string | null
   now?: number
 }): ReturnType<typeof syncKnownPortalSites> {
   return syncKnownPortalSites({
@@ -80,6 +95,7 @@ function sync(overrides: {
     liveVerified: overrides.liveVerified ?? [],
     worldKey: overrides.worldKey ?? WORLD_KEY,
     position: overrides.position ?? FAR,
+    ...(overrides.probe === undefined ? {} : { probe: overrides.probe }),
     now: overrides.now ?? 5000,
   })
 }
@@ -149,13 +165,64 @@ addCase('#80 route: the durable site is present as a CAN-only known-resource rou
   return { pass, detail: `route=${JSON.stringify({ ...route, frameCells: route?.frameCells?.length })} frameSites=${frameSites.length} existingFrame=${frame?.existingFrame?.length}` }
 })
 
-addCase('#80 evict: a failing live re-check at the recorded site (bot present) drops the entry', () => {
-  const result = sync({ known: [SITE], liveVerified: [], position: AT_SITE })
+addCase('#80 evict: the record is dropped only when world truth PROVES the portal gone', () => {
+  // A failed live re-check is not proof: the frame may simply be outside the
+  // body-relative sensor window, so the same "nothing sensed" input must keep the
+  // record (see the regression case below). Revocation needs the record's own
+  // cells to be READ and disproved.
+  const gone = sync({ known: [SITE], liveVerified: [], position: AT_SITE, probe: goneProbe })
+  const unlit = sync({ known: [SITE], liveVerified: [], position: AT_SITE, probe: unlitProbe })
   const pass =
-    result.removed.length === 1 &&
-    result.removed[0]?.x === ORIGIN.x &&
-    result.known.length === 0
-  return { pass, detail: `removed=${JSON.stringify(result.removed)} known=${JSON.stringify(result.known)}` }
+    gone.removed.length === 1 &&
+    gone.removed[0]?.x === ORIGIN.x &&
+    gone.known.length === 0 &&
+    gone.removalReasons[0]?.reason === 'frame_broken' &&
+    unlit.removed.length === 1 &&
+    unlit.removalReasons[0]?.reason === 'observed_unlit' &&
+    unlit.known.length === 0
+  return {
+    pass,
+    detail: `gone=${JSON.stringify(gone.removalReasons.map((entry) => entry.reason))} unlit=${JSON.stringify(unlit.removalReasons.map((entry) => entry.reason))}`,
+  }
+})
+
+addCase('#80 regression: a blind sensor tick NEVER drops a verified record (body outside the window)', () => {
+  // Measured live (run-mubhx20x-pie2, 17:28:25Z): the body descended to y=61.9
+  // beside the frame at y=66..70, the sensor searched dy -4..+4 around the body
+  // and returned nothing, and the old "not sensed while within proof distance"
+  // rule dropped the record. The standing, lit, already-verified gate then
+  // stopped satisfying the nether_portal rung and the next inventory-shaped
+  // resume re-queued its own construction rows.
+  const blind = sync({ known: [SITE], liveVerified: [], position: AT_SITE })
+  const unreadable = sync({
+    known: [SITE],
+    liveVerified: [],
+    position: AT_SITE,
+    // Unloaded chunks read as null: UNKNOWN, never "gone".
+    probe: () => null,
+  })
+  const pass =
+    blind.removed.length === 0 &&
+    blind.known.length === 1 &&
+    unreadable.removed.length === 0 &&
+    unreadable.known.length === 1
+  return { pass, detail: `blindKnown=${blind.known.length} unreadableKnown=${unreadable.known.length}` }
+})
+
+addCase('#80 recheck: the record coordinates let a distant body re-confirm the lit portal', () => {
+  // The body is 30+ blocks away (or below): the sensor sees nothing, but the
+  // record's own cells read back as a valid lit portal, so this tick observes
+  // the outcome and reports it as `confirmed` (the caller projects that into the
+  // live portal verdict + this run's own verification).
+  const far = { x: ORIGIN.x, y: ORIGIN.y - 34, z: ORIGIN.z + 3 }
+  const result = sync({ known: [{ ...SITE, lastVerifiedAt: 1 }], liveVerified: [], position: far, probe: litProbe, now: 4242 })
+  const pass =
+    result.removed.length === 0 &&
+    result.known.length === 1 &&
+    result.confirmed.length === 1 &&
+    result.confirmed[0]?.x === ORIGIN.x &&
+    result.confirmed[0]?.lastVerifiedAt === 4242
+  return { pass, detail: `confirmed=${JSON.stringify(result.confirmed.map((site) => `${site.x},${site.y},${site.z}@${site.lastVerifiedAt}`))}` }
 })
 
 addCase('#80 proof distance: absence far from the site is not proof and keeps the entry', () => {

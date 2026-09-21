@@ -62,7 +62,7 @@ import {
   stableOptionInstanceId,
 } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
-import type { ResidentWorldMemory } from './resident-types.ts'
+import type { KnownPortalSiteJson, ResidentWorldMemory } from './resident-types.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
 import type { AdvisorDecision, AdvisorReason, AdvisorState, AdvisorStrategy } from './advisor.ts'
@@ -403,6 +403,51 @@ function inNether(world: ResidentWorldMemory): boolean {
   )
 }
 
+/**
+ * The durable half of a world-outcome rung predicate.
+ *
+ * A rung whose OUTCOME is a world object rather than an inventory item has two
+ * independent proofs: the momentary live projection (`portalVerified`, computed
+ * from a search window around the BODY) and the run's own durable record of the
+ * achieved outcome (`knownPortalSites`, minted when the run itself verified it
+ * and carrying the frame/interior cells it was minted from).
+ *
+ * The live projection is blind whenever the structure lies outside that body
+ * window. Measured live (`run-mubhx20x-pie2`, 17:32:56Z): the body sat at y=62
+ * while the frame occupied y=66..70, so `PORTAL_FRAME_PROGRESS blocks=0` and
+ * `detectLivePortalVerification` returned false for a gate the same run had lit
+ * and verified seven minutes earlier. `deriveResumeRung` therefore re-derived
+ * `nether_portal` on every reload, re-queued `collect obsidian`, and the durable
+ * ledger reopened the finished construction rows with zero counts - an
+ * inventory-shaped resume un-satisfying an outcome the run had already proved.
+ *
+ * The record is not a verdict: `syncKnownPortalSites` revokes it the moment live
+ * world truth disproves it (positive evidence only), so reading it here can
+ * never keep a genuinely broken portal satisfied. This is capability closure
+ * like `rungBehindInventory` - it only answers whether the outcome already
+ * exists in this world, never which semantic option to choose next.
+ */
+export function verifiedPortalSiteInWorld(world: ResidentWorldMemory): KnownPortalSiteJson | null {
+  const sites = world.knownPortalSites
+  if (!Array.isArray(sites) || sites.length === 0) return null
+  const dimension =
+    typeof world.dimension === 'string' && world.dimension.length > 0
+      ? normalizePortalDimension(world.dimension)
+      : null
+  for (const site of sites) {
+    if (site === null || typeof site !== 'object') continue
+    if (typeof site.x !== 'number' || typeof site.y !== 'number' || typeof site.z !== 'number') continue
+    // A record only means anything in the dimension it was verified in. Reject a
+    // KNOWN mismatch; an unknown live dimension is not a conflict (the durable
+    // store is already keyed by world identity/dimension).
+    if (dimension !== null && typeof site.dimension === 'string' && site.dimension.length > 0) {
+      if (normalizePortalDimension(site.dimension) !== dimension) continue
+    }
+    return site
+  }
+  return null
+}
+
 /** The ordered capability ladder. Each rung states its own completion in inventory/world terms. */
 export const RUNGS: readonly Rung[] = [
   {
@@ -577,8 +622,22 @@ export const RUNGS: readonly Rung[] = [
     // `front_enter_nether` forever instead of advancing to `blaze_rods`/`ender_pearls`.
     // Returning to the overworld with no verified portal re-activates it.
     // `inNether` normalizes because mineflayer reports the bare `the_nether`.
+    //
+    // Durable half: the run's own verified-portal record also satisfies this
+    // rung. The live projection is re-derived from a search window around the
+    // body, so it reads false whenever the body is offset from the gate (below
+    // it, in a shaft beside it, or out of range after a reload). An
+    // inventory-shaped resume must not un-satisfy an outcome the run already
+    // proved, and a satisfied rung must not become unsatisfied because the
+    // inventory no longer holds the materials that were consumed into it.
+    // `verifiedPortalSiteInWorld` is revoked by live world truth (see
+    // `syncKnownPortalSites`), so a genuinely broken portal still re-opens this
+    // rung and its construction/repair goals.
     satisfied: (c, w) =>
-      has(c, 'nether_portal') || w.portalVerified === true || inNether(w),
+      has(c, 'nether_portal') ||
+      w.portalVerified === true ||
+      inNether(w) ||
+      verifiedPortalSiteInWorld(w) !== null,
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },

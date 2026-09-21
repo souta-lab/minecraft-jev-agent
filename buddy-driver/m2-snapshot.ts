@@ -71,6 +71,14 @@ export interface M2SnapshotMarker {
   verified?: boolean
   dimension?: string
   pos?: [number, number, number]
+  /**
+   * Provenance of the observation, when a marker can be produced by more than one
+   * route. `PORTAL_VERIFIED` is emitted by the ignition action (no source) and by
+   * the durable-site recheck (`durable-site-recheck`), which reads the run's own
+   * recorded frame/interior cells back as live world truth in a later generation.
+   * Optional, so snapshots written before this field still parse.
+   */
+  source?: string
 }
 
 /** A verified durable terminal observation captured after the required chain. */
@@ -322,6 +330,7 @@ export class M2SnapshotRecorder {
     if (typeof detail?.shape === 'string') marker.shape = detail.shape
     if (typeof detail?.verified === 'boolean') marker.verified = detail.verified
     if (typeof detail?.dimension === 'string') marker.dimension = detail.dimension
+    if (typeof detail?.source === 'string' && detail.source.length > 0) marker.source = detail.source
     const position = detail?.target !== null && typeof detail?.target === 'object'
       ? detail.target as { x?: unknown; y?: unknown; z?: unknown }
       : null

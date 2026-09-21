@@ -518,13 +518,20 @@ export function mergeKnownTraversalsInto(
 
 /**
  * Issue #80: a durable, world-keyed record that a VERIFIED lit nether portal
- * frame exists at these overworld coordinates. It is deliberately NOT a verdict:
- * `portalVerified` stays a live server-truth projection re-observed after every
- * generation/world change. This record only says "a verified portal exists at P"
- * (CAN fact), so the resident can route back and re-verify instead of rebuilding
- * a second frame after a death/respawn took it out of sensor range. The entry is
- * dropped when the live re-check at the site finds nothing while the bot is
- * there, and when the world epoch changes.
+ * frame exists at these overworld coordinates. It is deliberately NOT a stored
+ * verdict: `portalVerified` is still re-read from live block truth. This record
+ * only says "a verified portal exists at P" (CAN fact), so the resident can route
+ * back, re-verify and enter instead of rebuilding a second frame after a
+ * death/respawn/reload took the structure out of the body-relative sensor window.
+ *
+ * Lifecycle: minted from a live sighting; dropped on a world-epoch/dimension
+ * change; and revoked ONLY by positive world truth - the record's own `frame`
+ * cells read back as broken, or its own cells read back as no longer a lit
+ * portal. A failed sensor search is never proof of absence (the same #377 rule
+ * structure sites use): measured live, the previous "nothing sensed while the bot
+ * is within `PORTAL_SITE_PROOF_DISTANCE`" rule destroyed this record while the
+ * body sat 6 blocks from a standing, lit gate that lay outside the sensor's
+ * dy -4..+4 window.
  */
 export interface KnownPortalSiteJson {
   /** frame origin cell (the layout's lowest corner) */

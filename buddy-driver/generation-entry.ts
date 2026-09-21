@@ -36,7 +36,7 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
-import { portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
+import { NETHER_PORTAL, PORTAL_VERIFIED, portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
 import {
   NETHER_STRUCTURE_BLOCK_NAMES,
   countSensedPortalFrameBlocks,
@@ -388,12 +388,31 @@ export function evictStaleKnownResources(
 }
 
 /**
- * #80: proof distance for the durable portal site. A remembered site within this
- * radius was loaded while the bot stood there, so a live re-check that finds no
- * lit portal at the site is proof the record is stale. Outside the radius,
- * absence proves nothing and the entry is left alone (same rule as #14).
+ * #80: the near-field radius the ORIGINAL lifecycle used to treat a failed search
+ * as proof of absence. That inference is retired (see `syncKnownPortalSites`): a
+ * failed search is not an observation at ANY distance. Measured live
+ * (`run-mubhx20x-pie2`, 17:28:25Z): the record at 25,66,9 was dropped while the
+ * body sat 6 blocks away, because the frame at y=66..70 was outside the sensor
+ * window of a body at y=61.9. The constant is retained for fixtures and
+ * diagnostics only; production revocation is positive-evidence-only.
  */
 export const PORTAL_SITE_PROOF_DISTANCE = 8
+
+/** Why a durable portal record was dropped. Every reason is a POSITIVE observation. */
+export type PortalSiteRemovalReason =
+  /** the record belongs to a previous world epoch - the coordinate is meaningless */
+  | 'world_epoch'
+  /** the record was verified in another dimension */
+  | 'dimension'
+  /** the record's own frame cells were read and at least one is no longer obsidian */
+  | 'frame_broken'
+  /** the record's own cells were read and the interior is no longer a lit portal */
+  | 'observed_unlit'
+
+export interface PortalSiteRemoval {
+  site: KnownPortalSiteJson
+  reason: PortalSiteRemovalReason
+}
 
 export interface PortalSiteSyncResult {
   /** the durable list after record + refresh + eviction */
@@ -402,6 +421,16 @@ export interface PortalSiteSyncResult {
   added: KnownPortalSiteJson[]
   /** disproved / foreign-epoch sites to drop from durable memory */
   removed: KnownPortalSiteJson[]
+  /** typed reason for every removal (positive evidence only) */
+  removalReasons: PortalSiteRemoval[]
+  /**
+   * Records whose OWN cells were positively observed this tick: every recorded
+   * frame cell is `obsidian` and every recorded interior cell is `nether_portal`
+   * (the same postcondition the ignition action verifies). This is live world
+   * truth anchored at the record's coordinates, so it is valid even when the
+   * body-relative sensor window cannot reach the structure.
+   */
+  confirmed: KnownPortalSiteJson[]
 }
 
 function portalOriginKey(site: { x: number; y: number; z: number }): string {
@@ -412,12 +441,58 @@ function normalizePortalDimension(dimension: string): string {
   return dimension.replace(/^minecraft:/, '').toLowerCase()
 }
 
+/** Exact live read of one recorded portal cell; `null` = the chunk is not loaded = UNKNOWN. */
+export type PortalSiteCellProbe = (cell: Vec3Json) => string | null
+
+/**
+ * Read the record's own cells and return a POSITIVE verdict. A failed sensor
+ * search is never an input here: only a readable cell decides anything, and an
+ * unreadable (unloaded) cell is UNKNOWN, never proof.
+ */
+function portalSiteRecheck(
+  site: KnownPortalSiteJson,
+  probe: PortalSiteCellProbe,
+): { verdict: 'lit' | 'frame_broken' | 'observed_unlit' | 'unknown'; frameCells: number; interiorCells: number } {
+  const frameCells = site.frame ?? []
+  const interiorCells = site.interior ?? []
+  const frameReads = frameCells.map((cell) => probe(cell))
+  const interiorReads = interiorCells.map((cell) => probe(cell))
+  const frameReadable = frameCells.length > 0 && frameReads.every((name) => name !== null)
+  const interiorReadable = interiorCells.length > 0 && interiorReads.every((name) => name !== null)
+  const litInterior = interiorCells.length > 0 && interiorReads.every((name) => name === NETHER_PORTAL)
+  if (litInterior && (frameCells.length === 0 || frameReads.every((name) => name === 'obsidian'))) {
+    return { verdict: 'lit', frameCells: frameCells.length, interiorCells: interiorCells.length }
+  }
+  if (frameReadable && frameReads.some((name) => name !== 'obsidian')) {
+    return { verdict: 'frame_broken', frameCells: frameCells.length, interiorCells: interiorCells.length }
+  }
+  if (frameReadable || interiorReadable) {
+    // The recorded cells were READ and the portal postcondition does not hold:
+    // the frame exists without its lit interior, or the interior is gone.
+    return { verdict: 'observed_unlit', frameCells: frameCells.length, interiorCells: interiorCells.length }
+  }
+  return { verdict: 'unknown', frameCells: frameCells.length, interiorCells: interiorCells.length }
+}
+
 /**
  * #80 pure durable-site lifecycle. It records live-verified portal sites, keeps
- * existing records fresh, drops records the live re-check disproved while the bot
- * is close enough to trust the absence, and drops records from a previous world
- * epoch or dimension. It never decides "go there": it only maintains the CAN
- * fact "a verified portal exists at P".
+ * existing records fresh, and drops only records that live world truth PROVES
+ * stale: a previous world epoch / foreign dimension, the record's own frame
+ * cells read as broken, or its own cells read as no longer a lit portal.
+ *
+ * Revocation is deliberately positive-evidence-only. The previous rule dropped a
+ * record whenever the body-relative sensor search returned nothing while the
+ * body was within `PORTAL_SITE_PROOF_DISTANCE`; that conflated "not observed"
+ * with "observed absent" and destroyed a verified durable outcome whenever the
+ * body was offset from the structure (measured live: frame at y=66..70, body at
+ * y=61.9, sensor window dy -4..+4 -> nothing sensed -> record dropped -> the
+ * next inventory-shaped resume rebuilt `nether_portal` and re-queued the
+ * obsidian construction rows for a gate that was standing and lit).
+ *
+ * `probe` supplies exact block truth for the record's own cells (the same
+ * pattern `evictStaleKnownResources` uses for remembered ore); `null` means the
+ * chunk is not loaded and proves nothing. It never decides "go there": the
+ * lifecycle only maintains the CAN fact "a verified portal exists at P".
  */
 export function syncKnownPortalSites(input: {
   known: readonly KnownPortalSiteJson[]
@@ -428,24 +503,41 @@ export function syncKnownPortalSites(input: {
     interior?: readonly Vec3Json[]
   }[]
   worldKey: { dimension: string; worldEpoch: number }
+  /**
+   * Recorded as the observation tick's body position: diagnostics only. Distance
+   * is NOT a removal criterion (see this function's doc), and `proofDistance` is
+   * accepted for fixture compatibility but no longer decides anything.
+   */
   position: Vec3Json
+  probe?: PortalSiteCellProbe
   now?: number
   proofDistance?: number
 }): PortalSiteSyncResult {
   const now = input.now ?? Date.now()
-  const proofDistance = input.proofDistance ?? PORTAL_SITE_PROOF_DISTANCE
   const liveKeys = new Set(input.liveVerified.map((site) => portalOriginKey(site.origin)))
   const added: KnownPortalSiteJson[] = []
   const removed: KnownPortalSiteJson[] = []
+  const removalReasons: PortalSiteRemoval[] = []
+  const confirmed: KnownPortalSiteJson[] = []
   const kept: KnownPortalSiteJson[] = []
   const seen = new Set<string>()
+  const drop = (site: KnownPortalSiteJson, reason: PortalSiteRemovalReason): void => {
+    removed.push(site)
+    removalReasons.push({ site, reason })
+  }
+  const refresh = (site: KnownPortalSiteJson): KnownPortalSiteJson => ({
+    ...site,
+    lastVerifiedAt: now,
+    ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+    ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+  })
   for (const site of input.known) {
     const key = portalOriginKey(site)
     if (seen.has(key)) continue
     // World-epoch / dimension re-anchoring: a coordinate is only meaningful in
     // the world it was verified in, so a stale record is dropped, never probed.
     if (site.worldEpoch !== undefined && site.worldEpoch !== input.worldKey.worldEpoch) {
-      removed.push(site)
+      drop(site, 'world_epoch')
       continue
     }
     if (
@@ -453,25 +545,27 @@ export function syncKnownPortalSites(input: {
       site.dimension.length > 0 &&
       normalizePortalDimension(site.dimension) !== normalizePortalDimension(input.worldKey.dimension)
     ) {
-      removed.push(site)
+      drop(site, 'dimension')
       continue
     }
     if (liveKeys.has(key)) {
       seen.add(key)
-      kept.push({
-        ...site,
-        lastVerifiedAt: now,
-        ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
-        ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
-      })
+      kept.push(refresh(site))
       continue
     }
-    const distance = Math.hypot(site.x - input.position.x, site.y - input.position.y, site.z - input.position.z)
-    // The bot is close enough that a still-lit portal would have been sensed. The
-    // live re-check returned nothing at this site, so the record is disproved.
-    if (distance <= proofDistance) {
-      removed.push(site)
-      continue
+    if (input.probe !== undefined) {
+      const recheck = portalSiteRecheck(site, input.probe)
+      if (recheck.verdict === 'frame_broken' || recheck.verdict === 'observed_unlit') {
+        drop(site, recheck.verdict)
+        continue
+      }
+      if (recheck.verdict === 'lit') {
+        seen.add(key)
+        const record = refresh(site)
+        confirmed.push(record)
+        kept.push(record)
+        continue
+      }
     }
     seen.add(key)
     kept.push({ ...site })
@@ -494,7 +588,7 @@ export function syncKnownPortalSites(input: {
     added.push(record)
     kept.push(record)
   }
-  return { known: kept, added, removed }
+  return { known: kept, added, removed, removalReasons, confirmed }
 }
 
 /**
@@ -1301,12 +1395,25 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     dimension: String(ctx.bot.game?.dimension ?? ''),
   }
   /**
-   * #80: maintain the durable verified-portal-site record from live truth. The
-   * verdict itself stays live (`portalVerified`); this only records where a
-   * verified portal was, and drops the record when the live re-check disproves it
-   * at close range or the world epoch/dimension changed.
+   * #80: maintain the durable verified-portal-site record from live truth, and
+   * project the live-only verdict from BOTH observation routes.
+   *
+   * The verdict is no longer produced by the body-relative sensor window alone.
+   * `sensedVerifiedPortalSites` searches around the BODY (measured live: a body
+   * at y=62 cannot see a frame at y=66..70, `PORTAL_FRAME_PROGRESS blocks=0`), so
+   * the OLD code read a standing, lit, already-verified gate as "no portal" the
+   * moment the body was offset from it. A durable record whose own cells are read
+   * back as a valid lit portal is also live world truth - anchored at the
+   * record's coordinates instead of at the body - so it satisfies the verdict and
+   * the run records that observation (`PORTAL_SITE_RECHECK`, `PORTAL_TRUTH`
+   * source=durable-site-recheck, and this run's own M2 `PORTAL_VERIFIED`).
+   *
+   * Revocation stays positive-evidence-only, the same rule #377 established for
+   * structure sites: a failed search is never absence. `syncKnownPortalSites`
+   * drops a record only when its OWN cells read as broken/unlit, or on a
+   * world-epoch/dimension change.
    */
-  const syncPortalSiteMemory = (reason: string): { origin: Vec3Json; widthAxis: 'x' | 'z' }[] => {
+  const syncPortalSiteMemory = (reason: string): PortalSiteSyncResult => {
     const liveVerified = sensedVerifiedPortalSites(ctx.bot).map((site) => ({
       origin: { x: site.origin.x, y: site.origin.y, z: site.origin.z },
       widthAxis: site.widthAxis,
@@ -1314,28 +1421,81 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       interior: portalFrameLayout(site.origin, site.widthAxis).interior.map((cell) => ({ ...cell })),
     }))
     const entity = ctx.bot.entity
-    if (entity === undefined) return liveVerified
+    if (entity === undefined) {
+      // No body = nothing observed. Never revoke on an observation that was not
+      // taken, and never invent one.
+      return { known: world.knownPortalSites, added: [], removed: [], removalReasons: [], confirmed: [] }
+    }
     const result = syncKnownPortalSites({
       known: world.knownPortalSites,
       liveVerified,
       worldKey: ctx.worldKey,
       position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+      probe: (cell) => liveBlockNameAt(ctx.bot, cell),
     })
     world.knownPortalSites = result.known
-    if (result.added.length === 0 && result.removed.length === 0) return liveVerified
-    ctx.proposeWorldMemory({
-      ...(result.added.length === 0 ? {} : { knownPortalSites: result.added }),
-      ...(result.removed.length === 0 ? {} : { removeKnownPortalSites: result.removed }),
-    })
-    ctx.log('PORTAL_SITE_MEMORY', {
-      reason,
-      source: 'live-world',
-      added: result.added.length,
-      removed: result.removed.length,
-      known: result.known.length,
-      removedSites: result.removed.map((site) => `${site.x},${site.y},${site.z}`),
-    })
-    return liveVerified
+    const liveSighted = liveVerified.length > 0
+    const next = liveSighted || result.confirmed.length > 0
+    if (next !== world.portalVerified) {
+      world.portalVerified = next
+      ctx.log('PORTAL_TRUTH', {
+        verified: next,
+        reason,
+        // Provenance is explicit: the body-relative search this tick, or a
+        // coordinate-anchored recheck of the run's own durable record.
+        source: liveSighted ? 'live-world' : 'durable-site-recheck',
+      })
+    }
+    const changedMemory = result.added.length > 0 || result.removed.length > 0
+    if (changedMemory) {
+      ctx.proposeWorldMemory({
+        ...(result.added.length === 0 ? {} : { knownPortalSites: result.added }),
+        ...(result.removed.length === 0 ? {} : { removeKnownPortalSites: result.removed }),
+      })
+    }
+    if (changedMemory || result.confirmed.length > 0) {
+      ctx.log('PORTAL_SITE_MEMORY', {
+        reason,
+        source: 'live-world',
+        added: result.added.length,
+        removed: result.removed.length,
+        known: result.known.length,
+        removedSites: result.removed.map((site) => `${site.x},${site.y},${site.z}`),
+        removedReasons: result.removalReasons.map(
+          (entry) => `${entry.reason}@${entry.site.x},${entry.site.y},${entry.site.z}`,
+        ),
+        confirmedSites: result.confirmed.map((site) => `${site.x},${site.y},${site.z}`),
+      })
+    }
+    // The run's OWN verification of a gate it did not ignite this generation:
+    // the recorded cells were read back in THIS run and satisfied the exact
+    // ignition postcondition. Record it once per run (the marker carries its
+    // provenance) so the run has its own evidence instead of borrowing the
+    // previous run's, without returning the plan to construction rows.
+    if (!liveSighted && result.confirmed.length > 0 && m2Snapshot !== null) {
+      const recorded = m2Snapshot.current().markers.some((marker) => marker.name === PORTAL_VERIFIED)
+      if (!recorded) {
+        const site = result.confirmed[0]
+        if (site !== undefined) {
+          m2Snapshot.recordMarker(PORTAL_VERIFIED, {
+            verified: true,
+            dimension: ctx.worldKey.dimension,
+            at: `${site.x},${site.y},${site.z}`,
+            source: 'durable-site-recheck',
+          })
+          ctx.log('PORTAL_SITE_RECHECK', {
+            at: `${site.x},${site.y},${site.z}`,
+            dimension: ctx.worldKey.dimension,
+            frame: site.frame?.length ?? 0,
+            interior: site.interior?.length ?? 0,
+            body: `${Math.round(entity.position.x)},${Math.round(entity.position.y)},${Math.round(entity.position.z)}`,
+            verified: true,
+            source: 'live-world',
+          })
+        }
+      }
+    }
+    return result
   }
   /**
    * M3: maintain the durable Nether-structure-site record from live perception.
@@ -1398,21 +1558,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       world.dimension = nextDimension
       ctx.log('DIMENSION_TRUTH', { dimension: nextDimension, reason, source: 'live-world' })
     }
-    // One live scan supplies both the durable site record and the live-only
-    // verdict: `sensedVerifiedPortalSites` is the per-site form of
-    // `detectLivePortalVerification`, so a non-empty result IS the verdict.
-    const liveVerified = syncPortalSiteMemory(reason)
+    // One portal sync supplies both the durable site record and the live verdict:
+    // the body-relative search (`sensedVerifiedPortalSites` is the per-site form
+    // of `detectLivePortalVerification`) OR a coordinate-anchored recheck of the
+    // run's own durable record, which is the only route that works while the body
+    // is outside the sensor window of the structure.
+    syncPortalSiteMemory(reason)
     syncStructureSiteMemory(reason)
-    const next = liveVerified.length > 0
-    if (next === world.portalVerified) return
-    world.portalVerified = next
-    ctx.log('PORTAL_TRUTH', { verified: next, reason, source: 'live-world' })
   }
-  // Record a portal that was already verified at generation start (e.g. after a
-  // hot reload) so it is durable before the bot can wander out of sensor range.
-  syncPortalSiteMemory('generation-start')
-  // Same for a Nether-structure site already in scan range at generation start.
-  syncStructureSiteMemory('generation-start')
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const m2Snapshot =
     ctx.runId === undefined || ctx.m2SnapshotDir === undefined
@@ -1435,6 +1588,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     dir: ctx.m2SnapshotDir ?? null,
     path: m2Snapshot?.path ?? null,
   })
+  // Record a portal that was already verified at generation start (e.g. after a
+  // hot reload) so it is durable before the bot can wander out of sensor range.
+  // This runs AFTER the recorder exists: a coordinate-anchored recheck of an
+  // existing durable record is this run's own verification (see
+  // `syncPortalSiteMemory`) and must be recordable in THIS run's snapshot.
+  syncPortalSiteMemory('generation-start')
+  // Same for a Nether-structure site already in scan range at generation start.
+  syncStructureSiteMemory('generation-start')
   const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
