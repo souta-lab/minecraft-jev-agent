@@ -98,7 +98,7 @@ import {
   StateFingerprintMemory,
 } from './moveFailMemory.ts'
 import type { MoveFailEntry, MoveFailureReason } from './moveFailMemory.ts'
-import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatKnownResourceUnreachable, formatRetrieveStalled, planRetrievalEscalation, resolveRetrievalStallTicks } from './verticalPlan.ts'
+import { ASCENT_PROGRESS_EPSILON, evaluateRetrievalProgress, formatAscentRefused, formatKnownResourceUnreachable, formatRetrieveStalled, pillarColumnUnsafeFromBlocks, planRetrievalEscalation, planVerticalApproachDetailed, resolveRetrievalStallTicks, selectPlaceableBlock } from './verticalPlan.ts'
 import { evaluateDescendProgress, formatDescendProgress, formatDescendStalled, resolveDescendNoCandidateTicks, resolveDescendStallTicks, DESCEND_PROGRESS_LOG_TICKS } from './descendPlan.ts'
 import type { DescendProgressState } from './descendPlan.ts'
 import { DigMemory } from './worldMemory.ts'
@@ -1395,6 +1395,16 @@ export class JevController {
   private capabilityGapActive = false
   private capabilityGapSignature: string | null = null
   private ascendRefusedSinceObservation = false
+  /**
+   * Previous tick's sensor state, used only to re-derive the pure vertical plan
+   * for the capability target. `observeCapabilityGap` runs before this tick's
+   * sensor build, so the plan fact is one tick old; the tick guard rejects a
+   * stale/disconnected snapshot.
+   */
+  private lastWorldState: WorldState | null = null
+  private lastWorldStateTick = -1
+  /** last logged `ASCENT_REFUSED` line, so one dead end is one line. */
+  private lastAscentRefusalKey: string | null = null
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
@@ -1999,6 +2009,11 @@ export class JevController {
       this.logStaleKnownResources(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
       this.lastStateFingerprint = this.stateFingerprint(state)
+      // Retain the sensor facts the pure vertical-plan refusal needs (step cuts,
+      // terrain, inventory). `observeCapabilityGap` runs before the sensor build,
+      // so it reads the previous tick's snapshot through the tick guard.
+      this.lastWorldState = state
+      this.lastWorldStateTick = this.tickCounter
 
       if (state.self.health <= 0) {
         this.escalate('unexpected_world_state', 'health <= 0')
@@ -4694,8 +4709,14 @@ export class JevController {
 
   /**
    * The remembered target the ascent trap is measured against: the active
-   * retrieval when one exists, else the highest remembered resource still above
-   * the bot. Pure lookup; the trap predicate itself is `evaluateCapabilityGap`.
+   * retrieval when one exists, else the active surface-recovery goal's own
+   * `targetY`, else the highest remembered resource still above the bot. Pure
+   * lookup; the trap predicate itself is `evaluateCapabilityGap`.
+   *
+   * The surface goal is included because the planner's capability-gap handling
+   * forces exactly that goal (`buddy-driver/planner-legacy.ts`), and its
+   * `targetY` is the Y the body must actually reach. Without it, a shaft with no
+   * remembered upper feature had no target at all, so the trap could not fire.
    */
   private capabilityTarget(): { y: number; key: string } | null {
     const active = this.activeRetrieval
@@ -4707,8 +4728,51 @@ export class JevController {
       if (resource.position.y <= entity.position.y) continue
       if (best === null || resource.position.y > best.position.y) best = resource
     }
+    const current = this.queue.current
+    const surfaceTargetY =
+      current?.kind === 'surface' && typeof current.targetY === 'number' && Number.isFinite(current.targetY)
+        ? current.targetY
+        : null
+    if (surfaceTargetY !== null && surfaceTargetY > entity.position.y && (best === null || surfaceTargetY > best.position.y)) {
+      return { y: surfaceTargetY, key: `surface:${current?.id ?? 'surface'}:${surfaceTargetY}` }
+    }
     if (best === null) return null
     return { y: best.position.y, key: `known:${best.name}@${best.position.x},${best.position.y},${best.position.z}` }
+  }
+
+  /**
+   * Pure plan fact for the capability target: is an upward gap with no grounded
+   * plan? Reuses the same `planVerticalApproachDetailed` the candidate layer
+   * offers with, so the controller's refusal is exactly the plan the executor
+   * would have been given. A `plan` (pillar or staircase-up) or a level/downward
+   * target is not a refusal; only a typed `ascentRefusal` is. Logs the typed
+   * `ASCENT_REFUSED` line once per signature so the dead end is observable
+   * without spamming one line per tick.
+   */
+  private ascentRefusedByPlan(target: { y: number } | null): boolean {
+    const state = this.lastWorldState
+    const entity = this.bot.entity
+    if (state === null || entity === undefined || target === null) return false
+    if (this.lastWorldStateTick !== this.tickCounter - 1) return false
+    const decision = planVerticalApproachDetailed({
+      selfFeetY: entity.position.y,
+      selfPosition: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+      target: { x: entity.position.x, y: target.y, z: entity.position.z },
+      tunnel: state.signals.lastTunnel ?? null,
+      descent: state.descent,
+      stepCuts: state.stepCuts,
+      placeable: selectPlaceableBlock(state.inventory.counts),
+      columnSafe: !pillarColumnUnsafeFromBlocks(state.self.position, state.blocks),
+      inventory: state.inventory.counts,
+    })
+    const refusal = decision.ascentRefusal
+    if (decision.plan !== null || refusal === null) return false
+    const line = formatAscentRefused(refusal)
+    if (line !== this.lastAscentRefusalKey) {
+      this.lastAscentRefusalKey = line
+      this.logger.warn('agent', line, { ...refusal, goal: this.currentGoalKey() }, this.tickCounter)
+    }
+    return true
   }
 
   /**
@@ -4721,11 +4785,18 @@ export class JevController {
     const entity = this.bot.entity
     if (entity === undefined) return
     const target = this.capabilityTarget()
+    // A refused ascent is either an executed pillar that did not verify (the
+    // executor path) OR the pure plan layer proving there is no grounded up
+    // plan at all. The second is what the measured `recover_vertical_access`
+    // y>=80 stretch hit: no pillar was ever offered, so no executed refusal was
+    // ever recorded and the trap never fired while the body paced between two
+    // cells. Both are deterministic facts, so both feed the same predicate.
+    const planRefused = this.ascentRefusedByPlan(target)
     const decision = evaluateCapabilityGap(this.capabilityGapState, {
       y: entity.position.y,
       targetY: target === null ? null : target.y,
       targetKey: target === null ? null : target.key,
-      ascendRefused: this.ascendRefusedSinceObservation,
+      ascendRefused: this.ascendRefusedSinceObservation || planRefused,
     })
     this.capabilityGapState = decision.state
     this.ascendRefusedSinceObservation = false
