@@ -4589,6 +4589,32 @@ function routeOpeningCandidates(
     )
   }
   if (blockedTarget === null) return out
+  // `pickExplore` picks the NEAREST standable frontier, which is frequently
+  // behind the body when the withheld locomotion target is far away. The
+  // `moveAdvancesTowardTarget` filter below then removes every MOVE and Jev is
+  // left with WAIT/ESCALATE only. Observed live with the active M2 obsidian
+  // goal:
+  //   CANDIDATE_STARVATION presented=2 productive=0 goal=collect:obsidian:10
+  //     blockedBy=no_path missing=["RETRIEVE:known:obsidian:b28_67_9:open_path"]
+  //   body frozen at x=199.5 while the remembered cell is ~175m west, so the
+  //   goal could never be satisfied. Add the standable spot closest to the
+  //   withheld target as one more grounded MOVE fact: still a plain locomotion
+  //   candidate, no ranking, no coordinate special-casing.
+  const toward = state.terrain.standable
+    .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
+    .filter((spot) => distance(spot, state.self.position) > 1)
+    .sort((a, b) => distance(a, blockedTarget) - distance(b, blockedTarget))[0]
+  if (toward !== undefined) {
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        toward,
+        moveLabel(toward, 'walk toward the unreachable target', state.self.position),
+        null,
+      ),
+    )
+  }
   return out.filter(
     (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, blockedTarget),
   )
