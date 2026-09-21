@@ -164,6 +164,7 @@ import {
   resolveStrategicStallMinBodyProgress,
   StrategicStallTracker,
 } from './strategicStall.ts'
+import { computeShadowMetrics } from './shadowMetrics.ts'
 
 export type EscalationReason =
   | 'low_confidence'
@@ -2876,16 +2877,24 @@ export class JevController {
     )
   }
 
-  /** Demoted semantic questions: computed by code, logged, never steering (#11). */
+  /**
+   * Demoted semantic questions: computed by code, logged, never steering (#11).
+   * #360 §9: the live run logged one identical row 2148/2148 times because
+   * `goal_progress` read the legacy item-count fraction (`state.goal.progress`
+   * was 1 for a `surface` plan that already held its 1 log while y stayed 67) and
+   * the other three read `escalationRecommended`, which this loop never set. The
+   * pure computation now reads the active plan's completion and the code-owned
+   * recurrence evidence; see `shadowMetrics.ts` for the full trace.
+   */
   private shadowMetrics(state: WorldState): Record<string, number> {
-    const escalating = state.signals.escalationRecommended
-    return {
-      goal_progress: Math.round(state.goal.progress * 4),
-      plan_still_valid: escalating ? 1 : 4,
-      situation_understood: state.goalQueue.empty && !state.goal.complete ? 2 : 4,
-      goal_blocked: escalating ? 1 : 0,
-      strategy_change_needed: escalating ? 1 : 0,
-    }
+    return computeShadowMetrics({
+      goal: { progress: state.goal.progress, complete: state.goal.complete },
+      goalQueue: { empty: state.goalQueue.empty },
+      signals: {
+        escalationRecommended: state.signals.escalationRecommended,
+        strategicNonProgress: state.signals.strategicNonProgress ?? null,
+      },
+    })
   }
 
   private logShadowMetrics(state: WorldState): void {
