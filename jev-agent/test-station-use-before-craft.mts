@@ -285,6 +285,37 @@ function main(): void {
     )
   }
 
+  // (h) KNOWN RESIDUAL (owner decision needed; owned by the smelt prerequisite
+  // lane, not by this rule). Once the body has walked to the remembered table it
+  // becomes SENSED, and `prereqOption.ts#craftAndPlaceOption` (the #58 cost model)
+  // still prefers crafting a furnace over walking to one of the 17 known
+  // furnaces, so a duplicate `CRAFT:furnace` is offered with 17 furnaces known.
+  // This case PINS the boundary as executable evidence instead of prose: the
+  // station-use rule owns the craft-goal path (cases (a)-(g)); the smelt
+  // prerequisite's cost model is pinned by buddy-driver/test-furnace-place
+  // (33/33 required green: "blacklisted remembered furnace + held table chooses
+  // craft_and_place", "#11 v2: smelt charcoal + cobblestone 67 + reachable
+  // remembered table", "the abandoned craft path still yields the acquisition
+  // route"), and changing it invalidates those cases. Report it, do not silently
+  // rewrite another lane's acceptance.
+  {
+    const state = world(smeltGoal(), { raw_iron: 3, coal: 4, cobblestone: 200 }, MANY_STATIONS, {
+      craftingTables: [{ ...SENSED_TABLE, source: 'sensed' } as StationEntry],
+    })
+    const grounded = generateGroundedCandidates(state, options())
+    const candidateIds = grounded.candidates.map((candidate) => candidate.id)
+    const decision = planPrereqOptions(furnacePrereqInputFromState(state, options()))
+    const craft = decision.options.find((option) => option.path === 'craft_and_place')
+    check(
+      '(h) KNOWN RESIDUAL: the smelt prereq still prefers craft_and_place when a sensed table is available',
+      candidateIds.includes('CRAFT:furnace') &&
+        craft?.feasible === true &&
+        selectPrereqPath(decision) === 'craft_and_place' &&
+        grounded.candidates.some((candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'furnace'),
+      `ids=[${ids(grounded.candidates)}] chosen=${selectPrereqPath(decision)} craft=${craft?.feasible === true ? 'feasible' : (craft?.reason ?? 'missing')}`,
+    )
+  }
+
   // (b) no station anywhere: crafting the station is STILL a correct route.
   {
     const state = world(queued({}), { cobblestone: 200, oak_planks: 8 }, [])
