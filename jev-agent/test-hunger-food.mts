@@ -303,6 +303,15 @@ addCase('(d2) the food rung is OPTIONAL, SELF-CONTAINED, and only offered while 
     detail: `optional=${food?.optional === true} selfContained=${food?.selfContained === true} hungry=[${items.join(',')}] fed=${fed?.id ?? 'none'} noHungerFact=${unknownHunger?.id ?? 'none'}`,
   }
 })
+ 
+addCase('(d2b) optional food goals are replaceable by a semantic recovery plan', () => {
+  const option = buildPlanOptions({}, emptyWorldMemory(), { foodLevel: 0, eatBelowFood: THRESHOLD }).find((entry) => entry.id === 'food')
+  const foodGoals = (option?.goals ?? []).filter((goal) => goal.targetItem === 'food')
+  return {
+    pass: option !== undefined && foodGoals.length > 0 && foodGoals.every((goal) => goal.core !== true),
+    detail: `foodGoals=${foodGoals.length} core=[${foodGoals.map((goal) => String(goal.core === true)).join(',')}]`,
+  }
+})
 
 addCase('(d3) holding any edible item satisfies the food rung and stops offering it', () => {
   const food = RUNGS.find((rung) => rung.id === 'food')
