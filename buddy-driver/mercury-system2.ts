@@ -1115,6 +1115,21 @@ export interface MercuryAttemptOptions<T> {
   readonly onRetry: (detail: MercuryRetryDetail) => void
   /** Turn a failed attempt into corrective feedback for the next attempt; null when none applies. */
   readonly feedbackFor?: (error: unknown) => string | null
+  /**
+   * Backoff before a retryable failure is retried. Mirrors the planner-authority
+   * backoff (ec5b92c): the gateway returns bursts of `Service temporarily
+   * unavailable`, and immediate retries spent every attempt inside one burst and
+   * then terminated the resident (`FATAL context=mercury:<trigger>`).
+   */
+  readonly retryDelayMs?: (attempt: number) => number
+}
+
+/** Bounded backoff between Mercury retries (see retryDelayMs above). */
+const MERCURY_RETRY_BASE_MS = Number(process.env.BUDDY_MERCURY_RETRY_BASE_MS ?? 1500)
+const MERCURY_RETRY_MAX_MS = Number(process.env.BUDDY_MERCURY_RETRY_MAX_MS ?? 15000)
+
+function mercurySleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Run attempts with accounting at the boundary immediately before each provider call. */
@@ -1145,6 +1160,8 @@ export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): 
       previousError = error
       hasPreviousError = true
       feedback = options.feedbackFor?.(error) ?? null
+      const delay = options.retryDelayMs?.(attempt) ?? 0
+      if (delay > 0) await mercurySleep(delay)
     }
   }
   return { ok: false, error: new Error('mercury: retry loop produced no result'), attempts, failures }
@@ -1401,6 +1418,7 @@ export class MercurySystem2 implements System2Brain {
         call: callOnce,
         isRetryable: isRetryableMercuryAttempt,
         feedbackFor: mercuryRetryFeedback,
+        retryDelayMs: (attempt) => Math.min(MERCURY_RETRY_BASE_MS * 2 ** (attempt - 1), MERCURY_RETRY_MAX_MS),
         onRetry: ({ attempt, nextAttempt, error, feedback }) => {
           this.log('MERCURY_RETRY', {
             callId,
