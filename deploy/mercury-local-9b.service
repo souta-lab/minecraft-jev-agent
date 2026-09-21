@@ -1,0 +1,26 @@
+[Unit]
+Description=Qwen3.5-9B local Mercury System 2 endpoint (llama.cpp, Vulkan)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/llama-server \
+    --model /data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+    --alias qwen3.5-9b-local \
+    --host 127.0.0.1 \
+    --port 8081 \
+    --ctx-size 16384 \
+    --threads 8 \
+    --parallel 1 \
+    --flash-attn on \
+    --cache-type-k q8_0 \
+    --cache-type-v q8_0 \
+    --temp 0 \
+    --jinja \
+    --no-webui
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

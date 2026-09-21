@@ -91,7 +91,37 @@ BUDDY_PLANNER=llm BUDDY_SYSTEM2=mercury \
 bun buddy-driver/agent-runner.mts
 ```
 
-## Limits of this evidence
+## Ready-to-run setup (9B)
+
+Two repo files carry the setup so it survives on another machine:
+
+- `deploy/mercury-local-9b.service` — systemd **user** unit that serves
+  `/data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf` as alias `qwen3.5-9b-local` on
+  `127.0.0.1:8081` (`--ctx-size 16384 --jinja --temp 0`, `Restart=on-failure`).
+  Install with
+  `cp deploy/mercury-local-9b.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now mercury-local-9b`.
+- `tools/mercury-local-preflight.mjs` — proves the endpoint is usable:
+  `GET /models` lists the alias, then one `POST /chat/completions` with
+  `chat_template_kwargs { enable_thinking: false }` returns a JSON object. Non-zero
+  exit means "do not start the resident against this endpoint".
+- `tools/start-local-mercury.sh` — starts the unit if the endpoint is down, runs the
+  preflight, then execs the resident with
+  `BUDDY_MERCURY_BASE_URL` / `BUDDY_MERCURY_MODEL` / `BUDDY_MERCURY_LOCAL_NO_THINK=1` /
+  `BUDDY_SYSTEM2_TIMEOUT_MS=240000` / `BUDDY_PLANNER=llm` / `BUDDY_SYSTEM2=mercury`.
+
+Measured on this machine after installing the unit:
+
+```
+systemctl --user is-active mercury-local-9b  -> active
+GET  /models                                 -> ["qwen3.5-9b-local"]
+POST /chat/completions (preflight)           -> 312 ms, {"op":"patch","goals":[],"reason":"preflight"}
+3-scenario smoke via MercurySystem2          -> accepted 3/3, first attempt 2/3, median 1 694 ms, max 2 940 ms
+```
+
+Switching the live resident to it requires stopping the current process first: the host
+guard (`buddy-driver/data/resident/host.lock`) is single-instance, so two residents cannot
+coexist, and the patch lives on a branch until it is merged into `main`.
+
 
 - Three synthetic states, three runs each, no full resident run. A replay A/B against the
   gateway Mercury (issue #23) is still required before this counts as an acceptance result.
