@@ -369,7 +369,8 @@ function rememberedFrameState(invalidate: boolean): WorldState {
   const sensedBlockAt = bot.blockAt.bind(bot)
   ;(bot as unknown as { blockAt: (p: { x: number; y: number; z: number }) => unknown }).blockAt = (p) => {
     const name = modelled.get(`${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`)
-    return name === undefined ? sensedBlockAt(p) : { name, boundingBox: 'block', diggable: true }
+    if (name !== undefined) return { name, boundingBox: 'block', diggable: true }
+    return (sensedBlockAt as unknown as (point: unknown) => unknown)(p)
   }
   return buildWorldState(
     bot,

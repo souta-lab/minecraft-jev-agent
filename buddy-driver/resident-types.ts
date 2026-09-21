@@ -960,7 +960,10 @@ export interface AcceptanceRecord {
   record: 'acceptance'
   runId: string
   ts: string
+  /** the run's SOURCE identity: the boot commit (immutable), never the live checkout (#395) */
   gitCommit: string | null
+  /** the mutable working checkout HEAD at write time, kept separate so it cannot be mistaken for the run source */
+  checkoutHead?: string | null
   generationHash: string | null
   generationId: string | null
   contractVersion: number

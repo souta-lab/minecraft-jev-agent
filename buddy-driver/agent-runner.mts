@@ -502,6 +502,8 @@ const generationRegistries = new Map<string, GenerationResourceRegistry>()
 const generationStopWatch = new Map<string, NodeJS.Timeout>()
 
 const runId = `run-${Date.now().toString(36)}-${process.pid.toString(36)}`
+import { acceptanceProvenance } from './acceptance-provenance.ts'
+
 const bootSourceSha = gitCommit()
 const stats = {
   reconnects: 0,
@@ -1634,7 +1636,8 @@ function writeAcceptance(): string {
     record: 'acceptance',
     runId,
     ts: new Date().toISOString(),
-    gitCommit: gitCommit(),
+    // #395: the run's source identity is the boot commit, never the live checkout.
+    ...acceptanceProvenance(bootSourceSha, gitCommit()),
     generationHash,
     generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
     contractVersion: CONTRACT_VERSION,
