@@ -74,6 +74,19 @@ export function resolveStrategicStallMinBodyProgress(
   const raw = Number(env.BUDDY_STRATEGIC_STALL_MIN_BODY ?? STRATEGIC_STALL_MIN_BODY_PROGRESS_DEFAULT)
   return Number.isInteger(raw) && raw >= 0 ? raw : STRATEGIC_STALL_MIN_BODY_PROGRESS_DEFAULT
 }
+/**
+ * Stable block-cell identity for strategic recurrence evidence.
+ *
+ * `positionKey` intentionally preserves sub-block motion for the oscillation
+ * detector, but that precision is noise for semantic non-progress: Mineflayer
+ * commonly settles at several fractional coordinates inside the same block
+ * pocket. Floor each axis so jitter cannot turn one recurrent cell into several
+ * distinct states and prevent the bounded exhaustion window from firing.
+ */
+export function strategicStateKey(position: { x: number; y: number; z: number }): string {
+  return `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`
+}
+
 
 /**
  * One settled decision, reduced to the facts this evidence needs. `stateKey` is

@@ -165,6 +165,7 @@ import {
   resolveStrategicStallHorizon,
   resolveStrategicStallMaxDistinctStates,
   resolveStrategicStallMinBodyProgress,
+  strategicStateKey,
   StrategicStallTracker,
 } from './strategicStall.ts'
 import {
@@ -3908,7 +3909,7 @@ export class JevController {
     // does NOT clear the window: a successful MOVE is not semantic progress.
     this.signals.strategicNonProgress = this.strategicStall.note({
       optionInstanceId: this.currentOptionContext()?.instanceId ?? null,
-      stateKey: positionKey(this.bot.entity.position),
+      stateKey: strategicStateKey(this.bot.entity.position),
       progressKinds: taxonomy.progressKinds,
     })
     // #nonprogress-yield: a settled decision that showed `goal`/`search` progress

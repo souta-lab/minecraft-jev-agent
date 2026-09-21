@@ -32,6 +32,7 @@ import {
   STRATEGIC_STALL_MIN_BODY_PROGRESS_DEFAULT,
   StrategicStallTracker,
   strategicStallRequiredWindow,
+  strategicStateKey,
 } from './src/strategicStall.ts'
 import { evaluateBetaTerminationBoundary } from './src/system2Escalation.ts'
 import { JevController } from './src/controller.ts'
@@ -100,6 +101,25 @@ addCase('(a) the measured A<->B<->C shape (3 distinct cells) also exhausts', () 
     detail: JSON.stringify(evidence),
   }
 })
+addCase('(a) fractional motion in one pocket collapses to block-cell recurrence', () => {
+  const tracker = new StrategicStallTracker(24, 3, 6)
+  const positions = [
+    { x: 2.5, y: 67, z: 18.5 },
+    { x: 2.5, y: 67, z: 17.9 },
+    { x: 1.7, y: 67, z: 18.5 },
+    { x: 1.2, y: 67, z: 18.9 },
+  ]
+  for (let index = 0; index < 24; index += 1) {
+    const position = positions[index % positions.length]!
+    observe(tracker, strategicStateKey(position))
+  }
+  const evidence = tracker.evidence()
+  return {
+    pass: evidence.exhausted === true && evidence.distinctStates === 3,
+    detail: JSON.stringify(evidence),
+  }
+})
+
 
 // --- (b) successful body motion cannot reset; goal/search can ----------------
 
