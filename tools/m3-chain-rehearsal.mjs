@@ -359,6 +359,13 @@ export function materializeSyntheticRun({ caseName, runs, includeAuthority = tru
     run.samples.forEach((sample, sampleIndex) => {
       logLines.push(`[${stamp(base + 2 + sampleIndex)}] INVENTORY items=${JSON.stringify(sample)} pos=10,64,20`)
     })
+    // M3 requires live proof of Nether arrival (`nether_reached`), so every modelled run records the
+    // dimension it observed. The default is the Nether because this fixture IS the M3 endgame scenario;
+    // a case that wants the "twelve eyes but never left the overworld" negative sets
+    // `dimension: 'minecraft:overworld'` on its run and must then expect UNKNOWN, not PASS.
+    logLines.push(
+      `[${stamp(base + 2 + run.samples.length)}] DIMENSION_OBSERVED dimension=${run.dimension ?? 'minecraft:the_nether'} runId=${run.runId}`,
+    )
     if (includeAuthority) {
       decisionsLines.push(
         JSON.stringify({

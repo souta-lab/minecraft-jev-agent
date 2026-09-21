@@ -65,7 +65,7 @@ export const BLAZE_POWDER = 'blaze_powder'
 export const BLAZE_POWDER_REQUIRED = 12
 
 /** The conditions M3 must prove; inventory facts beyond these are diagnostics. */
-export const M3_REQUIRED_CONDITIONS = Object.freeze(['ender_eye_ready', 'model_authority'])
+export const M3_REQUIRED_CONDITIONS = Object.freeze(['ender_eye_ready', 'model_authority', 'nether_reached'])
 
 /** Default to the shared M2 run-scoped artifacts; allow M3-specific overrides. */
 export const M3_GATE_LOG = process.env.M3_GATE_LOG ?? process.env.M3_LOG ?? M2_GATE_LOG
@@ -200,9 +200,18 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
   const authorityPass = policy?.code === 0
   const materialsFail = !eyes.ready && eyes.materialInputsComplete
 
+  // M3 is "reach the Nether and prove twelve eyes", so Nether arrival is a REQUIRED condition,
+  // not a diagnostic: without it a run could claim M3 from the eyes alone while never having
+  // left the overworld. UNKNOWN (never FAIL) when the run simply has no Nether observation yet -
+  // the absence of a transition is not evidence of a failed one.
+  const netherObserved = observedDimensions.some((entry) => {
+    const value = typeof entry === 'string' ? entry : String(entry?.dimension ?? '')
+    return value === 'minecraft:the_nether' || value === 'the_nether'
+  })
   const conditions = {
     ender_eye_ready: eyes.ready ? 'PASS' : materialsFail ? 'FAIL' : 'UNKNOWN',
     model_authority: authorityPass ? 'PASS' : 'UNKNOWN',
+    nether_reached: netherObserved ? 'PASS' : 'UNKNOWN',
   }
   const perSource = sources.map((source) => ({
     name: source.name,
@@ -210,7 +219,7 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
     inventorySamples: Array.isArray(source.inventorySamples) ? source.inventorySamples.length : 0,
     dimensionObservations: Array.isArray(source.dimensionObservations) ? source.dimensionObservations : [],
   }))
-  const facts = { eyes, dimension, dimensions: [...new Set(observedDimensions)], authority: policy?.facts ?? null }
+  const facts = { eyes, dimension, dimensions: [...new Set(observedDimensions.map((entry) => (typeof entry === 'string' ? entry : entry?.dimension ?? null)))], netherReached: netherObserved, authority: policy?.facts ?? null }
 
   if (materialsFail) {
     return verdict({
