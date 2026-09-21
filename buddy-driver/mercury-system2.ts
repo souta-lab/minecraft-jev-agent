@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { generateText, tool } from 'ai'
+import type { Tool } from 'ai'
 import { z } from 'zod'
 import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { compilePlannedGoal, stableOptionInstanceId } from '../jev-agent/src/optionSpec.ts'
@@ -900,6 +901,13 @@ export function parseMercuryJsonText(text: string): unknown | null {
   return null
 }
 
+// AI SDK 7.0.107 exposes a deeply recursive FlexibleSchema type. Keeping the
+// already-validated Zod schema behind the concrete transport input type avoids
+// TS2589 during inference without weakening runtime validation: the same
+// MERCURY_PLAN_SCHEMA is still passed to the SDK and to validateMercuryPlan.
+type MercuryPlanTool = Tool<MercuryPlanJson, never, never>
+const MERCURY_PLAN_TOOL_SCHEMA = MERCURY_PLAN_SCHEMA as unknown as MercuryPlanTool['inputSchema']
+
 const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
   'This model cannot use a named tool choice. Prefer one emitPlan tool call when supported; otherwise return exactly one JSON object in the response text, with no prose or markdown. ' +
   'The top-level op must be exactly one of continue, patch, replace, abandon, complete, or abort. ' +
@@ -916,7 +924,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
         tools: {
           emitPlan: tool({
             description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
-            inputSchema: MERCURY_PLAN_SCHEMA,
+            inputSchema: MERCURY_PLAN_TOOL_SCHEMA,
           }),
         },
         // muse rejects a named tool choice but accepts the provider-neutral
@@ -940,7 +948,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
       tools: {
         emitPlan: tool({
           description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
-          inputSchema: MERCURY_PLAN_SCHEMA,
+          inputSchema: MERCURY_PLAN_TOOL_SCHEMA,
         }),
       },
       toolChoice: { type: 'tool', toolName: 'emitPlan' },

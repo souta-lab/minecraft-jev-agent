@@ -20,13 +20,12 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const require = createRequire(import.meta.url)
 
-function dependency(name) {
-  return require(path.join(ROOT, 'buddy-driver', 'node_modules', name))
-}
-
-const mineflayerModule = dependency('mineflayer')
+// These are direct root dependencies because this tool imports them directly.
+// Normal package resolution works with Bun's isolated linker and does not
+// depend on a workspace's physical node_modules layout.
+const mineflayerModule = require('mineflayer')
 const mineflayer = mineflayerModule.default ?? mineflayerModule
-const vec3Module = dependency('vec3')
+const vec3Module = require('vec3')
 const Vec3 = vec3Module.Vec3 ?? vec3Module
 
 export const STATE_SCHEMA_VERSION = 1

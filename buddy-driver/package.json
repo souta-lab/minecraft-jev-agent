@@ -52,6 +52,9 @@
     "mineflayer": "^4.39.0",
     "mineflayer-collectblock": "^1.6.0",
     "mineflayer-pathfinder": "^2.4.5",
+    "minecraft-data": "^3.116.0",
+    "prismarine-entity": "^2.6.0",
+    "vec3": "^0.1.10",
     "zod": "3.25.76"
   }
 }

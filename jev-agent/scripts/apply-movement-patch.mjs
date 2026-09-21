@@ -29,13 +29,68 @@
 // so `bun install` surfaces a broken patch immediately.
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
+const require = createRequire(import.meta.url)
 const PATCH_DIR = join(root, 'patches')
 const MARKER = '[jev-agent patch]'
+
+const packageRoots = new Map()
+
+function resolvePackageRoot(name) {
+  const cached = packageRoots.get(name)
+  if (cached !== undefined) return cached
+  const resolutionRoots = [root, dirname(root)]
+  const errors = []
+  for (const resolutionRoot of resolutionRoots) {
+    let entry
+    try {
+      entry = require.resolve(name, { paths: [resolutionRoot] })
+    } catch (error) {
+      errors.push(`${resolutionRoot}: ${error instanceof Error ? error.message : String(error)}`)
+      continue
+    }
+    // Bun's hoisted workspace layout can leave a workspace-local symlink in
+    // front of the real root package. Do not treat a dangling resolution as a
+    // usable target; try the repository root before failing.
+    if (!existsSync(entry)) {
+      errors.push(`${resolutionRoot}: resolved entry does not exist: ${entry}`)
+      continue
+    }
+    let candidate = dirname(entry)
+    while (candidate !== dirname(candidate)) {
+      const manifest = join(candidate, 'package.json')
+      if (existsSync(manifest)) {
+        try {
+          const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+          if (parsed?.name === name) {
+            packageRoots.set(name, candidate)
+            return candidate
+          }
+        } catch {
+          // Continue walking; the resolver's entry path remains authoritative.
+        }
+      }
+      candidate = dirname(candidate)
+    }
+  }
+  throw new Error(`dependency ${name} cannot be resolved to a package root:\n${errors.join('\n')}`)
+}
+
+function resolveTarget(target) {
+  const targets = [
+    ['node_modules/mineflayer/', 'mineflayer'],
+    ['node_modules/mineflayer-pathfinder/', 'mineflayer-pathfinder'],
+  ]
+  for (const [prefix, packageName] of targets) {
+    if (target.startsWith(prefix)) return join(resolvePackageRoot(packageName), target.slice(prefix.length))
+  }
+  return join(root, target)
+}
 
 /** Parse unified diffs into [{ target, hunks: [{ oldText, newText }] }]. */
 function parsePatch(text) {
@@ -96,10 +151,9 @@ const VERIFIERS = {
 }
 
 function applyFile(checkOnly, file) {
-  const target = join(root, file.target)
+  const target = resolveTarget(file.target)
   if (!existsSync(target)) {
-    console.log(`[movement-patch] skip: ${file.target} does not exist`)
-    return { applied: 0, already: 0, checks: [] }
+    throw new Error(`patch target missing: ${file.target} (resolved ${target})`)
   }
   let content = readFileSync(target, 'utf8')
   let applied = 0
