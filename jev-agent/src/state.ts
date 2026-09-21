@@ -131,6 +131,12 @@ export type EntityState = {
   hostile: boolean
 }
 
+/**
+ * Coarse mechanical category of a scanned block. `'ore'` is the name-scanned
+ * resource bucket: it covers both `ORE_SOURCES` (`_ore` blocks) and
+ * `DIRECT_BLOCK_SOURCES` (name-scanned non-ore drops such as obsidian), which
+ * the candidate layer treats identically for MINE/MOVE/DESCEND/retrieval.
+ */
 export type BlockKind = 'log' | 'stone' | 'ore' | 'hazard'
 
 export type HarvestTool = 'pickaxe' | 'axe' | 'shovel'
@@ -425,6 +431,33 @@ export const ORE_SOURCES: Readonly<Record<string, readonly string[]>> = {
 
 /** Every block name that can be an ore target, regardless of the focus item. */
 export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_SOURCES).flat())]
+
+/**
+ * Blocks whose primary drop is a directly collectible item that is neither an
+ * `_ore` nor a log. Obsidian is the M2 case: the typed portal plan emits
+ * `collect:obsidian`, but the block name carries no `_ore` suffix and is not in
+ * `STONE_LIKE`, so before this table a sensed obsidian block never entered
+ * `state.blocks` and the candidate generator could only offer exploration
+ * MOVE/WAIT (live CANDIDATE_STARVATION presented=1 productive=0).
+ *
+ * This is perception truth only: it names what to scan when the active goal
+ * targets the item. The MINE/MOVE/DESCEND and known-retrieval machinery still
+ * owns reach, pickup adjacency and the diamond-pickaxe harvest gate, and no goal
+ * or action is chosen or ranked here.
+ */
+export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> = {
+  obsidian: ['obsidian'],
+}
+
+/**
+ * The block names to name-scan for a collect goal, from ore drops plus direct
+ * (non-ore, non-log) drops. Returns undefined when the focus item has no
+ * name-scanned source, so callers keep their existing behaviour.
+ */
+export function scannedBlockNames(focusItem: string | null): readonly string[] | undefined {
+  if (focusItem === null) return undefined
+  return ORE_SOURCES[focusItem] ?? DIRECT_BLOCK_SOURCES[focusItem]
+}
 
 /** Resolve a block's primary drop, required tool class and required pickaxe rank. */
 export function resolveBlockHarvest(
@@ -810,18 +843,19 @@ function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: S
 }
 
 /**
- * Ore scan for the current collect subgoal. Ores are found by name through
+ * Name scan for the current collect subgoal. Ores are found by name through
  * `bot.findBlocks` (which sees loaded chunks in every direction) so buried and
- * deepslate ores become tunnel targets, not just exposed surface veins.
+ * deepslate ores become tunnel targets, not just exposed surface veins. Direct
+ * (non-ore) drops such as obsidian use the same scan so a sensed lava-adjacent
+ * block is real candidate-generation truth instead of invisible.
  */
-function buildOreBlocks(
+function buildScannedResourceBlocks(
   bot: Bot,
   options: SensorOptions,
   self: SelfState,
   focusItem: string | null,
 ): BlockState[] {
-  if (focusItem === null) return []
-  const sources = ORE_SOURCES[focusItem]
+  const sources = scannedBlockNames(focusItem)
   if (sources === undefined) return []
   const wanted = new Set(sources)
   const radius = Math.max(options.scanRadius, 64)
@@ -919,7 +953,7 @@ function buildBlocks(
       : scanPrerequisiteStone
         ? buildBuriedStoneBlocks(bot, stoneScanOptions, self, null, true)
         : []
-  const ores = buildOreBlocks(bot, options, self, focusItem)
+  const ores = buildScannedResourceBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)
   // Keep the bounded capability envelope ahead of the broad route-planning
   // stone scan. This is not a semantic ranking: `mineCandidates` applies a

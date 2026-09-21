@@ -737,6 +737,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     64,
   )
   const logs = scanBlockPositions(bot, LOG_BLOCK_NAMES, 64, 64)
+  // Obsidian is a non-ore direct drop required by the M2 portal plan
+  // (`collect:obsidian`). Keep it in durable known-resource memory so the
+  // candidate layer's known-coordinate retrieval survives after the block
+  // leaves the live sensor range. It is deliberately NOT added to the `ores`
+  // scan: `discoveredOres` stays `_ore`-only and obsidian carries no
+  // prospecting semantics.
+  const obsidian = scanBlockPositions(bot, ['obsidian'], 64, 32)
   const stationRuntimeLog = (event: string, detail?: Record<string, unknown>): void => ctx.log(event, detail)
   const tableValidation = validateRememberedStations(bot, 'crafting_table', world.craftingTables, tables, now, stationRuntimeLog)
   const furnaceValidation = validateRememberedStations(bot, 'furnace', world.furnaces, furnaces, now, stationRuntimeLog)
@@ -842,6 +849,22 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       x: log.x,
       y: log.y,
       z: log.z,
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
+      lastSeenAt: seenAt,
+    })
+  }
+  for (const block of obsidian) {
+    const name = bot.blockAt(new Vec3(block.x, block.y, block.z))?.name ?? 'obsidian'
+    foundResources.push({
+      name,
+      // The `'ore'` kind is the name-scanned-resource bucket the candidate
+      // layer's known retrieval matches on; producing this entry does not
+      // assert obsidian is an ore (see DIRECT_BLOCK_SOURCES in state.ts).
+      kind: 'ore',
+      x: block.x,
+      y: block.y,
+      z: block.z,
       dimension: ctx.worldKey.dimension,
       worldEpoch: ctx.worldKey.worldEpoch,
       lastSeenAt: seenAt,
