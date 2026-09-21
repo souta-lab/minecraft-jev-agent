@@ -328,6 +328,12 @@ function entryPlan(): PortalEntryPlan {
   const entryGrounded = generateGroundedCandidates(entryState, entryOptions)
   const enter = entryGrounded.candidates.find((candidate) => candidate.kind === 'ENTER_PORTAL')
 
+  const noPathGrounded = generateGroundedCandidates(entryState, {
+    ...entryOptions,
+    reachability: { pathProbe: () => 'no_path' },
+  })
+  const enterNoPath = noPathGrounded.candidates.find((candidate) => candidate.kind === 'ENTER_PORTAL')
+
   const ignitionState = worldState({
     position: { x: ENTER_CELL.x + 0.5, y: ENTER_CELL.y, z: ENTER_CELL.z - 2.5 },
     goalQueue: queueWith(queuedPlace('portal_lit', OVERWORLD)),
@@ -349,14 +355,15 @@ function entryPlan(): PortalEntryPlan {
     fromDimension: OVERWORLD,
     dimension: NETHER,
   })
+
   const refusalGrounded = generateGroundedCandidates(refusalState, {
     ...defaultCandidateOptions,
     reach: 4.5,
     portalEntry: unlitPlan,
   })
-
   const pass =
     enter !== undefined &&
+    enterNoPath !== undefined &&
     enter.kind === 'ENTER_PORTAL' &&
     enter.target !== null &&
     // The locomotion target is the interior cell itself (no bespoke approach).
@@ -372,9 +379,9 @@ function entryPlan(): PortalEntryPlan {
     refusalGrounded.entryRefusal !== null &&
     refusalGrounded.entryRefusal.line === 'PRECONDITION_MISSING portal=lit'
   check(
-    '(4) ENTER_PORTAL targets the interior cell and is offered only for the entry goal',
+    '(4) ENTER_PORTAL remains offered when the ordinary path probe says no_path',
     pass,
-    `enter=${enter?.id ?? 'none'} target=${JSON.stringify(enter?.target)} stray=${strayEnter?.id ?? 'none'} refusal=${refusalGrounded.entryRefusal?.line ?? 'none'}`,
+    `enter=${enter?.id ?? 'none'} noPath=${enterNoPath?.id ?? 'none'} target=${JSON.stringify(enter?.target)} stray=${strayEnter?.id ?? 'none'} refusal=${refusalGrounded.entryRefusal?.line ?? 'none'}`,
   )
 }
 

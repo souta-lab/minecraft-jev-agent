@@ -5562,7 +5562,12 @@ function evaluateCandidate(
 ): CandidateReachability | null {
   const position = candidate.target
   if (position === null || !REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
-  if (candidate.kind === 'MINE') return evaluateMineCandidate(candidate, context)
+  // Portal entry owns a bounded approach phase in the executor. A GoalBlock
+  // probe treats the non-solid portal interior as unpathable and withholds the
+  // only ENTER candidate before that approach can establish a stand beside the
+  // frame. The live lit/standable preconditions remain code-owned in
+  // planPortalEntry; executor verification still requires the dimension change.
+  if (candidate.kind === 'ENTER_PORTAL') return null
   const accessRefusal = digAccessRefusalOf(candidate)
   if (accessRefusal !== null) {
     const target = reachabilityTargetFor(context.state, candidate)
