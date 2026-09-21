@@ -230,6 +230,10 @@ addCase('(a) the milestone report stops advertising iron_ingot', () => {
   const legacyMilestoneReply = (): { goalItem: string; goalCount: number } => ({ goalItem: 'iron_ingot', goalCount: 3 })
   const nether = liveFrontier(LIVE_COUNTS, NETHER_WORLD)
   const entry = liveFrontier(LIVE_COUNTS, PORTAL_LIT_WORLD)
+  // The frontier the live run is on right now (gate unverified again at y=30):
+  // the projection is the obsidian frame work, never the iron seed.
+  const portal = liveFrontier(LIVE_COUNTS, emptyWorldMemory())
+  const portalRoot = compatibilityRootGoal(portal.goals, staticDefault)
   const netherRoot = compatibilityRootGoal(nether.goals, staticDefault)
   const entryRoot = compatibilityRootGoal(entry.goals, staticDefault)
   // The HOST reply: served from the generation's live status, exactly as
@@ -258,6 +262,8 @@ addCase('(a) the milestone report stops advertising iron_ingot', () => {
     netherRoot.goalItem === 'blaze_rod' &&
     netherRoot.goalCount === 7 &&
     entryRoot.goalItem === NETHER_PORTAL &&
+    portalRoot.goalItem === 'obsidian' &&
+    portalRoot.goalCount === 10 &&
     replyItem === 'blaze_rod' &&
     reply.goalCount === 7 &&
     entryItem === NETHER_PORTAL &&
@@ -267,7 +273,7 @@ addCase('(a) the milestone report stops advertising iron_ingot', () => {
     coldReply.goalItem === 'iron_ingot'
   return {
     pass,
-    detail: `nether=${reply.goalItem}:${reply.goalCount} entry=${entryReply.goalItem}:${entryReply.goalCount} coldBoot=${coldReply.goalItem}`,
+    detail: `nether=${reply.goalItem}:${reply.goalCount} entry=${entryReply.goalItem}:${entryReply.goalCount} portal=${portalRoot.goalItem}:${portalRoot.goalCount} coldBoot=${coldReply.goalItem}`,
   }
 })
 
