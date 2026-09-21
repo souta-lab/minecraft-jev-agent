@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -1438,6 +1438,10 @@ export class JevController {
   private lastCandidates: readonly Candidate[] = []
   private lastCandidateSignature = ''
   private lastLogRouteSignature = ''
+  /** Dedupe key for FOOD_LOW/EAT_REFUSED/FOOD_ROUTE so a stable food state is one auditable line. */
+  private lastFoodMarkerSignature = ''
+  /** Food-item counts at the previous decision tick, for FOOD_ACQUIRED; null until the first tick. */
+  private lastFoodCounts: Map<string, number> | null = null
   private lastProgress = 0
   private lastProgressAt = Date.now()
 
@@ -2211,6 +2215,7 @@ export class JevController {
       this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
+      this.logFoodState(candidates, state, groundingOptions)
       this.logLogRoute(candidates)
       this.logFuelSatisfaction(state)
 
@@ -6235,6 +6240,90 @@ export class JevController {
       },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Hunger observability. The eat mechanic itself is deterministic and already
+   * works when food is held; the live failure was a body with `food=0` and no
+   * edible item and no grounded route to one. These markers make each state
+   * greppable:
+   *
+   *   FOOD_LOW food=<n> threshold=<n>            hunger is at/below the eat gate
+   *   EAT_REFUSED reason=full|no_food            why no EAT candidate was offered
+   *   FOOD_ROUTE kind=animal target=<entity>     a grounded hunt route is on offer
+   *   FOOD_ACQUIRED item=<name> count=<n>        a food item count rose this tick
+   *
+   * Deduped by (food, threshold, held food, offered routes) so a stable food
+   * state is one auditable line, matching the LOG_ROUTE convention.
+   */
+  private logFoodState(candidates: readonly Candidate[], state: WorldState, options: CandidateOptions): void {
+    const threshold = options.eatBelowFood
+    const food = state.self.food
+    const held = pickFood(state)
+    const routes = candidates.filter((candidate) => typeof candidate.meta.foodRoute === 'string')
+    const signature = [
+      food,
+      threshold,
+      held ?? 'none',
+      routes
+        .map((candidate) => `${String(candidate.meta.foodRoute)}:${String(candidate.meta.foodTarget)}`)
+        .sort()
+        .join(','),
+    ].join('|')
+    if (signature !== this.lastFoodMarkerSignature) {
+      this.lastFoodMarkerSignature = signature
+      if (food <= threshold) {
+        this.logger.info(
+          'food',
+          `FOOD_LOW food=${food} threshold=${threshold}`,
+          { food, threshold, heldFood: held },
+          this.tickCounter,
+        )
+      }
+      if (held !== null && food > threshold) {
+        this.logger.info(
+          'food',
+          'EAT_REFUSED reason=full',
+          { food, threshold, heldFood: held },
+          this.tickCounter,
+        )
+      }
+      if (held === null && food <= threshold) {
+        this.logger.info('food', 'EAT_REFUSED reason=no_food', { food, threshold }, this.tickCounter)
+      }
+      for (const candidate of routes) {
+        this.logger.info(
+          'food',
+          `FOOD_ROUTE kind=${String(candidate.meta.foodRoute)} target=${String(candidate.meta.foodTarget)}`,
+          {
+            candidate: candidate.id,
+            kind: candidate.meta.foodRoute,
+            target: candidate.meta.foodTarget,
+            distance: candidate.meta.distance ?? null,
+          },
+          this.tickCounter,
+        )
+      }
+    }
+
+    // FOOD_ACQUIRED is an inventory delta, not a route fact. The first observed
+    // tick only seeds the baseline; a pre-existing stack is not an acquisition.
+    const current = new Map<string, number>()
+    for (const [name, count] of Object.entries(state.inventory.counts)) {
+      if (!isFoodItem(name)) continue
+      current.set(name, count)
+      if (this.lastFoodCounts === null) continue
+      const previous = this.lastFoodCounts.get(name) ?? 0
+      if (count > previous) {
+        this.logger.info(
+          'food',
+          `FOOD_ACQUIRED item=${name} count=${count}`,
+          { item: name, count, previous },
+          this.tickCounter,
+        )
+      }
+    }
+    this.lastFoodCounts = current
   }
 
   /**
