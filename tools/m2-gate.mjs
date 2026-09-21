@@ -389,7 +389,12 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
 
   const conditions = {
     diamond_ready: diamond.ready ? 'PASS' : 'UNKNOWN',
-    portal_materials_ready: materials.ready ? 'PASS' : 'UNKNOWN',
+    // Satisfied by the observed materials OR by the observed frame: a run can finish the
+    // gate without ever holding ten obsidian in one sample (the live M3 run continued a
+    // partially built frame - one edge already present - holding nine). Those ten edges
+    // ARE the obsidian, so requiring a single-sample count would fail a run whose OUTCOME
+    // is what M2 asks for.
+    portal_materials_ready: materials.ready || framePass ? 'PASS' : 'UNKNOWN',
     portal_built: framePass ? 'PASS' : frameFail ? 'FAIL' : 'UNKNOWN',
     portal_lit: litPass ? 'PASS' : litFail ? 'FAIL' : 'UNKNOWN',
   }

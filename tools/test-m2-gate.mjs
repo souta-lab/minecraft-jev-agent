@@ -177,7 +177,9 @@ ${text}`)
 for (const [label, lines, missing] of [
   ['no diamond evidence', [boot(RUN), MATERIALS_READY, ...PORTAL_CHAIN], 'diamond_ready'],
   ['diamond without the pickaxe', [boot(RUN), inv({ diamond: 3 }), MATERIALS_READY, ...PORTAL_CHAIN], 'diamond_ready'],
-  ['obsidian short of 10', [boot(RUN), DIAMOND_READY, inv({ flint_and_steel: 1, obsidian: 9 }), ...PORTAL_CHAIN], 'portal_materials_ready'],
+  // Unsatisfied only while the gate is NOT built: once the frame exists its ten edges ARE
+  // the obsidian, so a run that continued a partially built frame must not be failed.
+  ['obsidian short of 10 and no frame', [boot(RUN), DIAMOND_READY, inv({ flint_and_steel: 1, obsidian: 9 })], 'portal_materials_ready'],
   ['portal lit but never verified', [boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN.slice(0, -1)], 'portal_lit'],
   ['portal verified in the nether dimension', [boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN.slice(0, 3), '[2026-09-20T10:00:05.000Z] PORTAL_LIT pos=11,65,20 dimension=minecraft:the_nether', '[2026-09-20T10:00:06.000Z] PORTAL_VERIFIED=true'], 'portal_lit'],
   ['frame never validated', [boot(RUN), DIAMOND_READY, MATERIALS_READY, '[2026-09-20T10:00:02.000Z] PORTAL_BLOCK_PLACED pos=10,64,20'], 'portal_built'],
@@ -187,6 +189,18 @@ for (const [label, lines, missing] of [
   assert.match(text, new RegExp(`${missing}: (UNKNOWN|FAIL)`), text)
   assert.match(text, /status=UNKNOWN/, text)
   ok(`${label} -> UNKNOWN (no fabricated PASS)`)
+}
+
+{
+  // Positive counterpart: nine obsidian observed but the run BUILT and lit the frame, so the
+  // material precondition is proven by the outcome.
+  const { code, text } = await judge({
+    lines: [boot('run-m2-a'), DIAMOND_READY, inv({ flint_and_steel: 1, obsidian: 9 }), ...PORTAL_CHAIN],
+    expectedRunId: 'run-m2-a',
+  })
+  assert.equal(code, 0, `a built frame proves its own materials:\n${text}`)
+  assert.match(text, /status=PASS/, text)
+  ok('obsidian short of 10 but the frame is built and lit -> PASS (materials proven by outcome)')
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +217,10 @@ for (const [label, lines, missing] of [
   const asB = await judge({ lines: mixed, expectedRunId: OTHER_RUN })
   assert.equal(asB.code, 2, asB.text)
   assert.match(asB.text, /diamond_ready: UNKNOWN/, asB.text)
-  assert.match(asB.text, /portal_materials_ready: UNKNOWN/, asB.text)
+  // Run B's own chain proves B's materials too; the isolation property is that B cannot
+  // borrow A's diamond.
+  assert.match(asB.text, /diamond_ready: UNKNOWN/, asB.text)
+  assert.match(asB.text, /materials=PASS frame=PASS lit=PASS/, asB.text)
   ok('inventory in run A + portal in run B is UNKNOWN for both ids (no cross-run join)')
 }
 

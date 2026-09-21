@@ -311,13 +311,21 @@ export function derivePaths(root, overrides = {}) {
     logPath: overrides.logPath ?? join(root, 'buddy-driver', 'buddy.log'),
     snapshotDir: overrides.snapshotDir ?? acceptanceDir,
     decisionsPath: overrides.decisionsPath ?? join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'),
-    runnerOutPath: overrides.runnerOutPath ?? join(root, 'buddy-driver', 'runner.out'),
+    // A worktree resident logs to buddy.log with no runner.out; the gates already fall
+    // back to it, so read the authority fields from the stream that actually exists.
+    runnerOutPath:
+      overrides.runnerOutPath ??
+      firstExistingPath([
+        join(root, 'buddy-driver', 'runner.out'),
+        join(root, 'buddy-driver', 'buddy.log'),
+      ]),
     controlSocketPath:
       overrides.controlSocketPath === null
         ? null
         : overrides.controlSocketPath ?? join(root, 'buddy-driver', 'data', 'resident', 'control.sock'),
     acceptanceDir,
     serverProperties: overrides.serverProperties ?? null,
+    environment: overrides.environment ?? null,
   }
 }
 
@@ -459,7 +467,19 @@ export function coercePropertyValue(raw) {
   return raw
 }
 
-function composeEnvironment({ observations, dimensions, serverProperties }) {
+export function readEnvironmentFile(path) {
+  if (typeof path !== 'string' || !existsSync(path)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const values = parsed?.values ?? parsed
+    if (!isPlainObject(values)) return null
+    return { path, mtime: statSync(path).mtime.toISOString(), values }
+  } catch {
+    return null
+  }
+}
+
+function composeEnvironment({ observations, dimensions, serverProperties, environmentFile = null }) {
   const logFacts = { difficulty: null, mobSpawning: null, spawnAnimals: null, gamerules: null }
   for (const observation of Array.isArray(observations) ? observations : []) {
     for (const key of Object.keys(logFacts)) {
@@ -468,6 +488,14 @@ function composeEnvironment({ observations, dimensions, serverProperties }) {
   }
   const fromLog = (key) =>
     logFacts[key] === null ? null : { value: logFacts[key].value, source: 'log', runScoped: true, at: logFacts[key].at }
+  const envValues = environmentFile?.values ?? null
+  // Operator-recorded environment facts (console-verified gamerules). Mineflayer cannot
+  // read gamerules, so the honest source is the command plus the console confirmation;
+  // labelled runScoped:false, below run-scoped log facts and above server.properties.
+  const fromEnv = (key) => {
+    if (envValues === null || envValues[key] === undefined) return null
+    return { value: envValues[key], source: environmentFile.path, runScoped: false, at: environmentFile.mtime }
+  }
   const props = serverProperties?.values ?? null
   const fromProps = (key) => {
     if (props === null || props[key] === undefined) return null
@@ -475,10 +503,14 @@ function composeEnvironment({ observations, dimensions, serverProperties }) {
   }
   const observedDimensions = [...new Set((dimensions ?? []).map((entry) => entry.dimension))]
   return {
-    difficulty: fromLog('difficulty') ?? fromProps('difficulty'),
-    mobSpawning: fromLog('mobSpawning') ?? fromProps('spawn-monsters'),
-    spawnAnimals: fromLog('spawnAnimals') ?? fromProps('spawn-animals'),
-    gamerules: fromLog('gamerules'),
+    difficulty: fromLog('difficulty') ?? fromEnv('difficulty') ?? fromProps('difficulty'),
+    mobSpawning: fromLog('mobSpawning') ?? fromEnv('mobSpawning') ?? fromProps('spawn-monsters'),
+    spawnAnimals: fromLog('spawnAnimals') ?? fromEnv('spawnAnimals') ?? fromProps('spawn-animals'),
+    gamerules: fromLog('gamerules') ?? fromEnv('gamerules'),
+    environmentFile:
+      environmentFile === null
+        ? null
+        : { path: environmentFile.path, mtime: environmentFile.mtime, runScoped: false, values: environmentFile.values },
     dimensions: {
       count: (dimensions ?? []).length,
       observed: observedDimensions,
@@ -487,6 +519,11 @@ function composeEnvironment({ observations, dimensions, serverProperties }) {
     },
     serverProperties: serverProperties === null ? null : { path: serverProperties.path, mtime: serverProperties.mtime, runScoped: false, values: serverProperties.values },
   }
+}
+
+function firstExistingPath(candidates) {
+  for (const candidate of candidates) if (existsSync(candidate)) return candidate
+  return candidates[0] ?? null
 }
 
 /**
@@ -776,6 +813,7 @@ export async function buildRunArtifact({
     observations: attribution.environmentObservations,
     dimensions: attribution.dimensionObservations,
     serverProperties,
+    environmentFile: readEnvironmentFile(paths.environment),
   })
   if (environment.difficulty === null) missing.push('environment.difficulty')
   if (environment.mobSpawning === null) missing.push('environment.mobSpawning')
@@ -914,6 +952,7 @@ export function parseArgs(argv) {
     else if (arg === '--no-control-socket') out.overrides.controlSocketPath = null
     else if (arg === '--acceptance-dir') out.overrides.acceptanceDir = argv[++i] ?? null
     else if (arg === '--server-properties') out.overrides.serverProperties = argv[++i] ?? null
+    else if (arg === '--environment') out.overrides.environment = argv[++i] ?? null
     else throw new Error(`unknown argument: ${arg}`)
   }
   return out
@@ -943,6 +982,7 @@ export function usage() {
     '  --no-control-socket      never query the resident control socket',
     '  --acceptance-dir <path>  override the acceptance-<runId>.json directory',
     '  --server-properties <p>  read difficulty/spawn-monsters from a server.properties (labelled NOT run-scoped)',
+    '  --environment <p>        read operator-recorded environment facts (difficulty/gamerules JSON, labelled NOT run-scoped)',
     '',
     'Exit codes: 0 complete + both gates PASS; 1 a gate FAILs; 2 UNKNOWN/missing evidence/usage error.',
     '',
