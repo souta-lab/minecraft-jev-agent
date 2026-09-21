@@ -69,7 +69,7 @@ import type { GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -755,6 +755,25 @@ export function decideRetrieveMemory(
  * preserved. An empty queue (fresh bootstrap) keeps the requested op unchanged,
  * and an explicit `abort` is never overridden.
  */
+/**
+ * Pure decision behind the orphaned-smelt prerequisite retirement. A
+ * `smelt:iron_ingot` row exists only to feed a craft that consumes the ingot, so
+ * it is obsolete once that craft's product is held (`held`) and nothing live
+ * wants an iron ingot (`stillWanted`). Returns the audit reason, or null to keep
+ * the normal #55 protection. Exported so the decision is fixture-testable
+ * without a bot.
+ */
+export function orphanedSmeltPrerequisiteReason(input: {
+  kind: string
+  item: string | null
+  held: number
+  stillWanted: boolean
+}): string | null {
+  if (input.kind !== 'smelt' || input.item !== IRON_INGOT) return null
+  if (input.stillWanted || input.held < 1) return null
+  return `orphaned smelt prerequisite: ${FLINT_AND_STEEL}=${input.held} and no live row or incoming goal requires ${IRON_INGOT}`
+}
+
 export function resolveBootstrapPlanOp(queue: GoalQueue, requested: PlanOp | undefined): PlanOp {
   const op = requested ?? 'replace'
   if (op === 'replace' && queue.current !== null) return 'continue'
@@ -4524,12 +4543,38 @@ export class JevController {
   }
 
   /**
-   * Retire only the stale obsidian acquisition prerequisite that a live partial
-   * frame has already made unnecessary. This is a world-truth/lifecycle
-   * reconciliation, not a semantic preference: every other protected goal keeps
-   * the normal #55 reinsertion guarantee.
+   * Retire a stale protected prerequisite that world truth has already made
+   * unnecessary. This is a world-truth/lifecycle reconciliation, not a semantic
+   * preference: every other protected goal keeps the normal #55 reinsertion
+   * guarantee.
    */
   private protectedGoalRetireReason(goal: QueuedGoal, incoming: readonly PlannedGoal[]): string | null {
+    // An `smelt:iron_ingot` row exists only to feed a craft that consumes the
+    // ingot. Once that craft is resolved — the bot holds the flint_and_steel it
+    // produced — and nothing live still wants an iron ingot, the row can only
+    // re-run a smelt with no consumer, while its own station precondition (a
+    // furnace) blocks the queue head indefinitely. Observed live: the queue head
+    // was `smelt 1 x iron_ingot` with
+    // `CANDIDATE_STARVATION blockedBy=precondition:station:furnace repeat=36`
+    // while the real next step, `collect 10 x obsidian`, sat behind it.
+    if (goal.kind === 'smelt' && goal.targetItem === IRON_INGOT) {
+      const stillWanted =
+        incoming.some((planned) => planned.targetItem === IRON_INGOT) ||
+        this.queue.state.goals.some(
+          (row) =>
+            row.id !== goal.id &&
+            row.status !== 'done' &&
+            row.status !== 'impossible' &&
+            row.targetItem === IRON_INGOT,
+        )
+      const reason = orphanedSmeltPrerequisiteReason({
+        kind: goal.kind,
+        item: goal.targetItem,
+        held: this.countItem(FLINT_AND_STEEL),
+        stillWanted,
+      })
+      if (reason !== null) return reason
+    }
     if (goal.kind !== 'collect' || goal.targetItem !== OBSIDIAN) return null
     const continuesPortalFrame = incoming.some(
       (planned) =>
