@@ -106,6 +106,13 @@ function worldState(overrides: {
   signals?: AgentSignals
   furnaces?: StationEntry[]
   placementSpots?: Vec3Json[]
+  /**
+   * The subset of `placementSpots` whose only body access is a fluid column
+   * (the sensor's `submergedPlacementSpots`). Absent = none known.
+   */
+  submergedPlacementSpots?: Vec3Json[]
+  /** Body facts (breath / water cells) for the submersion safety cases. */
+  selfFacts?: Partial<SelfState>
   position?: Vec3Json
   craftingTables?: StationEntry[]
   descent?: DescentOption[]
@@ -133,7 +140,7 @@ function worldState(overrides: {
     schemaVersion: 1,
     tick: 7,
     timestampMs: 1_700_000_000_000,
-    self: self(overrides.position ?? { x: 29, y: 61, z: 35 }),
+    self: { ...self(overrides.position ?? { x: 29, y: 61, z: 35 }), ...(overrides.selfFacts ?? {}) },
     inventory: overrides.inventory ?? inventory({}),
     entities: [],
     blocks: [] as BlockState[],
@@ -141,6 +148,7 @@ function worldState(overrides: {
     craftingTables: overrides.craftingTables ?? [],
     furnaces: overrides.furnaces ?? [],
     placementSpots: overrides.placementSpots ?? [],
+    submergedPlacementSpots: overrides.submergedPlacementSpots ?? [],
     descent: overrides.descent ?? [],
     goal: smeltGoal(),
     goalQueue: {
@@ -895,6 +903,92 @@ addCase('(b2) the candidate generator refuses a retired placement item', () => {
   )
   const pass = retired === undefined
   return { pass, detail: `retiredPlace=${retired?.id ?? 'none'}` }
+})
+
+// --- (a3) SAFE: never place the station from a submerged body position -------
+// OPERATOR REPORT 2026-09-21: the agent built underwater and drowned (DEATH
+// pos=67.5,58.3,28.5 cause=water 16:59:34.792Z). A station must not be placed
+// into a cell whose body position is submerged when a dry alternative exists, so
+// the generator offers the dry spot INSTEAD of the wet one.
+
+addCase('(a3) a submerged body is offered the dry placement spot, never the wet one', () => {
+  const wet: Vec3Json = { x: 30, y: 61, z: 35 }
+  const dry: Vec3Json = { x: 32, y: 61, z: 35 }
+  const submerged = worldState({
+    inventory: heldFurnaceInventory,
+    placementSpots: [wet, dry],
+    submergedPlacementSpots: [wet],
+    selfFacts: { air: 18, feetInWater: true, eyesInWater: true },
+  })
+  const place = generateCandidates(submerged, defaultCandidateOptions).find((entry) => entry.kind === 'PLACE')
+  const dryOnly = generateCandidates(
+    worldState({ inventory: heldFurnaceInventory, placementSpots: [dry] }),
+    defaultCandidateOptions,
+  ).find((entry) => entry.kind === 'PLACE')
+  const pass =
+    place !== undefined &&
+    place.target?.x === dry.x &&
+    place.target?.z === dry.z &&
+    place.id !== `PLACE:furnace:p${wet.x}_${wet.y}_${wet.z}` &&
+    dryOnly !== undefined &&
+    dryOnly.target?.x === dry.x
+  return {
+    pass,
+    detail: `wet=${wet.x},${wet.y},${wet.z} dry=${dry.x},${dry.y},${dry.z} chosen=${place?.id ?? 'none'} dryOnly=${dryOnly?.id ?? 'none'}`,
+  }
+})
+
+addCase('(a3) with no dry alternative the historical spots are kept (no silent erasure)', () => {
+  const wet: Vec3Json = { x: 30, y: 61, z: 35 }
+  const onlyWet = worldState({
+    inventory: heldFurnaceInventory,
+    placementSpots: [wet],
+    submergedPlacementSpots: [wet],
+    selfFacts: { air: 18, feetInWater: true, eyesInWater: true },
+  })
+  const place = generateCandidates(onlyWet, defaultCandidateOptions).find((entry) => entry.kind === 'PLACE')
+  const pass = place !== undefined && place.target?.x === wet.x
+  return { pass, detail: `chosen=${place?.id ?? 'none'}` }
+})
+
+// --- (b3) the FURNACE path retires on the same bound, with one typed marker --
+// Live 2026-09-21T16:30:41.791Z (gen-mubgihtb-0p7plw): `PLACE:furnace:p57_59_-3`
+// reached `count=10 limit=5 reason=unknown_event`. The bound now owns this path
+// too: the ordinal clamps at 6, ONE typed marker names the retirement, and the
+// generator refuses the retired family afterwards. The typed reason is the real
+// measured cause (`place_refused`: mineflayer's "Server refused to place furnace
+// at (57, 59, -3): the block is still air"), not `unknown_event`.
+
+addCase('(b3) the furnace place family retires once, typed, and is refused afterwards', () => {
+  const at: Vec3Json = { x: 57, y: 59, z: -3 }
+  const actionId = 'PLACE:furnace:p57_59_-3'
+  const ledger = new PlaceRetryLedger()
+  const lines: string[] = []
+  const reasons: string[] = []
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const outcome = ledger.noteFailure({ item: 'furnace', actionId, at, reason: 'place_refused' })
+    reasons.push(outcome.retry ? 'retry' : 'retired')
+    if (outcome.exhaustedLine !== null) lines.push(outcome.exhaustedLine)
+  }
+  const spots: Vec3Json[] = [{ x: 57, y: 59, z: -3 }, { x: 58, y: 59, z: -3 }]
+  const live = worldState({ inventory: heldFurnaceInventory, placementSpots: spots })
+  const before = generateCandidates(live, { ...defaultCandidateOptions, retiredPlaceItems: ledger.retiredItemSet() }).find(
+    (entry) => entry.kind === 'PLACE',
+  )
+  const pass =
+    reasons.filter((entry) => entry === 'retry').length === PLACE_RETRY_LIMIT &&
+    lines.length === 1 &&
+    lines[0] ===
+      `${PLACE_RETRIES_EXHAUSTED} at=57,59,-3 item=furnace count=6/5 actionId=${actionId} reason=place_refused -> retire candidate` &&
+    ledger.isItemRetired('furnace') === true &&
+    ledger.isActionRetired(actionId) === true &&
+    ledger.anyExhausted() === true &&
+    MIRRORED_MARKERS.has(PLACE_RETRIES_EXHAUSTED) &&
+    before === undefined
+  return {
+    pass,
+    detail: `retries=${reasons.filter((entry) => entry === 'retry').length} lines=${lines.length} retired=${ledger.isItemRetired('furnace')} offered=${before?.id ?? 'none'} line=${lines[0]}`,
+  }
 })
 
 // --- (c) one-line abandon reason --------------------------------------------
