@@ -1503,8 +1503,14 @@ setInterval(() => {
     // Frontier advance, NOT completion: `status.rungId` is the first UNSATISFIED
     // rung, so labelling it `done=true` claimed a rung was complete while its
     // items were still absent (observed live: `MILESTONE name=ender_pearls
-    // done=true` with zero ender_pearl). The generation's own emitMilestones()
-    // logs the truthful `done=true` for the rung it has just advanced past.
+    // done=true` with zero ender_pearl). This HOST marker stays frontier
+    // telemetry. Completion claims come from the planner's milestone evidence
+    // stream (#392), which records `done=true` only when the rung's OWN predicate
+    // holds at that observation (`reason=predicate_satisfied`); otherwise it
+    // records the typed `reason=frontier_advanced_without_predicate` /
+    // `frontier_regressed_without_predicate` with the rung's own facts. Since
+    // #392 that stream is on the planner side, so this marker needs no
+    // compensation and must not be read as a completion.
     log('MILESTONE', { name: status.rungId, frontier: true, index: status.rungIndex, queueDone: status.queue.done, inventory: shortInv(truth.inventory) })
     saveState('milestone')
   }

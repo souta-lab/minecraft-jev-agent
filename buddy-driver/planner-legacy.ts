@@ -1300,6 +1300,150 @@ export function rungIndexById(id: string): number {
   return RUNGS.findIndex((rung) => rung.id === id)
 }
 
+// ---------------------------------------------------------------------------
+// #392 milestone evidence: frontier motion is telemetry, never completion
+// ---------------------------------------------------------------------------
+
+/**
+ * How a MILESTONE record was produced. `predicate_satisfied` is the ONLY reason
+ * that may carry `done=true`: the rung's own `satisfied(counts, world)` held at
+ * the observed moment. Every other reason is a typed statement that the frontier
+ * moved without proof for THAT rung's own outcome. Issue #392: the previous
+ * producer inferred `done=true` from `frontier.rungId !== lastMilestoneId` alone,
+ * so a rung could be recorded complete with zero evidence for its own predicate
+ * (live example: `done=true` while `ender_pearl = 0`), including on a frontier
+ * regression or a multi-rung jump.
+ */
+export type MilestoneReason =
+  | 'predicate_satisfied'
+  | 'frontier_advanced_without_predicate'
+  | 'frontier_regressed_without_predicate'
+  | 'frontier'
+
+export interface MilestoneRecord {
+  name: string
+  done: boolean
+  reason: MilestoneReason
+  /** true only for the first-unsatisfied-rung telemetry record, never a completion. */
+  frontier: boolean
+  /** the observations the rung's own predicate reads, recorded with the verdict. */
+  facts: Record<string, unknown>
+}
+
+export interface MilestoneStreamState {
+  /** the frontier id this stream last reported; null before the first evaluation. */
+  frontierId: string | null
+  /** rung id -> the strongest evidence already recorded for it in this stream. */
+  recorded: Record<string, 'done' | 'unproven'>
+}
+
+export function emptyMilestoneStream(): MilestoneStreamState {
+  return { frontierId: null, recorded: {} }
+}
+
+/**
+ * The rung's own observable facts: the targets its own goals name, the live
+ * counts behind them, and the world/inventory observations the ladder predicates
+ * read (`dimension`, `portalVerified`, pickaxe rank). Generic by construction --
+ * no rung is special-cased, the facts come from the rung's own declared goals.
+ */
+export function milestoneFacts(rung: Rung, counts: Counts, world: ResidentWorldMemory): Record<string, unknown> {
+  return {
+    predicate: rung.satisfied(counts, world),
+    goals: rung.goals(counts, world).map((goal) => ({
+      kind: goal.kind,
+      target: goal.targetItem ?? null,
+      required: goal.requiredCount,
+      have: goal.targetItem === null || goal.targetItem === undefined ? null : countResource(counts, goal.targetItem),
+    })),
+    dimension: world.dimension ?? null,
+    portalVerified: world.portalVerified === true,
+    pickaxeRank: bestPickaxeRank(counts),
+  }
+}
+
+function milestoneRecord(
+  rung: Rung | null,
+  name: string,
+  done: boolean,
+  reason: MilestoneReason,
+  frontier: boolean,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): MilestoneRecord {
+  return {
+    name,
+    done,
+    reason,
+    frontier,
+    facts: rung === null ? { predicate: false } : milestoneFacts(rung, counts, world),
+  }
+}
+
+/**
+ * Advance the milestone evidence stream by one observation (#392).
+ *
+ * A rung's `done=true` is emitted ONLY when that rung's own
+ * `satisfied(counts, world)` predicate holds in this observation:
+ *
+ * - every mandatory rung the frontier is already past is (re)checked against its
+ *   own predicate; a predicate that holds is recorded once as a verified
+ *   attainment, a predicate that does not hold is recorded once as the typed
+ *   `frontier_advanced_without_predicate` non-completion with the rung's facts.
+ *   This covers capability-closure rungs (a diamond pickaxe puts the iron age
+ *   "behind" the frontier while `charcoal`/`cobblestone` predicates are false)
+ *   and multi-rung jumps (every crossed rung is verified individually);
+ * - the rung the frontier leaves on a regression is reported as
+ *   `frontier_regressed_without_predicate`; its predicate is false by
+ *   construction because it is no longer behind the frontier;
+ * - the current first-unsatisfied rung is emitted as frontier telemetry
+ *   (`reason=frontier`, `done=false`), which is a pointer, not a verdict.
+ *
+ * Pure: the returned state replaces the input; nothing here inspects planner
+ * control flow other than the frontier transition itself.
+ */
+export function advanceMilestones(
+  state: MilestoneStreamState,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): { records: MilestoneRecord[]; state: MilestoneStreamState } {
+  const frontier = computeFrontier(counts, world)
+  const records: MilestoneRecord[] = []
+  const recorded: Record<string, 'done' | 'unproven'> = { ...state.recorded }
+
+  for (let i = 0; i < frontier.rungIndex; i += 1) {
+    const rung = RUNGS[i]
+    if (rung === undefined || !isMandatoryRung(rung)) continue
+    if (recorded[rung.id] === 'done') continue
+    if (rung.satisfied(counts, world)) {
+      records.push(milestoneRecord(rung, rung.id, true, 'predicate_satisfied', false, counts, world))
+      recorded[rung.id] = 'done'
+      continue
+    }
+    if (recorded[rung.id] === 'unproven') continue
+    records.push(milestoneRecord(rung, rung.id, false, 'frontier_advanced_without_predicate', false, counts, world))
+    recorded[rung.id] = 'unproven'
+  }
+
+  if (frontier.rungId !== state.frontierId) {
+    const previousIndex = state.frontierId === null ? -1 : rungIndexById(state.frontierId)
+    const previous = previousIndex >= 0 ? RUNGS[previousIndex] : undefined
+    if (previous !== undefined && previousIndex >= frontier.rungIndex) {
+      if (previous.satisfied(counts, world)) {
+        if (recorded[previous.id] !== 'done') {
+          records.push(milestoneRecord(previous, previous.id, true, 'predicate_satisfied', false, counts, world))
+          recorded[previous.id] = 'done'
+        }
+      } else {
+        records.push(milestoneRecord(previous, previous.id, false, 'frontier_regressed_without_predicate', false, counts, world))
+      }
+    }
+    records.push(milestoneRecord(RUNGS[frontier.rungIndex] ?? null, frontier.rungId, false, 'frontier', true, counts, world))
+  }
+
+  return { records, state: { frontierId: frontier.rungId, recorded } }
+}
+
 export interface RungSourceOfTruth {
   plannerRungId: string
   plannerRungIndex: number
@@ -2183,7 +2327,8 @@ export class PlannerBrain implements System2Brain {
   private cache: PlannerCacheFile
   private calls = 0
   private firstCall = true
-  private lastMilestoneId: string | null = null
+  /** #392: predicate-backed milestone evidence; the frontier id alone proves nothing. */
+  private milestones: MilestoneStreamState = emptyMilestoneStream()
   private readonly advisor: Advisor | undefined
   private readonly mercury: MercurySystem2 | undefined
   private readonly postDeathRecovery: boolean
@@ -2725,12 +2870,16 @@ export class PlannerBrain implements System2Brain {
     })
   }
 
+  /**
+   * #392: emit the milestone evidence stream. `done=true` is produced only by
+   * `advanceMilestones()`, which consults the rung's OWN predicate at the moment
+   * of the observation; a frontier transition on its own is telemetry
+   * (`reason=frontier`, `done=false`) and can never be read as a completion.
+   */
   private emitMilestones(counts: Counts): void {
-    const frontier = computeFrontier(counts, this.world)
-    if (frontier.rungId === this.lastMilestoneId) return
-    if (this.lastMilestoneId !== null) this.log('MILESTONE', { name: this.lastMilestoneId, done: true })
-    this.log('MILESTONE', { name: frontier.rungId, done: false })
-    this.lastMilestoneId = frontier.rungId
+    const advanced = advanceMilestones(this.milestones, counts, this.world)
+    this.milestones = advanced.state
+    for (const record of advanced.records) this.log('MILESTONE', { ...record })
   }
 
   private placedFurnacesNear(): number {
