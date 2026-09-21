@@ -1931,6 +1931,8 @@ export class PlannerBrain implements System2Brain {
   private readonly bot: Bot
   /** Live world-truth refresh (dimension / portal verdict) injected by the host. */
   private readonly refreshLiveFacts?: () => void
+  /** dedupe for the PLAN_REASON diagnosis (#359) */
+  private lastLoggedPlanReason: string | null = null
   /** last drained-queue semantic consultation (bounded by EMPTY_QUEUE_CONSULT_COOLDOWN_MS) */
   private lastEmptyQueueConsultMs = 0
   private readonly world: ResidentWorldMemory
@@ -2038,6 +2040,13 @@ export class PlannerBrain implements System2Brain {
 
     const waitStreak = trailingWaitStreak(request.recentOutcomes)
     const stalled = waitStreak >= 3
+    {
+      const reasonValue = String(reason)
+      if (this.lastLoggedPlanReason !== reasonValue) {
+        this.lastLoggedPlanReason = reasonValue
+        this.log('PLAN_REASON', { reason: reasonValue })
+      }
+    }
     const emptyQueueConsultDue =
       reason !== 'queue_empty' || Date.now() - this.lastEmptyQueueConsultMs >= EMPTY_QUEUE_CONSULT_COOLDOWN_MS
     const adviseReason =
