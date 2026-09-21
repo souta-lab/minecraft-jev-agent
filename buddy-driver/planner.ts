@@ -323,9 +323,6 @@ export class PlannerBrain implements System2Brain {
   }
 
   private groundedOptions(request: System2PlanRequest): PlanOption[] {
-    // Observability probe (#359): reuse an ALREADY-ALLOWLISTED marker name so the
-    // value survives whatever filtering drops the newly-invented names.
-    this.log('WAIT_LIMIT', { n: 0, strategy: `plan-reason:${String(request.reason)}`, probe: true })
     const counts = inventoryCounts(this.bot)
     const planningWorld = augmentPlannerWorldWithLiveStations(this.bot, this.world)
     const rung = resolveRungSourceOfTruth(counts, planningWorld, this.log)
@@ -467,6 +464,11 @@ export class PlannerBrain implements System2Brain {
       provider: this.provider,
       model: this.authorityModel,
       reason: request.reason,
+      // #359: record the trigger decision on this already-visible line. Newly invented
+      // marker names are dropped by the log path's filter, so the drained-queue
+      // question ("did mercuryTriggerFor map it, and did the guard suppress it?") could
+      // not be answered from the logs at all.
+      mercuryTrigger: String(mercuryTrigger ?? 'none'),
       optionIds: options.map((option) => option.id),
       capabilityGap: parseCapabilityGap(request.recentEvents),
     })
