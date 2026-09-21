@@ -29,8 +29,8 @@
     },
     "M4": {
       "title": "Ender Dragon",
-      "requires": ["blaze_rod>=7", "eye_of_ender>=12", "stronghold_reached", "end_portal_verified", "dimension=minecraft:the_end", "dragon_killed_verified"],
-      "evaluator": { "type": "manual", "reason": "M4 is the Ender Dragon milestone: reaching and killing the dragon in minecraft:the_end. The listed prerequisites are the path (Nether -> blaze rods -> eyes of ender -> stronghold -> end portal). No run-scoped M4 artifact gate is wired yet." }
+      "requires": ["blaze_rod>=7", "ender_eye>=12", "stronghold_reached", "end_portal_verified", "dimension=minecraft:the_end", "dragon_killed_verified"],
+      "evaluator": { "type": "manual", "reason": "M4 is the Ender Dragon milestone: reaching and killing the dragon in minecraft:the_end. The listed prerequisites are the path (Nether -> blaze rods -> ender_eye (Eye of Ender) -> stronghold -> end portal). The item id is ender_eye; eye_of_ender is the thrown projectile entity, not an item. No run-scoped M4 artifact gate is wired yet." }
     }
   }
 }

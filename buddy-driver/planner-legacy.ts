@@ -443,10 +443,10 @@ export const RUNGS: readonly Rung[] = [
     goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
   },
   {
-    id: 'eyes_of_ender',
+    id: 'ender_eyes',
     future: true,
-    satisfied: (c) => (c['eye_of_ender'] ?? 0) >= 12,
-    goals: () => [{ kind: 'craft', description: 'craft 12 x eye_of_ender', targetItem: 'eye_of_ender', requiredCount: 12 }],
+    satisfied: (c) => (c['ender_eye'] ?? 0) >= 12,
+    goals: () => [{ kind: 'craft', description: 'craft 12 x ender_eye', targetItem: 'ender_eye', requiredCount: 12 }],
   },
   {
     id: 'stronghold',
