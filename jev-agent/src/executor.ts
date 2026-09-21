@@ -21,7 +21,7 @@ import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, isBreakableSolidBlock } from './state.ts'
+import { PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, resolveBlockHarvest, toVec3 } from './state.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
@@ -5473,8 +5473,10 @@ export class Executor {
   }
 
   private passableAt(x: number, y: number, z: number): boolean {
-    const block = this.bot.blockAt(this.bot.entity.position.clone().set(x, y, z))
-    return block === null || block.boundingBox === 'empty'
+    // #382: delegate to the sensor's fail-closed rule instead of keeping a second,
+    // opposite one. `null` (unloaded/unknown) must not be passable.
+    const block = this.bot.blockAt(this.bot.entity.position.clone().set(x, y, z)) as { boundingBox: string } | null
+    return isPassable(block)
   }
 
   /**

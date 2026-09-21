@@ -700,7 +700,14 @@ export function distance(a: Vec3Json, b: Vec3Json): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 }
 
-function isPassable(block: { boundingBox: string } | null): boolean {
+/**
+ * #382: the ONE passability rule, shared with the executor. Fail closed: `null` is an
+ * UNLOADED cell (Mineflayer returns null for unknown points), not an empty one, so an
+ * unknown cell is never proven passable. The executor previously had its own rule with
+ * the opposite semantics, which let a body step into space the world model had never
+ * observed and manufactured clear-headroom/pillar/step affordances from missing data.
+ */
+export function isPassable(block: { boundingBox: string } | null): boolean {
   // lava/water have an "empty" bounding box, so passability alone is not
   // enough for a standable spot - the support check below excludes liquids.
   return block !== null && block.boundingBox === 'empty'
