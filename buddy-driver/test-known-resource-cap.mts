@@ -162,12 +162,15 @@ addCase('capacity churn preserves a singleton obsidian route while redundant loc
 
 // --- (e) legacy entries without lastSeenAt -------------------------------------
 
-addCase('a lastSeenAt-less redundant legacy cell is evicted first, but its identity keeps one anchor', () => {
+addCase('a legacy no-timestamp cell in the ABUNDANT class is evicted first, and the rare class keeps its anchor', () => {
   const store: KnownResourceJson[] = []
-  for (let index = 0; index < KNOWN_RESOURCE_CAP - 2; index += 1) {
+  for (let index = 0; index < KNOWN_RESOURCE_CAP - 3; index += 1) {
     store.push(cell('coal_ore', index, 30, 0, { lastSeenAt: T0 + index }))
   }
   // Legacy durable JSON predates the bookkeeping field: no lastSeenAt at all.
+  // It sits inside the ABUNDANT class, so it is the preferred victim (treated as
+  // the oldest there) while the rare singleton below is never touched.
+  store.push({ name: 'coal_ore', kind: 'ore', x: 555, y: 30, z: 0, dimension: DIM, worldEpoch: EPOCH })
   store.push({ name: 'oak_log', kind: 'log', x: 777, y: 70, z: 777, dimension: DIM, worldEpoch: EPOCH })
   store.push({ name: 'oak_log', kind: 'log', x: 778, y: 70, z: 777, dimension: DIM, worldEpoch: EPOCH })
   const log: LogEntry[] = []
@@ -182,9 +185,9 @@ addCase('a lastSeenAt-less redundant legacy cell is evicted first, but its ident
   const pass =
     added === 1 &&
     store.length === KNOWN_RESOURCE_CAP &&
-    legacyLogs.length === 1 &&
-    evicted?.detail?.name === 'oak_log' &&
-    evicted?.detail?.at === '777,70,777' &&
+    legacyLogs.length === 2 &&
+    evicted?.detail?.name === 'coal_ore' &&
+    evicted?.detail?.at === '555,30,0' &&
     evicted?.detail?.ageMs === null
   return {
     pass,

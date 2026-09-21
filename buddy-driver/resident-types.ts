@@ -174,6 +174,45 @@ export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): n
     return victim
   }
 
+  // Evict from the MOST ABUNDANT class first, and only from among that class's
+  // oldest cells. Preferring "any duplicated name" was not enough: live, the ten
+  // remembered `obsidian` cells were both duplicated and the oldest sightings, so
+  // the whole class was evicted (`KNOWN_RESOURCE_EVICTED item=obsidian ...
+  // reason=capacity` x10) by a flood of nearby coal_ore/copper_ore/oak_log - the
+  // M2 route to the portal frame was destroyed by ordinary exploration, and the
+  // body could no longer route to any obsidian at all. Rarity is the signal: a
+  // class with one or two remembered cells is far more expensive to re-acquire
+  // than one with dozens, so the abundant class pays for the new sighting.
+  let abundant: string | null = null
+  let abundantCount = 0
+  for (const [identity, count] of counts) {
+    if (count > abundantCount) {
+      abundant = identity
+      abundantCount = count
+    }
+  }
+  const evictFromAbundant = (): number => {
+    if (abundant === null || abundantCount <= 1) return -1
+    let victim = -1
+    let victimSeenAt = Number.POSITIVE_INFINITY
+    for (let index = 0; index < known.length; index += 1) {
+      const entry = known[index]
+      if (entry === undefined) continue
+      if (knownResourceIdentity(entry) !== abundant) continue
+      const seenAt =
+        typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt)
+          ? entry.lastSeenAt
+          : Number.NEGATIVE_INFINITY
+      if (victim < 0 || seenAt < victimSeenAt) {
+        victim = index
+        victimSeenAt = seenAt
+      }
+    }
+    return victim
+  }
+
+  const fromAbundant = evictFromAbundant()
+  if (fromAbundant >= 0) return fromAbundant
   const redundant = selectOldest(true)
   return redundant >= 0 ? redundant : selectOldest(false)
 }
