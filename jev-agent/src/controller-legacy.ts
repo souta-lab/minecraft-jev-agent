@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -1584,6 +1584,10 @@ export class JevController {
   private lastArmorRefusalKey: string | null = null
   /** last logged RESOURCE_SOURCE_EXCLUDED signature set, so one protected structure is one line. */
   private lastSourceExclusionKey: string | null = null
+  /** last logged EXPLORE_ROUTE_BLOCKED signature, so one explore dead end is one line. */
+  private lastExploreRouteBlockedKey: string | null = null
+  /** the current tick's typed explore dead end, fed into the starvation `missing` evidence. */
+  private exploreRouteBlockedThisTick: ExploreRouteBlocked | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -2272,6 +2276,7 @@ export class JevController {
       this.logEntryRefusal(grounded.entryRefusal)
       this.logArmorRefusal(grounded.armorRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
+      this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logSmeltRouteGap(state, groundingOptions)
@@ -2370,6 +2375,13 @@ export class JevController {
         if (this.smeltRouteGapThisTick !== null) {
           const smeltToken = `smelt:${this.smeltRouteGapThisTick.missing}`
           if (!missing.includes(smeltToken)) missing.push(smeltToken)
+        }
+        // A declared-producer collect goal with no grounded exploration route is
+        // the same kind of capability gap: name it in the starvation evidence so
+        // the boundary/escalation machinery can act instead of the body pacing.
+        if (this.exploreRouteBlockedThisTick !== null) {
+          const exploreToken = `explore_route_blocked:${this.exploreRouteBlockedThisTick.reason}`
+          if (!missing.includes(exploreToken)) missing.push(exploreToken)
         }
         this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
@@ -6877,6 +6889,31 @@ export class JevController {
     for (const exclusion of exclusions) {
       this.logger.warn('agent', formatResourceSourceExclusion(exclusion), { ...exclusion }, this.tickCounter)
     }
+  }
+
+  /**
+   * Surface the generator's typed explore dead end
+   * (`EXPLORE_ROUTE_BLOCKED goal=... item=... reason=no_frontier|unreachable|exhausted`)
+   * once per distinct line. When the active collect goal's item has a declared
+   * producer (a name-scanned block source or a mob drop) but the tick offers no
+   * grounded route - not even a generic exploration frontier - the stall must be
+   * an explicit typed fact instead of silent WAIT / a blind non-advancing dig.
+   * The marker is deterministic CAN truth about the OFFERED set, never a
+   * preference; the same fact is fed into the starvation `missing` evidence so a
+   * persistent dead end reaches the existing capability-gap boundary.
+   */
+  private logExploreRouteBlocked(blocked: ExploreRouteBlocked | null): void {
+    this.exploreRouteBlockedThisTick = blocked
+    const key = blocked === null ? null : formatExploreRouteBlocked(blocked)
+    if (key === this.lastExploreRouteBlockedKey) return
+    this.lastExploreRouteBlockedKey = key
+    if (blocked === null) return
+    this.logger.warn(
+      'agent',
+      formatExploreRouteBlocked(blocked),
+      { goal: blocked.goal, item: blocked.item, reason: blocked.reason },
+      this.tickCounter,
+    )
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */

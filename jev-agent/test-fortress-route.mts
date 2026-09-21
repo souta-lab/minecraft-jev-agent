@@ -280,9 +280,13 @@ addCase('(c) nether_bricks is not treated as yielding blaze_rod', () => {
 })
 
 // (d) the structure route does not collapse the presented set: with an
-// exploration strategy + a descent step the goal still has several grounded
-// alternatives (enumeration only; the route displaces nothing).
-addCase('(d) the blaze_rod candidate set stays non-degenerate with several routes', () => {
+// exploration strategy the goal still has several grounded alternatives AND the
+// sensor-derived descent step is NOT offered as a route to structure fabric.
+// A blind stair/tunnel DESCEND cannot reach built terrain, so `descendCandidates`
+// withholds it for a `structure` want (`meta.grounded=false` is not a route); the
+// non-degeneracy contract is therefore >= 2 distinct REAL routes, not the old
+// `>= 3` that counted the blind dig.
+addCase('(d) the blaze_rod candidate set stays non-degenerate and offers no blind structure DESCEND', () => {
   const state = build({
     dimension: 'minecraft:the_nether',
     current: queuedGoal('blaze_rod', 'explore_cave'),
@@ -296,9 +300,16 @@ addCase('(d) the blaze_rod candidate set stays non-degenerate with several route
     (candidate) =>
       candidate.id === retrievalId('blaze_rod', FORTRESS_CELL) && candidate.meta.resourceKind === 'structure',
   )
+  const blindDescends = actionable.filter(
+    (candidate) => candidate.kind === 'DESCEND' && candidate.meta.grounded !== true,
+  )
   return {
-    pass: hasStructureRoute && actionable.length >= 3 && distinct.size === actionable.length,
-    detail: `actionable=${actionable.length} distinct=${distinct.size} structureRoute=${hasStructureRoute} presented=${ids(grounded.candidates)}`,
+    pass:
+      hasStructureRoute &&
+      actionable.length >= 2 &&
+      distinct.size === actionable.length &&
+      blindDescends.length === 0,
+    detail: `actionable=${actionable.length} distinct=${distinct.size} structureRoute=${hasStructureRoute} blindDescends=${blindDescends.length} presented=${ids(grounded.candidates)}`,
   }
 })
 

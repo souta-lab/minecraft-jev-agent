@@ -378,6 +378,14 @@ export interface GroundedCandidatesResult {
    * when no candidate cell is protected.
    */
   sourceExclusions: ResourceSourceExclusion[]
+  /**
+   * Typed `EXPLORE_ROUTE_BLOCKED ... reason=...` when the active collect goal's
+   * item has a declared producer but the tick offers no grounded route at all -
+   * not even a generic exploration frontier. Null when the goal has a route, has
+   * no declared producer, or is not a collect goal. Non-null means "the dead end
+   * is said", never a silent WAIT.
+   */
+  exploreRouteBlocked: ExploreRouteBlocked | null
 }
 
 /**
@@ -588,6 +596,36 @@ export function surfaceAscentRouteless(candidates: readonly Candidate[]): boolea
       candidate.meta.surfaceAscent === true ||
       (typeof candidate.meta.vertical === 'string' && candidate.meta.vertical !== 'none'),
   )
+}
+
+/**
+ * Why a collect goal whose item has a declared producer has no grounded route at
+ * all: the generic exploration arm could not put a body-changing route on offer.
+ *
+ *   - `no_frontier`  the sensor knows no standable frontier cell beyond the body's
+ *                    own cell, so there is nowhere to walk;
+ *   - `unreachable`  frontier cells were enumerated but every locomotion
+ *                    candidate was withheld by the reachability gate;
+ *   - `exhausted`    a frontier exists but the arm offered nothing (all cells are
+ *                    blacklisted by move-failure memory).
+ *
+ * This is a deterministic CAN fact about the OFFERED set, never a preference. It
+ * exists so a declared-producer goal can never stall silently on WAIT / a blind
+ * DESCEND: the tick says "no exploration route, and here is why".
+ */
+export type ExploreRouteBlockedReason = 'no_frontier' | 'unreachable' | 'exhausted'
+
+export interface ExploreRouteBlocked {
+  /** goal key of the blocked collect goal, e.g. `collect:blaze_rod` */
+  goal: string
+  /** the focus item whose declared producer has no grounded route */
+  item: string
+  reason: ExploreRouteBlockedReason
+}
+
+/** The exact `EXPLORE_ROUTE_BLOCKED` observability line. */
+export function formatExploreRouteBlocked(blocked: ExploreRouteBlocked): string {
+  return `EXPLORE_ROUTE_BLOCKED goal=${blocked.goal} item=${blocked.item} reason=${blocked.reason}`
 }
 
 /**
@@ -941,13 +979,14 @@ export function generateGroundedCandidates(
 
 /**
  * True when a candidate is an actual ROUTE for the active focus: a sensed
- * MINE/MOVE/dig-access, a remembered RETRIEVE, a craft/smelt/place/portal step,
- * or a DESCEND the world grounds (a sensed/tunnel target, a remembered stone
- * level below, a stone-class focus, or an explicit `descend_to` predicate).
+ * MINE/MOVE/dig-access, a remembered RETRIEVE, a craft/smelt/place/portal step, a
+ * goalDrop ATTACK (the grounded producer route for a mob-drop item), or a DESCEND
+ * the world grounds (a sensed/tunnel target, a remembered stone level below, a
+ * stone-class focus, or an explicit `descend_to` predicate).
  *
  * A blind DESCEND carries none of those facts: it exists only because the focus
  * item has a declared scanned source, which is perception truth rather than a
- * route. Non-goal reactions (WAIT/ESCALATE/ATTACK/RETREAT/EAT) and clearance
+ * route. Ordinary reactions (WAIT/ESCALATE/ATTACK/RETREAT/EAT) and clearance
  * MINEs are never routes either.
  */
 function hasAdvancingGoalRoute(candidate: Candidate): boolean {
@@ -955,11 +994,15 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
   switch (candidate.kind) {
     case 'WAIT':
     case 'ESCALATE':
-    case 'ATTACK':
     case 'RETREAT':
     case 'EAT':
     case 'EQUIP':
       return false
+    case 'ATTACK':
+      // A `goalDrop` ATTACK is the direct grounded producer route for the active
+      // mob-drop collect goal (the executor verifies the kill and the drop);
+      // ordinary combat is a local reaction, not a goal route.
+      return typeof candidate.meta.goalDrop === 'string'
     case 'DESCEND':
       return candidate.meta.grounded === true
     default:
@@ -1283,27 +1326,29 @@ function generateRawCandidates(
   )
   if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
 
-  // #339 follow-up: a source declared in a static table (`flint -> gravel`) is
-  // perception truth ("which block do I scan"), never a route. A lone blind
-  // DESCEND produced only from that declaration (no sensed block, no tunnel
-  // target, no remembered coordinate, no predicate) must not suppress the
-  // grounded exploration alternatives. The DESCEND stays on offer; this only
-  // stops it from hiding the multi-cell search #339 intends when the world
-  // offers neither a sensed source nor a remembered coordinate.
+  // A collect focus can name a DECLARED PRODUCER (a name-scanned block source,
+  // or a mob whose drop is the item) while the tick offers no grounded route at
+  // all: nothing is sensed and nothing is remembered. That is a SEARCH problem,
+  // and the general answer is the same exploration/locomotion machinery used
+  // anywhere else - enumerate the nearest grounded frontier cells so the body
+  // can reach unsensed terrain (where the sensor can then recognise the source).
+  // A declared producer is perception truth ("which block/mob to look for"),
+  // never a route. This is deliberately producer-agnostic: it covers structure
+  // fabric (`blaze_rod` -> Nether fortress body), mob drops (`ender_pearl` ->
+  // enderman) and direct block sources (`flint` -> gravel) with the same arm, and
+  // it never names a structure or a dimension.
   //
-  // Scoped to collect goals over a DIRECT (non-ore) block source: an ORE source
-  // generates underground, so a blind DESCEND is itself a grounded search for
-  // it, and resource-class (`log`/`planks`) and `descend_to` goals keep their
-  // historical candidate sets.
+  // SCOPE: resource-class focuses (`log`/`planks`) keep their dedicated
+  // surface-explore arm, and ORE sources keep their DESCEND search arm; this only
+  // covers the declared DIRECT/mob producers that had none.
   const hasAdvancingRoute = candidates.some(hasAdvancingGoalRoute)
-  const declaredSourceNeedsExploration =
+  const declaredProducerNeedsExploration =
     goalKind === 'collect' &&
     descendTargetY === null &&
     focusItem !== null &&
     !isResourceClass(focusItem) &&
-    DIRECT_BLOCK_SOURCES[focusItem] !== undefined &&
-    retrievalWant(focusItem)?.kind === 'ore'
-  if (candidates.length === 0 || (declaredSourceNeedsExploration && !hasAdvancingRoute)) {
+    (DIRECT_BLOCK_SOURCES[focusItem] !== undefined || MOB_DROP_PRODUCERS[focusItem] !== undefined)
+  if (candidates.length === 0 || (declaredProducerNeedsExploration && !hasAdvancingRoute)) {
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
   candidates.push(...surfaceAscent.candidates)
@@ -2075,8 +2120,14 @@ function descendCandidates(
     z: Math.floor(state.self.position.z),
   }
   const knownStoneY = state.signals.knownStoneY ?? null
+  // A `structure` want's scanned source is built terrain (fortress fabric), not
+  // an underground vein: a downward staircase/tunnel step cannot reach it and
+  // must not be classified as an underground search. ORE sources and stone-class
+  // focuses keep the historical underground verdict unchanged.
+  const focusWant = focusItem === null ? null : retrievalWant(focusItem)
   const goalIsUnderground =
-    focusItem !== null && (STONE_YIELDS.has(focusItem) || scannedBlockNames(focusItem) !== undefined)
+    focusItem !== null &&
+    (STONE_YIELDS.has(focusItem) || (scannedBlockNames(focusItem) !== undefined && focusWant?.kind !== 'structure'))
   const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
 
   // Feasibility (CAN) rule for a SPECIFIC focus item whose source is not
@@ -4721,6 +4772,51 @@ interface ReachabilityGateContext {
   column: ColumnFacts
 }
 
+/**
+ * The active collect goal's focus item when that item names a DECLARED producer
+ * (a name-scanned block source or a mob drop producer). Null for every other
+ * goal: a goal without a declared producer has no "search for the source"
+ * contract, so it must not be reported as explore-blocked.
+ */
+function declaredProducerFocus(state: WorldState): string | null {
+  const current = state.goalQueue?.current ?? null
+  const kind = current?.kind ?? 'collect'
+  if (kind !== 'collect') return null
+  const focus = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focus === null || isResourceClass(focus)) return null
+  if (DIRECT_BLOCK_SOURCES[focus] === undefined && MOB_DROP_PRODUCERS[focus] === undefined) return null
+  return focus
+}
+
+/**
+ * Pure CAN fact: does the OFFERED set ground a route to the declared producer of
+ * the active collect focus? Uses the same route predicate as the exploration
+ * fallback trigger (`hasAdvancingGoalRoute`), so the marker can never disagree
+ * with the set it describes. Null when the goal is not a declared-producer
+ * collect or already has a route.
+ */
+function exploreRouteBlockedFact(
+  state: WorldState,
+  candidates: readonly Candidate[],
+  withheld: readonly CandidateReachability[],
+): ExploreRouteBlocked | null {
+  const item = declaredProducerFocus(state)
+  if (item === null) return null
+  if (candidates.some(hasAdvancingGoalRoute)) return null
+  const movementWithheld = withheld.some(
+    (entry) => entry.candidate.kind === 'MOVE' || entry.candidate.kind === 'RETRIEVE',
+  )
+  const frontierExists = state.terrain.standable.some(
+    (spot) => distance(spot, state.self.position) > 1.5,
+  )
+  const reason: ExploreRouteBlockedReason = movementWithheld
+    ? 'unreachable'
+    : frontierExists
+      ? 'exhausted'
+      : 'no_frontier'
+  return { goal: `collect:${item}`, item, reason }
+}
+
 export function applyReachabilityGate(
   raw: readonly Candidate[],
   state: WorldState,
@@ -4849,7 +4945,18 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals, surfaceAscentRefusal, sourceExclusions: exclusions }
+  return {
+    candidates,
+    reachability,
+    withheld,
+    placeRefusal,
+    ignitionRefusal,
+    entryRefusal,
+    armorRefusals,
+    surfaceAscentRefusal,
+    sourceExclusions: exclusions,
+    exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
+  }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
