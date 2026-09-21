@@ -18,6 +18,13 @@
 //                   `explore` goal that changes the resource source versus the
 //                   blocked goal; otherwise the caller rejects it
 //                   (`REPLAN_REJECTED no_body_delta`) and keeps the plan.
+//   4. ESCALATE   - issue #78: a run of `no_new_info` refusals for the SAME
+//                   (reason, goal, stateHash) means the local recovery itself
+//                   is making no progress. On the Nth consecutive cycle the
+//                   throttle releases the replan (`kind=exhausted`) so the
+//                   caller wakes System 2 with `LOCAL_RECOVERY_EXHAUSTED`.
+//                   Without this the WAIT-only stall could never produce a
+//                   fingerprint change and was held open indefinitely.
 //
 // No imports from the controller, no bot, no clock: `now` is injected, so the
 // whole policy is unit-testable.
@@ -26,10 +33,35 @@ import { createHash } from 'node:crypto'
 export const REPLAN_THROTTLE_WINDOW_MS_DEFAULT = 10_000
 export const REPLAN_POSITION_DELTA_DEFAULT = 2
 
+/**
+ * Issue #78 stall escalation: how many CONSECUTIVE zero-progress
+ * (`no_new_info`) throttled replan cycles for the SAME (reason, goal,
+ * stateHash) fingerprint the deterministic layer tolerates before it stops
+ * treating the suppression as a provable "nothing changed" and wakes System 2
+ * with `LOCAL_RECOVERY_EXHAUSTED`.
+ *
+ * The #44 throttle suppresses a replan while the fingerprint is unchanged,
+ * which is correct for mere churn. It is NOT correct when the suppressed
+ * replan IS the local recovery: with only WAIT actions the fingerprint can
+ * never change, so the suppression held the stall open for as long as the
+ * resident lived (live: ~5 min of WAIT actions, issue #78). N bounds that
+ * loop. Real progress, a changed fingerprint, or any allowed replan resets the
+ * counter, so a stall that IS advancing never fires the escalation.
+ */
+export const REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT = 6
+
 /** `BUDDY_REPLAN_THROTTLE_MS` overrides the window; invalid values fall back. */
 export function resolveReplanThrottleMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
   const raw = Number(env.BUDDY_REPLAN_THROTTLE_MS ?? REPLAN_THROTTLE_WINDOW_MS_DEFAULT)
   return Number.isFinite(raw) && raw >= 0 ? raw : REPLAN_THROTTLE_WINDOW_MS_DEFAULT
+}
+
+/** `BUDDY_REPLAN_NO_INFO_ESCALATE_CYCLES` overrides N; invalid values fall back. */
+export function resolveReplanNoInfoEscalateCycles(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_REPLAN_NO_INFO_ESCALATE_CYCLES ?? REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT
 }
 
 /** `BUDDY_REPLAN_POSITION_DELTA` overrides the block threshold; invalid values fall back. */
@@ -56,6 +88,13 @@ export interface ReplanInputs {
    * null. A capability gap is information the throttle must not swallow.
    */
   capabilityGap: string | null
+  /**
+   * Current durable goal key (`kind:target:count`). A different goal is new
+   * information for a WHAT replan, so it is part of the fingerprint and owns a
+   * separate no-progress streak (issue #78). Optional so pre-#78 fixtures and
+   * callers that only have world inputs keep their old hashes.
+   */
+  goalKey?: string | null
 }
 
 /** Canonical, order-independent inventory signature (counts > 0 only). */
@@ -78,6 +117,7 @@ export function hashReplanInputs(inputs: ReplanInputs): string {
     knownResources: inputs.knownResources,
     failures: inputs.failureSignature,
     capabilityGap: inputs.capabilityGap,
+    goal: inputs.goalKey ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -98,25 +138,42 @@ export function replanInputsChanged(
 ): boolean {
   if (current.capabilityGap !== null) return true
   if (previous.capabilityGap !== current.capabilityGap) return true
+  if ((previous.goalKey ?? null) !== (current.goalKey ?? null)) return true
   if (inventorySignature(previous.inventory) !== inventorySignature(current.inventory)) return true
   if (previous.knownResources !== current.knownResources) return true
   if (previous.failureSignature !== current.failureSignature) return true
   return movedBeyond(previous.position, current.position, positionDelta)
 }
 
-export type ReplanThrottleKind = 'fresh' | 'new_info' | 'window' | 'no_new_info'
+export type ReplanThrottleKind = 'fresh' | 'new_info' | 'window' | 'no_new_info' | 'exhausted'
 
 export interface ReplanThrottleDecision {
   allow: boolean
   kind: ReplanThrottleKind
   ageMs: number
   stateHash: string
+  /**
+   * Consecutive `no_new_info` refusals observed for this (reason, goal,
+   * stateHash) fingerprint, including the current cycle. 0 when the decision
+   * is not a zero-progress refusal.
+   */
+  noInfoStreak: number
+  /** The bounded N (`REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT`) this streak is measured against. */
+  noInfoLimit: number
 }
 
 interface ThrottleRecord {
   at: number
   inputs: ReplanInputs
   stateHash: string
+}
+
+/** The zero-progress streak: same reason + goal + fingerprint, consecutive refusals. */
+interface NoInfoStreak {
+  reason: string
+  goalKey: string | null
+  stateHash: string
+  count: number
 }
 
 function cloneInputs(inputs: ReplanInputs): ReplanInputs {
@@ -126,6 +183,7 @@ function cloneInputs(inputs: ReplanInputs): ReplanInputs {
     knownResources: inputs.knownResources,
     failureSignature: inputs.failureSignature,
     capabilityGap: inputs.capabilityGap,
+    goalKey: inputs.goalKey ?? null,
   }
 }
 
@@ -134,32 +192,74 @@ export function formatReplanThrottled(reason: string, decision: ReplanThrottleDe
   return `REPLAN_THROTTLED reason=${reason} ageMs=${decision.ageMs} -> reuse plan`
 }
 
+export const LOCAL_RECOVERY_NO_PROGRESS_MARKER = 'LOCAL_RECOVERY_NO_PROGRESS'
+export const LOCAL_RECOVERY_EXHAUSTED_MARKER = 'LOCAL_RECOVERY_EXHAUSTED'
+
+/**
+ * Counter marker: a replan for this fingerprint was throttled as
+ * `no_new_info` for the `noInfoStreak`-th consecutive cycle. Greppable proof
+ * that the local recovery is itself making no progress.
+ */
+export function formatLocalRecoveryNoProgress(
+  goalKey: string,
+  reason: string,
+  decision: ReplanThrottleDecision,
+): string {
+  return `${LOCAL_RECOVERY_NO_PROGRESS_MARKER} count=${decision.noInfoStreak}/${decision.noInfoLimit} goal=${goalKey} reason=${reason} stateHash=${decision.stateHash}`
+}
+
+/**
+ * Escalation marker: N consecutive zero-progress cycles exhausted the local
+ * recovery, so the throttle released the replan and System 2 is woken with an
+ * explicit semantic-boundary reason instead of being held behind `no_new_info`.
+ */
+export function formatLocalRecoveryExhausted(
+  goalKey: string,
+  reason: string,
+  decision: ReplanThrottleDecision,
+): string {
+  return `${LOCAL_RECOVERY_EXHAUSTED_MARKER} count=${decision.noInfoStreak}/${decision.noInfoLimit} goal=${goalKey} reason=${reason} stateHash=${decision.stateHash} -> wake System2`
+}
+
 /**
  * Bounded replan rate. Keyed by summon `reason`; the recorded `stateHash`
- * (inventory + position + known resources + failure signature) is what the
- * acceptance means by `(reason, stateHash)`.
+ * (inventory + position + known resources + failure signature + goal) is what
+ * the acceptance means by `(reason, stateHash)`. Rule 4 bounds the case where
+ * the suppressed replan is the only local recovery available.
  */
 export class ReplanThrottle {
   private readonly windowMs: number
   private readonly positionDelta: number
+  private readonly noInfoEscalateCycles: number
   private readonly records = new Map<string, ThrottleRecord>()
+  /** consecutive zero-progress refusals for one (reason, goal, fingerprint) */
+  private noInfo: NoInfoStreak | null = null
 
-  constructor(windowMs: number = REPLAN_THROTTLE_WINDOW_MS_DEFAULT, positionDelta: number = REPLAN_POSITION_DELTA_DEFAULT) {
+  constructor(
+    windowMs: number = REPLAN_THROTTLE_WINDOW_MS_DEFAULT,
+    positionDelta: number = REPLAN_POSITION_DELTA_DEFAULT,
+    noInfoEscalateCycles: number = REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT,
+  ) {
     this.windowMs = windowMs
     this.positionDelta = positionDelta
+    this.noInfoEscalateCycles =
+      Number.isInteger(noInfoEscalateCycles) && noInfoEscalateCycles >= 1
+        ? noInfoEscalateCycles
+        : REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT
   }
 
   /** Query without recording. Never mutates. */
   check(reason: string, inputs: ReplanInputs, now = Date.now()): ReplanThrottleDecision {
     const stateHash = hashReplanInputs(inputs)
     const previous = this.records.get(reason)
-    if (previous === undefined) return { allow: true, kind: 'fresh', ageMs: 0, stateHash }
+    const base = { noInfoStreak: 0, noInfoLimit: this.noInfoEscalateCycles }
+    if (previous === undefined) return { allow: true, kind: 'fresh', ageMs: 0, stateHash, ...base }
     const ageMs = now - previous.at
     if (!replanInputsChanged(previous.inputs, inputs, this.positionDelta)) {
-      return { allow: false, kind: 'no_new_info', ageMs, stateHash }
+      return { allow: false, kind: 'no_new_info', ageMs, stateHash, ...base }
     }
-    if (ageMs < this.windowMs) return { allow: false, kind: 'window', ageMs, stateHash }
-    return { allow: true, kind: 'new_info', ageMs, stateHash }
+    if (ageMs < this.windowMs) return { allow: false, kind: 'window', ageMs, stateHash, ...base }
+    return { allow: true, kind: 'new_info', ageMs, stateHash, ...base }
   }
 
   /** Record that a replan happened at `now`. */
@@ -167,15 +267,56 @@ export class ReplanThrottle {
     this.records.set(reason, { at: now, inputs: cloneInputs(inputs), stateHash: hashReplanInputs(inputs) })
   }
 
-  /** Allow-and-record in one step: the controller's entry point. */
+  /**
+   * Allow-and-record in one step: the controller's entry point.
+   *
+   * Bounds the #78 WAIT loop: a run of `no_new_info` refusals for the SAME
+   * (reason, goal, stateHash) is a local recovery that is itself making no
+   * progress. On the `noInfoEscalateCycles`-th consecutive one the throttle
+   * releases the replan (`kind=exhausted`) so the caller wakes System 2 with
+   * `LOCAL_RECOVERY_EXHAUSTED` instead of holding the stall open forever.
+   * Progress, changed inputs, a different goal, or any allowed replan resets
+   * the counter, so genuine progress and ordinary churn are unaffected.
+   */
   tryReplan(reason: string, inputs: ReplanInputs, now = Date.now()): ReplanThrottleDecision {
     const decision = this.check(reason, inputs, now)
-    if (decision.allow) this.record(reason, inputs, now)
-    return decision
+    if (decision.allow) {
+      this.noInfo = null
+      this.record(reason, inputs, now)
+      return decision
+    }
+    if (decision.kind !== 'no_new_info') {
+      // New information arrived (window still held): not a zero-progress stall.
+      this.noInfo = null
+      return decision
+    }
+    const goalKey = inputs.goalKey ?? null
+    const previous = this.noInfo
+    const sameStreak =
+      previous !== null &&
+      previous.reason === reason &&
+      previous.goalKey === goalKey &&
+      previous.stateHash === decision.stateHash
+    const count = sameStreak ? (previous?.count ?? 0) + 1 : 1
+    if (count >= this.noInfoEscalateCycles) {
+      this.noInfo = null
+      this.record(reason, inputs, now)
+      return {
+        allow: true,
+        kind: 'exhausted',
+        ageMs: decision.ageMs,
+        stateHash: decision.stateHash,
+        noInfoStreak: count,
+        noInfoLimit: this.noInfoEscalateCycles,
+      }
+    }
+    this.noInfo = { reason, goalKey, stateHash: decision.stateHash, count }
+    return { ...decision, noInfoStreak: count, noInfoLimit: this.noInfoEscalateCycles }
   }
 
   reset(): void {
     this.records.clear()
+    this.noInfo = null
   }
 }
 
