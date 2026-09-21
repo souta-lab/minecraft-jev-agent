@@ -1230,7 +1230,16 @@ function buildScannedResourceBlocks(
  * here, so they stay `unknown`. Only a DIFFERENT solid block is positive proof
  * that the remembered resource is gone.
  */
-const NON_PROVING_CELL_BLOCKS: ReadonlySet<string> = new Set([
+/**
+ * Loaded cells whose content PROVES a remembered resource is no longer there.
+ *
+ * Mineflayer's `bot.blockAt` contract distinguishes the two cases this classifier
+ * must not merge (#406): `null` means the cell is not loaded (no verdict), while a
+ * returned `Block('air')` means the loaded cell IS air. So air variants and fluids
+ * at a remembered resource cell are positive evidence of absence - the route is
+ * stale - not "unknown".
+ */
+const ABSENCE_PROVING_CELL_BLOCKS: ReadonlySet<string> = new Set([
   'air',
   'cave_air',
   'void_air',
@@ -1309,7 +1318,11 @@ export function probeKnownResources(
     // want, so the cell stays a valid route and is reported as `replaced`.
     else if (sameRememberedFamily(resource.name, observed) || focusSources?.includes(observed) === true)
       status = 'replaced'
-    else if (NON_PROVING_CELL_BLOCKS.has(observed) || block?.boundingBox === 'empty') status = 'unknown'
+    // Any other LOADED block falsifies the memory: `null` above is the only
+    // no-verdict case (unloaded cell). Air/fluids and empty-shape blocks are a
+    // loaded cell whose resource is gone, so a stale RETRIEVE route must not
+    // survive them (#406).
+    else if (ABSENCE_PROVING_CELL_BLOCKS.has(observed) || block?.boundingBox === 'empty') status = 'falsified'
     else status = 'falsified'
     out.push({ name: resource.name, position: { x: position.x, y: position.y, z: position.z }, observed, status })
   }
