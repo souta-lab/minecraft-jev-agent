@@ -21,6 +21,7 @@ import { partitionHazardsBySource } from './simdeath.ts'
 import type {
   AgentSnapshot,
   DeathHazard,
+  KnownPortalSiteJson,
   KnownResourceJson,
   LedgerProposalEnvelope,
   LedgerReconciliationProposal,
@@ -272,8 +273,52 @@ export function removeKnownResourceDtos(target: KnownResourceJson[], gone: Known
 }
 
 /**
- * Merge ONE staged world-memory delta into the live memory. This is the only
- * merge implementation; it mutates `memory` and never writes a file.
+ * #80: durable verified-portal sites merge/remove by origin x,y,z (widthAxis is
+ * part of the record). Coordinates are rounded exactly like the other durable
+ * merges so a re-observed site dedups instead of duplicating.
+ */
+export function mergeKnownPortalSiteDtos(target: KnownPortalSiteJson[], found: KnownPortalSiteJson[]): number {
+  const key = (site: KnownPortalSiteJson): string => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+  const seen = new Set(target.map(key))
+  let added = 0
+  for (const site of found) {
+    const siteKey = key(site)
+    if (seen.has(siteKey)) continue
+    seen.add(siteKey)
+    target.push({
+      x: Math.round(site.x),
+      y: Math.round(site.y),
+      z: Math.round(site.z),
+      widthAxis: site.widthAxis === 'z' ? 'z' : 'x',
+      ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+      ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+      ...(site.lastVerifiedAt === undefined ? {} : { lastVerifiedAt: site.lastVerifiedAt }),
+      ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+      ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+    })
+    added += 1
+  }
+  return added
+}
+
+export function removeKnownPortalSiteDtos(target: KnownPortalSiteJson[], gone: KnownPortalSiteJson[]): number {
+  const keys = new Set(gone.map((site) => `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`))
+  let removed = 0
+  for (let index = target.length - 1; index >= 0; index -= 1) {
+    const site = target[index]
+    if (site === undefined) continue
+    if (!keys.has(`${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`)) continue
+    target.splice(index, 1)
+    removed += 1
+  }
+  return removed
+}
+
+/**
+ * Merge ONE world-memory delta into the live memory. This is the only merge
+ * implementation: the staged commit point AND the live `proposeWorldMemory`
+ * runtime path both route through it, so the two paths can never diverge. It
+ * mutates `memory` and never writes a file.
  */
 export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldMemoryDelta, log: ProposalLog): void {
   if (delta.craftingTables !== undefined) mergeStationDtos(memory.craftingTables, delta.craftingTables, 'crafting_table')
@@ -289,6 +334,10 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
   }
   if (delta.knownResources !== undefined) mergeKnownResourceDtos(memory.knownResources, delta.knownResources)
   if (delta.removeKnownResources !== undefined) removeKnownResourceDtos(memory.knownResources, delta.removeKnownResources)
+  if (delta.knownPortalSites !== undefined) mergeKnownPortalSiteDtos(memory.knownPortalSites, delta.knownPortalSites)
+  if (delta.removeKnownPortalSites !== undefined) {
+    removeKnownPortalSiteDtos(memory.knownPortalSites, delta.removeKnownPortalSites)
+  }
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {
       memory.mined[key] = (memory.mined[key] ?? 0) + count
