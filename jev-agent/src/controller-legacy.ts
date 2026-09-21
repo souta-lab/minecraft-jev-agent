@@ -512,6 +512,9 @@ const DESCEND_NO_CANDIDATE_TICKS = resolveDescendNoCandidateTicks()
 /** Distance decrease (m) that counts as real retrieval progress. */
 const RETRIEVAL_PROGRESS_EPSILON = 0.5
 /** Issue #8: failed attempts at one coordinate before it is blacklisted. */
+// Below this windowed locomotion efficiency a verified MOVE is mechanical success
+// without progress, so it must not clear the failure memory (issue #360).
+const MOVE_PROGRESS_EFFICIENCY_FLOOR = resolveEnvPositiveInt('BUDDY_MOVE_PROGRESS_EFFICIENCY_FLOOR', 20)
 const MOVE_FAILMEM_LIMIT = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_LIMIT', 3)
 /** Issue #8: how long a blacklisted coordinate stays skipped. */
 const MOVE_FAILMEM_COOLDOWN_MS = resolveEnvPositiveInt('BUDDY_MOVE_FAILMEM_COOLDOWN_MS', 30_000)
@@ -1486,6 +1489,8 @@ export class JevController {
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
   /** Surface waypoints reached without finding the requested resource. */
+  /** windowed locomotion efficiency (%) over the last 40 samples; 100 when idle */
+  private lastLocomotionEfficiency = 100
   private readonly searchedSurfaceTargets = new Set<string>()
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
@@ -3863,6 +3868,7 @@ export class JevController {
     }
     const net = Math.hypot(last.x - first.x, last.y - first.y, last.z - first.z)
     const efficiency = traveled > 0.01 ? Math.round((net / traveled) * 100) : 100
+    this.lastLocomotionEfficiency = efficiency
     this.logger.info(
       'agent',
       `MOVE_EFFICIENCY samples=40 traveled=${Math.round(traveled * 100) / 100} net=${Math.round(net * 100) / 100} efficiency=${efficiency}%`,
@@ -6755,6 +6761,21 @@ export class JevController {
     this.resetDescendBudgetAfterWorldChange(candidate.id, 'verified_move')
     const dimension = this.currentDimension()
     const key = moveFailureKey(dimension, candidate.target)
+    // A verified micro-MOVE inside a low-efficiency window is mechanical success, not
+    // progress. Resetting the failure memory there is exactly what let the live
+    // 48-minute A<->B loop undo every oscillation blacklist (issue #360: 401
+    // OSCILLATION_DETECTED vs 49 blacklists, 1533 blocks travelled in a one-block
+    // box). Keeping the memory means the loop's own cells stay suppressed and the body
+    // must change neighbourhood instead of re-winning the same step.
+    if (this.lastLocomotionEfficiency < MOVE_PROGRESS_EFFICIENCY_FLOOR) {
+      this.logger.info(
+        'agent',
+        `MOVE_FAILMEM_RESET_SKIPPED efficiency=${this.lastLocomotionEfficiency}% reason=strategic_non_progress`,
+        { actionId: candidate.id, key },
+        this.tickCounter,
+      )
+      return
+    }
     if (!this.moveFailMemory.reset(dimension, candidate.target)) return
     if (this.lastMoveTarget !== null && this.lastMoveTarget.position.x === candidate.target.x && this.lastMoveTarget.position.z === candidate.target.z) {
       this.lastMoveTarget = null
