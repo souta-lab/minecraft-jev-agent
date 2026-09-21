@@ -75,6 +75,7 @@
     "anti-flap-test": "bun test ./test-anti-flap.mts",
     "predicate-goal-test": "bun test ./test-predicate-goal.mts",
     "descend-plan-test": "bun test ./test-descend-plan.mts",
+    "column-descent-test": "bun test ./test-column-descent.mts",
     "replan-throttle-test": "bun test ./test-replan-throttle.mts",
     "protected-goals-test": "bun test ./test-protected-goals.mts",
     "nether-portal-test": "bun test ./test-nether-portal.mts",

@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -1645,6 +1645,10 @@ export class JevController {
   private lastExploreRouteBlockedKey: string | null = null
   /** the current tick's typed explore dead end, fed into the starvation `missing` evidence. */
   private exploreRouteBlockedThisTick: ExploreRouteBlocked | null = null
+  /** last logged COLUMN_DESCENT_REFUSED signature, so one stalled column is one line. */
+  private lastColumnDescentRefusalKey: string | null = null
+  /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
+  private columnDescentRefusalThisTick: ColumnDescentRefusal | null = null
   /** Dedupe key for the last mirrored `RESOURCE_SOURCE_NONE` line. */
   private lastSourceGapKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
@@ -2367,6 +2371,7 @@ export class JevController {
       this.logArmorRefusal(grounded.armorRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
+      this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.noteFoodHabitat(grounded.foodHabitatRefusal)
@@ -2486,6 +2491,13 @@ export class JevController {
         if (this.exploreRouteBlockedThisTick !== null) {
           const exploreToken = `explore_route_blocked:${this.exploreRouteBlockedThisTick.reason}`
           if (!missing.includes(exploreToken)) missing.push(exploreToken)
+        }
+        // A stranded body with no safe descent is the same kind of capability
+        // gap: name the geometric no-safe-step fact in the starvation evidence so
+        // a WAIT on a 1-wide column can never be reported without its cause.
+        if (this.columnDescentRefusalThisTick !== null) {
+          const columnToken = `column_descent:${this.columnDescentRefusalThisTick.reason}`
+          if (!missing.includes(columnToken)) missing.push(columnToken)
         }
         // The typed no-source fact rides the same starvation/escalation evidence
         // so a starvation line never says only `no_productive_action` when the
@@ -7283,6 +7295,30 @@ export class JevController {
       'agent',
       formatExploreRouteBlocked(blocked),
       { goal: blocked.goal, item: blocked.item, reason: blocked.reason },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Surface the generator's typed no-safe-descent fact
+   * (`COLUMN_DESCENT_REFUSED reason=no_safe_step|no_tool|exhausted cell=x,y,z`)
+   * once per distinct line. A body with no standable frontier beyond its own cell
+   * has no walking route at all; when even the bounded, damage-free vertical step
+   * down its own support column is unavailable, the dead end must be an explicit
+   * fact instead of a bare WAIT. Deterministic SAFE truth about the OFFERED set,
+   * never a preference; the token also rides the starvation `missing` evidence so
+   * the cause reaches the capability-gap boundary.
+   */
+  private logColumnDescentRefusal(refusal: ColumnDescentRefusal | null): void {
+    this.columnDescentRefusalThisTick = refusal
+    const key = refusal === null ? null : formatColumnDescentRefused(refusal)
+    if (key === this.lastColumnDescentRefusalKey) return
+    this.lastColumnDescentRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn(
+      'agent',
+      formatColumnDescentRefused(refusal),
+      { ...refusal, goal: this.currentGoalKey() },
       this.tickCounter,
     )
   }

@@ -513,6 +513,14 @@ export interface GroundedCandidatesResult {
    */
   exploreRouteBlocked: ExploreRouteBlocked | null
   /**
+   * Typed `COLUMN_DESCENT_REFUSED reason=no_safe_step|no_tool|exhausted` when the
+   * body is stranded on its own support column and no bounded, damage-free
+   * descent off it can be offered. Null whenever the body is not stranded or a
+   * safe descent candidate was offered. Non-null means the WAIT has a stated
+   * cause instead of being silent.
+   */
+  columnDescentRefusal: ColumnDescentRefusal | null
+  /**
    * The typed "no available source for the active collect focus" fact, or null
    * when a grounded source route was offered (or the focus has no name-scanned
    * source at all). Mirrored as `RESOURCE_SOURCE_NONE ...`.
@@ -895,6 +903,75 @@ export function formatExploreRouteBlocked(blocked: ExploreRouteBlocked): string 
 }
 
 /**
+ * Why a STRANDED body (no standable frontier beyond its own cell - the same
+ * world fact `ExploreRouteBlocked` reports as `no_frontier`) could not be
+ * offered any controlled descent off its own support column:
+ *
+ *   - `no_safe_step`  no `DescentOption` is both safe and diggable (hazard,
+ *                     protected station, open floor, or no solid support), so
+ *                     there is no bounded step that cannot hurt the body;
+ *   - `no_tool`       a safe step exists but the body lacks the harvest tool
+ *                     its block needs;
+ *   - `exhausted`     every safe step has spent its bounded failure budget.
+ *
+ * This is deterministic CAN/SAFE truth about the OFFERED set, never a
+ * preference: it exists so "the body is cut off and the safe way down is
+ * unavailable" is a typed fact instead of a bare WAIT. A damaging drop is never
+ * a substitute - the refusal is the honest answer when no safe step exists.
+ */
+export type ColumnDescentRefusalReason = 'no_safe_step' | 'no_tool' | 'exhausted'
+
+export interface ColumnDescentRefusal {
+  reason: ColumnDescentRefusalReason
+  /** the stalled body cell the descent would leave (floored feet cell) */
+  cell: Vec3Json
+  /** required harvest tool when `reason === 'no_tool'` */
+  tool?: string | null
+  /** required pickaxe rank when `reason === 'no_tool'` */
+  tier?: number | null
+}
+
+/** The exact `COLUMN_DESCENT_REFUSED` observability line. */
+export function formatColumnDescentRefused(refusal: ColumnDescentRefusal): string {
+  const tool = refusal.reason === 'no_tool' ? ` tool=${refusal.tool ?? 'unknown'} tier=${refusal.tier ?? 0}` : ''
+  return `COLUMN_DESCENT_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}${tool}`
+}
+
+/**
+ * The frontier distance `pickExplore` uses to reject the body's own cell. Shared
+ * so "no walkable frontier" cannot drift between the exploration arm, the
+ * typed explore dead end and the stranded-column descent.
+ */
+const STRANDED_FRONTIER_DISTANCE = 1.5
+
+/**
+ * A body is STRANDED when the sensor knows no standable cell beyond the one it
+ * occupies: `pickExplore` finds no frontier and no ordinary walking MOVE can be
+ * enumerated. This is the one geometric precondition for
+ * {@link columnDescentCandidates} and is exported pure so the offer and its
+ * typed refusal read the same fact. It says nothing about pillars: a 1-wide
+ * ledge, a 1x1 shaft and a self-built column are the same world state.
+ */
+export function strandedOnColumn(state: Pick<WorldState, 'terrain' | 'self'>): boolean {
+  return !state.terrain.standable.some((spot) => distance(spot, state.self.position) > STRANDED_FRONTIER_DISTANCE)
+}
+
+/**
+ * Candidate kinds that move the body to another world cell. Used as the CAN
+ * envelope for the stranded-column descent: while ANY of these is on offer the
+ * tick already has a way out of the current cell, so the last-resort vertical
+ * step is not enumerated.
+ */
+const LOCOMOTION_CANDIDATE_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'RETRIEVE',
+  'RETREAT',
+  'STEP',
+  'DESCEND',
+  'ENTER_PORTAL',
+])
+
+/**
  * Why an ignition was not offered: a malformed frame (`PORTAL_LIGHT_REFUSED`)
  * or a missing flint_and_steel (`PRECONDITION_MISSING`). Surfaced instead of
  * silence, so a portal goal can never look "starved" for no reason.
@@ -1270,6 +1347,7 @@ export function generateGroundedCandidates(
     raw.surfaceAscentRefusal,
     raw.foodHabitatRefusal,
     raw.sourceExclusions,
+    raw.columnDescentRefusal,
   )
 }
 
@@ -1663,6 +1741,27 @@ function generateRawCandidates(
   candidates.push(...surfaceAscent.candidates)
   candidates.push(...foodHabitat.candidates)
 
+  // A stranded body (no standable frontier beyond its own cell) has no walking
+  // route at all: expose the bounded, damage-free vertical step down off its own
+  // support column through the same DESCEND mechanics the goal-grounded descent
+  // already uses. Offered only when the tick has NO other locomotion candidate,
+  // so an existing route is never displaced (this is a CAN envelope, not a
+  // preference: Jev still owns WHICH of the remaining candidates to take). The
+  // typed refusal is returned when even that safe step does not exist, so the
+  // tick never falls through to a bare WAIT without a stated cause.
+  const hasLocomotionCandidate = candidates.some((candidate) =>
+    LOCOMOTION_CANDIDATE_KINDS.has(candidate.kind),
+  )
+  const columnDescent = hasLocomotionCandidate
+    ? { candidates: [], refusal: null }
+    : columnDescentCandidates(state, options, focusItem)
+  const columnIds = new Set(candidates.map((candidate) => candidate.id))
+  for (const candidate of columnDescent.candidates) {
+    if (columnIds.has(candidate.id)) continue
+    columnIds.add(candidate.id)
+    candidates.push(candidate)
+  }
+
   candidates.push({
     id: 'WAIT',
     kind: 'WAIT',
@@ -1703,6 +1802,7 @@ function generateRawCandidates(
     armorRefusals,
     surfaceAscentRefusal: surfaceAscent.refusal,
     foodHabitatRefusal: foodHabitat.refusal,
+    columnDescentRefusal: columnDescent.refusal,
     sourceExclusions: resourceSourceExclusions(state),
   }
 }
@@ -2602,12 +2702,45 @@ function descendCandidates(
   }
   if (best === null) return []
 
-  const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
   // A DESCEND is a ROUTE only when the world grounds it: a sensed/tunnel target,
   // an explicit predicate, a remembered stone level below (for an underground
   // source), or a stone-class focus. Otherwise it is a blind search step, and
   // the declared-source exploration fallback may run beside it.
-  const grounded = descendToY || hasGoalTarget || knownStoneBelow || stoneGoal
+  const built = descendCandidateFromStep(state, options, best, {
+    focusItem,
+    descendTargetY,
+    grounded: descendToY || hasGoalTarget || knownStoneBelow || stoneGoal,
+    staircase: oscillate || (best.mode === 'down' && fixedCount === 0),
+  })
+  return built === null ? [] : [built.candidate]
+}
+
+function descendId(step: DescentOption): string {
+  const primary = step.mode === 'down' ? step.floor : step.wall
+  return `DESCEND:${step.mode}:${step.dir}:${blockId('b', primary)}`
+}
+
+/**
+ * One DESCEND candidate from an already-safe step. Shared by the goal-grounded
+ * descent family (`descendCandidates`) and the stranded-column descent
+ * (`columnDescentCandidates`), so a body descending toward a resource and a body
+ * descending off its own support column execute through exactly the same
+ * mechanics, guard and postcondition. Returns null when the step's block needs a
+ * harvest tool the body does not hold; the caller owns the typed reason.
+ */
+function descendCandidateFromStep(
+  state: WorldState,
+  options: CandidateOptions,
+  best: DescentOption,
+  spec: {
+    focusItem: string | null
+    descendTargetY: number | null
+    grounded: boolean
+    staircase: boolean
+    extraMeta?: Record<string, string | number | boolean>
+  },
+): { candidate: Candidate; toolReason: string } | null {
+  const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
   const choice = selectDigTool(
     {
       name: best.digName ?? '',
@@ -2617,14 +2750,16 @@ function descendCandidates(
     },
     (tool, tier) => hasTool(state, tool, tier),
   )
-  if (!choice.ok) return []
-
-  return [
-    {
+  if (!choice.ok) return null
+  const toward =
+    spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
+  return {
+    toolReason: choice.reason,
+    candidate: {
       id: descendId(best),
       kind: 'DESCEND',
-      label: `${best.dir === 'D' ? 'dig straight down' : best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${focusItem ?? (descendTargetY === null ? 'unknown' : `descend_to:Y=${descendTargetY}`)} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})`,
-      targetName: focusItem,
+      label: `${best.dir === 'D' ? 'dig straight down' : best.mode === 'down' ? 'dig a staircase step down' : 'tunnel one block forward'} toward ${toward} (${best.dir}), dig (${primary.x},${primary.y},${primary.z}) then stand at (${best.step.x},${best.step.y},${best.step.z})`,
+      targetName: spec.focusItem,
       target: primary,
       targetEntityId: null,
       itemName: null,
@@ -2639,12 +2774,12 @@ function descendCandidates(
         dir: best.dir,
         dx: best.dx,
         dz: best.dz,
-        focusItem: focusItem ?? 'unknown',
-        predicate: descendTargetY === null ? 'none' : `descend_to:Y=${descendTargetY}`,
-        descendTargetY: descendTargetY ?? 'none',
+        focusItem: spec.focusItem ?? 'unknown',
+        predicate: spec.descendTargetY === null ? 'none' : `descend_to:Y=${spec.descendTargetY}`,
+        descendTargetY: spec.descendTargetY ?? 'none',
         digBlockName: best.digName ?? 'unknown',
         toolReason: choice.reason,
-        staircase: oscillate || (best.mode === 'down' && fixedCount === 0),
+        staircase: spec.staircase,
         stepX: best.step.x,
         stepY: best.step.y,
         stepZ: best.step.z,
@@ -2665,15 +2800,97 @@ function descendCandidates(
         digZ: primary.z,
         diggable: true,
         safe: best.safe,
-        grounded,
+        grounded: spec.grounded,
+        ...(spec.extraMeta ?? {}),
       },
     },
-  ]
+  }
 }
 
-function descendId(step: DescentOption): string {
-  const primary = step.mode === 'down' ? step.floor : step.wall
-  return `DESCEND:${step.mode}:${step.dir}:${blockId('b', primary)}`
+/**
+ * The bounded descent off a body that is stranded on its own support column.
+ *
+ * `strandedOnColumn` (no standable cell beyond the body's own) is exactly the
+ * state where `pickExplore` can offer no MOVE and no ordinary route exists. The
+ * only body change the world allows is a controlled vertical step down, and the
+ * sensor has already proved which ones are SAFE (`state.descent`: safe, diggable,
+ * solid support under the landing cell, no hazard) - a one-block drop with
+ * support, never a damaging fall. This family exposes those existing
+ * `DescentOption`s as ordinary DESCEND candidates.
+ *
+ * General by construction: the trigger is the geometric "no walkable frontier"
+ * fact (a 1-wide ledge, a 1x1 shaft and a self-built column are identical here),
+ * the action is the shared DESCEND mechanics, and the choice stays with Jev.
+ * Nothing here is pillar-, goal- or M3-specific, and no candidate is ever a
+ * damaging drop: when no safe step exists the typed refusal says so instead.
+ *
+ * The `descendLimitReached` no-progress latch is deliberately NOT applied here.
+ * That latch bounds blind SEARCH descent (which can carve an unbounded tunnel
+ * network). A stranded body has nowhere else to go and this step is a verified
+ * block removal plus a monotone Y change, re-planned from fresh state every
+ * action; the bound is the safe-step fact itself (it is withdrawn the moment the
+ * body is no longer stranded, the floor is not diggable, a hazard appears, or
+ * the failure budget for the step is spent).
+ */
+function columnDescentCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+): { candidates: Candidate[]; refusal: ColumnDescentRefusal | null } {
+  if (!strandedOnColumn(state)) return { candidates: [], refusal: null }
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const safeDown = (state.descent ?? []).filter(
+    (step) =>
+      step.mode === 'down' &&
+      step.safe &&
+      step.diggable === true &&
+      !isProtectedStationBlock(step.digName ?? ''),
+  )
+  if (safeDown.length === 0) {
+    return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
+  }
+  const failureLimit = options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT
+  const retryable = safeDown.filter(
+    (step) => failureCount(state.signals.failedCandidates, descendId(step)) < failureLimit,
+  )
+  if (retryable.length === 0) {
+    return { candidates: [], refusal: { reason: 'exhausted', cell: feet } }
+  }
+  const best = pickBestDescendStep(retryable, {
+    wantDown: true,
+    hasTunnelTarget: false,
+    predicateDescend: false,
+    target: null,
+    feet,
+  })
+  if (best === null) return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
+  const built = descendCandidateFromStep(state, options, best, {
+    focusItem,
+    descendTargetY: null,
+    // A safe down step lands on solid support one block lower: that is a
+    // grounded body change (verified geometry), not a semantic claim.
+    grounded: true,
+    // A cardinal step is a staircase step; the own-column dig (`dx === dz === 0`)
+    // is "dig straight down", so it is not labelled a staircase.
+    staircase: !(best.dx === 0 && best.dz === 0),
+    extraMeta: { columnDescent: true },
+  })
+  if (built === null) {
+    return {
+      candidates: [],
+      refusal: {
+        reason: 'no_tool',
+        cell: feet,
+        tool: best.digHarvestTool ?? null,
+        tier: best.digHarvestTier ?? null,
+      },
+    }
+  }
+  return { candidates: [built.candidate], refusal: null }
 }
 
 /** PLACE candidate for a held station at a grounded spot (used for self-placed stations). */
@@ -3147,6 +3364,8 @@ interface RawCandidatesResult {
   surfaceAscentRefusal: SurfaceAscentRefusal | null
   /** typed refusal for a hungry hunt with no grounded route up to animal habitat */
   foodHabitatRefusal: SurfaceAscentRefusal | null
+  /** typed refusal when a stranded body has no safe descent off its own column */
+  columnDescentRefusal: ColumnDescentRefusal | null
   /** live-structure member cells refused as sources for the active collect goal */
   sourceExclusions: ResourceSourceExclusion[]
 }
@@ -5317,7 +5536,7 @@ function pickExplore(
 ): Vec3Json | null {
   const options = standable.filter(
     (spot) =>
-      distance(spot, state.self.position) > 1.5 &&
+      distance(spot, state.self.position) > STRANDED_FRONTIER_DISTANCE &&
       !isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot) &&
       failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < moveFailureLimit,
   )
@@ -5626,9 +5845,7 @@ function exploreRouteBlockedFact(
   const movementWithheld = withheld.some(
     (entry) => entry.candidate.kind === 'MOVE' || entry.candidate.kind === 'RETRIEVE',
   )
-  const frontierExists = state.terrain.standable.some(
-    (spot) => distance(spot, state.self.position) > 1.5,
-  )
+  const frontierExists = !strandedOnColumn(state)
   const reason: ExploreRouteBlockedReason = movementWithheld
     ? 'unreachable'
     : frontierExists
@@ -5648,6 +5865,7 @@ export function applyReachabilityGate(
   surfaceAscentRefusal: SurfaceAscentRefusal | null = null,
   foodHabitatRefusal: SurfaceAscentRefusal | null = null,
   sourceExclusions: ResourceSourceExclusion[] | null = null,
+  columnDescentRefusal: ColumnDescentRefusal | null = null,
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -5779,6 +5997,7 @@ export function applyReachabilityGate(
     armorRefusals,
     surfaceAscentRefusal,
     foodHabitatRefusal,
+    columnDescentRefusal,
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),
