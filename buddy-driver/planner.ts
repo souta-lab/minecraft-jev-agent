@@ -132,6 +132,13 @@ function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | 
     waitStreak += 1
   }
   if (waitStreak >= 3) return 'wait_limit'
+  // A drained queue is exactly the moment the next WHAT is decided. Without this
+  // the summon was answered only from the ladder's fixed rung menu, so goals the
+  // menu cannot express ("find obsidian where lava meets water", "stock food
+  // before the Nether", "build the return portal") were never proposed, and the
+  // frontier flapped between menu entries (live #359). Asking the semantic layer
+  // here opens the WHAT space; the durable stall gate below keeps the rate bounded.
+  if (request.reason === 'queue_empty') return 'no_candidate'
   if (request.reason === 'action_impossible') return 'action_impossible'
   if (request.reason === 'no_progress' || request.reason === 'need_llm' || request.reason === 'unknown_situation') {
     return 'no_progress'
@@ -322,7 +329,7 @@ export class PlannerBrain implements System2Brain {
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
     let mercuryTrigger = mercuryTriggerFor(request)
-    if (this.mercury !== undefined && mercuryTrigger === 'wait_limit') {
+    if (this.mercury !== undefined && (mercuryTrigger === 'wait_limit' || mercuryTrigger === 'no_candidate')) {
       // The `wait_limit` trigger is counter-shaped: an unchanged stall keeps
       // incrementing the trailing WAIT streak, so a consultation that produced
       // no plan would otherwise re-fire identically and spend the hourly
