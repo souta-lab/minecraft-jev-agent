@@ -1716,6 +1716,48 @@ export class JevController {
     this.system2 = brain
   }
 
+  /**
+   * Explicit player intent owns WHAT and therefore bypasses System2 selection,
+   * but still flows through the normal GoalQueue -> Jev -> Guard -> Executor.
+   * The autonomous mission is preserved behind the human interrupt queue.
+   */
+  submitHumanPlan(goals: readonly PlannedGoal[], requestedBy: string): QueuedGoal[] {
+    const previous = this.queue.current
+    const added = this.queue.interruptWithHumanPlan(goals, {
+      onDuplicate: (line) => this.logger.info('human', line, { requestedBy }, this.tickCounter),
+    })
+    if (added.length === 0) return []
+    this.semanticStateGeneration += 1
+    if (previous !== null && previous.origin !== 'human') {
+      this.executor.cancelCurrent(`human intent from ${requestedBy}`)
+    }
+    this.logger.warn(
+      'human',
+      `HUMAN_INTENT_APPLIED requestedBy=${requestedBy} goals=${added.length}`,
+      { requestedBy, goals: added.map((goal) => goal.description), queueDepth: this.queue.state.depth },
+      this.tickCounter,
+    )
+    this.requestDecision('human_intent', { requestedBy, goals: added.map((goal) => goal.id) })
+    return added
+  }
+
+  /** Clear only human-owned unfinished rows and resume the preserved mission. */
+  clearHumanPlan(requestedBy: string, reason = 'free'): QueuedGoal[] {
+    const currentWasHuman = this.queue.current?.origin === 'human'
+    const cleared = this.queue.clearHumanInterrupts(reason)
+    if (cleared.length === 0) return []
+    this.semanticStateGeneration += 1
+    if (currentWasHuman) this.executor.cancelCurrent(`human ${reason} from ${requestedBy}`)
+    this.logger.warn(
+      'human',
+      `HUMAN_INTENT_CLEARED requestedBy=${requestedBy} reason=${reason} goals=${cleared.length}`,
+      { requestedBy, reason, goals: cleared.map((goal) => goal.id), queueDepth: this.queue.state.depth },
+      this.tickCounter,
+    )
+    this.requestDecision('human_intent', { requestedBy, reason, cleared: cleared.map((goal) => goal.id) })
+    return cleared
+  }
+
   /** Must be called before start(). Rebuilds every derived object. */
   setOptions(partial: Partial<JevAgentOptions>): void {
     if (this.running) throw new Error('setOptions() cannot be called while the agent is running')
@@ -4719,6 +4761,15 @@ export class JevController {
    */
   private summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
     if (!this.running) return null
+    if (this.queue.current?.origin === 'human') {
+      this.logger.info(
+        'system2',
+        `HUMAN_INTENT_SYSTEM2_SUPPRESSED reason=${reason}`,
+        { reason, detail, current: this.queue.current.description },
+        this.tickCounter,
+      )
+      return { triggered: false, reason, detail: 'human intent owns WHAT until the interrupt completes or is cleared' }
+    }
     if (this.protectedReplanSuppressed(reason)) {
       return { triggered: false, reason, detail: 'protected prerequisite: replan suppressed (#46)' }
     }

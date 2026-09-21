@@ -44,7 +44,8 @@
     "plan-tail-test": "bun test ./test-plan-tail.mts",
     "m2-snapshot-test": "bun test ./test-m2-snapshot.mts",
     "mercury:last": "bun -e 'const text = await Bun.file(\"logs/jev/mercury-calls.jsonl\").text(); console.log(JSON.stringify(JSON.parse(text.trim().split(\"\\n\").at(-1)), null, 2))'",
-    "local-mercury-authority-test": "bun test ./test-local-mercury-authority.mts"
+    "local-mercury-authority-test": "bun test ./test-local-mercury-authority.mts",
+    "human-intent-test": "bun test ./test-human-intent.mts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
