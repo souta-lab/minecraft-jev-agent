@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { classifyActionOutcome, truthfulActionOutcome } from '../jev-agent/src/actionPostcondition.ts'
 import { canAuthoritativelyAbandonOption } from '../jev-agent/src/controller-legacy.ts'
-import { DEFAULT_LLM_MODEL } from '../jev-agent/src/jev.ts'
+import { DEFAULT_JEV_MODEL } from '../jev-agent/src/jev.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { applyCompiledPlan, currentOptionContextForQueuedGoal, makeOptionSnapshot } from '../jev-agent/src/optionSpec.ts'
 import { buildAuthorityQuestions } from '../jev-agent/src/jev-authority.ts'
@@ -433,7 +433,11 @@ assert.equal(reportBrain.authorityModel, 'none')
 // Reference the constant so a model change cannot silently drift this fixture.
 assert.deepEqual(reportBrain.authorityStack, {
   provider: 'hybrid',
-  model: `typesafe-ai:${DEFAULT_LLM_MODEL}|mercury:inception/mercury-2.5`,
+  // The planner authority asks an evaluation question, and the gateway only
+  // serves that API for evaluation models (verified: muse is rejected with
+  // "is a language model, not an evaluation model"), so the planner keeps
+  // DEFAULT_JEV_MODEL while the language-generation roles use DEFAULT_LLM_MODEL.
+  model: `typesafe-ai:${DEFAULT_JEV_MODEL}|mercury:inception/mercury-2.5`,
 })
 
 console.log('system2-causal-authority: PASS (causal authority regressions)')
