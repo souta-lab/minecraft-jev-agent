@@ -26,6 +26,8 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions } from './candidates.ts'
+import { formatArmorRefusal } from './gearPlan.ts'
+import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
@@ -205,6 +207,7 @@ export function filterFurnacePrerequisiteCandidates(
     if (
       candidate.kind === 'ATTACK' ||
       candidate.kind === 'EAT' ||
+      candidate.kind === 'EQUIP' ||
       candidate.kind === 'RETREAT' ||
       candidate.kind === 'WAIT' ||
       candidate.kind === 'ESCALATE'
@@ -1523,6 +1526,8 @@ export class JevController {
   private lastIgnitionRefusalKey: string | null = null
   /** last logged PORTAL_ENTER_REFUSED signature, so one transfer dead end is one line. */
   private lastEntryRefusalKey: string | null = null
+  /** last logged EQUIP_ARMOR_REFUSED signature set, so "nothing better is held" is one line. */
+  private lastArmorRefusalKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
@@ -2146,6 +2151,7 @@ export class JevController {
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
+      this.logArmorRefusal(grounded.armorRefusals)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
@@ -6334,6 +6340,21 @@ export class JevController {
       { reason: refusal.reason, cell: refusal.cell, item: refusal.item },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Surface every carried armor piece that was NOT offered because it is not
+   * strictly better than what is worn (`EQUIP_ARMOR_REFUSED slot=... item=...
+   * worn=... reason=not_better`), once per distinct refusal set. This is the
+   * explicit "nothing better is held" fact, never a silent churn.
+   */
+  private logArmorRefusal(refusals: readonly ArmorRefusal[]): void {
+    const key = refusals.length === 0 ? null : refusals.map(formatArmorRefusal).join('|')
+    if (key === this.lastArmorRefusalKey) return
+    this.lastArmorRefusalKey = key
+    for (const refusal of refusals) {
+      this.logger.warn('agent', formatArmorRefusal(refusal), { ...refusal }, this.tickCounter)
+    }
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */

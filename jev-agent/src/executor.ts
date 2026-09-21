@@ -12,7 +12,7 @@
 // guarded `bot.dig()` on the block the policy actually selected.
 import pathfinderModule from 'mineflayer-pathfinder'
 import type { PartiallyComputedPath } from 'mineflayer-pathfinder'
-import type { Bot } from 'mineflayer'
+import type { Bot, EquipmentDestination } from 'mineflayer'
 import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
@@ -28,6 +28,8 @@ import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
 import type { CraftRecipeLike } from './craftWindow.ts'
 import { isFuelItem } from './gameData.ts'
+import { ARMOR_DESTINATION, ARMOR_SLOT_INDEX, bestWeaponOffer, formatArmorEquip, formatWeaponEquip, formatWeaponRefusal } from './gearPlan.ts'
+import type { ArmorSlot } from './gearPlan.ts'
 import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
@@ -1382,6 +1384,8 @@ export class Executor {
           return await this.runEnterPortal(candidate, epoch, signal, startedAt)
         case 'EAT':
           return await this.runEat(candidate, epoch, signal, startedAt)
+        case 'EQUIP':
+          return await this.runEquip(candidate, epoch, signal, startedAt)
         case 'ATTACK':
           return await this.runAttack(candidate, epoch, signal, startedAt)
         case 'WAIT':
@@ -3312,6 +3316,103 @@ export class Executor {
     })
   }
 
+  /**
+   * Armor-equip action: put a carried armor piece on its slot destination and
+   * require the live armor slot to name it. The post-condition is asserted here
+   * and surfaced as the greppable `EQUIP_ARMOR ...` marker; an equip that did
+   * not stick is a `verify_failed`, never a silent success.
+   */
+  private async runEquip(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const itemName = candidate.itemName
+    if (itemName === null) throw new ExecutorError('target_gone', 'EQUIP candidate has no item')
+    const slot = readMetaString(candidate, 'slot')
+    if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
+      throw new ExecutorError('target_gone', `EQUIP candidate names no valid armor slot (${slot ?? 'none'})`)
+    }
+    const armorSlot: ArmorSlot = slot
+    const replaced = readMetaString(candidate, 'replaced')
+    let observed = this.wornArmorName(armorSlot)
+    for (let attempt = 1; attempt <= PLACE_EQUIP_RETRIES; attempt += 1) {
+      const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
+      if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
+      if (observed !== itemName) {
+        this.setPhase(candidate, epoch, 'equipping')
+        await this.equipItemTo(item, ARMOR_DESTINATION[armorSlot], epoch, signal)
+      }
+      observed = this.wornArmorName(armorSlot)
+      if (observed === itemName) {
+        this.logger.info('executor', formatArmorEquip({ slot: armorSlot, itemName, replaced }), {
+          actionId: candidate.id,
+          slot: armorSlot,
+          itemName,
+          replaced,
+          attempt,
+        })
+        return this.buildResult(candidate, epoch, startedAt, 'done', 'equipped', `wore ${itemName} on ${armorSlot}`, null, {
+          verified: true,
+          dropObserved: false,
+          blockRemoved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+        })
+      }
+      if (attempt < PLACE_EQUIP_RETRIES) await delay(PLACE_EQUIP_SETTLE_MS, signal)
+    }
+    throw new ExecutorError(
+      'verify_failed',
+      `equip ${itemName} was not reflected in the ${armorSlot} armor slot (found ${observed ?? 'empty'})`,
+    )
+  }
+
+  /**
+   * The worn item name in one armor destination, read from the live player
+   * window (slot 5=head .. 8=feet). `null` when the slot is empty.
+   */
+  private wornArmorName(slot: ArmorSlot): string | null {
+    const slots = (this.bot.inventory as { slots?: ReadonlyArray<{ name?: string } | null> }).slots
+    const item = slots?.[ARMOR_SLOT_INDEX[slot]]
+    return item !== undefined && item !== null && typeof item.name === 'string' ? item.name : null
+  }
+
+  /**
+   * Weapon-in-hand condition for combat. An ATTACK is a real melee lease: the
+   * damage actually dealt is the HELD item's. Before the lease starts, put the
+   * best carried sword/axe in the main hand when it out-damages what is held,
+   * through the same leased equip path as every other equip. Nothing better in
+   * the inventory is an explicit refusal marker, and the attack proceeds with
+   * whatever is in hand - this never blocks or replaces the Jev-chosen ATTACK.
+   */
+  private async equipCombatWeapon(candidate: Candidate, epoch: number, signal: AbortSignal): Promise<void> {
+    const held = this.bot.heldItem?.name ?? null
+    const offer = bestWeaponOffer(held, this.inventoryCounts())
+    if (offer === null) {
+      this.logger.info('executor', formatWeaponRefusal(held), { actionId: candidate.id, heldItem: held })
+      return
+    }
+    const item = this.bot.inventory.items().find((entry) => entry.name === offer.itemName)
+    if (item === undefined) {
+      this.logger.warn('executor', formatWeaponRefusal(held), {
+        actionId: candidate.id,
+        heldItem: held,
+        missing: offer.itemName,
+      })
+      return
+    }
+    this.setPhase(candidate, epoch, 'equipping')
+    await this.equipItemTo(item, 'hand', epoch, signal)
+    this.logger.info('executor', formatWeaponEquip(offer), {
+      actionId: candidate.id,
+      itemName: offer.itemName,
+      replaced: held,
+      damage: offer.damage,
+    })
+  }
+
   private async runAttack(
     candidate: Candidate,
     epoch: number,
@@ -3320,6 +3421,7 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const entityId = candidate.targetEntityId
     if (entityId === null) throw new ExecutorError('target_gone', 'ATTACK candidate has no entity id')
+    await this.equipCombatWeapon(candidate, epoch, signal)
     let attacks = 0
     let following = false
     const deadline = Date.now() + ATTACK_LEASE_MS
@@ -3753,6 +3855,26 @@ export class Executor {
     })
   }
 
+  /**
+   * The single equip mechanism. The leased allowlist port (#38) owns the side
+   * effect when the resident provides one; standalone runs fall back to the
+   * raw bot. Every equip (placement, armor, combat weapon) goes through here so
+   * the lease assertion and destination spelling live in exactly one place.
+   */
+  private async equipItemTo(
+    item: Item,
+    destination: EquipmentDestination,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.options.actuationPort !== undefined) {
+      await this.options.actuationPort.equip(item, destination)
+    } else {
+      await this.bot.equip(item, destination)
+    }
+    this.ensureOwned(epoch, signal)
+  }
+
   /** One post-condition-gated placement at an already-near cell. */
   private async equipPlacementItem(
     candidate: Candidate,
@@ -3765,12 +3887,7 @@ export class Executor {
       const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
       if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
       if (observed !== itemName) {
-        if (this.options.actuationPort !== undefined) {
-          await this.options.actuationPort.equip(item, 'hand')
-        } else {
-          await this.bot.equip(item, 'hand')
-        }
-        this.ensureOwned(epoch, signal)
+        await this.equipItemTo(item, 'hand', epoch, signal)
       }
       observed = this.bot.heldItem?.name ?? null
       if (observed === itemName) {
