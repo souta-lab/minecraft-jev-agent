@@ -4612,10 +4612,18 @@ function routeOpeningCandidates(
   const candidatesForWaypoint = state.terrain.standable
     .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
     .filter((spot) => distance(spot, state.self.position) > 1)
-  const detours = candidatesForWaypoint.filter((spot) => !nearRefused(spot))
-  const toward = (detours.length > 0 ? detours : candidatesForWaypoint).sort(
-    (a, b) => distance(a, blockedTarget) - distance(b, blockedTarget),
-  )[0]
+  // The waypoint must make real progress toward the withheld target. Offering the
+  // closest spot while ignoring distance produced an east/west oscillation at the
+  // same spot (operator: "it keeps pacing left and right"; live `pos` cycled
+  // 195.5 <-> 199) because lateral spots are no worse than forward ones under a
+  // pure closeness sort. Require the spot to be strictly closer to the target
+  // than the body is (>= 1 block), which is the same grounding the
+  // `moveAdvancesTowardTarget` filter already applies to plain MOVEs.
+  const selfDistance = distance(state.self.position, blockedTarget)
+  const detours = candidatesForWaypoint
+    .filter((spot) => !nearRefused(spot))
+    .filter((spot) => distance(spot, blockedTarget) <= selfDistance - 1)
+  const toward = detours.sort((a, b) => distance(a, blockedTarget) - distance(b, blockedTarget))[0]
   if (toward !== undefined) {
     out.push(
       exploreMoveCandidate(
