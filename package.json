@@ -52,7 +52,8 @@
     "run-artifacts-test": "bun tools/test-run-artifacts.mjs",
     "issue13-evidence-test": "bun tools/test-issue13-evidence.mjs",
     "world-state": "bun tools/world-player-state.mjs",
-    "world-state-test": "bun tools/test-world-player-state.mjs"
+    "world-state-test": "bun tools/test-world-player-state.mjs",
+    "resident-supervisor-test": "bun tools/test-resident-supervisor.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
