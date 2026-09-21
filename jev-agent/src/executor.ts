@@ -5014,18 +5014,11 @@ export class Executor {
     }
 
     const timeoutMs = this.options.portalEnterTimeoutMs ?? PORTAL_ENTER_TIMEOUT_MS
-    // The body gets in by the SAME generic locomotion move every other MOVE uses:
-    // `pathTo` with an exact `GoalBlock` (stock pathfinder first, then the
-    // planned control-walk fallback) to the standable interior cell. There is no
-    // bespoke approach cell and no direct-bearing walk; the one-block step up
-    // onto the frame floor is an ordinary climb the generic mover already
-    // handles. The earlier `GoalNear(...,1)` retry degenerated into a straight
-    // press because the body already sat within one block of the interior while
-    // one row below it - that is exactly the pacing loop this replaces. The only
-    // entry-specific facts are the live lit check above and the dimension
-    // postcondition below; standing inside a portal block is a world mechanic,
-    // not a skill.
-    this.setPhase(candidate, epoch, 'pathing')
+    // Establish a reachable stand beside the bottom frame edge before asking
+    // pathfinder to enter the non-solid portal cell. This reuses the bounded
+    // station-approach mechanics (direct-bearing fallback + safe stair cuts);
+    // GoalBlock cannot plan through a portal block from a lower tunnel.
+    const approachBlock = { x: enterCell.x, y: enterCell.y - 1, z: enterCell.z }
     // Abort the generic path the moment the server transfers us, so no fallback
     // keeps steering a body that is already in the other dimension.
     const transferSignal = new AbortController()
@@ -5045,7 +5038,9 @@ export class Executor {
         }
       }
     })()
+    this.setPhase(candidate, epoch, 'pathing')
     try {
+      await this.approachPlacedBlock(approachBlock, 'nether_portal', epoch, transferSignal.signal)
       await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
     } catch (error) {
       // A transfer during the path is already the postcondition; anything else

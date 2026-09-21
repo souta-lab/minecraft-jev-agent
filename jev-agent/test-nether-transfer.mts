@@ -491,14 +491,22 @@ async function runEnter(transfer: boolean) {
   const logPath = join(dir, 'agent.jsonl')
   const logger = new EventLogger(new JsonlWriter(logPath), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet', portalEnterTimeoutMs: 400 })
-  // The GENERIC locomotion stub: record the target the entry asked the ordinary
-  // mover for, step the body into that interior cell, and (for the success case)
-  // let the server-side transfer change the dimension. Nothing portal-specific
-  // is injected: the entry path is `pathTo`, exactly like a MOVE.
-  const calls: Vec3Json[] = []
-  ;(executor as unknown as {
+  const approachCalls: Vec3Json[] = []
+  type PortalExecutorHarness = {
+    approachPlacedBlock: (block: Vec3Json, label: string, epoch: number, signal: AbortSignal) => Promise<Vec3Json>
     pathTo: (target: Vec3Json, epoch: number, signal: AbortSignal, goalKind: string, fallback?: unknown) => Promise<void>
-  }).pathTo = async (target) => {
+  }
+  // Test seam for the private executor helpers; the fixture supplies both
+  // mechanics so this test remains offline and deterministic.
+  const harness = executor as unknown as PortalExecutorHarness
+  harness.approachPlacedBlock = async (block) => {
+    approachCalls.push({ ...block })
+    return { ...block }
+  }
+  // The generic locomotion stub records the entry target and lets the fake
+  // server transfer when the body reaches the portal interior.
+  const calls: Vec3Json[] = []
+  harness.pathTo = async (target) => {
     calls.push({ ...target })
     fixture.position.set(ENTER_CELL.x + 0.5, ENTER_CELL.y, ENTER_CELL.z + 0.5)
     if (transfer) fixture.bot.game.dimension = 'the_nether'
@@ -508,7 +516,7 @@ async function runEnter(transfer: boolean) {
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => (JSON.parse(line) as { message?: string }).message ?? '')
-  return { result, messages, calls }
+  return { result, messages, calls, approachCalls }
 }
 
 {
@@ -519,8 +527,11 @@ async function runEnter(transfer: boolean) {
     success.result.status === 'done' &&
     success.result.verified === true &&
     success.result.failure === null &&
-    // Fixture (a): the entry movement target is the interior cell, reached by
-    // the generic locomotion path (no bespoke approach / direct-bearing walk).
+    // The executor first establishes a reachable stand at the bottom frame
+    // edge, then asks generic locomotion to enter the interior cell.
+    success.approachCalls.length === 1 &&
+    key(success.approachCalls[0] ?? { x: -1, y: -1, z: -1 }) ===
+      key({ x: ENTER_CELL.x, y: ENTER_CELL.y - 1, z: ENTER_CELL.z }) &&
     success.calls.length === 1 &&
     key(success.calls[0] ?? { x: -1, y: -1, z: -1 }) === key(ENTER_CELL) &&
     enteredLines.length === 1 &&
@@ -529,9 +540,9 @@ async function runEnter(transfer: boolean) {
     failure.result.failure === 'verify_failed' &&
     failure.messages.every((line) => !line.startsWith(PORTAL_ENTERED))
   check(
-    '(5) executor reports done/entered only after dimension == the_nether',
+    '(5) executor approaches the bottom frame edge before entering and verifies the dimension change',
     pass,
-    `success=${success.result.status}/${success.result.failure ?? 'none'} verified=${success.result.verified} pathTo=${JSON.stringify(success.calls[0])} marker=[${enteredLines[0] ?? 'none'}] noTransfer=${failure.result.status}/${failure.result.failure ?? 'none'}`,
+    `success=${success.result.status}/${success.result.failure ?? 'none'} approach=${JSON.stringify(success.approachCalls[0])} pathTo=${JSON.stringify(success.calls[0])} marker=[${enteredLines[0] ?? 'none'}] noTransfer=${failure.result.status}/${failure.result.failure ?? 'none'}`,
   )
 }
 
