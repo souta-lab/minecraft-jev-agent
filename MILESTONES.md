@@ -16,9 +16,11 @@ M1 Jev-only plan (no LLM calls):
 M2 diamond-to-Nether-gate: diamond x3 -> diamond pickaxe -> flint_and_steel -> obsidian x10 -> build/light/verify portal
   (first milestone where the LLM must supply a long-horizon plan)
 
-M3 Nether progression after the gate: enter Nether -> blaze rods -> ender pearls -> eyes of ender
+M3 Nether access + 12 ender pearls: enter Nether -> ender_pearl x12
+  (the pearl half of the 12 Eyes of Ender that M4 needs; requires hostile-mob difficulty,
+   since peaceful mode disables enderman drops)
 
-M4 THE DRAGON: stronghold -> end portal -> kill Ender Dragon
+M4 THE DRAGON: blaze rods -> eyes of ender x12 -> stronghold -> end portal -> kill Ender Dragon
 
 ## Environment
 - Leaf 1.21.11 (build #178, Java 21, sha256 b01c2f6037f97a4e1cd1d23dc6574ebb4839de12395b62aa465fac63db263627)

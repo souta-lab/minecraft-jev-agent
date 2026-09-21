@@ -498,8 +498,8 @@ HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
 ```text
 M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone
 M2: diamond×3 -> diamond_pickaxe -> flint_and_steel -> obsidian×10 -> Nether gate built/lit/verified
-M3: enter Nether -> blaze rods / ender pearls -> eyes of ender
-M4: eyes -> stronghold -> End -> dragon
+M3: enter Nether -> ender_pearl×12
+M4: blaze rods -> eyes of ender×12 -> stronghold -> End -> dragon
 ```
 
 各段で一次ログ＋inventory/predicateをrun-scoped evidenceとして残し、ARCHITECTURE.mdとissueを更新する。
@@ -573,7 +573,7 @@ M4: eyes -> stronghold -> End -> dragon
 
 ## 7. M4設定blocker
 
-現在difficulty=peaceful。M2のネザーゲート構築まではpeacefulで進められる。blaze / enderman由来resourceが必要になるM3前にdifficulty変更をproduct decisionとして明示し、変更runを証拠化する。
+現在difficulty=peaceful。M2のネザーゲート構築まではpeacefulで進められる。M3は`ender_pearl×12`と定義され、エンダーマン（敵対mob）のドロップが必須になるため、M3着手前にdifficulty変更をproduct decisionとして明示し、変更runを証拠化する（ブレイズはM4のeyes of ender×12で必要になる）。
 それまではresident/Option/M2（ダイヤからゲートまで）の検証を進める。
 
 ## 8. 設計判定ルール
