@@ -4404,13 +4404,23 @@ export class Executor {
    * The live body's breath/water facts. Read at the moment of the mechanical
    * side effect, so a stale candidate snapshot cannot authorize working under
    * water. `bot.oxygenLevel` is the server's `air_supply` metadata.
+   *
+   * Air is the SAFE trigger, so a body with breath to spare returns without any
+   * block lookup and the two fluid cells are read only when the reading is
+   * actually about to be reported - which keeps the common path free of extra
+   * world reads. The full water facts for the semantic layer live on
+   * `SelfState` (`buildSelf`), not here.
    */
   private liveSubmersion(): BodySubmersion {
+    const air = (this.bot as { oxygenLevel?: number }).oxygenLevel
+    if (typeof air !== 'number' || !Number.isFinite(air) || air > LOW_AIR_LEVEL) {
+      return { air: typeof air === 'number' && Number.isFinite(air) ? air : MAX_AIR, feetInWater: false, eyesInWater: false, state: 'dry' }
+    }
     const position = this.bot.entity.position
     const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
     const eyes = { x: Math.floor(position.x), y: Math.floor(position.y + 1.62), z: Math.floor(position.z) }
     return bodySubmersion({
-      air: (this.bot as { oxygenLevel?: number }).oxygenLevel,
+      air,
       feetInWater: this.fluidCell(feet),
       eyesInWater: this.fluidCell(eyes),
     })
