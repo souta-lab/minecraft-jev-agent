@@ -84,12 +84,13 @@ import {
   readControlState,
 } from './pillarTakeoffTelemetry.ts'
 import {
+  correctStandingOnGround,
   formatPillarUpStep,
   installGroundCorrection,
   PILLAR_TAKEOFF_BUDGET_MS,
   PILLAR_TAKEOFF_POLL_MS,
 } from './pillarJump.ts'
-import type { PillarJumpTrace, SolidAt } from './pillarJump.ts'
+import type { JumpBotLike, PillarJumpTrace, SolidAt } from './pillarJump.ts'
 import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 import {
   OBSIDIAN,
@@ -537,6 +538,65 @@ export function deriveInteractionFace(from: Vec3Json, block: Vec3Json): Vec3Json
   const dz = from.z - block.z
   if (Math.abs(dx) >= Math.abs(dz)) return { x: dx >= 0 ? 1 : -1, y: 0, z: 0 }
   return { x: 0, y: 0, z: dz >= 0 ? 1 : -1 }
+}
+
+/**
+ * The observability marker for a dig whose stale `onGround` flag was corrected
+ * from the block grid. prismarine-block divides the break speed by 5 while
+ * `entity.onGround` is false, and this Leaf server ships no 26.1 collision
+ * shapes, so prismarine-physics reports `onGround=false` while a solid block is
+ * underfoot (the same parity quirk `pillarUp` diagnoses). The outgoing position
+ * packet then carries `onGround=false`, the server applies the vanilla airborne
+ * /5 penalty, and a block whose grounded break time is close to `digTimeoutMs`
+ * never lands before the executor aborts it. Live (source 6a7fccd, m3-live):
+ * the body reached the verified obsidian at (26,66,9) and every
+ * `MINE:b26_66_9` died as `dig timed out after 15000ms` (verified=false,
+ * progressDelta=0) until the resident hit `FATAL code=MODEL_UNAVAILABLE`.
+ * Obsidian is ~9.4s grounded but ~46.9s airborne, so the corrected dig is the
+ * difference between MINE succeeding and the loop that produced this marker.
+ */
+export function formatDigGroundCorrected(block: { name: string; position: Vec3Json }): string {
+  const { x, y, z } = block.position
+  return `DIG_GROUND_CORRECTED block=${block.name} at=${Math.round(x)},${Math.round(y)},${Math.round(z)}`
+}
+
+/**
+ * Run a dig with the block-grid ground correction installed for its whole
+ * duration, so the body state mineflayer's `digTime` reads and the body state
+ * the outgoing position packet advertises both agree with the world. This is
+ * the break-speed half of the same `onGround` parity quirk the pillar path
+ * corrects for its jump gate; without it a grounded obsidian dig is priced as
+ * airborne (~46.9s vs ~9.4s) and the executor's budget aborts it. The
+ * correction is grounded in the block grid: with no solid footing it declines,
+ * so a genuinely airborne dig keeps its real cost. `onCorrected` fires at most
+ * once, only when the stale flag was actually flipped.
+ */
+export async function withDigGroundCorrection<T>(
+  bot: JumpBotLike,
+  isSolid: SolidAt,
+  dig: () => Promise<T>,
+  onCorrected?: () => void,
+): Promise<T> {
+  let reported = false
+  const report = (grounded: boolean, before: boolean, after: boolean): void => {
+    if (reported || !grounded || before === true || after !== true) return
+    reported = true
+    onCorrected?.()
+  }
+  const uninstall = installGroundCorrection(bot, isSolid, undefined, (_event, grounded, before, after) => {
+    report(grounded, before, after)
+  })
+  // Ground synchronously too: `bot.dig` reads `digTime` before the first
+  // physicsTick listener can run.
+  if (bot.entity.onGround !== true) {
+    const before = bot.entity.onGround
+    report(correctStandingOnGround(bot, isSolid), before, bot.entity.onGround)
+  }
+  try {
+    return await dig()
+  } finally {
+    uninstall()
+  }
 }
 
 /** The feet-distance slack that counts as "arrived" for a remembered retrieve. */
@@ -5334,14 +5394,31 @@ export class Executor {
     await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
     this.ensureOwned(epoch, signal)
 
+    // Break speed reads the same stale `onGround` parity quirk the pillar path
+    // corrects for its jump gate: this server reports false while a solid block
+    // is underfoot, so the outgoing packet advertises an airborne body and the
+    // server charges the vanilla /5 penalty. Obsidian is ~9.4s grounded but
+    // ~46.9s airborne, which the flat budget below then aborts as `dig_timeout`
+    // (live MINE:b26_66_9). `withDigGroundCorrection` keeps the flag corrected
+    // from the block grid for the whole dig and names the corrected dig.
     let timedOut = false
-    const dig = this.bot.dig(block, 'ignore')
     const timer = setTimeout(() => {
       timedOut = true
       this.bot.stopDigging()
     }, this.options.digTimeoutMs)
     try {
-      await dig
+      await withDigGroundCorrection(
+        this.bot,
+        (x, y, z) => this.solidSupportAt(x, y, z),
+        () => this.bot.dig(block, 'ignore'),
+        () => {
+          this.logger.info('executor', formatDigGroundCorrected(block), {
+            actionId: this.action?.id ?? 'unknown',
+            block: block.name,
+            position: block.position,
+          })
+        },
+      )
     } catch (error) {
       if (timedOut) throw new ExecutorError('dig_timeout', `dig timed out after ${this.options.digTimeoutMs}ms`)
       throw new ExecutorError('dig_error', error instanceof Error ? error.message : String(error))
