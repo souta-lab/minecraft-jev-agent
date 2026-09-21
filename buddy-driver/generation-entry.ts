@@ -36,7 +36,12 @@ import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
 import { portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
-import { countSensedPortalFrameBlocks, detectLivePortalVerification, sensedVerifiedPortalSites } from '../jev-agent/src/state.ts'
+import {
+  NETHER_STRUCTURE_BLOCK_NAMES,
+  countSensedPortalFrameBlocks,
+  detectLivePortalVerification,
+  sensedVerifiedPortalSites,
+} from '../jev-agent/src/state.ts'
 import {
   PlannerBrain,
   RUNGS,
@@ -61,6 +66,7 @@ import type {
   KnownPortalSiteJson,
   KnownResourceJson,
   KnownStation,
+  KnownStructureSiteJson,
   MissionPreflightResult,
   ResidentGeneration,
   ResidentWorldMemory,
@@ -506,6 +512,124 @@ export function portalSiteKnownResources(
   }))
 }
 
+/** `the_nether` dimension id, normalized (no `minecraft:` prefix). */
+export const NETHER_DIMENSION_ID = 'the_nether'
+
+/**
+ * M3: Nether-only world truth. A Nether fortress can only exist in the Nether,
+ * so a structure record may only be minted there; the same id spellings
+ * (`the_nether` / `minecraft:the_nether`) are one dimension.
+ */
+export function isNetherDimension(dimension: string): boolean {
+  return normalizeDimensionId(dimension) === NETHER_DIMENSION_ID
+}
+
+/**
+ * M3: proof distance for a durable Nether-structure site record. A remembered
+ * anchor within this radius was loaded while the bot stood there, so a live scan
+ * that senses no structure fabric near the anchor is proof the record is stale.
+ * Outside the radius, absence proves nothing (same rule as #14 / #80).
+ */
+export const STRUCTURE_SITE_PROOF_DISTANCE = 8
+
+export interface StructureSiteSyncResult {
+  /** the durable list after record + refresh + eviction */
+  known: KnownStructureSiteJson[]
+  /** newly sensed sites to merge into durable memory */
+  added: KnownStructureSiteJson[]
+  /** foreign-epoch/dimension or disproved sites to drop from durable memory */
+  removed: KnownStructureSiteJson[]
+}
+
+function structureSiteKey(site: { x: number; y: number; z: number }): string {
+  return `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+}
+
+/**
+ * M3 pure durable Nether-structure-site lifecycle, mirroring
+ * `syncKnownPortalSites`. It records structure body cells sensed in the Nether,
+ * keeps existing records fresh, drops records the live scan disproved while the
+ * bot is close enough to trust the absence, and drops records from a previous
+ * world epoch or dimension.
+ *
+ * ADMISSION IS NETHER-ONLY: `nether_bricks` is a real block in any dimension
+ * (a player can place it anywhere), but only a Nether sighting can be fortress
+ * fabric. A non-Nether `worldKey.dimension` therefore mints nothing, so
+ * overworld sensing can never produce a Nether structure record. It never decides
+ * "go there": it only maintains the CAN fact "fortress fabric is at P".
+ */
+export function syncKnownStructureSites(input: {
+  known: readonly KnownStructureSiteJson[]
+  liveSensed: readonly { position: Vec3Json; kind: 'nether_fortress'; blocks: readonly string[] }[]
+  worldKey: { dimension: string; worldEpoch: number }
+  position: Vec3Json
+  now?: number
+  proofDistance?: number
+}): StructureSiteSyncResult {
+  const now = input.now ?? Date.now()
+  const proofDistance = input.proofDistance ?? STRUCTURE_SITE_PROOF_DISTANCE
+  const liveSensed = isNetherDimension(input.worldKey.dimension) ? input.liveSensed : []
+  const liveKeys = new Set(liveSensed.map((site) => structureSiteKey(site.position)))
+  const added: KnownStructureSiteJson[] = []
+  const removed: KnownStructureSiteJson[] = []
+  const kept: KnownStructureSiteJson[] = []
+  const seen = new Set<string>()
+  for (const site of input.known) {
+    const key = structureSiteKey(site)
+    if (seen.has(key)) continue
+    // World-epoch / dimension re-anchoring: a coordinate is only meaningful in
+    // the world it was sensed in, so a stale record is dropped, never probed.
+    if (site.worldEpoch !== undefined && site.worldEpoch !== input.worldKey.worldEpoch) {
+      removed.push(site)
+      continue
+    }
+    if (
+      site.dimension !== undefined &&
+      site.dimension.length > 0 &&
+      normalizeDimensionId(site.dimension) !== normalizeDimensionId(input.worldKey.dimension)
+    ) {
+      removed.push(site)
+      continue
+    }
+    if (liveKeys.has(key)) {
+      seen.add(key)
+      kept.push({
+        ...site,
+        lastSeenAt: now,
+        ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+      })
+      continue
+    }
+    const distance = Math.hypot(site.x - input.position.x, site.y - input.position.y, site.z - input.position.z)
+    // The bot is close enough that any fortress fabric at this anchor would have
+    // been sensed. The live scan found none, so the record is disproved.
+    if (distance <= proofDistance) {
+      removed.push(site)
+      continue
+    }
+    seen.add(key)
+    kept.push({ ...site, ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }) })
+  }
+  for (const site of liveSensed) {
+    const key = structureSiteKey(site.position)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const record: KnownStructureSiteJson = {
+      x: Math.round(site.position.x),
+      y: Math.round(site.position.y),
+      z: Math.round(site.position.z),
+      kind: site.kind,
+      blocks: [...new Set(site.blocks)].sort(),
+      dimension: input.worldKey.dimension,
+      worldEpoch: input.worldKey.worldEpoch,
+      lastSeenAt: now,
+    }
+    added.push(record)
+    kept.push(record)
+  }
+  return { known: kept, added, removed }
+}
+
 function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] {
   const ids: number[] = []
   for (const name of blockNames) {
@@ -844,6 +968,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: [...ctx.worldMemory.discoveredOres],
     knownResources: (ctx.worldMemory.knownResources ?? []).map((resource) => ({ ...resource })),
     knownPortalSites: (ctx.worldMemory.knownPortalSites ?? []).map((site) => ({ ...site })),
+    knownStructureSites: (ctx.worldMemory.knownStructureSites ?? []).map((site) => ({
+      ...site,
+      ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
+    })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
@@ -887,6 +1015,49 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
     return liveVerified
   }
+  /**
+   * M3: maintain the durable Nether-structure-site record from live perception.
+   * The record is CAN-only ("fortress fabric sensed at P"): it never decides "go
+   * there" and never sets a goal. Admission is Nether-only, so an overworld
+   * `nether_bricks` sighting mints nothing (see `syncKnownStructureSites`). Mirrors
+   * `syncPortalSiteMemory` including the generation-start write, so the record is
+   * durable before the bot wanders out of sensor range.
+   */
+  const syncStructureSiteMemory = (
+    reason: string,
+  ): { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] => {
+    const entity = ctx.bot.entity
+    if (entity === undefined) return []
+    const liveSensed: { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] = []
+    for (const position of scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)) {
+      const name = liveBlockNameAt(ctx.bot, position)
+      if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
+      liveSensed.push({ position, kind: 'nether_fortress', blocks: [name] })
+    }
+    const result = syncKnownStructureSites({
+      known: world.knownStructureSites,
+      liveSensed,
+      worldKey: ctx.worldKey,
+      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    })
+    world.knownStructureSites = result.known
+    if (result.added.length === 0 && result.removed.length === 0) return liveSensed
+    ctx.proposeWorldMemory({
+      ...(result.added.length === 0 ? {} : { knownStructureSites: result.added }),
+      ...(result.removed.length === 0 ? {} : { removeKnownStructureSites: result.removed }),
+    })
+    ctx.log('STRUCTURE_SITE_MEMORY', {
+      reason,
+      source: 'live-world',
+      kind: 'nether_fortress',
+      dimension: ctx.worldKey.dimension,
+      added: result.added.length,
+      removed: result.removed.length,
+      known: result.known.length,
+      removedSites: result.removed.map((site) => `${site.x},${site.y},${site.z}`),
+    })
+    return liveSensed
+  }
   const refreshLiveFacts = (reason: string): void => {
     const nextDimension = String(ctx.bot.game?.dimension ?? '')
     if (nextDimension !== world.dimension) {
@@ -897,6 +1068,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // verdict: `sensedVerifiedPortalSites` is the per-site form of
     // `detectLivePortalVerification`, so a non-empty result IS the verdict.
     const liveVerified = syncPortalSiteMemory(reason)
+    syncStructureSiteMemory(reason)
     const next = liveVerified.length > 0
     if (next === world.portalVerified) return
     world.portalVerified = next
@@ -905,6 +1077,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // Record a portal that was already verified at generation start (e.g. after a
   // hot reload) so it is durable before the bot can wander out of sensor range.
   syncPortalSiteMemory('generation-start')
+  // Same for a Nether-structure site already in scan range at generation start.
+  syncStructureSiteMemory('generation-start')
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const m2Snapshot =
     ctx.runId === undefined || ctx.m2SnapshotDir === undefined
@@ -1087,6 +1261,31 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       worldEpoch: ctx.worldKey.worldEpoch,
       lastSeenAt: seenAt,
     })
+  }
+  // M3: Nether fortress body cells also become remembered resource coordinates,
+  // so the existing `RETRIEVE:known` machinery has a grounded route to the
+  // fortress after it leaves live sensor range (the `blaze_rods` step's target).
+  // Dimension-gated exactly like the durable structure record: `nether_bricks`
+  // placed in the overworld is a real block but not a fortress landmark, so it is
+  // never recorded as a blaze_rod route there.
+  if (isNetherDimension(ctx.worldKey.dimension)) {
+    for (const position of scanBlockPositions(bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)) {
+      const name = liveBlockNameAt(bot, position)
+      if (name === null || !NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) continue
+      foundResources.push({
+        name,
+        // Same name-scanned-resource bucket as obsidian: this records the
+        // fortress landmark cell, it does NOT assert that nether bricks yield
+        // blaze_rod (see DIRECT_BLOCK_SOURCES in state.ts).
+        kind: 'ore',
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        dimension: ctx.worldKey.dimension,
+        worldEpoch: ctx.worldKey.worldEpoch,
+        lastSeenAt: seenAt,
+      })
+    }
   }
   const staleRemovals = evictStaleKnownResources(bot, world.knownResources, ctx.worldKey, (event, detail) => ctx.log(event, detail))
   const newKnownResources = mergeKnownResources(

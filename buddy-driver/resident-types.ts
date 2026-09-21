@@ -134,6 +134,38 @@ export interface KnownPortalSiteJson {
   interior?: Vec3Json[]
 }
 
+/**
+ * M3: a durable, world-keyed record that a Nether structure body was SENSED at
+ * these coordinates. Like `KnownPortalSiteJson` it is a CAN fact ("Nether
+ * fortress fabric exists at P"), never a verdict and never a route decision: the
+ * consumer re-grounds on live block truth before acting.
+ *
+ * Admission is NETHER-ONLY (`syncKnownStructureSites`). `nether_bricks` is a
+ * real block anywhere, including a player-placed overworld decoration, so an
+ * overworld sighting must never mint a fortress record. The entry survives
+ * generation/reload through the staged commit path and is dropped on a
+ * world-epoch or dimension change, exactly like a portal site.
+ */
+export interface KnownStructureSiteJson {
+  /** the sensed structure body cell (rounded): the durable route anchor */
+  x: number
+  y: number
+  z: number
+  /** structure class; only the Nether fortress body is produced today */
+  kind: 'nether_fortress'
+  /**
+   * Distinct structure body block names sensed over the site (corroboration:
+   * `nether_bricks` plus the fence/stair variants when present). Evidence only.
+   */
+  blocks?: string[]
+  /** dimension the site was sensed in; a coordinate is only valid there */
+  dimension?: string
+  /** world epoch the site was sensed in; a reset invalidates the coordinate */
+  worldEpoch?: number
+  /** epoch ms the structure body was last observed at this cell */
+  lastSeenAt?: number
+}
+
 /** The two station kinds the resident remembers coordinates for. */
 export type StationKind = 'crafting_table' | 'furnace'
 
@@ -177,6 +209,8 @@ export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | '
  *   discoveredOres     generation-entry ore scan (names only, per world key)
  *   knownResources     generation-entry ore/log/obsidian scan + #14 stale eviction
  *   knownPortalSites   generation-entry `syncPortalSiteMemory` (#80, CAN-only)
+ *   knownStructureSites generation-entry `syncStructureSiteMemory` (M3, CAN-only,
+ *                      Nether-only fortress body)
  *   moveFailures       controller `onMoveFailureMemoryChange`
  *   hazards            HOST `registerDeathHazard` on a production death (#26)
  *   mined              NO runtime producer: merge/persist machinery exists, but no
@@ -210,6 +244,14 @@ export interface ResidentWorldMemory {
    * on a world-epoch change.
    */
   knownPortalSites: KnownPortalSiteJson[]
+  /**
+   * M3: durable, world-keyed Nether-structure sites (fortress body cells). A CAN
+   * fact ("fortress fabric exists at P"), admitted only while the world key is
+   * the Nether and re-grounded from live block truth by the consumer. Survives
+   * generation reload/respawn; dropped on a failed live re-check at the site and
+   * on a world-epoch/dimension change.
+   */
+  knownStructureSites: KnownStructureSiteJson[]
   /** thin 2-block-wall / stuck memory; suppress repeat attempts. No runtime
    * producer yet - see the interface doc; always empty in live state. */
   traversalFailures: TraversalFailure[]
@@ -240,6 +282,7 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     discoveredOres: [],
     knownResources: [],
     knownPortalSites: [],
+    knownStructureSites: [],
     traversalFailures: [],
     moveFailures: [],
     hazards: [],
@@ -256,6 +299,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.discoveredOres = Array.isArray(memory.discoveredOres) ? memory.discoveredOres : []
   memory.knownResources = Array.isArray(memory.knownResources) ? memory.knownResources : []
   memory.knownPortalSites = Array.isArray(memory.knownPortalSites) ? memory.knownPortalSites : []
+  memory.knownStructureSites = Array.isArray(memory.knownStructureSites) ? memory.knownStructureSites : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
@@ -299,6 +343,10 @@ export interface WorldMemoryDelta {
   knownPortalSites?: KnownPortalSiteJson[]
   /** portal sites whose live re-check failed / epoch changed; the host drops them (#80) */
   removeKnownPortalSites?: KnownPortalSiteJson[]
+  /** Nether-structure sites to remember; the host merges them by cell (M3) */
+  knownStructureSites?: KnownStructureSiteJson[]
+  /** structure sites whose live re-check failed / epoch changed; the host drops them (M3) */
+  removeKnownStructureSites?: KnownStructureSiteJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   moveFailures?: MoveFailEntry[]

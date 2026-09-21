@@ -448,6 +448,34 @@ export const ORE_SOURCES: Readonly<Record<string, readonly string[]>> = {
 export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_SOURCES).flat())]
 
 /**
+ * M3: the Nether-structure body blocks worth name-scanning so a sensed Nether
+ * fortress becomes representable truth. Fortresses are built from nether brick
+ * blocks; the fence and stair variants are corroboration, not evidence of a
+ * completed structure on their own.
+ *
+ * Verified against the PINNED minecraft-data (1.21.11) loaded by mineflayer:
+ *   nether_bricks       id 380, diggable, hardness 2.0
+ *   nether_brick_fence  id 381, diggable, hardness 2.0
+ *   nether_brick_stairs id 382, diggable, hardness 2.0
+ * `blaze_spawner` does NOT exist in this data version — the only spawner names
+ * are `spawner` and `trial_spawner`. A generic `spawner` block would also match
+ * overworld dungeons, so it is deliberately NOT used here: the fortress body
+ * blocks are the grounded signal. (`nether_brick_slab`/`nether_brick_wall` also
+ * exist and can be added as corroboration later; they are left out to keep the
+ * scan set at the three names that most reliably mark fortress fabric.)
+ *
+ * The list is perception truth only. Whether a sensed body belongs to a real
+ * fortress is a dimension question owned by the durable structure record
+ * (`syncKnownStructureSites` in buddy-driver/generation-entry.ts), never a goal
+ * or ranking decision made here.
+ */
+export const NETHER_STRUCTURE_BLOCK_NAMES: readonly string[] = [
+  'nether_bricks',
+  'nether_brick_fence',
+  'nether_brick_stairs',
+]
+
+/**
  * Blocks whose primary drop is a directly collectible item that is neither an
  * `_ore` nor a log. Obsidian is the M2 case: the typed portal plan emits
  * `collect:obsidian`, but the block name carries no `_ore` suffix and is not in
@@ -457,8 +485,8 @@ export const ALL_ORE_BLOCKS: readonly string[] = [...new Set(Object.values(ORE_S
  *
  * This is perception truth only: it names what to scan when the active goal
  * targets the item. The MINE/MOVE/DESCEND and known-retrieval machinery still
- * owns reach, pickup adjacency and the diamond-pickaxe harvest gate, and no goal
- * or action is chosen or ranked here.
+ * owns reach, pickup adjacency and the harvest gate, and no goal or action is
+ * chosen or ranked here.
  */
 export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> = {
   obsidian: ['obsidian'],
@@ -470,12 +498,24 @@ export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> =
   // drop flint, which is fine: the route exists, and pickup/repeat stay with the
   // existing machinery.
   flint: ['gravel'],
+  // M3's `blaze_rods` rung collects 7 x blaze_rod. A blaze_rod is a mob drop, so
+  // there is no block whose yield is blaze_rod; what exists is the fortress body
+  // that hosts the blazes. Mapping the focus item to the structure fabric is the
+  // same "the block is the grounded affordance, the drop stays with the existing
+  // machinery" precedent as `flint -> gravel`: the name scan makes a sensed
+  // fortress visible (and durable via the Nether structure site record), and
+  // MINE/RETRIEVE/pickup keep their own gates. `syncKnownStructureSites`
+  // additionally refuses to mint a record outside the Nether, so a
+  // player-placed `nether_bricks` block in the overworld cannot masquerade as a
+  // fortress.
+  blaze_rod: NETHER_STRUCTURE_BLOCK_NAMES,
 }
 
 /**
  * The block names to name-scan for a collect goal, from ore drops plus direct
- * (non-ore, non-log) drops. Returns undefined when the focus item has no
- * name-scanned source, so callers keep their existing behaviour.
+ * (non-ore, non-log) drops and structure-landmark routes. Returns undefined when
+ * the focus item has no name-scanned source, so callers keep their existing
+ * behaviour.
  */
 export function scannedBlockNames(focusItem: string | null): readonly string[] | undefined {
   if (focusItem === null) return undefined
