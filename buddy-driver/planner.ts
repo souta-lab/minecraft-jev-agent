@@ -354,6 +354,7 @@ export class PlannerBrain implements System2Brain {
       // the survival `food` option is offered only when it is actually needed.
       foodLevel: this.bot.food ?? null,
       eatBelowFood: defaultCandidateOptions.eatBelowFood,
+      botY: this.bot.entity === undefined ? null : this.bot.entity.position.y,
       log: this.log,
     })
 

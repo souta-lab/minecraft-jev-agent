@@ -1100,6 +1100,12 @@ export const defaultCandidateOptions: CandidateOptions = {
 }
 
 /**
+ * The shared `food` resource class. A `collect food` goal is the survival goal
+ * the ladder's optional `food` rung emits; its producers are FOOD_ANIMALS.
+ */
+const FOOD_CLASS = 'food'
+
+/**
  * Passive animals whose drop is an edible item in the shared food class. They
  * are not `hostile`, so the hostile-only combat filter never offers them;
  * without this list the resident has no way to acquire food and cannot
@@ -1230,9 +1236,11 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
       return false
     case 'ATTACK':
       // A `goalDrop` ATTACK is the direct grounded producer route for the active
-      // mob-drop collect goal (the executor verifies the kill and the drop);
-      // ordinary combat is a local reaction, not a goal route.
-      return typeof candidate.meta.goalDrop === 'string'
+      // mob-drop collect goal (the executor verifies the kill and the drop); a
+      // `foodRoute=animal` ATTACK is the same kind of route for the survival food
+      // goal (the ATTACK executor walks to the animal and kills it). Ordinary
+      // combat is a local reaction, not a goal route.
+      return typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal'
     case 'DESCEND':
       return candidate.meta.grounded === true
     default:
@@ -5408,7 +5416,13 @@ function declaredProducerFocus(state: WorldState): string | null {
   const kind = current?.kind ?? 'collect'
   if (kind !== 'collect') return null
   const focus = current?.targetItem ?? state.goal.targetItem ?? null
-  if (focus === null || isResourceClass(focus)) return null
+  if (focus === null) return null
+  // The `food` resource class is a declared-producer focus: its producers are the
+  // passive FOOD_ANIMALS. Without this, a food collect goal where no animal is
+  // sensed has no declared-producer contract and the tick stalls silently
+  // (live: health=1, `collect:food 0/3`, only WAIT/DESCEND zero-progress).
+  if (focus === FOOD_CLASS) return focus
+  if (isResourceClass(focus)) return null
   if (DIRECT_BLOCK_SOURCES[focus] === undefined && MOB_DROP_PRODUCERS[focus] === undefined) return null
   return focus
 }
@@ -5539,11 +5553,14 @@ export function applyReachabilityGate(
   // says nothing about whether the active semantic goal has a grounded route.
   // A goalDrop ATTACK is the exception: it is a direct grounded producer route
   // for the current collect Option, so route-opening prerequisites may retire.
+  // A `foodRoute=animal` ATTACK is the same kind of route for the food goal.
   const hasGroundedGoalRoute = presented.some(
     (candidate) =>
       candidate.kind !== 'WAIT' &&
       candidate.kind !== 'ESCALATE' &&
-      (candidate.kind !== 'ATTACK' || typeof candidate.meta.goalDrop === 'string') &&
+      (candidate.kind !== 'ATTACK' ||
+        typeof candidate.meta.goalDrop === 'string' ||
+        candidate.meta.foodRoute === 'animal') &&
       candidate.kind !== 'RETREAT' &&
       candidate.kind !== 'EAT' &&
       candidate.kind !== 'EQUIP' &&
