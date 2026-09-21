@@ -2177,7 +2177,7 @@ export class JevController {
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
         },
-        sensorOptions(this.options),
+        sensorOptions(this.options, this.scheduler.worldRevision),
       )
       state = this.mergeRememberedPortalFrame(state)
       this.syncTerrainSignals(state)
@@ -2440,7 +2440,7 @@ export class JevController {
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
         },
-        sensorOptions(this.options),
+        sensorOptions(this.options, this.scheduler.worldRevision),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
       const freshCandidates = restrictCandidatesAtCriticalHealth(
@@ -7198,8 +7198,8 @@ function pickResummon(
   return first ?? { triggered: false, reason: null, detail: null }
 }
 
-function sensorOptions(options: JevAgentOptions): SensorOptions {
-  return { ...defaultSensorOptions, scanRadius: options.scanRadius, reach: options.reach }
+function sensorOptions(options: JevAgentOptions, worldRevision: number | null = null): SensorOptions {
+  return { ...defaultSensorOptions, scanRadius: options.scanRadius, reach: options.reach, worldRevision }
 }
 
 function candidateOptions(

@@ -142,6 +142,13 @@ export const defaultSchedulerOptions: SchedulerOptions = {
   coalesceMs: 40,
 }
 
+/**
+ * Process-lifetime count of observed world mutations, shared by every scheduler
+ * instance. Module-scoped so a scheduler rebuild inside one generation can never
+ * reset the revision under which a scan result was cached.
+ */
+let worldMutationCount = 0
+
 export class DecisionScheduler {
   private readonly bot: Bot
   private readonly logger: EventLogger
@@ -155,6 +162,13 @@ export class DecisionScheduler {
   private started = false
   private lastHealth: number | null = null
   private lastFood: number | null = null
+  /**
+   * Whether this scheduler currently observes every world mutation. Both the
+   * block-state listener and the chunk-column listeners must be attached before
+   * the revision is a complete witness (see `worldRevision`).
+   */
+  private observesBlocks = false
+  private observesChunks = false
 
   constructor(bot: Bot, logger: EventLogger, options: Partial<SchedulerOptions> = {}) {
     this.bot = bot
@@ -171,6 +185,22 @@ export class DecisionScheduler {
     return [...this.enabled]
   }
 
+  /**
+   * The exact world-mutation revision, or `null` when this scheduler does not
+   * observe every world mutation. `null` means "no complete witness exists" and
+   * every cache keyed on it must stay off.
+   *
+   * Mineflayer re-emits `blockUpdate`, `chunkColumnLoad` and `chunkColumnUnload`
+   * from `bot.world` (`lib/plugins/blocks.js`), and every block packet path
+   * (`multi_block_change`, `block_change`, explosion, digging feedback) reaches
+   * `world.setBlockStateId`, which emits `blockUpdate`. Counting all three is
+   * therefore a complete witness of "the bot's world model changed".
+   */
+  get worldRevision(): number | null {
+    if (!this.observesBlocks || !this.observesChunks || !this.started) return null
+    return worldMutationCount
+  }
+
   onDecision(handler: (event: TriggerEvent) => void): void {
     this.handler = handler
   }
@@ -185,7 +215,15 @@ export class DecisionScheduler {
     this.started = true
     this.lastHealth = this.bot.health
     this.lastFood = this.bot.food
-    if (this.enabled.has('block_broken')) this.bot.on('blockUpdate', this.onBlockUpdate)
+    if (this.enabled.has('block_broken')) {
+      this.bot.on('blockUpdate', this.onBlockUpdate)
+      this.observesBlocks = true
+    }
+    // Chunk load/unload are not decision triggers, but they do add/remove the
+    // blocks a scan can see, so they must be part of the world revision.
+    this.bot.on('chunkColumnLoad', this.onWorldChunkChange)
+    this.bot.on('chunkColumnUnload', this.onWorldChunkChange)
+    this.observesChunks = true
     if (this.enabled.has('path_completed')) this.bot.on('goal_reached', this.onGoalReached)
     if (this.enabled.has('mob_appeared')) this.bot.on('entitySpawn', this.onEntitySpawn)
     if (this.enabled.has('damage_taken')) this.bot.on('entityHurt', this.onEntityHurt)
@@ -204,6 +242,10 @@ export class DecisionScheduler {
     if (!this.started) return
     this.started = false
     this.bot.removeListener('blockUpdate', this.onBlockUpdate)
+    this.bot.removeListener('chunkColumnLoad', this.onWorldChunkChange)
+    this.bot.removeListener('chunkColumnUnload', this.onWorldChunkChange)
+    this.observesBlocks = false
+    this.observesChunks = false
     this.bot.removeListener('goal_reached', this.onGoalReached)
     this.bot.removeListener('entitySpawn', this.onEntitySpawn)
     this.bot.removeListener('entityHurt', this.onEntityHurt)
@@ -219,11 +261,18 @@ export class DecisionScheduler {
   }
 
   private readonly onBlockUpdate = (oldBlock: Block | null, newBlock: Block): void => {
+    // Counted before the trigger filter: the revision must witness every block
+    // state change, not only the "block became air" ones this trigger wants.
+    worldMutationCount += 1
     if (oldBlock === null || oldBlock.type === 0 || newBlock.type !== 0) return
     this.request('block_broken', {
       block: oldBlock.name,
       position: { x: oldBlock.position.x, y: oldBlock.position.y, z: oldBlock.position.z },
     })
+  }
+
+  private readonly onWorldChunkChange = (): void => {
+    worldMutationCount += 1
   }
 
   private readonly onGoalReached = (): void => {

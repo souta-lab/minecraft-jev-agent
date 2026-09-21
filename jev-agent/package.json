@@ -28,6 +28,7 @@
     "reachability-test": "bun test ./test-reachability.mts",
     "candidate-recovery-test": "bun test ./test-candidate-recovery.mts",
     "route-opening-continuation-test": "bun test ./test-route-opening-continuation.mts",
+    "scan-position-cache-test": "bun ./test-scan-position-cache.mts",
     "place-spot-test": "bun test ./test-place-spot.mts",
     "perception-test": "bun test ./test-perception.mts",
     "pit-escape-test": "bun test ./test-pit-escape.mts",

@@ -406,6 +406,14 @@ export interface SensorOptions {
   entityRadius: number
   maxStoneBlocks: number
   maxPlacementSpots: number
+  /**
+   * Exact world-mutation revision (see `DecisionScheduler.worldRevision`), or
+   * absent/null when the caller cannot prove one. Only when it is a finite
+   * number may `buildWorldState` reuse a `findBlocks` position list across
+   * builds (see `stableFindBlocks`). Absent = caching off, which is what every
+   * fixture and any non-resident caller gets.
+   */
+  worldRevision?: number | null
 }
 
 export const defaultSensorOptions: SensorOptions = {
@@ -752,35 +760,104 @@ export function isHostileEntityName(name: string, kind: string | undefined): boo
   return isHostile(name, kind)
 }
 
+/**
+ * Cross-build reuse of expensive `bot.findBlocks` position lists.
+ *
+ * `findBlocks` is the sensor's hot spot: Mineflayer walks an octahedron of 16^3
+ * sections and, for every section whose palette contains a match, materialises
+ * all 4096 blocks through `bot.blockAt`. A stalled resident re-runs the same
+ * scans every decision (measured ~282k block lookups per build, ~56% of them in
+ * the log scan and ~36% in the two station scans).
+ *
+ * A position list from `findBlocks` depends on exactly three things:
+ *   1. `bot.entity.position` floored to the block (Mineflayer uses it as the
+ *      search centre), and
+ *   2. the world model inside the loaded chunks, and
+ *   3. the query (matcher, maxDistance, count), folded into `scanId`.
+ *
+ * This helper requires (1) and (3) to be identical and (2) to be *proven*
+ * unchanged by the caller's `worldRevision`. When that proof is absent
+ * (`activeScanRevision === null`) it calls `findBlocks` directly, so fixtures,
+ * replays and any non-resident caller keep the uncached behaviour exactly.
+ *
+ * Everything position-dependent in a `BlockState` (`distance`, `inReach`,
+ * `adjacentStandable`) is re-derived from live block reads after the cached
+ * positions are returned, so a cached list can never carry a stale distance or
+ * a stale stand-affordance. What the cache could hide is a world change that the
+ * revision did not witness; the scheduler counts every `blockUpdate`,
+ * `chunkColumnLoad` and `chunkColumnUnload`, which is the complete set of
+ * mutations Mineflayer applies to `bot.world`.
+ */
+interface ScanPositionCacheEntry {
+  revision: number
+  positions: Vec3[]
+}
+
+/** Bounded so a long walk cannot accumulate position lists without limit. */
+const SCAN_POSITION_CACHE_CAP = 64
+const scanPositionCache = new Map<string, ScanPositionCacheEntry>()
+let activeScanRevision: number | null = null
+
+function stableFindBlocks(
+  bot: Bot,
+  scanId: string,
+  options: Parameters<Bot['findBlocks']>[0],
+): Vec3[] {
+  const revision = activeScanRevision
+  if (revision === null) return bot.findBlocks(options)
+  const point = bot.entity.position.floored()
+  const key = `${scanId}|${bot.game.dimension}|${point.x},${point.y},${point.z}`
+  const hit = scanPositionCache.get(key)
+  if (hit !== undefined && hit.revision === revision) return hit.positions
+  const positions = bot.findBlocks(options)
+  if (scanPositionCache.size >= SCAN_POSITION_CACHE_CAP) {
+    const oldest = scanPositionCache.keys().next().value
+    if (oldest !== undefined) scanPositionCache.delete(oldest)
+  }
+  scanPositionCache.set(key, { revision, positions })
+  return positions
+}
+
 function buildLogBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
-  const out: BlockState[] = []
-  const positions = bot.findBlocks({
+  const positions = stableFindBlocks(bot, `logs:${options.scanRadius}:256`, {
     matching: (block) => LOG_NAME.test(block.name),
     maxDistance: options.scanRadius,
     count: 256,
   })
+  // Resolve the cheap, world-read-free facts first, cut to the kept list, and
+  // only then probe the 12 stand neighbours. `findAdjacentStandable` costs 36
+  // block reads per target, and the old order ran it for up to 256 logs before
+  // `slice(0, maxLogs)` threw ~240 of them away. The sort key (distance then y)
+  // never depended on adjacency, so the kept list is identical.
+  const rows: Array<{ block: Exclude<ReturnType<Bot['blockAt']>, null>; pos: Vec3Json; distance: number; harvest: ReturnType<typeof resolveBlockHarvest> }> = []
   for (const position of positions) {
     const block = bot.blockAt(position)
     if (block === null) continue
     const pos = vecJson(position)
-    const adjacentStandable = findAdjacentStandable(bot, pos)
-    const harvest = resolveBlockHarvest(bot, block.name)
-    out.push({
-      kind: 'log',
-      name: block.name,
-      position: pos,
+    rows.push({
+      block,
+      pos,
       distance: round2(distance(pos, self.position)),
-      diggable: block.diggable,
-      inReach: distance(pos, self.eyePosition) <= options.reach,
-      hasAdjacentStandable: adjacentStandable !== null,
-      adjacentStandable,
-      yield: harvest.yield,
-      harvestTool: harvest.harvestTool,
-      harvestTier: harvest.harvestTier,
+      harvest: resolveBlockHarvest(bot, block.name),
     })
   }
-  out.sort((a, b) => a.distance - b.distance || b.position.y - a.position.y)
-  return out.slice(0, options.maxLogs)
+  rows.sort((a, b) => a.distance - b.distance || b.pos.y - a.pos.y)
+  return rows.slice(0, options.maxLogs).map((row) => {
+    const adjacentStandable = findAdjacentStandable(bot, row.pos)
+    return {
+      kind: 'log' as const,
+      name: row.block.name,
+      position: row.pos,
+      distance: row.distance,
+      diggable: row.block.diggable,
+      inReach: distance(row.pos, self.eyePosition) <= options.reach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: row.harvest.yield,
+      harvestTool: row.harvest.harvestTool,
+      harvestTier: row.harvest.harvestTier,
+    }
+  })
 }
 
 /**
@@ -879,7 +956,7 @@ function buildBuriedStoneBlocks(
   if (focusItem === null && !scanAllStone) return []
   if (focusItem !== null && !STONE_YIELDS.has(focusItem)) return []
   const radius = Math.min(options.scanRadius, 24)
-  const positions = bot.findBlocks({
+  const positions = stableFindBlocks(bot, `buriedStone:${radius}:96`, {
     matching: (block) => STONE_LIKE.has(block.name),
     maxDistance: radius,
     count: 96,
@@ -923,9 +1000,10 @@ function buildBuriedStoneBlocks(
  * the prerequisite envelope tags the resulting candidate.
  */
 function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
-  const positions = bot.findBlocks({
+  const radius = Math.max(options.reach + 2, 8)
+  const positions = stableFindBlocks(bot, `nearbyPlaceable:${radius}:256`, {
     matching: (block) => STONE_LIKE.has(block.name),
-    maxDistance: Math.max(options.reach + 2, 8),
+    maxDistance: radius,
     count: 256,
   })
   const out: BlockState[] = []
@@ -973,7 +1051,7 @@ function buildScannedResourceBlocks(
   if (sources === undefined) return []
   const wanted = new Set(sources)
   const radius = Math.max(options.scanRadius, 64)
-  const positions = bot.findBlocks({
+  const positions = stableFindBlocks(bot, `scanned:${focusItem ?? 'none'}:${radius}:96`, {
     matching: (block) => wanted.has(block.name),
     maxDistance: radius,
     count: 96,
@@ -1005,7 +1083,7 @@ function buildScannedResourceBlocks(
 
 function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
   const out: BlockState[] = []
-  const positions = bot.findBlocks({
+  const positions = stableFindBlocks(bot, `hazards:${options.hazardRadius}:32`, {
     matching: (block) => HAZARDS.has(block.name),
     maxDistance: options.hazardRadius,
     count: 32,
@@ -1129,12 +1207,15 @@ function buildStations(
   names: ReadonlySet<string>,
   remembered: readonly KnownResource[],
 ): StationEntry[] {
-  const sensed: StationEntry[] = bot
-    .findBlocks({
-      matching: (block) => names.has(block.name),
-      maxDistance: Math.max(16, options.reach + 8),
-      count: SENSED_STATION_CAP,
-    })
+  const radius = Math.max(16, options.reach + 8)
+  // One cache id per station kind (the `names` set is the query). The two live
+  // station scans were ~36% of all block lookups in a stalled build.
+  const scanId = `stations:${[...names].sort().join(',')}:${radius}:${SENSED_STATION_CAP}`
+  const sensed: StationEntry[] = stableFindBlocks(bot, scanId, {
+    matching: (block) => names.has(block.name),
+    maxDistance: radius,
+    count: SENSED_STATION_CAP,
+  })
     .map((position) => ({ ...vecJson(position), source: 'sensed' as const }))
     .sort((a, b) => distance(a, self.position) - distance(b, self.position))
   const sensedCells = new Set(sensed.map((station) => stationCellKey(station)))
@@ -1664,6 +1745,16 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
  * omitted rather than crashing the loop.
  */
 export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
+  const revision = options.worldRevision
+  activeScanRevision = typeof revision === 'number' && Number.isFinite(revision) ? revision : null
+  try {
+    return buildWorldStateUncached(bot, input, options)
+  } finally {
+    activeScanRevision = null
+  }
+}
+
+function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOptions): WorldState {
   const self = buildSelf(bot)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
