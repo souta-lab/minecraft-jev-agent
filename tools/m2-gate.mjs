@@ -690,11 +690,21 @@ export async function runM2Gate({
     const socketBinding = policySocket === undefined
       ? await readPolicySocketBinding(controlSocketPath)
       : policySocket
+    // The run binding is bracketed by the `BOOT ... runId=R` line. The resident is
+    // normally started detached, so `runner.out` often does not exist at all (the
+    // supervisor writes elsewhere) while `buddy.log` carries the identical
+    // `[ISO] BOOT ... runId=...` lines. Without this fallback every verdict degraded to
+    // UNKNOWN with reason=decisions_evidence_unavailable, i.e. the run-scoped policy
+    // evidence was unavailable for a reason that had nothing to do with the run.
+    const runnerOutForScan =
+      runnerOutPath !== null && runnerOutPath !== undefined && existsSync(runnerOutPath)
+        ? runnerOutPath
+        : join(REPO_ROOT, 'buddy-driver', 'buddy.log')
     rawPolicy = await loadPolicy({
       runId: expectedRunId,
       socket: socketBinding?.runId === expectedRunId ? socketBinding : null,
       decisionsPath,
-      runnerOutPath,
+      runnerOutPath: runnerOutForScan,
     })
   }
   const policy = scoped
