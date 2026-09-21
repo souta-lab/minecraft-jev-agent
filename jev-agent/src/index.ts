@@ -16,8 +16,8 @@ import { defaultJevAgentOptions, JevController } from './controller.ts'
 import type { EscalationReason, JevAgentOptions, RunSummary } from './controller.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal, toVec3 } from './state.ts'
 import type { AgentSignals, BlockState, EntityState, GoalState, SelfState, Vec3Json, WorldState } from './state.ts'
-import { applyReachabilityGate, defaultCandidateOptions, generateCandidates, generateGroundedCandidates } from './candidates.ts'
-import type { Candidate, CandidateAffordance, CandidateKind, CandidateOptions, CandidateReachability, GroundedCandidatesResult, ReachabilityGateOptions } from './candidates.ts'
+import { applyReachabilityGate, defaultCandidateOptions, formatResourceSourceExclusion, generateCandidates, generateGroundedCandidates, resourceSourceExclusions } from './candidates.ts'
+import type { Candidate, CandidateAffordance, CandidateKind, CandidateOptions, CandidateReachability, GroundedCandidatesResult, ReachabilityGateOptions, ResourceSourceExclusion } from './candidates.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
 import type { CalibrationEntry, DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionResultLog, DecisionSubgoalLog } from './decisionlog.ts'
 import { createRecipeIndex } from './crafting.ts'
@@ -64,6 +64,7 @@ export default jevAgent
 export { JevController, defaultJevAgentOptions, Executor, defaultExecutorOptions }
 export { buildWorldState, makeGoal, toVec3, defaultSensorOptions }
 export { generateCandidates, generateGroundedCandidates, applyReachabilityGate, defaultCandidateOptions, ACTING_KINDS }
+export { formatResourceSourceExclusion, resourceSourceExclusions }
 export { guardCandidate, guardDecision }
 export { createJevPolicy, EventLogger, JsonlWriter, writeOutcome, decisionIdFrom }
 export { QUESTION_NAMES, AUTHORITATIVE_QUESTION_NAMES, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES, questionNamesFor, shouldRetreatFrom, abandonRequested }
@@ -101,6 +102,7 @@ export type {
   CandidateReachability,
   GroundedCandidatesResult,
   ReachabilityGateOptions,
+  ResourceSourceExclusion,
   GuardCode,
   GuardContext,
   GuardPhase,

@@ -27,7 +27,7 @@ import type { BlockState, DescentOption, EntityState, KnownResource, StationEntr
 import { DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
-import { isProtectedStationBlock } from './blockSafety.ts'
+import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
@@ -323,6 +323,12 @@ export interface GroundedCandidatesResult {
    * held" was surfaced explicitly instead of silently churning.
    */
   armorRefusals: ArmorRefusal[]
+  /**
+   * Cells withheld from the active collect goal because they are members of a
+   * live structure (`RESOURCE_SOURCE_EXCLUDED ... reason=live_structure`). Empty
+   * when no candidate cell is protected.
+   */
+  sourceExclusions: ResourceSourceExclusion[]
 }
 
 /**
@@ -347,6 +353,89 @@ export interface PlaceRefusal {
 /** The exact `PLACE_REFUSED` observability line for one typed refusal. */
 export function formatPlaceRefusal(refusal: PlaceRefusal): string {
   return `PLACE_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} item=${refusal.item}`
+}
+
+/**
+ * A cell that WOULD have been offered as a source for the active collect goal
+ * but is a member of a live structure the resident depends on. This is the
+ * explicit fact that replaces silently dismantling the asset: the cell stays
+ * unavailable while the structure validates, and the plan must source the item
+ * elsewhere (other sensed/remembered cells, or exploration).
+ *
+ * Generic by construction: the reason is a membership predicate, and the
+ * diagnostic `structure` field is never matched on.
+ */
+export type ResourceSourceExclusionReason = 'live_structure'
+
+export interface ResourceSourceExclusion {
+  /** the item the active collect goal wants */
+  item: string
+  cell: Vec3Json
+  reason: ResourceSourceExclusionReason
+  /** diagnostic structure kind only (never matched on) */
+  structure: string
+}
+
+export const RESOURCE_SOURCE_EXCLUDED = 'RESOURCE_SOURCE_EXCLUDED'
+
+export function formatResourceSourceExclusion(exclusion: ResourceSourceExclusion): string {
+  return `${RESOURCE_SOURCE_EXCLUDED} item=${exclusion.item} cell=${exclusion.cell.x},${exclusion.cell.y},${exclusion.cell.z} reason=${exclusion.reason}`
+}
+
+/** The live-structure membership index for this world state (empty when none). */
+function liveStructureIndexOf(state: WorldState): ReadonlyMap<string, string> {
+  return liveStructureMemberIndex(state.liveStructureMembers)
+}
+
+/**
+ * The typed `RESOURCE_SOURCE_EXCLUDED` facts for the active collect goal: every
+ * sensed or remembered source cell the generator would otherwise offer that is a
+ * member of a live structure. Enumeration only - the actual refusal is applied
+ * at the two source selectors (`mineCandidates` for sensed cells,
+ * `knownResourceFor` for remembered cells), so the marker can never disagree
+ * with the offered set.
+ */
+export function resourceSourceExclusions(state: WorldState): ResourceSourceExclusion[] {
+  const index = liveStructureIndexOf(state)
+  if (index.size === 0) return []
+  const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem === null) return []
+  const out: ResourceSourceExclusion[] = []
+  const seen = new Set<string>()
+  const record = (position: Vec3Json, structure: string): void => {
+    const key = liveStructureCellKey(position)
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({
+      item: focusItem,
+      cell: { x: position.x, y: position.y, z: position.z },
+      reason: 'live_structure',
+      structure,
+    })
+  }
+  // (1) Sensed cells the MINE/MOVE/DESCEND families would otherwise offer, using
+  // the SAME source matching as `mineCandidates` (drop match plus the declared
+  // scanned block name, so `flint -> gravel` is covered too).
+  const want = retrievalWant(focusItem)
+  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+  for (const block of state.blocks) {
+    if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
+    if (!resourceMatches(block.yield, focusItem) && !(sourceNames?.includes(block.name) ?? false)) continue
+    const structure = index.get(liveStructureCellKey(block.position))
+    if (structure !== undefined) record(block.position, structure)
+  }
+  // (2) Remembered cells the RETRIEVE:known family would otherwise offer, using
+  // the same want matching and dimension re-anchoring as `knownResourceFor`.
+  if (want !== null) {
+    for (const resource of state.signals.knownResources ?? []) {
+      if (!resourceDimensionMatches(resource, state.self.dimension)) continue
+      const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
+      if (!matches) continue
+      const structure = index.get(liveStructureCellKey(resource.position))
+      if (structure !== undefined) record(resource.position, structure)
+    }
+  }
+  return out
 }
 
 /**
@@ -786,6 +875,7 @@ export function generateGroundedCandidates(
     raw.entryRefusal,
     raw.armorRefusals,
     raw.surfaceAscentRefusal,
+    raw.sourceExclusions,
   )
 }
 
@@ -1110,6 +1200,7 @@ function generateRawCandidates(
     entryRefusal,
     armorRefusals,
     surfaceAscentRefusal: surfaceAscent.refusal,
+    sourceExclusions: resourceSourceExclusions(state),
   }
 }
 
@@ -1323,9 +1414,16 @@ function mineCandidates(
   // only needs the block gone, because its drop may be transformed or lost.
   const goalKind = state.goalQueue?.current?.kind ?? 'collect'
   const requiresPickup = goalKind === 'collect' || goalKind === 'craft' || goalKind === 'smelt'
+  // A block that is a member of a live structure the resident depends on is not
+  // a source, whatever its name (see blockSafety.ts). Live portal frames are the
+  // measured case: `collect obsidian` must not dismantle the portal it just used
+  // or built. This is the general membership predicate, not a portal rule - the
+  // generator never learns which structure the cell belongs to.
+  const liveStructures = liveStructureIndexOf(state)
   const mineable = state.blocks.filter(
     (block) =>
       (block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore') &&
+      !isLiveStructureMember(liveStructures, block.position) &&
       (blockFilter === null || blockFilter(block)),
   )
   // The declared scanned source names the blocks that carry the focus item
@@ -2403,6 +2501,8 @@ interface RawCandidatesResult {
   armorRefusals: ArmorRefusal[]
   /** typed ascent refusal for a `surface` goal with no grounded vertical route */
   surfaceAscentRefusal: SurfaceAscentRefusal | null
+  /** live-structure member cells refused as sources for the active collect goal */
+  sourceExclusions: ResourceSourceExclusion[]
 }
 
 /**
@@ -3378,9 +3478,14 @@ function nearestResource(state: WorldState, focusItem: string | null): BlockStat
   // own drop is `gravel` (flint is only a probabilistic drop).
   const want = focusItem === null ? null : retrievalWant(focusItem)
   const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+  // A live-structure member is not a bearing either: aiming descent/exploration
+  // at the protected structure would keep the body circling the asset instead of
+  // re-sourcing the item. Membership truth only; no structure is named here.
+  const liveStructures = liveStructureIndexOf(state)
   let best: BlockState | null = null
   for (const block of state.blocks) {
     if (block.kind === 'hazard') continue
+    if (isLiveStructureMember(liveStructures, block.position)) continue
     if (
       focusItem !== null &&
       !resourceMatches(block.yield, focusItem) &&
@@ -3640,17 +3745,23 @@ function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | 
     // stay with the existing combat/pickup machinery.
     return null
   }
+  // A live-structure member is NOT obtainable in place (mineCandidates refuses
+  // it), so it must not suppress the remembered-coordinate route either: the
+  // remembered route is how the plan re-sources the item elsewhere.
+  const liveStructures = liveStructureIndexOf(state)
+  const mineableSource = (block: BlockState): boolean =>
+    !isLiveStructureMember(liveStructures, block.position) && mineableNow(block)
   if (want.kind === 'ore') {
     return (
       state.blocks.find(
         (block) =>
           block.kind === 'ore' &&
           (resourceMatches(block.yield, want.item) || want.blockNames.includes(block.name)) &&
-          mineableNow(block),
+          mineableSource(block),
       ) ?? null
     )
   }
-  return state.blocks.find((block) => block.kind === 'log' && mineableNow(block)) ?? null
+  return state.blocks.find((block) => block.kind === 'log' && mineableSource(block)) ?? null
 }
 
 function knownResourceFor(
@@ -3659,6 +3770,7 @@ function knownResourceFor(
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
 ): KnownResource | null {
   const known = state.signals.knownResources ?? []
+  const liveStructures = liveStructureIndexOf(state)
   let best: KnownResource | null = null
   for (const resource of known) {
     if (!resourceDimensionMatches(resource, state.self.dimension)) continue
@@ -3671,6 +3783,11 @@ function knownResourceFor(
     // test-fortress-route.mts): a Nether site never routes from the overworld.
     const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
     if (!matches) continue
+    // A remembered cell inside a live structure is not a source: a retrieval
+    // there would mine the structure the same way the sensed MINE would. Skip it
+    // and keep looking, so a farther ordinary cell is still preferred over
+    // dismantling the asset.
+    if (isLiveStructureMember(liveStructures, resource.position)) continue
     if (resourceDepleted(state, resource)) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
     if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
@@ -4232,7 +4349,11 @@ export function applyReachabilityGate(
   entryRefusal: PortalEntryRefusal | null = null,
   armorRefusals: ArmorRefusal[] = [],
   surfaceAscentRefusal: SurfaceAscentRefusal | null = null,
+  sourceExclusions: ResourceSourceExclusion[] | null = null,
 ): GroundedCandidatesResult {
+  // Direct callers (fixtures) may pass only raw candidates; derive the typed
+  // exclusions from the world state so the marker can never be dropped.
+  const exclusions = sourceExclusions ?? resourceSourceExclusions(state)
   const context: ReachabilityGateContext = {
     state,
     options,
@@ -4346,7 +4467,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals, surfaceAscentRefusal }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals, surfaceAscentRefusal, sourceExclusions: exclusions }
 }
 
 /** null when the candidate carries no capability precondition of its own. */

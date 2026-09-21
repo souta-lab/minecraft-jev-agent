@@ -21,11 +21,13 @@ import {
   detectPortalVerification,
   NETHER_PORTAL,
   portalFrameLayout,
+  portalFrameLiveStructureMembers,
   portalFrameNeedsTemporarySupport,
   validatePortalFrame,
 } from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
-import { isProtectedStationBlock } from './blockSafety.ts'
+import { isProtectedStationBlock, liveStructureCellKey } from './blockSafety.ts'
+import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
@@ -377,6 +379,15 @@ export type WorldState = {
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
   portalFrame?: PortalFrameValidation | null
+  /**
+   * Cells that belong to a structure the world model currently holds as LIVE
+   * (see `blockSafety.ts`). The sourcing layer refuses these cells as
+   * collect/mine sources while their structure validates, so a `collect <item>`
+   * goal cannot dismantle infrastructure the resident depends on. Absent in old
+   * replay fixtures means "no live structures", which keeps them behaviourally
+   * unchanged.
+   */
+  liveStructureMembers?: LiveStructureMember[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
@@ -1729,6 +1740,32 @@ function mergePortalFrameSites(live: readonly PortalFrameSite[], remembered: rea
   return merged
 }
 
+/**
+ * The live-structure membership fact for every site whose required geometry
+ * validates. Exported so any layer that re-derives `portalFrameSites` (for
+ * example the controller's in-memory frame memory) can recompute the same fact
+ * instead of leaving a stale membership set behind.
+ */
+export function liveStructureMembersForSites(sites: readonly PortalFrameSite[]): LiveStructureMember[] {
+  const members: LiveStructureMember[] = []
+  const seen = new Set<string>()
+  for (const site of sites) {
+    const blocks = site.existingFrame ?? []
+    // Fewer than the ten required edges cannot validate; skip without calling
+    // the validator so a partial frame never contributes membership.
+    if (blocks.length < 10) continue
+    const validation = validatePortalFrame({ blocks, widthAxis: site.widthAxis })
+    if (validation.shape !== 'ok') continue
+    for (const member of portalFrameLiveStructureMembers(validation)) {
+      const key = liveStructureCellKey(member.position)
+      if (seen.has(key)) continue
+      seen.add(key)
+      members.push(member)
+    }
+  }
+  return members
+}
+
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const found: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
@@ -1791,6 +1828,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     placementSpots: buildPlacementSpots(bot, options, self),
     portalFrameSites,
     portalFrame,
+    liveStructureMembers: liveStructureMembersForSites(portalFrameSites),
     descent: buildDescent(bot, options, self),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),

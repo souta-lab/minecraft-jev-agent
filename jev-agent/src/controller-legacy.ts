@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, SurfaceAscentRefusal } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatSmeltInputPrereq, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -82,7 +82,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, isSensedStation, isStandable, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { buildWorldState, defaultSensorOptions, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -1579,6 +1579,8 @@ export class JevController {
   private lastEntryRefusalKey: string | null = null
   /** last logged EQUIP_ARMOR_REFUSED signature set, so "nothing better is held" is one line. */
   private lastArmorRefusalKey: string | null = null
+  /** last logged RESOURCE_SOURCE_EXCLUDED signature set, so one protected structure is one line. */
+  private lastSourceExclusionKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -2217,6 +2219,7 @@ export class JevController {
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
       this.logArmorRefusal(grounded.armorRefusals)
+      this.logSourceExclusions(grounded.sourceExclusions)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
@@ -4824,6 +4827,10 @@ export class JevController {
       ...state,
       portalFrameSites: merged,
       portalFrame: state.portalFrame ?? this.rememberedPortalFrame,
+      // Re-derive the source-protection membership from the MERGED sites: the
+      // sensor computed it from the sites it saw this tick, and a frame that
+      // only this generation's memory still holds must stay protected too.
+      liveStructureMembers: liveStructureMembersForSites(merged),
     }
   }
 
@@ -6679,6 +6686,22 @@ export class JevController {
     this.lastArmorRefusalKey = key
     for (const refusal of refusals) {
       this.logger.warn('agent', formatArmorRefusal(refusal), { ...refusal }, this.tickCounter)
+    }
+  }
+
+  /**
+   * Surface every collect-source cell refused because it is a member of a live
+   * structure (`RESOURCE_SOURCE_EXCLUDED item=... cell=... reason=live_structure`),
+   * once per distinct set. This is the explicit fact that the bot is NOT
+   * dismantling infrastructure it depends on: the plan must source the item
+   * elsewhere instead.
+   */
+  private logSourceExclusions(exclusions: readonly ResourceSourceExclusion[]): void {
+    const key = exclusions.length === 0 ? null : exclusions.map(formatResourceSourceExclusion).join('|')
+    if (key === this.lastSourceExclusionKey) return
+    this.lastSourceExclusionKey = key
+    for (const exclusion of exclusions) {
+      this.logger.warn('agent', formatResourceSourceExclusion(exclusion), { ...exclusion }, this.tickCounter)
     }
   }
 

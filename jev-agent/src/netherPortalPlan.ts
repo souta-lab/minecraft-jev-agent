@@ -28,6 +28,7 @@
 // full frame -> light -> verify path is unit-testable without a live world.
 import { loadGameData, requiredPickaxeRank1 } from './gameData.ts'
 import type { PlannedGoal } from './goalQueue.ts'
+import type { LiveStructureMember } from './blockSafety.ts'
 
 // ---------------------------------------------------------------------------
 // constants / markers
@@ -392,6 +393,26 @@ export function portalFrameLayout(origin: PortalBlockPosition, widthAxis: Portal
   }
   const lightPosition = axisPosition(origin, widthAxis, 1, 1)
   return { origin, widthAxis, frame, corners, interior, lightPosition }
+}
+
+/**
+ * The full cell footprint of a VALIDATED frame, contributed to the world model
+ * as live-structure membership. The portal module's only responsibility here is
+ * the membership fact (which cells the live structure occupies); the generic
+ * source-protection predicate in `blockSafety.ts` owns the refusal and the
+ * candidate layer never learns the word "portal".
+ *
+ * A `shape: 'bad'` validation contributes nothing: an incomplete or damaged
+ * frame is not a live structure, so its obsidian stays an ordinary source (this
+ * is the legitimate-deconstruction case).
+ */
+export function portalFrameLiveStructureMembers(frame: PortalFrameValidation): LiveStructureMember[] {
+  if (frame.shape !== 'ok' || frame.origin === null) return []
+  const layout = portalFrameLayout(frame.origin, frame.widthAxis)
+  return [...layout.frame, ...layout.corners, ...layout.interior].map((cell) => ({
+    kind: 'nether_portal',
+    position: { x: cell.x, y: cell.y, z: cell.z },
+  }))
 }
 
 export interface PortalFrameValidation {
