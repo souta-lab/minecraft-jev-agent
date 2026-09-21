@@ -5863,9 +5863,12 @@ export class JevController {
   /**
    * SAFE: the survival fact no other counter owns. `damage_taken` / `hp_changed`
    * carry the health step, so this records consecutive damage at critical health
-   * for the ACTIVE plan and, once the bounded count is exhausted, logs the typed
-   * `CRITICAL_DAMAGE_EXHAUSTED` (or `BODY_STARVING` when the hunger bar is
-   * empty), removes WAIT for one decision, and wakes System2 through the same
+   * for the ACTIVE plan; the code-owned `bodyStarving` sensor fact is fed on
+   * every decision so the durable critical STARVING state arms the same counter
+   * even when no damage event arrives (the measured live plateau: health 1,
+   * food 0, no further `hp_changed`). Once the bounded count is exhausted it logs
+   * the typed `CRITICAL_DAMAGE_EXHAUSTED` (or `BODY_STARVING` when the hunger bar
+   * is empty), removes WAIT for one decision, and wakes System2 through the same
    * `escalate()` path #326/#337 use. The choice of WHAT ends the damage stays
    * with Jev; this only proves the current plan is not ending it.
    *
@@ -5875,21 +5878,34 @@ export class JevController {
    * step itself is what makes one hit cost exactly one.
    */
   private observeCriticalDamage(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
-    if (trigger !== 'damage_taken' && trigger !== 'hp_changed') return
     const rawHealth = typeof detail.health === 'number' && Number.isFinite(detail.health) ? detail.health : this.bot.health
     const health = typeof rawHealth === 'number' && Number.isFinite(rawHealth) ? rawHealth : Number.NaN
-    const previousHealth = this.lastObservedHealth
-    if (Number.isFinite(health)) this.lastObservedHealth = health
     const rawFood = typeof detail.food === 'number' && Number.isFinite(detail.food) ? detail.food : this.bot.food
     const food = typeof rawFood === 'number' && Number.isFinite(rawFood) ? rawFood : null
     const planKey = `${this.currentGoalKey()}|${this.queue.current?.id ?? 'none'}`
-    const evidence = this.criticalDamage.note({
-      health,
-      previousHealth,
-      planKey,
-      food,
-      sourceName: this.signals.lastDamage?.sourceName ?? null,
-    })
+    if (trigger === 'damage_taken' || trigger === 'hp_changed') {
+      // A fresh damage observation advances the event counter exactly once per
+      // health step. Only damage triggers may overwrite `lastObservedHealth`: a
+      // non-damage tick that did so would erase the step before it is counted.
+      const previousHealth = this.lastObservedHealth
+      if (Number.isFinite(health)) this.lastObservedHealth = health
+      this.criticalDamage.note({
+        health,
+        previousHealth,
+        planKey,
+        food,
+        sourceName: this.signals.lastDamage?.sourceName ?? null,
+      })
+    }
+    // SAFE: the critical STARVING state is a durable sensor fact, not an event.
+    // On this server starvation damage floors at 1 HP, so the measured live body
+    // (health 1, food 0, no food item, no `hp_changed` for a whole generation)
+    // never armed the event counter and idled with no escalation. Feeding the
+    // state fact on every decision - not only on a damage trigger - lets the same
+    // bounded boundary fire; a grounded food route that actually ends the
+    // starvation clears the fact and resets the count on the next decision.
+    const starving = food !== null && bodyStarving({ food, health })
+    const evidence = this.criticalDamage.noteStarving({ planKey, health, food, starving })
     this.signals.criticalDamage = evidence
     const goalKey = this.currentGoalKey()
     if (!evidence.active) {

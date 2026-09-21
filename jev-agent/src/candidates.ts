@@ -279,19 +279,29 @@ export const CRITICAL_DAMAGE_KINDS: ReadonlySet<CandidateKind> = new Set<Candida
   'EAT',
 ])
 
-export function restrictCandidatesDuringCriticalDamage(
-  state: Pick<WorldState, 'signals' | 'self'>,
-  candidates: readonly Candidate[],
-): Candidate[] {
-  const evidence = state.signals.criticalDamage ?? null
-  if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
-  const rescue = candidates.filter(
+/**
+ * The exact damage-ending subset of an offer: the same predicate
+ * `restrictCandidatesDuringCriticalDamage` keeps, exported so the controller and
+ * fixtures can name the code-owned fact "no rescue is grounded" without
+ * re-listing kinds and drifting from the restriction.
+ */
+export function damageEndingCandidates(candidates: readonly Candidate[]): Candidate[] {
+  return candidates.filter(
     (candidate) =>
       CRITICAL_DAMAGE_KINDS.has(candidate.kind) ||
       // A food-animal ATTACK is the grounded route to food, not a combat
       // preference: it is the one ATTACK that can end starvation.
       (candidate.kind === 'ATTACK' && candidate.meta.foodAnimal === true),
   )
+}
+
+export function restrictCandidatesDuringCriticalDamage(
+  state: Pick<WorldState, 'signals' | 'self'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const evidence = state.signals.criticalDamage ?? null
+  if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
+  const rescue = damageEndingCandidates(candidates)
   return rescue.length > 0 ? rescue : [...candidates]
 }
 

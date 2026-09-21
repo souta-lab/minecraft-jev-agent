@@ -49,6 +49,7 @@ import {
 import {
   ANIMAL_HABITAT_SEA_LEVEL,
   CRITICAL_DAMAGE_KINDS,
+  damageEndingCandidates,
   defaultCandidateOptions,
   foodHabitatAscent,
   formatFoodHabitatRefused,
@@ -518,6 +519,268 @@ function hungryUndergroundWorld(counts: Record<string, number>, entities: Entity
     '(f) the STARVING precondition does not touch a healthy body',
     healthyAttack.ok === true,
     `healthy=${healthyAttack.ok ? 'ok' : healthyAttack.code}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (g) the durable STARVING state arms the same bounded escalation WITHOUT a
+//     damage event - the measured live plateau (health 1, food 0)
+//
+// Live mechanism (run-mubobiq6-12onv, source 1a72fe2): the body held no edible
+// item, `FOOD_LOW food=0 heldFood=null`, its gameplay offer grounded no
+// damage-ending route, and starvation floors at 1 HP so no `hp_changed` event
+// ever arrived. The event-only tracker therefore stayed `active:false` forever
+// (the log carries exactly two `BODY_STARVING` lines and zero `CRITICAL_DAMAGE`)
+// while the body idled at health 1. The fix feeds the code-owned starving STATE
+// on every decision, so the same bounded boundary fires.
+// ---------------------------------------------------------------------------
+{
+  const plan = 'g60:collect:raw_iron|g60:collect:raw_iron'
+  const tracker = new CriticalDamageTracker(3)
+  const observed: CriticalDamageEvidence[] = []
+  for (let decision = 0; decision < 3; decision += 1) {
+    observed.push(tracker.noteStarving({ planKey: plan, health: 1, food: 0, starving: true }))
+  }
+  const third = observed[2]
+  let fired = 0
+  let line = ''
+  if (third !== undefined && third.exhausted) {
+    fired += 1
+    line = formatCriticalDamageExhausted('g60:collect:raw_iron', third)
+    tracker.acknowledgeEscalation()
+  }
+  check(
+    '(g1) a plateaud starving body arms the escalation with NO damage event (health 1, food 0)',
+    observed.every((entry) => entry.active === true) &&
+      fired === 1 &&
+      line.startsWith(CRITICAL_DAMAGE_EXHAUSTED_MARKER) &&
+      line.includes('food=0'),
+    `active=${observed.map((entry) => entry.active).join(',')} fired=${fired} line="${line}"`,
+  )
+  // Bounded: exactly as the damage path, the same plan now needs a LONGER run
+  // before the next wake, so a persistent starving state cannot hot-loop System2.
+  const after = tracker.evidence()
+  const next = Array.from({ length: 5 }, () =>
+    tracker.noteStarving({ planKey: plan, health: 1, food: 0, starving: true }).exhausted,
+  )
+  const sixth = tracker.noteStarving({ planKey: plan, health: 1, food: 0, starving: true }).exhausted
+  check(
+    '(g1) the starvation escalation is bounded - the next wake needs 6 fresh decisions',
+    after.exhaustedRepeats === 1 && after.limit === 6 && next.every((value) => value === false) && sixth === true,
+    `repeats=${after.exhaustedRepeats} limit=${after.limit} next=${next.join(',')} sixth=${sixth}`,
+  )
+  const recovered = tracker.noteStarving({ planKey: plan, health: 6, food: 4, starving: false })
+  check(
+    '(g1) a grounded recovery clears the durable starvation state (no escalation on progress)',
+    recovered.active === false && recovered.starvingDecisions === 0,
+    `active=${recovered.active} starvingDecisions=${String(recovered.starvingDecisions)}`,
+  )
+}
+
+function queuedRawIron(): QueuedGoal {
+  return {
+    id: 'g60:collect:raw_iron',
+    kind: 'collect',
+    description: 'collect 1 x raw_iron',
+    targetItem: 'raw_iron',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'llm',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
+function rawIronGoal(): GoalState {
+  return {
+    id: 'g60:collect:raw_iron',
+    description: 'collect 1 x raw_iron',
+    targetItem: 'raw_iron',
+    requiredCount: 1,
+    startCount: 0,
+    haveCount: 0,
+    progress: 0,
+    complete: false,
+    startedAtMs: 0,
+  }
+}
+
+/**
+ * The measured live shape: an underground body on a raw_iron goal with a
+ * remembered (or far sensed) iron cell, no edible item and no animal. `known`
+ * null means "no remembered cell"; otherwise the durable memory knows this one
+ * ore cell, exactly like the live `raw_iron:21` world model.
+ */
+function oreWorld(opts: {
+  health: number
+  food: number
+  counts: Record<string, number>
+  known: Vec3Json | null
+  standable?: Vec3Json[]
+  blocks?: WorldState['blocks']
+}): WorldState {
+  const feet: Vec3Json = { x: 3, y: 67, z: 22 }
+  const current = queuedRawIron()
+  return {
+    schemaVersion: 1,
+    tick: 7,
+    timestampMs: NOW,
+    self: self(feet, { health: opts.health, food: opts.food }),
+    inventory: inventory(opts.counts),
+    entities: [],
+    blocks: opts.blocks ?? [],
+    terrain: { standable: opts.standable ?? [feet] },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    goal: rawIronGoal(),
+    goalQueue: { ...emptyGoalQueueState(), depth: 1, current, empty: false, goals: [current] },
+    recentEvents: [],
+    descent: [],
+    stepCuts: [],
+    signals: signals({
+      knownResources: opts.known === null ? [] : [{ name: 'iron_ore', kind: 'ore', position: opts.known }],
+    }),
+  }
+}
+
+// (a) health 1 + no food + a remembered ore cell, and a sensed far ore block
+//     whose interaction stand does not exist: the offer grounds NO
+//     damage-ending route, the remembered ore route is on offer, and the
+//     dig-access MOVE is withheld exactly like the live `ACCESS:b-23_69_43`.
+//     The durable starvation state must therefore escalate ONCE - never a bare
+//     WAIT, and never an invented eat/hunt/ascent.
+{
+  const far: Vec3Json = { x: -23, y: 69, z: 43 }
+  const state = oreWorld({
+    health: 1,
+    food: 0,
+    counts: { stone_pickaxe: 1, charcoal: 1 },
+    known: far,
+    blocks: [
+      {
+        name: 'iron_ore',
+        kind: 'ore',
+        position: far,
+        distance: 33.7,
+        diggable: true,
+        inReach: false,
+        visible: true,
+        harvestTool: 'pickaxe',
+        harvestTier: 1,
+        hasAdjacentStandable: false,
+        adjacentStandable: null,
+      },
+    ],
+  })
+  const grounded = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    reachability: { digApproach: () => ({ approach: null, path: null }) },
+  })
+  const withheldAccess = grounded.withheld.find((entry) => entry.candidate.id === 'ACCESS:b-23_69_43')
+  const evidence = new CriticalDamageTracker(3)
+  let exhausted = false
+  for (let decision = 0; decision < 3; decision += 1) {
+    exhausted = evidence.noteStarving({
+      planKey: 'g60:collect:raw_iron|g60:collect:raw_iron',
+      health: 1,
+      food: 0,
+      starving: bodyStarving({ food: 0, health: 1 }),
+    }).exhausted
+  }
+  const restricted = restrictCandidatesDuringCriticalDamage(
+    { signals: { criticalDamage: evidence.evidence() } as AgentSignals, self: state.self },
+    grounded.candidates,
+  )
+  const rescue = damageEndingCandidates(restricted)
+  const productive = restricted.some((candidate) => candidate.kind !== 'WAIT')
+  const noInventedFood = restricted.every(
+    (candidate) => candidate.kind !== 'EAT' && !(candidate.kind === 'ATTACK' && candidate.meta.foodAnimal === true) && !candidate.id.startsWith('ASCEND:habitat:'),
+  )
+  check(
+    '(g2/a) health 1 + no food + a withheld remembered ore: one typed escalation, never a bare WAIT',
+    exhausted === true && rescue.length === 0 && productive === true && noInventedFood === true,
+    `escalated=${exhausted} rescue=[${rescue.map((candidate) => candidate.id).join(' ')}] offered=[${restricted.map((candidate) => candidate.id).join(' ')}]`,
+  )
+  check(
+    '(g2/a) the far dig-access MOVE is withheld exactly like the live ACCESS candidate',
+    withheldAccess !== undefined && withheldAccess.result.reason === 'no_standable_approach',
+    withheldAccess === undefined
+      ? 'withheld=[]'
+      : `withheld=${withheldAccess.candidate.id} reason=${withheldAccess.result.reason}`,
+  )
+}
+
+// (b) a reachable remembered ore cell: the ore route is presented and a healthy
+//     body's restriction is a no-op.
+{
+  const target: Vec3Json = { x: 3, y: 66, z: 30 }
+  const state = oreWorld({
+    health: 20,
+    food: 20,
+    counts: { stone_pickaxe: 1 },
+    known: target,
+    standable: [{ x: 3, y: 67, z: 22 }, { x: 3, y: 66, z: 30 }],
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const offered = grounded.candidates
+  const restricted = restrictCandidatesDuringCriticalDamage(
+    { signals: {} as AgentSignals, self: state.self },
+    offered,
+  )
+  const oreRoute = offered.some((candidate) => candidate.id.startsWith('RETRIEVE:known:raw_iron:'))
+  const unchanged =
+    restricted.length === offered.length && restricted.every((candidate, index) => candidate.id === offered[index]?.id)
+  check(
+    '(g3/b) a reachable remembered ore keeps its ore route and a healthy body is unchanged',
+    oreRoute && unchanged,
+    `oreRoute=${oreRoute} unchanged=${unchanged} offered=[${offered.map((candidate) => candidate.id).join(' ')}]`,
+  )
+}
+
+// (c) health 20 + remembered cell: the starving restriction never engages, so
+//     the existing explore/nearer-target behaviour is untouched.
+{
+  const state = oreWorld({
+    health: 20,
+    food: 20,
+    counts: { stone_pickaxe: 1 },
+    known: { x: -23, y: 69, z: 43 },
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const offeredIds = grounded.candidates.map((candidate) => candidate.id)
+  const restricted = restrictCandidatesDuringCriticalDamage(
+    { signals: { criticalDamage: { active: false } } as unknown as AgentSignals, self: state.self },
+    grounded.candidates,
+  )
+  const unchanged =
+    restricted.length === grounded.candidates.length &&
+    restricted.every((candidate, index) => candidate.id === grounded.candidates[index]?.id)
+  check(
+    '(g4/c) health 20 + a remembered cell leaves the offer unchanged (no starvation restriction)',
+    unchanged && offeredIds.length > 0,
+    `unchanged=${unchanged} offered=[${offeredIds.join(' ')}]`,
+  )
+}
+
+// (d) genuine no-route + no-food: exactly ONE escalation per bounded window.
+{
+  const tracker = new CriticalDamageTracker(3)
+  const plan = 'g60:collect:raw_iron|g60:collect:raw_iron'
+  const fireAt: number[] = []
+  for (let decision = 0; decision < 20; decision += 1) {
+    const state = tracker.noteStarving({ planKey: plan, health: 1, food: 0, starving: true })
+    if (!state.exhausted) continue
+    fireAt.push(decision)
+    tracker.acknowledgeEscalation()
+  }
+  check(
+    '(g5/d) a genuine no-route-no-food state escalates once per bounded window, never per tick',
+    fireAt.length === 2 && fireAt[0] === 2 && fireAt[1] === 8,
+    `fireAt=[${fireAt.join(',')}] (limit=3, next window 6)`,
   )
 }
 

@@ -122,18 +122,50 @@ export interface CriticalDamageEvidence {
   sourceName: string | null
   /**
    * True when the last observation was fresh damage at or below the critical
-   * floor. This is the sensor fact `restrictCandidatesDuringCriticalDamage`
-   * reads: the body is in a damaging state right now.
+   * floor OR the body is in a code-lived critical STARVING state. This is the
+   * sensor fact `restrictCandidatesDuringCriticalDamage` reads: the body is in
+   * a damaging state right now. The starving arm is a STATE, not an event: the
+   * measured live plateau (health 1, food 0) emitted no further `hp_changed`, so
+   * an event-only fact stayed `active: false` forever.
    */
   active: boolean
   /**
+   * Consecutive decisions the body has been at critical health with an empty
+   * hunger bar on this plan, whether or not a fresh damage event arrived. This
+   * is the durable-fact counter that lets the starving STATE arm the same
+   * escalation the damage-event counter arms.
+   */
+  starvingDecisions?: number
+  /**
    * True when this plan has absorbed `limit` consecutive damage observations at
-   * critical health without ending them. This is the code-owned proof the
-   * semantic layer may use as an exhaustion boundary.
+   * critical health - or `limit` consecutive decisions in the critical starving
+   * state - without ending them. This is the code-owned proof the semantic layer
+   * may use as an exhaustion boundary.
    */
   exhausted: boolean
   /** Fired boundaries for this plan since the last plan change / health gain. */
   exhaustedRepeats: number
+}
+
+/**
+ * One decision-time observation of the critical STARVING state. Unlike
+ * {@link CriticalDamageObservation} this is not an event: the controller feeds it
+ * on every tick from the live sensor (`bodyStarving`), so a body pinned at
+ * critical health with an empty hunger bar keeps advancing the count even when
+ * the server emits no further damage event.
+ *
+ * `starving` is passed in (not derived here) so this module stays free of a
+ * cycle with `state.ts`, which imports the critical-health number from here.
+ */
+export interface StarvationObservation {
+  /** plan/goal identity; a change re-arms the count and the repeat budget */
+  planKey: string
+  /** live health, HP (20 = full) */
+  health: number
+  /** live food level, or null when the sensor has no reading */
+  food?: number | null
+  /** code-owned sensor fact `bodyStarving({food, health})` */
+  starving: boolean
 }
 
 /** Evidence line: the damage-at-critical-health state itself, greppable and exact. */
@@ -171,15 +203,18 @@ const INACTIVE = {
  *
  * Semantics:
  *   - only a NEGATIVE health step at or below `criticalHealth` advances the
- *     count (that is a damage observation, not merely being hurt earlier);
- *   - any health gain, or any health above the floor, clears the count (real
+ *     damage count (that is a damage observation, not merely being hurt earlier);
+ *   - the critical STARVING state (`noteStarving`) advances a separate decision
+ *     count on every observation while `starving` is true, so a plateaud body
+ *     that emits no further damage event still reaches the exhausted boundary;
+ *   - any health gain, or any health above the floor, clears the counts (real
  *     recovery is progress and must not be escalated on);
- *   - a different `planKey` re-arms the count and the repeat budget, so a
+ *   - a different `planKey` re-arms the counts and the repeat budget, so a
  *     semantic replan is given a fresh chance instead of inheriting the
  *     previous plan's exhaustion;
- *   - `exhausted` becomes true only when the count reaches the bounded
- *     `limit`, which grows after each fired boundary on the SAME plan;
- *   - `acknowledgeEscalation()` records a fired boundary and clears the count,
+ *   - `exhausted` becomes true only when the larger of the two counts reaches the
+ *     bounded `limit`, which grows after each fired boundary on the SAME plan;
+ *   - `acknowledgeEscalation()` records a fired boundary and clears both counts,
  *     so the next boundary needs a longer run and no hot wake loop is possible.
  */
 export class CriticalDamageTracker {
@@ -189,6 +224,7 @@ export class CriticalDamageTracker {
   private food: number | null = null
   private sourceName: string | null = null
   private count = 0
+  private starvingCount = 0
   private exhaustedRepeats = 0
 
   constructor(limit: number = CRITICAL_DAMAGE_LIMIT_DEFAULT) {
@@ -200,6 +236,7 @@ export class CriticalDamageTracker {
     if (planKey === this.planKey) return
     this.planKey = planKey
     this.count = 0
+    this.starvingCount = 0
     this.exhaustedRepeats = 0
   }
 
@@ -225,40 +262,69 @@ export class CriticalDamageTracker {
     return this.evidence()
   }
 
+  /**
+   * Record one decision-time observation of the critical starving STATE and
+   * return the updated evidence.
+   *
+   * This is the durable-fact arm of the same tracker. It exists because the
+   * measured live failure (`run-mubobiq6-12onv`, source 1a72fe2: health 1,
+   * `FOOD_LOW food=0 heldFood=null`, no food item, and no `hp_changed` for the
+   * whole generation) proved that keying the escalation only off observed damage
+   * events leaves a starving body with no active evidence at all. `starving`
+   * comes from the code-owned sensor fact, so a plateaud body advances the
+   * boundary the same way a damage slide does. A grounded food route that
+   * actually ends the starvation clears the state on the next observation and
+   * resets the count, so only a plan that is NOT ending it reaches `exhausted`.
+   */
+  noteStarving(observation: StarvationObservation): CriticalDamageEvidence {
+    this.setPlan(observation.planKey)
+    if (typeof observation.food === 'number' && Number.isFinite(observation.food)) this.food = observation.food
+    if (Number.isFinite(observation.health)) this.health = observation.health
+    if (observation.starving) this.starvingCount += 1
+    else this.starvingCount = 0
+    return this.evidence()
+  }
+
   /** Current evidence without recording anything. Never mutates. */
   evidence(): CriticalDamageEvidence {
     const health = Number.isFinite(this.health) ? this.health : 0
     const required = criticalDamageRequiredLimit(this.limit, this.exhaustedRepeats)
     const critical = Number.isFinite(this.health) && health <= CRITICAL_DAMAGE_HEALTH
-    const active = critical && this.count > 0
+    const damageActive = critical && this.count > 0
+    const starvingActive = critical && this.starvingCount > 0
+    const active = damageActive || starvingActive
+    const reached = starvingActive ? Math.max(this.count, this.starvingCount) : this.count
     return {
       planKey: this.planKey,
       health,
       criticalHealth: CRITICAL_DAMAGE_HEALTH,
-      consecutiveDamage: active ? this.count : INACTIVE.consecutiveDamage,
+      consecutiveDamage: damageActive ? this.count : INACTIVE.consecutiveDamage,
+      starvingDecisions: this.starvingCount,
       limit: required,
       food: this.food,
       sourceName: this.sourceName,
       active,
-      exhausted: active && this.count >= required,
+      exhausted: active && reached >= required,
       exhaustedRepeats: this.exhaustedRepeats,
     }
   }
 
   /**
-   * A boundary fired for the current exhaustion. The count is cleared (the
+   * A boundary fired for the current exhaustion. Both counts are cleared (the
    * evidence was consumed) and the next boundary on the SAME plan needs twice
-   * as many observations, so a persistent damaging state cannot hot-loop
-   * System2 consultations.
+   * as many observations, so a persistent damaging/starving state cannot
+   * hot-loop System2 consultations.
    */
   acknowledgeEscalation(): CriticalDamageEvidence {
     this.exhaustedRepeats += 1
     this.count = 0
+    this.starvingCount = 0
     return this.evidence()
   }
 
   reset(): void {
     this.count = 0
+    this.starvingCount = 0
     this.exhaustedRepeats = 0
   }
 }
