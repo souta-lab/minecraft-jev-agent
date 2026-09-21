@@ -22,7 +22,7 @@ import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
 import { distance, PICKAXE_RANKS, resolveBlockHarvest, toVec3, PROBE_FLUIDS, PROBE_HAZARDS, isBreakableSolidBlock } from './state.ts'
-import { interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
+import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
 import { craftAtTable } from './craftWindow.ts'
@@ -4495,6 +4495,27 @@ export class Executor {
     const stands = this.interactionStands(block)
     const alreadyAt = this.standAt(block, stands)
     if (alreadyAt !== null) return alreadyAt
+    // An interaction stand is not limited to the four orthogonal neighbours the
+    // search enumerates: vanilla interaction is an eye->block-AABB reach test
+    // from one of the block's three stand levels, so a DIAGONAL feet cell can
+    // already interact. Accepting it here is the smallest fix for the live
+    // d8d53c2 SMELT wedge - the resident at (8.7,65,-9.3) held raw_iron x3 and
+    // faced a real furnace at (10,65,-9): the exact-cell test rejected the
+    // feet cell (8,65,-10), the stock `GoalNear` for the 0.42 m-away orthogonal
+    // stand (9,65,-9) was already satisfied and reported `reached` WITHOUT
+    // moving, and the control nudge pivoted on the same exact-cell predicate, so
+    // the approach could only repeat `reason=stuck` (81 attempts) and never open
+    // the furnace. When the live face is genuinely in reach, no path is needed.
+    const liveStand = this.standAtCurrentFeet(block)
+    if (liveStand !== null) {
+      const eye = this.bot.entity.position.offset(0, 1.62, 0)
+      this.logger.info(
+        'executor',
+        `approach ${label}: already in reach from (${liveStand.x},${liveStand.y},${liveStand.z}) face=${round2(faceDistanceFromEye({ x: eye.x, y: eye.y, z: eye.z }, block))}m; no path needed`,
+        { block },
+      )
+      return liveStand
+    }
     if (stands.length === 0) {
       this.notifyPathFailed(block, 'stuck')
       throw new ExecutorError(
@@ -4616,6 +4637,34 @@ export class Executor {
       if (sameBlockCell(feet, stand)) return stand
     }
     return null
+  }
+
+  /**
+   * The block's face as seen from the body's LIVE position, when the feet
+   * already sit on a valid interaction stance that is not one of the orthogonal
+   * `interactionStandCandidates` cells: the feet cell is at one of the block's
+   * `INTERACTION_STAND_DY` levels, passable with a passable head cell and solid
+   * support, and the live eyes are within `reach` of the block AABB. Returns
+   * that feet cell, or null when the body must still move to a stand.
+   *
+   * This is the same geometry the stand search uses, evaluated from where the
+   * body actually is instead of from the four enumerated neighbours, so a
+   * diagonal-but-interactable station needs no path at all.
+   */
+  private standAtCurrentFeet(block: Vec3Json): Vec3Json | null {
+    const position = this.bot.entity.position
+    const cell = {
+      x: Math.floor(position.x + 1e-3),
+      y: Math.floor(position.y + 1e-3),
+      z: Math.floor(position.z + 1e-3),
+    }
+    if (!INTERACTION_STAND_DY.includes(cell.y - block.y)) return null
+    if (!this.passableAt(cell.x, cell.y, cell.z)) return null
+    if (!this.passableAt(cell.x, cell.y + 1, cell.z)) return null
+    if (!this.solidSupportAt(cell.x, cell.y - 1, cell.z)) return null
+    const eye = position.offset(0, 1.62, 0)
+    if (faceDistanceFromEye({ x: eye.x, y: eye.y, z: eye.z }, block) > this.options.reach) return null
+    return cell
   }
 
   private findApproachStepCut(block: Vec3Json): Vec3Json | null {
