@@ -315,6 +315,7 @@ export function parseArgs(argv) {
     else if (a === '--base-delay-ms') opts.baseDelayMs = num(a, next())
     else if (a === '--max-delay-ms') opts.maxDelayMs = num(a, next())
     else if (a === '--reset-after-ms') opts.resetAfterMs = num(a, next())
+    else if (a === '--budget-delay-ms') opts.budgetDelayMs = num(a, next())
     else if (a === '--root') opts.root = next()
     else if (a === '--driver-dir') opts.driverDir = next()
     else if (a === '--child-script') opts.childScript = next()
