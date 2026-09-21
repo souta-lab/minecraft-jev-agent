@@ -5333,6 +5333,13 @@ const LOCOMOTION_GATED_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind
   'MOVE',
   'RETRIEVE',
   'RETREAT',
+  // ENTER_PORTAL walks the body to a named cell (the portal interior), so it is a locomotion
+  // candidate like the others: without it here the entry was offered even when the body could not
+  // route to it, and the live run re-armed `ENTER:26,67,9` (outcome=noPath/stuck) while the MOVE
+  // steps that would have advanced the body were passed over. A destination that cannot be reached
+  // is withheld with the same typed reason every other locomotion candidate uses, so the ordinary
+  // MOVE/vertical candidates drive the body instead.
+  'ENTER_PORTAL',
 ])
 
 /**
