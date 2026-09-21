@@ -640,6 +640,69 @@ export function classifyRetrieveApproach(input: RetrieveApproachInput): Retrieve
   }
 }
 
+/**
+ * Far-navigation leg constants (#352).
+ *
+ * A direct path to a target beyond `LEG_TRAVEL_MIN_DISTANCE` is routinely
+ * refused: the exact destination cell may be enclosed/lava-adjacent while its
+ * NEIGHBOURHOOD is reachable. Live (source `bd2485d`, resident `m3-live`) the M2
+ * `RETRIEVE:known:obsidian:b28_67_9` was chosen every tick from
+ * (195.6, 68, -14.5) with all seven remembered obsidian cells 169-172 m away,
+ * `no_path` was recorded, the coordinate was blacklisted and the body never
+ * moved (`obsidian=0`). This radius matches `FAR_LEG_PROBE_RADIUS` in
+ * `candidates.ts`, where a `no_path` probe beyond it is already not treated as a
+ * local blockage; within the radius the direct arrival path remains the honest
+ * plan.
+ */
+export const LEG_TRAVEL_MIN_DISTANCE = 24
+
+/**
+ * `GoalNear` radius of one committed leg. The leg trades the (possibly
+ * unreachable) exact destination for the target's reachable neighbourhood, so
+ * the pathfinder can return a route and the body actually closes distance; the
+ * next decision then re-plans from the new position.
+ */
+export const LEG_TRAVEL_RADIUS = 16
+
+/**
+ * A leg is positional progress only when the body closes at least this much
+ * feet-distance to the final target. The live M2 leg measured ~24 m and ~49 m
+ * per tick, so 4 m keeps the noisy sub-metre creeps out of the progress claim.
+ */
+export const LEG_TRAVEL_MIN_PROGRESS = 4
+
+export interface TravelLegDecision {
+  /** the remaining distance was beyond `LEG_TRAVEL_MIN_DISTANCE`, so a leg was warranted */
+  warranted: boolean
+  /** the BODY position closed at least `LEG_TRAVEL_MIN_PROGRESS` toward the target */
+  progressed: boolean
+  /** `remainingBefore - remainingAfter`; positive means the body closed distance */
+  delta: number
+  /** feet-distance to the final target after the leg */
+  remaining: number
+}
+
+/**
+ * Classify one committed travel leg from the BODY positions, never from the fact
+ * that a path was attempted: `remainingAfter` must be measured from
+ * `bot.entity.position` after the leg. A leg is positional progress only when
+ * the remaining feet-distance shrank by `minProgress`. It is **never arrival**:
+ * callers keep the final "target reached" post-condition separate from "leg
+ * walked", so a successful leg leaves the goal open for the next decision.
+ */
+export function classifyTravelLeg(input: {
+  remainingBefore: number
+  remainingAfter: number
+  minDistance?: number
+  minProgress?: number
+}): TravelLegDecision {
+  const minDistance = input.minDistance ?? LEG_TRAVEL_MIN_DISTANCE
+  const minProgress = input.minProgress ?? LEG_TRAVEL_MIN_PROGRESS
+  const delta = input.remainingBefore - input.remainingAfter
+  const warranted = input.remainingBefore > minDistance
+  return { warranted, progressed: warranted && delta >= minProgress, delta, remaining: input.remainingAfter }
+}
+
 export interface RetrieveOutcomeInput {
   /** feet->target distance before the retrieve attempt */
   before: number
@@ -1650,6 +1713,25 @@ export class Executor {
       this.ensureOwned(epoch, signal)
       pathError = error
     }
+    // LEG TRAVEL (#352): a MOVE to a far target fails the same way a far
+    // RETRIEVE does - the exact destination cell may be unpathable while its
+    // neighbourhood is reachable, so a direct `GoalBlock` path is refused and
+    // the body never closes the distance. Retry the SAME target with ONE
+    // committed leg at `LEG_TRAVEL_RADIUS`. A leg is body progress and NEVER
+    // arrival: `verified` below stays false unless `classifyMoveArrival` proves
+    // the destination, so the goal remains open for the next decision. A leg
+    // that closes less than `LEG_TRAVEL_MIN_PROGRESS` keeps the original typed
+    // failure (no false progress, bounded by the move-failure memory).
+    let legProgressed = false
+    if (pathError !== null) {
+      const leg = await this.runTravelLeg(candidate, target, epoch, signal)
+      if (leg.decision.progressed) {
+        legProgressed = true
+        pathError = null
+      } else if (leg.error !== null) {
+        pathError = leg.error
+      }
+    }
     const after = this.distanceToFeet(target)
     const endPosition = this.bot.entity.position.clone()
     const anchorDistance = anchor === null ? after : this.distanceToEyes(anchor)
@@ -1689,13 +1771,25 @@ export class Executor {
       )
       this.notifyPathCompleted(target)
     }
-    return this.buildResult(candidate, epoch, startedAt, 'done', 'arrived', `moved from ${round2(before)}m to ${round2(after)}m`, null, {
-      verified,
-      blockRemoved: false,
-      dropObserved: false,
-      itemsGained: 0,
-      goalItemCount: this.countGoalItem(),
-    })
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'done',
+      legProgressed && !verified ? 'leg' : 'arrived',
+      legProgressed && !verified
+        ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
+        : `moved from ${round2(before)}m to ${round2(after)}m`,
+      null,
+      {
+        verified,
+        blockRemoved: false,
+        dropObserved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+        progressed: legProgressed,
+      },
+    )
   }
 
   private async runRetrieve(
@@ -1840,26 +1934,18 @@ export class Executor {
     // next tick re-plan from the new position. The leg is progress, never arrival:
     // the arrival post-condition stays owned by later ticks, and a leg that does
     // not close distance keeps the original typed failure (no false progress).
-    if (approachError !== null && before > 24) {
-      try {
-        await this.pathToNear(target, 16, epoch, signal)
-      } catch (error) {
-        if (error instanceof ActionCancelled) throw error
-      }
-      const legAfter = this.distanceToFeet(target)
-      if (legAfter < before - 4) {
-        this.logger.info(
-          'executor',
-          `LEG_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(legAfter)} delta=${round2(before - legAfter)}`,
-          { actionId: candidate.id },
-        )
+    if (approachError !== null) {
+      const leg = await this.runTravelLeg(candidate, target, epoch, signal)
+      if (leg.decision.progressed) {
+        // A leg is BODY progress only. Clear the typed approach failure so the
+        // classifier below reports `progressed` (never arrival) and the final
+        // "target reached" post-condition stays owned by the next decision from
+        // the new position.
         approachError = null
-      } else {
-        this.logger.warn(
-          'executor',
-          `LEG_NO_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(legAfter)}`,
-          { actionId: candidate.id },
-        )
+      } else if (leg.error !== null) {
+        // No positional progress: keep the typed failure so the move-failure
+        // memory bounds the target (no infinite leg loop).
+        approachError = leg.error
       }
     }
     const after = this.distanceToFeet(target)
@@ -4544,6 +4630,68 @@ export class Executor {
       }))
     if (!controlsWorked) await this.walkByPackets(target, 1, epoch, signal)
     this.notifyPathCompleted(target)
+  }
+
+  /**
+   * Walk ONE committed leg toward a far target (#352).
+   *
+   * The leg retries the SAME target with the wider
+   * `GoalNear(target, LEG_TRAVEL_RADIUS)` so the pathfinder can reach the
+   * target's reachable neighbourhood instead of its (possibly enclosed) exact
+   * cell, then measures the remaining feet-distance from the BODY position.
+   *
+   * A leg is a body change and **never arrival**: the caller owns the final
+   * "target reached" post-condition and keeps its goal open when the leg only
+   * closed distance. A leg that closes less than `LEG_TRAVEL_MIN_PROGRESS`
+   * returns `progressed: false` together with the original typed path error, so
+   * the caller preserves that failure and the move-failure memory bounds the
+   * target - there is no infinite leg loop.
+   */
+  private async runTravelLeg(
+    candidate: Candidate,
+    target: Vec3Json,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<{ decision: TravelLegDecision; error: ExecutorError | null }> {
+    const remainingBefore = this.distanceToFeet(target)
+    const warranted = classifyTravelLeg({ remainingBefore, remainingAfter: remainingBefore })
+    if (!warranted.warranted) return { decision: warranted, error: null }
+    this.logger.info(
+      'executor',
+      `LEG_TRAVEL target=${target.x},${target.y},${target.z} remaining=${round2(remainingBefore)} radius=${LEG_TRAVEL_RADIUS}`,
+      { target, actionId: candidate.id, radius: LEG_TRAVEL_RADIUS },
+    )
+    let error: ExecutorError | null = null
+    try {
+      await this.pathToNear(target, LEG_TRAVEL_RADIUS, epoch, signal)
+    } catch (thrown) {
+      if (thrown instanceof ActionCancelled) throw thrown
+      error =
+        thrown instanceof ExecutorError
+          ? thrown
+          : new ExecutorError(
+              'path_stuck',
+              `travel leg toward (${target.x},${target.y},${target.z}) failed: ${
+                thrown instanceof Error ? thrown.message : String(thrown)
+              }`,
+            )
+    }
+    this.ensureOwned(epoch, signal)
+    const decision = classifyTravelLeg({ remainingBefore, remainingAfter: this.distanceToFeet(target) })
+    if (decision.progressed) {
+      this.logger.info(
+        'executor',
+        `LEG_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(decision.remaining)} delta=${round2(decision.delta)}`,
+        { target, actionId: candidate.id, remaining: round2(decision.remaining), delta: round2(decision.delta) },
+      )
+    } else {
+      this.logger.warn(
+        'executor',
+        `LEG_NO_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(decision.remaining)}`,
+        { target, actionId: candidate.id, remaining: round2(decision.remaining) },
+      )
+    }
+    return { decision, error }
   }
 
   /**
