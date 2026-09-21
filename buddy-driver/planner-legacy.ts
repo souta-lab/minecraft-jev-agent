@@ -384,7 +384,20 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'iron_ingot',
-    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3,
+    // The rung's ingots have exactly two consumers: the iron pickaxe and the
+    // flint_and_steel. When BOTH purposes are already fulfilled — an
+    // iron-or-better pickaxe is held AND the flint_and_steel it was smelted for
+    // is held — re-smelting 3 ingots is a dominated mid-step detour of the same
+    // class as `iron_gear` below. Measured live (`run-mub35qdr-1e1dh`): the bot
+    // held `flint_and_steel=1` and `diamond_pickaxe=1` while `iron_ingot=0`, so
+    // this rung stayed "unsatisfied" and its `smelt 1 x iron_ingot`
+    // prerequisite re-entered the durable queue and blocked `collect:obsidian`
+    // behind a furnace it could not reach.
+    //
+    // Honest requirement: if either consumer is still unfulfilled (no
+    // iron-or-better pickaxe, or no flint_and_steel), more iron IS genuinely
+    // needed and the rung stays unsatisfied.
+    satisfied: (c) => (c['iron_ingot'] ?? 0) >= 3 || (bestPickaxeRank(c) >= 3 && has(c, 'flint_and_steel')),
     // Same total-vs-shortfall bug as the raw_iron rung: with 2 ingots held this
     // compiled a required count of 1, so the third smelt was skipped entirely.
     goals: () => [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }],

@@ -29,7 +29,13 @@ import {
   splitProtectedGoals,
 } from './protectedGoals.ts'
 import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
-import { compilePlannedGoal, queuedToPlanned, stableOptionInstanceId } from './optionSpec.ts'
+import {
+  compilePlannedGoal,
+  orderPrerequisitesBeforeConsumers,
+  orphanedPrerequisiteDecision,
+  queuedToPlanned,
+  stableOptionInstanceId,
+} from './optionSpec.ts'
 
 export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
 
@@ -66,9 +72,52 @@ export interface ApplyPlanOptions {
   verifyCurrentComplete?: (goal: QueuedGoal) => boolean
   /** Audit sink for rejected lifecycle operations. */
   onOperationRejected?: (line: string) => void
+  /** Audit sink for orphaned-prerequisite retirement (#prereq-orphan); defaults to `onProtection`. */
+  onPrereqRetired?: (line: string) => void
+  /** Audit sink for prerequisite reordering (#prereq-order); defaults to `onProtection`. */
+  onPrereqReordered?: (line: string) => void
 }
 
 export const DUPLICATE_GOAL_SKIPPED = 'DUPLICATE_GOAL_SKIPPED'
+
+/**
+ * #prereq-orphan: an unfinished prerequisite row was retired because every row
+ * that consumed its target is resolved and no live row needs it any more.
+ */
+export const PREREQ_RETIRED = 'PREREQ_RETIRED'
+
+/**
+ * #prereq-order: an unfinished producer was moved in front of the unfinished
+ * row whose initiation predicate it satisfies.
+ */
+export const PREREQ_REORDERED = 'PREREQ_REORDERED'
+
+export function formatPrereqRetired(goal: QueuedGoal, dependents: number): string {
+  return (
+    `${PREREQ_RETIRED} id=${goal.id} item=${goal.targetItem ?? 'none'} reason=all_dependents_resolved` +
+    ` dependents=${dependents} protected=${goal.protected === true} core=${goal.core === true}`
+  )
+}
+
+export function formatPrereqReordered(prerequisite: QueuedGoal, consumer: QueuedGoal): string {
+  return `${PREREQ_REORDERED} id=${prerequisite.id} item=${prerequisite.targetItem ?? 'none'} before=${consumer.id} consumer=${consumer.kind}`
+}
+
+/**
+ * Default audit sink for prerequisite reconciliation, mirroring the predicate
+ * `PREDICATE_UNKNOWN` sink: production wires the resident logger through
+ * `onProtection`, and a queue used without a sink still emits the marker.
+ */
+const defaultPrereqSink = (line: string): void => {
+  process.stderr.write(`[prereq] ${line}\n`)
+}
+
+let prereqAuditSink: (line: string) => void = defaultPrereqSink
+
+/** Route `PREREQ_RETIRED` / `PREREQ_REORDERED` lines; pass null for the stderr default. */
+export function setPrereqAuditSink(sink: ((line: string) => void) | null): void {
+  prereqAuditSink = sink ?? defaultPrereqSink
+}
 
 /**
  * Identity of one goal *instance*: `stableOptionInstanceId` over the compiled
@@ -304,6 +353,8 @@ export class GoalQueue {
   private goals: QueuedGoal[] = []
   private counter = 0
   private queueRevision = 0
+  /** Most recent plan's audit sink, reused by later lifecycle transitions. */
+  private lifecycleSink: ((line: string) => void) | undefined
 
   get revision(): number {
     return this.queueRevision
@@ -354,6 +405,8 @@ export class GoalQueue {
     op: PlanOp = 'replace',
     options: ApplyPlanOptions = {},
   ): QueuedGoal[] {
+    const audit = options.onPrereqRetired ?? options.onPrereqReordered ?? options.onProtection
+    if (audit !== undefined) this.lifecycleSink = audit
     let effectiveOp = op
     let abandonedCurrentId: string | null = null
     if (op === 'complete') {
@@ -573,6 +626,75 @@ export class GoalQueue {
     this.queueRevision += 1
   }
 
+  /**
+   * #prereq-orphan: retire every unfinished row that the durable ledger proves
+   * is a leftover prerequisite - every row that consumed its target is resolved
+   * (done/impossible) and no live row requires the target any more. Retirement
+   * cascades (retiring `place:furnace` orphans the `craft:furnace` that fed it)
+   * and is bounded by the ledger length. It never marks a row done and never
+   * drops a row a live consumer still requires, so a genuinely required but
+   * unsatisfiable row still fails visibly (issue #55).
+   */
+  retireOrphanedPrerequisites(options: ApplyPlanOptions = {}, now: number = Date.now()): QueuedGoal[] {
+    const sink = options.onPrereqRetired ?? options.onProtection ?? this.lifecycleSink ?? prereqAuditSink
+    const retired: QueuedGoal[] = []
+    let changed = true
+    let guard = 0
+    while (changed && guard <= this.goals.length) {
+      changed = false
+      guard += 1
+      for (const goal of this.goals) {
+        if (goal.status !== 'pending' && goal.status !== 'active') continue
+        const decision = orphanedPrerequisiteDecision(goal, this.goals)
+        if (!decision.retire) continue
+        goal.status = 'impossible'
+        goal.detail = `retired prerequisite: reason=${decision.reason} dependents=${decision.dependents}`
+        goal.updatedAt = now
+        retired.push(goal)
+        sink(formatPrereqRetired(goal, decision.dependents))
+        changed = true
+      }
+    }
+    if (retired.length > 0) this.queueRevision += 1
+    return retired
+  }
+
+  /**
+   * #prereq-order: reorder only the UNFINISHED subsequence so an unfinished
+   * producer precedes the unfinished row whose initiation predicate it
+   * satisfies. Resolved history keeps its ledger position, and no row is added,
+   * dropped, or completed. Returns the moves that were applied.
+   */
+  orderPrerequisites(
+    options: ApplyPlanOptions = {},
+  ): Array<{ prerequisite: QueuedGoal; consumer: QueuedGoal }> {
+    const unfinished = this.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+    if (unfinished.length < 2) return []
+    const { rows, moves } = orderPrerequisitesBeforeConsumers(unfinished)
+    if (moves.length === 0) return []
+    const sink = options.onPrereqReordered ?? options.onProtection ?? this.lifecycleSink ?? prereqAuditSink
+    let cursor = 0
+    this.goals = this.goals.map((goal) => {
+      if (goal.status !== 'pending' && goal.status !== 'active') return goal
+      const replacement = rows[cursor]
+      cursor += 1
+      return replacement ?? goal
+    })
+    for (const move of moves) sink(formatPrereqReordered(move.prerequisite, move.consumer))
+    this.queueRevision += 1
+    return moves
+  }
+
+  /**
+   * Deterministic prerequisite reconciliation, run on every lifecycle
+   * transition (plan apply, progress, completion, restore). It cannot add work,
+   * cannot mark a row done, and cannot drop a row a live consumer requires.
+   */
+  private reconcilePrerequisites(): void {
+    this.retireOrphanedPrerequisites()
+    this.orderPrerequisites()
+  }
+
   snapshot(): GoalQueueSnapshot {
     return { counter: this.counter, goals: this.goals.map((goal) => ({ ...goal })), revision: this.queueRevision }
   }
@@ -592,6 +714,7 @@ export class GoalQueue {
   }
 
   private activate(): void {
+    this.reconcilePrerequisites()
     const goal = this.nextRef()
     if (goal !== undefined) goal.status = 'active'
   }

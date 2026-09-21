@@ -1574,6 +1574,222 @@ export function expandOptionDependencies(
 }
 
 // ---------------------------------------------------------------------------
+// queue prerequisite reconciliation (#prereq-orphan / #prereq-order)
+// ---------------------------------------------------------------------------
+
+/**
+ * The queue-level projection of one row the reconciler reads. Both `QueuedGoal`
+ * and `PlannedGoal` satisfy it, so retirement/ordering stay pure and testable
+ * with no queue and no bot.
+ */
+export interface QueuePrerequisiteRow {
+  kind: GoalKind
+  description: string
+  targetItem?: string | null
+  /** lifecycle status on a queued row; absent on a fresh `PlannedGoal`. */
+  status?: string
+  protected?: boolean
+  core?: boolean
+  targetY?: number | null
+  dimension?: string | null
+  optionSpec?: OptionSpec
+}
+
+/** Initiation predicates this row must satisfy before it may start. */
+export function queueRowPreconditions(row: QueuePrerequisiteRow): Predicate[] {
+  return compilePlannedGoal(row as PlannedGoal).preconditions
+}
+
+/**
+ * True when `predicate` demands the produced item `item`: an exact inventory
+ * item, a resource class the item belongs to, a remembered station, or a known
+ * ore. Pure predicate data, so the producer -> consumer edge is code-owned
+ * mechanics, never a semantic ranking.
+ */
+export function predicateRequiresItem(predicate: Predicate, item: string): boolean {
+  switch (predicate.kind) {
+    case 'inventoryAtLeast':
+    case 'oreKnown':
+      return predicate.item === item
+    case 'inventoryClassAtLeast':
+      return matchesResourceClass(item, predicate.cls)
+    case 'stationKnown':
+      return predicate.station === item
+    default:
+      return false
+  }
+}
+
+/** Kinds that put their target item into the inventory. */
+function rowProducesInventoryItem(row: QueuePrerequisiteRow): boolean {
+  return row.kind === 'collect' || row.kind === 'craft' || row.kind === 'smelt'
+}
+
+/**
+ * True when `row` is a producer that can satisfy `predicate`.
+ *
+ * Kind-aware on purpose: a `descend`/`explore`/`surface` row carries a
+ * `targetItem` as a navigation hint, not as an inventory product, and a `place`
+ * row satisfies a `stationKnown` predicate rather than an `inventoryAtLeast`
+ * one. Without this distinction the ordering/retirement pass would treat
+ * `descend_to:Y=-59` (targetItem `diamond`) as the producer of `3 x diamond`
+ * and move or retire it wrongly.
+ */
+export function rowSatisfiesPredicate(row: QueuePrerequisiteRow, predicate: Predicate): boolean {
+  const item = row.targetItem
+  if (typeof item !== 'string' || item.length === 0) return false
+  switch (predicate.kind) {
+    case 'inventoryAtLeast':
+      return rowProducesInventoryItem(row) && predicate.item === item
+    case 'inventoryClassAtLeast':
+      return rowProducesInventoryItem(row) && matchesResourceClass(item, predicate.cls)
+    case 'oreKnown':
+      return row.kind === 'collect' && predicate.item === item
+    case 'stationKnown':
+      return row.kind === 'place' && predicate.station === item
+    case 'pickaxeRankAtLeast': {
+      // A `craft:<tier>_pickaxe` row is the producer of the harvest tier the
+      // predicate demands (`collect obsidian` <- `craft diamond_pickaxe`).
+      const tool = PICKAXE_BY_RANK[predicate.rank]
+      return tool !== undefined && row.kind === 'craft' && item === tool
+    }
+    default:
+      return false
+  }
+}
+
+/**
+ * Ledger rows whose initiation predicates consume `row`'s output. A row is
+ * never its own dependent (a `place:furnace` row requires a held furnace as
+ * input but IS the furnace producer).
+ */
+export function dependentRows(
+  row: QueuePrerequisiteRow,
+  ledger: readonly QueuePrerequisiteRow[],
+): QueuePrerequisiteRow[] {
+  if (typeof row.targetItem !== 'string' || row.targetItem.length === 0) return []
+  return ledger.filter(
+    (other) => other !== row && queueRowPreconditions(other).some((predicate) => rowSatisfiesPredicate(row, predicate)),
+  )
+}
+
+export interface OrphanPrerequisiteDecision {
+  /** true only when retiring the row provably cannot drop live work */
+  retire: boolean
+  /** machine reason: `all_dependents_resolved` or why retirement was refused */
+  reason: string
+  /** number of resolved dependent rows that consumed this row's target */
+  dependents: number
+}
+
+function keepRow(reason: string): OrphanPrerequisiteDecision {
+  return { retire: false, reason, dependents: 0 }
+}
+
+/**
+ * #prereq-orphan: decide whether an unfinished row is a leftover prerequisite.
+ *
+ * A row is retired ONLY when the durable ledger proves it is no longer work:
+ *   - it has a target item;
+ *   - at least one other row consumes that target (otherwise it is not a
+ *     prerequisite and retiring it would drop live work);
+ *   - every consuming row is resolved (done/impossible), so no live row still
+ *     requires the target.
+ *
+ * `core`/`protected` are deliberately NOT a blanket veto. The measured live
+ * blocker (`run-mub35qdr-1e1dh`) was a `protected=true core=true`
+ * `smelt:iron_ingot` whose only consumer `craft:flint_and_steel` was already
+ * done, so a flag veto would keep the dead row at the queue head forever. The
+ * retirement is not a silent drop (#55): the row stays in the durable ledger,
+ * becomes `impossible` with a recording `detail`, and emits `PREREQ_RETIRED`.
+ *
+ * Deliberately conservative: a live consumer keeps the row, so a genuinely
+ * required but unsatisfiable prerequisite still fails visibly instead of being
+ * silently removed (issue #55 / AGENTS.md authority invariant).
+ */
+export function orphanedPrerequisiteDecision(
+  row: QueuePrerequisiteRow,
+  ledger: readonly QueuePrerequisiteRow[],
+): OrphanPrerequisiteDecision {
+  const item = row.targetItem
+  if (typeof item !== 'string' || item.length === 0) return keepRow('no_target_item')
+  const dependents = dependentRows(row, ledger)
+  if (dependents.length === 0) return keepRow('no_dependents')
+  const live = dependents.filter((other) => other.status === 'pending' || other.status === 'active')
+  if (live.length > 0) return { retire: false, reason: 'dependent_unfinished', dependents: dependents.length }
+  return { retire: true, reason: 'all_dependents_resolved', dependents: dependents.length }
+}
+
+export interface PrerequisiteOrderResult<T> {
+  /** same rows, reordered so every moved producer precedes its consumer */
+  rows: T[]
+  moves: Array<{ prerequisite: T; consumer: T }>
+}
+
+/**
+ * #prereq-order: move a PENDING producer in front of the row whose initiation
+ * predicate it satisfies. A row that needs a station prerequisite appended later
+ * can therefore never sit at the head while its prerequisite waits behind it.
+ *
+ * Two boundary rules keep this mechanical, not semantic:
+ *   - only a PENDING row is ever moved, and done/impossible history is excluded
+ *     by the caller (`rows` is the unfinished projection);
+ *   - an ACTIVE row is the executor's committed head. It is only preceded by a
+ *     producer for an unmet `stationKnown` precondition - the measured deadlock
+ *     (`WARN CANDIDATE_STARVATION blockedBy=precondition:station:furnace`) -
+ *     because an inventory/fuel/tool prerequisite of an already-active row is
+ *     owned by the candidate layer. This is what keeps the bootstrap
+ *     preserve-head invariant (`test-bootstrap-preserve.mts`) intact.
+ *
+ * Stable and bounded: only the relative order of `rows` changes. A row already
+ * ahead of its consumer is never touched, and no row is added, dropped, or
+ * marked complete.
+ */
+export function orderPrerequisitesBeforeConsumers<T extends QueuePrerequisiteRow>(
+  rows: readonly T[],
+): PrerequisiteOrderResult<T> {
+  const out = [...rows]
+  const moves: Array<{ prerequisite: T; consumer: T }> = []
+  const movable = (row: T): boolean => row.status === undefined || row.status === 'pending'
+  const bound = out.length * out.length + 1
+  for (let pass = 0; pass < bound; pass += 1) {
+    let moved = false
+    for (let i = 0; i < out.length; i += 1) {
+      const consumer = out[i]
+      if (consumer === undefined) continue
+      const needs = queueRowPreconditions(consumer)
+      if (needs.length === 0) continue
+      const consumerMovable = movable(consumer)
+      let producerIndex = -1
+      for (const predicate of needs) {
+        // An active row is never demoted for an inventory/fuel/tool
+        // prerequisite; only an unmet station precondition may precede it.
+        if (!consumerMovable && predicate.kind !== 'stationKnown') continue
+        for (let j = i + 1; j < out.length; j += 1) {
+          const candidate = out[j]
+          if (candidate === undefined || candidate === consumer) continue
+          if (!movable(candidate)) continue
+          if (!rowSatisfiesPredicate(candidate, predicate)) continue
+          producerIndex = j
+          break
+        }
+        if (producerIndex !== -1) break
+      }
+      if (producerIndex === -1) continue
+      const producer = out[producerIndex]
+      if (producer === undefined) continue
+      out.splice(producerIndex, 1)
+      out.splice(i, 0, producer)
+      moves.push({ prerequisite: producer, consumer })
+      moved = true
+      break
+    }
+    if (!moved) break
+  }
+  return { rows: out, moves }
+}
+
+// ---------------------------------------------------------------------------
 // flag-gated compile entry points
 // ---------------------------------------------------------------------------
 
