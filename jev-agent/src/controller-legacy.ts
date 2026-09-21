@@ -7002,10 +7002,20 @@ export class JevController {
     if (!result.newlyBlacklisted) return
     this.logger.warn(
       'agent',
-      formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
+      formatMoveTargetSkipped(key, result.entry.attempts, this.remainingCooldownSeconds(result.entry.blacklistedUntil)),
       { actionId: candidate.id, key, attempts: result.entry.attempts, reason },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Telemetry truth for a skip: the cooldown actually in force, including the
+   * #360 oscillation escalation. Reporting the base cooldown would log
+   * `cooldown=30` for a 60 s/10 min escalated suppression, which is exactly the
+   * "skip logged, surface unchanged" shape this fix closes.
+   */
+  private remainingCooldownSeconds(blacklistedUntil: number, now = Date.now()): number {
+    return Math.max(0, Math.ceil((blacklistedUntil - now) / 1000))
   }
 
   private recordMoveSuccess(candidate: Candidate): void {
@@ -7091,10 +7101,13 @@ export class JevController {
     const dimension = this.currentDimension()
     const seen = new Set<string>()
     // #360 §6: the detector reports the two BODY positions the bot swapped between,
-    // while the candidate identities are the TARGET cells it stepped to
-    // (live evidence: MOVE:p3_67_17/p3_67_18 looped while the escape blacklisted
-    // overworld:4,67,18 and :4,67,19 - different cells, so nothing was suppressed).
-    // Suppress the targets the body actually moved to as well.
+    // while the candidate identities are the TARGET cells it stepped to. The key
+    // is now the canonical occupied block cell (`moveFailureKey` floors), so the
+    // body cell and the candidate cell are the same identity; the remembered
+    // targets are kept as an explicit second source for a landing that stopped on
+    // a cell edge. Live evidence before the fix: MOVE:p3_67_17/p3_67_18 looped
+    // while the escape blacklisted overworld:4,67,18 and :4,67,19 - different
+    // cells, so nothing was suppressed.
     const trackedTargets: Vec3Json[] = []
     if (this.lastMoveTarget !== null && this.lastMoveTarget.dimension === dimension) trackedTargets.push(this.lastMoveTarget.position)
     if (this.previousMoveTarget !== null && this.previousMoveTarget.dimension === dimension) trackedTargets.push(this.previousMoveTarget.position)
@@ -7104,10 +7117,11 @@ export class JevController {
       if (seen.has(key)) continue
       seen.add(key)
       const result = this.moveFailMemory.blacklist(dimension, position, 'no_progress')
+      const cooldownSeconds = this.remainingCooldownSeconds(result.entry.blacklistedUntil, now)
       this.logger.warn(
         'agent',
-        formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
-        { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
+        formatMoveTargetSkipped(key, result.entry.attempts, cooldownSeconds),
+        { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: cooldownSeconds },
         this.tickCounter,
       )
     }

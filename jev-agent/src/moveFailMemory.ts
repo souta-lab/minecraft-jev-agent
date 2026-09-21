@@ -100,9 +100,28 @@ export function isTrackedMoveKind(kind: string): boolean {
   return TRACKED_MOVE_KINDS.has(kind)
 }
 
-/** Exact, dimension-scoped coordinate key: `<dimension>:<x>,<y>,<z>`. */
+/**
+ * The block CELL a position occupies. This is the one canonical identity for
+ * both sides of the blacklist: a candidate's `target` is already the integer
+ * stand cell (`MOVE:p3_67_18`), while an oscillation escape reports the raw
+ * *entity* position, which at rest is the CELL CENTRE (`3.5,67,18.5`).
+ *
+ * `Math.round` on a centre is off by one on both horizontal axes
+ * (`round(3.5)=4`, `round(18.5)=19`), so the escape recorded
+ * `overworld:4,67,19` while the candidate the body actually walked to was
+ * `overworld:3,67,18`: the skip never matched the surface Jev saw and the loop
+ * continued. Floor is the block coordinate convention the candidate ids and the
+ * terrain sensor already use, and is identical to `round` for every integer
+ * target, so candidate-side keys do not change.
+ */
+export function moveFailureCell(position: Vec3Like): { x: number; y: number; z: number } {
+  return { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+}
+
+/** Exact, dimension-scoped block-cell key: `<dimension>:<x>,<y>,<z>`. */
 export function moveFailureKey(dimension: string, position: Vec3Like): string {
-  return `${dimension}:${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`
+  const cell = moveFailureCell(position)
+  return `${dimension}:${cell.x},${cell.y},${cell.z}`
 }
 
 /** One-decimal position for log lines, matching the live HEARTBEAT format. */
@@ -155,7 +174,7 @@ export class MoveFailMemory {
       if (source === null || typeof source !== 'object') continue
       if (!Number.isFinite(source.x) || !Number.isFinite(source.y) || !Number.isFinite(source.z)) continue
       const dimension = typeof source.dimension === 'string' && source.dimension.length > 0 ? source.dimension : 'overworld'
-      const position = { x: Math.round(source.x), y: Math.round(source.y), z: Math.round(source.z) }
+      const position = moveFailureCell(source)
       const attempts = Number.isFinite(source.attempts) ? Math.max(0, Math.floor(source.attempts)) : 0
       const firstFailedAt = Number.isFinite(source.firstFailedAt) ? source.firstFailedAt : now
       const lastFailedAt = Number.isFinite(source.lastFailedAt) ? source.lastFailedAt : firstFailedAt
@@ -188,9 +207,7 @@ export class MoveFailMemory {
       entry = {
         key,
         dimension,
-        x: Math.round(position.x),
-        y: Math.round(position.y),
-        z: Math.round(position.z),
+        ...moveFailureCell(position),
         attempts: 0,
         firstFailedAt: now,
         lastFailedAt: now,
@@ -205,7 +222,10 @@ export class MoveFailMemory {
     entry.lastReason = reason
     let newlyBlacklisted = false
     if (entry.attempts >= this.failureLimit) {
-      entry.blacklistedUntil = now + this.cooldownMs
+      // Never SHORTEN an active (possibly escalated) escape cooldown: a later
+      // mechanical failure at the same cell is more evidence, not less, and a
+      // downgrade here would silently re-open the loop the escalation retired.
+      entry.blacklistedUntil = Math.max(entry.blacklistedUntil, now + this.cooldownMs)
       newlyBlacklisted = !wasBlacklisted
     }
     this.evictIfNeeded()
@@ -227,9 +247,7 @@ export class MoveFailMemory {
       ({
         key: moveFailureKey(dimension, position),
         dimension,
-        x: Math.round(position.x),
-        y: Math.round(position.y),
-        z: Math.round(position.z),
+        ...moveFailureCell(position),
         attempts: 0,
         firstFailedAt: now,
         lastFailedAt: now,

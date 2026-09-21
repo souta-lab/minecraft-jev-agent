@@ -564,9 +564,10 @@ export function traversalKindFromDelta(from: Vec3Json, to: Vec3Json): TraversalK
 }
 
 /**
- * `moveFailureKey` is `<dimension>:<round(x)>,<round(y)>,<round(z)>`. The
- * dimension may itself contain `:` (`minecraft:overworld`), so the cell is
- * parsed from the end. Pure and total: anything unparseable yields null.
+ * `moveFailureKey` is `<dimension>:<floor(x)>,<floor(y)>,<floor(z)>` (the
+ * occupied block cell). The dimension may itself contain `:` (`minecraft:overworld`),
+ * so the cell is parsed from the end. Pure and total: anything unparseable
+ * yields null.
  */
 export function parseMoveFailureCell(key: string): Vec3Json | null {
   const match = /:(-?\d+),(-?\d+),(-?\d+)$/.exec(key)
