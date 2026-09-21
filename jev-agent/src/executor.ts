@@ -1830,6 +1830,38 @@ export class Executor {
       )
     }
     this.ensureOwned(epoch, signal)
+    // LEG TRAVEL (#352): a direct arrival path to a target beyond the path
+    // probe's range rarely exists, and failing outright leaves a far goal
+    // unreachable forever. Live: `RETRIEVE:known:obsidian:b28_67_9` was chosen
+    // every tick from (195.6, 68, -14.5) with all seven remembered obsidian cells
+    // 169-172m away, the body never moved and `obsidian=0`, so the M2 portal frame
+    // could never be built. When the arrival approach failed and the target is
+    // still far, walk ONE committed leg with a wider radius toward it and let the
+    // next tick re-plan from the new position. The leg is progress, never arrival:
+    // the arrival post-condition stays owned by later ticks, and a leg that does
+    // not close distance keeps the original typed failure (no false progress).
+    if (approachError !== null && before > 24) {
+      try {
+        await this.pathToNear(target, 16, epoch, signal)
+      } catch (error) {
+        if (error instanceof ActionCancelled) throw error
+      }
+      const legAfter = this.distanceToFeet(target)
+      if (legAfter < before - 4) {
+        this.logger.info(
+          'executor',
+          `LEG_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(legAfter)} delta=${round2(before - legAfter)}`,
+          { actionId: candidate.id },
+        )
+        approachError = null
+      } else {
+        this.logger.warn(
+          'executor',
+          `LEG_NO_PROGRESS target=${target.x},${target.y},${target.z} remaining=${round2(legAfter)}`,
+          { actionId: candidate.id },
+        )
+      }
+    }
     const after = this.distanceToFeet(target)
     const endY = this.bot.entity.position.y
     const approach = classifyRetrieveApproach({
