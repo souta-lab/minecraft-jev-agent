@@ -63,6 +63,17 @@ export const FRAME_BUILD_INCOMPLETE = 'FRAME_BUILD_INCOMPLETE'
  * placing into the void.
  */
 export const FRAME_BUILD_UNGROUNDED = 'FRAME_BUILD_UNGROUNDED'
+/**
+ * A frame placement cell is occupied by a block the build cannot clear (not a
+ * placement scaffold, not diggable, or protected). Terminal typed refusal: the
+ * frame cannot be built from the current world, and the plan must say so once.
+ */
+export const FRAME_BUILD_BLOCKED = 'FRAME_BUILD_BLOCKED'
+/**
+ * The frame scan rejected every candidate origin. Names origin/axis/rule/cell/
+ * block so `portal_frame_site:none` can never again be a silent starvation.
+ */
+export const PORTAL_FRAME_SITE_REJECTED = 'PORTAL_FRAME_SITE_REJECTED'
 
 /**
  * The queue-level predicate that names the ignition operation. Both the
@@ -150,6 +161,14 @@ export interface PortalFrameSite {
    * validate its required geometry to count as live.
    */
   readonly coreIntact?: boolean
+  /**
+   * Required edge cells currently occupied by a CLEARABLE placement-scaffold
+   * block (`PILLAR_PLACE_PRIORITY`, e.g. leftover cobblestone). These are not
+   * obsidian and not air, so they are part of the missing set; the frame build
+   * clears them before placing the obsidian. Without this the scan rejected the
+   * whole site and the live plan reported a silent `portal_frame_site:none`.
+   */
+  readonly blockedFrame?: readonly PortalBlockPosition[]
 }
 
 function normalizeDimension(dimension: string): string {
@@ -603,6 +622,28 @@ export function formatFrameBuildIncomplete(input: {
 export function formatFrameBuildUngrounded(planned: number, actionId?: string): string {
   const action = actionId === undefined ? '' : ` actionId=${actionId}`
   return `${FRAME_BUILD_UNGROUNDED} planned=${planned}${action}`
+}
+
+/** Typed terminal refusal: a frame cell is occupied by an unclearable block. */
+export function formatFrameBuildBlocked(input: {
+  cell: PortalBlockPosition
+  block: string
+  actionId?: string
+}): string {
+  const action = input.actionId === undefined ? '' : ` actionId=${input.actionId}`
+  return `${FRAME_BUILD_BLOCKED} cell=${formatPos(input.cell)} block=${input.block}${action}`
+}
+
+/** Typed scan rejection: the best candidate origin and the rule that failed. */
+export function formatPortalFrameSiteRejected(input: {
+  origin: PortalBlockPosition
+  widthAxis: PortalWidthAxis
+  rule: string
+  cell: PortalBlockPosition
+  block: string
+  existing: number
+}): string {
+  return `${PORTAL_FRAME_SITE_REJECTED} origin=${formatPos(input.origin)} axis=${input.widthAxis} rule=${input.rule} cell=${formatPos(input.cell)} block=${input.block} existing=${input.existing}`
 }
 
 export interface BlockPlacementStep {

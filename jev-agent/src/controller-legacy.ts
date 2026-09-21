@@ -71,7 +71,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, formatPortalFrameSiteRejected, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -82,7 +82,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { buildWorldState, defaultSensorOptions, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -1029,6 +1029,9 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PLACE_RETRIES_EXHAUSTED',
   'FRAME_BUILD_INCOMPLETE',
   'FRAME_BUILD_UNGROUNDED',
+  'FRAME_BUILD_BLOCKED',
+  'PORTAL_FRAME_SITE_REJECTED',
+  'PORTAL_FRAME_CELL_CLEARED',
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
@@ -1609,6 +1612,8 @@ export class JevController {
   private lastArmorRefusalKey: string | null = null
   /** last logged RESOURCE_SOURCE_EXCLUDED signature set, so one protected structure is one line. */
   private lastSourceExclusionKey: string | null = null
+  /** last logged PORTAL_FRAME_SITE_REJECTED line, so one scan rejection is one line. */
+  private lastPortalFrameRejectionKey: string | null = null
   /** last logged EXPLORE_ROUTE_BLOCKED signature, so one explore dead end is one line. */
   private lastExploreRouteBlockedKey: string | null = null
   /** the current tick's typed explore dead end, fed into the starvation `missing` evidence. */
@@ -2441,6 +2446,9 @@ export class JevController {
           } else if (!frameBuildGrounded(state, OBSIDIAN)) {
             const token = 'portal_frame_site:none'
             if (!missing.includes(token)) missing.push(token)
+            // Name WHY every candidate origin was rejected (origin/axis/rule/
+            // cell/block) once, so `portal_frame_site:none` is never silent.
+            this.logPortalFrameSiteRejection(state)
           } else {
             const gap = frameBuildMaterialGap(state, OBSIDIAN)
             if (gap !== null) {
@@ -7006,6 +7014,34 @@ export class JevController {
     for (const exclusion of exclusions) {
       this.logger.warn('agent', formatResourceSourceExclusion(exclusion), { ...exclusion }, this.tickCounter)
     }
+  }
+
+  /**
+   * Name WHY the frame scan grounded no site, once per distinct rejection. The
+   * explainer shares the sensor's acceptance rule, so the line is the actual
+   * failing rule (origin/axis/rule/cell/block) rather than a bare
+   * `portal_frame_site:none`. Measured live 2026-09-21: the four-edge frame was
+   * rejected because leftover cobblestone scaffolds occupied left-edge cells.
+   */
+  private logPortalFrameSiteRejection(state: WorldState): void {
+    const rejection = explainNearestPortalFrameRejection(this.bot, sensorOptions(this.options), state.self)
+    if (rejection === null) return
+    const line = formatPortalFrameSiteRejected(rejection)
+    if (line === this.lastPortalFrameRejectionKey) return
+    this.lastPortalFrameRejectionKey = line
+    this.logger.warn(
+      'agent',
+      line,
+      {
+        origin: rejection.origin,
+        axis: rejection.widthAxis,
+        rule: rejection.rule,
+        cell: rejection.cell,
+        block: rejection.block,
+        existing: rejection.existing,
+      },
+      this.tickCounter,
+    )
   }
 
   /**

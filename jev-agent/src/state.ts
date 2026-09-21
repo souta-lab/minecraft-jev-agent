@@ -28,7 +28,7 @@ import {
   portalFrameNeedsTemporarySupport,
   validatePortalFrame,
 } from './netherPortalPlan.ts'
-import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
+import type { PortalBlockPosition, PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock, liveStructureCellKey } from './blockSafety.ts'
 import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
@@ -1786,20 +1786,175 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
 }
 
 /**
- * Ground a whole portal footprint, not just its first placement cell.
- *
- * A single supported air cell is insufficient for a frame: the other bottom
- * cells may be occupied, the interior may be blocked, or the selected cell
- * may be inside the bot after the sensor snapshot goes stale.  This scan is
- * still only a mechanical affordance check.  It does not choose a semantic
- * goal or rank Jev actions.
+ * The temporary placement-scaffold materials the frame build itself places
+ * (`PILLAR_PLACE_PRIORITY`). A frame cell occupied by one of these is a
+ * CLEARABLE obstruction: the build clears it and then places the obsidian,
+ * instead of the whole site silently disappearing. Any other non-air,
+ * non-obsidian block is a hard rejection that must be named with its
+ * rule/cell/block (measured live 2026-09-21: leftover cobblestone scaffolds in
+ * the left-edge cells made `portal_frame_site:none` silent).
  */
-export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfState): PortalFrameSite[] {
+const FRAME_CLEARABLE_BLOCKS: ReadonlySet<string> = new Set(PILLAR_PLACE_PRIORITY)
+
+export type PortalFrameSiteRejectionRule =
+  | 'footprint_blocked'
+  | 'interior_blocked'
+  | 'unsupported_bottom'
+  | 'body_overlap'
+
+/** One typed reason the frame scan rejected a candidate origin. */
+export interface PortalFrameSiteRejection {
+  readonly origin: PortalBlockPosition
+  readonly widthAxis: PortalWidthAxis
+  readonly rule: PortalFrameSiteRejectionRule
+  readonly cell: PortalBlockPosition
+  readonly block: string
+  /** obsidian edges already present at this origin, for ranking the best candidate */
+  readonly existing: number
+  /** clearable scaffold edges already present at this origin (same ranking) */
+  readonly blocked: number
+}
+
+interface FrameScanBlock {
+  readonly name: string
+  readonly boundingBox: string
+}
+
+interface FrameScanWorld {
+  readonly at: (x: number, y: number, z: number) => FrameScanBlock | null
+  readonly solid: (x: number, y: number, z: number) => boolean
+}
+
+/**
+ * The ONE frame-site acceptance rule, shared by the live sensor and the typed
+ * explainer so a rejection reason can never drift from the acceptance.
+ */
+function evaluatePortalFrameSite(
+  world: FrameScanWorld,
+  origin: PortalBlockPosition,
+  widthAxis: PortalWidthAxis,
+  body: PortalBlockPosition,
+): { site: PortalFrameSite } | { rejection: PortalFrameSiteRejection } {
+  const layout = portalFrameLayout(origin, widthAxis)
+  const existingFrame: Vec3Json[] = []
+  const blockedFrame: Vec3Json[] = []
+  let hard: { rule: PortalFrameSiteRejectionRule; cell: PortalBlockPosition; block: string } | null = null
+  for (const cell of layout.frame) {
+    const block = world.at(cell.x, cell.y, cell.z)
+    if (block?.name === 'obsidian') {
+      existingFrame.push(cell)
+      continue
+    }
+    if (block === null || REPLACEABLE_AIR.has(block.name)) continue
+    if (FRAME_CLEARABLE_BLOCKS.has(block.name)) {
+      blockedFrame.push(cell)
+      continue
+    }
+    // Record the first hard obstruction but keep scanning so the rejection
+    // carries the FULL existing/blocked counts (the ranking that picks the real
+    // partial frame needs them, not the prefix before the obstruction).
+    if (hard === null) hard = { rule: 'footprint_blocked', cell, block: block.name }
+  }
+  if (hard !== null) return { rejection: { origin, widthAxis, ...hard, existing: existingFrame.length, blocked: blockedFrame.length } }
+  // Corners are optional and may already contain harmless scaffolding; they are
+  // never counted toward the ten required edge blocks. The interior, however,
+  // must remain clear for a future ignition (or be the lit functional core).
+  for (const cell of layout.interior) {
+    const name = world.at(cell.x, cell.y, cell.z)?.name ?? null
+    if (name === null || (!REPLACEABLE_AIR.has(name) && name !== NETHER_PORTAL)) {
+      return {
+        rejection: { origin, widthAxis, rule: 'interior_blocked', cell, block: name ?? 'unknown', existing: existingFrame.length, blocked: blockedFrame.length },
+      }
+    }
+  }
+  // Bottom support is only required for the bottom EDGE cells the build still
+  // has to place. The two bottom corners are optional (a valid minimal frame
+  // omits them), so their columns never gate the site: an agent that mined the
+  // support row under the corners can still see and continue the four edge
+  // cells it actually placed.
+  for (const bottom of layout.frame) {
+    if (bottom.y !== origin.y) continue
+    if (existingFrame.some((cell) => portalCellKey(cell) === portalCellKey(bottom))) continue
+    if (!world.solid(bottom.x, bottom.y - 1, bottom.z)) {
+      return {
+        rejection: {
+          origin,
+          widthAxis,
+          rule: 'unsupported_bottom',
+          cell: bottom,
+          block: world.at(bottom.x, bottom.y - 1, bottom.z)?.name ?? 'air',
+          existing: existingFrame.length,
+          blocked: blockedFrame.length,
+        },
+      }
+    }
+  }
+  const first = { x: origin.x + 0.5, y: origin.y, z: origin.z + 0.5 }
+  if (distance(first, body) < 1.0) {
+    return {
+      rejection: { origin, widthAxis, rule: 'body_overlap', cell: origin, block: 'body', existing: existingFrame.length, blocked: blockedFrame.length },
+    }
+  }
+  const coreIntact = isPortalIgnitionPostconditionMet(
+    layout.interior,
+    (cell) => world.at(cell.x, cell.y, cell.z)?.name ?? null,
+    NETHER_PORTAL,
+  )
+  const temporarySupportRequired = portalFrameNeedsTemporarySupport(
+    origin,
+    widthAxis,
+    existingFrame,
+    (position) => world.solid(position.x, position.y, position.z),
+  )
+  return {
+    site: {
+      origin,
+      widthAxis,
+      safe: true,
+      reachable: true,
+      temporarySupportRequired,
+      coreIntact,
+      ...(existingFrame.length === 0 ? {} : { existingFrame }),
+      ...(blockedFrame.length === 0 ? {} : { blockedFrame }),
+    },
+  }
+}
+
+/** The bounded origin sweep shared by the live scan and the typed explainer. */
+function scanPortalFrameCandidates(
+  world: FrameScanWorld,
+  scanRadius: number,
+  self: SelfState,
+  onSite: (site: PortalFrameSite) => void,
+  onRejection: (rejection: PortalFrameSiteRejection) => void,
+): void {
   const base = {
     x: Math.floor(self.position.x),
     y: Math.floor(self.position.y),
     z: Math.floor(self.position.z),
   }
+  const body = self.position
+  // The portal may have been started several blocks away from the current
+  // spawn/stand position. Keep the search bounded, but wide enough to observe
+  // a nearby partial frame before a planner can replace it with a new site.
+  const frameRadius = Math.min(16, Math.max(8, Math.floor(scanRadius / 3)))
+  const axes: PortalWidthAxis[] = ['x', 'z']
+  for (let dx = -frameRadius; dx <= frameRadius; dx += 1) {
+    for (let dz = -frameRadius; dz <= frameRadius; dz += 1) {
+      for (let dy = -4; dy <= 4; dy += 1) {
+        const origin = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
+        for (const widthAxis of axes) {
+          const outcome = evaluatePortalFrameSite(world, origin, widthAxis, body)
+          if ('site' in outcome) onSite(outcome.site)
+          else onRejection(outcome.rejection)
+        }
+      }
+    }
+  }
+}
+
+/** Map the bot onto the pure `FrameScanWorld` view the acceptance rule reads. */
+function frameScanWorld(bot: Bot): FrameScanWorld {
   const scratch = bot.entity.position.clone()
   const cache = new Map<string, ReturnType<Bot['blockAt']>>()
   const at = (x: number, y: number, z: number): ReturnType<Bot['blockAt']> => {
@@ -1810,95 +1965,33 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
     cache.set(key, block)
     return block
   }
-  const clear = (x: number, y: number, z: number): boolean => {
-    const block = at(x, y, z)
-    return block !== null && REPLACEABLE_AIR.has(block.name)
+  return {
+    at: (x, y, z) => {
+      const block = at(x, y, z)
+      return block === null ? null : { name: block.name, boundingBox: block.boundingBox }
+    },
+    solid: (x, y, z) => at(x, y, z)?.boundingBox === 'block',
   }
-  const solid = (x: number, y: number, z: number): boolean => at(x, y, z)?.boundingBox === 'block'
-  const axes: PortalWidthAxis[] = ['x', 'z']
-  const sites: PortalFrameSite[] = []
-  const body = self.position
-  // The portal may have been started several blocks away from the current
-  // spawn/stand position. Keep the search bounded, but wide enough to observe
-  // a nearby partial frame before a planner can replace it with a new site.
-  const frameRadius = Math.min(16, Math.max(8, Math.floor(_options.scanRadius / 3)))
+}
 
-  for (let dx = -frameRadius; dx <= frameRadius; dx += 1) {
-    for (let dz = -frameRadius; dz <= frameRadius; dz += 1) {
-      for (let dy = -4; dy <= 4; dy += 1) {
-        const origin = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
-        for (const widthAxis of axes) {
-          const layout = portalFrameLayout(origin, widthAxis)
-          const existingFrame: Vec3Json[] = []
-          let validFootprint = true
-          for (const cell of layout.frame) {
-            const block = at(cell.x, cell.y, cell.z)
-            if (block?.name === 'obsidian') existingFrame.push(cell)
-            else if (!clear(cell.x, cell.y, cell.z)) {
-              validFootprint = false
-              break
-            }
-          }
-          if (!validFootprint) continue
-          // Corners are optional and may already contain harmless scaffolding;
-          // they are never counted toward the ten required edge blocks. The
-          // interior, however, must remain clear for a future ignition.
-          // A lit portal replaces the interior air with `nether_portal`. Keep
-          // the frame site observable so the controller can re-check that
-          // post-condition from live world truth instead of a stale queue bit.
-          const interiorNames = layout.interior.map((cell) => at(cell.x, cell.y, cell.z)?.name ?? null)
-          const interiorClearOrLit = interiorNames.every(
-            (name) => name !== null && (REPLACEABLE_AIR.has(name) || name === NETHER_PORTAL),
-          )
-          if (!validFootprint || !interiorClearOrLit) continue
-          // The structure's functional core is its COMPLETE lit interior (the same
-          // predicate `detectPortalVerification` / `portalLitTruth` use). A frame
-          // missing a required edge is still the live structure while its interior
-          // is fully lit, so membership can protect it without a perfect 10/10
-          // shape. Requiring the whole interior also rejects a spurious candidate
-          // origin whose interior merely overlaps a portal block from a real site.
-          const coreIntact = isPortalIgnitionPostconditionMet(
-            layout.interior,
-            (cell) => at(cell.x, cell.y, cell.z)?.name ?? null,
-            NETHER_PORTAL,
-          )
-          // Bottom support is only required for the bottom EDGE cells the build
-          // still has to place. The two bottom corners are optional (a valid
-          // minimal frame omits them), so their columns never gate the site: an
-          // agent that mined the support row under the corners can still see and
-          // continue the four edge cells it actually placed. A bottom edge that
-          // is already obsidian needs no support because nothing is placed there.
-          let supported = true
-          for (const bottom of layout.frame) {
-            if (bottom.y !== origin.y) continue
-            if (existingFrame.some((cell) => portalCellKey(cell) === portalCellKey(bottom))) continue
-            if (!solid(bottom.x, bottom.y - 1, bottom.z)) {
-              supported = false
-              break
-            }
-          }
-          if (!supported) continue
-          const temporarySupportRequired = portalFrameNeedsTemporarySupport(
-            origin,
-            widthAxis,
-            existingFrame,
-            (position) => solid(position.x, position.y, position.z),
-          )
-          const first = { x: origin.x + 0.5, y: origin.y, z: origin.z + 0.5 }
-          if (distance(first, body) < 1.0) continue
-          sites.push({
-            origin,
-            widthAxis,
-            safe: true,
-            reachable: true,
-            temporarySupportRequired,
-            coreIntact,
-            ...(existingFrame.length === 0 ? {} : { existingFrame }),
-          })
-        }
-      }
-    }
-  }
+/**
+ * Ground a whole portal footprint, not just its first placement cell.
+ *
+ * A single supported air cell is insufficient for a frame: the other bottom
+ * cells may be occupied, the interior may be blocked, or the selected cell
+ * may be inside the bot after the sensor snapshot goes stale.  This scan is
+ * still only a mechanical affordance check.  It does not choose a semantic
+ * goal or rank Jev actions.
+ */
+export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: SelfState): PortalFrameSite[] {
+  const sites: PortalFrameSite[] = []
+  scanPortalFrameCandidates(
+    frameScanWorld(bot),
+    _options.scanRadius,
+    self,
+    (site) => sites.push(site),
+    () => undefined,
+  )
 
   sites.sort((a, b) => {
     const aExisting = a.existingFrame?.length ?? 0
@@ -1923,6 +2016,37 @@ export function sensedPortalFrameSites(bot: Bot, options: SensorOptions = defaul
   // fixture construct a fake vector API.
   if (typeof (bot.entity?.position as unknown as { offset?: unknown })?.offset !== 'function') return []
   return buildPortalFrameSites(bot, options, buildSelf(bot))
+}
+
+/**
+ * WHY the frame scan grounded no site, named as origin/axis/rule/cell/block.
+ * The acceptance rule is shared with `buildPortalFrameSites`, so this can never
+ * drift from what the sensor actually rejected. The best candidate is the one
+ * with the most obsidian edges already present, then nearest to the body: that
+ * is the real partial frame, not an arbitrary empty footprint.
+ */
+export function explainNearestPortalFrameRejection(
+  bot: Bot,
+  options: SensorOptions = defaultSensorOptions,
+  self: SelfState = buildSelf(bot),
+): PortalFrameSiteRejection | null {
+  if (typeof (bot.entity?.position as unknown as { offset?: unknown })?.offset !== 'function') return null
+  let best: PortalFrameSiteRejection | null = null
+  const isBetter = (candidate: PortalFrameSiteRejection, current: PortalFrameSiteRejection): boolean => {
+    if (candidate.existing !== current.existing) return candidate.existing > current.existing
+    if (candidate.blocked !== current.blocked) return candidate.blocked > current.blocked
+    return distance(candidate.origin, self.position) < distance(current.origin, self.position)
+  }
+  scanPortalFrameCandidates(
+    frameScanWorld(bot),
+    options.scanRadius,
+    self,
+    () => undefined,
+    (rejection) => {
+      if (best === null || isBetter(rejection, best)) best = rejection
+    },
+  )
+  return best
 }
 
 /** Count the required edge blocks in the nearest live partial/full frame. */

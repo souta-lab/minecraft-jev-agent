@@ -103,6 +103,7 @@ import type { JumpBotLike, PillarJumpTrace, SolidAt } from './pillarJump.ts'
 import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 import {
   OBSIDIAN,
+  formatFrameBuildBlocked,
   formatFrameBuildIncomplete,
   formatFrameBuildUngrounded,
   formatPortalBlockPlaced,
@@ -152,6 +153,7 @@ export type FailureCode =
   | 'pickup_failed'
   | 'frame_build_incomplete'
   | 'frame_build_ungrounded'
+  | 'frame_build_blocked'
   | 'cancelled'
   | 'unknown_event'
 
@@ -4249,6 +4251,13 @@ export class Executor {
         this.emitFrameCell(candidate, itemName, existing, cell)
         continue
       }
+      if (FRAME_PLACE_ITEMS.has(itemName)) {
+        // A frame edge can be occupied by a leftover placement-scaffold block
+        // (the live 2026-09-21 rebuild left cobblestone in the left-edge cells).
+        // Placing obsidian there is impossible until it is cleared, so clear it
+        // first; a non-scaffold obstruction is a typed terminal refusal.
+        await this.clearFrameCellIfObstructed(candidate, cell, itemName, epoch, signal)
+      }
       const reference = this.findPlaceReference(cell)
       const targetInReach = this.distanceToEyes(cell) <= this.options.reach
       const referenceInReach = reference !== null && this.distanceToEyes(reference.block.position) <= this.options.reach
@@ -4460,6 +4469,52 @@ export class Executor {
       return feet
     }
     return null
+  }
+
+  /**
+   * Clear a placement-scaffold block that occupies a frame cell, so the
+   * obsidian can go in. The clear is a mechanically necessary prerequisite
+   * (buddy-driver AGENTS §2): no semantic choice exists once the frame geometry
+   * is selected. It reuses the real dig path (`equipTool`/`digBlock`), so the
+   * `isProtectedStationBlock` refusal and the dig budget still own safety. Any
+   * block that is not a known placement scaffold, or that cannot be dug, is a
+   * typed `FRAME_BUILD_BLOCKED` refusal instead of a silent verify loop.
+   */
+  private async clearFrameCellIfObstructed(
+    candidate: Candidate,
+    cell: Vec3Json,
+    itemName: string,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const block = this.currentBlockAt(cell)
+    if (block === null || block.boundingBox === 'empty' || block.name === itemName) return
+    const pickaxe = this.bot.inventory.items().find((entry) => entry.name.endsWith('_pickaxe'))
+    if (pickaxe !== undefined) await this.equipItemTo(pickaxe, 'hand', epoch, signal)
+    // Only clear the exact material this build uses for its temporary support
+    // (`findPortalScaffoldItem` = the first held PILLAR_PLACE_PRIORITY item).
+    // That removes the agent's own scaffold without excavating natural terrain
+    // that merely happens to sit in the ring; anything else is typed refused.
+    const scaffoldItem = this.findPortalScaffoldItem()
+    if (scaffoldItem === undefined || block.name !== scaffoldItem.name || !this.bot.canDigBlock(block)) {
+      const line = formatFrameBuildBlocked({ cell, block: block.name, actionId: candidate.id })
+      this.logger.warn('agent', line, { actionId: candidate.id, cell, block: block.name })
+      throw new ExecutorError('frame_build_blocked', line)
+    }
+    this.setPhase(candidate, epoch, 'digging')
+    await this.digBlock(block, epoch, signal)
+    this.ensureOwned(epoch, signal)
+    const after = this.currentBlockAt(cell)
+    if (after !== null && after.boundingBox === 'block') {
+      const line = formatFrameBuildBlocked({ cell, block: after.name, actionId: candidate.id })
+      this.logger.warn('agent', line, { actionId: candidate.id, cell, block: after.name })
+      throw new ExecutorError('frame_build_blocked', line)
+    }
+    this.logger.info('agent', `PORTAL_FRAME_CELL_CLEARED cell=${cell.x},${cell.y},${cell.z} block=${block.name}`, {
+      actionId: candidate.id,
+      cell,
+      block: block.name,
+    })
   }
 
   /**

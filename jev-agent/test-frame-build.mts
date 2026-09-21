@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import {
+  FRAME_BUILD_BLOCKED,
   FRAME_BUILD_INCOMPLETE,
   FRAME_BUILD_UNGROUNDED,
   OBSIDIAN,
@@ -48,7 +49,7 @@ import {
 import type { QueuedGoal } from './src/goalQueue.ts'
 import type { GoalQueueState } from './src/goalQueue.ts'
 import type { WorldState, Vec3Json, SelfState, InventoryState, AgentSignals } from './src/state.ts'
-import { buildPortalFrameSites, defaultSensorOptions } from './src/state.ts'
+import { buildPortalFrameSites, defaultSensorOptions, explainNearestPortalFrameRejection } from './src/state.ts'
 import type { PortalFrameSite } from './src/netherPortalPlan.ts'
 import { defaultCandidateOptions, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates } from './src/candidates.ts'
 import { Executor } from './src/executor.ts'
@@ -441,6 +442,9 @@ function liveVec(x: number, y: number, z: number) {
       this.z = nz
       return this
     },
+    offset(ox: number, oy: number, oz: number) {
+      return liveVec(this.x + ox, this.y + oy, this.z + oz)
+    },
   }
 }
 
@@ -469,6 +473,124 @@ function makeLiveFrameBot(): Bot {
     blockAt,
     inventory: { items: () => [] },
   } as unknown as Bot
+}
+
+// ---------------------------------------------------------------------------
+// (3g) the CURRENT live world (region r.0.0 chunk 1,0 @ 17:04Z): the rebuild is
+// blocked by leftover cobblestone scaffolds occupying the left-edge cells.
+// ---------------------------------------------------------------------------
+//
+// Live z=9 column: cobblestone at 25,67 / 25,68 / 25,69 (left edge) and the two
+// bottom corners 25,66 / 28,66; obsidian only at 28,69; everything else in the
+// ring air. The old footprint `clear` rule rejected every origin, so the plan
+// reported a silent `portal_frame_site:none`. The current rule accepts the
+// clearable scaffold occupancy and exposes it as `blockedFrame`.
+function currentLiveFrameGrid(): Map<string, string> {
+  const grid = new Map<string, string>()
+  for (let x = LIVE_ORIGIN.x - 6; x <= LIVE_ORIGIN.x + 12; x += 1) {
+    for (let z = LIVE_ORIGIN.z - 6; z <= LIVE_ORIGIN.z + 8; z += 1) {
+      for (let y = 60; y <= 74; y += 1) grid.set(`${x},${y},${z}`, y <= 64 ? 'stone' : 'air')
+    }
+  }
+  const set = (x: number, y: number, z: number, name: string): void => {
+    grid.set(`${x},${y},${z}`, name)
+  }
+  // Live support row under the two bottom edges.
+  set(26, 65, 9, 'grass_block')
+  set(27, 65, 9, 'grass_block')
+  // Left-edge scaffolding left behind by the rebuild + its bottom corner.
+  set(25, 66, 9, 'cobblestone')
+  set(25, 67, 9, 'cobblestone')
+  set(25, 68, 9, 'cobblestone')
+  set(25, 69, 9, 'cobblestone')
+  // Right bottom corner scaffolding and the one surviving obsidian edge.
+  set(28, 66, 9, 'cobblestone')
+  set(28, 69, 9, OBSIDIAN)
+  // A nearby non-clearable leaf block keeps the neighbouring origins rejected.
+  set(31, 67, 9, 'leaf_litter')
+  return grid
+}
+
+function makeRegionFrameBot(grid: Map<string, string>): Bot {
+  const blockAt = (v: { x: number; y: number; z: number }) => {
+    const name = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
+    if (name === undefined) return null
+    return {
+      name,
+      boundingBox: name === 'air' ? ('empty' as const) : ('block' as const),
+      position: liveVec(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)),
+    }
+  }
+  const position = liveVec(26.7, 66, 10.1)
+  return {
+    registry,
+    entity: { position, width: 0.6, height: 1.8, clone: () => position.clone() },
+    blockAt,
+    inventory: { items: () => [] },
+  } as unknown as Bot
+}
+
+{
+  const grid = currentLiveFrameGrid()
+  const liveSelf = self({ x: 26.7, y: 66, z: 10.1 })
+  const sites = buildPortalFrameSites(makeRegionFrameBot(grid), defaultSensorOptions, liveSelf)
+  const site = sites.find(
+    (candidate) => candidate.origin.x === 25 && candidate.origin.y === 66 && candidate.origin.z === 9 && candidate.widthAxis === 'x',
+  )
+  const blocked = new Set((site?.blockedFrame ?? []).map(key))
+  const grounding = site === undefined ? null : groundPortalFrame([site], { x: 26.7, y: 66, z: 10.1 })
+  const state = worldState({
+    position: { x: 26.7, y: 66, z: 10.1 },
+    inventory: inventory({ obsidian: 9, cobblestone: 64, diamond_pickaxe: 1 }),
+    goalQueue: queueWith({ ...queuedPlace(OBSIDIAN, []), placementCells: undefined, requiredCount: 10 }),
+    portalFrameSites: site === undefined ? [] : [site],
+  })
+  const place = generateGroundedCandidates(state, defaultCandidateOptions).candidates.find((candidate) => candidate.kind === 'PLACE')
+  const pass =
+    site?.existingFrame?.length === 1 &&
+    site.blockedFrame?.length === 3 &&
+    blocked.has('25,67,9') &&
+    blocked.has('25,68,9') &&
+    blocked.has('25,69,9') &&
+    grounding?.cells.length === 9 &&
+    place?.id === 'PLACE:obsidian:build:9@p26_66_9' &&
+    place?.placementCells?.length === 9
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (3g) the CURRENT live frame is accepted with clearable blockedFrame -> build the remaining 9\n' +
+      '      existing=' + (site?.existingFrame?.length ?? 'none') + ' blocked=' + (site?.blockedFrame?.length ?? 'none') +
+      ' groundingCells=' + (grounding?.cells.length ?? 'none') + ' candidate=' + (place?.id ?? 'none') + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+// (3h) a NON-clearable obstruction is a typed scan rejection, not `site:none`
+{
+  const grid = currentLiveFrameGrid()
+  grid.set('25,67,9', 'oak_leaves')
+  const liveSelf = self({ x: 26.7, y: 66, z: 10.1 })
+  const bot = makeRegionFrameBot(grid)
+  const sites = buildPortalFrameSites(bot, defaultSensorOptions, liveSelf)
+  const site = sites.find(
+    (candidate) => candidate.origin.x === 25 && candidate.origin.y === 66 && candidate.origin.z === 9 && candidate.widthAxis === 'x',
+  )
+  const rejection = explainNearestPortalFrameRejection(makeRegionFrameBot(grid), defaultSensorOptions, liveSelf)
+  const pass =
+    site === undefined &&
+    rejection?.origin.x === 25 &&
+    rejection?.origin.y === 66 &&
+    rejection?.origin.z === 9 &&
+    rejection?.widthAxis === 'x' &&
+    rejection?.rule === 'footprint_blocked' &&
+    rejection?.cell.x === 25 &&
+    rejection?.cell.y === 67 &&
+    rejection?.cell.z === 9 &&
+    rejection?.block === 'oak_leaves' &&
+    rejection?.existing === 1
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (3h) a non-clearable frame-cell obstruction names origin/axis/rule/cell/block\n' +
+      '      site=' + (site === undefined ? 'none' : 'present') + ' rejection=' + JSON.stringify(rejection) + '\n',
+  )
+  if (!pass) failures += 1
 }
 
 {
@@ -971,7 +1093,9 @@ function makeLivePlaceBot(existing: readonly Vec3Json[]) {
       position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)),
     }
   }
-  const position = new P(26.7, 66, 10.1)
+  // Stand clear of the frame plane (z=9..10); the live bot at z=10.1 would
+  // overlap the (…,9) cells, and this fake pathfinder cannot relocate it.
+  const position = new P(26.5, 66, 10.6)
   const obsidianId = (registry.itemsByName as Record<string, { id: number }>).obsidian?.id ?? 0
   const cobbleId = (registry.itemsByName as Record<string, { id: number }>).cobblestone?.id ?? 0
   const placeCalls: Vec3Json[] = []
@@ -1083,6 +1207,156 @@ async function runLiveFrameBuild(existing: readonly Vec3Json[], planned: readonl
     typed[0]?.startsWith(`${FRAME_BUILD_INCOMPLETE} planned=3 placed=3`) === true
   process.stdout.write(
     (pass ? 'PASS' : 'FAIL') + '  (5d-typed) a short frame batch fails once with FRAME_BUILD_INCOMPLETE\n' +
+      '      status=' + result.status + ' failure=' + result.failure + ' typed=[' + (typed[0] ?? 'none') + '] ready=' + ready.length + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+// ---------------------------------------------------------------------------
+// (5e) the CURRENT live rebuild: clear the leftover cobblestone scaffolds and
+// finish the 10-edge frame with obsidian=9 (exactly the live inventory).
+// ---------------------------------------------------------------------------
+function makeRegionPlaceBot(grid: Map<string, string>) {
+  const blockAt = (v: { x: number; y: number; z: number }) => {
+    const name = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
+    if (name === undefined) return null
+    return {
+      name,
+      boundingBox: name === 'air' ? ('empty' as const) : ('block' as const),
+      position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)),
+    }
+  }
+  // Stand clear of the frame plane (z=9..10); the live bot at z=10.1 would
+  // overlap the (…,9) cells, and this fake pathfinder cannot relocate it.
+  const position = new P(26.5, 66, 10.6)
+  const obsidianId = (registry.itemsByName as Record<string, { id: number }>).obsidian?.id ?? 0
+  const cobbleId = (registry.itemsByName as Record<string, { id: number }>).cobblestone?.id ?? 0
+  const pickId = (registry.itemsByName as Record<string, { id: number }>).diamond_pickaxe?.id ?? 0
+  const placeCalls: Vec3Json[] = []
+  const digCalls: Vec3Json[] = []
+  let heldName: string | null = null
+  const bot = {
+    registry,
+    entity: {
+      position,
+      yaw: 0,
+      pitch: 0,
+      onGround: true,
+      width: 0.6,
+      height: 1.8,
+      offset: (x: number, y: number, z: number) => position.offset(x, y, z),
+      clone: () => position.clone(),
+      distanceTo: (other: { x: number; y: number; z: number }) => position.distanceTo(other),
+    },
+    _client: { write: () => true },
+    physicsEnabled: true,
+    entities: {},
+    inventory: {
+      count: (id: number) => (id === obsidianId ? 9 : id === cobbleId ? 64 : id === pickId ? 1 : 0),
+      items: (): Array<{ name: string; type: number; count: number }> => [
+        { name: OBSIDIAN, type: obsidianId, count: 9 },
+        { name: 'cobblestone', type: cobbleId, count: 64 },
+        { name: 'diamond_pickaxe', type: pickId, count: 1 },
+      ],
+    },
+    get heldItem(): { name: string } | null {
+      return heldName === null ? null : { name: heldName }
+    },
+    blockAt,
+    on: () => undefined,
+    removeListener: () => undefined,
+    setControlState: () => undefined,
+    lookAt: async () => undefined,
+    equip: async (item: { name: string }) => {
+      heldName = item.name
+    },
+    canDigBlock: () => true,
+    digTime: () => 50,
+    stopDigging: () => undefined,
+    dig: async (block: { position: { x: number; y: number; z: number } }) => {
+      digCalls.push({ ...block.position })
+      grid.delete(key(block.position))
+    },
+    placeBlock: async (block: { position: { x: number; y: number; z: number } }, face: { x: number; y: number; z: number }) => {
+      const target = { x: block.position.x + face.x, y: block.position.y + face.y, z: block.position.z + face.z }
+      placeCalls.push(target)
+      grid.set(key(target), heldName ?? OBSIDIAN)
+    },
+    pathfinder: {
+      movements: null as unknown,
+      setMovements: () => undefined,
+      setGoal: () => undefined,
+      stop: () => undefined,
+      getPathTo: () => ({ status: 'noPath', path: [] }),
+    },
+  }
+  return { bot: bot as unknown as Bot, grid, placeCalls, digCalls }
+}
+
+async function runRegionFrameBuild(grid: Map<string, string>, planned: readonly Vec3Json[], label: string) {
+  const fixture = makeRegionPlaceBot(grid)
+  const dir = mkdtempSync(join(tmpdir(), `frame-build-${label}-`))
+  const logPath = join(dir, 'agent.jsonl')
+  const logger = new EventLogger(new JsonlWriter(logPath), false)
+  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const result = await executor.claim(placeFrameCandidate(planned, OBSIDIAN)).completion
+  const messages = readFileSync(logPath, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => (JSON.parse(line) as { message?: string }).message ?? '')
+  return { fixture, result, messages }
+}
+
+{
+  const grid = currentLiveFrameGrid()
+  const site = buildPortalFrameSites(makeRegionFrameBot(grid), defaultSensorOptions, self({ x: 26.7, y: 66, z: 10.1 })).find(
+    (candidate) => candidate.origin.x === 25 && candidate.origin.y === 66 && candidate.origin.z === 9 && candidate.widthAxis === 'x',
+  )
+  const grounding = site === undefined ? null : groundPortalFrame([site], { x: 26.7, y: 66, z: 10.1 })
+  const planned = grounding?.cells.map((cell) => ({ ...cell })) ?? []
+  const { fixture, result, messages } = await runRegionFrameBuild(grid, planned, 'live')
+  const layout = portalFrameLayout(LIVE_ORIGIN, 'x')
+  const ready = messages.filter((line) => line.startsWith(PORTAL_FRAME_READY))
+  const cleared = messages.filter((line) => line.startsWith('PORTAL_FRAME_CELL_CLEARED'))
+  const blocked = messages.filter((line) => line.startsWith(FRAME_BUILD_BLOCKED))
+  const pass =
+    planned.length === 9 &&
+    result.status === 'done' &&
+    result.verified === true &&
+    cleared.length === 3 &&
+    blocked.length === 0 &&
+    ready.length === 1 &&
+    ready[0] === `${PORTAL_FRAME_READY} blocks=10 shape=ok` &&
+    layout.frame.every((cell) => fixture.grid.get(key(cell)) === OBSIDIAN)
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (5e) the CURRENT live rebuild clears 3 scaffolds and reaches PORTAL_FRAME_READY\n' +
+      '      planned=' + planned.length + ' status=' + result.status + ' verified=' + result.verified +
+      ' cleared=' + cleared.length + ' ready=[' + (ready[0] ?? 'none') + '] failure=' + (result.failure ?? 'none') + ' detail=' + result.detail + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+{
+  // A NON-clearable obstruction (oak_leaves) is a typed terminal refusal.
+  const grid = currentLiveFrameGrid()
+  grid.set('25,67,9', 'oak_leaves')
+  const planned = [
+    { x: 26, y: 66, z: 9 },
+    { x: 27, y: 66, z: 9 },
+    { x: 25, y: 67, z: 9 },
+    { x: 28, y: 67, z: 9 },
+  ]
+  const { result, messages } = await runRegionFrameBuild(grid, planned, 'blocked')
+  const ready = messages.filter((line) => line.startsWith(PORTAL_FRAME_READY))
+  const typed = messages.filter((line) => line.startsWith(FRAME_BUILD_BLOCKED))
+  const pass =
+    result.status === 'failed' &&
+    result.failure === 'frame_build_blocked' &&
+    typed.length === 1 &&
+    typed[0]?.startsWith(`${FRAME_BUILD_BLOCKED} cell=25,67,9 block=oak_leaves`) === true &&
+    ready.length === 0
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (5f) a non-clearable frame obstruction refuses once with FRAME_BUILD_BLOCKED\n' +
       '      status=' + result.status + ' failure=' + result.failure + ' typed=[' + (typed[0] ?? 'none') + '] ready=' + ready.length + '\n',
   )
   if (!pass) failures += 1
