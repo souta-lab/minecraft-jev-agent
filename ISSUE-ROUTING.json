@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-20",
+  "asOf": "2026-09-21",
   "policy": {
     "wipLimit": 3,
     "unclassified": "backlog",
@@ -10,14 +10,15 @@
     "authorityResetRule": "Do not add deterministic semantic-ranking/retry/goal-ordering policy to advance M2/M3. Preserve deterministic truth, safety, mechanics and verification; semantic WHICH belongs to Jev and strategic WHAT NEXT belongs to System2. Deterministic semantic policy is an explicit baseline only. Fresh live acceptance must prove the effective model-authoritative path rather than inherit the historical fallback-only failure."
   },
   "now": [80, 221, 11],
-  "next": [128, 107, 121, 56],
+  "next": [128, 107, 121, 56, 295, 296, 297, 299, 308],
   "waitingLive": [226, 3, 13, 136],
   "research": [130],
   "future": [37, 35, 41, 52],
   "referenceOnly": [],
   "clusters": {
     "PORTAL_CONVERGENCE": [80],
-    "AUTHORITY_RESET": [226, 221, 11, 128, 107, 121, 56, 130],
+    "AUTHORITY_RESET": [226, 221, 11, 128, 107, 121, 56, 130, 297, 308],
+    "GOVERNANCE_HYGIENE": [295, 296, 299],
     "RESIDENT_CORRECTNESS": [3, 13, 136],
     "FUTURE_CAPABILITIES": [37, 35, 41, 52]
   },
@@ -33,6 +34,11 @@
     "3": "WAITING_LIVE only: durable queue restore has landed follow-up fixes; do not start another planner refactor without a fresh current-authority failure.",
     "13": "WAITING_LIVE only: lifecycle/resource cleanup fixtures exist; changed-hash soak evidence remains the only reason to reopen implementation.",
     "136": "WAITING_LIVE only: surface/vertical recovery truth fix is landed/offline-verified; do not reimplement unless a fresh Jev-authoritative run reproduces a current failure.",
-    "130": "Research only. Multi-head Jev experiments are non-blocking until the simple real-Jev authority path is proven first."
+    "130": "Research only. Multi-head Jev experiments are non-blocking until the simple real-Jev authority path is proven first.",
+    "295": "NEXT audit correctness: realign structural/wiring regression tests with the #11 authority facade so they inspect the runtime composition (controller.ts facade + controller-legacy.ts) and assert the current defaults (Option compiler ON, beta authority ON) instead of the superseded opt-in/shadow defaults. PR #298 (undrafted 2026-09-21) is the implementation lane; it must still detect a deliberately removed legacy call site and a deliberately removed facade strangler.",
+    "296": "NEXT governance: regenerate CURRENT-STATUS atomically with source SHA, generatedAt, and the live open-PR/issue list, and label frozen historical resident snapshots as historical. GitHub branch topology changed on 2026-09-21 (75 merged-PR head branches pruned, delete_branch_on_merge enabled), which is exactly the kind of drift this issue must catch automatically.",
+    "297": "NEXT authority audit: remove the post-selection groundMercuryPlan seam that rewrites the model-selected WHAT, and replace the misleading MercuryCallRecord outcome 'fallback' with a truthful terminal state (fatal/model_failure) plus corrected comments. Overlaps AUTHORITY_RESET; evidence recorded in #297.",
+    "299": "NEXT infrastructure: repo-invariants jobs conclude failure with steps=0 because of GitHub Actions billing (account payment/spending limit), not repository code; the root cause and evidence were recorded as an issue comment on 2026-09-21. Add an INFRA_UNKNOWN classification so acceptance tooling never treats a never-started job as a code FAIL, and do not gate acceptance on Actions until billing is restored.",
+    "308": "NEXT architecture target: converge production onto one Grounded Option Runtime with one canonical semantic state and one authority owner per decision class before M3/M4. PR #309 is the first integrated slice (System2 causal authority); sequence it after the current NOW lanes land or are explicitly blocked rather than raising the WIP limit."
   }
 }
