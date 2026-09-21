@@ -3314,6 +3314,12 @@ function allowsQueuedRetrievalProxy(current: { kind?: string; targetItem?: strin
  * exception is the explicit descent proxy above, and even there only the first
  * unresolved row after the current proxy is exposed.  Resolved rows never
  * contribute candidates. Pure.
+ *
+ * A `craft` goal's missing ingredient is therefore NOT sourced here: that is
+ * `craftIngredientRoute`'s job, and it proves the need from the recipe index
+ * (the same producer `completeStartablePrerequisites` names). A caller that
+ * omits `options.recipes` gets no craft-prerequisite retrieval on purpose; the
+ * queue row is not a substitute for the recipe-owned expansion.
  */
 function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueued = true): RetrievalWant[] {
   const current = state.goalQueue?.current ?? null
@@ -3878,12 +3884,18 @@ function exploreFallbackCandidates(
  */
 function logExploreCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
   const currentFocus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
-  // A prerequisite log can sit behind a craft goal in the queue. Focus the
-  // exploration heuristic on the resource class that the fallback can
-  // actually find, rather than asking it to match blocks against
-  // `wooden_pickaxe`/`charcoal`/`planks`.
-  const logNeed = retrievalNeeds(state, currentFocus).find((want) => want.kind === 'log')
-  const focusItem = logNeed === undefined ? currentFocus : 'log'
+  // A prerequisite log can sit behind a craft goal (`craft wooden_pickaxe`
+  // needs a log), so the active focus is often not log-class. Bias the
+  // exploration heuristic on the resource class the fallback can actually find
+  // instead of asking it to match blocks against `wooden_pickaxe`.
+  //
+  // #341 made `retrievalNeeds` active-row-only, so the queued prerequisite no
+  // longer appears there and must NOT be recovered from the queue (that was the
+  // leak #341 removed). This fallback is only reached for a log need
+  // (`logCollectGoal` or a withheld log route), so the class is already known:
+  // aim at the log bearing directly. Search-direction only - it never
+  // authorizes a retrieval for another item.
+  const focusItem = retrievalWant(currentFocus)?.kind === 'log' ? currentFocus : 'log'
   const spot = pickExplore(
     state,
     state.terrain.standable,
