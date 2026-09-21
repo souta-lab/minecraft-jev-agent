@@ -38,12 +38,12 @@ import type { ProgressKind } from './actionPostcondition.ts'
 export const STRATEGIC_STALL_HORIZON_DEFAULT = 24
 
 /**
- * How many DISTINCT state fingerprints may appear inside the window and still
- * count as "the same pocket". 3 covers the measured A<->B<->C (`MOVE:p3_67_17`,
- * `MOVE:p3_67_18`, `MOVE:p2_67_18`) and A<->B shapes while a real route grows
- * its distinct-state count monotonically.
+ * How many DISTINCT block-cell fingerprints may appear inside the window and
+ * still count as "the same pocket". Four covers the measured 2x2 respawn
+ * pocket (`(1|2,67,17|18)`) after strategic fingerprints discard sub-block
+ * jitter, while a real route grows its state footprint beyond the bound.
  */
-export const STRATEGIC_STALL_MAX_DISTINCT_STATES_DEFAULT = 3
+export const STRATEGIC_STALL_MAX_DISTINCT_STATES_DEFAULT = 4
 
 /**
  * Minimum body-progress decisions required in the window. A WAIT-only or

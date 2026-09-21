@@ -119,6 +119,22 @@ addCase('(a) fractional motion in one pocket collapses to block-cell recurrence'
     detail: JSON.stringify(evidence),
   }
 })
+addCase('(a) the four-cell respawn pocket exhausts under the default bound', () => {
+  const tracker = new StrategicStallTracker()
+  const cells = ['1,67,17', '1,67,18', '2,67,17', '2,67,18']
+  for (let index = 0; index < STRATEGIC_STALL_HORIZON_DEFAULT; index += 1) {
+    observe(tracker, cells[index % cells.length]!)
+  }
+  const evidence = tracker.evidence()
+  return {
+    pass:
+      evidence.exhausted === true &&
+      evidence.distinctStates === STRATEGIC_STALL_MAX_DISTINCT_STATES_DEFAULT &&
+      evidence.maxDistinctStates === STRATEGIC_STALL_MAX_DISTINCT_STATES_DEFAULT,
+    detail: JSON.stringify(evidence),
+  }
+})
+
 
 
 // --- (b) successful body motion cannot reset; goal/search can ----------------
