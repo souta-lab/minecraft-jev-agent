@@ -7,18 +7,22 @@
 //
 //   CANDIDATE_STARVATION presented=1..2 productive=0 goal=collect:food:3
 //     blockedBy=no_productive_action missing=["explore_route_blocked:no_frontier"]
-//   JEV_HEADS action=WAIT abandon=0.20-0.24 decision=continue
+//   LOCAL_PROGRESS_STALL stalledMs=40773 goal=collect:food:3 boundary=local_recovery
+//   JEV_HEADS action=MOVE/WAIT abandon=0.20-0.24 decision=continue
 //
-// while the frontier's own entry goal waited behind it. This fixture pins the
-// fix end to end:
+// while the frontier's own entry goal waited behind it. Its 33 `body` MOVE
+// decisions spanned ~15 distinct cells and gained zero items, so #360's
+// one-pocket recurrence (distinct<=3) never fired (0 STRATEGIC_NON_PROGRESS*
+// markers in the run). This fixture pins the fix end to end:
 //
-//   (a) an optional zero-semantic-progress row yields to the waiting frontier
-//       goal within a bounded number of settled decisions (typed marker);
+//   (a) an optional zero-semantic-progress head yields to the waiting frontier
+//       goal within a bounded number of decisions (typed marker);
 //   (b) a starving low-health body keeps food priority (critical fact);
 //   (c) a mandatory/frontier head is never yielded;
 //   (d) an optional row that IS making semantic progress is never yielded;
-//   plus the planner marker propagation, the bounded yield budget, the genuine
-//   journey guard, and durable persistence of the marker.
+//   (d2) a wide body-only journey is NOT semantic progress and still yields;
+//   plus the planner marker propagation, the bounded yield budget, durable
+//   persistence of the marker/bound, and the ledger re-attribution.
 //
 // Run: bun test ./test-nonprogress-yield.mts
 import {
@@ -28,7 +32,8 @@ import {
   NON_PROGRESS_ESCALATED,
   NON_PROGRESS_YIELD,
   NON_PROGRESS_YIELD_LIMIT_DEFAULT,
-  NonProgressTracker,
+  resolveNonProgressMaxYields,
+  resolveNonProgressYieldLimit,
 } from './src/goalQueue.ts'
 import type { QueuedGoal } from './src/goalQueue.ts'
 import { bodyStarving } from './src/state.ts'
@@ -93,7 +98,6 @@ addCase('(a) an optional zero-progress head yields to the waiting frontier withi
   let yieldedAt = -1
   let lastLine = ''
   for (let index = 1; index <= LIMIT + 1; index += 1) {
-    queue.noteSettledDecision(['none'], 'p9_68_5')
     const result = queue.reconcileNonProgressingHead({ limit: LIMIT })
     if (result.action === 'yield') {
       yieldedAt = index
@@ -119,7 +123,6 @@ addCase('(a2) the yield does not fire before the bound (bounded, not immediate)'
   const queue = foodAheadOfFrontier()
   let early = 0
   for (let index = 1; index < LIMIT; index += 1) {
-    queue.noteSettledDecision(['body'], 'p9_68_5')
     if (queue.reconcileNonProgressingHead({ limit: LIMIT }).action !== 'hold') early += 1
   }
   return {
@@ -132,7 +135,6 @@ addCase('(b) a starving low-health body keeps food priority (critical need escal
   const queue = foodAheadOfFrontier()
   let escalated: ReturnType<GoalQueue['reconcileNonProgressingHead']> | null = null
   for (let index = 0; index < LIMIT + 2; index += 1) {
-    queue.noteSettledDecision(['none'], 'p9_68_5')
     const result = queue.reconcileNonProgressingHead({ limit: LIMIT, critical: true })
     if (result.action !== 'hold') {
       escalated = result
@@ -154,7 +156,7 @@ addCase('(b) a starving low-health body keeps food priority (critical need escal
   }
 })
 
-addCase('(c) a mandatory/frontier head is unchanged (not eligible, no marker)', () => {
+addCase('(c) a mandatory/frontier head is unchanged (not eligible, not counted)', () => {
   const queue = new GoalQueue()
   queue.restore({
     counter: 2,
@@ -167,7 +169,6 @@ addCase('(c) a mandatory/frontier head is unchanged (not eligible, no marker)', 
   let sawNonHold = 0
   let last = queue.reconcileNonProgressingHead({ limit: LIMIT })
   for (let index = 0; index < LIMIT + 3; index += 1) {
-    queue.noteSettledDecision(['none'], 'p9_68_5')
     last = queue.reconcileNonProgressingHead({ limit: LIMIT })
     if (last.action !== 'hold') sawNonHold += 1
   }
@@ -175,9 +176,9 @@ addCase('(c) a mandatory/frontier head is unchanged (not eligible, no marker)', 
     pass:
       sawNonHold === 0 &&
       last.reason === 'not_optional' &&
-      queue.current?.id === 'g39:place:nether_portal' &&
-      queue.revision > 0,
-    detail: `nonHold=${sawNonHold} reason=${last.reason} head=${queue.current?.id ?? 'none'} rev=${queue.revision}`,
+      last.decisions === 0 &&
+      queue.current?.id === 'g39:place:nether_portal',
+    detail: `nonHold=${sawNonHold} reason=${last.reason} decisions=${last.decisions} head=${queue.current?.id ?? 'none'}`,
   }
 })
 
@@ -185,7 +186,7 @@ addCase('(d) an optional head that IS making semantic progress is unchanged', ()
   const queue = foodAheadOfFrontier()
   let sawNonHold = 0
   for (let index = 1; index <= LIMIT * 3; index += 1) {
-    queue.noteSettledDecision(index % 3 === 0 ? ['goal'] : ['body'], 'p9_68_5')
+    if (index % 3 === 0) queue.noteSemanticProgress(['goal'])
     if (queue.reconcileNonProgressingHead({ limit: LIMIT }).action !== 'hold') sawNonHold += 1
   }
   return {
@@ -194,16 +195,18 @@ addCase('(d) an optional head that IS making semantic progress is unchanged', ()
   }
 })
 
-addCase('(d2) a genuine journey (many distinct cells) never satisfies the one-pocket bound', () => {
+addCase('(d2) a wide body-only journey is NOT semantic progress and still yields', () => {
   const queue = foodAheadOfFrontier()
-  let sawNonHold = 0
-  for (let index = 0; index < LIMIT + 4; index += 1) {
-    queue.noteSettledDecision(['body'], `p${index}_68_5`)
-    if (queue.reconcileNonProgressingHead({ limit: LIMIT }).action !== 'hold') sawNonHold += 1
+  let yields = 0
+  for (let index = 1; index <= LIMIT; index += 1) {
+    // `body` progress across a different cell every decision: the measured
+    // ~15-distinct-cell wander must not protect the row.
+    queue.noteSemanticProgress(['body'])
+    if (queue.reconcileNonProgressingHead({ limit: LIMIT }).action === 'yield') yields += 1
   }
   return {
-    pass: sawNonHold === 0 && queue.current?.id === 'g37:collect:food',
-    detail: `nonHold=${sawNonHold} head=${queue.current?.id ?? 'none'}`,
+    pass: yields === 1 && queue.current?.id === 'g39:place:nether_portal',
+    detail: `yields=${yields} head=${queue.current?.id ?? 'none'}`,
   }
 })
 
@@ -236,7 +239,6 @@ addCase('(f) a row that already spent its yield budget escalates instead of yiel
   const queue = foodAheadOfFrontier({ yieldCount: 2 })
   let escalated: ReturnType<GoalQueue['reconcileNonProgressingHead']> | null = null
   for (let index = 0; index < LIMIT + 1; index += 1) {
-    queue.noteSettledDecision(['none'], 'p9_68_5')
     const result = queue.reconcileNonProgressingHead({ limit: LIMIT, maxYields: 2 })
     if (result.action !== 'hold') {
       escalated = result
@@ -259,7 +261,6 @@ addCase('(g) an optional head with no alternative row escalates (never yields in
   queue.restore({ counter: 1, revision: 1, goals: [goal('g1:collect:food', 'collect', 'food', 3, { optional: true })] })
   let escalated: ReturnType<GoalQueue['reconcileNonProgressingHead']> | null = null
   for (let index = 0; index < LIMIT + 1; index += 1) {
-    queue.noteSettledDecision(['none'], 'p9_68_5')
     const result = queue.reconcileNonProgressingHead({ limit: LIMIT })
     if (result.action !== 'hold') {
       escalated = result
@@ -276,32 +277,42 @@ addCase('(g) an optional head with no alternative row escalates (never yields in
   }
 })
 
-addCase('(h) the optional marker and the spent yield budget survive a durable snapshot', () => {
-  const queue = foodAheadOfFrontier({ yieldCount: 1 })
+addCase('(h) the marker, the spent yield budget and the no-progress bound survive a durable snapshot', () => {
+  const queue = foodAheadOfFrontier({ yieldCount: 1, nonProgressDecisions: 5 })
   const snapshot = queue.snapshot()
   const restored = new GoalQueue()
   restored.restore(snapshot)
   const head = restored.current
   return {
-    pass: head?.optional === true && head?.yieldCount === 1 && head?.id === 'g37:collect:food',
-    detail: `optional=${String(head?.optional)} yieldCount=${String(head?.yieldCount)} head=${head?.id ?? 'none'}`,
+    pass:
+      head?.optional === true &&
+      head?.yieldCount === 1 &&
+      head?.nonProgressDecisions === 5 &&
+      head?.id === 'g37:collect:food',
+    detail: `optional=${String(head?.optional)} yieldCount=${String(head?.yieldCount)} nonProgressDecisions=${String(head?.nonProgressDecisions)} head=${head?.id ?? 'none'}`,
   }
 })
 
-addCase('(i) an env override and the tracker window are bounded and resettable', () => {
-  const overridden = Number(process.env.BUDDY_NON_PROGRESS_YIELD_LIMIT ?? '0')
-  const tracker = new NonProgressTracker()
-  tracker.setGoal('g1')
-  tracker.note(['body'], 'a')
-  tracker.note(['none'], 'a')
-  const two = tracker.windowFor('g1')
-  tracker.note(['goal'], 'a')
-  const reset = tracker.windowFor('g1')
-  tracker.setGoal('g2')
-  const rearmed = tracker.windowFor('g1')
+addCase('(i) the env overrides are bounded and a semantic decision resets the counter', () => {
+  const queue = foodAheadOfFrontier()
+  queue.reconcileNonProgressingHead({ limit: 9 })
+  queue.reconcileNonProgressingHead({ limit: 9 })
+  const two = queue.current?.nonProgressDecisions ?? 0
+  queue.noteSemanticProgress(['search'])
+  const reset = queue.current?.nonProgressDecisions ?? 0
+  queue.reconcileNonProgressingHead({ limit: 9 })
+  queue.noteSemanticProgress(['none'])
+  const afterNone = queue.current?.nonProgressDecisions ?? 0
+  const env = { BUDDY_NON_PROGRESS_YIELD_LIMIT: '3', BUDDY_NON_PROGRESS_MAX_YIELDS: '0' }
   return {
-    pass: two === 2 && reset === 0 && rearmed === 0 && (overridden === 0 || overridden >= 1),
-    detail: `two=${two} reset=${reset} rearmed=${rearmed} env=${String(process.env.BUDDY_NON_PROGRESS_YIELD_LIMIT ?? 'unset')}`,
+    pass:
+      two === 2 &&
+      reset === 0 &&
+      afterNone === 1 &&
+      resolveNonProgressYieldLimit(env) === 3 &&
+      resolveNonProgressMaxYields(env) === 0 &&
+      resolveNonProgressYieldLimit({ BUDDY_NON_PROGRESS_YIELD_LIMIT: 'x' }) === LIMIT,
+    detail: `two=${two} reset=${reset} afterNone=${afterNone} envLimit=${resolveNonProgressYieldLimit(env)} envMaxYields=${resolveNonProgressMaxYields(env)}`,
   }
 })
 

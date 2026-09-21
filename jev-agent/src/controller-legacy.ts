@@ -2891,7 +2891,6 @@ export class JevController {
       goalKey: result.goalKey,
       decisions: result.decisions,
       limit: result.limit,
-      distinctStates: result.distinctStates,
       yields: result.yields,
       maxYields: result.maxYields,
       nextGoalId: result.nextGoalId,
@@ -3912,9 +3911,9 @@ export class JevController {
       stateKey: positionKey(this.bot.entity.position),
       progressKinds: taxonomy.progressKinds,
     })
-    // #nonprogress-yield: feed the same settled decision to the optional-head
-    // watchdog. `body`/`none` do not clear its window; a change of head re-arms.
-    this.queue.noteSettledDecision(taxonomy.progressKinds, positionKey(this.bot.entity.position))
+    // #nonprogress-yield: a settled decision that showed `goal`/`search` progress
+    // clears the optional-head bound. `body`/`none` deliberately do not.
+    this.queue.noteSemanticProgress(taxonomy.progressKinds)
 
     writeOutcome(this.jevWriter, {
       callId: decision.callId,
