@@ -944,6 +944,8 @@ export type MercuryTransport = (request: MercuryTransportRequest) => Promise<Mer
  * validation remains authoritative after transport parsing.
  */
 export const MUSE_SPARK_MODEL = SYSTEM2_MODEL_DEFAULT
+/** Generic sparse-System2 provider timeout; not model-specific. */
+export const SYSTEM2_TIMEOUT_DEFAULT_MS = 60_000
 
 /**
  * Model ids arrive either bare (`muse-spark-1.3-contributor`) or with the
@@ -1319,7 +1321,7 @@ export class MercurySystem2 implements System2Brain {
     // Provider calls stay bounded by timeout/retry. The durable repeated-stall
     // trigger backoff is model-agnostic; the old Mercury hourly cost guard is
     // disabled by default for Muse Spark and remains opt-in via env/options.
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 25000)
+    this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? SYSTEM2_TIMEOUT_DEFAULT_MS)
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
     this.transport = options.transport ?? defaultMercuryTransport(this.model)

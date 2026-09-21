@@ -18,6 +18,7 @@ import {
   mercuryTransportMode,
   MUSE_SPARK_MODEL,
   SYSTEM2_MODEL_DEFAULT,
+  SYSTEM2_TIMEOUT_DEFAULT_MS,
   MercuryPlanValidationError,
   MercurySystem2,
   normalizeMercuryPlan,
@@ -253,6 +254,37 @@ addCase('Muse Spark is the real default model id and uses the JSON-text transpor
     mercuryTransportMode(SYSTEM2_MODEL_DEFAULT) === 'json-text' &&
     mercuryTransportMode('muse-spark-1.3-contributor') === 'json-text'
   return { pass, detail: `default=${SYSTEM2_MODEL_DEFAULT} mode=${mercuryTransportMode(SYSTEM2_MODEL_DEFAULT)}` }
+})
+
+addCase('generic System2 default passes a 60s timeout to the transport', async () => {
+  const previous = process.env.BUDDY_SYSTEM2_TIMEOUT_MS
+  delete process.env.BUDDY_SYSTEM2_TIMEOUT_MS
+  const dir = mkdtempSync(join(tmpdir(), 'system2-timeout-'))
+  let observedTimeout = -1
+  try {
+    const system2 = new MercurySystem2({
+      summarize: () => mercurySummary(),
+      log: () => undefined,
+      callsPath: join(dir, 'system2-calls.jsonl'),
+      cachePath: join(dir, 'system2-cache.json'),
+      resolveKey: () => ({ key: 'test-key', origin: 'test' }),
+      transport: ({ timeoutMs }) => {
+        observedTimeout = timeoutMs
+        return Promise.resolve({
+          toolCalls: [{ input: { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 1 }], reason: 'test' } }],
+          usage: null,
+        })
+      },
+    })
+    await system2.tryRepair(planRequest(), 'no_candidate')
+    return {
+      pass: SYSTEM2_TIMEOUT_DEFAULT_MS === 60_000 && observedTimeout === SYSTEM2_TIMEOUT_DEFAULT_MS,
+      detail: `default=${SYSTEM2_TIMEOUT_DEFAULT_MS} observed=${observedTimeout}`,
+    }
+  } finally {
+    if (previous === undefined) delete process.env.BUDDY_SYSTEM2_TIMEOUT_MS
+    else process.env.BUDDY_SYSTEM2_TIMEOUT_MS = previous
+  }
 })
 
 addCase('Muse Spark default does not inherit the old Mercury 20/h self-budget', async () => {
