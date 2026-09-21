@@ -106,8 +106,13 @@ export interface DominatedPrerequisiteDecision {
   item: string
   /** held items that prove the purpose is fulfilled */
   held: readonly string[]
-  /** machine reason (`producer_rung_satisfied` / `all_consumers_satisfied`) */
+  /** machine reason (`producer_rung_satisfied` / `all_consumers_satisfied` / `outcome_already_satisfied`) */
   reason: string
+  /**
+   * World-outcome evidence for `outcome_already_satisfied`: the placed station
+   * cells (`item@x,y,z`) whose existence already provides the row's product.
+   */
+  outcome?: readonly string[]
 }
 
 export function formatPrereqRetired(goal: QueuedGoal, dependents: number): string {
@@ -118,8 +123,12 @@ export function formatPrereqRetired(goal: QueuedGoal, dependents: number): strin
 }
 
 export function formatPrereqDominated(goal: QueuedGoal, decision: DominatedPrerequisiteDecision): string {
+  const evidence =
+    decision.held.length > 0
+      ? `held=${decision.held.join(',')}`
+      : `held=none outcome=${(decision.outcome ?? []).join(',')}`
   return (
-    `${PREREQ_DOMINATED} id=${goal.id} item=${decision.item} held=${decision.held.join(',')}` +
+    `${PREREQ_DOMINATED} id=${goal.id} item=${decision.item} ${evidence}` +
     ` reason=${decision.reason} protected=${goal.protected === true} core=${goal.core === true}`
   )
 }
@@ -1049,8 +1058,12 @@ export class GoalQueue {
         // the orphan heuristic (which cannot see a consumer row that was pruned).
         const dominated = this.dominatedPrerequisiteReason?.(goal)
         if (dominated !== null && dominated !== undefined) {
+          const evidence =
+            dominated.held.length > 0
+              ? `held=${dominated.held.join(',')}`
+              : `held=none outcome=${(dominated.outcome ?? []).join(',')}`
           goal.status = 'impossible'
-          goal.detail = `retired dominated prerequisite: item=${dominated.item} held=${dominated.held.join(',')} reason=${dominated.reason}`
+          goal.detail = `retired dominated prerequisite: item=${dominated.item} ${evidence} reason=${dominated.reason}`
           goal.updatedAt = now
           retired.push(goal)
           sink(formatPrereqDominated(goal, dominated))

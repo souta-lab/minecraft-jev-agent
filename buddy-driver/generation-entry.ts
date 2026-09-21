@@ -1096,6 +1096,8 @@ export interface LedgerGoalDominated {
   item: string
   held: string[]
   reason: string
+  /** world-outcome evidence for `reason=outcome_already_satisfied` (`item@x,y,z`) */
+  outcome?: string[]
 }
 
 export interface LedgerGoalRetirement {
@@ -1227,6 +1229,7 @@ export function reconcileLedgerGoals(
           item: proof.item,
           held: [...proof.held],
           reason: proof.reason,
+          ...(proof.outcome === undefined ? {} : { outcome: [...proof.outcome] }),
         })
         return {
           ...goal,
@@ -1441,6 +1444,7 @@ function restoreLedgerIntoController(
         description: entry.description,
         item: entry.item,
         held: entry.held.join(','),
+        ...(entry.outcome === undefined ? {} : { outcome: entry.outcome.join(',') }),
         reason: entry.reason,
       })
     }

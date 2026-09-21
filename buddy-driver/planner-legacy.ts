@@ -62,6 +62,7 @@ import {
   stableOptionInstanceId,
 } from '../jev-agent/src/optionSpec.ts'
 import type { OptionWorldSnapshot } from '../jev-agent/src/optionSpec.ts'
+import { stationKindOfItem } from '../jev-agent/src/candidates.ts'
 import type { KnownPortalSiteJson, ResidentWorldMemory } from './resident-types.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import { Advisor } from './advisor.ts'
@@ -1083,8 +1084,14 @@ export interface DominatedPrerequisite {
   item: string
   /** held items that prove the purpose is fulfilled (audit evidence) */
   held: string[]
-  /** machine reason: `producer_rung_satisfied` or `all_consumers_satisfied` */
+  /** machine reason: `producer_rung_satisfied`, `all_consumers_satisfied` or `outcome_already_satisfied` */
   reason: string
+  /**
+   * World OUTCOME evidence for `outcome_already_satisfied`: the placed station
+   * cells (`kind@x,y,z`) that already provide what the row exists to produce.
+   * Absent for the inventory-shaped proofs, whose evidence is `held`.
+   */
+  outcome?: string[]
 }
 
 /**
@@ -1111,6 +1118,61 @@ const DOMINATED_PREREQUISITE_KINDS: ReadonlySet<GoalKind> = new Set<GoalKind>([
   'descend',
   'explore',
 ])
+
+/** The placed-station world projection a station item resolves to. */
+function knownStationCells(item: string, world: ResidentWorldMemory): Vec3Json[] | null {
+  const kind = stationKindOfItem(item)
+  if (kind === 'crafting_table') return world.craftingTables
+  if (kind === 'furnace') return world.furnaces
+  return null
+}
+
+/** Bound the audit evidence so a large station memory cannot flood one log line. */
+const STATION_OUTCOME_EVIDENCE_CAP = 4
+
+/**
+ * #station-outcome: the WORLD-outcome half of the station closure.
+ *
+ * A `craft`/`place` row for a station item (`crafting_table` / `furnace` class)
+ * exists to provide a USABLE station, never to accumulate the item for its own
+ * sake. The ladder already states that purpose in world terms: the
+ * `crafting_table` / `furnace` rungs are `satisfied` by `has(c, item) ||
+ * world.<kind>s.length > 0`, and `plannerReadinessSnapshot` publishes the same
+ * fact as `knownStations`. This proof applies that SAME predicate to the ROW:
+ * when a station of the kind is held or already placed-and-sensed in the world
+ * model, the outcome the row exists to produce exists, so the row is finished
+ * work the ledger never observed as `done`.
+ *
+ * Deliberately narrow (world truth, not inventory ranking):
+ *   - only `craft` / `place` rows whose targetItem resolves to a station kind;
+ *   - only when the row's own item is NOT held (`goalAlreadyMet` false, checked
+ *     by the caller), so a held station stays a normal DONE completion;
+ *   - the station test is EXACTLY the rung predicate's world half, so this can
+ *     never retire a row the ladder still considers live work.
+ *
+ * The genuine no-station path is untouched: with `world.craftingTables` /
+ * `world.furnaces` empty and no station held, this returns null and craft+place
+ * runs exactly as before. A station the runtime proved unreachable is removed
+ * from the same projection by `stationRuntimeFailure`, so the #58
+ * "sensed/blacklisted station still allows a local station craft" re-plan also
+ * keeps its craft+place row.
+ */
+function achievedStationOutcomeReason(
+  goal: Pick<PlannedGoal, 'kind' | 'targetItem' | 'requiredCount'>,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): DominatedPrerequisite | null {
+  if (goal.kind !== 'craft' && goal.kind !== 'place') return null
+  const item = goal.targetItem
+  if (typeof item !== 'string' || item.length === 0) return null
+  // Not a placed-station item: leave every other row to the inventory proofs.
+  if (stationKindOfItem(item) === null) return null
+  const cells = knownStationCells(item, world) ?? []
+  const held = has(counts, item)
+  if (cells.length === 0 && !held) return null
+  const outcome = cells.slice(0, STATION_OUTCOME_EVIDENCE_CAP).map((cell) => `${item}@${cell.x},${cell.y},${cell.z}`)
+  return { item, held: held ? [item] : [], reason: 'outcome_already_satisfied', outcome }
+}
 
 /**
  * #prereq-dominated: is an unfinished queued prerequisite still work?
@@ -1149,11 +1211,27 @@ export function dominatedPrerequisiteReason(
 ): DominatedPrerequisite | null {
   const item = goal.targetItem
   if (typeof item !== 'string' || item.length === 0) return null
-  if (!DOMINATED_PREREQUISITE_KINDS.has(goal.kind)) return null
   // A row whose own product is already complete is `DONE`, not dominated.
   if (goalAlreadyMet({ kind: goal.kind, description: '', targetItem: item, requiredCount: goal.requiredCount }, counts)) {
     return null
   }
+  // #station-outcome: before the inventory-shaped proofs, the WORLD-outcome
+  // closure. A `craft`/`place` row for a station item exists to provide a USABLE
+  // station, and the ladder's own rung predicate already answers "does this
+  // station exist" as `held OR placed-and-sensed` (`RUNGS` crafting_table /
+  // furnace, and `plannerReadinessSnapshot`'s `knownStations`). When that same
+  // fact holds, the row's outcome already exists: measured live
+  // (`run-mubndci6-11rgn`, gen-mubndcyc-1p09k1, body ~3,72,28) the queue head
+  // was an unfinished `craft 1 x crafting_table` row, the candidate layer
+  // correctly refused the duplicate craft (`CRAFT_STATION_ALREADY_KNOWN
+  // item=crafting_table held=0 sensed=3`), and the stalledMs timer climbed
+  // 67197 -> 91864 with no action able to complete the row, because the rung's
+  // world half of the satisfaction predicate was never applied to the ROW.
+  // The station item/kind mapping deliberately comes from the candidate layer's
+  // single projection (`stationKindOfItem`), so no second station list exists.
+  const stationOutcome = achievedStationOutcomeReason(goal, counts, world)
+  if (stationOutcome !== null) return stationOutcome
+  if (!DOMINATED_PREREQUISITE_KINDS.has(goal.kind)) return null
   const rungs = executableRungs()
   // Optional affordances never keep a mandatory prerequisite alive: `iron_gear`
   // also emits `collect:raw_iron` / `smelt:iron_ingot` through `climb`, but it is
