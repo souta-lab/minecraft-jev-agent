@@ -25,7 +25,7 @@ import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
-import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
@@ -37,7 +37,7 @@ import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from
 import { pickBestDescendStep } from './descendPlan.ts'
 import type { DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
-import { fuelCountFor, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
+import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
@@ -893,25 +893,7 @@ function generateRawCandidates(
   if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
 
   if (candidates.length === 0) {
-    const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
-    const explore = pickExplore(
-      state,
-      state.terrain.standable,
-      focusItem,
-      moveFailureLimit,
-      options.blacklistedMoveTargets,
-    )
-    if (explore !== null && failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', explore)}`) < moveFailureLimit) {
-      candidates.push(
-        exploreMoveCandidate(
-          state,
-          options,
-          explore,
-          moveLabel(explore, 'walk toward unexplored terrain', state.self.position),
-          focusWantsLog(goalKind, focusItem) ? 'explore' : null,
-        ),
-      )
-    }
+    candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
 
   candidates.push({
@@ -1043,6 +1025,94 @@ function digAccessRetirement(state: WorldState, block: BlockState, refusal: DigA
       [DIG_ACCESS_REFUSAL_META]: refusal,
     },
   }
+}
+
+/**
+ * Bounds the recipe-closure walk used by {@link mineDropAdvancesFocus}. The real
+ * chains are <10 items; the cap only stops a malformed recipe graph.
+ */
+const MAX_FOCUS_CHAIN_ITEMS = 64
+
+/** True when `material` appears anywhere in `root`'s bounded recipe closure. */
+function recipeChainContains(recipes: RecipeIndex, root: string, material: string): boolean {
+  const seen = new Set<string>()
+  const queue: string[] = [root]
+  while (queue.length > 0) {
+    const item = queue.shift() as string
+    if (seen.has(item)) continue
+    seen.add(item)
+    if (seen.size > MAX_FOCUS_CHAIN_ITEMS) return false
+    for (const variant of recipes.recipesFor(item)) {
+      for (const ingredient of variant.ingredients) {
+        if (ingredient.item === material) return true
+        if (!seen.has(ingredient.item)) queue.push(ingredient.item)
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Feasibility (CAN) rule for a MINE candidate against the active focus item.
+ *
+ * Mining a block whose drop is `dropItem` can advance the goal only when the
+ * drop IS the focus item (or satisfies its resource class), or when it is a
+ * material in the focus item's achievable recipe dependency chain: a furnace or
+ * a stone tool genuinely needs cobblestone, so plain stone serves those goals.
+ * Plain stone when the focus is `flint`/`gravel`/`raw_iron` cannot advance it and
+ * must not be offered.
+ *
+ * This is a WITHHOLDING rule, not a ranking: it removes provably non-advancing
+ * MINEs and never reorders or re-scores the remaining candidates. A resource
+ * class (`log`, `stone`, `planks`, `fuel`, `pickaxe`) and the null focus keep
+ * the historical behaviour (every producer stays offered), which preserves
+ * generic early-game goals. Without a recipe index the closure cannot be proven
+ * either way, so the candidate is kept (withhold only on proof).
+ *
+ * The withholding is a pure function of the active focus, so it is durable for
+ * the goal and resets the moment the goal/focus changes; no mutable memory is
+ * added (the generator stays a pure function of the state).
+ */
+function mineDropAdvancesFocus(
+  focusItem: string | null,
+  dropItem: string | null,
+  recipes: RecipeIndex | null,
+): boolean {
+  if (focusItem === null) return true
+  if (dropItem === null || dropItem.length === 0) return true
+  if (resourceMatches(dropItem, focusItem)) return true
+  if (isResourceClass(focusItem)) return true
+  if (recipes === null) return true
+  return recipeChainContains(recipes, focusItem, dropItem)
+}
+
+/**
+ * The item a MINE candidate's target yields. A regular MINE carries its block
+ * drop in `meta.yieldItem`. A clearance MINE targets a ceiling cell that may not
+ * be in `state.blocks`; resolve the sensed block's drop when present, else the
+ * canonical mechanics table (#54) using the cut's block name.
+ */
+function mineCandidateDrop(state: WorldState, candidate: Candidate): string | null {
+  const metaYield = candidate.meta?.yieldItem
+  if (candidate.meta?.clearance !== true && typeof metaYield === 'string' && metaYield.length > 0) {
+    return metaYield
+  }
+  const target = candidate.target
+  if (target !== null) {
+    const sensed = state.blocks.find(
+      (block) =>
+        block.position.x === target.x && block.position.y === target.y && block.position.z === target.z,
+    )
+    if (sensed !== undefined && typeof sensed.yield === 'string' && sensed.yield.length > 0) return sensed.yield
+  }
+  const name =
+    typeof candidate.targetName === 'string' && candidate.targetName.length > 0
+      ? candidate.targetName
+      : typeof metaYield === 'string'
+        ? metaYield
+        : ''
+  if (name.length === 0) return null
+  return resolveHarvest(loadGameData(), name).yield ?? name
 }
 
 /**
@@ -1261,7 +1331,17 @@ function mineCandidates(
     // deterministic preference: no MOVE is replaced or selected here.
     candidates.push(...descent)
   }
-  return candidates
+  // Feasibility (CAN) filter: a MINE whose drop cannot advance the active focus
+  // is withheld. The focused pool already satisfies this, so the rule bites on
+  // the clearance/headroom MINEs that bypass it: with `collect 1 x flint (from
+  // gravel)`, a ceiling stone clearance MINE completes with progressDelta=0 and
+  // is re-offered forever. This removes only provably non-advancing MINEs; the
+  // remaining candidates keep their order (no ranking).
+  return candidates.filter(
+    (candidate) =>
+      candidate.kind !== 'MINE' ||
+      mineDropAdvancesFocus(focusItem, mineCandidateDrop(state, candidate), options.recipes ?? null),
+  )
 }
 
 /**
@@ -1430,6 +1510,20 @@ function descendCandidates(
   const goalIsUnderground =
     focusItem !== null && (STONE_YIELDS.has(focusItem) || scannedBlockNames(focusItem) !== undefined)
   const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
+
+  // Feasibility (CAN) rule for a SPECIFIC focus item whose source is not
+  // underground and has no sensed/tunnel target: a staircase or level tunnel
+  // step cannot reach that source, so it is withheld instead of being re-offered
+  // forever (live `collect 1 x flint (from gravel)` carved a tunnel network while
+  // the goal never moved). Descending stays legitimate for underground resources
+  // (`goalIsUnderground`: ore/obsidian/stone goals), for an explicit
+  // `descend_to:Y` predicate (vertical recovery), for a sensed/tunnel target, and
+  // for resource-class goals (early-game `log`/`planks` keep the historical
+  // behaviour). Withholding only; the remaining candidates keep their order.
+  const focusIsSpecific = focusItem !== null && !isResourceClass(focusItem)
+  const hasGoalTarget = target !== null || tunnelTargets.length > 0
+  if (focusIsSpecific && descendTargetY === null && !goalIsUnderground && !hasGoalTarget) return []
+
   const targetBelow = target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
   // #41: an explicit descend predicate is positive evidence for a downward step
@@ -3505,6 +3599,79 @@ function exploreMoveCandidate(
       ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
     },
   }
+}
+
+/**
+ * Grounded exploration alternatives for a state whose subgoal produced no route.
+ *
+ * The stock fallback offered a single `pickExplore` MOVE, so Jev saw
+ * `presented=2` (WAIT + one action) or `presented=1` (WAIT only) and its choice
+ * carried no information: live `collect 1 x flint (from gravel)` logged
+ * `CANDIDATE_STARVATION presented=2 productive=0` x21 and `presented=1` x6 while
+ * Jev was invoked 120x. Enumerate up to `maxMoveCandidates` DISTINCT,
+ * mechanically grounded frontier cells (the nearest-first `pickExplore` pick
+ * first, then the remaining nearest frontier cells with a deterministic
+ * coordinate tie-break) so Jev pi has a real decision.
+ *
+ * Enumeration only: this adds valid actions, it does not rank, replace or
+ * suppress any existing candidate. The reachability gate still withholds any
+ * cell the body cannot actually reach, so "grounded" stays code-owned.
+ */
+function exploreFallbackCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+  goalKind: string,
+): Candidate[] {
+  const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const limit = Math.max(1, options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES)
+  const best = pickExplore(
+    state,
+    state.terrain.standable,
+    focusItem,
+    moveFailureLimit,
+    options.blacklistedMoveTargets,
+  )
+  if (best === null) return []
+  const logRoute = focusWantsLog(goalKind, focusItem) ? 'explore' : null
+  const out = [
+    exploreMoveCandidate(
+      state,
+      options,
+      best,
+      moveLabel(best, 'walk toward unexplored terrain', state.self.position),
+      logRoute,
+    ),
+  ]
+  const bestKey = blockId('p', best)
+  const alternatives = state.terrain.standable
+    .filter(
+      (spot) =>
+        blockId('p', spot) !== bestKey &&
+        distance(spot, state.self.position) > 1.5 &&
+        !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot) &&
+        failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) < moveFailureLimit,
+    )
+    .sort(
+      (a, b) =>
+        distance(a, state.self.position) - distance(b, state.self.position) ||
+        a.x - b.x ||
+        a.y - b.y ||
+        a.z - b.z,
+    )
+  for (const spot of alternatives) {
+    if (out.length >= limit) break
+    out.push(
+      exploreMoveCandidate(
+        state,
+        options,
+        spot,
+        moveLabel(spot, 'walk toward unexplored terrain', state.self.position),
+        logRoute,
+      ),
+    )
+  }
+  return out
 }
 
 /**
