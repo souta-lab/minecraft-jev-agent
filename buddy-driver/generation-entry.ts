@@ -707,8 +707,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
     portalVerified: detectLivePortalVerification(ctx.bot),
+    dimension: String(ctx.bot.game?.dimension ?? ''),
   }
   const refreshLiveFacts = (reason: string): void => {
+    const nextDimension = String(ctx.bot.game?.dimension ?? '')
+    if (nextDimension !== world.dimension) {
+      world.dimension = nextDimension
+      ctx.log('DIMENSION_TRUTH', { dimension: nextDimension, reason, source: 'live-world' })
+    }
     const next = detectLivePortalVerification(ctx.bot)
     if (next === world.portalVerified) return
     world.portalVerified = next

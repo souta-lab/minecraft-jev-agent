@@ -154,6 +154,14 @@ export interface ResidentWorldMemory {
    * re-observed after every generation/world change.
    */
   portalVerified?: boolean
+  /**
+   * Live server-truth projection of the bot's current dimension, with the same
+   * contract as `portalVerified` above: deliberately absent from
+   * WorldMemoryDelta and re-observed after every generation/world change. It is
+   * server truth, never durable memory. The `enter_nether` rung reads it so the
+   * ladder never plans Nether-only goals while the bot is still in the overworld.
+   */
+  dimension?: string
 }
 
 export function emptyWorldMemory(): ResidentWorldMemory {

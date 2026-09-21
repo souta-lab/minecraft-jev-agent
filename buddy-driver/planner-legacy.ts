@@ -39,7 +39,7 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta, parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
-import { netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
+import { netherPortalEntryGoal, netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
 import {
@@ -451,6 +451,17 @@ export const RUNGS: readonly Rung[] = [
     satisfied: (c, w) => has(c, 'nether_portal') || w.portalVerified === true,
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
+  },
+  // --- M2 -> M3 transition: step through the lit portal into the Nether. ---
+  // Satisfied by the code-owned dimension truth (`dimensionIs`), never by an
+  // inventory count: the executor's `runEnterPortal` walks into the lit interior
+  // and the postcondition is `bot.game.dimension == minecraft:the_nether`.
+  // Without this rung the ladder jumped straight to Nether-only goals
+  // (`blaze_rods`) while the bot was still in the overworld.
+  {
+    id: 'enter_nether',
+    satisfied: (_c, w) => w.dimension === 'minecraft:the_nether',
+    goals: () => [netherPortalEntryGoal()],
   },
   // --- M3 continued: Nether blaze rods -> pearls -> Eyes of Ender. ---
   {
