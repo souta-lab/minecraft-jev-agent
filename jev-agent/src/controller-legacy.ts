@@ -3718,6 +3718,7 @@ export class JevController {
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
       entityDefeated: result.entityDefeated,
+      damageObserved: result.damageObserved,
       arrived: moveArrived || retrieveArrived,
       distanceClosed: retrieveDistanceClosed,
       searchArrived: surfaceSearchArrived,
@@ -3734,6 +3735,7 @@ export class JevController {
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
       entityDefeated: result.entityDefeated,
+      damageObserved: result.damageObserved,
       arrived: moveArrived || retrieveArrived || surfaceSearchArrived,
       distanceClosed: retrieveDistanceClosed,
       searchArrived: surfaceSearchArrived,
@@ -3806,6 +3808,7 @@ export class JevController {
         verified: truth.verified,
         blockRemoved: result.blockRemoved,
         dropObserved: result.dropObserved,
+        damageObserved: result.damageObserved ?? false,
       })
       this.decisionWriter.write(pending.record)
       const chain = completeCausalChain(

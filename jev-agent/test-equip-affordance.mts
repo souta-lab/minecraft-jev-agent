@@ -18,6 +18,7 @@
 //
 // Run: bun test-equip-affordance.mts
 import { createRequire } from 'node:module'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -236,6 +237,7 @@ function makeFixture(opts: FixtureOptions = {}): Fixture {
 
   const equipCalls: Array<{ name: string; destination: string }> = []
   const attacks: number[] = []
+  const emitter = new EventEmitter()
   const applyEquip = (item: { name: string }, destination: string): void => {
     if (destination === 'hand') {
       bot.heldItem = { name: item.name, count: 1, slot: 36 } as Bot['heldItem']
@@ -250,6 +252,7 @@ function makeFixture(opts: FixtureOptions = {}): Fixture {
   const bot = {
     registry,
     entity: {
+      id: 1,
       position: feet,
       yaw: 0,
       pitch: 0,
@@ -274,8 +277,16 @@ function makeFixture(opts: FixtureOptions = {}): Fixture {
     },
     heldItem: null as { name: string; count: number; slot: number } | null,
     blockAt: () => null,
-    on: () => undefined,
-    removeListener: () => undefined,
+    // #391: the ATTACK lease now observes `entityHurt`/`entityDead`, so the bot
+    // double needs real listener wiring (it still only fires when emitted).
+    on: (event: string, handler: (...args: unknown[]) => void) => {
+      emitter.on(event, handler)
+      return bot
+    },
+    removeListener: (event: string, handler: (...args: unknown[]) => void) => {
+      emitter.removeListener(event, handler)
+      return bot
+    },
     setControlState: () => undefined,
     lookAt: async () => undefined,
     equip: async (item: { name: string }, destination: string) => {
@@ -287,6 +298,10 @@ function makeFixture(opts: FixtureOptions = {}): Fixture {
     stopDigging: () => undefined,
     attack: (entity: { id: number }) => {
       attacks.push(entity.id)
+      // Model a swing that CONNECTS: the server reports the damage with this
+      // body as its cause (#391). The lease may only call itself successful on
+      // that observation, never on the swing itself.
+      setTimeout(() => emitter.emit('entityHurt', entity, bot.entity), 10)
     },
     pathfinder: {
       movements: null as unknown,
@@ -580,6 +595,7 @@ addCase('(c) the ATTACK lease equips the carried sword to the main hand before i
   const pass =
     result.status === 'done' &&
     result.kind === 'ATTACK' &&
+    result.damageObserved === true &&
     fixture.equipCalls.length === 1 &&
     fixture.equipCalls[0]?.name === 'diamond_sword' &&
     fixture.equipCalls[0]?.destination === 'hand' &&
@@ -588,7 +604,7 @@ addCase('(c) the ATTACK lease equips the carried sword to the main hand before i
     marker === 'EQUIP_WEAPON item=diamond_sword replaced=iron_pickaxe reason=combat'
   return {
     pass,
-    detail: `status=${result.status} calls=${JSON.stringify(fixture.equipCalls)} held=${fixture.heldName()} attacks=${fixture.attacks.length} marker=${marker ?? 'none'}`,
+    detail: `status=${result.status} damageObserved=${result.damageObserved} calls=${JSON.stringify(fixture.equipCalls)} held=${fixture.heldName()} attacks=${fixture.attacks.length} marker=${marker ?? 'none'}`,
   }
 })
 
@@ -600,11 +616,12 @@ addCase('(c)(d) an already-best held weapon is not churned and the refusal marke
   const refusal = messages.find((message) => message.startsWith('EQUIP_WEAPON_REFUSED '))
   const pass =
     result.status === 'done' &&
+    result.damageObserved === true &&
     fixture.equipCalls.length === 0 &&
     fixture.heldName() === 'diamond_sword' &&
     refusal === 'EQUIP_WEAPON_REFUSED item=diamond_sword reason=no_better_weapon' &&
     fixture.attacks.length > 0
-  return { pass, detail: `calls=${fixture.equipCalls.length} refusal=${refusal ?? 'none'} attacks=${fixture.attacks.length}` }
+  return { pass, detail: `status=${result.status} damageObserved=${result.damageObserved} calls=${fixture.equipCalls.length} refusal=${refusal ?? 'none'} attacks=${fixture.attacks.length}` }
 })
 
 // ---------------------------------------------------------------------------

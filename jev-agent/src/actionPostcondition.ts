@@ -34,6 +34,14 @@ export interface ActionOutcomeInput {
   /** a target entity emitted Mineflayer's entityDead event during this action */
   entityDefeated?: boolean
   /**
+   * #391: an ATTACK lease observed server-side damage on its target (an
+   * `entityHurt` attributable to this lease, or the target's death during the
+   * lease). Issuing `bot.attack()` calls is an execution attempt and never sets
+   * this. It is the post-condition evidence for a non-hunt ATTACK: a hit is the
+   * bar, a kill is not.
+   */
+  damageObserved?: boolean
+  /**
    * True when this action must end with its drop in the inventory (a collect
    * goal). A collect MINE is complete only on `itemsGained > 0`; a removed block
    * and an observed drop are the DIG, not the acquisition.
@@ -118,6 +126,7 @@ export function classifyActionOutcome(input: ActionOutcomeTaxonomyInput): Action
     (input.kind === 'RETRIEVE' && input.distanceClosed === true)
   const search =
     input.entityDefeated === true ||
+    input.damageObserved === true ||
     input.blockRemoved === true ||
     (input.kind === 'DESCEND' && input.progressed === true) ||
     (input.kind === 'RETRIEVE' &&
@@ -234,6 +243,8 @@ export function describeActionPostcondition(kind: string): string {
       return 'the face block was removed'
     case 'EQUIP':
       return 'the armor piece is worn in its slot (the live armor slot names it)'
+    case 'ATTACK':
+      return 'a server-observed hit on the target attributable to this lease (`entityHurt` / damage with this body as the cause, or the target dying during the lease); a `goalDrop` hunt additionally requires the server entityDead event'
     case 'ESCALATE':
       return 'control-plane hand-off to System 2 (no physical post-condition)'
     case 'WAIT':
@@ -245,19 +256,27 @@ export function describeActionPostcondition(kind: string): string {
 
 /**
  * Observable progress: an item gained, a block removed, a deterministic body
- * change (a verified climb chunk that gained altitude), or a server-confirmed
- * entity death. `progressed` and `entityDefeated` are evidence of change only -
- * they never make an unverified action verified.
+ * change (a verified climb chunk that gained altitude), a server-confirmed
+ * entity death, or a server-observed damage event on the action's target
+ * (#391: a connected ATTACK is real world evidence even without a kill).
+ * `progressed`, `entityDefeated` and `damageObserved` are evidence of change
+ * only - they never make an unverified action verified on their own.
  */
 export function hasObservableProgress(
-  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed' | 'entityDefeated'>,
+  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed' | 'entityDefeated' | 'damageObserved'>,
 ): boolean {
-  return input.itemsGained > 0 || input.blockRemoved === true || input.progressed === true || input.entityDefeated === true
+  return (
+    input.itemsGained > 0 ||
+    input.blockRemoved === true ||
+    input.progressed === true ||
+    input.entityDefeated === true ||
+    input.damageObserved === true
+  )
 }
 
 /** Zero observable change: no item/block/body/entity change was proven. */
 export function isZeroProgressOutcome(
-  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed' | 'entityDefeated'>,
+  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed' | 'entityDefeated' | 'damageObserved'>,
 ): boolean {
   return !hasObservableProgress(input)
 }
@@ -290,6 +309,13 @@ export function isUnverifiedOutcome(input: ActionOutcomeInput): boolean {
  * effect). Every other kind is a lenient-movement kind, whose `verified` flag can
  * be set by a partial signal (a >0.01 m distance decrease) without the remembered
  * target ever being reached - see `truthfulActionOutcome`.
+ *
+ * ATTACK is deliberately NOT here (#391): the executor used to set
+ * `verified=true` after issuing swings, so a lease that never damaged anything
+ * was recorded as a strict success. Its evidence now travels as
+ * `damageObserved` (an attributable `entityHurt`, or the target dying during
+ * the lease) and is accepted through `hasObservableProgress`, never through the
+ * executor's flag.
  */
 const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
   'MINE',
@@ -302,7 +328,6 @@ const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
   'STEP',
   'EAT',
   'EQUIP',
-  'ATTACK',
 ])
 
 /**
@@ -324,6 +349,12 @@ export interface TruthfulOutcomeInput {
   progressed?: boolean
   /** server `entityDead` event proved that an ATTACK target died during this action */
   entityDefeated?: boolean
+  /**
+   * #391: the ATTACK lease observed server-side damage on its target (an
+   * `entityHurt` attributable to this lease). This is the hit evidence a
+   * non-hunt ATTACK succeeds on; a kill is not required.
+   */
+  damageObserved?: boolean
   /**
    * Live movement arrival from the controller (`classifyMoveOutcome`). Only
    * counted for the kinds whose post-condition is arrival; never inferred from
@@ -380,6 +411,10 @@ export interface TruthfulOutcome {
  * arrival, a measured distance closure, or concrete item/block evidence.
  * Everything else is `unreached` (bounded progress, never resets the failure
  * memory) or `zero_progress` (nothing changed at all).
+ *
+ * ATTACK is evidence-gated the same way (#391): the executor `verified` flag is
+ * no longer self-evident, so a lease with no server-observed damage is
+ * `zero_progress` here even if the raw result claimed `done`/`verified=true`.
  */
 export function truthfulActionOutcome(input: TruthfulOutcomeInput): TruthfulOutcome {
   // WAIT and ESCALATE are control-plane outcomes.  Preserve their completion

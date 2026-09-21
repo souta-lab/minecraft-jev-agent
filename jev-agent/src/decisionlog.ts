@@ -70,6 +70,12 @@ export interface DecisionResultLog {
   verified: boolean
   blockRemoved: boolean
   dropObserved: boolean
+  /**
+   * #391: a settled ATTACK observed server-side damage on its target. This is
+   * the evidence that makes `verified` true for a non-hunt ATTACK, so the
+   * causal record names it instead of only asserting the boolean.
+   */
+  damageObserved?: boolean
 }
 
 /** Whether Jev's `need_llm` interrupt woke System 2 for this decision, and why. */

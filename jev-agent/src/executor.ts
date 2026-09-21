@@ -181,6 +181,25 @@ export interface ExecutionResult {
   /** server `entityDead` event proved that an ATTACK target died during this lease */
   entityDefeated?: boolean
   /**
+   * #391 hit evidence for an ATTACK lease: how many swings produced a
+   * server-observed damage event on the target attributable to this lease.
+   * `bot.attack()` calls are attempts; only this count is a hit.
+   */
+  attackHits?: number
+  /**
+   * #391: a server-observed hit/damage on the ATTACK target proved the lease
+   * connected (an attributable `entityHurt`, or the target dying during the
+   * lease). A non-hunt ATTACK is verified only on this evidence - never on the
+   * number of swings issued.
+   */
+  damageObserved?: boolean
+  /**
+   * #391: health the target lost during the lease, when the entity exposes a
+   * numeric health. 0 when unobservable (the 1.21 metadata carries no mob
+   * health), so it is corroborating evidence and never the only hit proof.
+   */
+  targetHealthDelta?: number
+  /**
    * A RETRIEVE proved the remaining feet-distance to the remembered target
    * shrank by the meaningful epsilon. This is completion evidence the truth
    * layer may trust; `progressed` (a vertical chunk step) never is.
@@ -860,6 +879,30 @@ export const ATTACK_LEASE_MS = 2_200
 /** Goal-directed mob hunts are bounded Skills long enough to defeat an enderman. */
 export const GOAL_HUNT_LEASE_MS = 10_000
 export const ATTACK_COOLDOWN_MS = 500
+
+/**
+ * #391: how a swung lease proves it CONNECTED. Issuing `bot.attack()` is an
+ * execution attempt, not a hit. The evidence is a server-observed damage event
+ * on the target entity (`entityHurt`):
+ *
+ *   - the 1.20+ `damage_event` packet carries the causing entity, so a hurt
+ *     whose source is this body is direct attribution, whatever the timing;
+ *   - a server/version that only broadcasts the hurt animation carries no
+ *     source, so the hurt is accepted only inside this short window after one
+ *     of our swings. Fail closed: a real hit delayed beyond the window is
+ *     reported as `no-hit`, never the reverse.
+ *
+ * A hurt attributed to anything else belongs to that other attacker. The
+ * target's own death during the lease (`entityDead`) is terminal evidence that
+ * a hit landed, and is kept as a separate typed field.
+ */
+export const ATTACK_HIT_CORRELATION_MS = 250
+
+/** Mob health is not in the 1.21 entity metadata; only read it when exposed. */
+function readEntityHealth(entity: { health?: unknown } | undefined): number | null {
+  const health = entity?.health
+  return typeof health === 'number' && Number.isFinite(health) ? health : null
+}
 
 /**
  * Stations are durable world resources, not route terrain. A route-opening or
@@ -3657,6 +3700,13 @@ export class Executor {
     let attacks = 0
     let following = false
     let entityDefeated = false
+    // #391: hits are observed, never assumed. `hits` counts damage events on
+    // THIS target attributable to THIS lease; `lastSwingAt` is the fail-closed
+    // correlation window for servers whose hurt event carries no source.
+    let hits = 0
+    let lastSwingAt = 0
+    let healthBefore: number | null = null
+    let healthLast: number | null = null
     let lastTarget = candidate.target ?? { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z }
     const onEntityDead = (entity: Entity): void => {
       if (entity.id !== entityId) return
@@ -3668,7 +3718,32 @@ export class Executor {
         goalDrop: goalDrop ?? 'none',
       })
     }
+    const onTargetHurt = (entity: Entity, source?: Entity): void => {
+      if (entity.id !== entityId) return
+      const health = readEntityHealth(entity)
+      if (health !== null) healthLast = health
+      // The server attributes the cause: `source` is the entity that dealt the
+      // damage (undefined when the server only sent the hurt animation). A hurt
+      // sourced to another entity is that entity's hit, not ours.
+      const sourced = source !== undefined && source !== null
+      const sourcedToSelf = sourced && this.bot.entity !== undefined && source.id === this.bot.entity.id
+      if (sourced && !sourcedToSelf) return
+      if (!sourced && (lastSwingAt === 0 || Date.now() - lastSwingAt > ATTACK_HIT_CORRELATION_MS)) return
+      hits += 1
+      this.logger.info(
+        'executor',
+        `ATTACK_HIT action#${epoch} entity=${entityId} hits=${hits} attribution=${sourcedToSelf ? 'source' : 'swing-window'} targetHealth=${health ?? 'unknown'}`,
+        {
+          actionId: candidate.id,
+          targetEntityId: entityId,
+          hits,
+          attribution: sourcedToSelf ? 'source' : 'swing-window',
+          targetHealth: health,
+        },
+      )
+    }
     this.bot.on('entityDead', onEntityDead)
+    this.bot.on('entityHurt', onTargetHurt)
     const deadline = Date.now() + leaseMs
     try {
       while (Date.now() < deadline && !entityDefeated) {
@@ -3676,6 +3751,10 @@ export class Executor {
         const entity = this.bot.entities[entityId]
         if (entity === undefined) break
         lastTarget = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+        if (healthBefore === null) {
+          healthBefore = readEntityHealth(entity)
+          if (healthBefore !== null) healthLast = healthBefore
+        }
         const distanceToTarget = Math.hypot(
           entity.position.x - this.bot.entity.position.x,
           entity.position.y - this.bot.entity.position.y,
@@ -3700,20 +3779,32 @@ export class Executor {
         this.ensureOwned(epoch, signal)
         this.bot.attack(entity)
         attacks += 1
-        this.logger.info('executor', `ATTACK_LEASE action#${epoch} attempt=${attacks} distance=${Math.round(distanceToTarget * 100) / 100}m`, {
+        lastSwingAt = Date.now()
+        this.logger.info('executor', `ATTACK_LEASE action#${epoch} attempt=${attacks} hits=${hits} distance=${Math.round(distanceToTarget * 100) / 100}m`, {
           actionId: candidate.id,
           targetEntityId: entityId,
           distance: distanceToTarget,
           attempt: attacks,
+          hits,
           goalDrop: goalDrop ?? 'none',
         })
         await delay(Math.min(ATTACK_COOLDOWN_MS, Math.max(1, deadline - Date.now())), signal)
       }
     } finally {
       this.bot.removeListener('entityDead', onEntityDead)
+      this.bot.removeListener('entityHurt', onTargetHurt)
       if (following) this.bot.pathfinder?.setGoal(null)
     }
     if (attacks === 0) throw new ExecutorError('out_of_reach', `could not reach ${candidate.targetName ?? entityId} during ATTACK lease`)
+
+    // Typed lease evidence (#391). `entityDead` inside the lease is terminal
+    // proof that a damaging blow landed; the attributable hurt count is the
+    // direct hit evidence; a target health drop corroborates it when the
+    // entity actually exposes health.
+    const targetHealthDelta =
+      healthBefore !== null && healthLast !== null ? Math.max(0, Math.round((healthBefore - healthLast) * 100) / 100) : 0
+    const damageObserved = hits > 0 || entityDefeated || targetHealthDelta > 0
+    const attackEvidence = { attackHits: hits, damageObserved, targetHealthDelta }
 
     if (goalDrop !== null) {
       // The mob despawned, escaped or was never killed: the hunt's typed
@@ -3726,7 +3817,7 @@ export class Executor {
           startedAt,
           'failed',
           'target-not-defeated',
-          `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) but no entityDead event was observed`,
+          `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) with ${hits} hit(s) but no entityDead event was observed`,
           'verify_failed',
           {
             verified: false,
@@ -3735,6 +3826,7 @@ export class Executor {
             itemsGained: 0,
             goalItemCount: this.countItem(goalDrop),
             entityDefeated: false,
+            ...attackEvidence,
           },
         )
       }
@@ -3757,10 +3849,50 @@ export class Executor {
           itemsGained: report.itemsGained,
           goalItemCount: report.goalItemCount,
           entityDefeated: true,
+          ...attackEvidence,
         },
       )
       result.yieldItem = goalDrop
       return result
+    }
+
+    // A plain ATTACK (self-defence / food) is complete on a HIT, never on a
+    // kill and never on the swing count. Zero observed hits is a typed
+    // non-success so the candidate filter, the failure memory and the beta
+    // boundary can see that this attack is not working - the live
+    // `ATTACK:e4698` lease kept reporting `done/verified=true` while the target
+    // was never damaged (issue #391).
+    if (!damageObserved) {
+      this.logger.warn(
+        'executor',
+        `ATTACK_NO_HIT action#${epoch} entity=${entityId} swings=${attacks} hits=0 damageObserved=false targetHealthDelta=${targetHealthDelta}`,
+        {
+          actionId: candidate.id,
+          targetEntityId: entityId,
+          swings: attacks,
+          hits: 0,
+          damageObserved: false,
+          targetHealthDelta,
+        },
+      )
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'failed',
+        'no-hit',
+        `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) but no hit or damage on the target was observed`,
+        'verify_failed',
+        {
+          verified: false,
+          dropObserved: false,
+          blockRemoved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+          entityDefeated,
+          ...attackEvidence,
+        },
+      )
     }
 
     return this.buildResult(
@@ -3769,7 +3901,7 @@ export class Executor {
       startedAt,
       'done',
       'attacked',
-      `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) during ${ATTACK_LEASE_MS}ms lease`,
+      `attacked ${candidate.targetName ?? entityId} ${attacks} time(s), ${hits} hit(s) observed during ${ATTACK_LEASE_MS}ms lease`,
       null,
       {
         verified: true,
@@ -3777,6 +3909,8 @@ export class Executor {
         blockRemoved: false,
         itemsGained: 0,
         goalItemCount: this.countGoalItem(),
+        entityDefeated,
+        ...attackEvidence,
       },
     )
   }
@@ -5898,6 +6032,9 @@ export class Executor {
       progressed?: boolean
       entityDefeated?: boolean
       distanceClosed?: boolean
+      attackHits?: number
+      damageObserved?: boolean
+      targetHealthDelta?: number
     },
   ): ExecutionResult {
     return {
@@ -5929,6 +6066,8 @@ export class Executor {
       itemsGained: result.itemsGained,
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
+      entityDefeated: result.entityDefeated,
+      damageObserved: result.damageObserved,
     })
     if (!unverified) return result
     const postcondition = describeActionPostcondition(result.kind)
