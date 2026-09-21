@@ -4715,11 +4715,29 @@ function routeOpeningCandidates(
   // pure closeness sort. Require the spot to be strictly closer to the target
   // than the body is (>= 1 block), which is the same grounding the
   // `moveAdvancesTowardTarget` filter already applies to plain MOVEs.
-  const selfDistance = distance(state.self.position, blockedTarget)
+  // Aim at the REAL destination, not only at the cell that was just refused.
+  // The refused target is a local obstacle; the goal (for example the remembered
+  // obsidian the portal frame needs) is what the body must keep moving toward.
+  // Live (#352): with the blocked-target-only target the body paced and stalled
+  // in local pockets at x~135-146 while its seven remembered obsidian cells sat
+  // ~100m further west, because every offered waypoint was measured against the
+  // refused neighbour instead of the destination.
+  const rememberedForFocus = (state.signals.knownResources ?? []).filter(
+    (resource) => focus !== null && resource.name === focus,
+  )
+  const goalTarget: Vec3Json =
+    rememberedForFocus.length > 0
+      ? rememberedForFocus.reduce((best, entry) =>
+          distance(entry.position, state.self.position) < distance(best.position, state.self.position)
+            ? entry
+            : best,
+        ).position
+      : blockedTarget
+  const selfDistance = distance(state.self.position, goalTarget)
   const detours = candidatesForWaypoint
     .filter((spot) => !nearRefused(spot))
-    .filter((spot) => distance(spot, blockedTarget) <= selfDistance - 1)
-  const toward = detours.sort((a, b) => distance(a, blockedTarget) - distance(b, blockedTarget))[0]
+    .filter((spot) => distance(spot, goalTarget) <= selfDistance - 1)
+  const toward = detours.sort((a, b) => distance(a, goalTarget) - distance(b, goalTarget))[0]
   if (toward !== undefined) {
     out.push(
       exploreMoveCandidate(
@@ -4739,7 +4757,7 @@ function routeOpeningCandidates(
   // remaining work is to produce a real multi-leg route (walk a committed leg
   // toward the target, then re-plan) rather than to offer lateral wandering.
   return out.filter(
-    (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, blockedTarget),
+    (candidate) => candidate.kind !== 'MOVE' || moveAdvancesTowardTarget(state.self.position, candidate, goalTarget),
   )
 }
 
