@@ -1644,12 +1644,19 @@ function generateRawCandidates(
   // surface-explore arm, and ORE sources keep their DESCEND search arm; this only
   // covers the declared DIRECT/mob producers that had none.
   const hasAdvancingRoute = candidates.some(hasAdvancingGoalRoute)
+  // The `food` resource class is a declared-producer focus too (its producers are the passive
+  // FOOD_ANIMALS), so it needs the same exploration arm as the block/mob-drop producers. It is a
+  // resource class, so the plain `!isResourceClass` guard excluded it and a food goal with no animal
+  // sensed offered only WAIT (live: health=1 at habitat height, `collect:food 0/3`, candidates =
+  // ASCEND:habitat + WAIT, no search route). Keeping this in step with `declaredProducerFocus` means
+  // the typed explore-blocked fact and the offered set can never disagree.
   const declaredProducerNeedsExploration =
     goalKind === 'collect' &&
     descendTargetY === null &&
     focusItem !== null &&
-    !isResourceClass(focusItem) &&
-    (DIRECT_BLOCK_SOURCES[focusItem] !== undefined || MOB_DROP_PRODUCERS[focusItem] !== undefined)
+    (focusItem === FOOD_CLASS ||
+      (!isResourceClass(focusItem) &&
+        (DIRECT_BLOCK_SOURCES[focusItem] !== undefined || MOB_DROP_PRODUCERS[focusItem] !== undefined)))
   if (candidates.length === 0 || (declaredProducerNeedsExploration && !hasAdvancingRoute)) {
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
