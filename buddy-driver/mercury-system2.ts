@@ -26,6 +26,12 @@
 // `tool_choice`, so we get provider-enforced structured output by forcing a single
 // tool call whose `inputSchema` is the strict Zod plan schema. Model id:
 // `inception/mercury-2.5`.
+//
+// LOCAL ENDPOINT: BUDDY_MERCURY_BASE_URL routes Mercury directly to an
+// OpenAI-compatible /chat/completions server. The response still passes through
+// the same local JSON/schema/capability validation. Reasoning-capable local
+// models may use BUDDY_MERCURY_LOCAL_NO_THINK=1 to forward
+// { enable_thinking: false } through chat_template_kwargs.
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -1103,12 +1109,20 @@ export function mercuryTransportMode(model: string): MercuryTransportMode {
 
 export const MERCURY_LOCAL_BASE_URL_ENV = 'BUDDY_MERCURY_BASE_URL'
 export const MERCURY_LOCAL_API_KEY_ENV = 'BUDDY_MERCURY_API_KEY'
+export const MERCURY_LOCAL_NO_THINK_ENV = 'BUDDY_MERCURY_LOCAL_NO_THINK'
 
 export interface MercuryLocalEndpoint {
   /** OpenAI-compatible base URL without a trailing slash, e.g. http://127.0.0.1:8080/v1 */
   readonly baseUrl: string
   /** Bearer token; local servers commonly accept any non-empty value. */
   readonly apiKey: string
+  /**
+   * Extra chat_template_kwargs forwarded to the server. Reasoning models
+   * (Qwen3/Bonsai family) otherwise spend the whole output budget on hidden
+   * thinking and return empty content; BUDDY_MERCURY_LOCAL_NO_THINK=1 sets
+   * { enable_thinking: false }.
+   */
+  readonly chatTemplateKwargs?: Record<string, unknown>
 }
 
 /**
@@ -1120,9 +1134,11 @@ export function resolveMercuryLocalEndpoint(
 ): MercuryLocalEndpoint | null {
   const raw = (env[MERCURY_LOCAL_BASE_URL_ENV] ?? '').trim()
   if (raw === '') return null
+  const noThink = ['1', 'true', 'on', 'yes'].includes((env[MERCURY_LOCAL_NO_THINK_ENV] ?? '').trim().toLowerCase())
   return {
     baseUrl: raw.replace(/\/+$/, ''),
     apiKey: (env[MERCURY_LOCAL_API_KEY_ENV] ?? '').trim() || 'local',
+    ...(noThink ? { chatTemplateKwargs: { enable_thinking: false } } : {}),
   }
 }
 
@@ -1296,6 +1312,7 @@ export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpo
         max_tokens: maxOutputTokens,
         temperature: 0,
         stream: false,
+        ...(endpoint.chatTemplateKwargs !== undefined ? { chat_template_kwargs: endpoint.chatTemplateKwargs } : {}),
       }),
       signal: AbortSignal.timeout(timeoutMs),
     })

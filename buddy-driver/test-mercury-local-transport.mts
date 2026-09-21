@@ -78,7 +78,7 @@ function mercurySummary(): MercuryStateSummary {
 interface StubRequest {
   readonly url: string
   readonly authorization: string | undefined
-  readonly body: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number }
+  readonly body: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number; chat_template_kwargs?: Record<string, unknown> }
 }
 
 /** Start a localhost stub of an OpenAI-compatible chat-completions server. */
@@ -251,6 +251,38 @@ addCase('local mode never requires an AI Gateway key', async () => {
   }
 })
 
+addCase('resolveMercuryLocalEndpoint maps NO_THINK to chat_template_kwargs', () => {
+  const on = resolveMercuryLocalEndpoint({
+    BUDDY_MERCURY_BASE_URL: 'http://127.0.0.1:8080/v1',
+    BUDDY_MERCURY_LOCAL_NO_THINK: '1',
+  })
+  const off = resolveMercuryLocalEndpoint({ BUDDY_MERCURY_BASE_URL: 'http://127.0.0.1:8080/v1' })
+  const pass =
+    on?.chatTemplateKwargs?.enable_thinking === false &&
+    off !== null &&
+    off.chatTemplateKwargs === undefined
+  return { pass, detail: `on=${JSON.stringify(on?.chatTemplateKwargs)} off=${JSON.stringify(off?.chatTemplateKwargs)}` }
+})
+
+addCase('local transport forwards chat_template_kwargs to the server', async () => {
+  const stub = await startStub({ status: 200, content: VALID_PLAN_JSON })
+  try {
+    const transport = localMercuryTransport('bonsai-local', {
+      baseUrl: stub.baseUrl,
+      apiKey: 'local',
+      chatTemplateKwargs: { enable_thinking: false },
+    })
+    await transport({ system: 'SYS', prompt: 'PROMPT', maxOutputTokens: 512, timeoutMs: 5000 })
+    const kwargs = stub.requests[0]?.body.chat_template_kwargs
+    return {
+      pass: kwargs?.enable_thinking === false,
+      detail: `chat_template_kwargs=${JSON.stringify(kwargs)}`,
+    }
+  } finally {
+    await stub.close()
+  }
+})
+
 let failures = 0
 process.stdout.write('Mercury local OpenAI-compatible transport tests\n')
 process.stdout.write(`${'-'.repeat(72)}\n`)
@@ -263,4 +295,3 @@ for (const testCase of cases) {
 process.stdout.write(`${'-'.repeat(72)}\n`)
 process.stdout.write(`${cases.length - failures}/${cases.length} Mercury local transport cases passed\n`)
 if (failures > 0) process.exit(1)
-
