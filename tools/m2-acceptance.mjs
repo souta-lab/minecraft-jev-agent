@@ -45,11 +45,11 @@
 //   proving the earlier transient facts, matching the live gate's FAIL>UNKNOWN
 //   rule after all same-run evidence is joined.
 //
-// MILESTONES.md's diamond-pickaxe terminal and the earlier #209 extension are
-// HISTORICAL/spec drift and MUST NOT gate M2. The diamond-pickaxe criterion
-// belongs to the SEPARATE M3 acceptance defined below (`M3_CRITERIA` /
-// `runM3Acceptance`, CLI `--m3`) and is never consulted by the M2 pass/fail
-// path, so M2 and M3 cannot drift back into each other.
+// MILESTONES.md's current M3 terminal is `ender_pearl>=12`. The former
+// diamond-pickaxe criterion is historical/spec drift and MUST NOT gate M3.
+// The M3 gate below owns only the exact-run pearl predicate; M4's crafted
+// `ender_eye` item is a separate future rung.
+// M2 and M3 must not drift into each other.
 import { existsSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { pathToFileURL } from 'node:url'
@@ -82,8 +82,7 @@ export const M2_CONTROL_TIMEOUT_MS = 10_000
  * The historical iron-age acceptance contract: charcoal, iron_ingot and
  * iron_pickaxe. Each rung's `requires` names the rung that must already have
  * happened in the same run. The current M2 portal criteria are not evaluated
- * by this compatibility tool; `diamond_pickaxe` remains in the historical
- * separate M3 fixture below for backwards-compatible replay tests.
+ * by this compatibility tool.
  */
 export const M2_CRITERIA = [
   { item: 'charcoal', need: 1, requires: null },
@@ -95,15 +94,15 @@ export const M2_CRITERIA = [
 export const M2_CAUSAL_CHAIN = Object.freeze(M2_CRITERIA.map(({ item }) => item))
 
 /**
- * Separate M3 acceptance: owns the diamond-pickaxe terminal that used to be
- * (incorrectly) part of M2. Exported and independently runnable via
- * `runM3Acceptance` / CLI `--m3`. It is NOT consulted by the M2 pass/fail path,
- * so the two contracts can never drift back into each other.
+ * Current M3 acceptance: twelve ender pearls observed in the exact resident
+ * run. `ender_pearl` is the dropped item; `ender_eye` is the M4 craft result.
+ * M3 has no M2 furnace marker chain, so its run-scoped snapshot path validates
+ * source identity and latest inventory without borrowing M2 markers.
  */
-export const M3_CRITERIA = [{ item: 'diamond_pickaxe', need: 1, requires: 'iron_pickaxe' }]
+export const M3_CRITERIA = [{ item: 'ender_pearl', need: 12, requires: null }]
 
-/** Ordered item names of M3_CRITERIA, printed so the required order is explicit in gate output. */
-export const M3_CAUSAL_CHAIN = Object.freeze(M3_CRITERIA.map(({ item }) => item))
+/** M3 is a terminal inventory predicate, not an ordered M2 marker chain. */
+export const M3_CAUSAL_CHAIN = Object.freeze([])
 
 export const REPORT_COMMAND = { id: 'm2', cmd: 'report' }
 
@@ -343,6 +342,8 @@ export async function runAcceptance({
   readSnapshot,
   readRunIdentity,
   requireRealPolicy = true,
+  requireExpectedRunId = false,
+  requireChain = label === 'M2',
   policyEvidence = null,
   loadPolicy = loadPolicyEvidence,
   decisionsPath,
@@ -352,6 +353,10 @@ export async function runAcceptance({
   write(`${label} acceptance check — ${ts}`)
   write(`socket : ${sockPath}`)
   write(`command: ${JSON.stringify(REPORT_COMMAND)}`)
+  if (requireExpectedRunId && expectedRunId === null) {
+    write('RESULT: UNKNOWN (exact runId required)')
+    return 2
+  }
   write(`expectedRunId: ${expectedRunId ?? 'none'}`)
 
   const resolveSnapshot = readSnapshot ?? ((runId) => readSnapshotFile(runId, snapshotDir))
@@ -360,7 +365,7 @@ export async function runAcceptance({
   const emit = async (data, reportData, inventory, boundRunId) => {
     // Printed only after a readable evidence source with a validated run scope:
     // the chain claim is never made for unavailable or out-of-scope evidence.
-    write(`chain: ${chain.join(' -> ')}`)
+    write(`chain: ${chain.length === 0 ? 'none' : chain.join(' -> ')}`)
     const { allPass, observed } = evaluateCriteria(criteria, inventory)
     for (const { item, need } of criteria) {
       write(`${observed[item] >= need ? 'PASS' : 'FAIL'} ${item} >= ${need} (observed ${observed[item]})`)
@@ -428,12 +433,14 @@ export async function runAcceptance({
         reason: `snapshot run scope mismatch expected=${runId} observed=${typeof snapshot.runId === 'string' ? snapshot.runId : 'unknown'}`,
       }
     }
-    const chainCheck = snapshotHasOrderedChain(snapshot)
-    if (!chainCheck.valid) {
-      return {
-        status: 'unknown',
-        snapshotPath,
-        reason: `snapshot chain incomplete expected=${M2_REQUIRED_MARKERS.join('->')} observed=${chainCheck.observed.join('->') || 'none'}`,
+    if (requireChain) {
+      const chainCheck = snapshotHasOrderedChain(snapshot)
+      if (!chainCheck.valid) {
+        return {
+          status: 'unknown',
+          snapshotPath,
+          reason: `snapshot chain incomplete expected=${M2_REQUIRED_MARKERS.join('->')} observed=${chainCheck.observed.join('->') || 'none'}`,
+        }
       }
     }
     const identity = await resolveIdentity(runId)
@@ -534,12 +541,20 @@ export async function runAcceptance({
 }
 
 /**
- * Independent M3 acceptance: owns the diamond-pickaxe criterion moved out of M2.
- * Delegates to the shared runner with the M3 criteria/chain; the M2 pass/fail
- * path above never references it.
+ * M3 acceptance is the exact-run `ender_pearl>=12` terminal predicate.
+ * It intentionally skips the M2 furnace marker chain while retaining source
+ * identity and real-policy checks.
  */
 export function runM3Acceptance(options = {}) {
-  return runAcceptance({ ...options, label: 'M3', criteria: M3_CRITERIA, chain: M3_CAUSAL_CHAIN, requireRealPolicy: false })
+  return runAcceptance({
+    ...options,
+    label: 'M3',
+    criteria: M3_CRITERIA,
+    chain: M3_CAUSAL_CHAIN,
+    requireChain: false,
+    requireExpectedRunId: true,
+    requireRealPolicy: true,
+  })
 }
 
 function requestedArg(name, argv = process.argv.slice(2), env = process.env, envName = null) {
