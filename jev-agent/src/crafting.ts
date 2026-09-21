@@ -175,12 +175,21 @@ export function describeCraftOp(op: CraftOp): string {
  * recipe needs a table and none is placed, the planner returns a `place` op
  * first (reusing the held crafting_table, or crafting one first) - never a craft
  * that would be mechanically rejected by Mineflayer.
+ *
+ * `want` is the ABSOLUTE number of `goalItem` the caller's goal requires in the
+ * inventory; the top-level satisfaction test is `held >= want`. It defaults to
+ * 1, which is the correct semantics for a one-off step (a tool or a prerequisite
+ * ingredient). A still-active `craft N x item` goal must pass N: the outstanding
+ * amount is `N - haveCount`, so leaving the default 1 reports the goal satisfied
+ * as soon as a single copy is held and strands it below N (M3:
+ * `craft 12 x ender_eye` stalled at 1..11 eyes).
  */
 export function planNextCraftStep(
   index: RecipeIndex,
   goalItem: string,
   inventory: Readonly<Record<string, number>>,
   tableAvailable: boolean,
+  want = 1,
 ): CraftPlanResult {
   const have = (item: string, want: number): boolean => (inventory[item] ?? 0) >= want
 
@@ -235,7 +244,7 @@ export function planNextCraftStep(
     return { type: 'craft', item, count: chosen.resultCount, requiresTable: chosen.requiresTable }
   }
 
-  const op = produce(goalItem, 1, new Set<string>(), 0)
+  const op = produce(goalItem, want, new Set<string>(), 0)
   if (typeof op === 'string') return { op: null, reason: op }
   if (op === null) return { op: null, reason: `${goalItem} is already satisfied` }
   return { op, reason: describeCraftOp(op) }

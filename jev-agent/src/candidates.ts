@@ -1731,6 +1731,23 @@ function heldStationPlacement(
 }
 
 /**
+ * The absolute copy count the recipe planner must satisfy for `focusItem`.
+ *
+ * A `craft N x item` goal is only done once N copies are held, so the planner's
+ * top-level requirement is `requiredCount`, not 1. The still-outstanding amount
+ * is `requiredCount - haveCount`, and `planNextCraftStep` measures it against the
+ * live inventory (`held >= want`), so the absolute count that the outstanding
+ * amount is measured from is the correct argument. Anything that is not the
+ * active goal item (a tool or a prerequisite craft) keeps the single-item
+ * default.
+ */
+function craftGoalRequirement(state: WorldState, focusItem: string): number {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'craft' || current.targetItem !== focusItem) return 1
+  return Math.max(1, Math.floor(current.requiredCount))
+}
+
+/**
  * CRAFT/PLACE candidates driven by the pure recipe planner: exactly one grounded
  * step toward the current craft subgoal, or nothing when no step is executable
  * in this world state.
@@ -1745,7 +1762,8 @@ function craftCandidates(
   if (recipes === null || focusItem === null) return none
   // #58 keeps sensed-only semantics and is focus-aware; placespot supplied the result shape.
   const tableAvailable = sensedCraftingTableAvailable(state, options, focusItem)
-  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable)
+  const want = craftGoalRequirement(state, focusItem)
+  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, tableAvailable, want)
   const op = plan.op
 
   // M2 craft deadlock: a recipe whose chosen variant needs a 3x3 station must
@@ -1754,7 +1772,7 @@ function craftCandidates(
   // falling through keeps (c) the existing craft-a-table-from-planks step.
   // #craft-ingredient-prereq: a missing ingredient route is merged in, so a
   // withheld station retrieval cannot starve a craft that still needs a log.
-  if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts)) {
+  if (!tableAvailable && planRequiresTable(recipes, focusItem, state.inventory.counts, want)) {
     const acquisition = tableAcquisitionCandidates(state, options, focusItem)
     const route = craftIngredientRoute(state, options, focusItem)
     const merged = route === null ? [...acquisition.candidates] : [...acquisition.candidates, ...route.candidates]
@@ -1763,7 +1781,7 @@ function craftCandidates(
     // step as a second grounded candidate so the reachability gate can withdraw
     // only the bad retrieval route instead of collapsing the craft Option to
     // MOVE/WAIT. Jev still chooses between every surviving semantic action.
-    const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false)
+    const fallbackPlan = planNextCraftStep(recipes, focusItem, state.inventory.counts, false, want)
     if (fallbackPlan.op !== null) {
       const fallback = craftPlanStepCandidate(state, options, fallbackPlan.op, focusItem).candidate
       if (fallback !== null && !merged.some((candidate) => candidate.id === fallback.id)) merged.push(fallback)
@@ -1919,7 +1937,13 @@ export function craftIngredientPrereq(state: WorldState, options: CandidateOptio
   if (item === null) return null
   const recipes = options.recipes ?? null
   if (recipes === null || recipes.recipesFor(item).length === 0) return null
-  const plan = planNextCraftStep(recipes, item, state.inventory.counts, sensedCraftingTableAvailable(state, options, item))
+  const plan = planNextCraftStep(
+    recipes,
+    item,
+    state.inventory.counts,
+    sensedCraftingTableAvailable(state, options, item),
+    craftGoalRequirement(state, item),
+  )
   if (plan.op !== null) {
     if (plan.op.type !== 'craft') return null
     return { item, missing: plan.op.item, producer: `craft ${plan.op.item}`, depthBoundHit: false }
@@ -2018,7 +2042,13 @@ export function selfContainedCraftCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   if (recipes === null || focusItem === null || (current?.kind ?? 'collect') !== 'craft') return []
-  const plan = planNextCraftStep(recipes, focusItem, state.inventory.counts, sensedCraftingTableAvailable(state, options, focusItem))
+  const plan = planNextCraftStep(
+    recipes,
+    focusItem,
+    state.inventory.counts,
+    sensedCraftingTableAvailable(state, options, focusItem),
+    craftGoalRequirement(state, focusItem),
+  )
   if (plan.op === null) return []
   const step = craftPlanStepCandidate(state, options, plan.op, focusItem)
   return step.candidate === null ? [] : [step.candidate]
@@ -2558,14 +2588,17 @@ function craftingTableSource(
  * True when the recipe variant `planNextCraftStep` selected for this goal needs
  * a placed crafting_table. Re-planning with an assumed station (only the
  * `tableAvailable` flag changes) reports the chosen variant's own
- * `requiresTable`, so this never guesses from a second recipe lookup.
+ * `requiresTable`, so this never guesses from a second recipe lookup. `want` is
+ * forwarded so a partially-held `craft N x item` goal still reports the station
+ * requirement instead of looking already satisfied.
  */
 function planRequiresTable(
   recipes: RecipeIndex,
   focusItem: string,
   counts: Readonly<Record<string, number>>,
+  want = 1,
 ): boolean {
-  const op = planNextCraftStep(recipes, focusItem, counts, true).op
+  const op = planNextCraftStep(recipes, focusItem, counts, true, want).op
   return op !== null && op.type === 'craft' && op.requiresTable
 }
 
