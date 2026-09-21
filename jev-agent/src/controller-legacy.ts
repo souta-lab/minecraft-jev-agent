@@ -3587,6 +3587,7 @@ export class JevController {
       distanceClosed: retrieveDistanceClosed,
       searchArrived: surfaceSearchArrived,
       semanticProgress,
+      failureCode: result.failure,
     })
     if (surfaceSearchArrived && result.itemsGained === 0 && !result.blockRemoved) {
       this.recordSurfaceSearch(candidate)

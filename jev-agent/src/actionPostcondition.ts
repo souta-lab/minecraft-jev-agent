@@ -45,6 +45,8 @@ export interface ActionOutcomeInput {
   strategy?: string | null
   /** unverified attempts recorded for this planId INCLUDING this one, when known */
   attempts?: number | null
+  /** executor failure code, when execution failed; used only to classify invalidity evidence */
+  failureCode?: string | null
 }
 
 /** Execution and progress are separate axes; `verified` alone is not a taxonomy. */
@@ -62,6 +64,16 @@ export interface ActionOutcomeTaxonomy {
   control: 'none' | 'wait' | 'escalate'
   invalidity: 'none' | 'deterministic'
   semantic: 'none' | 'goal' | 'abandon'
+}
+
+/**
+ * Only failures that prove the candidate contradicts the CURRENT world facts are
+ * deterministic invalidity. Timeouts, stuck paths, pickup misses and generic
+ * executor errors are observations of an attempt, not proof that the same
+ * candidate is impossible under an unchanged relevant state.
+ */
+export function isDeterministicInvalidityFailure(failureCode: string | null | undefined): boolean {
+  return failureCode === 'target_gone' || failureCode === 'protected_station' || failureCode === 'tunnel_entry_refused'
 }
 
 export interface ActionOutcomeTaxonomyInput extends ActionOutcomeInput {
@@ -111,7 +123,8 @@ export function classifyActionOutcome(input: ActionOutcomeTaxonomyInput): Action
   if (search) kinds.push('search')
   if (kinds.length === 0) kinds.push('none')
   const progress = kinds.includes('goal') ? 'goal' : kinds.includes('search') ? 'search' : kinds.includes('body') ? 'body' : 'none'
-  const invalidity = execution === 'failure' && input.kind !== 'ESCALATE' ? 'deterministic' : 'none'
+  const invalidity =
+    execution === 'failure' && isDeterministicInvalidityFailure(input.failureCode) ? 'deterministic' : 'none'
   return { execution, verification, progress, progressKinds: kinds, control, invalidity, semantic }
 }
 

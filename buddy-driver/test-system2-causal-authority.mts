@@ -118,6 +118,28 @@ assert.equal(escalate.execution, 'control')
 assert.equal(escalate.invalidity, 'none')
 assert.equal(escalate.progress, 'none')
 
+// 4b. Attempt failure is not automatically proof of same-state invalidity.
+const transientPathFailure = classifyActionOutcome({
+  kind: 'MOVE',
+  status: 'failed',
+  verified: false,
+  itemsGained: 0,
+  blockRemoved: false,
+  failureCode: 'path_timeout',
+})
+assert.equal(transientPathFailure.execution, 'failure')
+assert.equal(transientPathFailure.invalidity, 'none')
+const deterministicGone = classifyActionOutcome({
+  kind: 'ATTACK',
+  status: 'failed',
+  verified: false,
+  itemsGained: 0,
+  blockRemoved: false,
+  failureCode: 'target_gone',
+})
+assert.equal(deterministicGone.execution, 'failure')
+assert.equal(deterministicGone.invalidity, 'deterministic')
+
 const waitTaxonomy = classifyActionOutcome({
   kind: 'WAIT',
   status: 'done',
