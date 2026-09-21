@@ -20,6 +20,8 @@
     "mcp-test": "bun test/mcp-test.js",
     "bun-residue-check": "bun tools/bun-residue-check.mjs",
     "movement-patch:check": "bun run --cwd jev-agent movement-patch:check",
+    "contract-docs-check": "bun run --cwd buddy-driver contract-docs-check",
+    "contract-docs-test": "bun run --cwd buddy-driver contract-docs-test",
     "lane-guard": "bun tools/lane-guard.mjs",
     "issue-graph": "bun tools/issue-graph.mjs",
     "current-status": "bun tools/current-status.mjs",
