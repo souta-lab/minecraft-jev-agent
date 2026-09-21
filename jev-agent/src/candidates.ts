@@ -324,6 +324,54 @@ export function formatPlaceRefusal(refusal: PlaceRefusal): string {
 }
 
 /**
+ * Vertical-safety truth for the MINE layer (owner rule: never dig the block you
+ * are standing on).
+ *
+ * The DESCEND own-column (`dir === 'D'`) step is already gated in `state.ts`
+ * (`no solid support at feet-2` / `floor already open (uncontrolled fall)`), but
+ * the plain MINE path had no equivalent check. `buildStoneBlocks` walks every
+ * column from the surface down and keeps the topmost air-exposed stone-like
+ * block; for the bot's own column the feet cell is air, so the support block at
+ * `feet.y - 1` is recorded as a normal `stone` BlockState. It is pickup-adjacent
+ * (`horizontal ~0`, `vertical 1.0 <= PICKUP_MINE_VERTICAL`), so `mineCandidates`
+ * emitted `MINE:<feet-1>` and removing it dropped the bot one block with no
+ * support check - the uncontrolled straight-down dig the owner reported.
+ *
+ * This is feasibility/safety truth, not ranking: the support cell is refused as
+ * a MINE and the controlled DESCEND step (which requires solid support at
+ * feet-2) owns it instead. The marker reuses the existing
+ * `DIG_DOWN_REFUSED reason=<...> cell=x,y,z` convention.
+ */
+export type DigDownRefusalReason = 'bot_support'
+
+export interface DigDownRefusal {
+  reason: DigDownRefusalReason
+  /** the support cell the dig would remove (the bot's own floor) */
+  cell: Vec3Json
+}
+
+/** The block cell directly beneath the bot's feet, from a (possibly fractional) position. */
+export function botSupportCell(position: Vec3Json): Vec3Json {
+  return { x: Math.floor(position.x), y: Math.floor(position.y) - 1, z: Math.floor(position.z) }
+}
+
+/**
+ * Non-null when `target` is the block directly beneath the bot's feet. Pure, so
+ * the candidate generator and the executor share the exact same truth.
+ */
+export function digsBotSupport(position: Vec3Json, target: Vec3Json | null): DigDownRefusal | null {
+  if (target === null) return null
+  const support = botSupportCell(position)
+  if (target.x !== support.x || target.y !== support.y || target.z !== support.z) return null
+  return { reason: 'bot_support', cell: support }
+}
+
+/** The exact `DIG_DOWN_REFUSED` observability line for a refused dig-down MINE. */
+export function formatDigDownRefused(refusal: DigDownRefusal): string {
+  return `DIG_DOWN_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+}
+
+/**
  * Why an ignition was not offered: a malformed frame (`PORTAL_LIGHT_REFUSED`)
  * or a missing flint_and_steel (`PRECONDITION_MISSING`). Surfaced instead of
  * silence, so a portal goal can never look "starved" for no reason.
@@ -1042,6 +1090,14 @@ function mineCandidates(
   for (const block of pool) {
     if (mineActions.length + moveActions.length + accessActions.length >= options.maxMineCandidates) break
     if (!block.diggable) continue
+    // Owner vertical-safety rule: never offer the block the bot is standing on as
+    // a MINE. The sensor records the air-exposed support block at feet.y - 1
+    // (buildStoneBlocks), and because it is pickup-adjacent the stock MINE branch
+    // would remove it and drop the bot uncontrolled. The controlled DESCEND
+    // own-column step owns that cell instead (state.ts requires solid support at
+    // feet-2). Feasibility truth only: this removes an unsafe affordance, it does
+    // not rank or replace the remaining candidates.
+    if (digsBotSupport(state.self.position, block.position) !== null) continue
     const harvestTool = block.harvestTool ?? null
     const tier = block.harvestTier ?? null
     if (!hasTool(state, harvestTool, tier)) continue

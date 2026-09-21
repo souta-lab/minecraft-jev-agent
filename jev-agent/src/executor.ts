@@ -17,6 +17,7 @@ import type { Block } from 'prismarine-block'
 import type { Entity } from 'prismarine-entity'
 import type { Item } from 'prismarine-item'
 import type { Candidate, CandidateKind } from './candidates.ts'
+import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
@@ -125,6 +126,7 @@ export type FailureCode =
   | 'protected_station'
   | 'dig_error'
   | 'dig_timeout'
+  | 'dig_down_refused'
   | 'craft_error'
   | 'place_error'
   | 'smelt_error'
@@ -1424,6 +1426,17 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'MINE candidate has no coordinates')
+
+    // Owner vertical-safety rule, shared with the candidate generator: a MINE
+    // must never remove the block the bot is standing on. `mineCandidates` no
+    // longer offers that cell; this is the execution-time truth for any stale or
+    // foreign MINE, and it emits the greppable DIG_DOWN_REFUSED marker instead of
+    // silently dropping the bot. Checked before the phase is set to `digging` so
+    // a refused dig is never logged as an active dig.
+    const digDown = digsBotSupport(this.bot.entity.position, target)
+    if (digDown !== null) {
+      throw new ExecutorError('dig_down_refused', formatDigDownRefused(digDown))
+    }
 
     const inReachNow = this.distanceToEyes(target) <= this.options.reach
     if (!candidate.inReach && !inReachNow) {
