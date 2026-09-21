@@ -121,7 +121,8 @@
 ## 標準指令（2026-09-18 追加・ユーザー指示）
 ```
 ★最終的な停止条件: 「ネザーゲートが完成し、かつ open issue が全て解決する」まで作業を止めない。
-  （M2 → M3: ダイヤ→火打石→黒曜石/ポータル枠→着火→ネザー到達→ender_pearl×12。以降 M4 も継続）
+  （M2 → M3: ダイヤ→火打石→黒曜石/ポータル枠→着火→verify。M3 = ender_pearl×12。
+    ネザー踏破・blaze・eyes は M4（ender_dragon）の前提として継続）
 ★replan で目標を捨てさせない:
   ・優先目標の前提（例: smelt のための furnace 設置）は replan/β の abandon 対象から保護する
     （PRECONDITION_PROTECTED。代替手段が前提を満たす場合のみ差し替え可）

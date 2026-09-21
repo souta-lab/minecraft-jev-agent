@@ -498,8 +498,8 @@ HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
 ```text
 M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone
 M2: diamond×3 -> diamond_pickaxe -> flint_and_steel -> obsidian×10 -> Nether gate built/lit/verified
-M3: enter Nether -> ender_pearl×12
-M4: blaze rods -> eyes of ender×12 -> stronghold -> End -> dragon
+M3: ender_pearl×12
+M4: enter Nether -> blaze rods -> eyes of ender×12 -> stronghold -> End -> dragon
 ```
 
 各段で一次ログ＋inventory/predicateをrun-scoped evidenceとして残し、ARCHITECTURE.mdとissueを更新する。
