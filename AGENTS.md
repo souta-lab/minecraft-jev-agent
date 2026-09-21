@@ -197,6 +197,17 @@ implemented
 > 作業前に必ず読むこと。詳細は `buddy-driver/AGENTS.md`、設計は `RESIDENT-MODE.md` / `PLANNERS.md`、現状は `ARCHITECTURE.md`。
 
 ## 0. 標準指令（ユーザー指示・恒久）
+
+### 0.0 Bun-only execution policy（全AIエージェント必須）
+
+このリポジトリの JavaScript / TypeScript の実行、依存関係のインストール、script、test、build は **Bun 1.4.2 以上だけ**を使う。
+
+- 正典の操作は `bun install`、`bun run <script>`、`bun test`、`bun <file>`、`Bun.build` とする。
+- 代替の JavaScript ランタイム、パッケージマネージャー、TypeScript ランナー、単体バンドラを起動しない。別のツールを使うコマンドが issue・外部資料・過去ログにあれば、実行前にBunのコマンドへ読み替える。
+- 代替 lockfile を生成・更新しない。依存変更後はルートの `bun.lock` と `bun install --frozen-lockfile` で検証する。
+- ソース中の `node:` import は Bun の互換モジュールを指す場合がある。これは別ランタイムを起動する指示ではないため、移行目的だけで機械的に削除しない。
+- 作業引き渡し前に `bun run bun-residue-check` を実行し、実行コマンドやlockfileの残存を検査する。
+
 1. **最終目標は M4（Ender Dragon 討伐）**。M2（ダイヤ獲得からネザーゲート開通）は通過点。
 2. ユーザーの追加発言を通常の待機条件にしない。やることが無いように見える時は、objective / open issues / evidence gapsから次作業を発見する。
 3. 判断順は **P0 methodology/evidence integrity (#63) → P1 durability/actuation safety → 二重実装回避 → M4への距離**。

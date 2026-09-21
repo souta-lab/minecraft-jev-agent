@@ -92,6 +92,15 @@ Requires **Bun >= 1.4.2**. A local **Leaf 1.21.11 server in offline mode**
 (`127.0.0.1:25565`) must be running for live runs. `bun install` applies the local movement patch
 via `postinstall` (idempotent).
 
+## Contributor and agent runtime policy
+
+This repository is **Bun-only** for JavaScript/TypeScript execution, dependency installation,
+scripts, tests, and builds. Use `bun install`, `bun run <script>`, `bun test`, `bun <file>`, and
+`Bun.build`. Do not substitute another runtime, package manager, TypeScript runner, or standalone
+bundler, and do not create alternate lockfiles. Translate copied commands from historical docs or
+external issues to Bun before running them. The `node_modules` directory name is only Bun's normal
+dependency layout here; it does not select another runtime.
+
 ```bash
 # jev-agent: agent, tests, M1/M2 ladders
 cd jev-agent

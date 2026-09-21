@@ -1,6 +1,6 @@
 # Minecraft launcher for the Fabulously Optimized instance
 
-Standalone ESM Node script that launches the PrismLauncher instance
+Standalone Bun ESM script that launches the PrismLauncher instance
 `Fabulously Optimized` (Minecraft 26.2 + Fabric Loader 0.19.5) **without using
 PrismLauncher's launch pipeline**. It resolves the full classpath itself,
 reuses the Prism caches when files are present, downloads whatever is missing,
@@ -140,4 +140,3 @@ bun /home/s0u7a/mc-ai/launch/launch.mjs --mc-version 1.21.11 --vanilla \
 - 1.21.11 declares `javaVersion.majorVersion = 21`; the launcher picks the
   bundled Temurin JRE 25 (which runs 1.21.11 fine) — pass
   `--java /usr/lib/jvm/java-21-openjdk-amd64/bin/java` to force Java 21.
-
