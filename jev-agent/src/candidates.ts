@@ -2919,18 +2919,39 @@ function descendCandidateFromStep(
     grounded: boolean
     staircase: boolean
     extraMeta?: Record<string, string | number | boolean>
+    /**
+     * A stranded body's own-column ESCAPE dig. Such a step is gated on whether the block can be
+     * broken at all (`diggable`), not on the harvest tool that yields DROPS: leaves are
+     * hand-breakable but their harvest tool is shears/hoe, and refusing the step for that reason
+     * left a body inside an oak-leaf canopy (world truth: 151 oak_leaves around it) with
+     * `explore_route_blocked:no_frontier` and no route out at all - the run could not reach the
+     * known furnace 7 blocks below. Goal-directed mining keeps the strict drop-tool gate.
+     */
+    escape?: boolean
   },
 ): { candidate: Candidate; toolReason: string } | null {
   const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
-  const choice = selectDigTool(
-    {
-      name: best.digName ?? '',
-      harvestTool: best.digHarvestTool ?? null,
-      harvestTier: best.digHarvestTier ?? null,
-      diggable: best.diggable === true,
-    },
-    (tool, tier) => hasTool(state, tool, tier),
-  )
+  // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
+  // broken at all (obsidian), and the state carries no hardness/hand-break fact to tell the two apart -
+  // so case (c2) (a step needing a pickaxe tier the body lacks) must keep refusing. Every other
+  // harvest tool only decides DROPS (leaves: shears/hoe, logs: axe, dirt/sand: shovel), so for a
+  // stranded body's escape step the dig is offered and the block is simply broken without its drop.
+  const escapeBreakable =
+    spec.escape === true &&
+    best.diggable === true &&
+    (best.digHarvestTool ?? null) !== 'pickaxe'
+  const choice =
+    escapeBreakable
+      ? { ok: true as const, tool: null, tier: null, reason: 'escape_breakable_without_drop_tool' }
+      : selectDigTool(
+          {
+            name: best.digName ?? '',
+            harvestTool: best.digHarvestTool ?? null,
+            harvestTier: best.digHarvestTier ?? null,
+            diggable: best.diggable === true,
+          },
+          (tool, tier) => hasTool(state, tool, tier),
+        )
   if (!choice.ok) return null
   const toward =
     spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
@@ -3059,6 +3080,8 @@ function columnDescentCandidates(
     // is "dig straight down", so it is not labelled a staircase.
     staircase: !(best.dx === 0 && best.dz === 0),
     extraMeta: { columnDescent: true },
+    // This is the body's only way off its own support column: gate it on breakability, not drops.
+    escape: true,
   })
   if (built === null) {
     return {
