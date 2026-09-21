@@ -3203,7 +3203,19 @@ function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueu
   if (current?.kind !== 'smelt') {
     push(state.goal.targetItem, goalWantsFuel(current), current)
     if (includeQueued) {
-      for (const queued of state.goalQueue.goals) push(queued.targetItem, goalWantsFuel(queued), queued)
+      for (const queued of state.goalQueue.goals) {
+        // #341: a resolved row must contribute ZERO candidates. Live, an earlier
+        // `collect:raw_iron` row that was already `done` was resurrected as a
+        // `RETRIEVE:known:raw_iron` want, so `CAUSAL planId=g3:collect:flint`
+        // carried `resource=iron_ore` and the body walked/digged toward a stale
+        // iron coordinate while the flint plan was active.
+        //
+        // Unresolved rows (`pending`/`active`) stay eligible on purpose: the
+        // deliberate cobblestone/descent proxy relies on being able to expose an
+        // unresolved queued retrieval. Only `done`/`impossible` are excluded.
+        if (queued.status === 'done' || queued.status === 'impossible') continue
+        push(queued.targetItem, goalWantsFuel(queued), queued)
+      }
     }
   }
   const wants: RetrievalWant[] = []

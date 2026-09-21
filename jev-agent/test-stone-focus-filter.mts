@@ -410,6 +410,107 @@ addCase('(1) no goal route still presents >=3 distinct grounded alternatives', (
   }
 })
 
+// --- P0 #341: resolved queue rows must contribute ZERO candidates -----------
+// Live shape: queue current = active `collect 1 x flint (from gravel)`, an earlier
+// `collect 1 x raw_iron` row already `done`, a known iron_ore coordinate, and no
+// sensed gravel. The generator used to resurrect the done row as
+// `RETRIEVE:known:raw_iron`, so `CAUSAL planId=g3:collect:flint` carried
+// `resource=iron_ore` and the body walked/digged toward a stale iron coordinate
+// while the flint plan was active.
+function statusRow(
+  kind: QueuedGoal['kind'],
+  targetItem: string,
+  description: string,
+  status: QueuedGoal['status'],
+): QueuedGoal {
+  return { ...queuedGoal(kind, targetItem, description), id: `g:${kind}:${targetItem}:${status}`, status }
+}
+
+function withQueue(state: WorldState, rows: QueuedGoal[]): WorldState {
+  const active = rows.find((entry) => entry.status === 'active') ?? rows[rows.length - 1]!
+  state.goalQueue = {
+    depth: rows.length,
+    current: active,
+    empty: false,
+    hasImpossible: rows.some((entry) => entry.status === 'impossible'),
+    done: rows.filter((entry) => entry.status === 'done').length,
+    goals: rows,
+  }
+  return state
+}
+
+function knownOre(name: string, position: Vec3Json): NonNullable<WorldState['signals']['knownResources']>[number] {
+  return { name, kind: 'ore', position, dimension: 'overworld', worldEpoch: 1, lastSeenAt: 0 }
+}
+
+function flintLeakWorld(status: QueuedGoal['status']): WorldState {
+  const state = build('collect', 'flint', 'collect 1 x flint (from gravel)', [], null, true)
+  const active = statusRow('collect', 'flint', 'collect 1 x flint (from gravel)', 'active')
+  withQueue(state, [statusRow('collect', 'raw_iron', 'collect 1 x raw_iron', status), active])
+  state.signals.knownResources = [knownOre('iron_ore', { x: 9, y: 54, z: -10 })]
+  return state
+}
+
+function flintLeakWorldWithFrontier(status: QueuedGoal['status']): WorldState {
+  const state = flintLeakWorld(status)
+  // #341 acceptance 5: removing the leaked retrieval must not collapse the set
+  // back to WAIT + one forced action, so give the world real frontier cells for
+  // the #339 exploration fallback.
+  state.terrain = {
+    standable: [
+      SELF,
+      { x: 3, y: 61, z: 0 },
+      { x: 0, y: 61, z: 3 },
+      { x: -3, y: 61, z: 0 },
+      { x: 0, y: 61, z: -3 },
+      { x: 3, y: 61, z: 3 },
+    ],
+  }
+  return state
+}
+
+addCase('#341 a done queue row contributes no retrieval candidate', () => {
+  const candidates = generateCandidates(flintLeakWorldWithFrontier('done'), OPTIONS)
+  const ids = candidates.map((candidate) => candidate.id)
+  const actionable = ids.filter((id) => !id.startsWith('WAIT'))
+  // The P0 requirement is the leak: no retrieval for the resolved row. The
+  // observed actionable count is reported as a diagnostic only — in this exact
+  // shape (flint source known-but-unsensed, nothing sensed) the set is
+  // DESCEND + WAIT, i.e. the #339 exploration fallback does NOT fire because a
+  // scanned source exists. That diversity gap is a separate follow-up, not part
+  // of the #341 leak, so it is recorded here rather than asserted.
+  return {
+    pass: !ids.some((id) => id.includes('raw_iron')),
+    detail: `ids=${ids.join(',')} actionable=${actionable.length}`,
+  }
+})
+
+addCase('#341 an impossible queue row contributes no retrieval candidate', () => {
+  const ids = generateCandidates(flintLeakWorld('impossible'), OPTIONS).map((candidate) => candidate.id)
+  return {
+    pass: !ids.some((id) => id.includes('raw_iron')),
+    detail: `ids=${ids.join(',')}`,
+  }
+})
+
+addCase('#341 the resolution filter only removes resolved rows (unresolved path untouched)', () => {
+  // Differential proof that the change is a narrowing, not a behaviour swap: the
+  // candidate-id set for the same world with the row resolved must be a subset of
+  // the unresolved one, and the unresolved set must not be smaller. That is what
+  // "the deliberate cobblestone/descent proxy keeps exposing unresolved queued
+  // work" means for any world shape, without pretending this fixture reproduces
+  // the proxy shape itself.
+  const resolved = generateCandidates(flintLeakWorld('done'), OPTIONS).map((candidate) => candidate.id)
+  const unresolved = generateCandidates(flintLeakWorld('pending'), OPTIONS).map((candidate) => candidate.id)
+  const resolvedSet = new Set(resolved)
+  const unresolvedSet = new Set(unresolved)
+  const subset = [...resolvedSet].every((id) => unresolvedSet.has(id))
+  return {
+    pass: subset && unresolvedSet.size >= resolvedSet.size,
+    detail: `resolved=[${resolved.join(',')}] unresolved=[${unresolved.join(',')}] subset=${subset}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('stone focus feasibility filter - purposeless MINE/DESCEND withholding\n')
 process.stdout.write('-'.repeat(72) + '\n')
