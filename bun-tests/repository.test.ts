@@ -21,9 +21,10 @@ async function runBun(cwd: string, args: string[]): Promise<void> {
 }
 
 const TEST_ARGS = ['test', '--timeout=120000', '--max-concurrency=1']
+const SUITE_OPTIONS = { timeout: 120_000 }
 
-test('jev-agent Bun suite', async () => runBun(resolve(ROOT, 'jev-agent'), TEST_ARGS))
-test('buddy-driver Bun suite', async () => runBun(resolve(ROOT, 'buddy-driver'), TEST_ARGS))
+test('jev-agent Bun suite', async () => runBun(resolve(ROOT, 'jev-agent'), TEST_ARGS), SUITE_OPTIONS)
+test('buddy-driver Bun suite', async () => runBun(resolve(ROOT, 'buddy-driver'), TEST_ARGS), SUITE_OPTIONS)
 test('Bedrock MCP companion imports under Bun', async () => {
   await runBun(ROOT, [
     '-e',
