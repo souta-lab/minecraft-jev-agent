@@ -4,6 +4,13 @@ Evidence only. Every number below was produced on this machine on 2026-09-21 wit
 patched `task/mercury-local-transport` code path (`BUDDY_MERCURY_BASE_URL` +
 `BUDDY_MERCURY_LOCAL_NO_THINK=1`). No value is estimated.
 
+> Superseded run notice: an earlier version of this file reported single runs per model
+> whose fixture listed `iron_ore`/`coal_ore` as collectable. The code-owned matrix
+> (`MERCURY_ALLOWED_GOALS`) rejects those names, so that fixture penalised every model
+> with rejections it should never have seen. The table below uses the real matrix
+> (`generation-entry.ts:664` passes `MERCURY_ALLOWED_GOALS` unchanged) and 3 runs per
+> scenario per model.
+
 ## Hardware / runtime
 
 - CPU: AMD Ryzen 7 9800X3D, RAM 30 GB
@@ -12,50 +19,66 @@ patched `task/mercury-local-transport` code path (`BUDDY_MERCURY_BASE_URL` +
 - Ternary Bonsai 2 requires the PrismML fork binaries
   (`PrismML-Eng/llama.cpp` release `prism-b10709-9a9394a`, ubuntu-vulkan-x64)
 - Server: `llama-server --host 127.0.0.1 --port 8081 -c 16384 --jinja`
+  (Bonsai 2 was served with `-c 8192`)
 
 ## Test method
 
 `MercurySystem2.tryRepair()` is driven directly against the local endpoint with the real
-`SYSTEM_PROMPT`, the real `validateMercuryPlan` grounding/capability validation, the real
-state-hash cache and the real corrective-retry loop. `resolveKey: () => null` proves the
-gateway key is never consulted. Two scenario states:
+`SYSTEM_PROMPT`, `MERCURY_ALLOWED_GOALS`, `validateMercuryPlan`, the state-hash cache and
+the corrective-retry loop (`retries: 2`). `resolveKey: () => null` proves the gateway key is
+never consulted. Three scenarios x 3 runs per model, fresh cache/temp dir for every run:
 
-- **simple**: stuck underground at y=12, no pickaxe, allowedGoals = stone/coal_ore/iron_ore/log
-  collect, stone_pickaxe/crafting_table/furnace/stick craft, charcoal/iron_ingot smelt
-- **hard**: `action_impossible`, missing fuel and no reachable placed furnace,
-  goal queue empty, allowedGoals unchanged
+- **simple**: stuck underground at y=12, no pickaxe
+- **hard**: `action_impossible`, no fuel and no reachable placed furnace, `hasImpossible`
+- **post_death**: died to lava, respawned at the surface with an empty inventory
 
-`elapsed` is the wall time of `tryRepair()` (includes every attempt and the cache write).
+`accepted` = `tryRepair()` returned a plan; `first_attempt_accepted` = no `PLAN_REJECTED`
+was logged; `ms` = wall time of `tryRepair()` including retries.
 
 ## Results
 
-| Model | File size | simple | hard | Verdict |
-| --- | --- | --- | --- | --- |
-| Ternary Bonsai 2 27B PTQ1_0 (fork) | 5.93 GB | 14 046 ms, accepted attempt 1 (`patch collect stone`) | 27 260 ms, 1 rejection then accepted (`patch collect coal`) | viable, slow, fork-only |
-| Qwen3.5-9B UD-Q4_K_XL (stock) | 5.97 GB | 1 622 ms, accepted attempt 1 (`replace craft stone_pickaxe`) | 3 346 ms, 1 rejection then accepted (`replace collect coal`) | **best balance** |
-| Qwen3.5-9B with thinking enabled | 5.97 GB | — | 22 289 ms, 1 rejection then accepted | thinking costs ~7x with no quality gain |
-| Qwen3.5-4B UD-Q4_K_XL (stock) | 2.91 GB | 1 976 ms, 1 rejection then accepted (`replace collect raw_iron`) | 920 ms, accepted attempt 1 (`replace goto_resource coal_ore`) | fastest usable |
-| Qwen3.5-2B UD-Q4_K_XL (stock) | 1.34 GB | **FATAL `MODEL_UNAVAILABLE`** after 2 attempts (`collect iron_ore`, then `collect coal_ore` after corrective feedback) | 377 ms, accepted attempt 1 (`patch place furnace`) | not reliable (1 of 2 scenarios fatal) |
+| Model | File size | accepted | first attempt | median ms | max ms |
+| --- | --- | --- | --- | --- | --- |
+| Ternary Bonsai 2 27B PTQ1_0 (fork) | 5.93 GB | 9/9 | **9/9** | 14 604 | 18 892 |
+| **Qwen3.5-9B UD-Q4_K_XL** (stock) | 5.97 GB | 9/9 | 6/9 | **1 390** | 3 118 |
+| Qwen3.5-4B UD-Q4_K_XL (stock) | 2.91 GB | 9/9 | 6/9 | 1 384 | 2 106 |
+| Qwen3.5-2B UD-Q4_K_XL (stock) | 1.34 GB | 9/9 | 4/9 | 896 | 1 081 |
 
-## What the failures prove
+### Plan quality (read from the emitted goal chains)
 
-- The grounding guard is model-independent: every model that emitted an item outside
-  `allowedGoals` (`iron_ore`, `coal_ore`) was rejected locally with `PLAN_REJECTED`
-  before any plan reached the goal queue.
-- The corrective retry works when the model can use the feedback: Bonsai 2 27B, Qwen3.5-9B
-  and Qwen3.5-4B all recovered on attempt 2.
-- Qwen3.5-2B ignored the corrective feedback twice, which exhausted `maxAttempts` and
-  produced `FATAL code=MODEL_UNAVAILABLE` — in the resident that terminates the process by
-  design, so 2B must not be selected for Mercury.
-- Reasoning must be disabled (`BUDDY_MERCURY_LOCAL_NO_THINK=1`). With the default
-  `reasoning_effort=xhigh` the model spent the whole output budget on hidden thinking
-  (`finish_reason=length`, empty content); the same state then succeeded in 20 s once
-  `enable_thinking:false` was sent.
+- Bonsai 2 27B, post_death: `collect log -> craft crafting_table -> place crafting_table ->
+  collect raw_iron -> smelt iron_ingot` (complete and ordered).
+- Qwen3.5-9B, post_death: `collect coal x8 -> craft furnace -> place furnace ->
+  collect raw_iron -> smelt iron_ingot`; simple: `craft stone_pickaxe` (targets the real
+  blocker); hard: `collect coal -> place furnace -> smelt iron_ingot`, accepted on attempt 2.
+- Qwen3.5-4B, hard: `collect coal -> craft furnace -> place furnace -> smelt charcoal x64`
+  — validation passes but `smelt charcoal x64` is not a sensible fuel step. simple:
+  `craft wooden_pickaxe`. post_death: `collect raw_iron -> smelt iron_ingot`, i.e. the fuel
+  and station steps are missing.
+- Qwen3.5-2B, simple: `continue` with `collect cobblestone x1` / `collect raw_iron x1` —
+  neither addresses the missing pickaxe. hard: `place furnace x1` only. post_death:
+  `complete` with an empty goal list, which requests completion of an Option that has no
+  work behind it.
 
-## Recommended configuration
+### What matters for the choice
+
+- Qwen3.5-9B and Qwen3.5-4B have **statistically identical latency** (median 1 390 ms vs
+  1 384 ms). Prompt evaluation dominates the wall time, so the smaller model buys nothing
+  here; the 9B plan semantics are clearly better.
+- Qwen3.5-2B is the fastest but its plans are semantically wrong even though they pass the
+  schema and capability validation, so validation alone cannot select it.
+- Bonsai 2 27B is the only model that produced correct plans on the first attempt in every
+  run, at roughly 10x the latency — acceptable for an exception-only planner, but it needs
+  the PrismML fork binaries.
+
+## Recommendation
+
+Default **Qwen3.5-9B** (best quality/latency balance, stock llama.cpp). Use Bonsai 2 27B
+when first-attempt plan quality matters more than latency (and the fork binaries are
+available). 4B adds no speed; 2B should not be selected for Mercury.
 
 ```bash
-# start the server (one model at a time: 16 GB VRAM fits ~2 x 6 GB but leaves <2 GB free)
+# server
 llama-server -m /data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf \
   --host 127.0.0.1 --port 8081 -c 16384 --jinja
 
@@ -70,7 +93,9 @@ bun buddy-driver/agent-runner.mts
 
 ## Limits of this evidence
 
-- Two synthetic states, one run each, no repetition and no full resident run.
-  A replay A/B against the gateway Mercury (issue #23) is still required before this
-  counts as an acceptance result.
-- Latency is measured with idle GPU; concurrent Minecraft server load was not isolated.
+- Three synthetic states, three runs each, no full resident run. A replay A/B against the
+  gateway Mercury (issue #23) is still required before this counts as an acceptance result.
+- Latency was measured with an otherwise idle GPU; concurrent Minecraft load was not isolated.
+- Reasoning must stay disabled. With the default `reasoning_effort=xhigh` the model spent the
+  whole output budget on hidden thinking (`finish_reason=length`, empty content); the same
+  state succeeded in 20 s once `enable_thinking:false` was sent.
