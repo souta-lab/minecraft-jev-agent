@@ -22,6 +22,7 @@ import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '..
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
+import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
 import { HUMAN_INTENT_MAX_COUNT, parseHumanIntentCommand, parseQuantityReply } from './human-intent.ts'
 import { M2SnapshotRecorder } from './m2-snapshot.ts'
 import { OptionCompilingSystem2, optionSnapshotFromBot } from './option-brain.ts'
@@ -305,14 +306,6 @@ function resourceKey(resource: { name: string; x: number; y: number; z: number }
   return `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
 }
 
-/**
- * Dimension identity for comparing a remembered resource against the active
- * world key. `the_nether` and `minecraft:the_nether` are the same dimension.
- */
-function normalizeDimensionId(dimension: string): string {
-  return dimension.replace(/^minecraft:/, '').toLowerCase()
-}
-
 function resourceAt(resource: { x: number; y: number; z: number }): string {
   return `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
 }
@@ -437,10 +430,6 @@ function portalOriginKey(site: { x: number; y: number; z: number }): string {
   return `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
 }
 
-function normalizePortalDimension(dimension: string): string {
-  return dimension.replace(/^minecraft:/, '').toLowerCase()
-}
-
 /** Exact live read of one recorded portal cell; `null` = the chunk is not loaded = UNKNOWN. */
 export type PortalSiteCellProbe = (cell: Vec3Json) => string | null
 
@@ -543,7 +532,7 @@ export function syncKnownPortalSites(input: {
     if (
       site.dimension !== undefined &&
       site.dimension.length > 0 &&
-      normalizePortalDimension(site.dimension) !== normalizePortalDimension(input.worldKey.dimension)
+      normalizeDimensionId(site.dimension) !== normalizeDimensionId(input.worldKey.dimension)
     ) {
       drop(site, 'dimension')
       continue
@@ -1539,8 +1528,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
     portalVerified: detectLivePortalVerification(ctx.bot),
-    dimension: String(ctx.bot.game?.dimension ?? ''),
+    dimension: canonicalDimensionId(ctx.bot.game?.dimension),
   }
+  // The body's actual dimension is the world fact a Nether arrival is proven by,
+  // and the host HEARTBEAT line does not carry it. State it once here at
+  // generation start (a run that starts/resumes in the Nether is never
+  // evidence-blind), then once per CHANGE from `refreshLiveFacts`. Observation
+  // only - it never chooses a destination.
+  const dimensionObserver = createDimensionObserver(ctx.log, ctx.runId, world.dimension)
   /**
    * #80: maintain the durable verified-portal-site record from live truth, and
    * project the live-only verdict from BOTH observation routes.
@@ -1712,11 +1707,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     return liveSensed
   }
   const refreshLiveFacts = (reason: string): void => {
-    const nextDimension = String(ctx.bot.game?.dimension ?? '')
-    if (nextDimension !== world.dimension) {
-      world.dimension = nextDimension
-      ctx.log('DIMENSION_TRUTH', { dimension: nextDimension, reason, source: 'live-world' })
-    }
+    // Edge-triggered: `observe` logs one DIMENSION_TRANSITION per real change and
+    // nothing while the dimension is constant. Keeps `world.dimension` canonical.
+    world.dimension = dimensionObserver.observe(ctx.bot.game?.dimension, reason)
     // One portal sync supplies both the durable site record and the live verdict:
     // the body-relative search (`sensedVerifiedPortalSites` is the per-site form
     // of `detectLivePortalVerification`) OR a coordinate-anchored recheck of the
