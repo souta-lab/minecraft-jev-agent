@@ -127,15 +127,18 @@ import {
   formatPrereqOptionDetail,
   formatPrereqOptionFor,
   formatPrereqRankShadow,
+  formatPrereqStationKnown,
   formatPrereqSwitch,
   isInventorySourced,
   knownStationKey,
   nextPrereqPath,
   planPrereqOptions,
   preferPrereqPath,
+  PREREQ_STATION_ALREADY_KNOWN,
   prereqOptionReason,
   prereqProgressSignature,
   prereqSubjectForGoal,
+  prereqWithheldCraft,
   resolvePrereqRankPolicy,
   resolvePrereqStallTicks,
   selectPrereqPath,
@@ -1049,6 +1052,11 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PREREQ_OPTION',
   'PREREQ_RANK_SHADOW',
   'PREREQ_SWITCH',
+  // OPERATOR RULE (station-use-before-craft): the smelt prerequisite withheld a
+  // duplicate station craft because a usable station of that kind already
+  // exists. Keep the typed fact on the mirrored event path so a run proves the
+  // duplicate was refused for a named reason instead of merely being absent.
+  PREREQ_STATION_ALREADY_KNOWN,
   'FURNACE_READY',
   'STATION_REGISTERED',
   'SMELT_DONE',
@@ -1674,6 +1682,8 @@ export class JevController {
   private prereqLoggedKey: string | null = null
   /** goal|line key of the last `FURNACE_PREREQ_ALREADY_SATISFIED` observation logged */
   private prereqSatisfiedLoggedKey: string | null = null
+  /** goal|line key of the last `PREREQ_STATION_ALREADY_KNOWN` line logged. */
+  private prereqStationKnownLoggedKey: string | null = null
   private prereqProgress: PrereqProgress | null = null
   private readonly prereqStallTicks = resolvePrereqStallTicks()
   /** #78: options excluded for the current goal after repeated unverified failure (path -> fingerprint). */
@@ -6553,6 +6563,7 @@ export class JevController {
       this.prereqForcedPath = null
       this.prereqProgress = null
       this.prereqLoggedKey = null
+      this.prereqStationKnownLoggedKey = null
       this.abandonedRetrievePaths.clear()
       this.retrieveUnverified = null
     }
@@ -6597,6 +6608,33 @@ export class JevController {
           this.tickCounter,
         )
       }
+    }
+    // OPERATOR RULE (station-use-before-craft): when the world already holds a
+    // usable station of the needed kind the craft path is INELIGIBLE, so say so
+    // with its own typed line instead of only omitting `CRAFT:furnace` from the
+    // offered set. The line is derived from the very option the planner marked
+    // ineligible, and it names the path that runs instead, so the run log can
+    // never show a withheld duplicate craft without its reason.
+    const withheldCraft = prereqWithheldCraft(decision)
+    if (withheldCraft !== null && input.knownStation !== null) {
+      const stationKnownLine = formatPrereqStationKnown(input.knownStation, input.heldCount, chosen)
+      if (stationKnownLine !== this.prereqStationKnownLoggedKey) {
+        this.prereqStationKnownLoggedKey = stationKnownLine
+        this.logger.info(
+          'agent',
+          stationKnownLine,
+          {
+            reason: withheldCraft.reason,
+            station: input.knownStation,
+            held: input.heldCount,
+            chosen,
+            goal: goalKey,
+          },
+          this.tickCounter,
+        )
+      }
+    } else {
+      this.prereqStationKnownLoggedKey = null
     }
     const kept = filterFurnacePrerequisiteCandidates(candidates, chosen)
     if (chosen === null) return kept
@@ -6660,6 +6698,7 @@ export class JevController {
     this.prereqForcedPath = null
     this.prereqGoalKey = null
     this.prereqLoggedKey = null
+    this.prereqStationKnownLoggedKey = null
     this.prereqProgress = null
     this.prereqChosenPath = null
     this.abandonedRetrievePaths.clear()

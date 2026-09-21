@@ -41,7 +41,8 @@ import {
 } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { createRecipeIndex } from './src/crafting.ts'
-import { knownStationKey, planPrereqOptions, selectPrereqPath } from './src/prereqOption.ts'
+import { knownStationKey, planPrereqOptions, PREREQ_STATION_ALREADY_KNOWN, prereqWithheldCraft, formatPrereqStationKnown, selectPrereqPath } from './src/prereqOption.ts'
+import { MIRRORED_MARKERS } from './src/controller.ts'
 import type { AgentSignals, GoalState, InventoryState, KnownResource, SelfState, StationEntry, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
@@ -235,29 +236,48 @@ function main(): void {
     )
   }
 
-  // (a3) the smelt lane sees the same rule for the measured shape (26 known
-  // tables + 17 known furnaces, none sensed): the known-furnace travel route is
-  // offered and no station is crafted this tick. Once the body reaches the
-  // remembered table it becomes SENSED, which is the #58 boundary pinned by (g).
+  // (a3) OPERATOR DECISION 2026-09-21: the smelt lane now obeys the same rule for
+  // the measured shape (26 known tables + 17 known furnaces, none sensed). The
+  // prerequisite cost model used to prefer `craft_and_place` here - walking to a
+  // known table to craft a duplicate furnace - because craft+place scored 4
+  // against a 93.9 walk. A usable known furnace makes craft_and_place INELIGIBLE,
+  // so the known-furnace route is chosen and the duplicate-craft route (the
+  // crafting-table retrieve) is not offered at all. Once the body reaches a
+  // remembered table it becomes SENSED, which stays the #58 boundary pinned by (g).
   {
     const state = world(smeltGoal(), { raw_iron: 3, coal: 4, cobblestone: 200 }, MANY_STATIONS)
     const grounded = generateGroundedCandidates(state, options())
     const candidateIds = grounded.candidates.map((candidate) => candidate.id)
+    const input = furnacePrereqInputFromState(state, options())
+    const decision = planPrereqOptions(input)
+    const chosen = selectPrereqPath(decision)
     const furnaceTravel = grounded.candidates.find(
       (candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'furnace',
     )
-    const tableTravel = grounded.candidates.find(
-      (candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'crafting_table',
-    )
-    const decision = planPrereqOptions(furnacePrereqInputFromState(state, options()))
+    const craft = decision.options.find((option) => option.path === 'craft_and_place')
+    const withheld = prereqWithheldCraft(decision)
+    const marker =
+      withheld === null || input.knownStation === null
+        ? 'none'
+        : formatPrereqStationKnown(input.knownStation, input.heldCount, chosen)
     check(
-      '(a3) a smelt with 17 known furnaces offers the known-station routes and crafts no station this tick',
+      '(a3) a smelt with 17 known furnaces walks to one, offers no duplicate-craft route, and types the reason',
       furnaceTravel !== undefined &&
-        tableTravel !== undefined &&
+        furnaceTravel.meta.prereqPath === 'use_known_station' &&
+        !candidateIds.some((id) => id.startsWith('RETRIEVE:known:station:crafting_table')) &&
+        !grounded.candidates.some((candidate) => candidate.meta.prereqPath === 'craft_and_place') &&
         !candidateIds.some((id) => id === 'CRAFT:furnace') &&
         !candidateIds.some((id) => id === 'CRAFT:crafting_table') &&
-        selectPrereqPath(decision) !== null,
-      `ids=[${ids(grounded.candidates)}] chosen=${selectPrereqPath(decision)}`,
+        chosen === 'use_known_station' &&
+        decision.chosen === 'use_known_station' &&
+        craft?.feasible === false &&
+        craft.reason === 'station_already_known' &&
+        withheld !== null &&
+        marker.startsWith('PREREQ_STATION_ALREADY_KNOWN') &&
+        marker.includes('station=furnace') &&
+        marker.includes('held=0') &&
+        marker.includes('next=use_known_station'),
+      `ids=[${ids(grounded.candidates)}] chosen=${chosen} craft=${craft?.reason ?? 'missing'} marker=${marker}`,
     )
   }
 
@@ -285,34 +305,129 @@ function main(): void {
     )
   }
 
-  // (h) KNOWN RESIDUAL (owner decision needed; owned by the smelt prerequisite
-  // lane, not by this rule). Once the body has walked to the remembered table it
-  // becomes SENSED, and `prereqOption.ts#craftAndPlaceOption` (the #58 cost model)
-  // still prefers crafting a furnace over walking to one of the 17 known
-  // furnaces, so a duplicate `CRAFT:furnace` is offered with 17 furnaces known.
-  // This case PINS the boundary as executable evidence instead of prose: the
-  // station-use rule owns the craft-goal path (cases (a)-(g)); the smelt
-  // prerequisite's cost model is pinned by buddy-driver/test-furnace-place
-  // (33/33 required green: "blacklisted remembered furnace + held table chooses
-  // craft_and_place", "#11 v2: smelt charcoal + cobblestone 67 + reachable
-  // remembered table", "the abandoned craft path still yields the acquisition
-  // route"), and changing it invalidates those cases. Report it, do not silently
-  // rewrite another lane's acceptance.
+  // (h) THE RESIDUAL, NOW FIXED (owner decision 2026-09-21; was pinned as a KNOWN
+  // RESIDUAL by lane c4a0c7ec). The measured probe shape: the body walks to a
+  // remembered table, so a table becomes SENSED, and
+  // `prereqOption.ts#craftAndPlaceOption` used to prefer crafting a furnace over
+  // walking to one of the 17 known furnaces:
+  //   candidates=[CRAFT:furnace, RETRIEVE:known:station:furnace:b140_59_30, WAIT]
+  //   chosen=craft_and_place
+  // The duplicate craft is now INELIGIBLE (a usable station exists), so the same
+  // shape offers the known-furnace route only, chooses it, and the controller's
+  // `filterFurnacePrerequisiteCandidates` keeps that route. The table no longer
+  // routes the craft step because there is no craft step to route.
   {
     const state = world(smeltGoal(), { raw_iron: 3, coal: 4, cobblestone: 200 }, MANY_STATIONS, {
       craftingTables: [{ ...SENSED_TABLE, source: 'sensed' } as StationEntry],
     })
     const grounded = generateGroundedCandidates(state, options())
     const candidateIds = grounded.candidates.map((candidate) => candidate.id)
+    const input = furnacePrereqInputFromState(state, options())
+    const decision = planPrereqOptions(input)
+    const chosen = selectPrereqPath(decision)
+    const furnaceTravel = grounded.candidates.find(
+      (candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'furnace',
+    )
+    const craft = decision.options.find((option) => option.path === 'craft_and_place')
+    const withheld = prereqWithheldCraft(decision)
+    const marker =
+      withheld === null || input.knownStation === null
+        ? 'none'
+        : formatPrereqStationKnown(input.knownStation, input.heldCount, chosen)
+    // The sensed table is still what #58 decides about (case (g)); it is NOT what
+    // blocks the duplicate craft - the known furnace is.
+    const sensedTablePresent = input.tableAvailable === true && input.placedCount === 0
+    check(
+      '(h) the fixed residual: the smelt prerequisite walks to a known furnace instead of crafting a duplicate',
+      candidateIds.length === 2 &&
+        candidateIds[0] === 'RETRIEVE:known:station:furnace:b140_59_30' &&
+        !candidateIds.some((id) => id === 'CRAFT:furnace') &&
+        furnaceTravel !== undefined &&
+        furnaceTravel.meta.prereqPath === 'use_known_station' &&
+        chosen === 'use_known_station' &&
+        craft?.feasible === false &&
+        craft.reason === 'station_already_known' &&
+        sensedTablePresent &&
+        withheld !== null &&
+        marker === 'PREREQ_STATION_ALREADY_KNOWN station=furnace at=140,59,30 held=0 next=use_known_station',
+      `ids=[${ids(grounded.candidates)}] chosen=${chosen} craft=${craft?.reason ?? 'missing'} marker=${marker}`,
+    )
+  }
+
+  // (h2) NO usable station anywhere (no furnace known, none held) + a usable sensed
+  // table: crafting the furnace is STILL correct, so craft_and_place wins and no
+  // withheld-craft marker is emitted. This is the "crafting a station stays correct
+  // when no usable station exists anywhere and none is held" half of the rule.
+  {
+    const state = world(smeltGoal(), { raw_iron: 3, coal: 4, cobblestone: 200 }, MANY_TABLES, {
+      craftingTables: [{ ...SENSED_TABLE, source: 'sensed' } as StationEntry],
+    })
+    const grounded = generateGroundedCandidates(state, options())
+    const candidateIds = grounded.candidates.map((candidate) => candidate.id)
     const decision = planPrereqOptions(furnacePrereqInputFromState(state, options()))
     const craft = decision.options.find((option) => option.path === 'craft_and_place')
+    const craftCandidate = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
     check(
-      '(h) KNOWN RESIDUAL: the smelt prereq still prefers craft_and_place when a sensed table is available',
-      candidateIds.includes('CRAFT:furnace') &&
+      '(h2) with no usable furnace anywhere the furnace craft is still the chosen route',
+      selectPrereqPath(decision) === 'craft_and_place' &&
+        decision.chosen === 'craft_and_place' &&
         craft?.feasible === true &&
-        selectPrereqPath(decision) === 'craft_and_place' &&
-        grounded.candidates.some((candidate) => candidate.kind === 'RETRIEVE' && candidate.meta.resource === 'furnace'),
+        craftCandidate !== undefined &&
+        craftCandidate.meta.prereqPath === 'craft_and_place' &&
+        prereqWithheldCraft(decision) === null &&
+        !candidateIds.some((id) => id === 'CRAFT:crafting_table'),
       `ids=[${ids(grounded.candidates)}] chosen=${selectPrereqPath(decision)} craft=${craft?.feasible === true ? 'feasible' : (craft?.reason ?? 'missing')}`,
+    )
+  }
+
+  // (h3) the case the three buddy-driver assertions encode: the remembered furnace
+  // is RETIRED (blacklisted / proven unreachable), so no usable station exists and
+  // the craft path is allowed again. A blacklisted cell still EXISTS, but it is not
+  // USABLE - this is the escape hatch that keeps an unreachable station from
+  // starving the smelt, and it is why the station-use rule keys on usability rather
+  // than mere existence.
+  {
+    const retired = MANY_FURNACES.map((entry) => knownStationKey({ name: 'furnace', position: entry.position }))
+    const blacklist = new Set(retired)
+    const state = world(smeltGoal(), { raw_iron: 3, coal: 4, cobblestone: 200 }, MANY_STATIONS, {
+      craftingTables: [{ ...SENSED_TABLE, source: 'sensed' } as StationEntry],
+    })
+    const grounded = generateGroundedCandidates(state, options(blacklist))
+    const decision = planPrereqOptions(furnacePrereqInputFromState(state, options(blacklist)))
+    const craft = decision.options.find((option) => option.path === 'craft_and_place')
+    const known = decision.options.find((option) => option.path === 'use_known_station')
+    const craftCandidate = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
+    check(
+      '(h3) a retired (blacklisted) remembered furnace makes the craft path legitimate again',
+      selectPrereqPath(decision) === 'craft_and_place' &&
+        craft?.feasible === true &&
+        known?.feasible === false &&
+        known.reason === 'known_station_unreachable' &&
+        craftCandidate !== undefined &&
+        craftCandidate.meta.prereqPath === 'craft_and_place' &&
+        prereqWithheldCraft(decision) === null,
+      `chosen=${selectPrereqPath(decision)} craft=${craft?.feasible === true ? 'feasible' : (craft?.reason ?? 'missing')} known=${known?.reason ?? 'missing'}`,
+    )
+  }
+
+  // (h4) a held station keeps the inventory-first place route (#78), unchanged by
+  // the rule: place_held stays the chosen path and craft_and_place stays ineligible
+  // for its own pre-existing reason (`furnace_already_held`), never
+  // `station_already_known`.
+  {
+    const state = world(smeltGoal(), { raw_iron: 3, coal: 4, cobblestone: 200, furnace: 1 }, MANY_STATIONS)
+    const grounded = generateGroundedCandidates(state, options())
+    const decision = planPrereqOptions(furnacePrereqInputFromState(state, options()))
+    const craft = decision.options.find((option) => option.path === 'craft_and_place')
+    const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE')
+    check(
+      '(h4) a held furnace keeps the place_held route and never reaches the station-use gate',
+      selectPrereqPath(decision) === 'place_held' &&
+        place !== undefined &&
+        place.meta.prereqPath === 'place_held' &&
+        craft?.feasible === false &&
+        craft.reason === 'furnace_already_held',
+      `chosen=${selectPrereqPath(decision)} place=${place?.id ?? 'none'} craft=${craft?.reason ?? 'missing'}`,
     )
   }
 
@@ -440,11 +555,14 @@ function main(): void {
     )
   }
 
-  // The wiring: the generator owns the rule and the controller mirrors the typed
-  // fact through the same marker family it already uses for craft prerequisites.
+  // The wiring: the generator owns the rule, the controller mirrors the typed
+  // fact through the same marker family it already uses for craft prerequisites,
+  // and the smelt prerequisite's withheld-craft fact is on the mirrored event path
+  // (run-scoped evidence that the duplicate craft was refused for a named reason).
   {
     const candidates = source('./src/candidates.ts')
     const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
+    const prereq = source('./src/prereqOption.ts')
     const wired =
       candidates.includes('function stationWorldTruth') &&
       candidates.includes('function stationCraftAllowed') &&
@@ -455,11 +573,17 @@ function main(): void {
       candidates.includes('CRAFT_STATION_ALREADY_KNOWN') &&
       candidates.includes('remembered: nearestFirst') &&
       controller.includes('logCraftStationGap(') &&
-      controller.includes('CRAFT_STATION_ALREADY_KNOWN')
+      controller.includes('CRAFT_STATION_ALREADY_KNOWN') &&
+      prereq.includes('export function prereqWithheldCraft') &&
+      prereq.includes('export function formatPrereqStationKnown') &&
+      prereq.includes('STATION_ALREADY_KNOWN_REASON') &&
+      controller.includes('prereqWithheldCraft(decision)') &&
+      controller.includes('formatPrereqStationKnown(') &&
+      MIRRORED_MARKERS.has(PREREQ_STATION_ALREADY_KNOWN)
     check(
       '(f) the rule, the typed fact and the controller mirror are wired',
       wired,
-      `truth=${candidates.includes('function stationWorldTruth')} allowed=${candidates.includes('function stationCraftAllowed')} planStep=${candidates.includes('function planStepCraftsKnownStation')} gap=${candidates.includes('export function craftStationGap')} ladder=${candidates.includes('function stationAcquisitionCandidates')} durable=${candidates.includes('remembered: nearestFirst')} log=${controller.includes('logCraftStationGap(')}`,
+      `truth=${candidates.includes('function stationWorldTruth')} allowed=${candidates.includes('function stationCraftAllowed')} planStep=${candidates.includes('function planStepCraftsKnownStation')} gap=${candidates.includes('export function craftStationGap')} ladder=${candidates.includes('function stationAcquisitionCandidates')} durable=${candidates.includes('remembered: nearestFirst')} log=${controller.includes('logCraftStationGap(')} withheld=${controller.includes('prereqWithheldCraft(decision)')} mirrored=${MIRRORED_MARKERS.has(PREREQ_STATION_ALREADY_KNOWN)}`,
     )
   }
 

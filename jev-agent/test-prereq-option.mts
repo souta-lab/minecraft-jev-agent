@@ -66,7 +66,15 @@ addCase('(a) a held furnace wins place_held and logs the alternatives', () => {
   return { pass, detail: line }
 })
 
-addCase('(a2) crafting beats walking when the known station is far and materials are held', () => {
+// OPERATOR DECISION 2026-09-21 (station-use-before-craft): (a2) and (a3) used to
+// pin "crafting a duplicate station beats walking to a known one" - (a2) because
+// the walk was far, (a3) because it was close. Both were the duplicate-craft
+// preference the operator reported. A usable, non-blacklisted station of the
+// needed kind now makes craft_and_place INELIGIBLE, so existence - not distance -
+// decides: the plan walks to the station it already has. The cost model still
+// orders the eligible paths (a1, a6); it no longer decides whether a station that
+// already exists may be crafted again.
+addCase('(a2) a known station makes the duplicate craft ineligible even when it is far', () => {
   const decision = planPrereqOptions(
     input({
       stoneCount: 8,
@@ -74,11 +82,15 @@ addCase('(a2) crafting beats walking when the known station is far and materials
       knownStation: { name: 'furnace', position: { x: 60, y: 0, z: 0 } },
     }),
   )
-  const pass = decision.chosen === 'craft_and_place'
-  return { pass, detail: decision.line }
+  const craft = decision.options.find((option) => option.path === 'craft_and_place')
+  const pass =
+    decision.chosen === 'use_known_station' &&
+    craft?.feasible === false &&
+    craft.reason === 'station_already_known'
+  return { pass, detail: `${decision.line} | craft=${craft?.reason ?? 'missing'}` }
 })
 
-addCase('(a3) #78: crafting from held materials beats a close known station', () => {
+addCase('(a3) a close known station also blocks the duplicate craft (existence, not distance)', () => {
   const decision = planPrereqOptions(
     input({
       stoneCount: 8,
@@ -86,8 +98,12 @@ addCase('(a3) #78: crafting from held materials beats a close known station', ()
       knownStation: { name: 'furnace', position: { x: 3, y: 0, z: 0 } },
     }),
   )
-  const pass = decision.chosen === 'craft_and_place'
-  return { pass, detail: decision.line }
+  const craft = decision.options.find((option) => option.path === 'craft_and_place')
+  const pass =
+    decision.chosen === 'use_known_station' &&
+    craft?.feasible === false &&
+    craft.reason === 'station_already_known'
+  return { pass, detail: `${decision.line} | craft=${craft?.reason ?? 'missing'}` }
 })
 
 addCase('(a4) live M2 blocker: a blacklisted known station loses to craft_and_place, not WAIT', () => {
@@ -108,7 +124,11 @@ addCase('(a4) live M2 blocker: a blacklisted known station loses to craft_and_pl
   return { pass, detail: `${decision.line} | known=${known?.reason ?? 'missing'}` }
 })
 
-addCase('(a5) #11 v2: the cheaper feasible path wins, rank is only a shadow baseline', () => {
+// Re-pinned (owner decision 2026-09-21): with the known station present the craft
+// path is ineligible, so the cost order and its rank shadow are logged over the
+// eligible set (use_known_station cost 48 wins outright). The "cost decides, rank
+// is only a shadow" property is pinned by (a6), where the two policies diverge.
+addCase('(a5) #11 v2: with the duplicate craft ineligible the cost order and shadow cover the eligible set', () => {
   const decision = planPrereqOptions(
     input({
       stoneCount: 8,
@@ -120,14 +140,14 @@ addCase('(a5) #11 v2: the cheaper feasible path wins, rank is only a shadow base
   const known = decision.options.find((option) => option.path === 'use_known_station')
   const shadow = formatPrereqRankShadow(decision, decision.chosen)
   const pass =
-    decision.chosen === 'craft_and_place' &&
+    decision.chosen === 'use_known_station' &&
     decision.policy === 'cost' &&
-    craft?.feasible === true &&
-    craft.cost === 4 &&
+    craft?.feasible === false &&
+    craft.reason === 'station_already_known' &&
     known?.feasible === true &&
     known.cost === 48 &&
-    shadow === 'PREREQ_RANK_SHADOW policy=cost cost_choice=craft_and_place rank_choice=craft_and_place agree=true'
-  return { pass, detail: `${decision.line} | ${shadow} | craft=${craft?.cost ?? 'none'} known=${known?.cost ?? 'none'}` }
+    shadow === 'PREREQ_RANK_SHADOW policy=cost cost_choice=use_known_station rank_choice=use_known_station agree=true'
+  return { pass, detail: `${decision.line} | ${shadow} | craft=${craft?.reason ?? 'missing'} known=${known?.cost ?? 'none'}` }
 })
 
 addCase('(a6) #11 v2: cost and rank diverge -> cost decides, rank shadow-logged, env restores rank', () => {
@@ -166,7 +186,11 @@ addCase('(2) selectPrereqPath never returns null while a feasible option exists'
   const pass =
     selectPrereqPath(onlyCraft, new Set<PrereqPath>(['craft_and_place'])) === 'craft_and_place' &&
     selectPrereqPath(onlyCraft, allAbandoned) === 'craft_and_place' &&
-    selectPrereqPath(withKnown, allAbandoned) === 'craft_and_place' &&
+    // Re-pinned (owner decision 2026-09-21): with a usable known station the craft
+    // path is ineligible, so the all-abandoned fallback returns the one feasible
+    // path (use_known_station) rather than the duplicate craft. The property under
+    // test - abandonment is a preference, never null while a route exists - holds.
+    selectPrereqPath(withKnown, allAbandoned) === 'use_known_station' &&
     selectPrereqPath(withKnown, new Set<PrereqPath>(['craft_and_place'])) === 'use_known_station' &&
     selectPrereqPath(noFeasible, new Set<PrereqPath>()) === null &&
     selectPrereqPath(noFeasible, allAbandoned) === null

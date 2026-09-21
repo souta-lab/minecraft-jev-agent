@@ -305,6 +305,11 @@ function blacklistFromMemory(memory: MoveFailMemory, state: WorldState): Readonl
   return keys
 }
 
+// STILL CORRECT under the station-use-before-craft rule (owner decision
+// 2026-09-21): the ONLY remembered furnace here is blacklisted by the move-failure
+// memory, and a blacklisted cell is NOT usable, so no usable station exists and
+// crafting one is the legitimate route. This is the escape hatch that keeps an
+// unreachable station from starving a smelt. The assertion is unchanged.
 addCase('(live) blacklisted remembered furnace + held table chooses craft_and_place, never only WAIT', () => {
   const knownFurnace: KnownResource = { name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }
   const state = worldState({
@@ -368,7 +373,18 @@ addCase('(live) blacklisted furnace + a reachable remembered table walks to it u
   return { pass, detail: `${decision.line} | retrieve=${retrieve?.id ?? 'none'}` }
 })
 
-addCase('(live) #11 v2: smelt charcoal + cobblestone 67 + reachable remembered table is productive, never starving', () => {
+// OPERATOR DECISION 2026-09-21 (owner-authorized re-pin; was "#11 v2: smelt
+// charcoal + cobblestone 67 + reachable remembered table is productive, never
+// starving"): this shape knows a furnace at 29,61,35 as well as a table at
+// 40,29,35. The old expectation (`chosen=craft_and_place`) was the duplicate-craft
+// preference the operator reported ("it crafts a crafting table / furnace even
+// though one is nearby"): the #58 cost model scored craft+place at 4 against a
+// 54.3 walk, so it crafted a second furnace while a usable one was known.
+// A usable, non-blacklisted station now makes `craft_and_place` INELIGIBLE
+// (prereqOption.ts#craftAndPlaceOption), so the plan walks to the known furnace.
+// The case's real intent - never starve with a reachable route on the table - is
+// preserved: a productive, feasible acquisition route is still offered.
+addCase('(live) #11 v2: smelt charcoal + cobblestone 67 + a known furnace is walked to and stays productive, never starving', () => {
   const feet: Vec3Json = { x: 32, y: 40, z: 37 }
   const table: Vec3Json = { x: 40, y: 29, z: 35 }
   const furnaceStation: Vec3Json = { x: 29, y: 61, z: 35 }
@@ -418,28 +434,38 @@ addCase('(live) #11 v2: smelt charcoal + cobblestone 67 + reachable remembered t
     current: charcoal,
   })
   const decision = planPrereqOptions(furnacePrereqInputFromState(state, defaultCandidateOptions))
+  const craft = decision.options.find((option) => option.path === 'craft_and_place')
   const chosen = selectPrereqPath(decision, new Set<PrereqPath>(['craft_and_place']))
   const candidates = generateCandidates(state, defaultCandidateOptions)
-  const acquire = candidates.find((candidate) => candidate.id === 'RETRIEVE:known:station:crafting_table:b40_29_35')
+  const acquire = candidates.find((candidate) => candidate.id === 'RETRIEVE:known:station:furnace:b29_61_35')
+  const duplicate = candidates.find((candidate) => candidate.id === 'CRAFT:furnace')
   const kept =
     chosen === null ? [] : candidates.filter((candidate) => candidate.meta.prereqPath === undefined || candidate.meta.prereqPath === chosen)
   const blockedBy = goalStarvationBlockedBy(null, charcoal, [])
   const starvation = candidateStarvationLine(kept, 'smelt:charcoal:1', false, blockedBy, [])
   const shadow = formatPrereqRankShadow(decision, chosen)
   const pass =
-    decision.chosen === 'craft_and_place' &&
-    chosen !== null &&
+    decision.chosen === 'use_known_station' &&
+    craft?.feasible === false &&
+    craft.reason === 'station_already_known' &&
+    duplicate === undefined &&
+    chosen === 'use_known_station' &&
     kept.some((candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE') &&
     acquire !== undefined &&
-    acquire.meta.prereqPath === 'craft_and_place' &&
+    acquire.meta.prereqPath === 'use_known_station' &&
     acquire.affordance?.feasible === true &&
     starvation === null
   return {
     pass,
-    detail: `${decision.line} | ${shadow} | chosen=${chosen} acquire=${acquire?.id ?? 'none'} kept=[${kept.map((candidate) => candidate.id).join(',')}] starvation=${starvation ?? 'none'}`,
+    detail: `${decision.line} | ${shadow} | chosen=${chosen} acquire=${acquire?.id ?? 'none'} craft=${craft?.reason ?? 'missing'} kept=[${kept.map((candidate) => candidate.id).join(',')}] starvation=${starvation ?? 'none'}`,
   }
 })
 
+// STILL CORRECT under the station-use-before-craft rule (owner decision
+// 2026-09-21): the known furnace is retired by the explicit reachability
+// blacklist, so no USABLE station exists ("with the world paths gone") and the
+// craft-and-place path is legitimate again, reached through the remembered
+// table. The assertion is unchanged.
 addCase('(live) #11 v2: with the world paths gone the abandoned craft path still yields the acquisition route', () => {
   const feet: Vec3Json = { x: 32, y: 40, z: 37 }
   const table: Vec3Json = { x: 40, y: 29, z: 35 }
