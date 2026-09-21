@@ -52,8 +52,13 @@ export function isProtectedGoal(goal: ProtectableGoal): boolean {
   // may still carry `core=true` from the rung compiler; preserve explicit
   // prerequisites, but let a proven no-frontier replan retire this stale row.
   if (goal.protected === true) return true
-  if (goal.kind === 'collect' && goal.targetItem === 'food') return false
+  if (isReplaceableOptionalFoodGoal(goal)) return false
   return goal.core === true
+}
+ 
+/** Optional survival rows may be replaced when a patch changes the recovery route. */
+export function isReplaceableOptionalFoodGoal(goal: ProtectableGoal): boolean {
+  return goal.protected !== true && goal.kind === 'collect' && goal.targetItem === 'food'
 }
 
 /**

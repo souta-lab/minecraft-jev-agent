@@ -27,7 +27,7 @@ import {
   generateCandidates,
   generateGroundedCandidates,
 } from './src/candidates.ts'
-import { emptyGoalQueueState } from './src/goalQueue.ts'
+import { GoalQueue, emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { isProtectedGoal } from './src/protectedGoals.ts'
 import { buildWorldState, defaultSensorOptions, makeGoal } from './src/state.ts'
@@ -320,6 +320,30 @@ addCase('(d2c) persisted core food rows remain replaceable but prerequisites sta
   return {
     pass: !isProtectedGoal(food) && isProtectedGoal(prerequisite),
     detail: `foodProtected=${isProtectedGoal(food)} prerequisiteProtected=${isProtectedGoal(prerequisite)}`,
+  }
+})
+ 
+addCase('(d2d) a patch replaces a persisted active food row with a new semantic goal', () => {
+  const queue = new GoalQueue()
+  queue.restore({
+    counter: 1,
+    revision: 1,
+    goals: [
+      {
+        ...foodGoal(),
+        core: true,
+        protected: false,
+      },
+    ],
+  })
+  queue.applyPlan(
+    [{ kind: 'collect', description: 'collect 10 x obsidian', targetItem: 'obsidian', requiredCount: 10 }],
+    'llm',
+    'patch',
+  )
+  return {
+    pass: queue.current?.targetItem === 'obsidian',
+    detail: `current=${queue.current?.targetItem ?? 'none'} depth=${queue.state.depth}`,
   }
 })
 
