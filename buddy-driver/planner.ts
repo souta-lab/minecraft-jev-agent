@@ -236,6 +236,8 @@ export class PlannerBrain implements System2Brain {
   private readonly resolveKey: () => KeyResolution | null
   private readonly terminate: (() => never) | undefined
   private readonly refreshLiveFacts: (() => void) | undefined
+  /** dedupe for the SYSTEM2_PLAN_REQUEST_REASON diagnosis (#359) */
+  private lastLoggedPlanReason: string | null = null
   private readonly legacy: LegacyPlannerBrain
   private readonly mercury: MercurySystem2 | undefined
   private lastAuthorityProvider: string
@@ -328,6 +330,15 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
+    // One-line diagnosis for #359: the decision line reports `reason=queue_empty`,
+    // but the request's own field is what the trigger reads (and `trigger=no_candidate`
+    // never fired), so record the value actually carried here. Deduped by value to
+    // keep the log readable.
+    const reasonValue = String((request as { reason?: unknown }).reason ?? 'undefined')
+    if (this.lastLoggedPlanReason !== reasonValue) {
+      this.lastLoggedPlanReason = reasonValue
+      this.log('SYSTEM2_PLAN_REQUEST_REASON', { reason: reasonValue })
+    }
     let mercuryTrigger = mercuryTriggerFor(request)
     if (this.mercury !== undefined && (mercuryTrigger === 'wait_limit' || mercuryTrigger === 'no_candidate')) {
       // The `wait_limit` trigger is counter-shaped: an unchanged stall keeps
