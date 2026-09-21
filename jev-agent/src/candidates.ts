@@ -30,8 +30,8 @@ import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool } from './toolChoice.ts'
-import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
-import type { VerticalInput, VerticalPlan } from './verticalPlan.ts'
+import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
+import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { pickBestDescendStep } from './descendPlan.ts'
@@ -297,6 +297,14 @@ export interface GroundedCandidatesResult {
    */
   placeRefusal: PlaceRefusal | null
   /**
+   * Typed ascent refusal (`SURFACE_ASCENT_REFUSED reason=no_placeable|
+   * unsafe_column`) when the active `surface` goal's `targetY` is above the body
+   * beyond `VERTICAL_GAP` and no grounded vertical plan can be built. Non-null
+   * means "no route is enumerated AND the reason is said", the exact silence the
+   * 48-minute pacing loop ran in. Null when no surface ascent was requested.
+   */
+  surfaceAscentRefusal: SurfaceAscentRefusal | null
+  /**
    * Typed ignition refusal (`PORTAL_LIGHT_REFUSED` / `PRECONDITION_MISSING`)
    * when a portal goal's frame could not be lit. Null when no ignition was
    * requested this cycle (never when one was requested and withheld).
@@ -387,6 +395,61 @@ export function digsBotSupport(position: Vec3Json, target: Vec3Json | null): Dig
 /** The exact `DIG_DOWN_REFUSED` observability line for a refused dig-down MINE. */
 export function formatDigDownRefused(refusal: DigDownRefusal): string {
   return `DIG_DOWN_REFUSED reason=${refusal.reason} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+}
+
+/**
+ * Why a `surface` goal's upward gap has no grounded ascent route. `surface`
+ * goals (`kind: 'surface'`, `strategy: 'return_to_surface'`, `targetY` from
+ * `deriveUpperAccessTargetY`) exist to regain the surface, but the `default`
+ * branch of `generateRawCandidates` routed them through `mineCandidates`, which
+ * offers only the sensed log pool, and `retrievalCandidates`/`surfaceSpot`,
+ * which can only name a standable cell the sensor already saw (at most
+ * `floor(self.y) + 1`). No family enumerated the vertical leg the goal exists
+ * for, so the body paced inside the level-move set (live 48-minute loop: 144 x
+ * `MOVE:p3_6*`, zero ascent markers). This is the typed cause of that dead end:
+ * `no_placeable` (no block to pillar with) or `unsafe_column` (hazard in the
+ * ascent column).
+ */
+export interface SurfaceAscentRefusal {
+  reason: UpwardRefusalReason
+  /** the `surface` goal id the refused ascent belongs to */
+  goalId: string
+  /** feet Y the ascent would have started from */
+  fromY: number
+  /** the goal's requested target Y */
+  toY: number
+  /** the own-column feet cell the refused ascent belongs to */
+  cell: Vec3Json
+}
+
+/** The exact `SURFACE_ASCENT_REFUSED` observability line for the candidate layer. */
+export function formatSurfaceAscentRefused(refusal: SurfaceAscentRefusal): string {
+  return `SURFACE_ASCENT_REFUSED reason=${refusal.reason} goal=${refusal.goalId} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+}
+
+/**
+ * Deterministic feasibility fact for a `surface` goal whose ascent plan is
+ * refused: is ANY offered candidate a body-changing route? A sensed MINE, a
+ * locomotion MOVE, a dig STEP/DESCEND, a remembered RETRIEVE, an attached
+ * vertical plan, or a capability acquisition that could build the missing fact
+ * all count. When this is false the tick offers only WAIT/ESCALATE/EAT/EQUIP, so
+ * the Option provably cannot progress from the current state - the fact the
+ * controller may turn into `impossible` instead of pacing. Pure and exported so
+ * the threshold is testable without a bot, and deliberately broad so a single
+ * blocked pillar never erases a real alternative route.
+ */
+export function surfaceAscentRouteless(candidates: readonly Candidate[]): boolean {
+  return !candidates.some(
+    (candidate) =>
+      candidate.kind === 'MINE' ||
+      candidate.kind === 'MOVE' ||
+      candidate.kind === 'STEP' ||
+      candidate.kind === 'DESCEND' ||
+      candidate.kind === 'RETRIEVE' ||
+      candidate.meta.capabilityAcquisition === true ||
+      candidate.meta.surfaceAscent === true ||
+      (typeof candidate.meta.vertical === 'string' && candidate.meta.vertical !== 'none'),
+  )
 }
 
 /**
@@ -724,6 +787,7 @@ export function generateGroundedCandidates(
     raw.ignitionRefusal,
     raw.entryRefusal,
     raw.armorRefusals,
+    raw.surfaceAscentRefusal,
   )
 }
 
@@ -826,6 +890,13 @@ function generateRawCandidates(
       candidates.push(...mineCandidates(state, options, focusItem, descendTargetY))
       break
   }
+
+  // A `surface` goal's vertical route (the leg the goal exists for). Computed
+  // here so the typed refusal is available even when the family offers nothing,
+  // and appended after the explore fallback below so the level-move enumeration
+  // and the clearance filter are unchanged: CAN enumeration, never an override
+  // and never a rank.
+  const surfaceAscent = surfaceAscentCandidates(state, options)
 
   if (strategy === 'explore_cave') {
     const explore = pickExplore(
@@ -1000,6 +1071,7 @@ function generateRawCandidates(
   if (candidates.length === 0 || (declaredSourceNeedsExploration && !hasAdvancingRoute)) {
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
+  candidates.push(...surfaceAscent.candidates)
 
   candidates.push({
     id: 'WAIT',
@@ -1033,7 +1105,14 @@ function generateRawCandidates(
     })
   }
 
-  return { candidates, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals }
+  return {
+    candidates,
+    placeRefusal,
+    ignitionRefusal,
+    entryRefusal,
+    armorRefusals,
+    surfaceAscentRefusal: surfaceAscent.refusal,
+  }
 }
 
 /** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
@@ -1462,6 +1541,117 @@ function mineCandidates(
       mineDropAdvancesFocus(focusItem, mineCandidateDrop(state, candidate), options.recipes ?? null) ||
       mineSourceAdvancesFocus(focusItem, candidate),
   )
+}
+
+/** The candidate family plus the typed refusal that answers a `surface` goal. */
+export interface SurfaceAscentResult {
+  candidates: Candidate[]
+  refusal: SurfaceAscentRefusal | null
+}
+
+/**
+ * The vertical route a `surface` goal actually asks for.
+ *
+ * A `surface` goal (`recover_vertical_access`, `kind: 'surface'`, `targetY` from
+ * `deriveUpperAccessTargetY`) promises "recover vertical access to y>=N". The
+ * candidate layer used to answer it with level exploration MOVEs only: the
+ * `default` branch of `generateRawCandidates` routes it through `mineCandidates`
+ * (empty log pool when no log is sensed) and `retrievalCandidates`, whose
+ * `surfaceSpot` can only name a standable cell the sensor saw - never higher than
+ * `floor(self.y) + 1` (`buildTerrain` scans dy in [-1, +1]). Nothing enumerated
+ * the ascent, so the Option could never satisfy and the body shuffled inside the
+ * level set (measured: 144 x `MOVE:p3_6*` over 4 minutes, 0 ASCENT/PILLAR
+ * markers, 1533 blocks travelled / 0.815 net).
+ *
+ * This enumerates the SAME grounded vertical route the MINE/RETRIEVE paths
+ * already attach to an above target: reuse a remembered tunnel, cut an
+ * up-staircase, or pillar with a held placeable block. It is CAN enumeration -
+ * the route is appended alongside every other candidate, never an override and
+ * never ranked. When no grounded plan exists it returns the typed
+ * `SURFACE_ASCENT_REFUSED` refusal instead of silence, so the dead end is an
+ * explicit fact the controller can surface/re-plan on.
+ */
+export function surfaceAscentCandidates(state: WorldState, options: CandidateOptions): SurfaceAscentResult {
+  const current = state.goalQueue?.current ?? null
+  if (current?.kind !== 'surface') return { candidates: [], refusal: null }
+  const targetY =
+    typeof current.targetY === 'number' && Number.isFinite(current.targetY) ? current.targetY : null
+  if (targetY === null) return { candidates: [], refusal: null }
+  const self = state.self.position
+  const feet = { x: Math.floor(self.x), y: Math.floor(self.y), z: Math.floor(self.z) }
+  if (targetY - self.y <= VERTICAL_GAP) return { candidates: [], refusal: null }
+  // The same own-column target the controller's pure plan refusal uses
+  // (`ascentRefusedByPlan`), so the offered candidate and the refusal describe
+  // the same plan.
+  const target = { x: feet.x, y: targetY, z: feet.z }
+  const decision = planVerticalApproachDetailed(verticalInputFor(state, target))
+  if (decision.plan === null) {
+    const refusal = decision.ascentRefusal
+    if (refusal === null) return { candidates: [], refusal: null }
+    return {
+      candidates: [],
+      refusal: {
+        reason: refusal.reason,
+        goalId: current.id,
+        fromY: refusal.fromY,
+        toY: refusal.toY,
+        cell: refusal.cell,
+      },
+    }
+  }
+  const plan = decision.plan
+  const targetCell =
+    plan.kind === 'pillar' ? { x: feet.x, y: plan.toY, z: feet.z } : plan.kind === 'reuse' ? plan.tunnel : plan.step
+  const tunnelFallback =
+    plan.kind === 'reuse' ? planVerticalApproach({ ...verticalInputFor(state, target), tunnel: null }) : null
+  const verticalMeta = {
+    ...verticalPlanMeta(plan, feet.y, targetY),
+    ...(plan.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+  }
+  const digTool =
+    plan.kind === 'staircase'
+      ? selectDigTool(
+          {
+            name: plan.digName ?? '',
+            harvestTool: plan.harvestTool ?? null,
+            harvestTier: plan.harvestTier ?? null,
+            diggable: true,
+          },
+          (tool, tier) => hasTool(state, tool, tier),
+        )
+      : null
+  return {
+    candidates: [
+      {
+        id: `ASCEND:surface:${blockId('p', targetCell)}`,
+        kind: 'MOVE',
+        label: `ascend toward the surface y>=${targetY}${verticalPlanLabel(plan)}`,
+        targetName: null,
+        target: targetCell,
+        targetEntityId: null,
+        itemName: null,
+        // The plan itself already proved the dig is executable (`selectUpStep`
+        // checks `canDigBlock` against the live inventory), so an up-staircase
+        // needs no separate tool gate here.
+        requiresTool: plan.kind === 'staircase',
+        toolName: digTool !== null && digTool.ok ? digTool.tool : null,
+        toolTier: plan.kind === 'staircase' ? plan.harvestTier : null,
+        inReach: distance(targetCell, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          x: targetCell.x,
+          y: targetCell.y,
+          z: targetCell.z,
+          surfaceAscent: true,
+          surfaceGoalId: current.id,
+          ascentTargetY: targetY,
+          ...verticalMeta,
+        },
+      },
+    ],
+    refusal: null,
+  }
 }
 
 /**
@@ -2213,6 +2403,8 @@ interface RawCandidatesResult {
   entryRefusal: PortalEntryRefusal | null
   /** carried armor pieces that are not better than what is worn (no churn) */
   armorRefusals: ArmorRefusal[]
+  /** typed ascent refusal for a `surface` goal with no grounded vertical route */
+  surfaceAscentRefusal: SurfaceAscentRefusal | null
 }
 
 /**
@@ -4041,6 +4233,7 @@ export function applyReachabilityGate(
   ignitionRefusal: IgnitionRefusal | null = null,
   entryRefusal: PortalEntryRefusal | null = null,
   armorRefusals: ArmorRefusal[] = [],
+  surfaceAscentRefusal: SurfaceAscentRefusal | null = null,
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -4155,7 +4348,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals, surfaceAscentRefusal }
 }
 
 /** null when the candidate carries no capability precondition of its own. */

@@ -59,6 +59,8 @@
     "issue43-test": "bun test ./test-issue43.mts",
     "fuel-guard-test": "bun test ./test-fuel-guard.mts",
     "vertical-plan-test": "bun test ./test-vertical-plan.mts",
+    "surface-ascent-test": "bun test ./test-surface-ascent.mts",
+    "vertical-recovery-shaft-test": "bun test ./test-vertical-recovery-shaft.mts",
     "log-route-test": "bun test ./test-log-route.mts",
     "craft-log-route-test": "bun test ./test-craft-log-route.mts",
     "wedge-guard-test": "bun test ./test-wedge-guard.mts",

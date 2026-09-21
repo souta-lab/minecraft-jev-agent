@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -513,6 +513,13 @@ function emptySignals(): AgentSignals {
 export const MAX_BLOCK_REACH = 5
 /** A repeated WAIT becomes a bounded replan first (never an immediate wedge). */
 const WAIT_REPLAN_LIMIT = 4
+/**
+ * A `surface` goal whose ascent plan is refused AND whose tick offers no
+ * body-changing route at all is marked `impossible` after this many consecutive
+ * candidate generations under the same refusal signature. Bounded so a
+ * transient blocked column never abandons a satisfiable Option.
+ */
+const SURFACE_ASCENT_IMPOSSIBLE_STREAK = 3
 /** Issue #45: an active RETRIEVE that stops closing distance for this many ticks escalates. */
 const RETRIEVAL_STALL_TICKS = resolveRetrievalStallTicks()
 /** Issue #41: a descend goal with no vertical progress for this many ticks escalates. */
@@ -1533,6 +1540,21 @@ export class JevController {
   private lastWorldStateTick = -1
   /** last logged `ASCENT_REFUSED` line, so one dead end is one line. */
   private lastAscentRefusalKey: string | null = null
+  /** last logged candidate-layer `SURFACE_ASCENT_REFUSED` line (one per signature). */
+  private lastSurfaceAscentRefusalKey: string | null = null
+  /**
+   * Latest candidate-layer ascent refusal for the active `surface` goal, plus
+   * whether the tick offered NO body-changing route at all (pure
+   * `surfaceAscentRouteless`). Read by the queue-sync surface branch: a refusal
+   * with no route, seen for several consecutive candidate generations under the
+   * same goal, is the deterministic "this Option cannot progress from this
+   * state" fact, so it becomes `impossible` instead of pacing.
+   */
+  private lastSurfaceAscentRefusal: SurfaceAscentRefusal | null = null
+  private lastSurfaceAscentRouteless = false
+  /** consecutive candidate generations that reported the same refusal signature. */
+  private surfaceAscentRefusalStreak = 0
+  private surfaceAscentRefusalStreakKey: string | null = null
   private lastSurfaceGoalId: string | null = null
   private fuelSatisfiedKey: string | null = null
   private readonly loggedUnreachableMoves = new Set<string>()
@@ -2194,6 +2216,7 @@ export class JevController {
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
       this.logArmorRefusal(grounded.armorRefusals)
+      this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
@@ -4321,7 +4344,41 @@ export class JevController {
         ...this.predicateSnapshot(),
         inventory: this.inventorySnapshot(),
       })
-      if (evaluation === null || !evaluation.satisfied) return
+      if (evaluation === null || !evaluation.satisfied) {
+        // Deterministic feasibility (CAN/TRUE, not a preference): the candidate
+        // layer proved there is no grounded ascent route for this `targetY`, the
+        // tick offered NO body-changing route at all (`surfaceAscentRouteless`),
+        // and that same refusal has held for several consecutive candidate
+        // generations under this goal. The Option provably cannot progress from
+        // this state, so mark it impossible and let System2 replace it instead of
+        // the body pacing in the level-move set (the measured 48-minute loop).
+        // The stale CAPABILITY_GAP marker is dropped here so the planner's
+        // forced-surface path (planner-legacy `forcedSurface`) cannot immediately
+        // re-issue the same impossible row; the durable log lines remain.
+        const refusal = this.lastSurfaceAscentRefusal
+        if (
+          refusal !== null &&
+          this.lastSurfaceAscentRouteless &&
+          this.surfaceAscentRefusalStreak >= SURFACE_ASCENT_IMPOSSIBLE_STREAK &&
+          refusal.goalId === current.id
+        ) {
+          const impossible = this.queue.markImpossible(
+            `surface goal '${current.id}' has no grounded ascent route (${formatSurfaceAscentRefused(refusal)})`,
+          )
+          if (impossible !== null) {
+            this.capabilityGapActive = false
+            this.capabilityGapSignature = null
+            this.lastSurfaceAscentRefusal = null
+            this.lastSurfaceAscentRefusalKey = null
+            this.surfaceAscentRefusalStreak = 0
+            this.surfaceAscentRefusalStreakKey = null
+            this.recentEvents = this.recentEvents.filter((line) => !line.startsWith('CAPABILITY_GAP '))
+            this.recentEvents.push(`goal impossible: ${impossible.description}`)
+            this.summonLlm('action_impossible', `current goal is not executable: ${impossible.description}`)
+          }
+        }
+        return
+      }
       const beforeId = current.id
       const beforeDescription = current.description
       this.queue.markDone()
@@ -6544,6 +6601,40 @@ export class JevController {
         this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
       }
     }
+  }
+
+  /**
+   * Surface the generator's typed ascent refusal (`SURFACE_ASCENT_REFUSED
+   * reason=no_placeable|unsafe_column goal=... from_y=... to_y=...`) once per
+   * distinct refusal, and retain the two facts the queue-sync `surface` branch
+   * needs. The measured 48-minute loop ran with no route enumerated AND nothing
+   * saying why; this makes the dead end explicit and feeds the existing
+   * capability-gap latch so the planner re-plans instead of the body pacing
+   * inside the level-move set. The refusal is a deterministic plan fact, not a
+   * semantic preference.
+   */
+  private noteSurfaceAscent(refusal: SurfaceAscentRefusal | null, candidates: readonly Candidate[]): void {
+    this.lastSurfaceAscentRefusal = refusal
+    // Pure candidate fact: is any body-changing route on offer at all? A single
+    // refused pillar must never erase a real level/mine/step alternative.
+    this.lastSurfaceAscentRouteless = surfaceAscentRouteless(candidates)
+    if (refusal !== null) this.ascendRefusedSinceObservation = true
+    const key = refusal === null ? null : formatSurfaceAscentRefused(refusal)
+    if (key === null || key !== this.surfaceAscentRefusalStreakKey) {
+      this.surfaceAscentRefusalStreakKey = key
+      this.surfaceAscentRefusalStreak = key === null ? 0 : 1
+    } else {
+      this.surfaceAscentRefusalStreak += 1
+    }
+    if (key === this.lastSurfaceAscentRefusalKey) return
+    this.lastSurfaceAscentRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn(
+      'agent',
+      formatSurfaceAscentRefused(refusal),
+      { ...refusal, goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
   }
 
   /**
