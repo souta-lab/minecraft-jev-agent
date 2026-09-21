@@ -274,6 +274,7 @@ Options:
   --base-delay-ms N     first backoff delay (default ${DEFAULTS.baseDelayMs})
   --max-delay-ms N      backoff ceiling (default ${DEFAULTS.maxDelayMs})
   --reset-after-ms N    a run alive at least this long resets the failure streak
+  --budget-delay-ms <ms>  backoff for a model-budget exit (default 1800000)
                         (default ${DEFAULTS.resetAfterMs})
   --root PATH           shared tree root (default ${MC_AI_ROOT})
   --driver-dir PATH     directory the host runs from (default <root>/buddy-driver)
