@@ -35,7 +35,8 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
-import { countSensedPortalFrameBlocks, detectLivePortalVerification } from '../jev-agent/src/state.ts'
+import { portalFrameLayout } from '../jev-agent/src/netherPortalPlan.ts'
+import { countSensedPortalFrameBlocks, detectLivePortalVerification, sensedVerifiedPortalSites } from '../jev-agent/src/state.ts'
 import {
   PlannerBrain,
   RUNGS,
@@ -57,6 +58,7 @@ import type {
   GenerationContext,
   GenerationResources,
   GenerationStatus,
+  KnownPortalSiteJson,
   KnownResourceJson,
   KnownStation,
   MissionPreflightResult,
@@ -364,6 +366,144 @@ export function evictStaleKnownResources(
     if (resource !== undefined && staleKeys.has(resourceKey(resource))) known.splice(index, 1)
   }
   return stale
+}
+
+/**
+ * #80: proof distance for the durable portal site. A remembered site within this
+ * radius was loaded while the bot stood there, so a live re-check that finds no
+ * lit portal at the site is proof the record is stale. Outside the radius,
+ * absence proves nothing and the entry is left alone (same rule as #14).
+ */
+export const PORTAL_SITE_PROOF_DISTANCE = 8
+
+export interface PortalSiteSyncResult {
+  /** the durable list after record + refresh + eviction */
+  known: KnownPortalSiteJson[]
+  /** newly verified sites to merge into durable memory */
+  added: KnownPortalSiteJson[]
+  /** disproved / foreign-epoch sites to drop from durable memory */
+  removed: KnownPortalSiteJson[]
+}
+
+function portalOriginKey(site: { x: number; y: number; z: number }): string {
+  return `${Math.round(site.x)},${Math.round(site.y)},${Math.round(site.z)}`
+}
+
+function normalizePortalDimension(dimension: string): string {
+  return dimension.replace(/^minecraft:/, '').toLowerCase()
+}
+
+/**
+ * #80 pure durable-site lifecycle. It records live-verified portal sites, keeps
+ * existing records fresh, drops records the live re-check disproved while the bot
+ * is close enough to trust the absence, and drops records from a previous world
+ * epoch or dimension. It never decides "go there": it only maintains the CAN
+ * fact "a verified portal exists at P".
+ */
+export function syncKnownPortalSites(input: {
+  known: readonly KnownPortalSiteJson[]
+  liveVerified: readonly {
+    origin: Vec3Json
+    widthAxis: 'x' | 'z'
+    frame?: readonly Vec3Json[]
+    interior?: readonly Vec3Json[]
+  }[]
+  worldKey: { dimension: string; worldEpoch: number }
+  position: Vec3Json
+  now?: number
+  proofDistance?: number
+}): PortalSiteSyncResult {
+  const now = input.now ?? Date.now()
+  const proofDistance = input.proofDistance ?? PORTAL_SITE_PROOF_DISTANCE
+  const liveKeys = new Set(input.liveVerified.map((site) => portalOriginKey(site.origin)))
+  const added: KnownPortalSiteJson[] = []
+  const removed: KnownPortalSiteJson[] = []
+  const kept: KnownPortalSiteJson[] = []
+  const seen = new Set<string>()
+  for (const site of input.known) {
+    const key = portalOriginKey(site)
+    if (seen.has(key)) continue
+    // World-epoch / dimension re-anchoring: a coordinate is only meaningful in
+    // the world it was verified in, so a stale record is dropped, never probed.
+    if (site.worldEpoch !== undefined && site.worldEpoch !== input.worldKey.worldEpoch) {
+      removed.push(site)
+      continue
+    }
+    if (
+      site.dimension !== undefined &&
+      site.dimension.length > 0 &&
+      normalizePortalDimension(site.dimension) !== normalizePortalDimension(input.worldKey.dimension)
+    ) {
+      removed.push(site)
+      continue
+    }
+    if (liveKeys.has(key)) {
+      seen.add(key)
+      kept.push({
+        ...site,
+        lastVerifiedAt: now,
+        ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+        ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+      })
+      continue
+    }
+    const distance = Math.hypot(site.x - input.position.x, site.y - input.position.y, site.z - input.position.z)
+    // The bot is close enough that a still-lit portal would have been sensed. The
+    // live re-check returned nothing at this site, so the record is disproved.
+    if (distance <= proofDistance) {
+      removed.push(site)
+      continue
+    }
+    seen.add(key)
+    kept.push({ ...site })
+  }
+  for (const site of input.liveVerified) {
+    const key = portalOriginKey(site.origin)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const record: KnownPortalSiteJson = {
+      x: Math.round(site.origin.x),
+      y: Math.round(site.origin.y),
+      z: Math.round(site.origin.z),
+      widthAxis: site.widthAxis,
+      dimension: input.worldKey.dimension,
+      worldEpoch: input.worldKey.worldEpoch,
+      lastVerifiedAt: now,
+      ...(site.frame === undefined ? {} : { frame: site.frame.map((cell) => ({ ...cell })) }),
+      ...(site.interior === undefined ? {} : { interior: site.interior.map((cell) => ({ ...cell })) }),
+    }
+    added.push(record)
+    kept.push(record)
+  }
+  return { known: kept, added, removed }
+}
+
+/**
+ * #80: expose durable portal sites as CAN-only known-resource entries. The
+ * `'portal'` kind is inert to the ore/log/station retrieval matches; the sensor
+ * projects it back into `portalFrameSites` so the existing portal grounding
+ * machinery gets the route to the site. It never asserts the portal is lit.
+ */
+export function portalSiteKnownResources(
+  known: readonly KnownPortalSiteJson[],
+): {
+  name: string
+  kind: 'portal'
+  position: Vec3Json
+  widthAxis: 'x' | 'z'
+  dimension?: string
+  worldEpoch?: number
+  frameCells?: Vec3Json[]
+}[] {
+  return known.map((site) => ({
+    name: 'nether_portal',
+    kind: 'portal' as const,
+    position: { x: site.x, y: site.y, z: site.z },
+    widthAxis: site.widthAxis,
+    ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+    ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+    ...(site.frame === undefined ? {} : { frameCells: site.frame.map((cell) => ({ ...cell })) }),
+  }))
 }
 
 function scanBlockPositions(bot: Bot, blockNames: readonly string[], maxDistance: number, cap: number): Vec3Json[] {
@@ -703,11 +843,49 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mined: { ...ctx.worldMemory.mined },
     discoveredOres: [...ctx.worldMemory.discoveredOres],
     knownResources: (ctx.worldMemory.knownResources ?? []).map((resource) => ({ ...resource })),
+    knownPortalSites: (ctx.worldMemory.knownPortalSites ?? []).map((site) => ({ ...site })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
     portalVerified: detectLivePortalVerification(ctx.bot),
     dimension: String(ctx.bot.game?.dimension ?? ''),
+  }
+  /**
+   * #80: maintain the durable verified-portal-site record from live truth. The
+   * verdict itself stays live (`portalVerified`); this only records where a
+   * verified portal was, and drops the record when the live re-check disproves it
+   * at close range or the world epoch/dimension changed.
+   */
+  const syncPortalSiteMemory = (reason: string): { origin: Vec3Json; widthAxis: 'x' | 'z' }[] => {
+    const liveVerified = sensedVerifiedPortalSites(ctx.bot).map((site) => ({
+      origin: { x: site.origin.x, y: site.origin.y, z: site.origin.z },
+      widthAxis: site.widthAxis,
+      ...(site.existingFrame === undefined ? {} : { frame: site.existingFrame.map((cell) => ({ ...cell })) }),
+      interior: portalFrameLayout(site.origin, site.widthAxis).interior.map((cell) => ({ ...cell })),
+    }))
+    const entity = ctx.bot.entity
+    if (entity === undefined) return liveVerified
+    const result = syncKnownPortalSites({
+      known: world.knownPortalSites,
+      liveVerified,
+      worldKey: ctx.worldKey,
+      position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+    })
+    world.knownPortalSites = result.known
+    if (result.added.length === 0 && result.removed.length === 0) return liveVerified
+    ctx.proposeWorldMemory({
+      ...(result.added.length === 0 ? {} : { knownPortalSites: result.added }),
+      ...(result.removed.length === 0 ? {} : { removeKnownPortalSites: result.removed }),
+    })
+    ctx.log('PORTAL_SITE_MEMORY', {
+      reason,
+      source: 'live-world',
+      added: result.added.length,
+      removed: result.removed.length,
+      known: result.known.length,
+      removedSites: result.removed.map((site) => `${site.x},${site.y},${site.z}`),
+    })
+    return liveVerified
   }
   const refreshLiveFacts = (reason: string): void => {
     const nextDimension = String(ctx.bot.game?.dimension ?? '')
@@ -715,11 +893,18 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       world.dimension = nextDimension
       ctx.log('DIMENSION_TRUTH', { dimension: nextDimension, reason, source: 'live-world' })
     }
-    const next = detectLivePortalVerification(ctx.bot)
+    // One live scan supplies both the durable site record and the live-only
+    // verdict: `sensedVerifiedPortalSites` is the per-site form of
+    // `detectLivePortalVerification`, so a non-empty result IS the verdict.
+    const liveVerified = syncPortalSiteMemory(reason)
+    const next = liveVerified.length > 0
     if (next === world.portalVerified) return
     world.portalVerified = next
     ctx.log('PORTAL_TRUTH', { verified: next, reason, source: 'live-world' })
   }
+  // Record a portal that was already verified at generation start (e.g. after a
+  // hot reload) so it is durable before the bot can wander out of sensor range.
+  syncPortalSiteMemory('generation-start')
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const m2Snapshot =
     ctx.runId === undefined || ctx.m2SnapshotDir === undefined
@@ -943,7 +1128,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     placedFurnacesNear: furnaces.length,
     knownFurnaces: world.furnaces.length,
     resumeRungIndex: resume.rungIndex,
-    portalFrameBlocks: countSensedPortalFrameBlocks(ctx.bot),
+    // #80: a durable verified portal site is a complete 10-block frame. Feeding
+    // its coverage makes the portal rung re-verify the existing lit portal instead
+    // of planning a second obsidian collection/build after a respawn.
+    portalFrameBlocks: Math.max(countSensedPortalFrameBlocks(ctx.bot), world.knownPortalSites.length > 0 ? 10 : 0),
   })
   if (ladder.unsatisfiable !== null) {
     ctx.log('LADDER_UNSATISFIABLE', { reason: ladder.unsatisfiable, rungId: ladder.rungId })
@@ -1100,6 +1288,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         kind: 'station' as const,
         position: { x: table.x, y: table.y, z: table.z },
       })),
+      // #80: durable verified-portal sites ride the same known-resource envelope.
+      // The `portal` kind is CAN-only: it is the grounded route back to a site the
+      // live detector already verified, never a claim that the portal is lit now.
+      ...portalSiteKnownResources(world.knownPortalSites),
     ],
   }
 
