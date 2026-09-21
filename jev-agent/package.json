@@ -35,6 +35,7 @@
     "pillar-apex-test": "bun test ./test-pillar-apex.mts",
     "demo": "bun demo.mts",
     "guard-test": "bun test ./test-guard.mts",
+    "dig-down-guard-test": "bun test ./test-dig-down-guard.mts",
     "gating-test": "bun test ./test-gating.mts",
     "loop-test": "bun test ./test-loop.mts",
     "audit-test": "bun test ./test-audit.mts",
