@@ -124,6 +124,9 @@ export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWor
 }
 
 /** The gateway System2 model is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
+const MERCURY_INTENT_TTL_MS = 10 * 60_000
+const MERCURY_INTENT_MAX_USES = 3
+
 function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | null {
   let waitStreak = 0
   for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
@@ -236,6 +239,10 @@ export class PlannerBrain implements System2Brain {
   private readonly resolveKey: () => KeyResolution | null
   private readonly terminate: (() => never) | undefined
   private readonly refreshLiveFacts: (() => void) | undefined
+  /** last semantic plan, continued across a drained queue (#359) */
+  private lastMercuryPlan: System2Plan | null = null
+  private lastMercuryPlanAtMs = 0
+  private lastMercuryPlanUses = 0
   /** dedupe for the SYSTEM2_PLAN_REQUEST_REASON diagnosis (#359) */
   private lastLoggedPlanReason: string | null = null
   private readonly legacy: LegacyPlannerBrain
@@ -368,6 +375,12 @@ export class PlannerBrain implements System2Brain {
       })
       const repair = await this.mercury.tryRepair(request, mercuryTrigger)
       if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+      // #359: keep the semantic layer's intent so a drained queue continues the
+      // thread instead of immediately re-drawing the ladder menu. Bounded by TTL
+      // and reuse count so a stale plan cannot loop.
+      this.lastMercuryPlan = repair.plan
+      this.lastMercuryPlanAtMs = Date.now()
+      this.lastMercuryPlanUses = 0
       this.log('SYSTEM2_AUTHORITY_DECISION', {
         provider: this.provider,
         model: this.authorityModel,
@@ -378,6 +391,24 @@ export class PlannerBrain implements System2Brain {
         goals: repair.goals.map((goal) => goal.description),
       })
       return repair.plan
+    }
+    // #359: a drained queue right after a semantic proposal continues that proposal
+    // (up to the TTL and reuse bound) rather than replacing the thread with a fresh
+    // menu draw - the live M3 stall showed Mercury's `explore_cave` being executed and
+    // then discarded, so exploration never accumulated into the mission road.
+    if (
+      request.reason === 'queue_empty' &&
+      this.lastMercuryPlan !== null &&
+      this.lastMercuryPlanUses < MERCURY_INTENT_MAX_USES &&
+      Date.now() - this.lastMercuryPlanAtMs < MERCURY_INTENT_TTL_MS
+    ) {
+      this.lastMercuryPlanUses += 1
+      this.log('MERCURY_INTENT_CONTINUED', {
+        ageMs: Date.now() - this.lastMercuryPlanAtMs,
+        uses: this.lastMercuryPlanUses,
+        goals: this.lastMercuryPlan.goals.map((goal) => goal.description),
+      })
+      return this.lastMercuryPlan
     }
     this.lastAuthorityProvider = 'typesafe-ai'
     this.lastAuthorityModel = this.model
