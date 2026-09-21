@@ -2447,8 +2447,11 @@ export class JevController {
             const token = 'portal_frame_site:none'
             if (!missing.includes(token)) missing.push(token)
             // Name WHY every candidate origin was rejected (origin/axis/rule/
-            // cell/block) once, so `portal_frame_site:none` is never silent.
-            this.logPortalFrameSiteRejection(state)
+            // cell/block) once per distinct starvation signature, so
+            // `portal_frame_site:none` is never silent. The explainer re-runs
+            // the full origin sweep, so gate it on the first tick of a new
+            // signature instead of paying it on every starved tick.
+            if (this.noProductiveRepeats === 1) this.logPortalFrameSiteRejection(state)
           } else {
             const gap = frameBuildMaterialGap(state, OBSIDIAN)
             if (gap !== null) {
