@@ -31,7 +31,7 @@ import {
 import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
 import { compilePlannedGoal, queuedToPlanned, stableOptionInstanceId } from './optionSpec.ts'
 
-export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
+export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'goto' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
 
 /** Where a goal came from, for the decision log / debugging. */
 export type GoalOrigin = 'bootstrap' | 'llm' | 'mechanical'
@@ -137,6 +137,8 @@ export interface QueuedGoal {
   semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
+  /** Code-grounded navigation target. System2 selects the semantic goal but never supplies these coordinates. */
+  targetPosition?: PlacementCell | null
   /** how many relevant items the bot held when the goal was created */
   startCount: number
   /** live progress toward `requiredCount` (collect goals) */
@@ -173,6 +175,8 @@ export interface PlannedGoal {
   semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
+  /** Code-grounded navigation target. System2 selects the semantic goal but never supplies these coordinates. */
+  targetPosition?: PlacementCell | null
   detail?: string
   /** Issue #55: deterministic prerequisite; a patch/replace may not drop it. */
   protected?: boolean
@@ -229,6 +233,7 @@ export interface GoalQueueCurrentLog {
   haveCount: number
   requiredCount: number
   targetY: number | null
+  targetPosition?: PlacementCell | null
   optionInstanceId?: string | null
   optionTemplateId?: string | null
   semanticOptionInstanceId?: string | null
@@ -259,6 +264,7 @@ export function toGoalQueueStateLog(state: GoalQueueState): GoalQueueStateLog {
             haveCount: state.current.haveCount,
             requiredCount: state.current.requiredCount,
             targetY: state.current.targetY ?? null,
+            targetPosition: state.current.targetPosition ?? null,
             optionInstanceId: state.current.optionInstanceId ?? null,
             optionTemplateId: state.current.optionTemplateId ?? null,
             semanticOptionInstanceId: state.current.semanticOptionInstanceId ?? null,
@@ -512,6 +518,9 @@ export class GoalQueue {
       ...(plan.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: plan.semanticOptionTemplateId }),
       ...(plan.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: plan.semanticOptionIntent }),
       ...(plan.placementCells === undefined ? {} : { placementCells: [...plan.placementCells] }),
+      ...(plan.targetPosition === undefined
+        ? {}
+        : { targetPosition: plan.targetPosition === null ? null : { ...plan.targetPosition } }),
       startCount: 0,
       haveCount: 0,
       status: 'pending',

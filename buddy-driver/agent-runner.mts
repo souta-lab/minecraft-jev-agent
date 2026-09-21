@@ -28,6 +28,7 @@ import type {
   ActuationLease,
   AgentSnapshot,
   DeathHazard,
+  DeathRecoveryContext,
   GenerationContext,
   GenerationModule,
   GenerationResourceCounts,
@@ -66,6 +67,7 @@ import {
 import type { PendingProposals } from './proposal-staging.ts'
 import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
+import { isHostileEntityName } from '../jev-agent/src/state.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
@@ -565,6 +567,10 @@ let pendingResetReason: string | null = null
 let lastDeathAt = 0
 let lastHealth: number | null = null
 let lastSeenDeathPosition: Vec3Json | null = null
+let lastDeathRecoveryContext: DeathRecoveryContext | null = null
+const recentDeathTimes: number[] = []
+const DEATH_RECOVERY_WINDOW_MS = 2 * 60 * 1000
+const DEATH_HOSTILE_RADIUS = 16
 // #34: the last inventory observed while alive. A Mineflayer `death` read is
 // already post-drop, so the DEATH marker uses this instead of reading at death.
 const preLossInventory = createPreLossInventoryTracker()
@@ -880,6 +886,7 @@ function makeGenerationContext(
     goalItem: GOAL_ITEM,
     goalCount: GOAL_COUNT,
     resetReason: pendingResetReason,
+    deathRecovery: pendingResetReason === 'death' ? lastDeathRecoveryContext : null,
   }
 }
 
@@ -1222,6 +1229,22 @@ function registerDeathHazard(pos: Vec3Json, reason: string): DeathHazard {
   return hazard
 }
 
+function nearbyHostilesAtDeath(b: Bot, pos: Vec3Json | null): DeathRecoveryContext['nearbyHostiles'] {
+  if (pos === null) return []
+  const out: DeathRecoveryContext['nearbyHostiles'] = []
+  for (const candidate of Object.values(b.entities)) {
+    if (candidate.id === b.entity?.id || candidate.isValid === false || candidate.position === undefined) continue
+    const name = String(candidate.name ?? candidate.mobType ?? candidate.kind ?? 'unknown')
+    const kind = typeof candidate.kind === 'string' ? candidate.kind : undefined
+    if (!isHostileEntityName(name, kind)) continue
+    const distance = Math.hypot(candidate.position.x - pos.x, candidate.position.y - pos.y, candidate.position.z - pos.z)
+    if (distance > DEATH_HOSTILE_RADIUS) continue
+    out.push({ name, distance: Number(distance.toFixed(2)) })
+  }
+  out.sort((a, b2) => a.distance - b2.distance)
+  return out.slice(0, 8)
+}
+
 interface DeathRecoveryInput {
   cause: string
   source: HazardSource
@@ -1238,6 +1261,22 @@ function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json 
   const pos: Vec3Json | null = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
   const lost = input.telemetry.lostInventory
   const simulated = input.source === 'simulation'
+  const now = Date.now()
+  if (!simulated) {
+    while (recentDeathTimes.length > 0 && now - (recentDeathTimes[0] ?? now) > DEATH_RECOVERY_WINDOW_MS) recentDeathTimes.shift()
+    recentDeathTimes.push(now)
+    lastDeathRecoveryContext = {
+      occurredAt: now,
+      position: pos === null ? null : { ...pos },
+      dimension: state.dimension,
+      cause: input.cause,
+      lostInventory: { ...lost },
+      itemsLost: input.telemetry.itemsLost,
+      nearbyHostiles: nearbyHostilesAtDeath(b, pos),
+      recentDeathCount: recentDeathTimes.length,
+      recentDeathWindowMs: DEATH_RECOVERY_WINDOW_MS,
+    }
+  }
   log('DEATH', {
     pos: pos === null ? '?' : fmtPos(pos),
     dimension: state.dimension,
@@ -1249,7 +1288,7 @@ function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json 
     simulated,
     ...(input.rehearsalMode === undefined ? {} : { rehearsalMode: input.rehearsalMode }),
   })
-  lastDeathAt = Date.now()
+  lastDeathAt = now
   lastSeenDeathPosition = pos
   if (pos !== null) {
     if (shouldRegisterHazard(input.source)) {

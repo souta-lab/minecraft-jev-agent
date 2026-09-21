@@ -54,6 +54,7 @@ import {
 } from './planner.ts'
 import type { Counts, Rung } from './planner.ts'
 import type {
+  DeathRecoveryContext,
   GenerationContext,
   GenerationResources,
   GenerationStatus,
@@ -613,11 +614,12 @@ function restoreLedgerIntoController(
   }
 }
 
-function buildMercurySummary(
+export function buildMercurySummary(
   bot: Bot,
   world: ResidentWorldMemory,
   request: System2PlanRequest,
   trigger: MercuryTriggerReason,
+  deathRecovery: DeathRecoveryContext | null = null,
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
@@ -661,6 +663,27 @@ function buildMercurySummary(
     deathHistory: world.hazards.map(
       (hazard) => `${hazard.reason}@${Math.round(hazard.x)},${Math.round(hazard.y)},${Math.round(hazard.z)}x${hazard.count}`,
     ),
+    postDeath:
+      trigger === 'post_death' && deathRecovery !== null
+        ? {
+            latestDeathPoint:
+              deathRecovery.position === null
+                ? null
+                : {
+                    x: Math.round(deathRecovery.position.x),
+                    y: Math.round(deathRecovery.position.y),
+                    z: Math.round(deathRecovery.position.z),
+                  },
+            dimension: deathRecovery.dimension,
+            cause: deathRecovery.cause,
+            lostInventory: { ...deathRecovery.lostInventory },
+            itemsLost: deathRecovery.itemsLost,
+            nearbyHostiles: deathRecovery.nearbyHostiles.map((hostile) => ({ ...hostile })),
+            recentDeathCount: deathRecovery.recentDeathCount,
+            recentDeathWindowSec: Math.round(deathRecovery.recentDeathWindowMs / 1000),
+            recoveryChoices: ['recover_death_site', 'rebuild_equipment', 'leave_danger_area'] as const,
+          }
+        : null,
     allowedGoals: MERCURY_ALLOWED_GOALS,
   }
 }
@@ -977,13 +1000,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const mercuryCachePath = fileURLToPath(new URL(`./mercury-cache-${cacheNamespace}.json`, import.meta.url))
   const mercury = mercuryEnablement.enabled
     ? new MercurySystem2({
-        summarize: (request, trigger) => buildMercurySummary(bot, world, request, trigger),
+        summarize: (request, trigger) => buildMercurySummary(bot, world, request, trigger, ctx.deathRecovery ?? null),
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,
         worldKey: { serverId: ctx.worldKey.serverId, dimension: ctx.worldKey.dimension, worldEpoch: ctx.worldKey.worldEpoch },
         terminate: terminateResident,
         postDeathRecovery,
+        isCurrent: () => ctx.lease.isActive(id),
+        generationId: id,
       })
     : undefined
 

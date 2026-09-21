@@ -10,6 +10,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT,
   localMercuryTransport,
   MercurySystem2,
   resolveMercuryLocalEndpoint,
@@ -283,6 +284,46 @@ addCase('local transport forwards chat_template_kwargs to the server', async () 
   }
 })
 
+addCase('local Mercury default budget is effectively unbounded for resident use', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-local-budget-'))
+  const logs: string[] = []
+  const envBefore = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+  delete process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+  let transportCalls = 0
+  try {
+    const mercury = new MercurySystem2({
+      summarize: (request) => ({ ...mercurySummary(), wakeDetail: request.detail, recentFailures: [request.detail] }),
+      log: hostLog(logs),
+      callsPath: join(dir, 'mercury-calls.jsonl'),
+      cachePath: join(dir, 'mercury-cache.json'),
+      model: 'bonsai-local',
+      retries: 0,
+      localEndpoint: { baseUrl: 'http://127.0.0.1:8080/v1', apiKey: 'local' },
+      transport: async () => {
+        transportCalls += 1
+        return {
+          toolCalls: [{ input: JSON.parse(VALID_PLAN_JSON) }],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }
+      },
+    })
+    for (let i = 0; i < 25; i += 1) {
+      const repair = await mercury.tryRepair({ ...planRequest(), detail: `unique-${i}`, tick: i + 1 }, 'no_candidate')
+      if (repair === null) return { pass: false, detail: `repair null at i=${i}` }
+    }
+    const budgetLog = logs.find((line) => line.startsWith('ADVISOR_TRANSPORT')) ?? ''
+    const exhausted = logs.some((line) => line.startsWith('MERCURY_BUDGET_EXHAUSTED'))
+    const pass =
+      transportCalls === 25 &&
+      !exhausted &&
+      budgetLog.includes(`maxPerHour=${LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT}`)
+    return { pass, detail: `calls=${transportCalls} exhausted=${exhausted} transport=${budgetLog}` }
+  } finally {
+    if (envBefore === undefined) delete process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+    else process.env.BUDDY_SYSTEM2_MAX_PER_HOUR = envBefore
+  }
+})
+
 let failures = 0
 process.stdout.write('Mercury local OpenAI-compatible transport tests\n')
 process.stdout.write(`${'-'.repeat(72)}\n`)
@@ -295,4 +336,3 @@ for (const testCase of cases) {
 process.stdout.write(`${'-'.repeat(72)}\n`)
 process.stdout.write(`${cases.length - failures}/${cases.length} Mercury local transport cases passed\n`)
 if (failures > 0) process.exit(1)
-

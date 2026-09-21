@@ -337,7 +337,18 @@ export class PlannerBrain implements System2Brain {
       reason: request.reason,
     })
     const repair = await this.mercury.tryRepair(request, mercuryTrigger)
-    if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+    if (repair === null) {
+      if (!this.mercury.generationCurrent) {
+        this.log('SYSTEM2_STALE_DISCARD', {
+          provider: this.provider,
+          model: this.authorityModel,
+          trigger: mercuryTrigger,
+          reason: request.reason,
+        })
+        return { op: 'continue', goals: [], note: `stale Mercury result discarded (${mercuryTrigger})` }
+      }
+      return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+    }
     this.log('SYSTEM2_AUTHORITY_DECISION', {
       provider: this.provider,
       model: this.authorityModel,

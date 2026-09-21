@@ -1118,6 +1118,8 @@ function preconditionCauseName(predicate: Predicate): string {
       return `y<=${predicate.y}`
     case 'levelAtLeast':
       return `y>=${predicate.y}`
+    case 'positionNear':
+      return `position:${predicate.position.x},${predicate.position.y},${predicate.position.z}`
     case 'healthAtLeast':
       return 'health'
     case 'custom':
@@ -3676,6 +3678,54 @@ export class JevController {
   private syncQueue(trigger: DecisionTrigger): void {
     const current = this.queue.current
     if (current === null) return
+    if (current.kind === 'goto') {
+      const target = current.targetPosition ?? null
+      if (target === null) {
+        const impossible = this.queue.markImpossible(`goto goal '${current.id}' has no code-grounded target position`)
+        if (impossible !== null) {
+          this.recentEvents.push(`goal impossible: ${impossible.description}`)
+          this.summonLlm('action_impossible', `current goal is not executable: ${impossible.description}`)
+        }
+        return
+      }
+      const goalDimension = (current.dimension ?? '').replace(/^minecraft:/, '')
+      const liveDimension = this.currentDimension().replace(/^minecraft:/, '')
+      if (goalDimension.length > 0 && goalDimension !== liveDimension) {
+        const impossible = this.queue.markImpossible(
+          `goto goal '${current.id}' belongs to dimension ${current.dimension ?? 'unknown'} but live dimension is ${this.currentDimension()}`,
+        )
+        if (impossible !== null) {
+          this.recentEvents.push(`goal impossible: ${impossible.description}`)
+          this.summonLlm('action_impossible', `current goal is not executable: ${impossible.description}`)
+        }
+        return
+      }
+      const position = this.bot.entity.position
+      const distanceToTarget = Math.hypot(position.x - target.x, position.y - target.y, position.z - target.z)
+      if (distanceToTarget > 2.5) return
+      const beforeId = current.id
+      const beforeDescription = current.description
+      this.queue.markDone()
+      const after = this.queue.current
+      this.pendingTransition = {
+        fromId: beforeId,
+        fromDescription: beforeDescription,
+        toId: after?.id ?? null,
+        toDescription: after?.description ?? null,
+        trigger,
+        inventory: this.inventorySnapshot(),
+      }
+      this.lastProgressAt = Date.now()
+      this.lastProgress = 0
+      this.logger.warn(
+        'queue',
+        `subgoal COMPLETE [${beforeDescription}] -> [${after?.description ?? 'plan complete'}] trigger=${trigger} distance=${Math.round(distanceToTarget * 100) / 100}`,
+        { from: beforeId, to: after?.id ?? null, trigger, distance: distanceToTarget, target },
+        this.tickCounter,
+      )
+      if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}`)
+      return
+    }
     if (current.kind === 'descend') {
       // The plan was supplied before the smelt inputs were held, so the ore
       // descent that preceded the smelt is now a stale prerequisite. Retire it
@@ -4292,6 +4342,16 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
+        if (!this.running) {
+          this.logger.warn(
+            'system2',
+            'SYSTEM2_STALE_DISCARD reason=controller_stopped',
+            { reason, requestId: requestContext.requestId, note: plan.note, op: plan.op ?? 'replace' },
+            this.tickCounter,
+          )
+          this.llmInFlight = false
+          return
+        }
         const current = this.queue.state
         const currentContext: System2ApplyState = {
           queueRevision: this.queue.revision,
@@ -4364,6 +4424,15 @@ export class JevController {
       })
       .catch((error: unknown) => {
         this.llmInFlight = false
+        if (!this.running) {
+          this.logger.warn(
+            'system2',
+            'SYSTEM2_STALE_DISCARD reason=controller_stopped_error',
+            { reason, requestId: requestContext.requestId, error: describeFailure(error) },
+            this.tickCounter,
+          )
+          return
+        }
         const fatal = error instanceof FatalModelError ? error : new FatalModelError('system2-plan', 1, describeFailure(error))
         failLoud(fatal, (event, detail) => this.logger.error('system2', event, { reason, ...(detail ?? {}) }, this.tickCounter), this.options.terminateOnModelFailure)
       })

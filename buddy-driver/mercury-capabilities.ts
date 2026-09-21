@@ -37,6 +37,7 @@ export const MERCURY_TYPED_GOAL_KINDS = [
   'smelt',
   'goto',
   'goto_resource',
+  'recover_death_site',
   'descend_to',
   'explore',
   'build_portal_frame',
