@@ -14,6 +14,7 @@
     "contract-docs-test": "bun test ./test-contract-docs.mts",
     "ladder-test": "bun test ./test-ladder.mts",
     "prereq-dominated-test": "bun ./test-prereq-dominated.mts",
+    "descend-domination-test": "bun ./test-descend-domination.mts",
     "ladder-floor-test": "bun test ./test-ladder-floor.mts",
     "option-ladder-test": "bun test ./test-option-ladder.mts",
     "retrieval-body-test": "bun test ./test-retrieval-body.mts",

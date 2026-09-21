@@ -42,6 +42,7 @@ import type {
   WorldMemoryDelta,
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
+import { milestoneReport } from './milestone-report.ts'
 import { normalizeStation } from './station-memory.ts'
 import {
   capturePreLossInventory,
@@ -2075,13 +2076,22 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
     return
   }
   if (cmd === 'milestone' || cmd === 'goal') {
-    controlReply(socket, request, true, {
-      milestone: state.milestone,
-      milestoneIndex: state.milestoneIndex,
-      goalItem: GOAL_ITEM,
-      goalCount: GOAL_COUNT,
-      ledgerMirror: state.ledger,
-    })
+    // The live frontier owns what is outstanding work: serve the generation's
+    // projection, and fall back to the static M2 seed only until a generation has
+    // reported one (measured live `run-mubhn83u`: the frontier was `blaze_rods`
+    // while this reply still advertised the satisfied `iron_ingot x3` rung).
+    controlReply(
+      socket,
+      request,
+      true,
+      milestoneReport({
+        milestone: state.milestone,
+        milestoneIndex: state.milestoneIndex,
+        ledgerMirror: state.ledger,
+        status: lastStatus,
+        fallback: { goalItem: GOAL_ITEM, goalCount: GOAL_COUNT },
+      }),
+    )
     return
   }
   if (cmd === 'quit') {

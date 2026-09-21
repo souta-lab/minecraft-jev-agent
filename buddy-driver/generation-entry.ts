@@ -2195,6 +2195,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     refreshLiveFacts('status')
     const truth = readTruth()
     const frontier = deriveResumeRung(truth.inventory, world)
+    // The control socket's `milestone` reply is served by the HOST, so carry the
+    // same frontier projection the controller is seeded with: the frontier's own
+    // item-bearing goal, never the host's historical `iron_ingot x3` default.
+    const frontierGoals = buildLadder(truth.inventory, world, undefined, { resumeRungIndex: frontier.rungIndex }).goals
+    const rootGoal = compatibilityRootGoal(frontierGoals, { goalItem: ctx.goalItem, goalCount: ctx.goalCount })
     const current = controller.agent.current
     return {
       running: controller.isRunning,
@@ -2213,6 +2218,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       plannedGoals: ladder.goals.length,
       rungIndex: frontier.rungIndex,
       rungId: frontier.rungId,
+      goalItem: rootGoal.goalItem,
+      goalCount: rootGoal.goalCount,
       ledgerBasis: {
         worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
         frontierRungId: frontier.rungId,

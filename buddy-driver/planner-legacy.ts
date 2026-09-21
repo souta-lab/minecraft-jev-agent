@@ -29,7 +29,7 @@ import { dirname } from 'node:path'
 import type { Bot } from 'mineflayer'
 import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
-import type { PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
+import type { GoalKind, PlanOp, PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
@@ -1013,12 +1013,39 @@ export interface DominatedPrerequisite {
 }
 
 /**
+ * Row kinds whose `targetItem` names the item the row exists to ACQUIRE.
+ *
+ * `collect`/`craft`/`smelt` put that item into the inventory. `descend` and
+ * `explore` carry it as the item the row exists to REACH (Mercury's
+ * `explore:cave` compiles to `descend` + `targetItem:'raw_iron'`; see
+ * `optionSpec-legacy.ts` `rowSatisfiesPredicate`, which calls it a navigation
+ * hint) - and that reach-a-source purpose is exactly what this proof reasons
+ * about, so a descent for an item whose every consumer is already satisfied is
+ * obsolete work.
+ *
+ * Deliberately EXCLUDED: a `place` row's product is a WORLD structure verified
+ * by world truth (its `targetItem` is the material it spends, not a product),
+ * and `goto`/`surface`/`recover`/`unknown` are movement/recovery rows. The
+ * existing `#prereq-dominated` fixture (f) pins the place case: a lit/verified
+ * portal must not turn the obsidian frame row into a dominated row.
+ */
+const DOMINATED_PREREQUISITE_KINDS: ReadonlySet<GoalKind> = new Set<GoalKind>([
+  'collect',
+  'craft',
+  'smelt',
+  'descend',
+  'explore',
+])
+
+/**
  * #prereq-dominated: is an unfinished queued prerequisite still work?
  *
- * A producer row (collect/craft/smelt with a target item) whose product exists
- * only to feed ladder rungs can be retired when every purpose of that product is
- * already fulfilled - the same "consumers satisfied by better items" closure the
- * rung `satisfied` predicates already encode. Two code-owned proofs:
+ * A producer row (collect/craft/smelt with a target item) or an acquisition row
+ * (descend/explore, whose target item names the source it exists to reach) whose
+ * product/purpose exists only to feed ladder rungs can be retired when every
+ * purpose of that product is already fulfilled - the same "consumers satisfied by
+ * better items" closure the rung `satisfied` predicates already encode. Two
+ * code-owned proofs:
  *
  *   - producer_rung_satisfied: the rung(s) that emit this exact goal are already
  *     satisfied while the product is NOT held, so the satisfaction came from a
@@ -1033,6 +1060,12 @@ export interface DominatedPrerequisite {
  * Returning null keeps the row exactly as #55/orphan reconciliation left it.
  * Deliberately conservative: no consumer rung at all means "not a prerequisite I
  * can prove obsolete", never "retire".
+ *
+ * Measured live (`run-mubhn83u`, source 0ffa709): the gate was lit and verified,
+ * the frontier was `blaze_rods`, and the bot held `diamond_pickaxe=1` +
+ * `flint_and_steel=1`, yet an active `descend:raw_iron` row (Mercury's
+ * `explore:cave`) kept it digging down - `DOMINATED_PREREQUISITE_KINDS` is the
+ * filter that let that row survive, because `descend` was not in it.
  */
 export function dominatedPrerequisiteReason(
   goal: Pick<PlannedGoal, 'kind' | 'targetItem' | 'requiredCount'>,
@@ -1041,7 +1074,7 @@ export function dominatedPrerequisiteReason(
 ): DominatedPrerequisite | null {
   const item = goal.targetItem
   if (typeof item !== 'string' || item.length === 0) return null
-  if (goal.kind !== 'collect' && goal.kind !== 'craft' && goal.kind !== 'smelt') return null
+  if (!DOMINATED_PREREQUISITE_KINDS.has(goal.kind)) return null
   // A row whose own product is already complete is `DONE`, not dominated.
   if (goalAlreadyMet({ kind: goal.kind, description: '', targetItem: item, requiredCount: goal.requiredCount }, counts)) {
     return null
