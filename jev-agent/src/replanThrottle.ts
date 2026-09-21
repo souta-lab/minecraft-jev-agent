@@ -25,6 +25,13 @@
 //                   caller wakes System 2 with `LOCAL_RECOVERY_EXHAUSTED`.
 //                   Without this the WAIT-only stall could never produce a
 //                   fingerprint change and was held open indefinitely.
+//   5. ACTION FAIL - a DIFFERENT loop the counters above cannot see: the same
+//                   plan re-offered with its action failing the SAME typed way
+//                   (`path_stuck`, `path_no_path`, ...). Those are held
+//                   `local_recovery`, so no replan is attempted and no throttle
+//                   counter advances. `ActionFailureEscalation` bounds it by
+//                   `(plan, actionId, failureReason)` and wakes System2 on the
+//                   Nth via `ACTION_FAILURE_EXHAUSTED`.
 //
 // No imports from the controller, no bot, no clock: `now` is injected, so the
 // whole policy is unit-testable.
@@ -49,6 +56,35 @@ export const REPLAN_POSITION_DELTA_DEFAULT = 2
  * counter, so a stall that IS advancing never fires the escalation.
  */
 export const REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT = 6
+
+/**
+ * Bounded escalation for a typed ACTION failure (issue #78 follow-up).
+ *
+ * The #44/#78 counters above bound the *replan* rate: they only advance when a
+ * replan is suppressed. They cannot see the distinct live loop where the SAME
+ * plan is re-offered and its action fails with the SAME typed error
+ * (`path_stuck`, `path_no_path`, ...) inside the executor. Local route failures
+ * are deliberately held `local_recovery` and excluded from `same_failure_3x`,
+ * so nothing advances: live run `run-muaxgdyk-15kc9` re-ran
+ * `SMELT:iron_ingot reason=stuck attempts=81` with
+ * `grep -c LOCAL_RECOVERY_NO_PROGRESS = 0`.
+ *
+ * This counter is DISTINCT from `REPLAN_NO_INFO_ESCALATE_CYCLES_DEFAULT`: it
+ * counts consecutive identical `(plan, actionId, failureReason)` action
+ * failures, not throttled replans. On the Nth the local recovery is exhausted
+ * and System2 is woken (`ACTION_FAILURE_EXHAUSTED`). It mirrors the #78
+ * default so there is one bounded-escalation shape; `BUDDY_ACTION_FAILURE_ESCALATE_CYCLES`
+ * overrides it.
+ */
+export const ACTION_FAILURE_ESCALATE_CYCLES_DEFAULT = 6
+
+/** `BUDDY_ACTION_FAILURE_ESCALATE_CYCLES` overrides N; invalid values fall back. */
+export function resolveActionFailureEscalateCycles(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_ACTION_FAILURE_ESCALATE_CYCLES ?? ACTION_FAILURE_ESCALATE_CYCLES_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : ACTION_FAILURE_ESCALATE_CYCLES_DEFAULT
+}
 
 /** `BUDDY_REPLAN_THROTTLE_MS` overrides the window; invalid values fall back. */
 export function resolveReplanThrottleMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
@@ -95,6 +131,16 @@ export interface ReplanInputs {
    * callers that only have world inputs keep their old hashes.
    */
   goalKey?: string | null
+  /**
+   * Issue #78 follow-up: the `plan|action|reason` fingerprint of a typed
+   * action-failure streak that has JUST reached its bound, else null. N
+   * identical typed failures are deterministic proof that the local recovery is
+   * exhausted, so the bound is genuine new information for the replan gate: the
+   * controller surfaces it here so `tryReplan` releases the escalation wake
+   * instead of suppressing it as `no_new_info`. It is null at every count below
+   * N, so ordinary repeated failures still cannot churn a replan per tick.
+   */
+  actionFailureExhausted?: string | null
 }
 
 /** Canonical, order-independent inventory signature (counts > 0 only). */
@@ -118,6 +164,7 @@ export function hashReplanInputs(inputs: ReplanInputs): string {
     failures: inputs.failureSignature,
     capabilityGap: inputs.capabilityGap,
     goal: inputs.goalKey ?? null,
+    actionFailureExhausted: inputs.actionFailureExhausted ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -139,6 +186,7 @@ export function replanInputsChanged(
   if (current.capabilityGap !== null) return true
   if (previous.capabilityGap !== current.capabilityGap) return true
   if ((previous.goalKey ?? null) !== (current.goalKey ?? null)) return true
+  if ((previous.actionFailureExhausted ?? null) !== (current.actionFailureExhausted ?? null)) return true
   if (inventorySignature(previous.inventory) !== inventorySignature(current.inventory)) return true
   if (previous.knownResources !== current.knownResources) return true
   if (previous.failureSignature !== current.failureSignature) return true
@@ -184,6 +232,7 @@ function cloneInputs(inputs: ReplanInputs): ReplanInputs {
     failureSignature: inputs.failureSignature,
     capabilityGap: inputs.capabilityGap,
     goalKey: inputs.goalKey ?? null,
+    actionFailureExhausted: inputs.actionFailureExhausted ?? null,
   }
 }
 
@@ -219,6 +268,120 @@ export function formatLocalRecoveryExhausted(
   decision: ReplanThrottleDecision,
 ): string {
   return `${LOCAL_RECOVERY_EXHAUSTED_MARKER} count=${decision.noInfoStreak}/${decision.noInfoLimit} goal=${goalKey} reason=${reason} stateHash=${decision.stateHash} -> wake System2`
+}
+
+export const ACTION_FAILURE_REPEAT_MARKER = 'ACTION_FAILURE_REPEAT'
+export const ACTION_FAILURE_EXHAUSTED_MARKER = 'ACTION_FAILURE_EXHAUSTED'
+
+/** Stable `plan|action|reason` identity of one typed action-failure streak. */
+export function actionFailureKey(planKey: string | null, actionId: string, reason: string): string {
+  return `${planKey ?? 'unknown'}|${actionId}|${reason}`
+}
+
+export interface ActionFailureEscalationDecision {
+  /** true on exactly the Nth consecutive identical typed failure */
+  escalate: boolean
+  /** consecutive identical typed failures including the current one */
+  count: number
+  /** the bounded N this streak is measured against */
+  limit: number
+  planKey: string | null
+  actionId: string
+  reason: string
+}
+
+/**
+ * Counter marker: the `count`-th consecutive identical typed action failure for
+ * this `(plan, actionId, reason)`. Greppable proof that the same failing action
+ * is being re-offered, which the #44/#78 replan counters cannot see.
+ */
+export function formatActionFailureRepeat(decision: ActionFailureEscalationDecision): string {
+  return `${ACTION_FAILURE_REPEAT_MARKER} count=${decision.count}/${decision.limit} plan=${decision.planKey ?? 'unknown'} action=${decision.actionId} reason=${decision.reason}`
+}
+
+/**
+ * Escalation marker: N consecutive identical typed action failures exhausted the
+ * local recovery, so System2 is woken with an explicit semantic-boundary reason
+ * instead of the plan being re-offered unchanged.
+ */
+export function formatActionFailureExhausted(decision: ActionFailureEscalationDecision): string {
+  return `${ACTION_FAILURE_EXHAUSTED_MARKER} count=${decision.count}/${decision.limit} plan=${decision.planKey ?? 'unknown'} action=${decision.actionId} reason=${decision.reason} -> wake System2`
+}
+
+interface ActionFailureStreak {
+  planKey: string | null
+  actionId: string
+  reason: string
+  count: number
+}
+
+/**
+ * Bounded, pure counter for typed ACTION failures. Distinct from the #44/#78
+ * `ReplanThrottle.noInfo` streak: that one counts suppressed replans, this one
+ * counts the same action failing the same way inside the executor.
+ *
+ * Semantics:
+ *   - consecutive identical `(planKey, actionId, reason)` failures accumulate;
+ *   - ANY change of plan/action/reason restarts the streak at 1;
+ *   - the caller resets it on observed progress and after escalation fires, so
+ *     the bound cannot hot-loop;
+ *   - on exactly the Nth failure `escalate=true` and the streak is cleared, so
+ *     the next escalation needs N fresh failures;
+ *   - `pendingEscalation()` holds that Nth decision until the caller resets, so
+ *     the controller can surface it as new information to the replan gate.
+ */
+export class ActionFailureEscalation {
+  private readonly limit: number
+  private streak: ActionFailureStreak | null = null
+  private exhausted: ActionFailureEscalationDecision | null = null
+
+  constructor(limit: number = ACTION_FAILURE_ESCALATE_CYCLES_DEFAULT) {
+    this.limit = Number.isInteger(limit) && limit >= 1 ? limit : ACTION_FAILURE_ESCALATE_CYCLES_DEFAULT
+  }
+
+  /** Record one typed action failure and return the bounded decision. */
+  noteFailure(planKey: string | null, actionId: string, reason: string): ActionFailureEscalationDecision {
+    const previous = this.streak
+    const same =
+      previous !== null &&
+      previous.planKey === planKey &&
+      previous.actionId === actionId &&
+      previous.reason === reason
+    const count = same ? previous.count + 1 : 1
+    const decision: ActionFailureEscalationDecision = {
+      escalate: count >= this.limit,
+      count,
+      limit: this.limit,
+      planKey,
+      actionId,
+      reason,
+    }
+    this.streak = decision.escalate ? null : { planKey, actionId, reason, count }
+    this.exhausted = decision.escalate ? decision : null
+    return decision
+  }
+
+  /** The escalation awaiting handling, or null. Non-mutating. */
+  pendingEscalation(): ActionFailureEscalationDecision | null {
+    return this.exhausted
+  }
+
+  /** The `plan|action|reason` fingerprint of the pending escalation, or null. */
+  pendingKey(): string | null {
+    const pending = this.exhausted
+    return pending === null ? null : actionFailureKey(pending.planKey, pending.actionId, pending.reason)
+  }
+
+  /** Consecutive identical failures recorded so far (0 when none). */
+  count(): number {
+    return this.streak?.count ?? 0
+  }
+
+  /** Reset on observed progress, a handled escalation, or a world-state change. */
+  reset(): void {
+    this.streak = null
+    this.exhausted = null
+  }
 }
 
 /**
