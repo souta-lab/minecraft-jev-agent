@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-20",
+  "updatedAt": "2026-09-21",
   "dimensions": {
     "policy": ["missing", "defined"],
     "implementation": ["none", "partial", "landed"],
@@ -116,6 +116,51 @@
       "observation": "not-run",
       "compliance": "unknown",
       "note": "Research only. Do not start factorized/multi-head policy work before the simple real-Jev authority path is proven live."
+    },
+    "295": {
+      "acceptanceClass": "audit-correctness",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "offline",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "Structural/wiring regression tests still inspect only the monolithic controller.ts while the runtime is now the controller.ts facade plus controller-legacy.ts, so several audits are known-red. PR #298 (undrafted 2026-09-21) realigns them and asserts the current defaults (Option compiler ON, beta authority ON). Re-verify after #298 lands; it must still detect a deliberately removed legacy call site and a deliberately removed facade strangler."
+    },
+    "296": {
+      "acceptanceClass": "governance-derived-state",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "CURRENT-STATUS.md is still a hand-carried snapshot reporting a stale base SHA and a stale open-PR list. GitHub branch topology changed on 2026-09-21 (75 merged-PR head branches pruned; delete_branch_on_merge enabled), so derived state must be regenerated atomically with source SHA, generatedAt, live open-PR/issue lists, and frozen historical snapshots explicitly labeled historical."
+    },
+    "297": {
+      "acceptanceClass": "architecture-authority",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "Audit of current main still finds (1) groundMercuryPlan rewriting the model-selected WHAT after selection and (2) MercuryCallRecord outcome 'fallback' written immediately before a fatal model failure. Both need a truthful representation: code-owned initiation predicates that preserve the selected Option identity, and a terminal fatal/model_failure outcome with corrected comments."
+    },
+    "299": {
+      "acceptanceClass": "ci-infrastructure",
+      "policy": "defined",
+      "implementation": "none",
+      "verification": "none",
+      "observation": "fail",
+      "compliance": "fail",
+      "note": "repo-invariants jobs conclude failure with steps=0 because GitHub Actions never dispatches a runner (account payment/spending-limit annotation), not because of repository code; the root cause and evidence were recorded as an issue comment on 2026-09-21. Required: an INFRA_UNKNOWN classification so acceptance tooling never treats a never-started job as a code FAIL, and no reliance on Actions as an acceptance gate until billing is restored."
+    },
+    "308": {
+      "acceptanceClass": "architecture-convergence",
+      "policy": "defined",
+      "implementation": "partial",
+      "verification": "integration",
+      "observation": "unknown",
+      "compliance": "unknown",
+      "note": "Target production state: one Grounded Option Runtime with one canonical semantic state and one authority owner per decision class. PR #309 (System2 causal authority) is the first integrated slice; retiring the remaining duplicated semantic representations (RUNGS/PlanOption/System2Plan/PlannedGoal) is not yet scheduled."
     }
   }
 }
