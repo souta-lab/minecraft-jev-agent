@@ -5461,7 +5461,15 @@ export class Executor {
       this.bot,
       (x, y, z) => this.solidSupportAt(x, y, z),
       async () => {
-        const plan = planDigTime(this.bot.digTime(block), this.options.digTimeoutMs)
+        // A malformed target (no `digTime`) is an unbounded schedule, never an
+        // escape: the floor stays and the mechanism's own rejection is typed.
+        let libraryMs: number
+        try {
+          libraryMs = this.bot.digTime(block)
+        } catch {
+          libraryMs = Number.POSITIVE_INFINITY
+        }
+        const plan = planDigTime(libraryMs, this.options.digTimeoutMs)
         this.lastDigPlan = plan
         if (plan.extended) {
           this.logger.info('executor', formatDigBudget(plan), {

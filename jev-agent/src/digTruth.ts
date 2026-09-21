@@ -244,7 +244,19 @@ export async function runBoundedDig(
   budgetMs: number,
   now: () => number = Date.now,
 ): Promise<DigRaceResult> {
-  const scheduledMs = mechanism.digTime()
+  // A malformed block (no `digTime`) must surface as a typed error, not escape
+  // the race as an unhandled rejection.
+  let scheduledMs: number
+  try {
+    scheduledMs = mechanism.digTime()
+  } catch (error) {
+    return {
+      outcome: 'error',
+      error: error instanceof Error ? error.message : String(error),
+      elapsedMs: 0,
+      scheduledMs: Number.NaN,
+    }
+  }
   const startedAt = now()
   let timedOut = false
   const timer = setTimeout(() => {

@@ -268,6 +268,23 @@ addCase('(d) a mechanism rejection is an error, never a silent success', async (
   }
 })
 
+addCase('(d) a malformed schedule read is a typed error, not an escape', async () => {
+  const race = await runBoundedDig(
+    {
+      digTime: () => {
+        throw new Error('dig time for obsidian is Infinity')
+      },
+      dig: () => Promise.resolve(),
+      stopDigging: () => {},
+    },
+    500,
+  )
+  return {
+    pass: race.outcome === 'error' && race.error === 'dig time for obsidian is Infinity',
+    detail: `outcome=${race.outcome} error=${race.error}`,
+  }
+})
+
 // --- (e) the typed, mirrored marker ------------------------------------------
 
 addCase('(e) DIG_FAILED names the reason, the live tool, the tier and the block', () => {
