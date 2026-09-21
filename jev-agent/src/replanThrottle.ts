@@ -533,6 +533,171 @@ export class WaitStreakEscalation {
 }
 
 /**
+ * Bounded beta-abandon deferral (live defect, source `d428d1c`, m3-live).
+ *
+ * Measured freeze, `planId=g3:collect:flint`:
+ *
+ *   BETA_DEFERRED optionId=front_nether_portal planId=g3:collect:flint beta=0.52
+ *                 reason=control_action action=WAIT
+ *   BETA_SHADOW   optionId=front_nether_portal beta=0.52 threshold=0.5
+ *                 would=abandon actual=continue agree=false mode=authority
+ *   JEV_HEADS     action=WAIT abandon=0.53 decision=continue abandonRequested=true
+ *                 betaAuthority=true betaShadowed=false abandonEnforced=false
+ *                 abandonSuppressed=true attempts=74
+ *   ACTION        n=746..748 id=WAIT kind=WAIT phase=waiting
+ *
+ * With `betaAuthority=true`, beta crossed its abandon threshold and requested the
+ * abandon, but `evaluateBetaTerminationBoundary` refuses to cross the lifecycle
+ * boundary while `decisionActionId` is a control action (WAIT/ESCALATE), because
+ * a control tick is not semantic abandonment. That rule is correct for ONE
+ * decision: do not yank a running action. It is circular when the plan is
+ * starved (presented=1, actionable=0) and the only action a stuck plan can emit
+ * is WAIT — WAIT suppresses the abandon, and suppressing the abandon keeps WAIT.
+ * The `#343` WAIT_STREAK/WAIT_EXHAUSTED counters cannot see this shape either:
+ * they only count while `actionable > 0`.
+ *
+ * This counter bounds the DEFERRAL, not the abandon decision: after N
+ * consecutive deferrals for the same `(plan, action, reason)` the controller
+ * honors beta's vote instead of suppressing it again. It never selects an
+ * Option, ranks candidates, or decides WHAT comes next — the released abandon
+ * still runs through the ordinary `markOptionAbandoned` + System2 handoff.
+ *
+ * Reset (so a legitimate deferral is preserved and the bound cannot hot-loop):
+ *   - verified progress (`progressed`) resets the streak: a genuinely
+ *     productive in-flight action keeps its deferral indefinitely;
+ *   - a different plan/action/reason restarts the streak at 1;
+ *   - the streak clears on the Nth release, so the next release needs N fresh
+ *     deferrals; `applyAbandon`'s `abandonCooldownMs` and `summonLlm`'s cooldown
+ *     bound the wake rate.
+ */
+export const BETA_ABANDON_DEFER_CYCLES_DEFAULT = 6
+
+/** `BUDDY_BETA_ABANDON_DEFER_CYCLES` overrides N; invalid values fall back. */
+export function resolveBetaAbandonDeferCycles(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_BETA_ABANDON_DEFER_CYCLES ?? BETA_ABANDON_DEFER_CYCLES_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : BETA_ABANDON_DEFER_CYCLES_DEFAULT
+}
+
+export const BETA_ABANDON_DEFERRED_MARKER = 'BETA_ABANDON_DEFERRED'
+export const BETA_ABANDON_RELEASED_MARKER = 'BETA_ABANDON_RELEASED'
+
+export interface BetaAbandonDeferralInput {
+  plan: string | null
+  action: string
+  /** the pure boundary's deferral reason (`control_action`, `control_outcome`, ...) */
+  reason: string
+  /** verified goal/body/search progress for this plan; resets the streak. */
+  progressed?: boolean
+}
+
+export interface BetaAbandonDeferralDecision {
+  /** true while the deferral is still allowed; false on the Nth (release). */
+  defer: boolean
+  /** consecutive deferrals for this `(plan, action, reason)` including the current one. */
+  count: number
+  /** the bounded N this streak is measured against. */
+  limit: number
+  plan: string | null
+  action: string
+  reason: string
+  /** true exactly on the Nth deferral: the caller must honor the abandon. */
+  released: boolean
+}
+
+/** Counter marker: the `count`-th consecutive deferral of a requested abandon. */
+export function formatBetaAbandonDeferred(decision: BetaAbandonDeferralDecision): string {
+  return `${BETA_ABANDON_DEFERRED_MARKER} count=${decision.count}/${decision.limit} plan=${decision.plan ?? 'unknown'} action=${decision.action} reason=${decision.reason}`
+}
+
+/** Release marker: N deferrals exhausted; beta's abandon is honored at this boundary. */
+export function formatBetaAbandonReleased(
+  plan: string | null,
+  action: string,
+  reason: string,
+  beta: number | null,
+): string {
+  return `${BETA_ABANDON_RELEASED_MARKER} plan=${plan ?? 'unknown'} action=${action} beta=${beta ?? 'null'} reason=${reason}`
+}
+
+interface BetaAbandonStreak {
+  plan: string | null
+  action: string
+  reason: string
+  count: number
+}
+
+/**
+ * Bounded, pure counter for a repeatedly deferred beta abandon. See the block
+ * comment above for the defect, the reset conditions and the authority
+ * boundary (it releases a decision beta already made; it never makes one).
+ */
+export class BetaAbandonDeferral {
+  private readonly limit: number
+  private streak: BetaAbandonStreak | null = null
+
+  constructor(limit: number = BETA_ABANDON_DEFER_CYCLES_DEFAULT) {
+    this.limit = Number.isInteger(limit) && limit >= 1 ? limit : BETA_ABANDON_DEFER_CYCLES_DEFAULT
+  }
+
+  /** Record one deferred abandon request and return the bounded decision. */
+  note(input: BetaAbandonDeferralInput): BetaAbandonDeferralDecision {
+    if (input.progressed === true) {
+      this.streak = null
+      return {
+        defer: true,
+        count: 0,
+        limit: this.limit,
+        plan: input.plan,
+        action: input.action,
+        reason: input.reason,
+        released: false,
+      }
+    }
+    const previous = this.streak
+    const same =
+      previous !== null &&
+      previous.plan === input.plan &&
+      previous.action === input.action &&
+      previous.reason === input.reason
+    const count = same ? previous.count + 1 : 1
+    if (count >= this.limit) {
+      this.streak = null
+      return {
+        defer: false,
+        count,
+        limit: this.limit,
+        plan: input.plan,
+        action: input.action,
+        reason: input.reason,
+        released: true,
+      }
+    }
+    this.streak = { plan: input.plan, action: input.action, reason: input.reason, count }
+    return {
+      defer: true,
+      count,
+      limit: this.limit,
+      plan: input.plan,
+      action: input.action,
+      reason: input.reason,
+      released: false,
+    }
+  }
+
+  /** Consecutive deferrals recorded so far (0 when none / reset by progress). */
+  count(): number {
+    return this.streak?.count ?? 0
+  }
+
+  /** Reset on verified progress, a plan change, an honored abandon, or after release. */
+  reset(): void {
+    this.streak = null
+  }
+}
+
+/**
  * Bounded replan rate. Keyed by summon `reason`; the recorded `stateHash`
  * (inventory + position + known resources + failure signature + goal) is what
  * the acceptance means by `(reason, stateHash)`. Rule 4 bounds the case where

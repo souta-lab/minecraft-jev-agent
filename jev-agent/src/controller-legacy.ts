@@ -85,7 +85,7 @@ import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, W
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
-import { ActionFailureEscalation, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
+import { ActionFailureEscalation, BetaAbandonDeferral, BETA_ABANDON_DEFERRED_MARKER, BETA_ABANDON_RELEASED_MARKER, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatBetaAbandonDeferred, formatBetaAbandonReleased, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveBetaAbandonDeferCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
@@ -342,6 +342,15 @@ export interface JevAgentOptions {
    */
   waitStreakEscalateCycles: number
   /**
+   * Control-action abandon-deferral bound (live defect, d428d1c/m3-live): a
+   * beta abandon requested above threshold while the only action is a control
+   * action (WAIT/ESCALATE) is deferred at most this many consecutive times for
+   * the same `(plan, action, reason)` before it is honored. Verified progress or
+   * a plan change resets the streak.
+   * `BUDDY_BETA_ABANDON_DEFER_CYCLES` overrides it.
+   */
+  betaAbandonDeferCycles: number
+  /**
    * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
    * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
@@ -395,6 +404,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   replanNoInfoEscalateCycles: resolveReplanNoInfoEscalateCycles(),
   actionFailureEscalateCycles: resolveActionFailureEscalateCycles(),
   waitStreakEscalateCycles: resolveWaitStreakEscalateCycles(),
+  betaAbandonDeferCycles: resolveBetaAbandonDeferCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
   worldEpoch: 0,
 }
@@ -993,6 +1003,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   ACTION_PREEMPT,
   WAIT_STREAK_MARKER,
   WAIT_EXHAUSTED_MARKER,
+  BETA_ABANDON_DEFERRED_MARKER,
+  BETA_ABANDON_RELEASED_MARKER,
   'BETA_DEFERRED',
 ])
 
@@ -1303,6 +1315,25 @@ export function canAuthoritativelyAbandonOption(optionId: string | null): option
   return typeof optionId === 'string' && optionId.length > 0
 }
 
+/**
+ * Verified goal/body/search progress observed for the current decision. Used
+ * only to reset the bounded beta-abandon deferral (a productive in-flight action
+ * keeps its deferral); it never selects an action.
+ */
+export function betaAbandonProgressObserved(reason: string, outcome: System2Outcome | null): boolean {
+  if (reason === 'body_or_search_progress') return true
+  if (outcome === null) return false
+  const kinds = outcome.progressKinds ?? []
+  return (
+    outcome.progress === 'goal' ||
+    outcome.progress === 'body' ||
+    outcome.progress === 'search' ||
+    kinds.includes('goal') ||
+    kinds.includes('body') ||
+    kinds.includes('search')
+  )
+}
+
 export class JevController {
   private readonly bot: Bot
   private options: JevAgentOptions
@@ -1411,6 +1442,14 @@ export class JevController {
   private readonly actionFailureEscalation: ActionFailureEscalation
   /** #327 follow-up: bounded chosen-WAIT streak while real actions exist. */
   private readonly waitStreakEscalation: WaitStreakEscalation
+  /**
+   * Bounded control-action abandon deferral (d428d1c/m3-live): `WAIT` must not
+   * be able to suppress its own beta abandon indefinitely. See
+   * `BetaAbandonDeferral` for the reset conditions and the authority boundary.
+   */
+  private readonly betaAbandonDeferral: BetaAbandonDeferral
+  /** Plan revision the current `betaTerminationBoundary` decision belongs to. */
+  private betaAbandonPlanId: string | null = null
   /**
    * Set for exactly one decision after an actionable WAIT streak is exhausted,
    * so WAIT is removed from the offered set and the policy must choose a real
@@ -1561,6 +1600,7 @@ export class JevController {
     )
     this.actionFailureEscalation = new ActionFailureEscalation(this.options.actionFailureEscalateCycles)
     this.waitStreakEscalation = new WaitStreakEscalation(this.options.waitStreakEscalateCycles)
+    this.betaAbandonDeferral = new BetaAbandonDeferral(this.options.betaAbandonDeferCycles)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.recipeIndex = createRecipeIndex(bot.registry)
@@ -2492,16 +2532,68 @@ export class JevController {
    * A beta vote is semantic, but a control tick, a local route miss, or recent
    * body/search progress is not semantic abandonment. Keep this boundary pure
    * and auditable; it never selects the next Option.
+   *
+   * The pure gate cannot distinguish ONE control tick from a STARVED plan whose
+   * only action is WAIT: in both cases `decisionActionId` is WAIT, so the gate
+   * returns `control_action` and refuses to cross the lifecycle boundary. Left
+   * unbounded that is circular — WAIT suppresses the abandon, and suppressing
+   * the abandon keeps WAIT (live d428d1c, `attempts=74`,
+   * `CANDIDATE_STARVATION presented=1 productive=0`). The controller therefore
+   * bounds the DEFERRAL here: N consecutive deferrals for the same
+   * `(plan, action, reason)` release beta's own vote instead of suppressing it
+   * again. Verified progress resets the streak, so a genuinely productive
+   * in-flight action keeps its deferral; this never selects an Option.
    */
   private betaTerminationBoundary(decision: JevResult, optionId: string | null): BetaTerminationBoundaryDecision {
-    return evaluateBetaTerminationBoundary({
+    const outcome = this.recentOutcomes.at(-1) ?? null
+    const boundary = evaluateBetaTerminationBoundary({
       optionId,
       requested: abandonRequested(decision),
       decisionActionId: decisionIdFrom(decision),
-      latestOutcome: this.recentOutcomes.at(-1) ?? null,
+      latestOutcome: outcome,
       semanticExhausted: false,
       semanticInvalid: false,
     })
+    if (!abandonRequested(decision) || boundary.adopt) {
+      // A vote that is honored (or not requested) ends the deferred streak.
+      this.betaAbandonDeferral.reset()
+      return boundary
+    }
+    const action = decisionIdFrom(decision) ?? 'WAIT'
+    const progressed = betaAbandonProgressObserved(boundary.reason, outcome)
+    const bounded = this.betaAbandonDeferral.note({
+      plan: this.betaAbandonPlanId,
+      action,
+      reason: boundary.reason,
+      progressed,
+    })
+    if (bounded.defer) {
+      this.logger.info(
+        'heads',
+        formatBetaAbandonDeferred(bounded),
+        {
+          count: bounded.count,
+          limit: bounded.limit,
+          planId: bounded.plan,
+          action: bounded.action,
+          reason: bounded.reason,
+          progressed,
+        },
+        this.tickCounter,
+      )
+      return boundary
+    }
+    const probability = decision.answers.abandon_option?.probability ?? null
+    this.logger.warn(
+      'heads',
+      formatBetaAbandonReleased(bounded.plan, bounded.action, bounded.reason, probability),
+      { planId: bounded.plan, action: bounded.action, reason: bounded.reason, beta: probability },
+      this.tickCounter,
+    )
+    // Beta already voted to end the Option; the deferral budget is spent, so
+    // honor that vote. The released abandon still runs through the ordinary
+    // `markOptionAbandoned` + System2 handoff — this layer never picks WHAT next.
+    return { adopt: true, wake: true, reason: 'semantic_abandon' }
   }
 
   /**
@@ -2513,6 +2605,9 @@ export class JevController {
   private abandonVerdict(decision: JevResult, optionId: string | null, planId: string | null): AbandonVerdict {
     const requested = abandonRequested(decision)
     const now = Date.now()
+    // The wrapper calls this immediately before `betaTerminationBoundary`, so the
+    // deferral bound below is keyed on the same plan revision this verdict used.
+    this.betaAbandonPlanId = planId
     if (!canAuthoritativelyAbandonOption(optionId)) {
       const classification = classifyAbandonRequest({
         abandonRequested: requested,
