@@ -124,28 +124,57 @@ function knownResourceIdentity(resource: KnownResourceJson): string {
 }
 
 /**
- * Capacity-eviction rule for the durable known-resource store.
+ * Recency-of-proof victim selection for a bounded durable store.
+ *
+ * The store is a bounded "where things are / how they connect" memory, not a
+ * ranked plan: when it is full a newly observed fact must displace the
+ * remembered fact that is cheapest to re-derive, rather than be dropped for the
+ * lifetime of the world key. The value proxy is recency of PROOF (`lastSeenAt`),
+ * which every scan/refresh path maintains:
+ *
+ *  - the OLDEST proof is evicted first;
+ *  - entries with no `seenAt` predate the bookkeeping field (legacy durable
+ *    JSON) and are treated as the oldest, so they are evicted first;
+ *  - ties break toward the earliest array position (stable and deterministic).
+ *
+ * Returns the victim index, or -1 when nothing can be evicted. Pure.
+ */
+function selectBoundedLruVictim<T>(list: readonly T[], seenAtOf: (entry: T) => number | undefined): number {
+  let victim = -1
+  let victimSeenAt = Number.NEGATIVE_INFINITY
+  for (let index = 0; index < list.length; index += 1) {
+    const entry = list[index]
+    if (entry === undefined) continue
+    const raw = seenAtOf(entry)
+    const seenAt = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number.NEGATIVE_INFINITY
+    if (victim < 0 || seenAt < victimSeenAt) {
+      victim = index
+      victimSeenAt = seenAt
+    }
+  }
+  return victim
+}
+
+/**
+ * Issue #14 follow-up: capacity-eviction rule for the durable known-resource
+ * store. Expressed ON TOP of `selectBoundedLruVictim`: choose the victim from
+ * the MOST ABUNDANT identity class (`knownResourceIdentity`), and within that
+ * class the oldest proof; only when every identity is a singleton (or nothing
+ * matches) does it fall back to the generic global-oldest victim.
  *
  * The store is a bounded "where things are" memory, not a ranked plan. A dense
  * vein can contribute dozens of adjacent coal/copper cells while a rare route
  * may have only one remembered coordinate. Pure oldest-first eviction therefore
- * destroys information diversity: the live M3 run evicted every remembered
- * obsidian cell under local coal/copper scan pressure, after which the agent had
- * no bearing and paced locally.
- *
- * Compression rule:
- *  - first evict the OLDEST REDUNDANT coordinate from an identity that still has
- *    another coordinate (`name + dimension + worldEpoch`);
- *  - this preserves the last route anchor for every identity while any redundant
- *    cell exists elsewhere in the store;
- *  - legacy entries without `lastSeenAt` are still the oldest within the chosen
- *    pool;
- *  - if every identity is already a singleton, fall back to global oldest so the
- *    bounded store can still learn a genuinely new identity;
- *  - ties break toward the earliest array position (stable and deterministic).
+ * destroys information diversity: live, the ten remembered `obsidian` cells were
+ * both duplicated and the oldest sightings, so a flood of nearby coal_ore /
+ * copper_ore / oak_log (`KNOWN_RESOURCE_EVICTED item=obsidian ... reason=capacity`
+ * x10) destroyed the M2 route to the portal frame. Rarity is the signal: a class
+ * with one or two remembered cells is far more expensive to re-acquire than one
+ * with dozens, so the abundant class pays for the new sighting.
  *
  * This is retention/compression truth only: it does not know the active goal or
- * rank resources by mission value. Returns the victim index, or -1 when empty.
+ * rank resources by mission value. Returns the victim index, or -1 when nothing
+ * can be evicted.
  */
 export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): number {
   if (known.length === 0) return -1
@@ -155,34 +184,6 @@ export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): n
     counts.set(identity, (counts.get(identity) ?? 0) + 1)
   }
 
-  const selectOldest = (redundantOnly: boolean): number => {
-    let victim = -1
-    let victimSeenAt = Number.POSITIVE_INFINITY
-    for (let index = 0; index < known.length; index += 1) {
-      const entry = known[index]
-      if (entry === undefined) continue
-      if (redundantOnly && (counts.get(knownResourceIdentity(entry)) ?? 0) <= 1) continue
-      const seenAt =
-        typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt)
-          ? entry.lastSeenAt
-          : Number.NEGATIVE_INFINITY
-      if (victim < 0 || seenAt < victimSeenAt) {
-        victim = index
-        victimSeenAt = seenAt
-      }
-    }
-    return victim
-  }
-
-  // Evict from the MOST ABUNDANT class first, and only from among that class's
-  // oldest cells. Preferring "any duplicated name" was not enough: live, the ten
-  // remembered `obsidian` cells were both duplicated and the oldest sightings, so
-  // the whole class was evicted (`KNOWN_RESOURCE_EVICTED item=obsidian ...
-  // reason=capacity` x10) by a flood of nearby coal_ore/copper_ore/oak_log - the
-  // M2 route to the portal frame was destroyed by ordinary exploration, and the
-  // body could no longer route to any obsidian at all. Rarity is the signal: a
-  // class with one or two remembered cells is far more expensive to re-acquire
-  // than one with dozens, so the abundant class pays for the new sighting.
   let abundant: string | null = null
   let abundantCount = 0
   for (const [identity, count] of counts) {
@@ -191,30 +192,103 @@ export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): n
       abundantCount = count
     }
   }
-  const evictFromAbundant = (): number => {
-    if (abundant === null || abundantCount <= 1) return -1
-    let victim = -1
-    let victimSeenAt = Number.POSITIVE_INFINITY
+
+  // Evict from the MOST ABUNDANT class first, and only from among that class's
+  // oldest cells. The generic primitive supplies the age semantics (missing
+  // `lastSeenAt` counts as oldest) and the stable earliest-index tie break, so
+  // the class rule and the fallback cannot drift onto different orders.
+  if (abundant !== null && abundantCount > 1) {
+    const indices: number[] = []
     for (let index = 0; index < known.length; index += 1) {
       const entry = known[index]
-      if (entry === undefined) continue
-      if (knownResourceIdentity(entry) !== abundant) continue
-      const seenAt =
-        typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt)
-          ? entry.lastSeenAt
-          : Number.NEGATIVE_INFINITY
-      if (victim < 0 || seenAt < victimSeenAt) {
-        victim = index
-        victimSeenAt = seenAt
-      }
+      if (entry !== undefined && knownResourceIdentity(entry) === abundant) indices.push(index)
     }
-    return victim
+    const relative = selectBoundedLruVictim(
+      indices.map((index) => known[index] as KnownResourceJson),
+      (entry) => entry.lastSeenAt,
+    )
+    const victimIndex = relative < 0 ? undefined : indices[relative]
+    if (victimIndex !== undefined) return victimIndex
   }
 
-  const fromAbundant = evictFromAbundant()
-  if (fromAbundant >= 0) return fromAbundant
-  const redundant = selectOldest(true)
-  return redundant >= 0 ? redundant : selectOldest(false)
+  // Every identity is already a singleton (or nothing matched): fall back to the
+  // generic global-oldest victim so the bounded store can still learn a genuinely
+  // new identity.
+  return selectBoundedLruVictim(known, (entry) => entry.lastSeenAt)
+}
+
+/**
+ * The ONE bounded-LRU merge used by every durable "remembered facts" store.
+ * `mergeKnownResourcesInto` and `mergeKnownTraversalsInto` are thin typed
+ * wrappers over this; there is no second merge implementation.
+ *
+ * Contracts:
+ *  - dedupe is exact-key `keyOf`;
+ *  - a re-observation REFRESHES the existing entry via `refresh` instead of
+ *    inserting or spending an eviction;
+ *  - at the cap the store's victim rule is applied (generic oldest-proof LRU by
+ *    default; see `selectBoundedLruVictim`) or, when nothing is evictable, the
+ *    sighting is refused and counted in `dropped` - never silently;
+ *  - `normalize` stamps/copies the stored DTO (rounded coordinates etc.).
+ */
+interface BoundedLruStore<T> {
+  cap: number
+  keyOf: (entry: T) => string
+  seenAtOf: (entry: T) => number | undefined
+  /** Store-specific victim rule; defaults to the generic oldest-proof LRU. The
+   * known-resource store overrides it with `selectKnownResourceEvictionVictim`
+   * so abundance-aware compression stays the one capacity rule. */
+  selectVictim?: (list: T[]) => number
+  normalize: (entry: T) => T
+  refresh: (existing: T, observed: T) => void
+  log?: (event: string, detail?: Record<string, unknown>) => void
+  now: number
+  evictedEvent: string
+  evictionDetail: (victim: T, now: number) => Record<string, unknown>
+  fullEvent: string
+}
+
+function mergeBoundedLruInto<T>(
+  target: T[],
+  found: readonly T[],
+  store: BoundedLruStore<T>,
+): { added: number; evicted: T[]; dropped: number; inserted: T[] } {
+  const byKey = new Map<string, T>()
+  for (const entry of target) {
+    const key = store.keyOf(entry)
+    if (!byKey.has(key)) byKey.set(key, entry)
+  }
+  const evicted: T[] = []
+  const inserted: T[] = []
+  let added = 0
+  let dropped = 0
+  for (const entry of found) {
+    const key = store.keyOf(entry)
+    const existing = byKey.get(key)
+    if (existing !== undefined) {
+      store.refresh(existing, entry)
+      continue
+    }
+    if (target.length >= store.cap) {
+      const victimIndex = store.selectVictim?.(target) ?? selectBoundedLruVictim(target, store.seenAtOf)
+      const victim = victimIndex < 0 ? undefined : target[victimIndex]
+      if (victim === undefined) {
+        dropped += 1
+        continue
+      }
+      target.splice(victimIndex, 1)
+      byKey.delete(store.keyOf(victim))
+      evicted.push(victim)
+      store.log?.(store.evictedEvent, store.evictionDetail(victim, store.now))
+    }
+    const stored = store.normalize(entry)
+    target.push(stored)
+    byKey.set(key, stored)
+    added += 1
+    inserted.push(stored)
+  }
+  if (dropped > 0) store.log?.(store.fullEvent, { cap: store.cap, dropped })
+  return { added, evicted, dropped, inserted }
 }
 
 export interface MergeKnownResourcesOptions {
@@ -259,46 +333,14 @@ export function mergeKnownResourcesInto(
   const cap = options.cap ?? KNOWN_RESOURCE_CAP
   const log = options.log
   const emitInsertMarker = options.emitInsertMarker ?? false
-  const byKey = new Map<string, KnownResourceJson>()
-  for (const resource of target) {
-    const key = knownResourceKey(resource)
-    if (!byKey.has(key)) byKey.set(key, resource)
-  }
-  const evicted: KnownResourceJson[] = []
-  let added = 0
-  let dropped = 0
-  const now = Date.now()
-  for (const resource of found) {
-    const key = knownResourceKey(resource)
-    const existing = byKey.get(key)
-    if (existing !== undefined) {
-      // Re-observation is free proof the cell is still valuable: refresh recency
-      // instead of inserting a duplicate or spending an eviction on it.
-      if (typeof resource.lastSeenAt === 'number' && Number.isFinite(resource.lastSeenAt)) {
-        existing.lastSeenAt = resource.lastSeenAt
-      }
-      continue
-    }
-    if (target.length >= cap) {
-      const victimIndex = selectKnownResourceEvictionVictim(target)
-      const victim = victimIndex < 0 ? undefined : target[victimIndex]
-      if (victim === undefined) {
-        dropped += 1
-        continue
-      }
-      target.splice(victimIndex, 1)
-      byKey.delete(knownResourceKey(victim))
-      evicted.push(victim)
-      log?.('KNOWN_RESOURCE_EVICTED', {
-        item: victim.name,
-        name: victim.name,
-        at: knownResourceAt(victim),
-        reason: 'capacity',
-        ageMs:
-          typeof victim.lastSeenAt === 'number' && Number.isFinite(victim.lastSeenAt) ? now - victim.lastSeenAt : null,
-      })
-    }
-    const stored: KnownResourceJson = {
+  const result = mergeBoundedLruInto(target, found, {
+    cap,
+    keyOf: knownResourceKey,
+    seenAtOf: (resource) => resource.lastSeenAt,
+    // Capacity truth for resources is abundance-aware (721377e): a dense local
+    // class pays for the new sighting before the last anchor of a rare class.
+    selectVictim: selectKnownResourceEvictionVictim,
+    normalize: (resource) => ({
       name: resource.name,
       kind: resource.kind,
       x: Math.round(resource.x),
@@ -307,11 +349,29 @@ export function mergeKnownResourcesInto(
       ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
       ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
       ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
-    }
-    target.push(stored)
-    byKey.set(key, stored)
-    added += 1
-    if (emitInsertMarker) {
+    }),
+    // Re-observation is free proof the cell is still valuable: refresh recency
+    // instead of inserting a duplicate or spending an eviction on it.
+    refresh: (existing, resource) => {
+      if (typeof resource.lastSeenAt === 'number' && Number.isFinite(resource.lastSeenAt)) {
+        existing.lastSeenAt = resource.lastSeenAt
+      }
+    },
+    log,
+    now: Date.now(),
+    evictedEvent: 'KNOWN_RESOURCE_EVICTED',
+    fullEvent: 'KNOWN_RESOURCE_FULL',
+    evictionDetail: (victim, now) => ({
+      item: victim.name,
+      name: victim.name,
+      at: knownResourceAt(victim),
+      reason: 'capacity',
+      ageMs:
+        typeof victim.lastSeenAt === 'number' && Number.isFinite(victim.lastSeenAt) ? now - victim.lastSeenAt : null,
+    }),
+  })
+  if (emitInsertMarker) {
+    for (const stored of result.inserted) {
       log?.('KNOWN_RESOURCE', {
         item: stored.name,
         kind: stored.kind,
@@ -320,8 +380,125 @@ export function mergeKnownResourcesInto(
       })
     }
   }
-  if (dropped > 0) log?.('KNOWN_RESOURCE_FULL', { cap, dropped })
-  return { added, evicted, dropped }
+  return { added: result.added, evicted: result.evicted, dropped: result.dropped }
+}
+
+// ---------------------------------------------------------------------------
+// durable traversal memory (issue #354)
+// ---------------------------------------------------------------------------
+
+/** The observed traversal family. `tunnel` is reserved for a dug tunnel leg. */
+export type TraversalKind = 'step' | 'descend' | 'tunnel' | 'climb'
+export type TraversalResult = 'ok' | 'blocked'
+/** The typed cause of a refusal; `wall` is the generic terrain/geometry refusal. */
+export type TraversalBlockReason = 'lava' | 'fall' | 'wall' | 'void'
+
+/**
+ * Issue #354: a durable, world-keyed TRAVERSAL FACT observed from a real
+ * locomotion outcome - which leg actually opened a route, which leg was refused.
+ *
+ * It is world truth recorded from an observed outcome (a move/dig that completed
+ * or was refused), never a semantic preference and never a route decision:
+ *  - `from`/`to` are the rounded cells of the observed leg;
+ *  - `kind` is geometric (`step`/`descend`/`climb`; `tunnel` for a dug tunnel);
+ *  - `result` is `ok` when the body completed the leg, `blocked` when it was
+ *    refused, with the typed `reason` when known;
+ *  - `worldEpoch` namespaces the fact exactly like `KnownResourceJson`.
+ *
+ * The newest observation of a `(kind, from, to)` leg SUPERSEDES the previous
+ * one, so a route that was blocked and later opened stops being suppressed. The
+ * store is bounded (`KNOWN_TRAVERSAL_CAP`, oldest-proof LRU eviction) and is
+ * dropped with its world key on a `worldEpoch` change, exactly like
+ * `knownResources`.
+ */
+export interface KnownTraversalJson {
+  from: Vec3Json
+  to: Vec3Json
+  kind: TraversalKind
+  result: TraversalResult
+  reason?: TraversalBlockReason
+  worldEpoch?: number
+  /** epoch ms the outcome was observed */
+  lastSeenAt?: number
+}
+
+/** Bounded size of the durable traversal store (same LRU rule as KNOWN_RESOURCE_CAP). */
+export const KNOWN_TRAVERSAL_CAP = 128
+
+function traversalCell(cell: Vec3Json): string {
+  return `${Math.round(cell.x)},${Math.round(cell.y)},${Math.round(cell.z)}`
+}
+
+/** Leg identity: the latest observed outcome for a (kind, from, to) supersedes. */
+function knownTraversalKey(traversal: KnownTraversalJson): string {
+  return `${traversal.kind}@${traversalCell(traversal.from)}->${traversalCell(traversal.to)}`
+}
+
+export interface MergeKnownTraversalsOptions {
+  log?: (event: string, detail?: Record<string, unknown>) => void
+  /** store bound; defaults to `KNOWN_TRAVERSAL_CAP` */
+  cap?: number
+}
+
+export interface MergeKnownTraversalsResult {
+  added: number
+  evicted: KnownTraversalJson[]
+  /** observations refused because the store was full and nothing was evictable */
+  dropped: number
+}
+
+/**
+ * Insert observed traversal facts into the bounded durable store. Thin wrapper
+ * over the ONE `mergeBoundedLruInto` primitive (same eviction order, same
+ * refusal semantics as the known-resource store).
+ *
+ * Capacity: `TRAVERSAL_EVICTED from=<cell> to=<cell> kind=<...> result=<...> reason=capacity ageMs=<n>`;
+ * a full store with nothing evictable refuses with `TRAVERSAL_FULL cap=<n> dropped=<n>`.
+ */
+export function mergeKnownTraversalsInto(
+  target: KnownTraversalJson[],
+  found: readonly KnownTraversalJson[],
+  options: MergeKnownTraversalsOptions = {},
+): MergeKnownTraversalsResult {
+  const result = mergeBoundedLruInto(target, found, {
+    cap: options.cap ?? KNOWN_TRAVERSAL_CAP,
+    keyOf: knownTraversalKey,
+    seenAtOf: (traversal) => traversal.lastSeenAt,
+    normalize: (traversal) => ({
+      from: { x: Math.round(traversal.from.x), y: Math.round(traversal.from.y), z: Math.round(traversal.from.z) },
+      to: { x: Math.round(traversal.to.x), y: Math.round(traversal.to.y), z: Math.round(traversal.to.z) },
+      kind: traversal.kind,
+      result: traversal.result,
+      ...(traversal.reason === undefined ? {} : { reason: traversal.reason }),
+      ...(traversal.worldEpoch === undefined ? {} : { worldEpoch: traversal.worldEpoch }),
+      ...(traversal.lastSeenAt === undefined ? {} : { lastSeenAt: traversal.lastSeenAt }),
+    }),
+    // The newest observed outcome for a leg is the truth: a leg that was blocked
+    // and later opened must stop being suppressed.
+    refresh: (existing, observed) => {
+      existing.result = observed.result
+      if (observed.reason === undefined) delete existing.reason
+      else existing.reason = observed.reason
+      if (observed.worldEpoch !== undefined) existing.worldEpoch = observed.worldEpoch
+      if (typeof observed.lastSeenAt === 'number' && Number.isFinite(observed.lastSeenAt)) {
+        existing.lastSeenAt = observed.lastSeenAt
+      }
+    },
+    log: options.log,
+    now: Date.now(),
+    evictedEvent: 'TRAVERSAL_EVICTED',
+    fullEvent: 'TRAVERSAL_FULL',
+    evictionDetail: (victim, now) => ({
+      from: traversalCell(victim.from),
+      to: traversalCell(victim.to),
+      kind: victim.kind,
+      result: victim.result,
+      reason: 'capacity',
+      ageMs:
+        typeof victim.lastSeenAt === 'number' && Number.isFinite(victim.lastSeenAt) ? now - victim.lastSeenAt : null,
+    }),
+  })
+  return { added: result.added, evicted: result.evicted, dropped: result.dropped }
 }
 
 /**
@@ -435,6 +612,8 @@ export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | '
  *   knownPortalSites   generation-entry `syncPortalSiteMemory` (#80, CAN-only)
  *   knownStructureSites generation-entry `syncStructureSiteMemory` (M3, CAN-only,
  *                      Nether-only fortress body)
+ *   knownTraversals    generation-entry `recordTraversalOutcome` from the
+ *                      controller/executor locomotion outcome stream (#354)
  *   moveFailures       controller `onMoveFailureMemoryChange`
  *   hazards            HOST `registerDeathHazard` on a production death (#26)
  *   mined              NO runtime producer: merge/persist machinery exists, but no
@@ -476,6 +655,16 @@ export interface ResidentWorldMemory {
    * on a world-epoch/dimension change.
    */
   knownStructureSites: KnownStructureSiteJson[]
+  /**
+   * Issue #354: durable, world-keyed traversal facts observed from real
+   * locomotion outcomes ("this leg opened a route" / "this leg was refused").
+   * It supplies the connectivity half that coordinates alone cannot: a
+   * remembered `blocked` leg suppresses a waypoint the candidate layer would
+   * otherwise re-offer, and a remembered `ok` leg corroborates a reachable
+   * waypoint. It is never a live check: the executor re-validates the cell, and
+   * the whole store is dropped with its world key on a `worldEpoch` change.
+   */
+  knownTraversals: KnownTraversalJson[]
   /** thin 2-block-wall / stuck memory; suppress repeat attempts. No runtime
    * producer yet - see the interface doc; always empty in live state. */
   traversalFailures: TraversalFailure[]
@@ -507,6 +696,7 @@ export function emptyWorldMemory(): ResidentWorldMemory {
     knownResources: [],
     knownPortalSites: [],
     knownStructureSites: [],
+    knownTraversals: [],
     traversalFailures: [],
     moveFailures: [],
     hazards: [],
@@ -524,6 +714,7 @@ export function normalizeWorldMemory(memory: ResidentWorldMemory): ResidentWorld
   memory.knownResources = Array.isArray(memory.knownResources) ? memory.knownResources : []
   memory.knownPortalSites = Array.isArray(memory.knownPortalSites) ? memory.knownPortalSites : []
   memory.knownStructureSites = Array.isArray(memory.knownStructureSites) ? memory.knownStructureSites : []
+  memory.knownTraversals = Array.isArray(memory.knownTraversals) ? memory.knownTraversals : []
   memory.traversalFailures = Array.isArray(memory.traversalFailures) ? memory.traversalFailures : []
   memory.moveFailures = Array.isArray(memory.moveFailures) ? memory.moveFailures : []
   memory.hazards = Array.isArray(memory.hazards) ? memory.hazards : []
@@ -571,6 +762,8 @@ export interface WorldMemoryDelta {
   knownStructureSites?: KnownStructureSiteJson[]
   /** structure sites whose live re-check failed / epoch changed; the host drops them (M3) */
   removeKnownStructureSites?: KnownStructureSiteJson[]
+  /** observed traversal facts to remember; the host merges them by leg (#354) */
+  knownTraversals?: KnownTraversalJson[]
   mined?: Record<string, number>
   traversalFailures?: TraversalFailure[]
   moveFailures?: MoveFailEntry[]

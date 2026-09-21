@@ -67,16 +67,20 @@ import type {
   KnownResourceJson,
   KnownStation,
   KnownStructureSiteJson,
+  KnownTraversalJson,
   MissionPreflightResult,
   ResidentGeneration,
   ResidentWorldMemory,
   ServerTruth,
   StationKind,
   StructuralSmokeResult,
+  TraversalBlockReason,
+  TraversalKind,
+  TraversalResult,
   Vec3Json,
   WorldMemoryDelta,
 } from './resident-types.ts'
-import { KNOWN_RESOURCE_CAP, mergeKnownResourcesInto } from './resident-types.ts'
+import { KNOWN_RESOURCE_CAP, mergeKnownResourcesInto, mergeKnownTraversalsInto } from './resident-types.ts'
 import { worldCacheNamespace } from './world-epoch.ts'
 import {
   applyStationFailure,
@@ -519,6 +523,207 @@ export function structureSiteKnownResources(
     ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
     ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
   }))
+}
+
+// ---------------------------------------------------------------------------
+// #354 traversal memory: producer (observed outcome -> durable fact) and
+// consumer (durable fact -> grounded candidate envelope)
+// ---------------------------------------------------------------------------
+
+/** Cardinal/vertical bearing of an observed leg (`D` = down, `U` = up). */
+export type TraversalDirection = 'E' | 'W' | 'N' | 'S' | 'U' | 'D'
+
+/** Rounded cell key, the same `x,y,z` identity the durable merges use. */
+export function traversalCellKey(cell: Vec3Json): string {
+  return `${Math.round(cell.x)},${Math.round(cell.y)},${Math.round(cell.z)}`
+}
+
+/**
+ * Bearing of an observed leg, from the dominant axis of the displacement. `+z`
+ * is south in Minecraft coordinates, matching the E/W/N/S/down convention the
+ * descent planner already uses.
+ */
+export function traversalDirection(from: Vec3Json, to: Vec3Json): TraversalDirection {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const dz = to.z - from.z
+  const ax = Math.abs(dx)
+  const ay = Math.abs(dy)
+  const az = Math.abs(dz)
+  if (ay > ax && ay > az) return dy < 0 ? 'D' : 'U'
+  if (ax >= az) return dx >= 0 ? 'E' : 'W'
+  return dz >= 0 ? 'S' : 'N'
+}
+
+/** Geometric traversal family of an observed leg. */
+export function traversalKindFromDelta(from: Vec3Json, to: Vec3Json): TraversalKind {
+  const dy = to.y - from.y
+  if (dy <= -1) return 'descend'
+  if (dy >= 1) return 'climb'
+  return 'step'
+}
+
+/**
+ * `moveFailureKey` is `<dimension>:<round(x)>,<round(y)>,<round(z)>`. The
+ * dimension may itself contain `:` (`minecraft:overworld`), so the cell is
+ * parsed from the end. Pure and total: anything unparseable yields null.
+ */
+export function parseMoveFailureCell(key: string): Vec3Json | null {
+  const match = /:(-?\d+),(-?\d+),(-?\d+)$/.exec(key)
+  if (match === null) return null
+  return { x: Number(match[1]), y: Number(match[2]), z: Number(match[3]) }
+}
+
+/**
+ * #354 producer, pure half: translate ONE existing controller/executor outcome
+ * event into a durable traversal fact, or null when the event carries no
+ * traversal outcome.
+ *
+ * The events are the controller's own settled-outcome stream, already wired to
+ * the generation through `eventSink`:
+ *   - `PATH_CALLBACK` `completed`/`failed` - the executor's path outcome with the
+ *     destination cell and the typed failure `outcome`;
+ *   - `MOVE_FAILMEM` - the controller refused a tracked move to a cell;
+ *   - `MOVE_FAILMEM_RESET` - the controller observed a tracked move reaching a cell.
+ *
+ * `fromPosition` is the live body cell sampled before the outcome (server truth,
+ * never a new sensor). `reasonAt` maps a known death hazard at the destination to
+ * a typed reason; anything unmapped is the generic `wall` terrain refusal.
+ */
+export function traversalFactFromEvent(input: {
+  event: string
+  detail: Record<string, unknown>
+  fromPosition: Vec3Json
+  worldEpoch: number
+  now?: number
+  reasonAt?: (to: Vec3Json) => TraversalBlockReason | undefined
+}): KnownTraversalJson | null {
+  const from: Vec3Json = {
+    x: Math.round(input.fromPosition.x),
+    y: Math.round(input.fromPosition.y),
+    z: Math.round(input.fromPosition.z),
+  }
+  let to: Vec3Json | null = null
+  let result: TraversalResult | null = null
+  let kind: TraversalKind | null = null
+  if (input.event === 'PATH_CALLBACK') {
+    const target = asVec3Json(input.detail.target)
+    if (target === null) return null
+    to = { x: Math.round(target.x), y: Math.round(target.y), z: Math.round(target.z) }
+    if (input.detail.phase === 'completed') result = 'ok'
+    else if (input.detail.phase === 'failed') result = 'blocked'
+    else return null
+  } else if (input.event === 'MOVE_FAILMEM' || input.event === 'MOVE_FAILMEM_RESET') {
+    const key = typeof input.detail.key === 'string' ? input.detail.key : null
+    to = key === null ? null : parseMoveFailureCell(key)
+    if (to === null) return null
+    result = input.event === 'MOVE_FAILMEM' ? 'blocked' : 'ok'
+    // A descent candidate's own kind is authoritative over the raw delta (a
+    // level-mode tunnel step does not change y).
+    if (input.detail.kind === 'DESCEND') kind = 'descend'
+  } else {
+    return null
+  }
+  if (kind === null) kind = traversalKindFromDelta(from, to)
+  // A completed leg that starts and ends in the same cell proves nothing; it is
+  // also the duplicate arrival event (`PATH_CALLBACK completed` fires alongside
+  // `MOVE_FAILMEM_RESET`), so never store it. A refusal in place is still a fact.
+  if (result === 'ok' && traversalCellKey(from) === traversalCellKey(to)) return null
+  const reason = result === 'blocked' ? (input.reasonAt?.(to) ?? 'wall') : undefined
+  return {
+    from,
+    to,
+    kind,
+    result,
+    ...(reason === undefined ? {} : { reason }),
+    worldEpoch: input.worldEpoch,
+    lastSeenAt: input.now ?? Date.now(),
+  }
+}
+
+/**
+ * #354 consumer, pure half: suppress a waypoint the candidate layer would
+ * otherwise re-offer when a remembered `blocked` traversal covers it from where
+ * the body is NOW. "Covered" means the remembered leg ended at the waypoint cell
+ * and departed from the bot's current neighbourhood, so a blocked-west fact does
+ * not suppress an unrelated west waypoint on the other side of the map. Pure.
+ */
+export const TRAVERSAL_LOCAL_RADIUS = 4
+
+export interface TraversalSuppression {
+  waypoint: Vec3Json
+  fact: KnownTraversalJson
+  direction: TraversalDirection
+}
+
+export function traversalIsLocal(from: Vec3Json, position: Vec3Json, radius = TRAVERSAL_LOCAL_RADIUS): boolean {
+  return Math.hypot(from.x - position.x, from.y - position.y, from.z - position.z) <= radius
+}
+
+export function filterBlockedTraversalWaypoints<T extends { position: Vec3Json }>(
+  waypoints: readonly T[],
+  traversals: readonly KnownTraversalJson[],
+  position: Vec3Json,
+  worldEpoch: number,
+  radius = TRAVERSAL_LOCAL_RADIUS,
+): { kept: T[]; blocked: TraversalSuppression[] } {
+  const blockedFacts = traversals.filter(
+    (fact) =>
+      fact.result === 'blocked' &&
+      (fact.worldEpoch === undefined || fact.worldEpoch === worldEpoch) &&
+      traversalIsLocal(fact.from, position, radius),
+  )
+  const kept: T[] = []
+  const blocked: TraversalSuppression[] = []
+  for (const waypoint of waypoints) {
+    const key = traversalCellKey(waypoint.position)
+    const fact = blockedFacts.find((candidate) => traversalCellKey(candidate.to) === key)
+    if (fact === undefined) {
+      kept.push(waypoint)
+      continue
+    }
+    blocked.push({ waypoint: waypoint.position, fact, direction: traversalDirection(fact.from, fact.to) })
+  }
+  return { kept, blocked }
+}
+
+/**
+ * #354 consumer, offer half: a waypoint already in the grounded envelope that a
+ * remembered SUCCESSFUL traversal from the bot's neighbourhood actually reached.
+ * The fact corroborates reachability; the candidate layer still chooses and the
+ * executor still re-validates the cell. Pure.
+ */
+export function traversalHintsForWaypoints<T extends { position: Vec3Json }>(
+  waypoints: readonly T[],
+  traversals: readonly KnownTraversalJson[],
+  position: Vec3Json,
+  worldEpoch: number,
+  radius = TRAVERSAL_LOCAL_RADIUS,
+): { waypoint: Vec3Json; fact: KnownTraversalJson }[] {
+  const okFacts = traversals.filter(
+    (fact) =>
+      fact.result === 'ok' &&
+      (fact.worldEpoch === undefined || fact.worldEpoch === worldEpoch) &&
+      traversalIsLocal(fact.from, position, radius),
+  )
+  const hints: { waypoint: Vec3Json; fact: KnownTraversalJson }[] = []
+  for (const waypoint of waypoints) {
+    const key = traversalCellKey(waypoint.position)
+    const fact = okFacts.find((candidate) => traversalCellKey(candidate.to) === key)
+    if (fact !== undefined) hints.push({ waypoint: waypoint.position, fact })
+  }
+  return hints
+}
+
+/** One entry of the grounded known-resource envelope generation-entry hands to Jev. */
+export interface KnownResourceEnvelopeEntry {
+  name: string
+  kind: 'ore' | 'log' | 'station' | 'portal' | 'structure'
+  position: Vec3Json
+  dimension?: string
+  worldEpoch?: number
+  widthAxis?: 'x' | 'z'
+  frameCells?: Vec3Json[]
 }
 
 /** `the_nether` dimension id, normalized (no `minecraft:` prefix). */
@@ -981,6 +1186,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       ...site,
       ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
     })),
+    knownTraversals: (ctx.worldMemory.knownTraversals ?? []).map((traversal) => ({
+      ...traversal,
+      from: { ...traversal.from },
+      to: { ...traversal.to },
+    })),
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
@@ -1310,6 +1520,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres,
     knownResources: foundResources,
     removeKnownResources: staleRemovals,
+    knownTraversals: world.knownTraversals,
     traversalFailures: world.traversalFailures,
     moveFailures: world.moveFailures,
   }
@@ -1324,6 +1535,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: world.discoveredOres,
     knownResources: world.knownResources.length,
     newKnownResources,
+    knownTraversals: world.knownTraversals.length,
     moveFailures: world.moveFailures.length,
     removedStations: removedStations.length,
   })
@@ -1416,6 +1628,127 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       })
     : undefined
 
+  /**
+   * #354 producer (the ONLY one): route a settled controller/executor locomotion
+   * outcome from the existing `eventSink` stream into the durable traversal
+   * store. No new sensor: `from` is the body cell sampled from server truth at
+   * the previous observed outcome (so a completion records the leg it actually
+   * traversed, not the arrival cell).
+   */
+  const traversalReasonAt = (to: Vec3Json): TraversalBlockReason | undefined => {
+    const hazard = world.hazards.find(
+      (h) => Math.round(h.x) === to.x && Math.round(h.y) === to.y && Math.round(h.z) === to.z,
+    )
+    if (hazard === undefined) return undefined
+    if (hazard.reason === 'lava') return 'lava'
+    if (hazard.reason === 'fall') return 'fall'
+    if (hazard.reason === 'void') return 'void'
+    return undefined
+  }
+  const liveCell = (): Vec3Json | null => {
+    const position = ctx.bot.entity?.position
+    if (position === undefined || position === null) return null
+    return { x: Math.round(position.x), y: Math.round(position.y), z: Math.round(position.z) }
+  }
+  let traversalFromCell: Vec3Json | null = liveCell()
+  const recordTraversalOutcome = (event: string, detail: Record<string, unknown>): void => {
+    const from = traversalFromCell ?? liveCell()
+    if (from === null) return
+    const fact = traversalFactFromEvent({
+      event,
+      detail,
+      fromPosition: from,
+      worldEpoch: ctx.worldKey.worldEpoch,
+      reasonAt: traversalReasonAt,
+    })
+    if (fact !== null) {
+      mergeKnownTraversalsInto(world.knownTraversals, [fact], { log: (e, d) => ctx.log(e, d) })
+      ctx.proposeWorldMemory({ knownTraversals: [fact] })
+      ctx.log('TRAVERSAL_RECORDED', {
+        from: traversalCellKey(fact.from),
+        to: traversalCellKey(fact.to),
+        kind: fact.kind,
+        result: fact.result,
+        ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+      })
+    }
+    const next = liveCell()
+    if (next !== null) traversalFromCell = next
+  }
+
+  /**
+   * #354 consumer (the ONLY one): project durable traversal facts into the SAME
+   * grounded known-resource envelope the candidate layer already reads, instead
+   * of adding a candidate-layer hook. A remembered `blocked` leg from the bot's
+   * neighbourhood removes the waypoint cell it covers, so the candidate layer
+   * cannot re-offer that direction; a remembered `ok` leg only corroborates a
+   * reachable waypoint (TRAVERSAL_HINT). Both are envelope-level facts: Jev still
+   * chooses, the executor still re-validates the cell, and no ranking is added.
+   */
+  const knownResourceEnvelope: KnownResourceEnvelopeEntry[] = [
+    ...world.knownResources
+      .filter((resource) => {
+        if (resource.kind !== 'station') return true
+        // Holding a station makes PLACE the preferred prerequisite path, but
+        // it does not make remembered world stations disappear.  In a cave
+        // with no valid placement spot, hiding every known furnace/table
+        // collapses the prerequisite ladder to WAIT even though retrieval is
+        // still a grounded fallback.
+        return !unusableStationKeys.has(`${resource.name}:${stationKey(resource)}`)
+      })
+      .map((resource) => ({
+        name: resource.name,
+        kind: resource.kind,
+        position: { x: resource.x, y: resource.y, z: resource.z },
+        ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+        ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      })),
+    // Keep durable stations in the controller envelope even when the same
+    // item is held.  `planPrereqOptions` still ranks a valid held placement
+    // first; these entries are the fallback when placement geometry refuses.
+    ...world.furnaces.map((furnace) => ({
+      name: 'furnace',
+      kind: 'station' as const,
+      position: { x: furnace.x, y: furnace.y, z: furnace.z },
+    })),
+    ...world.craftingTables.map((table) => ({
+      name: 'crafting_table',
+      kind: 'station' as const,
+      position: { x: table.x, y: table.y, z: table.z },
+    })),
+    // #80: durable verified-portal sites ride the same known-resource envelope.
+    // The `portal` kind is CAN-only: it is the grounded route back to a site the
+    // live detector already verified, never a claim that the portal is lit now.
+    ...portalSiteKnownResources(world.knownPortalSites),
+    // #342: durable Nether fortress sites ride the same envelope so the
+    // `blaze_rods` goal gets a grounded route to the remembered body.
+    ...structureSiteKnownResources(world.knownStructureSites ?? []),
+  ]
+  const traversalProjectionCell = liveCell() ?? { x: 0, y: 0, z: 0 }
+  const traversalProjection = filterBlockedTraversalWaypoints(
+    knownResourceEnvelope,
+    world.knownTraversals,
+    traversalProjectionCell,
+    ctx.worldKey.worldEpoch,
+  )
+  const groundedWaypoints = traversalProjection.kept
+  for (const suppression of traversalProjection.blocked) {
+    ctx.log('TRAVERSAL_BLOCKED', {
+      from: traversalCellKey(suppression.fact.from),
+      dir: suppression.direction,
+      reason: suppression.fact.reason ?? 'wall',
+      waypoint: traversalCellKey(suppression.waypoint),
+    })
+  }
+  for (const hint of traversalHintsForWaypoints(
+    groundedWaypoints,
+    world.knownTraversals,
+    traversalProjectionCell,
+    ctx.worldKey.worldEpoch,
+  )) {
+    ctx.log('TRAVERSAL_HINT', { waypoint: traversalCellKey(hint.waypoint), source: 'memory' })
+  }
+
   const options: Partial<JevAgentOptions> = {
     goalItem: ctx.goalItem,
     goalCount: ctx.goalCount,
@@ -1459,51 +1792,16 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       const status = typeof detail.status === 'string' ? detail.status : null
       if (actionId !== null && status !== null) m2Snapshot?.recordTerminal(actionId, { verified, status })
       handleStationEvent(event, detail)
+      // #354: the ONE traversal producer. The executor/controller outcome stream
+      // is already mirrored here; no extra listener or sensor is added.
+      recordTraversalOutcome(event, detail)
     },
     moveFailureEntries: world.moveFailures,
     onMoveFailureMemoryChange: (entries) => {
       world.moveFailures = entries.map((entry) => ({ ...entry }))
       ctx.proposeWorldMemory({ moveFailures: world.moveFailures })
     },
-    knownResources: [
-      ...world.knownResources
-        .filter((resource) => {
-          if (resource.kind !== 'station') return true
-          // Holding a station makes PLACE the preferred prerequisite path, but
-          // it does not make remembered world stations disappear.  In a cave
-          // with no valid placement spot, hiding every known furnace/table
-          // collapses the prerequisite ladder to WAIT even though retrieval is
-          // still a grounded fallback.
-          return !unusableStationKeys.has(`${resource.name}:${stationKey(resource)}`)
-        })
-        .map((resource) => ({
-          name: resource.name,
-          kind: resource.kind,
-          position: { x: resource.x, y: resource.y, z: resource.z },
-          ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
-          ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
-        })),
-      // Keep durable stations in the controller envelope even when the same
-      // item is held.  `planPrereqOptions` still ranks a valid held placement
-      // first; these entries are the fallback when placement geometry refuses.
-      ...world.furnaces.map((furnace) => ({
-        name: 'furnace',
-        kind: 'station' as const,
-        position: { x: furnace.x, y: furnace.y, z: furnace.z },
-      })),
-      ...world.craftingTables.map((table) => ({
-        name: 'crafting_table',
-        kind: 'station' as const,
-        position: { x: table.x, y: table.y, z: table.z },
-      })),
-      // #80: durable verified-portal sites ride the same known-resource envelope.
-      // The `portal` kind is CAN-only: it is the grounded route back to a site the
-      // live detector already verified, never a claim that the portal is lit now.
-      ...portalSiteKnownResources(world.knownPortalSites),
-      // #342: durable Nether fortress sites ride the same envelope so the
-      // `blaze_rods` goal gets a grounded route to the remembered body.
-      ...structureSiteKnownResources(world.knownStructureSites ?? []),
-    ],
+    knownResources: groundedWaypoints,
   }
 
   const controller = new JevController(bot, options)
