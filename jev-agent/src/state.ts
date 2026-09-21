@@ -79,9 +79,12 @@ export type KnownResource = {
    * Broad class. `portal` (issue #80) is a durable verified-portal site: it is
    * inert to the ore/log/station retrieval matches and is consumed by
    * `rememberedPortalFrameSites` so the existing portal grounding/entry
-   * machinery gets a grounded route back to the site.
+   * machinery gets a grounded route back to the site. `structure` (#342) is a
+   * durable Nether fortress site: the candidate layer matches it by block name
+   * (`NETHER_STRUCTURE_BLOCK_NAMES`), giving a `blaze_rod` goal a route to the
+   * remembered body without asserting the body yields a blaze rod.
    */
-  kind: 'ore' | 'log' | 'station' | 'portal'
+  kind: 'ore' | 'log' | 'station' | 'portal' | 'structure'
   position: Vec3Json
   /**
    * Issue #14: the coordinate is only meaningful in the world it was scanned in.

@@ -512,6 +512,31 @@ export function portalSiteKnownResources(
   }))
 }
 
+/**
+ * #342: expose durable Nether fortress sites through the same CAN-only
+ * known-resource envelope as the portal sites above. `structure` is distinct
+ * from `ore` for observability; the candidate layer matches it by block name
+ * (`NETHER_STRUCTURE_BLOCK_NAMES`), so a `blaze_rod` goal gets the grounded
+ * route to the remembered body. It never asserts the body yields a blaze rod.
+ */
+export function structureSiteKnownResources(
+  known: readonly KnownStructureSiteJson[],
+): {
+  name: string
+  kind: 'structure'
+  position: Vec3Json
+  dimension?: string
+  worldEpoch?: number
+}[] {
+  return known.map((site) => ({
+    name: 'nether_bricks',
+    kind: 'structure' as const,
+    position: { x: site.x, y: site.y, z: site.z },
+    ...(site.dimension === undefined ? {} : { dimension: site.dimension }),
+    ...(site.worldEpoch === undefined ? {} : { worldEpoch: site.worldEpoch }),
+  }))
+}
+
 /** `the_nether` dimension id, normalized (no `minecraft:` prefix). */
 export const NETHER_DIMENSION_ID = 'the_nether'
 
@@ -1491,6 +1516,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       // The `portal` kind is CAN-only: it is the grounded route back to a site the
       // live detector already verified, never a claim that the portal is lit now.
       ...portalSiteKnownResources(world.knownPortalSites),
+      // #342: durable Nether fortress sites ride the same envelope so the
+      // `blaze_rods` goal gets a grounded route to the remembered body.
+      ...structureSiteKnownResources(world.knownStructureSites ?? []),
     ],
   }
 
