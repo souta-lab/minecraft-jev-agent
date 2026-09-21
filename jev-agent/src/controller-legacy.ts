@@ -1355,18 +1355,27 @@ export function canAuthoritativelyAbandonOption(optionId: string | null): option
  * only to reset the bounded beta-abandon deferral (a productive in-flight action
  * keeps its deferral); it never selects an action.
  */
-export function betaAbandonProgressObserved(reason: string, outcome: System2Outcome | null): boolean {
-  if (reason === 'body_or_search_progress') return true
-  if (outcome === null) return false
-  const kinds = outcome.progressKinds ?? []
-  return (
-    outcome.progress === 'goal' ||
-    outcome.progress === 'body' ||
-    outcome.progress === 'search' ||
-    kinds.includes('goal') ||
-    kinds.includes('body') ||
-    kinds.includes('search')
-  )
+export function betaAbandonProgressObserved(
+  reason: string,
+  outcome: System2Outcome | null,
+  locomotionEfficiency = 100,
+): boolean {
+  const kinds = outcome?.progressKinds ?? []
+  const progress = outcome?.progress ?? null
+  if (progress === 'goal' || progress === 'search' || kinds.includes('goal') || kinds.includes('search')) return true
+  const bodyProgress =
+    outcome === null
+      ? reason === 'body_or_search_progress'
+      : progress === 'body' || kinds.includes('body') || reason === 'body_or_search_progress'
+  if (!bodyProgress) return false
+  // Issue #360 sections 8 and 11: body motion kept the bounded beta-abandon deferral
+  // alive every cycle, so Jev beta's abandon vote (measured live at 0.68-0.73 against a
+  // 0.5 threshold) was deferred forever and the Option never ended. Walking is still
+  // legitimate progress, so the deferral is kept only when the body is actually going
+  // somewhere: the windowed locomotion efficiency must be above the same floor the
+  // move-failure memory uses. A state-recurring micro-move loop sits at ~0-6% and no
+  // longer holds the Option open.
+  return locomotionEfficiency >= MOVE_PROGRESS_EFFICIENCY_FLOOR
 }
 
 export class JevController {
@@ -2657,7 +2666,7 @@ export class JevController {
       return boundary
     }
     const action = decisionIdFrom(decision) ?? 'WAIT'
-    const progressed = betaAbandonProgressObserved(boundary.reason, outcome)
+    const progressed = betaAbandonProgressObserved(boundary.reason, outcome, this.lastLocomotionEfficiency)
     const bounded = this.betaAbandonDeferral.note({
       plan: this.betaAbandonPlanId,
       action,
