@@ -47,11 +47,14 @@ import {
   reconcileProtection,
 } from './protectionConflict.ts'
 import {
+  ACTION_COMMIT,
+  ACTION_PREEMPT,
   CANDIDATE_COMMIT_RELEASED,
   CANDIDATE_FLAP,
+  evaluateActionCommitment,
   evaluateCandidateFlap,
 } from './candidateCommitment.ts'
-import type { CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
+import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from './candidateCommitment.ts'
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
@@ -82,7 +85,7 @@ import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, W
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
-import { ActionFailureEscalation, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import { ActionFailureEscalation, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs, resolveWaitStreakEscalateCycles, formatWaitExhausted, formatWaitStreak, WAIT_EXHAUSTED_MARKER, WAIT_STREAK_MARKER, WaitStreakEscalation } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
@@ -332,6 +335,13 @@ export interface JevAgentOptions {
    */
   actionFailureEscalateCycles: number
   /**
+   * Issue #327 follow-up: consecutive chosen WAIT decisions while real
+   * actionable candidates exist, after which the local recovery is declared
+   * exhausted and System2 is woken (`WAIT_EXHAUSTED`).
+   * `BUDDY_WAIT_STREAK_ESCALATE_CYCLES` overrides it.
+   */
+  waitStreakEscalateCycles: number
+  /**
    * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
    * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
@@ -384,6 +394,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   replanPositionDelta: resolveReplanPositionDelta(),
   replanNoInfoEscalateCycles: resolveReplanNoInfoEscalateCycles(),
   actionFailureEscalateCycles: resolveActionFailureEscalateCycles(),
+  waitStreakEscalateCycles: resolveWaitStreakEscalateCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
   worldEpoch: 0,
 }
@@ -978,6 +989,10 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   PROTECTION_ABANDON_CONFLICT,
   CANDIDATE_FLAP,
   CANDIDATE_COMMIT_RELEASED,
+  ACTION_COMMIT,
+  ACTION_PREEMPT,
+  WAIT_STREAK_MARKER,
+  WAIT_EXHAUSTED_MARKER,
   'BETA_DEFERRED',
 ])
 
@@ -1394,6 +1409,14 @@ export class JevController {
    * `replanThrottle`'s #44/#78 no-progress counter by construction.
    */
   private readonly actionFailureEscalation: ActionFailureEscalation
+  /** #327 follow-up: bounded chosen-WAIT streak while real actions exist. */
+  private readonly waitStreakEscalation: WaitStreakEscalation
+  /**
+   * Set for exactly one decision after an actionable WAIT streak is exhausted,
+   * so WAIT is removed from the offered set and the policy must choose a real
+   * candidate. Cleared at the next candidate build; never a standing filter.
+   */
+  private waitSuppressed = false
   private readonly loggedStaleResources = new Set<string>()
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
@@ -1486,6 +1509,13 @@ export class JevController {
   private readonly abandonedOptions = new AbandonmentLedger()
   /** #11 v2 §7: anti-thrash commitment - one candidate until a fact changes. */
   private commitmentState: CandidateFlapState | null = null
+  /**
+   * Action-lifecycle commitment: the in-flight chosen action is held for a
+   * bounded window so the next decision cannot replace it before it settles.
+   * Released on completion/failure (`onActionComplete`), a plan/goal change, a
+   * deterministic invalidation, or the bounded window/budget.
+   */
+  private actionCommitmentState: ActionCommitmentState | null = null
   /** verified-outcome counter; a change clears the flap window and the commitment. */
   private progressEpoch = 0
   private commitmentProgressEpoch = 0
@@ -1530,6 +1560,7 @@ export class JevController {
       this.options.replanNoInfoEscalateCycles,
     )
     this.actionFailureEscalation = new ActionFailureEscalation(this.options.actionFailureEscalateCycles)
+    this.waitStreakEscalation = new WaitStreakEscalation(this.options.waitStreakEscalateCycles)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.recipeIndex = createRecipeIndex(bot.registry)
@@ -2096,6 +2127,22 @@ export class JevController {
       if (this.queue.current?.kind === 'descend' && candidates.some((candidate) => candidate.kind !== 'WAIT')) {
         candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
       }
+      // #327 follow-up: an exhausted actionable-WAIT streak removes the no-op for
+      // exactly one decision, so the policy must choose a real candidate. This is
+      // a control bound on the no-op, never a ranking of the real candidates: it
+      // only filters WAIT, and the flag is cleared here.
+      if (this.waitSuppressed) {
+        this.waitSuppressed = false
+        if (candidates.some((candidate) => candidate.kind !== 'WAIT')) {
+          candidates = candidates.filter((candidate) => candidate.kind !== 'WAIT')
+          this.logger.warn(
+            'agent',
+            `WAIT_FORCED goal="${this.currentGoalKey()}" reason=wait_streak_exhausted`,
+            { goal: this.currentGoalKey() },
+            this.tickCounter,
+          )
+        }
+      }
       this.observeDescendProgress(candidates)
       this.lastCandidates = candidates
       this.logCandidates(candidates, state)
@@ -2213,9 +2260,11 @@ export class JevController {
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
       const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
+      const heldId = this.applyActionCommitment(committedId, candidates, state)
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(committedId, dangerGate, candidates)
+      const gated = this.applyDangerGate(heldId, dangerGate, candidates)
       const chosenId = gated.chosenId
+      this.noteWaitStreak(chosenId, actionable)
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
 
@@ -2916,6 +2965,104 @@ export class JevController {
   }
 
   /**
+   * Action-lifecycle commitment: hold the action the executor is ALREADY running
+   * for a bounded window instead of letting this decision cancel it via
+   * `Executor.claim` (which cancels any different in-flight action first).
+   *
+   * This is the same authority invariant as the flap commitment: it can only
+   * keep the action Jev already chose, or release to the raw choice - code never
+   * substitutes a different candidate. `ACTION_COMMIT` is logged when a switch is
+   * suppressed; `ACTION_PREEMPT` when the held action is released and replaced.
+   */
+  private applyActionCommitment(
+    chosenId: string,
+    candidates: readonly Candidate[],
+    state: WorldState,
+  ): string {
+    const running = this.executor.current
+    const invalid = running === null ? null : this.deterministicInvalid(candidates, state)
+    const decision = evaluateActionCommitment({
+      previous: this.actionCommitmentState,
+      inFlight:
+        running === null
+          ? null
+          : { id: running.id, epoch: running.epoch, startedAtMs: running.startedAt },
+      chosenId,
+      planKey: this.actionCommitmentPlanKey(state),
+      nowMs: Date.now(),
+      inFlightInvalid: running !== null && invalid !== null && invalid.has(running.id),
+      inFlightOffered: running !== null && candidates.some((candidate) => candidate.id === running.id),
+    })
+    this.actionCommitmentState = decision.state
+    if (decision.line !== null) {
+      this.logger.warn(
+        'policy',
+        decision.line,
+        { chosenId, heldId: decision.chosenId, planKey: this.actionCommitmentPlanKey(state) },
+        this.tickCounter,
+      )
+    }
+    if (decision.releaseLine !== null) {
+      this.logger.warn(
+        'policy',
+        decision.releaseLine,
+        { chosenId, heldId: null, planKey: this.actionCommitmentPlanKey(state) },
+        this.tickCounter,
+      )
+    }
+    return decision.chosenId
+  }
+
+  /** Plan/goal identity for the action commitment; a change resets it. */
+  private actionCommitmentPlanKey(state: WorldState): string {
+    const current = state.goalQueue?.current
+    return `${this.currentGoalKey()}|plan=${current?.id ?? 'none'}|rev=${state.goalQueue?.revision ?? this.queue.revision}`
+  }
+
+  /**
+   * #327 follow-up: bound the chosen no-op WAIT while real actionable candidates
+   * are offered. The policy model itself can keep choosing WAIT with several real
+   * actions on the table; no existing counter sees that (`LOCAL_RECOVERY_*` only
+   * advance on suppressed replans, `ACTION_FAILURE_*` only on typed action
+   * failures, and the #43 WAIT wedge is suppressed when the junk-inventory
+   * fingerprint churns every tick).
+   *
+   * On the Nth consecutive actionable WAIT the local recovery is exhausted:
+   * `WAIT_EXHAUSTED` is logged, `progress_stall` wakes System2 through the same
+   * `escalate()` path #326/#337 use, and WAIT is removed for exactly one decision
+   * so the policy must choose a real candidate. The streak clears on any non-WAIT
+   * choice, on `actionable === 0`, on a goal/plan change (inside the counter), on
+   * progress (in `onActionComplete`), and on the Nth decision - so the next
+   * escalation needs N fresh WAITs and no hot wake loop is possible. Its
+   * fingerprint is exposed through `replanInputs()` so the #44 throttle cannot
+   * swallow this one wake as `no_new_info`.
+   */
+  private noteWaitStreak(chosenId: string, actionable: number): void {
+    const goalKey = this.currentGoalKey()
+    const decision = this.waitStreakEscalation.noteChoice(chosenId, actionable, goalKey)
+    if (decision.count === 0) return
+    const detail = {
+      goal: goalKey,
+      actionable,
+      count: decision.count,
+      limit: decision.limit,
+    }
+    if (!decision.escalate) {
+      this.logger.warn('policy', formatWaitStreak(decision), detail, this.tickCounter)
+      return
+    }
+    this.logger.warn('policy', formatWaitExhausted(decision), { ...detail, boundary: 'semantic_boundary' }, this.tickCounter)
+    // Force the next decision to choose a real candidate, then reset so the
+    // bound cannot hot-loop: N fresh WAITs are required before the next wake.
+    this.waitSuppressed = true
+    this.escalate(
+      'progress_stall',
+      `WAIT_EXHAUSTED count=${decision.count}/${decision.limit} goal=${goalKey} actionable=${actionable}`,
+    )
+    this.waitStreakEscalation.reset()
+  }
+
+  /**
    * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
    * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
    * and only give up after PLACE_RETRY_LIMIT attempts.
@@ -3121,6 +3268,16 @@ export class JevController {
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
+    // A settled action (done / failed / cancelled) releases the in-flight
+    // commitment immediately, so the next decision is free to choose again. The
+    // epoch match keeps a stale completion from clearing a newer action's hold.
+    if (
+      this.actionCommitmentState !== null &&
+      this.actionCommitmentState.actionId === result.actionId &&
+      this.actionCommitmentState.epoch === result.epoch
+    ) {
+      this.actionCommitmentState = null
+    }
     const moved =
       this.actionStart === null
         ? 0
@@ -3172,6 +3329,8 @@ export class JevController {
       // Observed progress (body/search/goal) resets the typed-action-failure
       // streak: the same action failing again is no longer one unbroken run.
       this.actionFailureEscalation.reset()
+      // Real progress also ends any actionable-WAIT streak (#327 follow-up).
+      this.waitStreakEscalation.reset()
     }
     this.recentOutcomes.push({
       actionId: result.actionId,
@@ -5428,6 +5587,9 @@ export class JevController {
       // exhausted, so it is genuine new information for the replan gate even
       // though the cheap world inputs are identical. Null at every count < N.
       actionFailureExhausted: this.actionFailureEscalation.pendingKey(),
+      // The Nth actionable WAIT is proof the no-op selection itself is the loop,
+      // so it is genuine new information for the replan gate.
+      waitStreakExhausted: this.waitStreakEscalation.pendingKey(),
     }
   }
 

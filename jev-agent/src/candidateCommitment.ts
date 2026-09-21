@@ -226,3 +226,202 @@ export function evaluateCandidateFlap(input: CandidateFlapInput): CandidateFlapD
     releaseLine: null,
   }
 }
+
+// ---------------------------------------------------------------------------
+// In-flight ACTION commitment (action lifecycle, not preference)
+// ---------------------------------------------------------------------------
+//
+// Measured live on `449cedd` (m3-live, planId=g3:collect:flint):
+//
+//   RETRIEVE:known:obsidian:b28_67_9 x2, DESCEND:level:W:b125_66_-10 x2, WAIT x4
+//   PATH_CALLBACK phase=failed actionId=DESCEND:level:W:b125_66_-10
+//   position ~125,66; net movement ~0 over many minutes
+//
+// `Executor.claim(candidate)` cancels any *different* in-flight action first
+// (`cancelCurrent`, executor.ts). Nothing in the controller bounded that
+// switch: `evaluateCandidateFlap` above only arms after N consecutive changed
+// ticks under an UNCHANGED semantic fingerprint, and the fingerprint includes
+// rounded position + inventory, so any action that actually moves the body (or
+// digs junk) resets the flap window before it can hold. A newly chosen
+// candidate therefore replaced the running action whenever a decision happened
+// to be produced, and the body never finished either alternative.
+//
+// This is the SAME mechanism as the flap commitment - hold a candidate JEV
+// ACTUALLY CHOSE long enough for it to settle, never substitute a different
+// semantic choice - but keyed on the live in-flight ACTION INSTANCE and bounded
+// by a completion window. It is deliberately NOT a preference: it can only keep
+// the action the executor is already running, or release to whatever the raw
+// choice is (`chosenId`). Code never picks a replacement.
+//
+// Release is immediate and unconditional when:
+//   - nothing is in flight (the action completed, failed or was cancelled);
+//   - the plan/goal identity changed (a different goal resets the commitment);
+//   - the held candidate vanished from the grounded set;
+//   - deterministic feasibility rejected the held candidate; or
+//   - the bounded window (`windowMs`) / decision budget (`maxHolds`) elapsed.
+// The last two are the anti-infinite-commitment guard: after the bound the raw
+// choice wins, so a genuinely stuck action cannot freeze the controller (#327).
+
+/** Bounded completion window an in-flight chosen action gets before replacement. */
+export const ACTION_COMMIT_MS_DEFAULT = 8000
+
+/** `BUDDY_ACTION_COMMIT_MS` overrides the window; invalid values fall back. */
+export function resolveActionCommitMs(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_ACTION_COMMIT_MS ?? ACTION_COMMIT_MS_DEFAULT)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : ACTION_COMMIT_MS_DEFAULT
+}
+
+/** Decisions a single in-flight action may be held through before the raw choice wins. */
+export const ACTION_COMMIT_HOLDS_DEFAULT = 8
+
+/** `BUDDY_ACTION_COMMIT_HOLDS` overrides the decision budget; invalid values fall back. */
+export function resolveActionCommitHolds(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_ACTION_COMMIT_HOLDS ?? ACTION_COMMIT_HOLDS_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : ACTION_COMMIT_HOLDS_DEFAULT
+}
+
+/** Mirrored markers for the in-flight action lifecycle. */
+export const ACTION_COMMIT = 'ACTION_COMMIT'
+export const ACTION_PREEMPT = 'ACTION_PREEMPT'
+
+export function formatActionCommit(plan: string, action: string, remainingMs: number): string {
+  return `${ACTION_COMMIT} plan=${plan} action=${action} remainingMs=${remainingMs}`
+}
+
+export function formatActionPreempt(plan: string, from: string, to: string, reason: string): string {
+  return `${ACTION_PREEMPT} plan=${plan} from=${from} to=${to} reason=${reason}`
+}
+
+/** Why a held in-flight action was allowed to be replaced. */
+export type ActionCommitReleaseReason =
+  | 'plan_changed'
+  | 'no_longer_offered'
+  | 'deterministically_invalid'
+  | 'window_elapsed'
+  | 'decision_budget_exhausted'
+
+export interface ActionCommitmentState {
+  /** the held action instance identity: candidate id + executor epoch */
+  readonly actionId: string
+  readonly epoch: number
+  readonly planKey: string
+  /** decisions taken while holding this action against a different choice */
+  readonly holds: number
+}
+
+export interface ActionCommitmentInput {
+  readonly previous: ActionCommitmentState | null
+  /** the executor's in-flight action instance, or null when nothing is running. */
+  readonly inFlight: {
+    readonly id: string
+    readonly epoch: number
+    readonly startedAtMs: number
+  } | null
+  /** the raw (after flap commitment) policy choice for this decision. */
+  readonly chosenId: string
+  /** plan/goal identity; a change resets the commitment. */
+  readonly planKey: string
+  readonly nowMs: number
+  readonly windowMs?: number
+  readonly maxHolds?: number
+  /** deterministic feasibility rejected the in-flight candidate. */
+  readonly inFlightInvalid: boolean
+  /** the in-flight candidate is still in the grounded candidate set. */
+  readonly inFlightOffered: boolean
+}
+
+export interface ActionCommitmentDecision {
+  /** null once nothing is held (in flight settled, or commitment released). */
+  readonly state: ActionCommitmentState | null
+  /** the action the controller may claim: the held action, or the new choice. */
+  readonly chosenId: string
+  /** true when a different choice was suppressed for the held in-flight action. */
+  readonly committed: boolean
+  /** the `ACTION_COMMIT ...` line when a switch was suppressed, else null. */
+  readonly line: string | null
+  /** the `ACTION_PREEMPT ...` line when the held action was released, else null. */
+  readonly releaseLine: string | null
+}
+
+/**
+ * Hold a Jev-chosen in-flight action for a bounded window instead of letting
+ * the next decision replace it. Pure: `now`, the in-flight instance and the
+ * grounded set are all injected, so the lifecycle is unit-testable without a
+ * bot. See the block comment above for the authority invariant and release set.
+ */
+export function evaluateActionCommitment(input: ActionCommitmentInput): ActionCommitmentDecision {
+  const windowMs = input.windowMs ?? ACTION_COMMIT_MS_DEFAULT
+  const maxHolds = input.maxHolds ?? ACTION_COMMIT_HOLDS_DEFAULT
+  const inFlight = input.inFlight
+
+  // (b) no action is in flight: a completed/failed/cancelled action releases the
+  // commitment immediately, so the raw choice is honored on this decision.
+  if (inFlight === null) {
+    return { state: null, chosenId: input.chosenId, committed: false, line: null, releaseLine: null }
+  }
+
+  const previous = input.previous
+  const sameInstance =
+    previous !== null &&
+    previous.actionId === inFlight.id &&
+    previous.epoch === inFlight.epoch &&
+    previous.planKey === input.planKey
+
+  // Jev re-selected the running action: keep the commitment anchored, no switch.
+  if (input.chosenId === inFlight.id) {
+    return {
+      state: {
+        actionId: inFlight.id,
+        epoch: inFlight.epoch,
+        planKey: input.planKey,
+        holds: previous !== null && sameInstance ? previous.holds : 0,
+      },
+      chosenId: input.chosenId,
+      committed: false,
+      line: null,
+      releaseLine: null,
+    }
+  }
+
+  const elapsedMs = Number.isFinite(inFlight.startedAtMs) ? input.nowMs - inFlight.startedAtMs : windowMs
+  const remainingMs = Math.max(0, Math.floor(windowMs - elapsedMs))
+  const holds = previous !== null && sameInstance ? previous.holds : 0
+
+  // (c) plan/goal change, (d) deterministic infeasibility/vanishing and the
+  // bounded window/budget all release; everything else holds.
+  let reason: ActionCommitReleaseReason | null = null
+  if (!sameInstance && previous !== null && previous.planKey !== input.planKey) {
+    reason = 'plan_changed'
+  } else if (!input.inFlightOffered) {
+    reason = 'no_longer_offered'
+  } else if (input.inFlightInvalid) {
+    reason = 'deterministically_invalid'
+  } else if (elapsedMs >= windowMs) {
+    reason = 'window_elapsed'
+  } else if (holds >= maxHolds) {
+    reason = 'decision_budget_exhausted'
+  }
+
+  if (reason === null) {
+    // (a) hold: suppress the different choice for the bounded window.
+    return {
+      state: { actionId: inFlight.id, epoch: inFlight.epoch, planKey: input.planKey, holds: holds + 1 },
+      chosenId: inFlight.id,
+      committed: true,
+      line: formatActionCommit(input.planKey, inFlight.id, remainingMs),
+      releaseLine: null,
+    }
+  }
+
+  return {
+    state: null,
+    chosenId: input.chosenId,
+    committed: false,
+    line: null,
+    releaseLine: formatActionPreempt(input.planKey, inFlight.id, input.chosenId, reason),
+  }
+}
