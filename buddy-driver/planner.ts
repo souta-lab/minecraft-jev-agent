@@ -323,6 +323,9 @@ export class PlannerBrain implements System2Brain {
   }
 
   private groundedOptions(request: System2PlanRequest): PlanOption[] {
+    // Observability probe (#359): reuse an ALREADY-ALLOWLISTED marker name so the
+    // value survives whatever filtering drops the newly-invented names.
+    this.log('WAIT_LIMIT', { n: 0, strategy: `plan-reason:${String(request.reason)}`, probe: true })
     const counts = inventoryCounts(this.bot)
     const planningWorld = augmentPlannerWorldWithLiveStations(this.bot, this.world)
     const rung = resolveRungSourceOfTruth(counts, planningWorld, this.log)
