@@ -44,7 +44,8 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalEntered, formatPortalLit, normalizePortalDimension, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, normalizePortalDimension, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
+import type { PortalEntryRouteBlockedReason } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -1774,30 +1775,8 @@ export class Executor {
     // carry the same vertical contract as RETRIEVE candidates so navigation
     // does not throw away the deterministic ascent plan and then retry a
     // horizontal path that cannot reach the resource's Y level.
-    const vertical = readMetaString(candidate, 'vertical') ?? 'none'
-    let activeVertical = vertical
-    let verticalStep = false
-    if (vertical !== 'none') {
-      this.setPhase(candidate, epoch, 'vertical')
-      if (vertical === 'reuse') {
-        const reuse = await this.runReuseVerticalLeg(candidate, epoch, signal, target)
-        verticalStep = reuse.step
-        if (reuse.refused) {
-          const fallback = readMetaString(candidate, 'fallbackVertical')
-          if (fallback === null || fallback === 'none') {
-            throw new ExecutorError(
-              'tunnel_entry_refused',
-              `${candidate.id} reuse tunnel entry not usable and no fallback vertical plan`,
-            )
-          }
-          activeVertical = fallback
-          this.logger.info('agent', `TUNNEL_ENTRY_FALLBACK vertical=${fallback}`, { actionId: candidate.id, target })
-          verticalStep = await this.runVerticalLeg(candidate, fallback, true, epoch, signal, target, startY)
-        }
-      } else {
-        verticalStep = await this.runVerticalLeg(candidate, vertical, false, epoch, signal, target, startY)
-      }
-
+    const { activeVertical, verticalStep } = await this.runVerticalContract(candidate, epoch, signal, target, startY)
+    if (activeVertical !== 'none') {
       this.ensureOwned(epoch, signal)
       if (
         shouldAbortUnproductivePillar({
@@ -2250,6 +2229,47 @@ export class Executor {
       )
     }
     return true
+  }
+
+  /**
+   * Execute the candidate's grounded vertical contract ONCE - the same
+   * `vertical=reuse|staircase|staircase-up|pillar` meta every other
+   * "get to a cell" candidate (MINE/MOVE/RETRIEVE) carries. Returns the active
+   * leg name and whether it produced a durable step. Shared by `runMove` and
+   * `runEnterPortal`, so the portal entry approach can never drift back into a
+   * bare `pathTo` walk with no dig/vertical route.
+   */
+  private async runVerticalContract(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    target: Vec3Json,
+    startY: number,
+  ): Promise<{ activeVertical: string; verticalStep: boolean }> {
+    const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    let activeVertical = vertical
+    let verticalStep = false
+    if (vertical === 'none') return { activeVertical, verticalStep }
+    this.setPhase(candidate, epoch, 'vertical')
+    if (vertical === 'reuse') {
+      const reuse = await this.runReuseVerticalLeg(candidate, epoch, signal, target)
+      verticalStep = reuse.step
+      if (reuse.refused) {
+        const fallback = readMetaString(candidate, 'fallbackVertical')
+        if (fallback === null || fallback === 'none') {
+          throw new ExecutorError(
+            'tunnel_entry_refused',
+            `${candidate.id} reuse tunnel entry not usable and no fallback vertical plan`,
+          )
+        }
+        activeVertical = fallback
+        this.logger.info('agent', `TUNNEL_ENTRY_FALLBACK vertical=${fallback}`, { actionId: candidate.id, target })
+        verticalStep = await this.runVerticalLeg(candidate, fallback, true, epoch, signal, target, startY)
+      }
+    } else {
+      verticalStep = await this.runVerticalLeg(candidate, vertical, false, epoch, signal, target, startY)
+    }
+    return { activeVertical, verticalStep }
   }
 
   private async runVerticalLeg(
@@ -5015,16 +5035,15 @@ export class Executor {
 
     const timeoutMs = this.options.portalEnterTimeoutMs ?? PORTAL_ENTER_TIMEOUT_MS
     // The body gets in by the SAME generic locomotion move every other MOVE uses:
-    // `pathTo` with an exact `GoalBlock` (stock pathfinder first, then the
-    // planned control-walk fallback) to the standable interior cell. There is no
-    // bespoke approach cell and no direct-bearing walk; the one-block step up
-    // onto the frame floor is an ordinary climb the generic mover already
-    // handles. The earlier `GoalNear(...,1)` retry degenerated into a straight
-    // press because the body already sat within one block of the interior while
-    // one row below it - that is exactly the pacing loop this replaces. The only
-    // entry-specific facts are the live lit check above and the dimension
-    // postcondition below; standing inside a portal block is a world mechanic,
-    // not a skill.
+    // `pathTo` with an exact `GoalBlock` to the standable interior cell. When
+    // that plain walk cannot reach the cell - the live case (run-mubj6ucc-si3e,
+    // source 52594db) was a body ~14 blocks BELOW a lit, valid gate behind
+    // diggable terrain - the candidate's grounded vertical/dig contract (the
+    // SAME `vertical` meta a MOVE candidate carries) runs the ordinary vertical
+    // leg here, and the walk is retried once after that chunk opens the way. The
+    // dig budget / protection guards are the shared dig path's; this adds no
+    // portal-specific mechanic. Standing inside a portal block is a world
+    // mechanic, not a skill.
     this.setPhase(candidate, epoch, 'pathing')
     // Abort the generic path the moment the server transfers us, so no fallback
     // keeps steering a body that is already in the other dimension.
@@ -5045,18 +5064,100 @@ export class Executor {
         }
       }
     })()
+    const startY = this.bot.entity.position.y
+    let pathError: unknown = null
+    let progressedChunk = false
+    let activeVertical = 'none'
     try {
       await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
     } catch (error) {
       // A transfer during the path is already the postcondition; anything else
       // (including a caller abort) is a real failure.
-      if (!this.dimensionMatches(dimension)) throw error
+      if (!this.dimensionMatches(dimension)) {
+        pathError = error
+        let leg: { progressed: boolean; error: ExecutorError | null; activeVertical: string }
+        try {
+          leg = await this.runEntryRouteLeg(candidate, epoch, transferSignal.signal, enterCell, startY)
+        } catch (legThrow) {
+          // A transfer (or caller abort) during the route leg is not a route
+          // failure: if the dimension changed, the postcondition is already met;
+          // otherwise the cancellation is real and must propagate.
+          if (!this.dimensionMatches(dimension)) throw legThrow
+          leg = { progressed: false, error: null, activeVertical: 'none' }
+          pathError = null
+        }
+        activeVertical = leg.activeVertical
+        if (leg.progressed) {
+          // The chunk durably moved the body toward the cell: the same bounded
+          // ONE-chunk-per-action policy MOVE uses. Retry the walk once inside
+          // this action, so a single chunk that opens the way still completes
+          // the entry instead of spending a decision on the climb alone.
+          progressedChunk = true
+          if (!this.dimensionMatches(dimension)) {
+            try {
+              await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
+              pathError = null
+              progressedChunk = false
+            } catch (retry) {
+              if (!this.dimensionMatches(dimension)) pathError = retry
+            }
+          }
+          if (this.dimensionMatches(dimension)) {
+            progressedChunk = false
+            pathError = null
+          }
+        } else if (leg.error !== null) {
+          pathError = leg.error
+        }
+      }
     } finally {
       transferSignal.abort()
       signal.removeEventListener('abort', onCallerAbort)
       await watchingTransfer
     }
     this.ensureOwned(epoch, signal)
+    if (!this.dimensionMatches(dimension) && progressedChunk) {
+      // Durable body progress, entry not reached: a bounded chunk, never DONE.
+      // The goal stays open and the next decision re-plans from the new Y.
+      const climbedTo = Math.floor(this.bot.entity.position.y)
+      const startFloorY = Math.floor(startY)
+      this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, enterCell.y), {
+        actionId: candidate.id,
+        target: enterCell,
+        vertical: activeVertical,
+      })
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'done',
+        'climbed',
+        `climbed from y=${startFloorY} to y=${climbedTo} toward the portal entry at (${enterCell.x},${enterCell.y},${enterCell.z}) (bounded chunk; next decision re-plans)`,
+        null,
+        {
+          verified: false,
+          blockRemoved: activeVertical === 'staircase' || activeVertical === 'staircase-up',
+          dropObserved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+          progressed: true,
+        },
+      )
+    }
+    if (!this.dimensionMatches(dimension) && pathError !== null) {
+      // No route and no durable body change: ONE typed failure naming the
+      // obstruction, so the option can be abandoned instead of re-arming the
+      // same unreachable walk (the live run alternated `noPath`/`stuck`).
+      const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError)
+      this.logger.warn('agent', blocked, {
+        actionId: candidate.id,
+        failure: pathError instanceof ExecutorError ? pathError.code : 'unknown_event',
+        target: enterCell,
+        fromY: Math.floor(this.bot.entity.position.y),
+        toY: enterCell.y,
+      })
+      throw new ExecutorError('path_no_path', blocked)
+    }
     if (!this.dimensionMatches(dimension)) {
       // Standing in the lit portal block is the transfer trigger; wait out the
       // server-side portal delay under a bounded deadline.
@@ -5074,6 +5175,67 @@ export class Executor {
       )
     }
     return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+  }
+
+  /**
+   * Run the candidate's grounded vertical/dig route toward the portal entry
+   * ONCE, in bounded chunks - the same `vertical=reuse|staircase|staircase-up|
+   * pillar` contract `runMove` executes. Returns `progressed` only when the body
+   * DURABLY climbed; a route that could not dig/step returns the typed error
+   * instead, so `runEnterPortal` can fail ONCE with the obstruction rather than
+   * re-arming an unreachable walk.
+   */
+  private async runEntryRouteLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    enterCell: Vec3Json,
+    startY: number,
+  ): Promise<{ progressed: boolean; error: ExecutorError | null; activeVertical: string }> {
+    if ((readMetaString(candidate, 'vertical') ?? 'none') === 'none') {
+      return { progressed: false, error: null, activeVertical: 'none' }
+    }
+    try {
+      const { activeVertical, verticalStep } = await this.runVerticalContract(candidate, epoch, signal, enterCell, startY)
+      const climbed = Math.floor(this.bot.entity.position.y) > Math.floor(startY)
+      return { progressed: verticalStep && climbed, error: null, activeVertical }
+    } catch (error) {
+      if (error instanceof ActionCancelled) throw error
+      return {
+        progressed: false,
+        error:
+          error instanceof ExecutorError
+            ? error
+            : new ExecutorError(
+                'path_stuck',
+                `entry route leg failed: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+        activeVertical: readMetaString(candidate, 'vertical') ?? 'none',
+      }
+    }
+  }
+
+  /**
+   * The typed, STABLE reason the entry approach cannot be completed. `reason` is
+   * one of `no_route` / `route_blocked` / `budget_exhausted` and `detail` names
+   * the obstruction (the offering layer's ascent refusal, or the failed leg's
+   * own code). A stable line is what bounds the failure: the live run alternated
+   * `noPath`/`stuck` and the escalation counter reset on every alternation.
+   */
+  private portalEntryRouteBlockedLine(candidate: Candidate, enterCell: Vec3Json, pathError: unknown): string {
+    const refusal = readMetaString(candidate, 'entryRouteRefusal')
+    const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+    const code = pathError instanceof ExecutorError ? pathError.code : null
+    const reason: PortalEntryRouteBlockedReason =
+      code === 'path_timeout' ? 'budget_exhausted' : vertical !== 'none' ? 'route_blocked' : 'no_route'
+    const detail = refusal ?? code
+    return formatPortalEntryRouteBlocked({
+      reason,
+      entryCell: enterCell,
+      fromY: Math.floor(this.bot.entity.position.y),
+      toY: enterCell.y,
+      ...(detail === null || detail.length === 0 ? {} : { detail }),
+    })
   }
 
   private enteredResult(

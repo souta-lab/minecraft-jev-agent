@@ -932,6 +932,23 @@ export function entryCandidates(
   if (plan === null) return { candidates: [], refusal: null }
   if (!plan.ok) return { candidates: [], refusal: { reason: plan.reason, line: plan.line } }
   const entry = plan.candidate
+  // The entry cell is reached by the SAME bounded dig/vertical route machinery
+  // every other "get to a cell" goal uses: the grounded vertical plan is
+  // compiled into the MOVE contract meta (`vertical=staircase-up|...`) and the
+  // executor runs it with the ordinary vertical leg when the plain walk cannot
+  // reach the cell. Live (run-mubj6ucc-si3e, source 52594db) the body sat ~14
+  // blocks BELOW the lit gate behind diggable terrain and the entry carried no
+  // route at all, so `pathTo(enterCell)` reported `noPath`/`stuck` forever. When
+  // no grounded plan exists the refusal is carried too, so the executor fails
+  // ONCE with the obstruction instead of re-arming the same unreachable walk.
+  const route = planVerticalApproachDetailed(verticalInputFor(state, entry.enterCell))
+  const verticalMeta = verticalPlanMeta(route.plan, Math.floor(state.self.position.y), entry.enterCell.y)
+  // The same reuse fallback a MOVE candidate carries, so a remembered tunnel
+  // entry that turns out to be unusable live still has a second grounded leg.
+  const tunnelFallback =
+    route.plan?.kind === 'reuse'
+      ? planVerticalApproach({ ...verticalInputFor(state, entry.enterCell), tunnel: null })
+      : null
   return {
     candidates: [
       {
@@ -941,7 +958,8 @@ export function entryCandidates(
         targetName: NETHER_PORTAL,
         // The interior cell itself is the locomotion target: the generic MOVE
         // machinery walks the body in (standing in a portal block is the world
-        // mechanic that transfers). ENTER_PORTAL carries no bespoke approach.
+        // mechanic that transfers). Where the walk cannot reach it, the same
+        // grounded vertical plan a MOVE candidate carries supplies the dig leg.
         target: entry.enterCell,
         targetEntityId: null,
         itemName: null,
@@ -956,6 +974,11 @@ export function entryCandidates(
           enterZ: entry.enterCell.z,
           dimension: entry.dimension,
           portalCells: serializePortalCells(entry.portalCells),
+          ...verticalMeta,
+          ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+          ...(route.plan === null && route.ascentRefusal !== null
+            ? { entryRouteRefusal: route.ascentRefusal.reason }
+            : {}),
         },
       },
     ],

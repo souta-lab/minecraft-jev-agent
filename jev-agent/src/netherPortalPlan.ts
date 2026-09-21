@@ -1072,6 +1072,39 @@ export function formatPortalEnterRefused(reason: PortalEntryRefusalReason, detai
   return `${PORTAL_ENTER_REFUSED} reason=${reason}${suffix}`
 }
 
+/**
+ * Why the entry APPROACH cannot be completed: the generic locomotion walk was
+ * refused and the shared dig/vertical route machinery could not open the way
+ * either. This is a typed, stable reason so the option can be abandoned after a
+ * bounded number of identical failures instead of re-arming an unreachable
+ * `pathTo` forever:
+ *   - `no_route`          the offering layer found no grounded vertical plan
+ *                         for the entry cell (nothing to climb, nothing to dig);
+ *   - `route_blocked`     a grounded plan existed but its leg could not dig or
+ *                         step (unbreakable face, protected block, lost support);
+ *   - `budget_exhausted`  the walk consumed its path budget with no route and no
+ *                         durable body change.
+ * `detail` may name the obstruction (for example the ascent refusal reason).
+ */
+export type PortalEntryRouteBlockedReason = 'no_route' | 'route_blocked' | 'budget_exhausted'
+
+export interface PortalEntryRouteBlockedInput {
+  readonly reason: PortalEntryRouteBlockedReason
+  readonly entryCell: PortalBlockPosition
+  readonly fromY: number
+  readonly toY: number
+  readonly detail?: string
+}
+
+/** The exact `PORTAL_ENTRY_ROUTE_BLOCKED` line: the obstruction, named. */
+export function formatPortalEntryRouteBlocked(input: PortalEntryRouteBlockedInput): string {
+  const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
+  return (
+    `PORTAL_ENTRY_ROUTE_BLOCKED reason=${input.reason}` +
+    ` entry=${formatPos(input.entryCell)} from_y=${input.fromY} to_y=${input.toY}${detail}`
+  )
+}
+
 /** The exact `PORTAL_ENTERED` line. */
 export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: string = NETHER): string {
   return `${PORTAL_ENTERED} pos=${formatPos(enterCell)} dimension=${dimension}`
