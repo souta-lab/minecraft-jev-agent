@@ -133,6 +133,55 @@ export const COMBAT_CANDIDATE_RANGE = 8
  */
 export const CRITICAL_COMBAT_HEALTH = 6
 
+/**
+ * P1 durability: a hostile that has actually engaged the bot is a
+ * response-worthy threat far beyond melee range. A skeleton opens fire at
+ * roughly 10-16m, which is inside neither `IMMEDIATE_HOSTILE_RANGE` (3.2m) nor
+ * `COMBAT_CANDIDATE_RANGE` (8m); without this band Jev sees the attacker in
+ * `entities` but has no grounded response at all, which is the observed
+ * "does not react while being shot" failure. This only guarantees the option
+ * set exists - ATTACK versus RETREAT remains Jev's choice.
+ */
+export const THREAT_RESPONSE_RANGE = 24
+
+/** How long a damage observation keeps a hostile response-worthy. */
+export const THREAT_MEMORY_MS = 8000
+
+/**
+ * Bound on distinct retreat destinations offered, so Jev can pick a direction
+ * instead of being handed a single spot. Small and fixed so the candidate list
+ * cannot be crowded by escape routes.
+ */
+export const MAX_RETREAT_CANDIDATES = 3
+
+/**
+ * Is this hostile a threat Jev must be able to answer? Code owns only the
+ * grounded predicate; the choice of ATTACK/RETREAT stays with Jev.
+ *
+ *   immediate   - already inside melee range (unchanged behaviour)
+ *   attributed  - the recorded damage source is this exact entity
+ *   engaged     - the bot was damaged inside `THREAT_MEMORY_MS` and this
+ *                 hostile has line of sight (used when Mineflayer did not
+ *                 attribute the attacker; `lineOfSight === undefined` is
+ *                 UNKNOWN and does not invent a threat)
+ *
+ * `nowMs` is injectable so the fixture does not depend on wall clock.
+ */
+export function isResponseWorthyThreat(
+  state: Pick<WorldState, 'entities' | 'signals'>,
+  entity: Pick<EntityState, 'id' | 'hostile' | 'distance' | 'attackedSelf' | 'lineOfSight'>,
+  nowMs = Date.now(),
+): boolean {
+  if (!entity.hostile) return false
+  if (!Number.isFinite(entity.distance) || entity.distance > THREAT_RESPONSE_RANGE) return false
+  if (entity.distance <= IMMEDIATE_HOSTILE_RANGE) return true
+  if (entity.attackedSelf === true) return true
+  const last = state.signals.lastDamage ?? null
+  if (last === null || !Number.isFinite(last.atMs) || nowMs - last.atMs > THREAT_MEMORY_MS) return false
+  // Attribution unknown -> require positive sight evidence; never invent one.
+  return entity.lineOfSight === true
+}
+
 export function restrictCandidatesDuringImmediateThreat(
   state: Pick<WorldState, 'entities'>,
   candidates: readonly Candidate[],
@@ -1092,9 +1141,22 @@ function generateRawCandidates(
   candidates.push(...armorEquipCandidates(state))
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
-  const hostile = nearestHostile(state, IMMEDIATE_HOSTILE_RANGE)
-  const retreat = pickRetreat(state, state.terrain.standable, danger, hostile, options.blacklistedMoveTargets)
-  if (retreat !== null) {
+  // Response-worthy threats include ranged attackers that have already engaged
+  // the bot, not just the melee-immediate ones. This is the P1 durability fix:
+  // a skeleton shooting from 10m previously produced neither ATTACK (8m cap) nor
+  // RETREAT (3.2m cap), so Jev could only WAIT/MOVE while being hit.
+  const responseThreats = state.entities
+    .filter((entity) => isResponseWorthyThreat(state, entity, state.timestampMs))
+    .sort((a, b) => a.distance - b.distance)
+  const primaryThreat = responseThreats[0] ?? null
+  const retreats = pickRetreats(
+    state,
+    state.terrain.standable,
+    danger,
+    responseThreats,
+    options.blacklistedMoveTargets,
+  )
+  for (const retreat of retreats) {
     candidates.push({
       id: `RETREAT:${blockId('p', retreat)}`,
       kind: 'RETREAT',
@@ -1107,7 +1169,22 @@ function generateRawCandidates(
       toolName: null,
       inReach: distance(retreat, state.self.position) <= options.reach,
       hasStandableAdjacent: true,
-      meta: { tick: state.tick, x: retreat.x, y: retreat.y, z: retreat.z },
+      meta: {
+        tick: state.tick,
+        x: retreat.x,
+        y: retreat.y,
+        z: retreat.z,
+        ...(primaryThreat === null
+          ? {}
+          : {
+              threatEntityId: primaryThreat.id,
+              threatName: primaryThreat.name,
+              threatDistance: primaryThreat.distance,
+              separation: Math.round(distance(retreat, primaryThreat.position) * 100) / 100,
+              ...(primaryThreat.attackedSelf === true ? { threatAttackedSelf: true } : {}),
+              ...(primaryThreat.heldItem != null ? { threatHeldItem: primaryThreat.heldItem } : {}),
+            }),
+      },
     })
   }
 
@@ -4048,45 +4125,39 @@ function nearestDanger(state: WorldState, radius: number): BlockState | null {
   return nearest
 }
 
-function nearestHostile(state: WorldState, radius: number): EntityState | null {
-  let nearest: EntityState | null = null
-  for (const entity of state.entities) {
-    if (!entity.hostile || entity.distance > radius) continue
-    if (nearest === null || entity.distance < nearest.distance) nearest = entity
-  }
-  return nearest
-}
-
-function pickRetreat(
+/**
+ * Ranked retreat destinations. The first entry is the spot with the greatest
+ * separation from the nearest response-worthy threat; up to
+ * `MAX_RETREAT_CANDIDATES` are returned so Jev can choose a direction instead of
+ * receiving one pre-picked spot. Every returned spot must *increase* separation
+ * from an immediate/attributed threat, so a retreat can never be a re-labeled
+ * MOVE. With no sensed threat the original hazard/self escape semantics are
+ * preserved.
+ */
+function pickRetreats(
   state: WorldState,
   standable: Vec3Json[],
   danger: BlockState | null,
-  hostile: EntityState | null,
+  threats: readonly EntityState[],
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
-): Vec3Json | null {
+): Vec3Json[] {
   const hurt = state.self.health <= CRITICAL_COMBAT_HEALTH
-  if (danger === null && hostile === null && !hurt) return null
+  if (danger === null && threats.length === 0 && !hurt) return []
+  const hostile = threats.length > 0 ? threats[0] ?? null : null
   const threat = danger?.position ?? hostile?.position ?? state.self.position
   const currentThreatDistance = hostile === null ? null : distance(state.self.position, hostile.position)
-  let best: Vec3Json | null = null
-  let bestScore = Number.NEGATIVE_INFINITY
+  const scored: Array<{ spot: Vec3Json; separation: number }> = []
   for (const spot of standable) {
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
-    const score = distance(spot, threat)
-    if (score > bestScore) {
-      bestScore = score
-      best = spot
-    }
+    scored.push({ spot, separation: distance(spot, threat) })
   }
-  if (best === null) return null
-  if (hostile !== null) {
-    // A retreat that does not increase separation is only a re-labeled MOVE;
-    // do not offer it as a safety affordance.
-    if (currentThreatDistance === null || bestScore <= currentThreatDistance + 0.25) return null
-  } else if (bestScore < HAZARD_DANGER_RADIUS) {
-    return null
-  }
-  return best
+  if (scored.length === 0) return []
+  scored.sort((a, b) => b.separation - a.separation)
+  const qualifying =
+    hostile !== null
+      ? scored.filter((entry) => currentThreatDistance !== null && entry.separation > currentThreatDistance + 0.25)
+      : scored.filter((entry) => entry.separation >= HAZARD_DANGER_RADIUS)
+  return qualifying.slice(0, MAX_RETREAT_CANDIDATES).map((entry) => entry.spot)
 }
 
 /**

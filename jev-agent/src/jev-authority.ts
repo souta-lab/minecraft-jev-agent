@@ -235,6 +235,10 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
       position: state.self.position,
       health: state.self.health,
       food: state.self.food,
+      // P1 durability: a falling health number is not enough to answer "am I
+      // being attacked, and by what?". The recorded damage event makes the
+      // threat explicit so Jev can choose fight/flee instead of WAIT.
+      lastDamage: state.signals.lastDamage ?? null,
     },
     inventory: state.inventory.counts,
     goal: state.goal,

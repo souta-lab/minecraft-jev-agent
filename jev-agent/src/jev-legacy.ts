@@ -792,6 +792,12 @@ function toEvaluationState(state: WorldState): EvaluationState {
       name: entity.name,
       distance: entity.distance,
       hostile: entity.hostile,
+      // P1 durability: a hostile's threat context must survive the compact
+      // projection, otherwise the decision layer sees a name at a distance and
+      // cannot tell an armed attacker with line of sight from a wandering mob.
+      lineOfSight: entity.lineOfSight,
+      heldItem: entity.heldItem,
+      attackedSelf: entity.attackedSelf,
     })),
     blocks: state.blocks.map((block) => ({
       kind: block.kind,

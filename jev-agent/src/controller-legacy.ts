@@ -506,6 +506,7 @@ function emptySignals(): AgentSignals {
     knownResources: [],
     strategicNonProgress: null,
     oscillationsDetected: 0,
+    lastDamage: null,
   }
 }
 
@@ -2128,6 +2129,7 @@ export class JevController {
       this.updateStallSignal()
       this.observeRetrievalStall()
       this.observeCapabilityGap()
+      this.observeThreat(trigger, detail)
 
       if (this.bot.entity === undefined) return
 
@@ -5402,6 +5404,40 @@ export class JevController {
       this.logger.warn('agent', line, { ...refusal, goal: this.currentGoalKey() }, this.tickCounter)
     }
     return true
+  }
+
+  /**
+   * P1 durability: turn the scheduler's damage observation into sensor
+   * evidence. `damage_taken` carries the Mineflayer-attributed attacker, so
+   * `signals.lastDamage` records *who* hit the bot (null = environmental /
+   * unattributed, never an invented source). A negative `hp_changed` without a
+   * fresh attributed event keeps attribution only inside the same hit burst.
+   */
+  private observeThreat(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
+    const now = Date.now()
+    if (trigger === 'damage_taken') {
+      const sourceId =
+        typeof detail.attackerId === 'number' && Number.isFinite(detail.attackerId) ? detail.attackerId : null
+      const sourceName = typeof detail.attackerName === 'string' && detail.attackerName.length > 0 ? detail.attackerName : null
+      this.signals.lastDamage = {
+        atMs: now,
+        health: this.bot.health ?? 0,
+        sourceId,
+        sourceName,
+      }
+      return
+    }
+    if (trigger !== 'hp_changed') return
+    const delta = typeof detail.delta === 'number' ? detail.delta : 0
+    if (delta >= 0) return
+    const previous = this.signals.lastDamage ?? null
+    const sameBurst = previous !== null && now - previous.atMs <= 1500
+    this.signals.lastDamage = {
+      atMs: now,
+      health: typeof detail.health === 'number' ? detail.health : this.bot.health ?? 0,
+      sourceId: sameBurst ? previous.sourceId : null,
+      sourceName: sameBurst ? previous.sourceName : null,
+    }
   }
 
   /**

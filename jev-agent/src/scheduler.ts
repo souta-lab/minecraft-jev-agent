@@ -298,9 +298,21 @@ export class DecisionScheduler {
     this.request('mob_appeared', detail)
   }
 
-  private readonly onEntityHurt = (entity: Entity): void => {
-    if (this.bot.entity === undefined || entity.id !== this.bot.entity.id) return
-    this.request('damage_taken', { health: this.bot.health })
+  private readonly onEntityHurt = (entity: Entity | undefined, source?: Entity): void => {
+    if (this.bot.entity === undefined || entity === undefined || entity.id !== this.bot.entity.id) return
+    // Mineflayer's `damage_event` carries the attacking entity when the server
+    // attributes the damage; `source` is undefined for environmental damage.
+    // Recording it here is what makes the attacker visible to the decision
+    // layer instead of leaving only a falling health number.
+    const attackerName =
+      source === undefined || source === null
+        ? null
+        : source.username ?? source.name ?? source.kind ?? 'unknown'
+    this.request('damage_taken', {
+      health: this.bot.health,
+      attackerId: source?.id ?? null,
+      attackerName,
+    })
   }
 
   private readonly onHealth = (): void => {

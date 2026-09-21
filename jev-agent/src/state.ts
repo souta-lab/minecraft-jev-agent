@@ -169,6 +169,46 @@ export type EntityState = {
   position: Vec3Json
   distance: number
   hostile: boolean
+  /**
+   * Mechanical line of sight from the bot's eyes to this entity
+   * (`bot.canSeeBlock` accepts anything with a `position`). `true` is positive
+   * sight evidence; `false` means an occluder is between the bot and the entity;
+   * `undefined`/absent means the sensor could not observe it this tick. Optional
+   * so replay fixtures written before the threat context still type-check.
+   */
+  lineOfSight?: boolean
+  /**
+   * Item the entity is holding right now (its main equipment slot), or `null`
+   * when it holds nothing. This is how an armed attacker (a skeleton with a bow)
+   * becomes visible to the decision layer without inferring mob AI.
+   */
+  heldItem?: string | null
+  /**
+   * Health reported by Mineflayer for this entity, or `null` when the version
+   * does not expose mob health. Absent `null` is UNKNOWN, not full health.
+   */
+  health?: number | null
+  /**
+   * The controller's recorded recent damage source *is* this entity. Attribution
+   * truth from the `entityHurt` listener within the threat-memory window, never
+   * an inference from proximity. Optional so old fixtures still type-check.
+   */
+  attackedSelf?: boolean
+}
+
+/**
+ * The most recent damage event observed by the controller. `sourceId` /
+ * `sourceName` are `null` when Mineflayer reported no attacker (environmental
+ * damage); the candidate layer treats the damage recency as UNKNOWN attribution
+ * and falls back to line-of-sight threats rather than inventing a source.
+ */
+export type LastDamageEvidence = {
+  /** wall-clock ms of the damage observation */
+  atMs: number
+  /** bot health immediately after the hit */
+  health: number
+  sourceId: number | null
+  sourceName: string | null
 }
 
 /**
@@ -358,6 +398,13 @@ export type AgentSignals = {
    * the SMELT candidate can report `furnaceSource=held` to FURNACE_READY.
    */
   heldFurnacePlacedAt?: string | null
+  /**
+   * P1 durability: the most recent damage the controller observed, including
+   * the Mineflayer-reported attacker when one exists. This is what lets the
+   * decision layer see "I was just shot by e4965" instead of only a falling
+   * health number. Optional for pure fixtures.
+   */
+  lastDamage?: LastDamageEvidence | null
 }
 
 export type WorldState = {
@@ -721,9 +768,15 @@ function buildInventory(bot: Bot): InventoryState {
   return { slots, counts, totalItems }
 }
 
-function buildEntities(bot: Bot, options: SensorOptions, selfPosition: Vec3Json): EntityState[] {
+function buildEntities(
+  bot: Bot,
+  options: SensorOptions,
+  selfPosition: Vec3Json,
+  lastDamage: LastDamageEvidence | null | undefined,
+): EntityState[] {
   const out: EntityState[] = []
   const selfId = bot.entity.id
+  const attackerId = lastDamage?.sourceId ?? null
   for (const entity of Object.values(bot.entities)) {
     if (entity.id === selfId) continue
     if (entity.isValid === false) continue
@@ -738,10 +791,35 @@ function buildEntities(bot: Bot, options: SensorOptions, selfPosition: Vec3Json)
       position: vecJson(entity.position),
       distance: round2(distanceToBot),
       hostile: isHostile(name, entity.kind),
+      lineOfSight: canSeeEntity(bot, entity),
+      heldItem: heldItemName(entity),
+      health: typeof entity.health === 'number' && Number.isFinite(entity.health) ? entity.health : null,
+      attackedSelf: attackerId !== null && entity.id === attackerId,
     })
   }
   out.sort((a, b) => a.distance - b.distance)
   return out.slice(0, options.maxEntities)
+}
+
+/**
+ * Line of sight to an entity. Mineflayer's `canSeeBlock` is a ray from the eyes
+ * and only needs `position`, so it works on any entity. A fixture bot that does
+ * not implement it yields `undefined` (UNKNOWN) rather than a false negative.
+ */
+function canSeeEntity(bot: Bot, entity: { position: Vec3Json }): boolean | undefined {
+  const canSee = bot.canSeeBlock
+  if (typeof canSee !== 'function') return undefined
+  try {
+    return canSee.call(bot, entity as never) === true
+  } catch {
+    return undefined
+  }
+}
+
+/** The entity's held item name, or null when it holds nothing / is not exposed. */
+function heldItemName(entity: { heldItem?: { name?: string } | null }): string | null {
+  const held = entity.heldItem
+  return held != null && typeof held.name === 'string' && held.name.length > 0 ? held.name : null
 }
 
 const HOSTILE_NAMES = new Set([
@@ -1820,7 +1898,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     timestampMs: Date.now(),
     self,
     inventory,
-    entities: buildEntities(bot, options, self.position),
+    entities: buildEntities(bot, options, self.position, input.signals.lastDamage),
     blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
     terrain: { standable: buildTerrain(bot, options, self) },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
