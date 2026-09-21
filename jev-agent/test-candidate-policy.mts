@@ -210,6 +210,45 @@ addCase('a remote hostile is observed but not offered as a purposeless combat ro
   return { pass: attackIds.length === 0, detail: `remoteDistance=22 attackIds=[${attackIds.join(',')}]` }
 })
 
+addCase('an observed enderman is a grounded producer route for an ender_pearl collect goal beyond generic combat range', () => {
+  const state = exploreState(0)
+  state.goal = { ...state.goal, id: 'collect:ender_pearl', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }
+  state.goalQueue.current = { ...state.goalQueue.current!, id: 'g1:collect:ender_pearl', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }
+  state.entities = [
+    { id: 31, name: 'enderman', kind: 'mob', username: null, position: { x: 18, y: 10, z: 0.5 }, distance: 18, hostile: true },
+    { id: 32, name: 'skeleton', kind: 'mob', username: null, position: { x: 19, y: 10, z: 0.5 }, distance: 19, hostile: true },
+  ]
+  const generated = generateCandidates(state)
+  const enderman = generated.find((candidate) => candidate.id === 'ATTACK:e31')
+  const remoteSkeleton = generated.find((candidate) => candidate.id === 'ATTACK:e32')
+  const pass = enderman?.meta.goalDrop === 'ender_pearl' && enderman?.meta.requiresKill === true && enderman.itemName === 'ender_pearl' && remoteSkeleton === undefined
+  return { pass, detail: `enderman=${enderman?.label ?? 'none'} goalDrop=${enderman?.meta.goalDrop ?? 'none'} skeleton=${remoteSkeleton?.id ?? 'none'}` }
+})
+
+addCase('goal producers do not consume the bounded local-combat candidate budget', () => {
+  const state = exploreState(0)
+  state.goal = { ...state.goal, id: 'collect:ender_pearl', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }
+  state.goalQueue.current = { ...state.goalQueue.current!, id: 'g1:collect:ender_pearl', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }
+  state.entities = [
+    { id: 35, name: 'zombie', kind: 'mob', username: null, position: { x: 2, y: 10, z: 0.5 }, distance: 2, hostile: true },
+    { id: 36, name: 'enderman', kind: 'mob', username: null, position: { x: 18, y: 10, z: 0.5 }, distance: 18, hostile: true },
+  ]
+  const generated = generateCandidates(state, { ...defaultCandidateOptions, maxAttackCandidates: 1 })
+  const ids = generated.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  const pass = ids.includes('ATTACK:e35') && ids.includes('ATTACK:e36')
+  return { pass, detail: `budget=1 attacks=[${ids.join(',')}]` }
+})
+
+addCase('a blaze is the grounded producer for a blaze_rod collect goal', () => {
+  const state = exploreState(0)
+  state.self = { ...state.self, dimension: 'minecraft:the_nether' }
+  state.goal = { ...state.goal, id: 'collect:blaze_rod', description: 'collect 7 x blaze_rod', targetItem: 'blaze_rod', requiredCount: 7 }
+  state.goalQueue.current = { ...state.goalQueue.current!, id: 'g1:collect:blaze_rod', description: 'collect 7 x blaze_rod', targetItem: 'blaze_rod', requiredCount: 7 }
+  state.entities = [{ id: 41, name: 'blaze', kind: 'mob', username: null, position: { x: 14, y: 10, z: 0.5 }, distance: 14, hostile: true }]
+  const blaze = generateCandidates(state).find((candidate) => candidate.id === 'ATTACK:e41')
+  return { pass: blaze?.meta.goalDrop === 'blaze_rod' && blaze.itemName === 'blaze_rod', detail: `blaze=${blaze?.label ?? 'none'} goalDrop=${blaze?.meta.goalDrop ?? 'none'}` }
+})
+
 addCase('protected station cells are not emitted as DESCEND or STEP dig affordances', () => {
   const state = exploreState(0)
   state.goal.targetItem = 'cobblestone'

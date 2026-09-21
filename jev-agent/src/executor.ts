@@ -42,7 +42,7 @@ import type { ArmorSlot } from './gearPlan.ts'
 import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
-import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
+import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
 import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalEntered, formatPortalLit, normalizePortalDimension, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
@@ -171,6 +171,8 @@ export interface ExecutionResult {
    * chunk that gained altitude). Never a substitute for `verified`.
    */
   progressed: boolean
+  /** server `entityDead` event proved that an ATTACK target died during this lease */
+  entityDefeated?: boolean
   /**
    * A RETRIEVE proved the remaining feet-distance to the remembered target
    * shrank by the meaningful epsilon. This is completion evidence the truth
@@ -848,6 +850,8 @@ const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
  */
 export const MELEE_ATTACK_RANGE = 3.1
 export const ATTACK_LEASE_MS = 2_200
+/** Goal-directed mob hunts are bounded Skills long enough to defeat an enderman. */
+export const GOAL_HUNT_LEASE_MS = 10_000
 export const ATTACK_COOLDOWN_MS = 500
 
 /**
@@ -3636,14 +3640,35 @@ export class Executor {
     const entityId = candidate.targetEntityId
     if (entityId === null) throw new ExecutorError('target_gone', 'ATTACK candidate has no entity id')
     await this.equipCombatWeapon(candidate, epoch, signal)
+    // A `goalDrop` ATTACK is a goal-directed hunt: its mechanical completion is
+    // the server `entityDead` event and its collect completion is the wanted
+    // drop reaching the inventory. An ordinary ATTACK (local safety / food)
+    // keeps the historical bounded melee lease and `attacked` result.
+    const goalDrop = readMetaString(candidate, 'goalDrop')
+    const beforeDropCount = this.countItem(goalDrop)
+    const leaseMs = goalDrop === null ? ATTACK_LEASE_MS : GOAL_HUNT_LEASE_MS
     let attacks = 0
     let following = false
-    const deadline = Date.now() + ATTACK_LEASE_MS
+    let entityDefeated = false
+    let lastTarget = candidate.target ?? { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z }
+    const onEntityDead = (entity: Entity): void => {
+      if (entity.id !== entityId) return
+      entityDefeated = true
+      lastTarget = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+      this.logger.info('executor', `ATTACK_TARGET_DEAD action#${epoch} entity=${entityId}`, {
+        actionId: candidate.id,
+        targetEntityId: entityId,
+        goalDrop: goalDrop ?? 'none',
+      })
+    }
+    this.bot.on('entityDead', onEntityDead)
+    const deadline = Date.now() + leaseMs
     try {
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline && !entityDefeated) {
         this.ensureOwned(epoch, signal)
         const entity = this.bot.entities[entityId]
         if (entity === undefined) break
+        lastTarget = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
         const distanceToTarget = Math.hypot(
           entity.position.x - this.bot.entity.position.x,
           entity.position.y - this.bot.entity.position.y,
@@ -3663,7 +3688,7 @@ export class Executor {
           this.bot.pathfinder?.setGoal(null)
           following = false
         }
-        this.setPhase(candidate, epoch, 'attacking')
+        this.setPhase(candidate, epoch, goalDrop === null ? 'attacking' : `hunting-for-${goalDrop}`)
         await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
         this.ensureOwned(epoch, signal)
         this.bot.attack(entity)
@@ -3673,13 +3698,64 @@ export class Executor {
           targetEntityId: entityId,
           distance: distanceToTarget,
           attempt: attacks,
+          goalDrop: goalDrop ?? 'none',
         })
         await delay(Math.min(ATTACK_COOLDOWN_MS, Math.max(1, deadline - Date.now())), signal)
       }
     } finally {
+      this.bot.removeListener('entityDead', onEntityDead)
       if (following) this.bot.pathfinder?.setGoal(null)
     }
     if (attacks === 0) throw new ExecutorError('out_of_reach', `could not reach ${candidate.targetName ?? entityId} during ATTACK lease`)
+
+    if (goalDrop !== null) {
+      // The mob despawned, escaped or was never killed: the hunt's typed
+      // post-condition (`isMobHuntPostconditionMet`) is unmet, so this is a
+      // non-completion rather than a silent "the mob disappeared" success.
+      if (!isMobHuntPostconditionMet(entityDefeated)) {
+        return this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'failed',
+          'target-not-defeated',
+          `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) but no entityDead event was observed`,
+          'verify_failed',
+          {
+            verified: false,
+            dropObserved: false,
+            blockRemoved: false,
+            itemsGained: 0,
+            goalItemCount: this.countItem(goalDrop),
+            entityDefeated: false,
+          },
+        )
+      }
+      this.setPhase(candidate, epoch, `collecting-${goalDrop}`)
+      const report = await this.collectDrop(lastTarget, goalDrop, beforeDropCount, false, epoch, signal)
+      const result = this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'done',
+        report.itemsGained > 0 ? 'drop-acquired' : 'target-defeated',
+        report.itemsGained > 0
+          ? `defeated ${candidate.targetName ?? entityId} and acquired ${report.itemsGained} x ${goalDrop}`
+          : `defeated ${candidate.targetName ?? entityId}; no ${goalDrop} acquired from this kill`,
+        null,
+        {
+          verified: true,
+          dropObserved: report.dropObserved,
+          blockRemoved: false,
+          itemsGained: report.itemsGained,
+          goalItemCount: report.goalItemCount,
+          entityDefeated: true,
+        },
+      )
+      result.yieldItem = goalDrop
+      return result
+    }
+
     return this.buildResult(
       candidate,
       epoch,
@@ -5715,6 +5791,7 @@ export class Executor {
     failure: FailureCode | null,
     extra: Pick<ExecutionResult, 'verified' | 'blockRemoved' | 'dropObserved' | 'itemsGained' | 'goalItemCount'> & {
       progressed?: boolean
+      entityDefeated?: boolean
       distanceClosed?: boolean
     },
   ): ExecutionResult {

@@ -849,6 +849,17 @@ const FOOD_ANIMALS = new Set([
   'tropical_fish',
 ])
 
+/**
+ * Deterministic Minecraft producer truth for mob-drop collect goals. This table
+ * answers CAN/TRUE only: when the active collect target is one of these items,
+ * every currently sensed producer is exposed as a grounded ATTACK alternative.
+ * Jev still owns WHICH producer/action to pursue.
+ */
+const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
+  ender_pearl: new Set(['enderman']),
+  blaze_rod: new Set(['blaze']),
+}
+
 const HAZARD_DANGER_RADIUS = 3
 
 export function blockId(prefix: 'b' | 'p', position: Vec3Json): string {
@@ -1075,6 +1086,16 @@ function generateRawCandidates(
   const hostiles = state.entities.filter(
     (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
   )
+  // Goal-directed mob drops: when the ACTIVE collect goal targets an item whose
+  // only producer is a mob (`ender_pearl` <- enderman, `blaze_rod` <- blaze),
+  // expose every sensed producer as a grounded ATTACK candidate. This is
+  // producer truth (CAN), never a preference: Jev still owns WHICH
+  // producer/action to pursue, and the `goalDrop` meta is what makes the
+  // executor verify a real kill plus the wanted drop (see `runAttack`).
+  const producerNames = focusItem === null || goalKind !== 'collect' ? undefined : MOB_DROP_PRODUCERS[focusItem]
+  const goalDropTargets =
+    producerNames === undefined ? [] : state.entities.filter((entity) => producerNames.has(entity.name))
+  const goalDropByEntity = new Set(goalDropTargets.map((entity) => entity.id))
   // Food acquisition: when the resident is hungry (at or below `eatBelowFood`)
   // and holds no food, offer the grounded ATTACK affordance for every sensed
   // passive food animal so Jev can choose to hunt. Code only reports CAN (a real
@@ -1090,17 +1111,38 @@ function generateRawCandidates(
           (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
         )
       : []
-  const attackTargets = [...hostiles, ...huntTargets].slice(0, options.maxAttackCandidates)
+  // The ordinary combat budget bounds local reaction candidates only. A sensed
+  // producer for the ACTIVE collect Option is an additional grounded affordance,
+  // not a semantically preferred occupant of that budget. Keeping the two sets
+  // independent prevents code from deciding WHICH by crowding either a safety
+  // threat or a goal producer out of Jev's candidate set.
+  const seenAttackIds = new Set<number>()
+  const attackTargets = [...hostiles, ...huntTargets]
+    .filter((entity) => {
+      if (seenAttackIds.has(entity.id)) return false
+      seenAttackIds.add(entity.id)
+      return true
+    })
+    .slice(0, options.maxAttackCandidates)
+  for (const producer of goalDropTargets) {
+    if (seenAttackIds.has(producer.id)) continue
+    seenAttackIds.add(producer.id)
+    attackTargets.push(producer)
+  }
   for (const entity of attackTargets) {
     const isFoodTarget = huntTargets.includes(entity)
+    const goalDrop = goalDropByEntity.has(entity.id) ? focusItem : null
     candidates.push({
       id: `ATTACK:e${entity.id}`,
       kind: 'ATTACK',
-      label: `attack ${entity.name} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z})`,
+      label:
+        goalDrop === null
+          ? `attack ${entity.name} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z})`
+          : `hunt ${entity.name} ${entity.distance}m away for ${goalDrop} at (${entity.position.x},${entity.position.y},${entity.position.z})`,
       targetName: entity.name,
       target: entity.position,
       targetEntityId: entity.id,
-      itemName: null,
+      itemName: goalDrop,
       requiresTool: false,
       toolName: null,
       inReach: entity.distance <= options.reach,
@@ -1109,6 +1151,7 @@ function generateRawCandidates(
         tick: state.tick,
         entityId: entity.id,
         distance: entity.distance,
+        ...(goalDrop === null ? {} : { goalDrop, requiresKill: true }),
         // Typed CAN fact: this ATTACK is the grounded route to food, and which
         // animal it targets. The marker reader/log must not infer it from the
         // entity name alone (a hostile and a food animal can share no name).
@@ -1206,7 +1249,7 @@ function generateRawCandidates(
       candidate.meta.clearance !== true &&
       candidate.kind !== 'WAIT' &&
       candidate.kind !== 'ESCALATE' &&
-      candidate.kind !== 'ATTACK' &&
+      (candidate.kind !== 'ATTACK' || candidate.meta.goalDrop === focusItem) &&
       candidate.kind !== 'RETREAT' &&
       candidate.kind !== 'EAT' &&
       candidate.kind !== 'EQUIP',
@@ -4744,14 +4787,15 @@ export function applyReachabilityGate(
   // route for a local tunnel and repeatedly jump/pillar without progress.
   // This is a candidate-validity envelope, not a semantic preference: when no
   // direct route exists, all grounded recovery families remain available.
-  // ATTACK/RETREAT/EAT are local safety/control actions. Their presence says
-  // nothing about whether the active semantic goal has a grounded route; a
-  // hostile entity must not make a valid route-opening prerequisite disappear.
+  // Ordinary ATTACK/RETREAT/EAT are local safety/control actions. Their presence
+  // says nothing about whether the active semantic goal has a grounded route.
+  // A goalDrop ATTACK is the exception: it is a direct grounded producer route
+  // for the current collect Option, so route-opening prerequisites may retire.
   const hasGroundedGoalRoute = presented.some(
     (candidate) =>
       candidate.kind !== 'WAIT' &&
       candidate.kind !== 'ESCALATE' &&
-      candidate.kind !== 'ATTACK' &&
+      (candidate.kind !== 'ATTACK' || typeof candidate.meta.goalDrop === 'string') &&
       candidate.kind !== 'RETREAT' &&
       candidate.kind !== 'EAT' &&
       candidate.kind !== 'EQUIP' &&

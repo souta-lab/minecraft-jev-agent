@@ -31,6 +31,8 @@ export interface ActionOutcomeInput {
   blockRemoved?: boolean
   /** deterministic body change with no block/item evidence (altitude gained), when known */
   progressed?: boolean
+  /** a target entity emitted Mineflayer's entityDead event during this action */
+  entityDefeated?: boolean
   /**
    * True when this action must end with its drop in the inventory (a collect
    * goal). A collect MINE is complete only on `itemsGained > 0`; a removed block
@@ -115,6 +117,7 @@ export function classifyActionOutcome(input: ActionOutcomeTaxonomyInput): Action
     input.arrived === true ||
     (input.kind === 'RETRIEVE' && input.distanceClosed === true)
   const search =
+    input.entityDefeated === true ||
     input.blockRemoved === true ||
     (input.kind === 'DESCEND' && input.progressed === true) ||
     (input.kind === 'RETRIEVE' &&
@@ -200,6 +203,11 @@ export function isMinePostconditionMet(evidence: MinePostconditionEvidence): boo
   return true
 }
 
+/** A goal-directed mob hunt is mechanically complete only on the server death event. */
+export function isMobHuntPostconditionMet(entityDefeated: boolean): boolean {
+  return entityDefeated
+}
+
 /**
  * The per-action post-condition the executor is checking, in words, so the
  * ACTION_UNVERIFIED line names what was expected (issue #79 acceptance).
@@ -236,19 +244,20 @@ export function describeActionPostcondition(kind: string): string {
 }
 
 /**
- * Observable progress: an item gained, a block removed, or a deterministic
- * body change (a verified climb chunk that gained altitude). `progressed` is
- * evidence of change only - it never makes an unverified action verified.
+ * Observable progress: an item gained, a block removed, a deterministic body
+ * change (a verified climb chunk that gained altitude), or a server-confirmed
+ * entity death. `progressed` and `entityDefeated` are evidence of change only -
+ * they never make an unverified action verified.
  */
 export function hasObservableProgress(
-  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
+  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed' | 'entityDefeated'>,
 ): boolean {
-  return input.itemsGained > 0 || input.blockRemoved === true || input.progressed === true
+  return input.itemsGained > 0 || input.blockRemoved === true || input.progressed === true || input.entityDefeated === true
 }
 
-/** Zero observable change: nothing was gained, no block was removed, no body change proven. */
+/** Zero observable change: no item/block/body/entity change was proven. */
 export function isZeroProgressOutcome(
-  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed'>,
+  input: Pick<ActionOutcomeInput, 'itemsGained' | 'blockRemoved' | 'progressed' | 'entityDefeated'>,
 ): boolean {
   return !hasObservableProgress(input)
 }
@@ -313,6 +322,8 @@ export interface TruthfulOutcomeInput {
   blockRemoved: boolean
   /** deterministic body change with no item/block evidence (a climb chunk) */
   progressed?: boolean
+  /** server `entityDead` event proved that an ATTACK target died during this action */
+  entityDefeated?: boolean
   /**
    * Live movement arrival from the controller (`classifyMoveOutcome`). Only
    * counted for the kinds whose post-condition is arrival; never inferred from

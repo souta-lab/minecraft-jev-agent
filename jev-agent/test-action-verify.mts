@@ -8,10 +8,12 @@ import {
   evaluateUnverifiedBudget,
   formatActionUnverified,
   hasObservableProgress,
+  isMobHuntPostconditionMet,
   isPlacePostconditionMet,
   isSmeltPostconditionMet,
   isUnverifiedOutcome,
   isZeroProgressOutcome,
+  classifyActionOutcome,
   UNVERIFIED_ACTION_LIMIT,
 } from './src/actionPostcondition.ts'
 import { executeFurnaceSmelt, formatSmeltLog, isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './src/executor.ts'
@@ -104,6 +106,15 @@ addCase('(#79a) smelt done+verified=false+progressDelta=0 is FAILURE with ACTION
     line.includes('postcondition=target item count increased') &&
     describeActionPostcondition('SMELT').includes('input+fuel consumed')
   return { pass, detail: line }
+})
+
+addCase('(M3) mob-drop ATTACK requires entityDead and remains search progress until the drop is acquired', () => {
+  const dead = isMobHuntPostconditionMet(true)
+  const alive = isMobHuntPostconditionMet(false)
+  const killedNoDrop = classifyActionOutcome({ kind: 'ATTACK', status: 'done', verified: true, itemsGained: 0, blockRemoved: false, entityDefeated: true })
+  const killedWithDrop = classifyActionOutcome({ kind: 'ATTACK', status: 'done', verified: true, itemsGained: 1, blockRemoved: false, entityDefeated: true, semanticProgress: true })
+  const pass = dead && !alive && killedNoDrop.progress === 'search' && killedNoDrop.semantic === 'none' && killedWithDrop.progress === 'goal' && killedWithDrop.semantic === 'goal'
+  return { pass, detail: `dead=${dead} alive=${alive} noDrop=${killedNoDrop.progress}/${killedNoDrop.semantic} withDrop=${killedWithDrop.progress}/${killedWithDrop.semantic}` }
 })
 
 addCase('(#79b) a genuine smelt (item count increases) is verified=true and advances the ladder', () => {
