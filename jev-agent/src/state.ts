@@ -13,6 +13,7 @@ import { Vec3 } from 'vec3'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { System2Outcome } from './system2.ts'
+import type { StrategicStallEvidence } from './strategicStall.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
@@ -341,6 +342,15 @@ export type AgentSignals = {
   descendLimitReached?: boolean
   /** durable known-resource coordinates injected by the host (issue #43) */
   knownResources?: KnownResource[]
+  /**
+   * #360: code-owned state-recurrence evidence for the ACTIVE Option. Verified
+   * body motion that keeps returning to the same small set of states with zero
+   * goal/search progress is strategic non-progress; the semantic layer needs
+   * this to see a stalled Option that every other counter misses.
+   */
+  strategicNonProgress?: StrategicStallEvidence | null
+  /** #360: `OSCILLATION_DETECTED` count for the active Option instance. */
+  oscillationsDetected?: number
   /**
    * #78: block key (`bX_Y_Z`) of a furnace the bot placed from a held item, so
    * the SMELT candidate can report `furnaceSource=held` to FURNACE_READY.

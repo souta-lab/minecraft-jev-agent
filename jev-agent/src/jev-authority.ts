@@ -45,7 +45,14 @@ const BETA_INSTRUCTIONS =
   'WHAT comes next. False means keep the current Option. WAIT and ESCALATE are control-plane outcomes, not productive ' +
   'goal progress; body/search progress is real progress even when the goal item is unchanged. A local path failure is ' +
   'recovery evidence, not semantic exhaustion. Do not end the Option merely because one action failed if the Option ' +
-  'remains viable.'
+  'remains viable. ' +
+  'The code-owned signals.strategicNonProgress block is grounded evidence about the WHOLE recent trajectory, not one ' +
+  'action: when it shows a full recurrence window (exhausted=true) of verified body-only decisions that returned to the ' +
+  'same few states (distinctStates <= maxDistinctStates) with zero goal/search progress, the current local recovery is ' +
+  'reiterating the same state instead of advancing, however successful each individual MOVE was. Treat that as ' +
+  'exhaustion evidence: true means end this Option. Sustained signals.oscillationsDetected against zero goal/search ' +
+  'progress is the same fact. The reverse also holds: a single productive action, one failure, or a window with real ' +
+  'goal/search progress is NOT exhaustion.'
 
 const RETREAT_INSTRUCTIONS =
   'Should the bot retreat immediately for safety based on the current observed threats, health, and grounded escape actions?'
@@ -215,7 +222,12 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
   }
 }
 
-function authorityState(request: JevRequest): Record<string, unknown> {
+/**
+ * The exact grounded state handed to the model for one evaluate() call. Exported
+ * so the authority evidence a head actually sees (including the #360
+ * `strategicNonProgress` block) is behaviourally testable, not only log-inspectable.
+ */
+export function authorityState(request: JevRequest): Record<string, unknown> {
   const state = request.state
   return {
     tick: state.tick,
@@ -250,6 +262,11 @@ function authorityState(request: JevRequest): Record<string, unknown> {
       lastPathStatus: state.signals.lastPathStatus,
       escalationRecommended: state.signals.escalationRecommended,
       knownResources: (state.signals.knownResources ?? []).slice(0, 24),
+      // #360: without this block beta only ever saw verified body outcomes and an
+      // empty failure history, so a 48-minute state-recurring MOVE loop looked
+      // like a healthy agent (max beta 0.36 < 0.5 over 2148 votes).
+      strategicNonProgress: state.signals.strategicNonProgress ?? null,
+      oscillationsDetected: state.signals.oscillationsDetected ?? 0,
     },
     recentEvents: state.recentEvents.slice(-16),
   }
