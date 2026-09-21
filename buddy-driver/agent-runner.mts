@@ -1,5 +1,5 @@
 // agent-runner.mts - the HOST. It owns the one long-lived Mineflayer connection
-// and swaps the reloadable intelligence (a hash-stamped esbuild bundle) without
+// and swaps the reloadable intelligence (a hash-stamped Bun.build bundle) without
 // ever reconnecting.
 //
 //   HOST (never reloaded): createBot + plugins, reconnect backoff, logger,
@@ -7,7 +7,7 @@
 //   GENERATION (swapped): the jev-agent controller + planner, bundled to ONE file
 //
 // Launch (detached, survives the shell):
-//   cd /home/s0u7a/mc-ai/buddy-driver && setsid nohup node agent-runner.mts \
+//   cd /home/s0u7a/mc-ai/buddy-driver && setsid nohup bun agent-runner.mts \
 //     </dev/null > runner.out 2>&1 &
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
@@ -2200,8 +2200,8 @@ log('BOOT', {
   pid: process.pid,
   runId,
   source: bootSourceSha,
-  runtime: process.release.name,
-  node: process.version,
+  runtime: 'bun',
+  runtimeVersion: Bun.version,
   bundle: currentBundle ?? 'none',
   milestone: state.milestone,
   generations: state.generations,

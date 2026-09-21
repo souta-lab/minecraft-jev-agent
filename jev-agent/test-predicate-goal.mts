@@ -2,7 +2,7 @@
 // success evaluation, predicate derivation and the ore-descent plan target.
 // No bot, no network.
 //
-// Run: npx tsx test-predicate-goal.mts
+// Run: bun test-predicate-goal.mts
 import {
   describeSpatialPredicate,
   evaluateSpatialPredicate,

@@ -1,7 +1,7 @@
 // test-vertical-plan.mts - issue #45 unit proof for the retrieval vertical leg
 // and the stall escalation. No bot, no network.
 //
-// Run: npx tsx test-vertical-plan.mts
+// Run: bun test-vertical-plan.mts
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { guardCandidate } from './src/policy.ts'

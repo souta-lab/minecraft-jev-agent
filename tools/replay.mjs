@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // tools/replay.mjs — deterministic offline A/B replay harness (issue #23).
 //
 // Reads a window of `logs/jev/decisions.jsonl` (plus optional `run.jsonl` for
@@ -18,7 +18,7 @@
 // observed for the divergent chains. Everything is pure data replay.
 //
 // Usage:
-//   node tools/replay.mjs [--decisions <path>] [--run <path>]
+//   bun tools/replay.mjs [--decisions <path>] [--run <path>]
 //                         [--jev-calls <path>] [--mercury-calls <path>]
 //                         [--last N] [--from-tick N] [--to-tick N]
 //                         [--threshold 0.5] [--max-divergences 50]
@@ -584,7 +584,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    'usage: node tools/replay.mjs [options]',
+    'usage: bun tools/replay.mjs [options]',
     '',
     'options:',
     '  --decisions <path>     default buddy-driver/logs/jev/decisions.jsonl',

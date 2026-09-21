@@ -1,7 +1,7 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // apply-movement-patch.mjs
 //
-// Re-applies the local movement patches after `npm install`. Two dependency
+// Re-applies the local movement patches after `bun install`. Two dependency
 // defects make a Leaf 1.21.11 server reject the bot's movement while it is in
 // contact with terrain (see ~/mc-ai/ARCHITECTURE.md section 9 and the read-only
 // harness ~/mc-ai/mcbot/movement-test/README.md sections 7-9):
@@ -22,11 +22,11 @@
 //
 // The two mineflayer hunks are a strict subset of the open upstream PR #4063.
 // All patches are reversible: delete the dependency dirs and reinstall with
-// `npm ci --ignore-scripts`.
+// `bun install --frozen-lockfile --ignore-scripts`.
 //
-// Usage:  node scripts/apply-movement-patch.mjs [--check]
+// Usage:  bun scripts/apply-movement-patch.mjs [--check]
 // Exit 0 when every patch is applied or already present; non-zero on any failure
-// so `npm install` surfaces a broken patch immediately.
+// so `bun install` surfaces a broken patch immediately.
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

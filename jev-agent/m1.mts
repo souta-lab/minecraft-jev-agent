@@ -2,7 +2,7 @@
 // deterministic Jev fallback) as the ONLY decision maker, while the long-horizon
 // planner is a single-shot stub. Proves `llm.called === false` on every decision.
 //
-// Run: npx tsx m1.mts [--seconds 900] [--log-dir logs/m1-run] [--fallback]
+// Run: bun m1.mts [--seconds 900] [--log-dir logs/m1-run] [--fallback]
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'

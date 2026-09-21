@@ -18,7 +18,7 @@
 //
 // Authority invariant: anti-thrash may HOLD a candidate Jev selected long enough
 // to settle, but it may not choose a cheaper/different semantic candidate on
-// Jev's behalf. Pure: no bot, no network, no model. Run: npx tsx test-anti-flap.mts
+// Jev's behalf. Pure: no bot, no network, no model. Run: bun test-anti-flap.mts
 import { readFileSync } from 'node:fs'
 import {
   AbandonmentLedger,

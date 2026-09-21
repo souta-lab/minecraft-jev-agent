@@ -1,6 +1,6 @@
 // test-gating.mts - proof that `score` answers are treated as (value x certainty).
 //
-// Run: npm run gating-test
+// Run: bun run gating-test
 //
 // The head-line case is the exact sample observed from the real model:
 //   danger.score = 0.91 with providerMetadata.typesafe.confidence.danger = 0.09

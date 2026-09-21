@@ -10,7 +10,7 @@
 // `forcedRepositions` counter, plus the server's authoritative view of the
 // walker read by a second observer bot.
 //
-// Run: npx tsx movement-patch-test.mts [--username AI_MVX] [--seconds 90]
+// Run: bun movement-patch-test.mts [--username AI_MVX] [--seconds 90]
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'

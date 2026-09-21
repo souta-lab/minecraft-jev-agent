@@ -2,7 +2,7 @@
 // bounded-effort drop, next-resource switch, branch-mine fallback, the exact log
 // lines the acceptance harness greps, and the configurable progress window.
 //
-// Run: npx tsx test-retrieval-stall.mts
+// Run: bun test-retrieval-stall.mts
 import {
   ASCENT_PROGRESS_EPSILON,
   evaluateRetrievalProgress,

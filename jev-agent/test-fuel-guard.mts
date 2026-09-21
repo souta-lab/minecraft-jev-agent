@@ -3,7 +3,7 @@
 // unreachable-move guard (a target above the climb limit is logged and retired).
 // No bot, no network.
 //
-// Run: npx tsx test-fuel-guard.mts
+// Run: bun test-fuel-guard.mts
 import { defaultCandidateOptions, formatFuelSatisfied, fuelSatisfaction, generateCandidates, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './src/policy.ts'

@@ -10,21 +10,21 @@ login). Nothing in the PrismLauncher config is modified.
 ## Run it
 
 ```bash
-node /home/s0u7a/mc-ai/launch/launch.mjs
+bun /home/s0u7a/mc-ai/launch/launch.mjs
 ```
 
 Useful flags:
 
 ```bash
-node launch.mjs --dry-run              # print the java command, do not launch
-node launch.mjs --username Notch       # offline player name (default: s0u7a)
-node launch.mjs --uuid <uuid>          # override the derived offline UUID
-node launch.mjs --memory 6G            # -Xmx (default: 4G)
-node launch.mjs --kill-after 300       # stop the game automatically after 300 s
-node launch.mjs --download-assets      # fetch asset objects missing from the cache
-node launch.mjs --assets-dir DIR       # assets root (default: PrismLauncher cache)
-node launch.mjs --java /path/to/java   # java executable override
-node launch.mjs --help
+bun launch.mjs --dry-run              # print the java command, do not launch
+bun launch.mjs --username Notch       # offline player name (default: s0u7a)
+bun launch.mjs --uuid <uuid>          # override the derived offline UUID
+bun launch.mjs --memory 6G            # -Xmx (default: 4G)
+bun launch.mjs --kill-after 300       # stop the game automatically after 300 s
+bun launch.mjs --download-assets      # fetch asset objects missing from the cache
+bun launch.mjs --assets-dir DIR       # assets root (default: PrismLauncher cache)
+bun launch.mjs --java /path/to/java   # java executable override
+bun launch.mjs --help
 ```
 
 The offline UUID is derived the standard way: MD5 of `OfflinePlayer:<name>`
@@ -113,7 +113,7 @@ client matching the local Leaf 1.21.11 server. Use a separate `--data-dir` and
 `localhost:25565`:
 
 ```bash
-node /home/s0u7a/mc-ai/launch/launch.mjs \
+bun /home/s0u7a/mc-ai/launch/launch.mjs \
   --mc-version 1.21.11 --vanilla \
   --game-dir /home/s0u7a/mc-ai/launch/game-1.21.11 \
   --data-dir /home/s0u7a/mc-ai/launch/data-1.21.11 \
@@ -124,7 +124,7 @@ node /home/s0u7a/mc-ai/launch/launch.mjs \
 Dry-run (verified working, downloads meta/libraries/client but launches nothing):
 
 ```bash
-node /home/s0u7a/mc-ai/launch/launch.mjs --mc-version 1.21.11 --vanilla \
+bun /home/s0u7a/mc-ai/launch/launch.mjs --mc-version 1.21.11 --vanilla \
   --server localhost:25565 --username s0u7a --dry-run
 ```
 

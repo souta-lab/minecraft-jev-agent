@@ -6,7 +6,7 @@
 // (VERTICAL_HOP_RISE_MS=180, VERTICAL_HOP_PUSH_MS=260) and the truth rule
 // hopHoldsForward (still re-exported from the executor).
 //
-//   npm run hop-policy-test
+//   bun run hop-policy-test
 import { DEFAULT_HOP_POLICY, formatHopPlan, hopHoldsForward, planVerticalHop } from './src/hopPolicy.ts'
 import { hopHoldsForward as executorHopHoldsForward } from './src/executor.ts'
 

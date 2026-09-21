@@ -13,7 +13,7 @@ import {
   plannerCapabilityHash,
   plannerStateHash,
   plannerWorldKeyString,
-} from './planner.ts'
+} from './planner-legacy.ts'
 import type { PlannerWorldKey } from './planner.ts'
 import {
   MERCURY_CACHE_SCHEMA_VERSION,

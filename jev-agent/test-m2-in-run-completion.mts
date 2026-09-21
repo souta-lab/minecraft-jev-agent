@@ -26,7 +26,7 @@
 //    sequence: `PATH_CALLBACK phase=failed ... outcome=stuck` then
 //    `CAUSAL ... verified=true status=done` then `MOVE_FAILMEM_RESET`, forever.
 //
-// Run: npx tsx test-m2-in-run-completion.mts
+// Run: bun test-m2-in-run-completion.mts
 import { RUNGS, filterAlreadyMet, smeltPriorityGoal } from '../buddy-driver/planner.ts'
 import type { Counts } from '../buddy-driver/planner.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'

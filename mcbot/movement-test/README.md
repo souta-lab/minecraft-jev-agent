@@ -29,7 +29,7 @@ movement-test/
   README.md                  this report
   logs/                      raw JSONL + per-run summary JSON (evidence)
   variants/
-    A/ node_modules/mineflayer         stock mineflayer@4.39.0 (npm registry)
+    A/ node_modules/mineflayer         stock mineflayer@4.39.0 (package registry)
     B/mineflayer-src                   git PR #4107 head 4ac7233…
     C/mineflayer-src                   B + PR #4128 diff + local minecraft-data flag
     E/mineflayer-src                   git PR #4108 head 4f31b3e1…
@@ -47,10 +47,10 @@ Nothing under `~/mc-ai/mcbot/node_modules` or `~/mc-ai/jev-agent/` was modified.
 cd ~/mc-ai/mcbot/movement-test
 
 # canonical run: stand 10 s, walk up to 5 blocks / 6 s, settle 1.5 s
-node probe.mjs --variant A --username AI_Bot --stand-seconds 10 --walk-seconds 6 --settle-seconds 1.5 --terrain drop
+bun probe.mjs --variant A --username AI_Bot --stand-seconds 10 --walk-seconds 6 --settle-seconds 1.5 --terrain drop
 
 # open-ground run (auto-picks the longest clear straight run)
-node probe.mjs --variant G --username AI_QB --terrain flat
+bun probe.mjs --variant G --username AI_QB --terrain flat
 ```
 
 Output (stdout):
@@ -120,7 +120,7 @@ World is freshly generated, peaceful, `spawn-protection=0`; no terrain was modif
 
 | Variant | Contents | Source | State | Head SHA |
 |---|---|---|---|---|
-| **A** | unmodified published `mineflayer` | npm | 4.39.0 | — |
+| **A** | unmodified published `mineflayer` | package registry | 4.39.0 | — |
 | **B** | A + PR **#4107** (answer pings/teleports at next tick, arrival order) | `PrismarineJS/mineflayer` | **OPEN** | `4ac7233799487bc7b105bb8504dd50e04dd9306b` |
 | **C** | B + PR **#4128** (serverbound `tick_end` each tick; `lastSent.time` after forced move) | idem | **OPEN** | `5152c76759841d8e10605e01c3864a707c5bb53b` |
 | **D** | PR **#4125** (`accept_teleportation` carries x/y/z/yaw/pitch on 26.3) | idem | **OPEN** | `93c8c160bd243716e75caad558f9492c5bc4e9be` |
@@ -307,7 +307,7 @@ Mechanism:
   #3947 (horizontal collision) cannot run on 26.1 (its branch is mineflayer 4.37.1).
 * **Server untouched.** No server config was modified; the only write outside
   `movement-test/` (a `features.json` edit made by a mis-resolving helper script) was
-  reverted byte-for-byte and verified identical to the npm `minecraft-data@3.116.0`
+  reverted byte-for-byte and verified identical to the registry `minecraft-data@3.116.0`
   tarball.
 
 ### Recommended pin
@@ -315,7 +315,7 @@ Mechanism:
 In `~/mc-ai/mcbot/` and jev-agent, pin Mineflayer to PR #4063:
 
 ```
-npm i github:PrismarineJS/mineflayer#fc480ee8c456de87ce77769b31ba8bcf88703043
+bun add github:PrismarineJS/mineflayer#fc480ee8c456de87ce77769b31ba8bcf88703043
 ```
 
 Caveat: #4063 is an **open, unmerged** PR. If a minimal, self-contained patch is
@@ -455,19 +455,19 @@ jumps:3}`, `rose:2`.
 cd ~/mc-ai/mcbot/movement-test
 
 # terrain recon (live, via the bot)
-node vertical.mjs --variant G --mode recon --username AI_R1
+bun vertical.mjs --variant G --mode recon --username AI_R1
 
 # flat jump sanity (expect rose=1.2522, forcedRepositions=1)
-node vertical.mjs --variant G --mode jump  --username AI_J1
+bun vertical.mjs --variant G --mode jump  --username AI_J1
 
 # climb a 1-block step / 1-deep pit (use a fresh or free saved username)
-node vertical.mjs --variant G --mode nav    --username AI_N1 --target 32.5,64,-58.5
-node vertical.mjs --variant G --mode digpit --username AI_P1 --depth 1
-node vertical.mjs --variant A --mode digpit --username AI_P2 --depth 1   # stock baseline
+bun vertical.mjs --variant G --mode nav    --username AI_N1 --target 32.5,64,-58.5
+bun vertical.mjs --variant G --mode digpit --username AI_P1 --depth 1
+bun vertical.mjs --variant A --mode digpit --username AI_P2 --depth 1   # stock baseline
 
 # 2-deep pit (expect escaped=false) and 2-deep+bench (expect escaped=true)
-node vertical.mjs --variant G --mode digpit --username AI_D2 --depth 2
-node vertical.mjs --variant G --mode digpit --username AI_D3 --depth 2 --bench
+bun vertical.mjs --variant G --mode digpit --username AI_D2 --depth 2
+bun vertical.mjs --variant G --mode digpit --username AI_D3 --depth 2 --bench
 ```
 
 Notes: use a fresh username per run so the offline server does not respawn the bot at a
@@ -498,4 +498,3 @@ backups, or other directories were touched.
 |---|---|
 | `vertical.mjs` | focused jump / step / pit / nav / digpit harness + the fix recipe |
 | `region-read.mjs` | read-only Anvil (`.mca`) reader used to inspect terrain geometry |
-

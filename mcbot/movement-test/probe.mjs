@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // movement-test/probe.mjs
 //
 // Minimal, bare-Mineflayer movement probe for the local Leaf 26.1.2 server.
@@ -21,8 +21,8 @@
 //   DETAIL: forcedRepositions=F selfPins=P maxDisplacement=D expected=E stall=yes|no tickEnd=T
 //
 // Usage:
-//   node probe.mjs --variant A
-//   node probe.mjs --variant B --direction E --stand-seconds 2
+//   bun probe.mjs --variant A
+//   bun probe.mjs --variant B --direction E --stand-seconds 2
 //
 // Variant dirs are isolated under variants/<A|B|C>/ ; this file never imports
 // the shared mcbot/node_modules stack unless explicitly pointed at it.
@@ -45,7 +45,7 @@ const opt = (n, d) => {
 }
 
 if (has('help')) {
-  console.log(`Usage: node probe.mjs [options]
+  console.log(`Usage: bun probe.mjs [options]
 
   --variant <A|B|C>     mineflayer variant to load (default A)
   --mineflayer <dir>    explicit path to a mineflayer package dir (overrides --variant)

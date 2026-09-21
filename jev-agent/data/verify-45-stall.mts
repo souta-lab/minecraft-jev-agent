@@ -2,7 +2,7 @@
 // closing distance emits RETRIEVE_STALLED, drops the unreachable known resource
 // (KNOWN_RESOURCE_UNREACHABLE), and the next decision is NOT WAIT.
 //
-// Run: BUDDY_RETRIEVAL_STALL_TICKS=8 npx tsx data/verify-45-stall.mts AI_M2S45
+// Run: BUDDY_RETRIEVAL_STALL_TICKS=8 bun data/verify-45-stall.mts AI_M2S45
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { jevAgent } from '../src/index.ts'

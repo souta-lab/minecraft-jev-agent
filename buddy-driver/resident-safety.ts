@@ -8,7 +8,7 @@
 //        stale generation can never act against a dead socket.
 //
 // This module is imported by the HOST (agent-runner.mts, native TS stripping)
-// and by the RELOADABLE generation bundle (generation-entry.ts via esbuild). It
+// and by the RELOADABLE generation bundle (generation-entry.ts via Bun.build). It
 // has no runtime dependency on mineflayer or sockets: the only imports are
 // type-only, so Node strips them and nothing extra reaches the bundle.
 

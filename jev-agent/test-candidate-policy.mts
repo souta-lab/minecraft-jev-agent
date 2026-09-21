@@ -3,7 +3,7 @@
 // (moveFailureLimit=4, descendFailureLimit=3, placeSpotRetryLimit=2) instead of
 // inline module constants, and the generator honors the configured value.
 //
-//   npm run candidate-policy-test
+//   bun run candidate-policy-test
 import { blockId, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, generateCandidates, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'

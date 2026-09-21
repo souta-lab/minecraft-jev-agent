@@ -382,7 +382,7 @@ buddy-driver/package.json
         共有ツリーを checkout で切り替えると稼働中のエージェントが別ブランチのコードで動き出し、他のタスクの編集も壊れる
   （実例: #21 は /tmp/opencode/wt21 を使用。これが正しい）
 ・★共有ツリーの HEAD は常に `main` でなければならない。同期の `reset` は現在のブランチを動かすため、
-  非 `main` HEAD ではレーンのブランチを静かに書き換える。共有ツリーの同期は `node tools/sync-shared-tree.mjs`
+  非 `main` HEAD ではレーンのブランチを静かに書き換える。共有ツリーの同期は `bun tools/sync-shared-tree.mjs`
   を使い、`SYNC_HEAD_WRONG head=<branch>` で停止した場合は checkout や reset で回避しない。
 ・main へ直接コミットするのは「単一の作業者しか触っていない」ことが明確な場合のみ（例: tools/, docs のみ）
 ・★**ブランチ上の修正は main にマージされるまで稼働中エージェントに反映されない**
@@ -401,9 +401,9 @@ buddy-driver/package.json
    ／ movement=executor,candidates,state ／ Mercury/CI=PRブランチ `sol/system2-ci-mercury` ／ tools・docs=誰でも）
 ```
 ```
-・健全性の一括確認:      node tools/buddy-status.mjs        （--json で機械可読）
+・健全性の一括確認:      bun tools/buddy-status.mjs        （--json で機械可読）
 ・常駐ホストは単一:      pgrep は bash ラッパーに誤マッチするので tools の判定を使う。kill は pid 指定
-・デタッチ起動:          cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &
+・デタッチ起動:          cd buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 ・サーバー:              127.0.0.1:25565 (Leaf 1.21.11, offline, peaceful)。停止時は
                          -DPaper.IgnoreJavaVersion=true を付けて起動（Java は 21.0.13-ea のため必須）
 ・制御ソケット:          data/resident/control.sock（0600, JSON Lines）
@@ -411,7 +411,7 @@ buddy-driver/package.json
    実行可:   freeze / resume / reload / gc / leakcheck / simdeath / quit
    注意:     goal/milestone は注入不可（照会だけ）。worldreset は実装にあるが破壊的なので使わない
    契約:     HOST↔generation の契約バージョンは RESIDENT-MODE.md §4-A が正典（数値を再掲しない）。
-            doc/code の不一致は buddy-driver の `npm run contract-docs-check` が FAIL で検出する。
+            doc/code の不一致は buddy-driver の `bun run contract-docs-check` が FAIL で検出する。
             不一致は hot reload では解消せず、ホスト再起動が必要（`RELOAD_REJECTED ... mismatch` が観測される）。
 ・Bot名:                 AI_Buddy は常駐が占有。検証は AI_M1* / AI_M2* 等を使う。s0u7a は人間用
 ・秘密:                  /home/s0u7a/.config/kimaki-secrets/ 配下は絶対に出力しない
@@ -452,9 +452,9 @@ HARD STOPに該当するintegration操作だけを保留し、review/test等は�
 健全性/host:
 
 ```text
-status: node tools/buddy-status.mjs  (--json available)
+status: bun tools/buddy-status.mjs  (--json available)
 resident host: single instance
-start: cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &
+start: cd buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 server: 127.0.0.1:25565 (Leaf 1.21.11, offline, peaceful)
 Java: 21.0.13-ea; server startには -DPaper.IgnoreJavaVersion=true
 control socket: data/resident/control.sock (0600, JSON Lines)
@@ -466,20 +466,20 @@ secret boundary: /home/s0u7a/.config/kimaki-secrets/
 
 `worldreset`, server stop/restart, intentional resident shutdown等はH1/H4として扱う。
 HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
-`npm run contract-docs-check` がdoc/code mismatchを検出する。
+`bun run contract-docs-check` がdoc/code mismatchを検出する。
 
 ### 4.0-B レーン重複防止 / supersession / CURRENT-STATUS（派生）
 
 ```text
-・lane開始前（実装に触る前）: node tools/lane-guard.mjs を実行する（読み取り専用）。
+・lane開始前（実装に触る前）: bun tools/lane-guard.mjs を実行する（読み取り専用）。
   DUPLICATE_LANE（exit 1）= 同一issueを主張するopen PR/worktreeが既にある。
   → 新laneを足さず、既存laneと調整・統合する（重複実装は後でマージ衝突の山になる）。
 ・stale branch/worktreeのsupersession: headが origin/main の祖先であり、追跡された変更が
   無いことを証明できたものだけをprune候補にする。未マージ・dirtyなworktreeは削除しない。
   判断材料は lane-guard の branches/worktrees/prs と UNKNOWN 表示（読めないソースを推測で埋めない）。
-・現在状態はDERIVED（手書きしない）: node tools/current-status.mjs が「今何が真か」の正典。
-  再生成は npm run current-status:write。TODO/docsは古いruntime状態を現在として再掲しない
-  （historical evidenceとしてのみ残す）。依存とfrontierは node tools/issue-graph.mjs。
+・現在状態はDERIVED（手書きしない）: bun tools/current-status.mjs が「今何が真か」の正典。
+  再生成は bun run current-status:write。TODO/docsは古いruntime状態を現在として再掲しない
+  （historical evidenceとしてのみ残す）。依存とfrontierは bun tools/issue-graph.mjs。
 ```
 
 ## 5. 完了の定義（M4）

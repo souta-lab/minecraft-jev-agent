@@ -107,7 +107,7 @@ Detached start (when host startup is explicitly appropriate):
 
 ```bash
 cd /home/s0u7a/mc-ai/buddy-driver
-setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &
+setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &
 ```
 
 Do not use broad `pkill -f` patterns. Intentional host/server shutdown/restart follows the root HARD STOP rules.

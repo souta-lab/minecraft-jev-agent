@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // movement-test/vertical.mjs
 //
 // Focused vertical-movement harness (jump / step-up / pit-escape) built on the
@@ -12,10 +12,10 @@
 //   pit     try to leave a 2-block pit (optionally: walk to a discovered pit first)
 //
 // Usage:
-//   node vertical.mjs --variant G --mode recon --username AI_R1
-//   node vertical.mjs --variant G --mode jump  --username AI_J1
-//   node vertical.mjs --variant G --mode step  --username AI_S1 --direction N
-//   node vertical.mjs --variant G --mode pit   --username AI_P1 --pit x,y,z
+//   bun vertical.mjs --variant G --mode recon --username AI_R1
+//   bun vertical.mjs --variant G --mode jump  --username AI_J1
+//   bun vertical.mjs --variant G --mode step  --username AI_S1 --direction N
+//   bun vertical.mjs --variant G --mode pit   --username AI_P1 --pit x,y,z
 //
 // All packet-level evidence is written to logs/<variant>-<tag>-<ts>.jsonl and a
 // summary JSON next to it.
@@ -35,7 +35,7 @@ const opt = (n, d) => {
 }
 
 if (has('help')) {
-  console.log(`Usage: node vertical.mjs [options]
+  console.log(`Usage: bun vertical.mjs [options]
   --variant <A|...|L|STOCK>   mineflayer variant (default G)
   --mineflayer <dir>          explicit mineflayer package dir
   --host/--port               server (default 127.0.0.1:25565)

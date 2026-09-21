@@ -10,7 +10,7 @@
 //       with action=escape;
 //   (d) no world-retrieval option is chosen while the required item is held.
 //
-// Run: npx tsx test-prereq-oscillation.mts
+// Run: bun test-prereq-oscillation.mts
 import { defaultCandidateOptions, furnacePrereqInputFromState, generateCandidates } from './src/candidates.ts'
 import { formatFurnaceReady } from './src/placementGuard.ts'
 import {

@@ -8,7 +8,7 @@
 //   (b) exposed stone with a standable spot within ~30 blocks,
 //   (c) the nearest iron_ore and its depth (info only).
 //
-// Run: npx tsx data/seed-scan.mts [username]
+// Run: bun data/seed-scan.mts [username]
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 

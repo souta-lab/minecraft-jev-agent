@@ -18,7 +18,7 @@
 //   6. the truthful-outcome layer treats IGNITE as self-evident verified so the
 //      controller advances only on a proven ignition.
 //
-// Run: npx tsx test-portal-ignite.mts
+// Run: bun test-portal-ignite.mts
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

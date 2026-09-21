@@ -11,7 +11,7 @@
 // that reproduces the prismarine-physics jump gate and the clientbound
 // `onGround=false` rubber-band - no live server.
 //
-//   npm run pillar-jump-test
+//   bun run pillar-jump-test
 import type { Bot } from 'mineflayer'
 import { ActuationLeaseManager, withActuationLease } from '../buddy-driver/resident-safety.ts'
 import { correctStandingOnGround, formatPillarUpStep, jumpWithGroundCorrection, JUMP_IMPULSE_VY, TAKEOFF_RISE } from './src/pillarJump.ts'

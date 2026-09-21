@@ -2,7 +2,7 @@
 // fixes (#7 tool choice, #8a spatial failure memory, #8b hop order is covered
 // live, #9/#4 descend evidence + no-progress cap + fixed dig direction).
 //
-// Run: npx tsx movement-fix-test.mts
+// Run: bun movement-fix-test.mts
 import { emptyGoalQueueState, generateCandidates, makeGoal } from './src/index.ts'
 import type { AgentSignals, WorldState } from './src/index.ts'
 import type { DescentOption } from './src/state.ts'

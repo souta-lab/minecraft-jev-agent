@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // tools/run-artifacts.mjs — run-scoped acceptance artifacts (issue #63, section 4).
 //
 // Shared `buddy.log`, `mercury-calls.jsonl` and friends are append-only and mix
@@ -446,7 +446,7 @@ export function buildChecks(record, mercuryModel = null) {
       'buddy-driver/agent-runner.mts:1166-1211 writeAcceptance().',
       'no acceptance-<runId>.json under buddy-driver/data/resident/.',
       'UNKNOWN',
-      'node tools/run-artifacts.mjs capture <runId>',
+      'bun tools/run-artifacts.mjs capture <runId>',
     )
     return checks
   }
@@ -471,7 +471,7 @@ export function buildChecks(record, mercuryModel = null) {
     'tools/run-artifacts.mjs forwards these fields from AcceptanceRecord when present; the current host record schema does not expose them yet.',
     `missing=[${missingMetadata.join(',')}]`,
     missingMetadata.length === 0 ? 'PASS' : 'UNKNOWN',
-    `node tools/run-artifacts.mjs capture ${record.runId}`,
+    `bun tools/run-artifacts.mjs capture ${record.runId}`,
   )
 
   const baseline = record.listenerBaseline ?? {}
@@ -483,7 +483,7 @@ export function buildChecks(record, mercuryModel = null) {
     'buddy-driver/agent-runner.mts:518-527 listenerCounts()/listenerLeak(); baseline set at :667-668; recorded at :1201-1203.',
     `listenerLeak=${record.listenerLeak} grew=[${grew.join(',')}] baseline=${JSON.stringify(baseline)} current=${JSON.stringify(current)}`,
     record.listenerLeak === false && grew.length === 0 ? 'PASS' : 'FAIL',
-    `node tools/run-artifacts.mjs capture ${record.runId}`,
+    `bun tools/run-artifacts.mjs capture ${record.runId}`,
   )
   push(
     'reconnect_free',
@@ -491,7 +491,7 @@ export function buildChecks(record, mercuryModel = null) {
     'buddy-driver/resident-types.ts:308 stats.reconnects; recorded at buddy-driver/agent-runner.mts:1195.',
     `reconnects=${record.reconnects}`,
     record.reconnects === 0 ? 'PASS' : 'FAIL',
-    `node tools/run-artifacts.mjs capture ${record.runId}`,
+    `bun tools/run-artifacts.mjs capture ${record.runId}`,
   )
   push(
     'reload_hash_churn',
@@ -499,7 +499,7 @@ export function buildChecks(record, mercuryModel = null) {
     'buddy-driver/agent-runner.mts:1249,1283 increment stats.reloadsChangedHash; recorded at :1197.',
     `reloadsChangedHash=${record.reloadsChangedHash} reloadsSkippedUnchanged=${record.reloadsSkippedUnchanged} reloadsFailed=${record.reloadsFailed}`,
     record.reloadsChangedHash >= 5 ? 'PASS' : 'FAIL',
-    `node tools/run-artifacts.mjs capture ${record.runId}`,
+    `bun tools/run-artifacts.mjs capture ${record.runId}`,
   )
   push(
     'no_wedge',
@@ -507,7 +507,7 @@ export function buildChecks(record, mercuryModel = null) {
     'buddy-driver/resident-types.ts:307 stats.wedge; recorded at buddy-driver/agent-runner.mts:1194.',
     `wedge=${record.wedge} goalComplete=${record.goalComplete}`,
     record.wedge === false ? 'PASS' : 'FAIL',
-    `node tools/run-artifacts.mjs capture ${record.runId}`,
+    `bun tools/run-artifacts.mjs capture ${record.runId}`,
   )
   return checks
 }

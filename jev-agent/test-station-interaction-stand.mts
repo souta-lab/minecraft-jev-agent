@@ -20,7 +20,7 @@
 //   (d) the stand filter (passable + supported + face in reach);
 //   (e) the wiring that forwards the face into craftAtTable/openBlock.
 //
-// Run: node --test test-station-interaction-stand.mts
+// Run: bun --test test-station-interaction-stand.mts
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'

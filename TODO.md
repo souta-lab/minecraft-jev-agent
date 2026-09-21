@@ -57,7 +57,7 @@
   （ops.json に s0u7a と AI_Buddy を level 4 で登録済み。次回再起動後に有効）
 ・RCONはLeafでは実際にはlistenしない → ops.json 方式で運用
 ・Java は 21.0.13-ea のため `-DPaper.IgnoreJavaVersion=true` 必須
-・常駐ホストは単一インスタンス。検証は node tools/buddy-status.mjs
+・常駐ホストは単一インスタンス。検証は bun tools/buddy-status.mjs
 ・ブランチ作業は git worktree（共有ツリーで checkout しない）。ブランチ修正は main マージ後に初めて稼働中エージェントへ反映
 ・ゲート: tools/verify-issue12.mjs / verify-issue13.mjs / verify-mercury.mjs
 ```
@@ -180,7 +180,7 @@
   → 方針: freeze で無駄な世代生成とサーバー負荷を止め、修正着地後に resume して検証する（接続・在庫・WorldMemory は保持）
 
 2026-09-18 02:44 JST — ★#15 ゲートgreen（キャッシュループ恒久修正が main で機能）
-  node tools/verify-mercury.mjs → PASS 5/5
+  bun tools/verify-mercury.mjs → PASS 5/5
     has_successful_call: ok=39 errored=3 total=42
     no_cached_strategy_loop: cachedAdvisorLines=13  maxConsecutiveSameStrategy=2（以前112）  bypasses=5  refusals=9
   → 同一キャッシュ戦略の連続適用が解消。grounding による実行不能戦略の拒否（refusals=9）も機能

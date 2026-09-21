@@ -15,7 +15,7 @@
 // (or re-evaluated) by the capability-acquisition pass, and that the fallback
 // craft ladder offers the same placement step.
 //
-// Run: npm run place-spot-test
+// Run: bun run place-spot-test
 import { createRequire } from 'node:module'
 import {
   applyReachabilityGate,

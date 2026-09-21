@@ -13,7 +13,7 @@
 // and whose jump gate NEVER fires, so a takeoff can only come from the verified
 // impulse (its own regression is in test-pillar-jump.mts). No live server.
 //
-//   npm run pillar-apex-test
+//   bun run pillar-apex-test
 import {
   formatPillarFail,
   formatPillarRetire,

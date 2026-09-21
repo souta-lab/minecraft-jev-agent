@@ -6,7 +6,7 @@
 // `selectPlaceableBlock`, `selectPillarFallbackColumn` and
 // `planVerticalApproach(...).steps` must agree with the policy decisions.
 //
-//   npm run pillar-search-test
+//   bun run pillar-search-test
 import {
   decidePillarPlaceBlock,
   decidePillarRelocation,

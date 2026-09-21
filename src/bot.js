@@ -1,7 +1,10 @@
 'use strict'
 
 const { randomUUID } = require('crypto')
-const bedrock = require('bedrock-protocol')
+// `bedrock-protocol`'s public createClient entry eagerly loads the native
+// RakNet backend. Bun cannot load that Node-ABI addon, so use the same Client
+// class with the package's pure-JS RakNet backend explicitly selected.
+const { Client: BedrockClient } = require('bedrock-protocol/src/client')
 
 const DIMENSIONS = { 0: 'overworld', 1: 'nether', 2: 'the_end' }
 const DEFAULT_LOG_SIZE = 200
@@ -98,16 +101,22 @@ class McBot {
     this.state = 'connecting'
     this._push('system', `connecting to ${this.host}:${this.port} as ${this.username}`)
 
-    const client = bedrock.createClient({
+    const client = new BedrockClient({
       host: this.host,
       port: this.port,
       username: this.username,
       offline: true, // no Microsoft/Xbox account
       version: this.version,
+      // Bun does not load the Node-ABI native RakNet addon. The pure-JS
+      // backend keeps the Bedrock MCP companion runnable under Bun.
+      raknetBackend: 'jsp-raknet',
+      delayedInit: true,
       conLog: null,
     })
     this.client = client
     this._wire(client)
+    client.on('connect_allowed', () => client.connect())
+    client.init()
 
     return this.waitForSpawn(this.connectTimeoutMs)
   }

@@ -1,7 +1,7 @@
 // test-move-failmem.mts - issue #8 acceptance: durable coordinate failure memory
 // + explicit oscillation detection for the movement layer.
 //
-// Run: npx tsx test-move-failmem.mts
+// Run: bun test-move-failmem.mts
 import {
   detectOscillation,
   filterBlacklistedMoves,

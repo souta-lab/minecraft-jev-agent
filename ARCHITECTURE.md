@@ -3,7 +3,7 @@
 対象読者: 外部シニアレビュア（Sol）。目的は宣伝ではなく、現状の実装・動いているもの・壊れているもの・詰まっているもの・次の一手を、証拠付きで渡して軌道修正してもらうこと。
 
 読み方に関する注意:
-- 本ドキュメントは 2026-09-18 00:03 JST 時点のスナップショット。この時点で **リポジトリは赤い**（typecheck が通らない、2 つのテストがロード不能）。同時に **常駐ホストが生きたプロセスとして走っている**（`node agent-runner.mts`, PID 150528）。つまり「実装中」の状態を写している。
+- 本ドキュメントは 2026-09-18 00:03 JST 時点のスナップショット。この時点で **リポジトリは赤い**（typecheck が通らない、2 つのテストがロード不能）。同時に **常駐ホストが生きたプロセスとして走っている**（移行前ランタイム、PID 150528）。つまり「実装中」の状態を写している。現在の起動方法は下記のBun移行記録に従う。
 - 検証できなかった主張は `UNVERIFIED: ...` と明記した。プロンプト側の主張でも、実ファイルと食い違うものは実測を優先し、差分を本文に書いた。
 - ファイルパスは `/home/s0u7a/mc-ai/` 起点。ログは `jev-agent/logs/` 起点。
 - **優先順位は `RESIDENT-MODE.md` §13-0（P0 green build → P1 atomic swap → P2 freeze/resume → P3 M1 golden → P4 2-block fixture → P5 Jev shadow→authority → P6 M2 ladder）が正典であり、本文書 §7 の順序に優先する。**
@@ -87,17 +87,17 @@ locomotion, actuator, dig/pickup, craft/smelt を担当。主要なもの:
 
 - **Mineflayer を fork しない**。stock published `mineflayer@4.39.0` / `minecraft-protocol@1.68.0` / `minecraft-data@3.116.0` / `mineflayer-pathfinder@2.4.5`。`package.json` に `github:` / SHA pin は無い。
 - ローカル patch: `patches/mineflayer-4.39.0-locomotion.patch`（upstream PR #4063 のサブセット）。内容は (1) `sendTeleportReply()` が clientbound teleport に応答する際 `lastSent` を server target で上書きしない、(2) `updatePosition` が vanilla の `dx*dx+dy*dy+dz*dz > 4e-8 || positionReminder >= 20` を使う。
-- `scripts/apply-movement-patch.mjs` が `postinstall` で冪等適用、`npm run movement-patch:check` で検証。実測直近: `applied 0 hunk(s), 5 already present; verified 4/4 checks`（`npm run movement-patch:check`, 2026-09-18 00:02）。
-- 撤退口: `npm ci --ignore-scripts`。
+- `scripts/apply-movement-patch.mjs` が `postinstall` で冪等適用、`bun run movement-patch:check` で検証。実測直近: `applied 0 hunk(s), 5 already present; verified 4/4 checks`（`bun run movement-patch:check`, 2026-09-18 00:02）。
+- 撤退口: `bun install --frozen-lockfile --ignore-scripts`。
 
 ### 2.5 常駐ホスト（`buddy-driver/`、2026-09-17 深夜に実装済み）
 
 | ファイル | 役割 |
 |---|---|
 | `agent-runner.mts` (689 行) | HOST。`mineflayer.createBot` + plugin、再接続 backoff、logger 所有、`buddy-state.json` の原子的ミラー、Unix socket 制御サーバ、reload 調停、source watcher |
-| `generation-entry.ts` (404 行) | RELOADABLE 層の入口。`JevController` + `FixedPlanSystem2` をラップ。esbuild で 1 本の hash 付きファイルに束ねる |
+| `generation-entry.ts` (404 行) | RELOADABLE 層の入口。`JevController` + `FixedPlanSystem2` をラップ。Bun.build で 1 本の hash 付きファイルに束ねる |
 | `resident-types.ts` | HOST ↔ generation 契約。`ResidentWorldMemory`、`ResidentState`、`ResidentGeneration`（`attach`/`start`/`quiesce`/`dispose`/`status`/`structuralSmoke`/`missionPreflight`/`stopReason`/`hasStopped`）。`CONTRACT_VERSION` の code 正典（値は `RESIDENT-MODE.md` §4-A） |
-| `build.mts` (90 行) | esbuild ビルド出力 `data/resident/gen-<sha12>.mjs` |
+| `build.mts` (90 行) | Bun.build ビルド出力 `data/resident/gen-<sha12>.mjs` |
 | `data/resident/control.sock` | mode 0600 の制御チャネル（実在を確認） |
 | `buddy-state.json` | durable mirror（`worldMemory`, `ledger`, `generations`, `reloads`, `recoveries`） |
 
@@ -199,14 +199,14 @@ CORE + trigger 別 question 集合、boolean 0.30/0.70 帯、action-only authori
 
 | テスト | 結果 |
 |---|---|
-| `npm run typecheck` | PASS（clean、exit 0） |
-| `npm run guard-test` | PASS 12/12 |
-| `npm run gating-test` | PASS 6/6 |
-| `npm run loop-test` | PASS 7/7 |
-| `npm run m1-test` | PASS 5/5 |
-| `npm run audit-test` | PASS 9/9 |
-| `npm run step-pipeline-test` | PASS 6/6 |
-| `npm run movement-patch:check` | PASS（`0 hunk(s), 5 already present; verified 4/4 checks`） |
+| `bun run typecheck` | PASS（clean、exit 0） |
+| `bun run guard-test` | PASS 12/12 |
+| `bun run gating-test` | PASS 6/6 |
+| `bun run loop-test` | PASS 7/7 |
+| `bun run m1-test` | PASS 5/5 |
+| `bun run audit-test` | PASS 9/9 |
+| `bun run step-pipeline-test` | PASS 6/6 |
+| `bun run movement-patch:check` | PASS（`0 hunk(s), 5 already present; verified 4/4 checks`） |
 
 `craftWindow.ts` の ESM 問題は `import type { Window }`（型のみ）と
 `createRequire(import.meta.url)('prismarine-item')`（CJS default の call signature）で解消した。
@@ -219,7 +219,7 @@ CORE + trigger 別 question 集合、boolean 0.30/0.70 帯、action-only authori
 ### 6.1 RESOLVED（2026-09-18 00:28）: ビルド緑・ladder 再走可能
 
 `src/craftWindow.ts` の ESM import 2 件を修正（`Window` は type-only、`prismarine-item` は
-`createRequire`）。`npm run typecheck` clean、全 7 スイートが緑（§5.7）。M1/M2 の再走を
+`createRequire`）。`bun run typecheck` clean、全 7 スイートが緑（§5.7）。M1/M2 の再走を
 塞いでいた赤は解消した。
 
 残る実ブロッカーはコードではなく **world 枯渇と移動**である（§6.2 以降）。`data/seed-scan.mts`
@@ -278,7 +278,7 @@ stock の `bot.craft` のまま（実証済み）。失敗時は recipe/delta/in
 
 プロンプトの「not delivered yet」は **stale**。現状:
 - `buddy-driver/agent-runner.mts`（689 行）に host、`generation-entry.ts`（404 行）、`build.mts`、`resident-types.ts` が存在。
-- esbuild build 成功: `BUILD hash=45ed55a58a16 bytes=1004535 ms=33 outfile=.../gen-45ed55a58a16.mjs`（`buddy.log` 2026-09-17 23:59:58）。
+- 移行前バンドラの historical build 成功: `BUILD hash=45ed55a58a16 bytes=1004535 ms=33 outfile=.../gen-45ed55a58a16.mjs`（`buddy.log` 2026-09-17 23:59:58）。現在のビルドはBun.buildを使用する。
 - control socket 実在: `data/resident/control.sock`（mode `srw-------`）。
 - source watcher と reload 調停が動き、RELOAD ログが出ている（`buddy.log`）:
   - `15:01:30 RELOAD ok=true trigger=source-changed skipped=unchanged ms=22`
@@ -295,17 +295,17 @@ stock の `bot.craft` のまま（実証済み）。失敗時は recipe/delta/in
 
 ### 6.6 hot reload が使う**正しい** reload 単位（訂正）
 
-`import('./controller.ts?v=hash')` 単体は壊れる。controller の静的 import（`./executor.ts`, `./candidates.ts` ...）は世代 0 の URL に解決され、新しい controller が古い executor/candidates に配線される（stale graph）。正解は reload 層を **esbuild で 1 本のバンドルに固め、内容ハッシュ付きの新パスとして import する**:
+`import('./controller.ts?v=hash')` 単体は壊れる。controller の静的 import（`./executor.ts`, `./candidates.ts` ...）は世代 0 の URL に解決され、新しい controller が古い executor/candidates に配線される（stale graph）。正解は reload 層を **Bun.build で 1 本のバンドルに固め、内容ハッシュ付きの新パスとして import する**:
 ```ts
-await esbuild.build({
+await Bun.build({
   entryPoints: ['src/host/generation-entry.ts'],
-  bundle: true, format: 'esm', platform: 'node',
+  format: 'esm', target: 'bun',
   packages: 'external',                       // mineflayer/pathfinder/prismarine を共有
   outfile: `data/resident/gen-${sha.slice(0,12)}.mjs`,
 })
 const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原子的な世代交代
 ```
-`packages:'external'` により `new Movements(bot)` が host の pathfinder plugin と同一クラスになる。esbuild は devDependency 固定（`buddy-driver/package.json` に `esbuild: 0.28.2`）。
+`packages:'external'` により `new Movements(bot)` が host の pathfinder plugin と同一クラスになる。Bun本体がバンドラを提供し、追加のバンドラ依存は持たない。
 
 ### 6.7 プロセス/オーケストレーションの病理（Sol に共有したい）
 
@@ -323,9 +323,9 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
    - Gate: `m1-diag2` の `MOVE:b16_67_24` 型の hop ループが消える。同一シードで cobblestone 脚が前進。`logs/` に `CLIMB_FAIL` が出る。
 
 2. **Craft-at-station 修正の着地**。`src/craftWindow.ts` の import/型を直す（`prismarine-windows` の `Window` は named export では無い、`prismarine-item` の default import が callable でない）。reachability を事前検証し、失敗時は wedge せず clean に fail する。
-   - Gate: `npm run typecheck` clean、`audit-test` 9/9、`step-pipeline-test` 6/6 が再びロード・pass。`logs/m1-diag2` 相当の craft 成功を full ladder run で再現。
+   - Gate: `bun run typecheck` clean、`audit-test` 9/9、`step-pipeline-test` 6/6 が再びロード・pass。`logs/m1-diag2` 相当の craft 成功を full ladder run で再現。
 
-3. **Resident mode（host layer + reloadable generation）の成立**。固定 username `AI_Buddy` で 1 回接続し接続を保持。決定層を esbuild で 1 本の hash 付きファイルに固めて `import()`。
+3. **Resident mode（host layer + reloadable generation）の成立**。固定 username `AI_Buddy` で 1 回接続し接続を保持。決定層を Bun.build で 1 本の hash 付きファイルに固めて `import()`。
    - Gate: reload を 5 回行い (a) listener 数が基準値で一定、(b) inventory/queue/position が保持、(c) `bot.username` 不変、(d) 少なくとも 1 回は意図的 wedge → freeze → 修正 → reload → resume が成立。現状の `reloads:0` を 1 以上にし、`RELOAD ok=true`（`skipped=unchanged` 以外）を出す。
 
 4. **Control channel**（`data/resident/control.sock` は実在、JSON-lines、`control/inbox.jsonl` fallback）: `goal / milestone / mode / report / reload / retry / freeze / resume / leakcheck / gc / quit`。
@@ -337,8 +337,7 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 6. **Persistent WorldMemory**（mined coords, discovered ores, **discovered crafting tables**, explored regions）。候補が既知 station を優先し、枯渇資源を避ける。世界リセット不要化。
    - Gate: M2 後に、spawn から再探索せず鉄を見つけられる。探索距離が減少。作業台の新規設置が 0〜1 個に収まる（現状 scan で 9 個見つかっている土台あり）。
 
-7. **Runtime/bundler の決定**。**esbuild を既定（安定性優先）**。`Bun.build` と Bun runtime はゲート通過後のみ: (1) `bun run` で接続 + SPAWN（`bot.version==1.21.11`）、(2) movement patch 有効、（3）M1 regression 4/4（deterministic, wedge 0）、(4) テスト全緑を `bun test` で再現、(5) resident 検証を Bun 上で通す。
-   - 記録: 現時点の採用は **Node + tsx + esbuild**（`buddy.log`: `runtime=node node=v25.9.0`）。Bun は未検証。
+7. **Runtime/bundler の決定**。**Bun runtime + Bun.build を既定**。移行済みの一次証拠は `bun run typecheck`、native `Bun.build`、Bun隔離fixture、および `AI_BunVerify` のisolated live SPAWN。M2 live gateと既存known-redの解消は別ゲートとして残す。
 
 8. その後に capability ladder: current M2（diamond → Nether gate）、M3（Nether
    entry/resources）、… M4。旧charcoal/iron ladderは下位能力とhistorical evidence。
@@ -382,7 +381,7 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 | `/home/s0u7a/mc-ai/buddy-driver/agent-runner.mts` | 常駐 HOST（接続、reconnect、制御 socket、reload 調停、state mirror） |
 | `/home/s0u7a/mc-ai/buddy-driver/generation-entry.ts` | RELOADABLE 層の入口（JevController + ladder planner） |
 | `/home/s0u7a/mc-ai/buddy-driver/resident-types.ts` | HOST ↔ generation 契約（`CONTRACT_VERSION` の code 正典。値は `RESIDENT-MODE.md` §4-A） |
-| `/home/s0u7a/mc-ai/buddy-driver/build.mts` | esbuild バンドラ |
+| `/home/s0u7a/mc-ai/buddy-driver/build.mts` | Bun.build バンドラ |
 | `/home/s0u7a/mc-ai/buddy-driver/buddy.log` | BOOT / BUILD / SPAWN / GENERATION_READY / RELOAD(ok=false) / SHUTDOWN |
 | `/home/s0u7a/mc-ai/buddy-driver/runner.out` | generation の agent ログ（DESCEND dig_error, smoke 失敗の文脈） |
 | `/home/s0u7a/mc-ai/buddy-driver/buddy-state.json` | durable mirror（`reloads:0`, `generations:2`, `worldMemory.craftingTables`） |
@@ -416,16 +415,16 @@ const mod = await import(pathToFileURL(outfile).href)  // 1 file == 1 URL == 原
 - author: Sisyphus-Junior（M2 セッションからの handoff。コードは変更していない。読み取りと検証のみ）
 - 検証区分:
   - **VERIFIED（実測で確認）**: §3 の環境（jar sha256、Java 21.0.12.1、server.properties）、§5.1 M1 PASS の各数値、§5.6 craft diag 成功、§5.7 テスト現況、§6.1 のコンパイル/ロードエラー、§6.3 の hop ループと 2-block fail-fast、§6.5 の RELOAD ログ・`reloads:0`・`craftingTables=9`、§6.4 の join/PLACE 集計、movement patch check 4/4。
-  - **UNVERIFIED**: (a) world 内 crafting_table の正確なブロック数（ブロックスキャン未実施）、(b) §6.7 の orchestration 病理（対応ログパス無し、ユーザー/セッション観測）、(c) Bun runtime の互換性（未検証）、(d) 敵モブ/戦闘系は peaceful のため未検証、(e) resident の freeze report 実生成（`logs/resident/` 空）。
+  - **UNVERIFIED**: (a) world 内 crafting_table の正確なブロック数（ブロックスキャン未実施）、(b) §6.7 の orchestration 病理（対応ログパス無し、ユーザー/セッション観測）、(c) 敵モブ/戦闘系は peaceful のため未検証、(d) resident の freeze report 実生成（`logs/resident/` 空）。Bunのisolated resident起動/SPAWNは移行後に別runで確認済みだが、M2 live gateの証拠ではない。
   - **STALE CLAIM の訂正**: 「hot reload 未配達」は誤り（実装済み・atomic swap のみ未成立）、「テスト全緑」は現時点で誤り（typecheck と 2 テストが赤）、「56 crafting_table placement events」は「56 log files が文字列を含む」が正しい。
 
 ## AI_Buddy resident driver (added)
 
 `buddy-driver/` runs the M2 intelligence as a **resident** agent: one long-lived
 Mineflayer connection as `AI_Buddy`, with the reloadable layer bundled by
-**esbuild** into one hash-stamped file and hot-swapped without reconnecting.
-Runtime: **Node 25 native TypeScript stripping** (Bun not adopted — §0-A gates
-not run; stability first). Bundler: **esbuild 0.28.2, pinned** (user decision).
+**Bun.build** into one hash-stamped file and hot-swapped without reconnecting.
+Runtime: **Bun 1.4.2**. The bundler is the Bun runtime's native build API; no separate
+bundler package or separate TypeScript runner is required.
 
 - Host: `buddy-driver/agent-runner.mts` (bot, reconnect, logger, state mirror,
   control socket, reload arbiter).
@@ -482,7 +481,7 @@ The older semantic questions (`goal_progress`, `plan_still_valid`, `situation_un
 above a threshold requests a System2 replan. See `RESIDENT-MODE.md` section 14.
 
 ## Operating facts for whoever picks this up
-- One-shot health dashboard: `node tools/buddy-status.mjs` (`--json` for machine-readable). It prints host count,
+- One-shot health dashboard: `bun tools/buddy-status.mjs` (`--json` for machine-readable). It prints host count,
   control-socket state, churn counters, listener leak, world memory, acceptance/freeze artifact paths, and marker counts.
 - Control socket `buddy-driver/data/resident/control.sock` (0600, JSON lines):
   query-only `report | status | goal | milestone | acceptance`; actions `freeze | resume | reload | gc | leakcheck |

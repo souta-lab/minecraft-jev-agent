@@ -20,10 +20,10 @@
 // The pure helpers are exported so `buddy-driver/test-contract-docs.mts` can test
 // the checker itself (positive + negative) without shelling out.
 //
-// Run: node tools/check-contract-docs.mjs
-//      node tools/check-contract-docs.mjs --json
+// Run: bun tools/check-contract-docs.mjs
+//      bun tools/check-contract-docs.mjs --json
 // Test hooks (used by the test suite to prove the negative path):
-//      CONTRACT_DOCS_SIMULATE_CODE=2 CONTRACT_DOCS_SIMULATE_DOC=3 node tools/check-contract-docs.mjs
+//      CONTRACT_DOCS_SIMULATE_CODE=2 CONTRACT_DOCS_SIMULATE_DOC=3 bun tools/check-contract-docs.mjs
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'

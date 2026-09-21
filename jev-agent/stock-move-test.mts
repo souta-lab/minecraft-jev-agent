@@ -7,7 +7,7 @@
 // actuator, no position_look packets. It quotes the pathfinder events, the
 // position deltas and the server forcedMove (rubber-band) count.
 //
-// Run: npx tsx stock-move-test.mts [--username AI_R2] [--seconds 60]
+// Run: bun stock-move-test.mts [--username AI_R2] [--seconds 60]
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 

@@ -140,19 +140,19 @@ start. Cold start, if anything, looked *cheaper* than the warm p90.
 cd /home/s0u7a/mc-ai/jev-agent
 
 # full suite: 61 calls, self-paced to the free-tier quota (~72 min)
-node bench.mjs --out data/bench.jsonl --seed 20260917
+bun bench.mjs --out data/bench.jsonl --seed 20260917
 
 # one bucket / N calls (e.g. 10 warm samples)
-node bench.mjs --bucket warm --calls 10 --out data/bench.jsonl
+bun bench.mjs --bucket warm --calls 10 --out data/bench.jsonl
 
 # just the first-call-of-process sample
-node bench.mjs --bucket cold --calls 1 --out /tmp/opencode/cold.jsonl
+bun bench.mjs --bucket cold --calls 1 --out /tmp/opencode/cold.jsonl
 
 # re-measure the state-size → inputTokens mapping (3 calls)
-node bench.mjs --calibrate
+bun bench.mjs --calibrate
 
 # pacing knobs (defaults: 4 successes / 300 s). --pace off disables waiting.
-node bench.mjs --quota 4 --window-sec 300
+bun bench.mjs --quota 4 --window-sec 300
 ```
 
 Flags: `--calls N`, `--bucket <name>[,<name>...]`, `--out <file>`, `--append`,

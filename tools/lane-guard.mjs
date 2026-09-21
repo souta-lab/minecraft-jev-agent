@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // tools/lane-guard.mjs — duplicate-lane detector for issue claims.
 //
 // A "lane" is a concurrent work claim on the same issue: a branch, an open PR,
@@ -11,7 +11,7 @@
 // Exit 1 + `DUPLICATE_LANE` when 2+ open PRs or 2+ worktrees claim one issue.
 // Exit 0 + `NO_DUPLICATES` otherwise. Unreadable sources are marked `UNKNOWN`.
 //
-// Usage: node tools/lane-guard.mjs
+// Usage: bun tools/lane-guard.mjs
 
 import { execFile } from 'node:child_process'
 import process from 'node:process'

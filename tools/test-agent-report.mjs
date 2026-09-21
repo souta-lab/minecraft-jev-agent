@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // tools/test-agent-report.mjs - offline fixture test for tools/agent-report.mjs.
 //
 // Builds a synthetic buddy.log + control-report JSON that reproduce the known
@@ -6,7 +6,7 @@
 // detects the blockers, the reload failure, and the VERDICT - without needing
 // the live resident, a socket, or any network.
 //
-// Usage: node tools/test-agent-report.mjs
+// Usage: bun tools/test-agent-report.mjs
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // m2-live-gate: the executable close/no-close gate for the CURRENT M2
 // contract (diamond -> Nether-gate). The historical iron-age tools remain
 // available for replay, but this command must never evaluate that old chain.

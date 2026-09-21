@@ -31,7 +31,7 @@ M4 THE DRAGON: stronghold -> end portal -> kill Ender Dragon
 - stock published `mineflayer@4.39.0` / `minecraft-protocol@1.68.0` / `minecraft-data@3.116.0` /
   `mineflayer-pathfinder@2.4.5` — **no git pin**. (Previously pinned to open PR #4063 head
   fc480ee8c456de87ce77769b31ba8bcf88703043; the pin was removed in the 1.21.11 migration. Rollback:
-  `npm i mineflayer@4.39.0`.)
+  `bun add mineflayer@4.39.0`.)
 
 ## PRIORITY (updated): M1 first, M4 deprioritised
 M1 is the top priority now. Target metric: **LLM calls == 0 for the whole run**.
@@ -67,7 +67,7 @@ Invariants verified: pinned mineflayer, canDig=false, single-action ownership, g
 ## M1 status: IN PROGRESS - blocker = VERTICAL MOVEMENT, not decision-making
   flat walking now reliable (forcedRepositions=0); 1-2 block steps/slopes still stall ("packet locomotion blocked").
   M1 acceptance unchanged: oak_log>=3 -> crafting_table>=1 -> wooden_pickaxe>=1 -> cobblestone>=16, llm.called==false for the run.
-  CAUTION: src/ is being concurrently rewritten by the M1 task; `npm run typecheck` was reported with 7 transient errors
+  CAUTION: src/ is being concurrently rewritten by the M1 task; `bun run typecheck` was reported with 7 transient errors
   (controller.ts, system2.ts, data/probe-walk.mts) at one point - re-verify typecheck before trusting any M1 evidence.
 
 ## M1 result: PASS (5/5 acceptance) - evidence in /home/s0u7a/mc-ai/jev-agent/logs/m1-final/
@@ -88,7 +88,7 @@ pre-existed. Fresh-state behaviour was separately proven live: a clean spawn min
 crafting_table + stick + wooden_pickaxe, placed the table and mined cobblestone 2 -> 17.
 
 ## M1 implementation: DONE (all 4 known gaps closed)
-Implemented (src/, typecheck clean, `npm run m1-test` 5/5):
+Implemented (src/, typecheck clean, `bun run m1-test` 5/5):
   - `src/crafting.ts` (new): pure minecraft-data recipe index + `planNextCraftStep()`; walks the exact M1 chain
     oak_log -> oak_planks -> crafting_table -> stick -> place table -> wooden_pickaxe (verified against real 26.1 recipes).
   - `CandidateKind` += CRAFT | PLACE. Generation is goal-directed by the current goal-queue subgoal:
@@ -139,7 +139,7 @@ Ported the proven recipe from `mcbot/movement-test/vertical.mjs#navigateTo` into
     stepper remains only as a fallback. Arrival logs now carry `climbed=<m> jumps=N recoveries=N forcedRepositions=N`.
 Invariants kept: canDig=false movement-only pathfinder, single-action ownership (actionEpoch/AbortController),
 mechanical guard, grounded candidates, event-driven scheduler, 2D danger gate, `llm.called=false` during runs.
-Tests after the change: `npm run typecheck` clean; guard-test 12/12, gating-test 6/6, loop-test 7/7, m1-test 5/5.
+Tests after the change: `bun run typecheck` clean; guard-test 12/12, gating-test 6/6, loop-test 7/7, m1-test 5/5.
 
 Agent-level terrain evidence (executor's OWN MOVE actions; runner `data/verify-vertical.mts`, username AI_V4,
 log/evidence dir `logs/vertical-port/`):
@@ -183,7 +183,7 @@ Landing the port exposed three residual defects. Measured on the live server and
    or another target instead of looping on a 4-block tree trunk (this does NOT blacklist targets that
    fail transiently, e.g. the V1 run's b40 target failed 3x then succeeded).
 
-Re-verified after the refinements: `npm run typecheck` clean; guard-test **12/12**, gating-test **6/6**,
+Re-verified after the refinements: `bun run typecheck` clean; guard-test **12/12**, gating-test **6/6**,
 loop-test **7/7**, m1-test **5/5**. Agent-level evidence (`logs/agent-test-v1bC.log`, runner
 `movement-agent-test.mts`, username AI_V1bC) - inside the executor's OWN MOVE action:
   - 1-deep pit escape: `control locomotion arrival start=(25.5,62,-69.5) end=(26.08,63.25,-69.5)
@@ -325,9 +325,9 @@ MIGRATION (done):
   `level-seed=2024`. The 26.1.2 jar moved to `jars/`; the 26.1.2 world archived as
   `world-26.1.2-backup`. `server.log` shows `Done (15.402s)!`; `ss -ltnp` shows 25565 owned by the
   new JVM.
-- Agent: removed the `github:` pin; `npm ls` = stock `mineflayer@4.39.0` /
+- Agent: removed the `github:` pin; `bun pm ls` = stock `mineflayer@4.39.0` /
   `minecraft-protocol@1.68.0` / `minecraft-data@3.116.0` / `mineflayer-pathfinder@2.4.5`; no
-  `github:`/SHA anywhere in `package.json` or `package-lock.json`.
+  `github:`/SHA anywhere in `package.json` or `bun.lock`.
 - `minecraft-data@3.116.0` **does** ship `blockCollisionShapes` for pc/1.21.11 (protocol 774), so
   the collision-shape theory is dead.
 
@@ -360,10 +360,10 @@ cobblestone leg.
 
 Implemented the two PR #4063 movement fixes as a **local patch** (no git pin):
 `patches/mineflayer-4.39.0-locomotion.patch`, applied idempotently by
-`scripts/apply-movement-patch.mjs` from `postinstall`; `npm run movement-patch:check` verifies it.
+`scripts/apply-movement-patch.mjs` from `postinstall`; `bun run movement-patch:check` verifies it.
 Hunks: (1) `sendTeleportReply()` replies to a clientbound teleport without writing the server
 target into `lastSent`; (2) `updatePosition` uses vanilla's
-`dx*dx+dy*dy+dz*dz > 4e-8 || positionReminder >= 20`. Reversible via `npm ci --ignore-scripts`.
+`dx*dx+dy*dy+dz*dz > 4e-8 || positionReminder >= 20`. Reversible via `bun install --frozen-lockfile --ignore-scripts`.
 
 Harness-level verification (bare mineflayer, no agent loop, observer bot for server-side view,
 `movement-patch-test.mts`; A/B with `movement-ab.mjs`):
@@ -393,7 +393,7 @@ stock `GoalBlock -> stuck`, control-walk `packet locomotion blocked before (2.5,
 `no jump headroom`). iron_ore/iron_ingot/iron_pickaxe not reached — blocked by the same residual
 step-climb rejection.
 
-Post-patch suite: `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9.
+Post-patch suite: `bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9.
 
 ## B1/B2/B3 BLOCKER FIXES (2026-09-17) — pickup FIXED; stair-cut pipeline landed; step climb verified
 - B1 drop pickup: `mineflayer-collectblock`'s entity path (`GoalFollow(entity,0)`) hangs on 1.21.11 and
@@ -466,7 +466,7 @@ Agent-level proof (`data/placed-approach-test.mts`, fresh identity AI_PA12):
 `pre-contact jump#1 ray rise=1 dist=1.2 at y=67 ->(6,67,8)` ->
 `approach test_station arrival horizontal=3.54m->2.33m face=2.95m cuts=1` (`climbed=2.25m`, error none).
 
-Tests: `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+Tests: `bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6, `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
 
 Live regression runs on the now-depleted world (fresh identities): M1 `AI_M1K` 3/4, `AI_M1L` 0/4;
@@ -525,7 +525,7 @@ consumed ~180 s, so the smelt legs (charcoal/iron_ingot/iron_pickaxe) were never
 attempt. Attempts: `logs/m2-fresh/` 2/14, `logs/m2-fresh2/` 5/14, `logs/m2-fresh3..5`, `logs/m2-AI_M2W..Z`.
 
 ### Tests (unchanged, re-run)
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
 
 ## M2 three-blocker fix round (2026-09-18) — canopy clearance + pickup + phased ledger
@@ -571,7 +571,7 @@ but `bot.craft(recipe, 1, table)` gains 0 (`craft wooden_pickaxe gained 0 (after
 additionally depend on DESCEND. `charcoal`/`iron_ingot`/`iron_pickaxe` were never offered.
 
 ### Tests
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
 
 ## CRAFT-AT-STATION BLOCKER FIXED (2026-09-18 00:29 JST) — `src/craftWindow.ts`
@@ -594,7 +594,7 @@ step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present
 - Evidence: `logs/probe-direct3.log` (`DIRECT craftAtTable ok`, `AGENT-PATH result ... crafted 1x
   wooden_pickaxe gained=1`); `logs/m1-craftfix-console.log` live `craft recipe wooden_pickaxe ...
   table=crafting_table@-10,67,11` -> `subgoal COMPLETE [craft 1 x wooden_pickaxe] have=1`.
-- Tests: `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+- Tests: `bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
   step-pipeline-test 6/6; `movement-patch:check` ok (4/4).
 - NOT REACHED: M1 4/4 full re-run and the M2 charcoal/iron ladder. The seed-2024 surface stone is
   mined out (`data/seed-scan.mts`: `exposed+standable=0`) and log collection still hits the known

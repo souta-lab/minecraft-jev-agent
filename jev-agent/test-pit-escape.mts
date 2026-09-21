@@ -5,7 +5,7 @@
 // kept re-selecting a MOVE whose hop failed (JUMP_FAIL) because a
 // `done/verified=false` MOVE that wandered >=0.5m reset its own blacklist.
 //
-//   npm run pit-escape-test
+//   bun run pit-escape-test
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { classifyMoveOutcome } from './src/controller.ts'

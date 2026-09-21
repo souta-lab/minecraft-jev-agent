@@ -2,7 +2,7 @@
 // a safe step cut is emitted as a candidate when a MOVE is blocked, the guard
 // accepts it, and a stale/absent cut is rejected.
 //
-// Run: npx tsx data/step-pipeline-test.mts
+// Run: bun data/step-pipeline-test.mts
 import {
   emptyGoalQueueState,
   generateCandidates,

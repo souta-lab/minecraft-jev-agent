@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // world-player-state.mjs - read-only live world/player observation.
 //
 // This is deliberately a sensor, not a planner.  It joins Mineflayer's live
@@ -655,7 +655,7 @@ export async function observeOnce(options, bot) {
 const HELP = `world-player-state.mjs - read-only live state observer
 
 Usage:
-  node tools/world-player-state.mjs --target AI_Buddy --admin-user s0u7a --json
+  bun tools/world-player-state.mjs --target AI_Buddy --admin-user s0u7a --json
 
 Options:
   --target/--player NAME       player to observe (default AI_Buddy)

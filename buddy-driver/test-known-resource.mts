@@ -275,7 +275,7 @@ addCase('an active smelt does not retrieve a future ore before its own prerequis
   return { pass, detail: `retrievals=[${retrievals.map((candidate) => String(candidate.meta.resource)).join(',')}]` }
 })
 
-addCase('retrieval is offered alongside a dig candidate but a visible matching ore suppresses it', () => {
+addCase('a direct dig route suppresses later retrieval, and visible matching ore suppresses it too', () => {
   const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 } }
   const proxy = worldState({
     position: { x: 0, y: 60, z: 0 },
@@ -295,11 +295,12 @@ addCase('retrieval is offered alongside a dig candidate but a visible matching o
     goalQueue: queueWith(queuedGoal({})),
     blocks: [oreBlock({ x: 1, y: 60, z: 0 })],
     knownResources: [known],
+    inventory: inventory({ iron_pickaxe: 1 }),
   })
   const suppressed = generateCandidates(visible, defaultCandidateOptions)
   const stillRetrieve = suppressed.some((candidate: Candidate) => candidate.kind === 'RETRIEVE')
   const stillMine = suppressed.some((candidate: Candidate) => candidate.kind === 'MINE')
-  return { pass: hasMine && hasRetrieve && !stillRetrieve && stillMine, detail: `alongside=${hasMine}/${hasRetrieve} visible=${stillMine}/${stillRetrieve}` }
+  return { pass: hasMine && !hasRetrieve && !stillRetrieve && stillMine, detail: `alongside=${hasMine}/${hasRetrieve} visible=${stillMine}/${stillRetrieve}` }
 })
 
 addCase('a remembered log beyond proof distance grounds a charcoal RETRIEVE', () => {

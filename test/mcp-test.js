@@ -1,8 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 'use strict'
 
 // Drives src/mcp-server.js over stdio and exercises every MCP tool.
-// Run: node test/mcp-test.js
+// Run: bun test/mcp-test.js
 const path = require('path')
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js')
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js')

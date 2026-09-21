@@ -12,7 +12,7 @@
 // the planner ladder with op=replace therefore deleted the restored head and
 // the smelt never became active.
 //
-// Run: npx tsx test-bootstrap-preserve.mts
+// Run: bun test-bootstrap-preserve.mts
 import { resolveBootstrapPlanOp } from './src/controller.ts'
 import { GoalQueue } from './src/goalQueue.ts'
 import type { GoalQueueSnapshot, PlanOp, PlannedGoal, QueuedGoal } from './src/goalQueue.ts'

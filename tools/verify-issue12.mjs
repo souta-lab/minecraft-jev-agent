@@ -1,9 +1,9 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // verify-issue12: automatic acceptance check for issue #12
 // (PRECONDITION_MISSING must not stop the generation; the ladder must be replaced with
 //  the prerequisite chain, and the agent must actually start digging again).
 //
-// Usage: node tools/verify-issue12.mjs [--json] [--run <runId>]
+// Usage: bun tools/verify-issue12.mjs [--json] [--run <runId>]
 // Read-only. No secrets printed.
 //
 // Evidence source (issue #63 §4): this gate prefers run-scoped evidence

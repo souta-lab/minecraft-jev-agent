@@ -1,7 +1,7 @@
 // probe-m2.mts - READ-ONLY pre-flight for M2: what resources exist around the
 // spawn and which of them are reachable under movements.canDig=false?
 //
-// Run: npx tsx data/probe-m2.mts [username]
+// Run: bun data/probe-m2.mts [username]
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { defaultExecutorOptions, Executor, EventLogger } from '../src/index.ts'

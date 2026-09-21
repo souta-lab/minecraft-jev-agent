@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // test-m2-snapshot-evidence: RED-FIRST evidence for the run-scoped M2 snapshot.
 //
 // The M2 gap this locks down (run-mu8ps36q-xegj): the required marker chain and the

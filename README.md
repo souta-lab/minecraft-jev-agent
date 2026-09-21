@@ -34,10 +34,10 @@ large historical/research backlog while only a few items are executable.
 From the repository root:
 
 ```bash
-npm run frontier          # small executable working set; NOW is capped at 3
-npm run frontier:check    # fails if WIP exceeds the cap or a P0/P1 issue is unrouted
-npm run current-status    # evidence-only repo/runtime snapshot
-npm run lane-guard        # avoid duplicate parallel implementation lanes
+bun run frontier          # small executable working set; NOW is capped at 3
+bun run frontier:check    # fails if WIP exceeds the cap or a P0/P1 issue is unrouted
+bun run current-status    # evidence-only repo/runtime snapshot
+bun run lane-guard        # avoid duplicate parallel implementation lanes
 ```
 
 `ISSUE-ROUTING.json` is the machine-readable routing layer. Its categories mean:
@@ -63,7 +63,7 @@ when it has a genuinely distinct acceptance boundary.
   state and an actuation lease are implemented.
 
 Runtime position, current rung, active queue, open PR/issue counts, and other time-sensitive facts
-belong in `CURRENT-STATUS.md` / `npm run current-status`, not in this README.
+belong in `CURRENT-STATUS.md` / `bun run current-status`, not in this README.
 
 ## Execution modes
 
@@ -72,13 +72,13 @@ for acceptance work:
 
 ```bash
 # deterministic high-level planner: no planner network call
-BUDDY_PLANNER=deterministic node buddy-driver/agent-runner.mts
+BUDDY_PLANNER=deterministic bun buddy-driver/agent-runner.mts
 
 # bounded Jev high-level horizon planner (requires configured Jev/Gateway credentials)
-BUDDY_PLANNER=llm node buddy-driver/agent-runner.mts
+BUDDY_PLANNER=llm bun buddy-driver/agent-runner.mts
 
 # optional exception-driven Mercury System2 repair; explicit opt-in only
-BUDDY_SYSTEM2=mercury node buddy-driver/agent-runner.mts
+BUDDY_SYSTEM2=mercury bun buddy-driver/agent-runner.mts
 ```
 
 `BUDDY_PLANNER=auto` exists for convenience and currently selects the Jev planner when a usable API
@@ -88,35 +88,35 @@ mechanics and postcondition verification remain deterministic in every mode.
 
 ## How to run
 
-Requires **Node >= 22** (developed on Node 25). A local **Leaf 1.21.11 server in offline mode**
-(`127.0.0.1:25565`) must be running for live runs. `npm install` applies the local movement patch
+Requires **Bun >= 1.4.2**. A local **Leaf 1.21.11 server in offline mode**
+(`127.0.0.1:25565`) must be running for live runs. `bun install` applies the local movement patch
 via `postinstall` (idempotent).
 
 ```bash
 # jev-agent: agent, tests, M1/M2 ladders
 cd jev-agent
-npm install
-npm run movement-patch:check
-npm run typecheck
-npm run guard-test
-npm run gating-test
-npm run m1
-npx tsx m2.mts
-npx tsx demo.mts --help
+bun install
+bun run movement-patch:check
+bun run typecheck
+bun run guard-test
+bun run gating-test
+bun run m1
+bun m2.mts
+bun demo.mts --help
 
 # resident host: persistent connection + generation hot reload
 cd ../buddy-driver
-node agent-runner.mts
+bun agent-runner.mts
 
 # companion: minimal follower bot
-node ../companion/buddy.cjs
+bun ../companion/buddy.cjs
 
 # movement patch apply / check (run inside jev-agent)
-node scripts/apply-movement-patch.mjs
-node scripts/apply-movement-patch.mjs --check
+bun scripts/apply-movement-patch.mjs
+bun scripts/apply-movement-patch.mjs --check
 ```
 
-The patch is reversible: `rm -rf node_modules && npm ci --ignore-scripts` restores stock
+The patch is reversible: `rm -rf node_modules && bun install --frozen-lockfile --ignore-scripts` restores stock
 `mineflayer`. The local patch contains only experimentally justified locomotion bookkeeping changes;
 keep it small so causality and rollback remain clear.
 

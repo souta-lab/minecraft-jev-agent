@@ -8,7 +8,7 @@
 // productive candidate was the stone ceiling clearance MINE b30_35_35, chosen
 // 25x, `dig_timeout` 30x, inventory frozen, no log gained.
 //
-//   npm run log-route-test
+//   bun run log-route-test
 import { applyReachabilityGate, blockId, defaultCandidateOptions, formatLogRoute, generateGroundedCandidates, logCollectGoal, logRouteOf } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // m2-policy-evidence: read-only proof that the REAL policy (`typesafe-ai/jev`)
 // actually ran for an exact resident runId. This is a M2 gate-strengthening
 // input: a run whose decisions came from the deterministic fallback can no

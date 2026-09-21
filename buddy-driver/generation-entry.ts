@@ -1,6 +1,6 @@
 // generation-entry.ts - the RELOADABLE layer.
 //
-// esbuild bundles this file (and everything it imports from ../jev-agent/src/**)
+// Bun.build bundles this file (and everything it imports from ../jev-agent/src/**)
 // into ONE hash-stamped ESM file. The host then `import()`s that single file: one
 // file == one URL == the whole generation swaps atomically, so a new controller
 // can never be wired to stale sibling modules.

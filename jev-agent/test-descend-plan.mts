@@ -2,7 +2,7 @@
 // produces an executable descend candidate (never a WAIT-only list) and that a
 // stalled descend escalates. No bot, no network.
 //
-// Run: npx tsx test-descend-plan.mts
+// Run: bun test-descend-plan.mts
 import {
   evaluateDescendProgress,
   formatDescendProgress,

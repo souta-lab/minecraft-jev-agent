@@ -6,16 +6,12 @@ intelligence is hot-swappable without reconnecting. Spec: `../RESIDENT-MODE.md`.
 
 ## Runtime decision (recorded per §0-A)
 
-**Node 25 with native TypeScript stripping — not Bun.**
-- `node agent-runner.mts` runs `.mts`/`.ts` with type stripping on by default
-  (verified: `node t.mts` → `ts-ok`, node `v25.9.0`).
-- **Why not Bun:** §0-A allows Bun only after its migration gates pass
-  (connect+SPAWN, movement patch active, M1 4/4, tests green, resident verification).
-  Priority #1 was live gameplay fast; spending the budget proving
-  `mineflayer`/`minecraft-protocol` (`net`, `zlib`, `dns`) compatibility on Bun was
-  not worth the risk. Node is the proven runtime here (the M2 runner uses it).
-- **Bundler: esbuild (pinned `0.28.2`, devDependency) — the user's explicit
-  stability-first call.** `Bun.build` is not used.
+**Bun 1.4.2 is the resident runtime and native bundler.**
+- `bun agent-runner.mts` runs `.mts`/`.ts` directly with Bun's TypeScript transform.
+- `Bun.build` creates the hash-stamped generation bundle while keeping Mineflayer,
+  pathfinder, and Prismarine packages external so host and generation share classes.
+- The migration gates remain explicit: Bun typecheck/build are isolated proof; live
+  Mineflayer SPAWN and resident/M2 acceptance are separate live evidence gates.
 - Revisit Bun only if the §0-A gates are run explicitly.
 
 ## Layering (mirrors §3)
@@ -113,7 +109,7 @@ re-placed. Beyond the ladder it keeps collecting (resident upkeep).
 
 ## Verification
 
-- **Launch**: `cd /home/s0u7a/mc-ai/buddy-driver && setsid nohup node
+- **Launch**: `cd /home/s0u7a/mc-ai/buddy-driver && setsid nohup bun
   agent-runner.mts </dev/null >> runner.out 2>&1 &`
 - **Reload without reconnect**: `RELOAD ok=true ... ms=236/243/502` with **no
   `SPAWN`/`RECONNECT`** between reloads → the connection was preserved.

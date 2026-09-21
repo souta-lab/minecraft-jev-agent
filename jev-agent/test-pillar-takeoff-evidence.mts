@@ -7,7 +7,7 @@
 // fresh exact-RC run captures the same-attempt telemetry and a minimal actuator
 // repair is justified separately. It is deliberately excluded from acceptance
 // evidence and is only run explicitly with:
-//   npm run pillar-takeoff-evidence-red
+//   bun run pillar-takeoff-evidence-red
 // The green, acceptance-relevant fixture is test-pillar-takeoff-instrumentation.mts.
 // ============================================================================
 // Diagnostic fixture for the exact RC boundary:

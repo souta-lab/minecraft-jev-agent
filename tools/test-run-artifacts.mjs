@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Fixture tests for run-scoped evidence selection.
 // A runId on an arbitrary trailing event must not outrank the latest BOOT
 // boundary, or a gate can silently evaluate the wrong run.

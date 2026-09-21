@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // agent-report.mjs - read-only observability report for the resident AI_Buddy agent.
 //
 // Combines the live control socket (`report` command only) with the structured
@@ -12,7 +12,7 @@
 // makes no LLM calls and no network traffic beyond the local unix socket.
 //
 // Usage:
-//   node tools/agent-report.mjs [--json] [--watch [sec]] [--since <min>]
+//   bun tools/agent-report.mjs [--json] [--watch [sec]] [--since <min>]
 //                               [--full] [--why] [--log <path>]
 //                               [--report <json>] [--no-socket]
 //
@@ -849,10 +849,10 @@ function readJsonSafe(p) {
 
 export function findHostPids() {
   try {
-    const out = execFileSync('pgrep', ['-af', 'node agent-runner.mts'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = execFileSync('pgrep', ['-af', 'bun agent-runner.mts'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     return out
       .split('\n')
-      .filter((l) => /\d+\s+\S*node\s+agent-runner\.mts/.test(l) && !/\bbash\b|\/bin\/sh\b/.test(l))
+      .filter((l) => /\d+\s+\S*bun\s+agent-runner\.mts/.test(l) && !/\bbash\b|\/bin\/sh\b/.test(l))
       .map((l) => l.trim().split(/\s+/)[0])
   } catch {
     return []
@@ -910,7 +910,7 @@ export async function runOnce(opts) {
 
 const HELP = `agent-report.mjs - read-only observability report for the resident AI_Buddy
 
-Usage: node tools/agent-report.mjs [options]
+Usage: bun tools/agent-report.mjs [options]
 
 Options:
   --json            emit the complete report as JSON (never truncated)

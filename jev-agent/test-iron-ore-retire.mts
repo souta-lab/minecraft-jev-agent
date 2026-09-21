@@ -15,7 +15,7 @@
 // `KNOWN_RESOURCE_UNREACHABLE` in the whole run). The fix gates the clear on
 // OBSERVABLE progress, the same criterion the move-failure memory already uses.
 //
-// Run: npm run iron-ore-retire-test
+// Run: bun run iron-ore-retire-test
 import { defaultCandidateOptions, generateCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import {
   decideKnownRetrieve,

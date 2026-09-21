@@ -13,7 +13,7 @@
 // raw_iron, and HOP_PLAN / JUMP_ATTEMPT looped. The remaining distance to the
 // target did NOT shrink; only the vertical gap moved.
 //
-// Run: npm run retrieve-truthful-outcome-test
+// Run: bun run retrieve-truthful-outcome-test
 import { classifyRetrieveOutcome } from './src/executor.ts'
 import type { RetrieveOutcomeInput, RetrieveOutcome } from './src/executor.ts'
 import { decideRetrieveMemory } from './src/controller.ts'

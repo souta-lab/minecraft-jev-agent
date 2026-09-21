@@ -13,8 +13,8 @@
 // the same stall signals now classify as `stalled`, and `runRetrieve` throws the
 // original typed ExecutorError instead of reporting a soft done.
 //
-// Run: node ../../jev-agent/node_modules/.bin/tsx test-retrieve-approach-stall.mts
-//      node --test test-retrieve-approach-stall.mts
+// Run: bun test ./test-retrieve-approach-stall.mts
+//      bun --test test-retrieve-approach-stall.mts
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { classifyRetrieveApproach, ExecutorError, isAtRequiredLevel, RETRIEVE_ARRIVAL_RADIUS, shouldAbortUnproductivePillar } from './src/executor.ts'

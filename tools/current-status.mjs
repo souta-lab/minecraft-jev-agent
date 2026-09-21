@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // current-status: derive a CURRENT-STATUS.md snapshot from real evidence only.
-// Usage: node tools/current-status.mjs [--write]
+// Usage: bun tools/current-status.mjs [--write]
 //   --write   also write CURRENT-STATUS.md to the current working directory.
 // Every section is labeled EVIDENCE or UNKNOWN. Values are never invented: if a
 // command fails, the section is UNKNOWN and the failure is shown verbatim.
