@@ -47,11 +47,13 @@ import {
   FLINT_AND_STEEL,
   NETHER_PORTAL,
   OBSIDIAN,
+  PORTAL_ENTERED_PREDICATE,
+  PORTAL_LIT_PREDICATE,
   groundPortalFrame,
   planPortalIgnition,
   serializePortalCells,
 } from './netherPortalPlan.ts'
-import type { PortalFrameValidation } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -60,6 +62,7 @@ export type CandidateKind =
   | 'PLACE'
   | 'SMELT'
   | 'IGNITE'
+  | 'ENTER_PORTAL'
   | 'DESCEND'
   | 'STEP'
   | 'RETRIEVE'
@@ -226,6 +229,14 @@ export interface CandidateOptions {
    * the ONLY way an IGNITE candidate is offered (issue lane: live ignition).
    */
   portalFrame?: PortalFrameValidation | null
+  /**
+   * The grounded dimension-transfer plan for an `enter:nether_portal` goal,
+   * computed by the controller from live world truth (lit interior cells + a
+   * safe, supported, in-reach stand) and evaluated by the pure
+   * `planPortalEntry`. Null when no entry goal is active. The plan carries its
+   * own typed refusal so a lit-but-unapproachable portal is never silent.
+   */
+  portalEntry?: PortalEntryPlan | null
 }
 
 /** Stable key for a surface-search waypoint in one dimension/world view. */
@@ -279,6 +290,13 @@ export interface GroundedCandidatesResult {
    * requested this cycle (never when one was requested and withheld).
    */
   ignitionRefusal: IgnitionRefusal | null
+  /**
+   * Typed dimension-transfer refusal (`PORTAL_ENTER_REFUSED` /
+   * `PRECONDITION_MISSING`) when an entry goal's lit portal could not be
+   * entered. Null when no entry was requested this cycle (never when one was
+   * requested and withheld).
+   */
+  entryRefusal: PortalEntryRefusal | null
 }
 
 /**
@@ -329,6 +347,12 @@ export function ignitionCandidates(
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   if (focusItem !== NETHER_PORTAL) return { candidates: [], refusal: null }
+  // A `nether_portal` goal under the entry predicate is the DIMENSION TRANSFER,
+  // not the ignition: offering flint_and_steel there would be a different
+  // semantic action. Only the ignition goal (explicit `portal_lit`, or a legacy
+  // row with no predicate) may be offered IGNITE.
+  const predicate = current?.targetPredicate ?? null
+  if (predicate !== null && predicate !== PORTAL_LIT_PREDICATE) return { candidates: [], refusal: null }
   const frame = options.portalFrame ?? null
   if (frame === null) return { candidates: [], refusal: null }
 
@@ -359,6 +383,69 @@ export function ignitionCandidates(
           lightZ: ignition.lightPosition.z,
           dimension: ignition.dimension,
           portalCells: serializePortalCells(ignition.portalCells),
+        },
+      },
+    ],
+    refusal: null,
+  }
+}
+
+/**
+ * Why entry was refused: the exact `planPortalEntry` reason and line. Surfaced
+ * instead of silence so a `portal_entered` goal can never look starved while the
+ * lit portal is unreachable or not actually lit.
+ */
+export interface PortalEntryRefusal {
+  reason: string
+  line: string
+}
+
+/**
+ * The grounded dimension-transfer candidate for the active goal. Offered ONLY
+ * while the goal targets the `nether_portal` place operation under the
+ * `portal_entered` predicate; the transfer itself is then a single deterministic
+ * body action with a `dimension == <target>` postcondition. The controller
+ * supplies the live plan (lit interior + safe approach); this never chooses WHEN
+ * to enter.
+ */
+export function entryCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+): { candidates: Candidate[]; refusal: PortalEntryRefusal | null } {
+  const current = state.goalQueue?.current ?? null
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem !== NETHER_PORTAL) return { candidates: [], refusal: null }
+  if (current?.targetPredicate !== PORTAL_ENTERED_PREDICATE) return { candidates: [], refusal: null }
+  const plan = options.portalEntry ?? null
+  if (plan === null) return { candidates: [], refusal: null }
+  if (!plan.ok) return { candidates: [], refusal: { reason: plan.reason, line: plan.line } }
+  const entry = plan.candidate
+  return {
+    candidates: [
+      {
+        id: entry.id,
+        kind: 'ENTER_PORTAL',
+        label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
+        targetName: NETHER_PORTAL,
+        // The approach is the locomotion target; the interior cell is where the
+        // body must end up and is carried explicitly so the executor walks in.
+        target: entry.approachCell,
+        targetEntityId: null,
+        itemName: null,
+        requiresTool: false,
+        toolName: null,
+        inReach: distance(entry.approachCell, state.self.eyePosition) <= options.reach,
+        hasStandableAdjacent: true,
+        meta: {
+          tick: state.tick,
+          enterX: entry.enterCell.x,
+          enterY: entry.enterCell.y,
+          enterZ: entry.enterCell.z,
+          approachX: entry.approachCell.x,
+          approachY: entry.approachCell.y,
+          approachZ: entry.approachCell.z,
+          dimension: entry.dimension,
+          portalCells: serializePortalCells(entry.portalCells),
         },
       },
     ],
@@ -579,7 +666,7 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal)
+  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal, raw.entryRefusal)
 }
 
 function generateRawCandidates(
@@ -589,6 +676,7 @@ function generateRawCandidates(
   let candidates: Candidate[] = []
   let placeRefusal: PlaceRefusal | null = null
   let ignitionRefusal: IgnitionRefusal | null = null
+  let entryRefusal: PortalEntryRefusal | null = null
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -610,6 +698,9 @@ function generateRawCandidates(
       const ignition = ignitionCandidates(state, options)
       candidates.push(...ignition.candidates)
       ignitionRefusal = ignition.refusal
+      const entry = entryCandidates(state, options)
+      candidates.push(...entry.candidates)
+      entryRefusal = entry.refusal
       break
     }
     default:
@@ -807,7 +898,7 @@ function generateRawCandidates(
     })
   }
 
-  return { candidates, placeRefusal, ignitionRefusal }
+  return { candidates, placeRefusal, ignitionRefusal, entryRefusal }
 }
 
 /** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
@@ -1804,6 +1895,7 @@ interface RawCandidatesResult {
   candidates: Candidate[]
   placeRefusal: PlaceRefusal | null
   ignitionRefusal: IgnitionRefusal | null
+  entryRefusal: PortalEntryRefusal | null
 }
 
 /**
@@ -2976,6 +3068,7 @@ function knownResourceFor(
   const known = state.signals.knownResources ?? []
   let best: KnownResource | null = null
   for (const resource of known) {
+    if (!resourceDimensionMatches(resource, state.self.dimension)) continue
     const matches = want.kind === 'ore' ? want.blockNames.includes(resource.name) : resource.name.endsWith('_log')
     if (!matches) continue
     if (resourceDepleted(state, resource)) continue
@@ -3015,8 +3108,25 @@ export function staleKnownResources(
   proofDistance = KNOWN_RESOURCE_PROOF_DISTANCE,
 ): KnownResource[] {
   return (state.signals.knownResources ?? []).filter(
-    (resource) => (resource.kind === 'ore' || resource.kind === 'log') && resourceDepleted(state, resource, proofDistance),
+    (resource) =>
+      resourceDimensionMatches(resource, state.self.dimension) &&
+      (resource.kind === 'ore' || resource.kind === 'log') &&
+      resourceDepleted(state, resource, proofDistance),
   )
+}
+
+/**
+ * Issue #14 dimension re-anchoring: a remembered coordinate is only meaningful
+ * in the dimension it was scanned in. Entries written before the field existed
+ * carry no dimension and remain valid (backwards compatible); an entry whose
+ * recorded dimension differs from the bot's current one is NEVER offered as a
+ * retrieval target. This is a world-truth filter, not a preference: the cell is
+ * a different place in a different dimension.
+ */
+export function resourceDimensionMatches(resource: KnownResource, dimension: string): boolean {
+  if (resource.dimension === undefined || resource.dimension.length === 0) return true
+  const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
+  return normalize(resource.dimension) === normalize(dimension)
 }
 
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
@@ -3392,6 +3502,7 @@ export function applyReachabilityGate(
   options: CandidateOptions = defaultCandidateOptions,
   placeRefusal: PlaceRefusal | null = null,
   ignitionRefusal: IgnitionRefusal | null = null,
+  entryRefusal: PortalEntryRefusal | null = null,
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -3498,7 +3609,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
