@@ -1,10 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // verify-mercury: acceptance checks for the Mercury System2Brain issues
 //   #15 cache hit must NOT discard the cached plan (no "continue []")
 //   #15 cache invalidation: repeated identical cached strategies must be bypassed
 //   #30 patch/replace must not drop the tail of the plan
 //   #18 retry accounting should be visible
-// Usage: node tools/verify-mercury.mjs [--json] [--all] [--samples] [--run <runId>]
+// Usage: bun tools/verify-mercury.mjs [--json] [--all] [--samples] [--run <runId>]
 //   --all     count the whole selected evidence (reproduces the historical pre-fix loop)
 //   --samples print the most recent ADVISOR_CACHE bypass / STRATEGY_REFUSED lines
 //   --run     pin a specific runId (default: newest run)

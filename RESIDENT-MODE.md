@@ -6,28 +6,26 @@
 
 ## 0-A. ランタイム/バンドラ方針（ユーザー指示: 基盤をBunにして高速化）
 
-### 採用: バンドラは **esbuild を既定（安定性優先）**、Bun はゲート通過後のみ
-- **ユーザー最終判断: 安定性優先**。高速バンドラが使えるとしても、実績のある方を既定にする。
-  → **バンドラ = esbuild**（devDependency に固定）。世代ごとのハッシュ付き新ファイル＋`import()` の運用は §2 のまま（原子的な世代交代は不変）。
-  → **`Bun.build` はフラグ付きの実験経路**とし、§0-A下部の移行ゲートを全て通った場合のみ採用。通らなければ esbuild のまま。
+### 採用: Bunをランタイム・バンドラ・テスト基盤として使用
+- **canonical runtime = Bun 1.4.2**。`bun run` でTSを直接実行し、別のTypeScript runnerへの依存を持たない。
+  世代ごとのハッシュ付き新ファイル＋`import()` の運用は §2 のまま（原子的な世代交代は不変）。
   ```ts
-  await esbuild.build({ entryPoints:['src/host/generation-entry.ts'], bundle:true, format:'esm',
-    platform:'node', packages:'external', outfile:`data/resident/gen-${sha.slice(0,12)}.mjs` })
+  await Bun.build({ entrypoints:['generation-entry.ts'], format:'esm', target:'bun',
+    packages:'external', sourcemap:'inline' })
   ```
-- **ランタイム Bun は許容（ただしゲート通過が条件）**。`bun run` でTS直実行＝tsx不要、`bun test` でテスト高速化、`Bun.serve({unix})` が制御ソケットに合致。
-  通らなければ Node+tsx に戻す。どちらになったかを `ARCHITECTURE.md` / `M2-PROGRESS.md` に1行で記録する。
+- **canonical test/build commands = `bun test` / `Bun.build`**。Bunの子プロセスで既存のトップレベルfixtureも隔離実行し、fixtureの終了コードを検証する。
 
 ### 受け入れるリスクと検証ゲート（必須）
-Bun の Node 互換で最大のリスクは **mineflayer / minecraft-protocol**（`net`・`zlib` gzip stream・`dns`・`crypto`）。
+Bunの互換層で最大のリスクは **mineflayer / minecraft-protocol**（`net`・`zlib` gzip stream・`dns`・`crypto`）。
 - 有利な事実: 本サーバーは **`online-mode=false`** のためプロトコルの暗号化ハンドシェイク（AES/CFB8）を通らない＝互換リスクの主要因が1つ消えている。
-- **移行ゲート（これが通るまでNodeに戻せる状態を維持）**:
+- **移行ゲート（live証拠が揃うまでUNKNOWNを維持）**:
   1. `bun run` で接続でき `SPAWN` する（`bot.version==1.21.11`）。
   2. **移動パッチが有効**（`patches/mineflayer-4.39.0-locomotion.patch` / `movement-patch:check` が ok。Bun でも `node_modules` へのパッチ適用は同じ。postinstall 実行可否を確認）。
   3. **M1 回帰 4/4**（`llm.called==false`、wedge 0）を同一の決定論モードで再現。
   4. テスト全緑を **`bun test`** で再現（typecheck / guard 12/12 / gating 6/6 / loop 7/7 / m1-test 5/5 / audit-test 9/9 / step-pipeline-test 6/6）。
   5. 常駐モードの検証（§9）を Bun 上で通す。
-- 上記1〜3が落ちる場合: ランタイムは **Node（tsx）に戻し、バンドラのみ Bun.build をサブプロセス/スクリプトとして利用**する（`bun build` をCLIとして呼ぶだけなら実行時の互換リスクはゼロ）。この hybrid は許容（高速バンドルの利得は保持）。
-- 判断の記録: どちらの構成になったかを `ARCHITECTURE.md` と `M2-PROGRESS.md` に1行で残す。
+- 1〜3が落ちた場合はBun互換性の一次証拠をFAIL/UNKNOWNとして記録し、該当するBun境界だけを修正する。別ランタイムを暗黙に復活させない。
+- 判断の記録: effective runtime/provider、build hash、resident generation、live gate結果をrun artifactに残す。
 
 ---
 
@@ -58,18 +56,17 @@ Bun の Node 互換で最大のリスクは **mineflayer / minecraft-protocol**�
 ## 2. 最重要の技術訂正（これを外すと必ず壊れる）
 `import('./controller.ts?v=hash')` 単体では**壊れる**。controller の静的 import（`./executor.ts` `./candidates.ts` …）は世代0のURLに解決され、**新しい controller が古い executor/candidates に配線される**（stale graph）。
 
-正解＝**リロード層を esbuild で1本のバンドルに固め、内容ハッシュ付きの新パスとして import する**:
+正解＝**リロード層を `Bun.build` で1本のバンドルに固め、内容ハッシュ付きの新パスとして import する**:
 ```ts
-esbuild.build({
-  entryPoints: ['src/host/generation-entry.ts'],
-  bundle: true, format: 'esm', platform: 'node',
+await Bun.build({
+  entrypoints: ['generation-entry.ts'],
+  format: 'esm', target: 'bun',
   packages: 'external',                       // mineflayer/pathfinder/prismarine を共有
-  outfile: `data/resident/gen-${sha.slice(0,12)}.mjs`,
+  sourcemap: 'inline',
 })
 const mod = await import(pathToFileURL(outfile).href)  // 1ファイル=1URL=グラフが原子的に世代交代
 ```
 - `packages:'external'` で `new Movements(bot)` がホストのpathfinderプラグインと同一クラスになる。
-- esbuild は devDependency として明示固定（tsx 経由の推移依存に頼らない）。
 - 旧世代のバンドルはロールバック用に残す（`gen-<prevHash>.mjs`）。
 
 ## 3. 層分離
@@ -87,8 +84,8 @@ const mod = await import(pathToFileURL(outfile).href)  // 1ファイル=1URL=グ
 ## 4. Generation 契約（現行・正典）
 
 > この節が HOST ↔ generation 契約の正典。値・ライフサイクル・スワップ・拒否の観測性・移行手順は
-> すべてここに従う。コードと文書の不一致は `node tools/check-contract-docs.mjs` が FAIL で検出する
-> （`npm run contract-docs-check` / `npm run contract-docs-test`）。
+> すべてここに従う。コードと文書の不一致は `bun tools/check-contract-docs.mjs` が FAIL で検出する
+> （`bun run contract-docs-check` / `bun run contract-docs-test`）。
 
 ### 4-A. 契約バージョン（値の唯一の doc 正典）
 
@@ -177,11 +174,11 @@ RELOAD ok=false trigger=<t> ms=<n> message=CONTRACT_VERSION mismatch: generation
    自分の定数として持ち、世代バンドルの export と比較する。つまり新しい契約は reload では採用できず、
    不一致の間は `RELOAD ok=false` が繰り返されるだけ。手順:
    `kill <pid>`（`pkill -f` は自爆するので禁止）→ `data/resident/host.lock` が解放されたことを確認 →
-   `cd buddy-driver && setsid nohup node agent-runner.mts </dev/null > runner.out 2>&1 &`
+   `cd buddy-driver && setsid nohup bun agent-runner.mts </dev/null > runner.out 2>&1 &`
 5. **検証**: 新規ブートで `BOOT ... contractVersion=<n>` が出る、または `RELOAD ok=true`（hash 変化）が出る。
-   そして `CONTRACT_VERSION mismatch` 行が 0 件であること。`node tools/buddy-status.mjs --json` の report で
+   そして `CONTRACT_VERSION mismatch` 行が 0 件であること。`bun tools/buddy-status.mjs --json` の report で
    `contractVersion == <n>` を確認する。
-6. **guard を通す**: `npm run contract-docs-check` と `npm run contract-docs-test` を緑にする。
+6. **guard を通す**: `bun run contract-docs-check` と `bun run contract-docs-test` を緑にする。
    片方でも赤なら移行未完了として扱う。
 
 
@@ -247,7 +244,7 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 ## 11. 移行手順（各段階に検証可能なマイルストーン）
 1. `m2` からヘッドレス `ResidentHost` を抽出し、既存 `JevController` を無改造で装着。wedge/finish で**終了せず**接続を保持し freeze レポートを出す。（Short）
    検証: wedge を起こしてもプロセスが生存、`bot.health` が読める、freeze JSON が生成される。
-2. Generation 契約＋esbuild バンドルによるホットリロード。ホストがbotを保持したまま世代交代。（Medium）
+2. Generation 契約＋Bun.build バンドルによるホットリロード。ホストがbotを保持したまま世代交代。（Medium）
    検証: 5回リロードで listener数一定・在庫/queue 保持・`bot.username` 不変。
 3. 制御チャネル（Unixソケット＋inboxフォールバック）。（Medium）
    検証: 1プロセスでソケット経由の目標を連続5回注入、再接続0回で全て完了報告。
@@ -259,7 +256,7 @@ wedge検出 → ctx.requestFreeze(reason) → cancelCurrent → settle（≤3s�
 ---
 
 ## 12. 運用ノート（実測で踏んだ罠 — 常駐化でも必ず再発する）
-- **デタッチ起動**: `cd <dir> && NODE_PATH=/home/s0u7a/mc-ai/jev-agent/node_modules setsid nohup node x.cjs </dev/null > x.log 2>&1 &`
+- **デタッチ起動**: `cd <dir> && setsid nohup bun x.cjs </dev/null > x.log 2>&1 &`
   これをしないと bash ツールが子プロセスを待ち続けてタイムアウトし、シェル終了時に bot も落ちる。
 - **`pkill -f "buddy.cjs"` 自爆**: `pkill -f` は自分のコマンドラインにもマッチし得るため、実行シェルごと殺してツールがハングする。
   停止は PID 指定（`kill <pid>`）か、`pgrep -f` で自分のPIDを除外して行う。

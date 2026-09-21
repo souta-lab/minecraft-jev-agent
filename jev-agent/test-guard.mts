@@ -1,7 +1,7 @@
 // test-guard.mts - unit-style proof that the deterministic guard rejects
 // mechanically-bad candidates without any Jev call and without a live bot.
 //
-// Run: npm run guard-test
+// Run: bun run guard-test
 import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import { guardCandidate, guardDecision } from './src/policy.ts'

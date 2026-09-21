@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // movement-test/region-read.mjs
 //
 // Minimal read-only Minecraft Anvil (.mca) reader for the live Leaf world.
@@ -12,8 +12,8 @@
 //   world.blockName(x, y, z)
 //
 // Usage (CLI scan):
-//   node region-read.mjs scan <x> <y> <z> [radius]
-//   node region-read.mjs column <x> <z>
+//   bun region-read.mjs scan <x> <y> <z> [radius]
+//   bun region-read.mjs column <x> <z>
 
 import fs from 'node:fs'
 import path from 'node:path'

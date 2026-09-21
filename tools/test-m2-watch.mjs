@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // test-m2-watch: offline fixtures for tools/m2-watch.mjs.
 // Pins run scoping and the ordered causal chain so old all-time markers cannot
 // make a fresh M2 attempt look complete.

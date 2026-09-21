@@ -18,7 +18,7 @@
 //    `harvested === 0` (#199). The initiation layer also demanded only ONE fuel
 //    unit, which under-counts a log fuel (1.5 smelts).
 //
-// Run: npx tsx test-m2-fuel-and-pickaxe.mts
+// Run: bun test-m2-fuel-and-pickaxe.mts
 import { createRequire } from 'node:module'
 import { createRecipeIndex, planNextCraftStep } from './src/crafting.ts'
 import { compilePlannedGoal, isOptionStartable, makeOptionSnapshot } from './src/optionSpec.ts'

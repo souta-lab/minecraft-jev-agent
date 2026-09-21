@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // test-m2-policy-evidence: offline fixtures for tools/m2-policy-evidence.mjs.
 //
 // Pins the run binding of the real-policy requirement: decisions/generation

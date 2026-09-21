@@ -1,7 +1,7 @@
 // Position a fresh offline bot at a chosen spot and log out there, so a later
 // run (e.g. m1.mts) resumes from that terrain. Test utility only.
 //
-// Run: npx tsx data/position-bot.mts <username> <x,y,z>
+// Run: bun data/position-bot.mts <username> <x,y,z>
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { Executor, EventLogger, defaultExecutorOptions } from '../src/index.ts'

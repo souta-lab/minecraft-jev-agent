@@ -7,7 +7,7 @@
 // approach cuts the upper rim block into a 1-block step, and the actuator climbs
 // out and arrives within the horizontal interaction tolerance.
 //
-// Run: npx tsx data/placed-approach-test.mts --username AI_PA1
+// Run: bun data/placed-approach-test.mts --username AI_PA1
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { Executor, EventLogger, defaultExecutorOptions } from '../src/index.ts'

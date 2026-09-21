@@ -28,7 +28,7 @@
 //      CHARGED, and repeated partials must eventually retire the target;
 //   C. a real arrival OR an acquired item DOES reset/clear exactly as before.
 //
-// Run: node --test test-retrieve-failure-memory.mts
+// Run: bun --test test-retrieve-failure-memory.mts
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {

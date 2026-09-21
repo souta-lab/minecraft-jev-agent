@@ -6,8 +6,8 @@
 //               (RETURN_TO_KNOWN_RESOURCE) instead of WAIT.
 //
 // Run from jev-agent/:
-//   npx tsx data/probe-issue43.mts --wait
-//   npx tsx data/probe-issue43.mts --retrieve
+//   bun data/probe-issue43.mts --wait
+//   bun data/probe-issue43.mts --retrieve
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'

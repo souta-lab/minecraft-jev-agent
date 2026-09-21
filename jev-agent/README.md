@@ -111,15 +111,15 @@ the clientbound-teleport reply writes the server's target into `lastSent`, and
 threshold. `patches/mineflayer-4.39.0-locomotion.patch` ports the two changes that
 the upstream PR #4063 ablation attributes the fix to (L and K in
 `mcbot/movement-test/README.md` §7). `scripts/apply-movement-patch.mjs` applies it
-idempotently and is wired into `postinstall`, so the patch survives `npm install`:
+idempotently and is wired into `postinstall`, so the patch survives `bun install`:
 
 ```bash
-npm install                       # postinstall applies + verifies the patch
-npm run movement-patch:check      # assert it is already applied (exit 1 otherwise)
-node scripts/apply-movement-patch.mjs --check
+bun install                       # postinstall applies + verifies the patch
+bun run movement-patch:check      # assert it is already applied (exit 1 otherwise)
+bun scripts/apply-movement-patch.mjs --check
 ```
 
-The patch is reversible: `rm -rf node_modules && npm ci --ignore-scripts` gives back
+The patch is reversible: `rm -rf node_modules && bun install --frozen-lockfile --ignore-scripts` gives back
 stock. It is a strict subset of PR #4063 — no git pin, no fork, no `any`, and the
 five hunks each carry a `[jev-agent patch]` comment explaining the change. Scripts:
 `movement-patch-test.mts` (bare-mineflayer step/pit/26 m verification with a
@@ -135,15 +135,15 @@ so this is not a missing PR hunk. The control-walk fallback is therefore retaine
 
 ## Quick start
 
-Requires **Node ≥ 22** (developed on Node 25). A Minecraft server must be reachable
+Requires **Bun ≥ 1.4.2**. A Minecraft server must be reachable
 (`127.0.0.1:25565`, offline mode).
 
 ```bash
-npm install
-npm run typecheck     # tsc --noEmit
-npm run guard-test    # 10/10 deterministic guard cases
-npm run gating-test   # 6/6 (value x certainty) gating cases
-npm run demo          # the PoC; add --help for options
+bun install
+bun run typecheck     # tsc --noEmit
+bun run guard-test    # 10/10 deterministic guard cases
+bun run gating-test   # 6/6 (value x certainty) gating cases
+bun run demo          # the PoC; add --help for options
 ```
 
 Demo options:
@@ -223,7 +223,7 @@ export function applyDangerGate(chosenId, gate, safeAction) {
 
 `gate.actionable` is true only when the provider reported a confidence **and** it is `>= 0.4`.
 The observed sample `danger.score = 0.91` with `providerMetadata.typesafe.confidence.danger = 0.09`
-therefore leaves the executor's current action untouched. `npm run gating-test` proves the exact
+therefore leaves the executor's current action untouched. `bun run gating-test` proves the exact
 sample, the severe override, the confident-safe case and the missing/`null` cases.
 
 ## Decision log (`logs/decisions.jsonl`)
@@ -315,9 +315,9 @@ Running the demo on **Leaf 26.1.2 / protocol 775 with `mineflayer@4.39.0` + `min
 
 ## Verification evidence
 
-* `npm run typecheck` → clean (`tsc --noEmit`, exit 0).
-* `npm run guard-test` → **12/12** guard cases.
-* `npm run gating-test` → **6/6** cases, including the documented `danger` sample
+* `bun run typecheck` → clean (`tsc --noEmit`, exit 0).
+* `bun run guard-test` → **12/12** guard cases.
+* `bun run gating-test` → **6/6** cases, including the documented `danger` sample
   (score `0.91`, confidence `0.09` → `preserved`, action unchanged).
 * Real-Jev demo (key from the secrets file, `--reach 5 --settle 8000`):
   `[agent] stopped reason=… success=true verifiedDigs=1`, `[verify] blockRemoved=true dropObserved=true`,
@@ -350,7 +350,7 @@ Reproduce with:
 
 ```bash
 cd /home/s0u7a/mc-ai/jev-agent
-npx tsx demo.mts --username AI_M32 --seconds 60 --settle 9000 --log-dir logs/m0-final
+bun demo.mts --username AI_M32 --seconds 60 --settle 9000 --log-dir logs/m0-final
 ```
 
 Outcome (raw lines from `logs/m0-final/`):
@@ -379,4 +379,3 @@ walk-up spot was 2–6 blocks up a hillside/canopy, and both actuations stalled 
 `packet locomotion blocked before (2.5,65,-68.5)` / `path_reset stuck`. The run above uses a spawn
 (`AI_M32`) whose nearest out-of-reach log has a flat 3-node route; terrain-contact climbing is still
 the open problem for M1.
-

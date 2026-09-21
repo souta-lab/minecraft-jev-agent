@@ -328,7 +328,11 @@ async function main(): Promise<void> {
         ],
       }),
     })
-    const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability: { memory: null } })
+    const grounded = generateGroundedCandidates(state, {
+      ...defaultCandidateOptions,
+      unreachableStations: new Set([knownStationKey({ name: 'furnace', position: REMEMBERED_NEAR_FURNACE })]),
+      reachability: { memory: null },
+    })
     const retrieve = grounded.candidates.find((entry) => entry.kind === 'RETRIEVE')
     await check(
       '(truth) a filtered remembered furnace is not re-injected from state.furnaces',
@@ -592,7 +596,7 @@ async function main(): Promise<void> {
   // The wiring: the controller charges the option on a mechanical rejection and
   // the generator skips a proven-unreachable sensed furnace.
   {
-    const controller = source('./src/controller.ts')
+    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
     const policy = source('./src/policy.ts')
     const candidates = source('./src/candidates.ts')
     const moveFail = source('./src/moveFailMemory.ts')

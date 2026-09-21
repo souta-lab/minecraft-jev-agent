@@ -5,7 +5,7 @@
 // bounded genuine wedge, the live y=11 needs_ascend exploration shape, and the
 // mirrored WEDGE_SUPPRESSED marker.
 //
-// Run: npm run wedge-guard-test
+// Run: bun run wedge-guard-test
 import {
   evaluateWedgeRepeat,
   formatWedgeAbort,

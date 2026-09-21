@@ -1,11 +1,11 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // tools/test-replay.mjs — fixture test for the #23 replay harness.
 //
 // Builds a small synthetic decision log + CAUSAL run log, runs both policies,
 // and asserts the expected agreement/divergence counts and verified-outcome
 // summary. Runs entirely offline; no LLM/server/network.
 //
-// Usage: node tools/test-replay.mjs
+// Usage: bun tools/test-replay.mjs
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'

@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // m2-watch: read-only scan of the buddy-driver log for M2 milestone markers.
-// Usage: node tools/m2-watch.mjs [--log <path>] [--since <ISO timestamp|epoch-ms>] [--run <runId>]
+// Usage: bun tools/m2-watch.mjs [--log <path>] [--since <ISO timestamp|epoch-ms>] [--run <runId>]
 // Default log: /home/s0u7a/mc-ai/buddy-driver/buddy.log
 // Exit: 0 = ordered required M2 chain complete, 1 = incomplete/invalid chain,
 //       2 = log/scope unreadable. Prints UNKNOWN and never fabricates data.

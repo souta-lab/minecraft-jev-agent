@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // verify-issue13: listener-leak acceptance check.
 // Samples the resident control socket several times and asserts that no event's
 // listener count exceeds the ownership-aware expected count. Generation-owned
@@ -8,7 +8,7 @@
 // The resident report carries a runId. The verifier binds the socket samples
 // and callback-log window to that same run; a missing/mismatched scope is
 // UNKNOWN, never a false PASS from an all-time append-only log.
-// Usage: node tools/verify-issue13.mjs [--json] [--samples 3] [--gap 8000] [--run <runId>]
+// Usage: bun tools/verify-issue13.mjs [--json] [--samples 3] [--gap 8000] [--run <runId>]
 import net from 'node:net'
 import { existsSync, readFileSync } from 'node:fs'
 import { inspectGenerationCallbackLog } from './issue13-evidence.mjs'
@@ -35,7 +35,7 @@ const JSON_OUT = args.includes('--json')
 const REQUESTED_RUN_ID = valueAfter('--run')
 
 if (HELP) {
-  process.stdout.write('usage: node tools/verify-issue13.mjs [--json] [--samples 3] [--gap 8000] [--run <runId>]\n')
+  process.stdout.write('usage: bun tools/verify-issue13.mjs [--json] [--samples 3] [--gap 8000] [--run <runId>]\n')
   process.exit(0)
 }
 

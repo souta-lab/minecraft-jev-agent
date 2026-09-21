@@ -4,7 +4,7 @@
 // every decision and reports per-subgoal inventory, Jev cost, escalations and
 // wedge-abort count. Objective = the R3 acceptance (iron_ingot >= 3).
 //
-// Run: npx tsx m2.mts [--seconds 200] [--log-dir logs/m2-run] [--username AI_R2] [--fallback]
+// Run: bun m2.mts [--seconds 200] [--log-dir logs/m2-run] [--username AI_R2] [--fallback]
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'

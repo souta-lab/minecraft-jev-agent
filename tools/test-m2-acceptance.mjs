@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // test-m2-acceptance: offline fixtures for the historical iron-age
 // compatibility gate and its separate diamond-pickaxe replay fixture. These
 // tests do not define the current M2; see MILESTONE-CONTRACT.json.

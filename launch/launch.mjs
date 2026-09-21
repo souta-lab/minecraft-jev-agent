@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Standalone launcher for the "Fabulously Optimized" Fabric instance.
 //
 // Resolves the Minecraft client jar, Minecraft libraries, Fabric Loader
@@ -6,7 +6,7 @@
 // are already there, downloading the rest), then starts KnotClient with an
 // offline account. Nothing inside the PrismLauncher config is modified.
 //
-// Usage: node launch.mjs [--instance DIR] [--mc-version V] [--vanilla]
+// Usage: bun launch.mjs [--instance DIR] [--mc-version V] [--vanilla]
 //                        [--fabric-version V] [--game-dir DIR] [--mods-dir DIR]
 //                        [--data-dir DIR] [--server HOST:PORT]
 //                        [--username NAME] [--uuid UUID] [--dry-run]

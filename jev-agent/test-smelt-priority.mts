@@ -12,7 +12,7 @@
 // the smelt (and its PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE chain) never
 // ran. `staleOreDescend` retires the obsolete descent so the queue advances.
 //
-// Run: npx tsx test-smelt-priority.mts
+// Run: bun test-smelt-priority.mts
 import { staleOreDescend } from './src/controller.ts'
 import { GoalQueue } from './src/goalQueue.ts'
 import type { PlannedGoal } from './src/goalQueue.ts'

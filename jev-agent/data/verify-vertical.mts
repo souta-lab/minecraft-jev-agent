@@ -5,7 +5,7 @@
 // too. It quotes the executor's `control locomotion arrival` y-progression,
 // jump/recovery counts and forcedRepositions.
 //
-// Run: npx tsx data/verify-vertical.mts [username] [logDir]
+// Run: bun data/verify-vertical.mts [username] [logDir]
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'

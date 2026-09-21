@@ -21,7 +21,7 @@
 //
 // Pure: no bot, no network, no model.
 //
-// Run: npx tsx test-candidate-recovery.mts  (wired as `npm run candidate-recovery-test`)
+// Run: bun test-candidate-recovery.mts  (wired as `bun run candidate-recovery-test`)
 import { applyReachabilityGate, defaultCandidateOptions } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'

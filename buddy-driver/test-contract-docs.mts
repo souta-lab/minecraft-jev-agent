@@ -9,7 +9,7 @@
 //       report/status/acceptance (never silent);
 //   (d) the migration procedure (including the mandatory host restart) is documented.
 //
-// Run: npm run contract-docs-test
+// Run: bun run contract-docs-test
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'

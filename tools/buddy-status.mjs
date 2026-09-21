@@ -1,6 +1,6 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // buddy-status: one-shot health dashboard for the resident AI_Buddy agent.
-// Usage: node tools/buddy-status.mjs [--json]
+// Usage: bun tools/buddy-status.mjs [--json]
 // Reads: process table, control socket (report), buddy.log markers, git log.
 // Read-only. Safe to run anytime. No secrets are printed.
 import { execSync } from 'node:child_process'
@@ -17,12 +17,12 @@ const sh = (c) => {
 }
 
 function hosts() {
-  const out = sh("pgrep -af 'node agent-runner.mts'")
+  const out = sh("pgrep -af 'bun agent-runner.mts'")
   if (!out) return []
-  // Only real node processes: exclude bash -c wrappers whose command line merely
+  // Only real Bun processes: exclude bash -c wrappers whose command line merely
   // contains the pgrep pattern (a known false-positive trap).
   return out.split('\n')
-    .filter((l) => /\d+\s+\S*node\s+agent-runner\.mts/.test(l) && !/\bbash\b|\/bin\/sh\b/.test(l))
+    .filter((l) => /\d+\s+\S*bun\s+agent-runner\.mts/.test(l) && !/\bbash\b|\/bin\/sh\b/.test(l))
     .map((l) => l.trim().split(/\s+/)[0])
 }
 

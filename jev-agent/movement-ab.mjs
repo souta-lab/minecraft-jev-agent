@@ -2,7 +2,7 @@
 // step/pit/far scenario against any mineflayer package dir, with C2S packet
 // counters, to decide whether stock or the full PR #4063 restores climbing.
 //
-// node movement-ab.mjs --mineflayer <dir> --username AI_MVG1
+// bun movement-ab.mjs --mineflayer <dir> --username AI_MVG1
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'

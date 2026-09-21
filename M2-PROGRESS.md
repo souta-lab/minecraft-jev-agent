@@ -14,7 +14,7 @@ Started: 2026-09-17 ~10:14 UTC. Timebox: 45 min. Bots: AI_M2a / AI_M2b (never AI
 ## S1 — typecheck + tests + wedge detector (done, implementation)
 - Fixed incomplete previous-attempt wiring: GoalKind += place|smelt; executor runSmelt + runDescend;
   policy guardSmelt + guardDescend; FailureCode += smelt_error|smelt_timeout.
-- `npm run typecheck` -> clean (exit 0).
+- `bun run typecheck` -> clean (exit 0).
 - Tests: guard 12/12, gating 6/6, loop 7/7, m1 5/5.
 - Wedge detector in controller: aborts on same chosen action id >5 (wedgeRepeatLimit) or goal progress 0 >60s
   (wedgeStallMs); logs `ABORT: wedge detected (...)`, stop reason=wedge.
@@ -58,7 +58,7 @@ REQUIRED FIX (do this before further runs):
   `smelt_error|smelt_timeout`. Movement pathfinder stays canDig=false (descending is MINE/DESCEND only).
 - GoalQueue: `place`/`smelt` kinds; smelt is inventory-counted, place completes when the item leaves the
   inventory. `planFromJson` extended with place/smelt.
-- `npm run typecheck` clean. Tests unaffected: guard 12/12, gating 6/6, loop 7/7, m1 5/5.
+- `bun run typecheck` clean. Tests unaffected: guard 12/12, gating 6/6, loop 7/7, m1 5/5.
 
 ## S3 — M2 ladder run (bounded, aborted on wedge)
 - Runner `m2.mts` (cap --seconds 300) with `M2_PLAN_JSON` (14 subgoals), username AI_M2a.
@@ -201,7 +201,7 @@ R2/R3 NOT reached — EXACT next blocker (candidate reachability, not locomotion
     cost total=$0.000322 mean=$0.000107/call; wedgeAborts=1; verifiedDigs=0 itemsCollected=0.
   - Per-subgoal inventory: g1 `collect 3 x log`: before `{}` -> after `{}` (never reached a log).
 
-Verification: `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit-test 9/9
+Verification: `bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit-test 9/9
 (audit case H updated to assert the new `headroomAt`/`landingHeadroom`/`jumpAllowed` wiring).
 Temp probe files (`probe-dep*.mjs`) created for the diagnosis were deleted; `~/mc-ai/mcbot/movement-test/`
 was read/executed but not modified.
@@ -223,9 +223,9 @@ S0 server migrate (done)
   160 blocks). Regenerated with `level-seed=2024` (dense oak/birch, 397 logs within 96, nearest 2 m).
 
 S1 agent migrate (done)
-- removed `github:PrismarineJS/mineflayer#fc480ee8...`; reinstalled from registry. `npm ls`:
+- removed `github:PrismarineJS/mineflayer#fc480ee8...`; reinstalled from registry. `bun pm ls`:
   mineflayer@4.39.0, minecraft-protocol@1.68.0, minecraft-data@3.116.0, mineflayer-pathfinder@2.4.5.
-  No `github:`/SHA in package.json or package-lock.json. `npm run typecheck` clean.
+  No `github:`/SHA in package.json or bun.lock. `bun run typecheck` clean.
 
 S2 hypothesis test (FALSIFIED)
 - flat raw walk: 10.53 m, `forcedRepositions=0`.
@@ -248,7 +248,7 @@ S4 tests (retargeted)
 - typecheck clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9.
 
 S5 launched the client check
-- `node launch/launch.mjs --mc-version 1.21.11 --vanilla --server localhost:25565 --username s0u7a
+- `bun launch/launch.mjs --mc-version 1.21.11 --vanilla --server localhost:25565 --username s0u7a
   --dry-run` -> exit 0 (documented in launch/README.md). No client launched for real.
 
 M2 (furnace/charcoal -> iron_ore -> iron ingot x3 -> iron_pickaxe): NOT reached (gated behind M1).
@@ -263,9 +263,9 @@ S1 patch (done)
   `sendTeleportReply()` answers a clientbound teleport **without** writing the server target into
   `lastSent`; `updatePosition` uses vanilla `dx*dx+dy*dy+dz*dz > 4e-8 || positionReminder >= 20`.
 - `scripts/apply-movement-patch.mjs` applies it idempotently + verifies 4 invariants; wired into
-  `postinstall`; `npm run movement-patch:check`. Reversible: `npm ci --ignore-scripts`.
+  `postinstall`; `bun run movement-patch:check`. Reversible: `bun install --frozen-lockfile --ignore-scripts`.
 - applied: `applied 5 hunk(s), 0 already present; verified 4/4 checks`; second run `0 hunk(s), 5
-  already present`. `node --check physics.js` OK.
+  already present`. `bun build --no-bundle --target=bun --outfile=/dev/null physics.js` OK.
 
 S2 harness verification (bare mineflayer, `movement-patch-test.mts` + `movement-ab.mjs`)
 - baseline `AI_MVB`: stock step `reached=false dy=0.00 forced=162` (`path_reset stuck`).
@@ -292,7 +292,7 @@ S3 M1 on 1.21.11 with the patch (`logs/m1-121c/`, `m1-121d/`, `m1-121e/`)
   (`ray rise=2`, impossible) -> 1 oak_log then wedge 61.6 s; `logs/m1-121d/` and `m1-121e/`
   verified 3 digs with `gained=0` (drop never picked up) -> `FINAL INVENTORY={}`.
 
-S4 suite: `npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9.
+S4 suite: `bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9.
 
 S5 M2 attempt (`logs/m2-mv/`, console `logs/m2-mv-console.log`, username AI_M2MV, 200 s)
 - 3/14 subgoals completed in order: `collect 3 x log` -> `craft crafting_table` -> `craft
@@ -384,9 +384,9 @@ Live evidence (`logs/m1-fix-ready-console.log`):
     `moved=2.94m forcedRepositions=0`.
 
 ### Suite after the fixes
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9;
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1 5/5, audit 9/9;
 `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`);
-`npm run step-pipeline-test` 4/4.
+`bun run step-pipeline-test` 4/4.
 
 ### M1 re-run (AI_M1F, `logs/m1-fix-ready/`, 190 s): 3/4 subgoals IN ORDER, wedge at cobblestone
   - subgoals 1-3 COMPLETE with real pickups: `collect 3 x oak_log` (3 x `gained=1`), `crafting_table`,
@@ -518,7 +518,7 @@ runs never reach. Fresh-world repeat (or restored world) is required to demonstr
 live; the approach fix itself is proven by `data/placed-approach-test.mts`.
 
 ### Suite after the fix
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
 
 
@@ -584,7 +584,7 @@ step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present
   table but trapped in canopy). All runs `llm.called==false` on every decision.
 
 ### G. Suite
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6, `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
 
 ## THREE-BLOCKER FIX ROUND (2026-09-18 ~00:xx JST) — canopy clearance + pickup + phased ledger
@@ -650,7 +650,7 @@ step-pipeline-test 6/6, `movement-patch:check` ok (`0 hunk(s), 5 already present
   three fixes above.
 
 ### Suite after this round
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).
 
 ## CRAFT-AT-STATION BLOCKER FIXED (2026-09-18 00:29 JST)
@@ -699,5 +699,5 @@ step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present
 - All runs keep `llm.called==false` on every decision.
 
 ### Suite
-`npm run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
+`bun run typecheck` clean; guard 12/12, gating 6/6, loop 7/7, m1-test 5/5, audit-test 9/9,
 step-pipeline-test 6/6; `movement-patch:check` ok (`0 hunk(s), 5 already present; verified 4/4`).

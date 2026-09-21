@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // world-player-state.mjs - read-only live world/player observation.
 //
 // This is deliberately a sensor, not a planner.  It joins Mineflayer's live
@@ -20,13 +20,12 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const require = createRequire(import.meta.url)
 
-function dependency(name) {
-  return require(path.join(ROOT, 'buddy-driver', 'node_modules', name))
-}
-
-const mineflayerModule = dependency('mineflayer')
+// These are direct root dependencies because this tool imports them directly.
+// Normal package resolution works with Bun's isolated linker and does not
+// depend on a workspace's physical node_modules layout.
+const mineflayerModule = require('mineflayer')
 const mineflayer = mineflayerModule.default ?? mineflayerModule
-const vec3Module = dependency('vec3')
+const vec3Module = require('vec3')
 const Vec3 = vec3Module.Vec3 ?? vec3Module
 
 export const STATE_SCHEMA_VERSION = 1
@@ -655,7 +654,7 @@ export async function observeOnce(options, bot) {
 const HELP = `world-player-state.mjs - read-only live state observer
 
 Usage:
-  node tools/world-player-state.mjs --target AI_Buddy --admin-user s0u7a --json
+  bun tools/world-player-state.mjs --target AI_Buddy --admin-user s0u7a --json
 
 Options:
   --target/--player NAME       player to observe (default AI_Buddy)

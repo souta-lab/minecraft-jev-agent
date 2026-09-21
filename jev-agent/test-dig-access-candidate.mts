@@ -20,7 +20,7 @@
 // supplies through `CandidateOptions.reachability.digApproach`; the controller
 // wires it to the live #244 `interactionStandCandidates` probe, tests inject it.
 //
-// Run: node --test test-dig-access-candidate.mts
+// Run: bun --test test-dig-access-candidate.mts
 import { readFileSync } from 'node:fs'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import { StateFingerprintMemory } from './src/moveFailMemory.ts'

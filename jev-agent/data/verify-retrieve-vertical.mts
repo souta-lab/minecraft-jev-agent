@@ -2,7 +2,7 @@
 // remembered resource is below the bot must include a vertical leg (REUSE_TUNNEL
 // or STAIRCASE) and change the bot's Y toward the target instead of WAITing.
 //
-// Run: npx tsx data/verify-retrieve-vertical.mts [username]
+// Run: bun data/verify-retrieve-vertical.mts [username]
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { jevAgent } from '../src/index.ts'

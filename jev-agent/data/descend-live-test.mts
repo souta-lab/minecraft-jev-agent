@@ -2,7 +2,7 @@
 // path: a stone goal with no tool drives the candidate generator straight into
 // DESCEND, so the run logs TOOL_CHOICE/DIG_PATH/STAIRCASE/DESCEND_LIMIT.
 //
-// Run: npx tsx data/descend-live-test.mts --username AI_M1MV --seconds 150
+// Run: bun data/descend-live-test.mts --username AI_M1MV --seconds 150
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'

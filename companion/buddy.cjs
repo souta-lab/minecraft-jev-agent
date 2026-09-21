@@ -6,7 +6,7 @@
  * AI_Buddy and walks to / follows the human player so the AI is visible in-game.
  *
  * Run:
- *   NODE_PATH=/home/s0u7a/mc-ai/jev-agent/node_modules node buddy.cjs
+ *   NODE_PATH=/home/s0u7a/mc-ai/jev-agent/node_modules bun buddy.cjs
  */
 
 const mineflayer = require('mineflayer');

@@ -27,8 +27,8 @@
 //
 // Pure: no bot, no network, no model.
 //
-// Run: npx tsx test-route-opening-continuation.mts
-//      (wired as `npm run route-opening-continuation-test`)
+// Run: bun test-route-opening-continuation.mts
+//      (wired as `bun run route-opening-continuation-test`)
 import { applyReachabilityGate, defaultCandidateOptions } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { isAtRequiredLevel } from './src/executor.ts'
@@ -51,7 +51,7 @@ const OPEN_TARGET: Vec3Json = { x: 56, y: 60, z: 24 }
 /** The opened level step cell (`DESCEND:level:E` step, wall and head both clear). */
 const STEP: Vec3Json = { x: 55, y: 61, z: 26 }
 /** A second, different opened level step: genericity, not a coordinate special case. */
-const STEP_W: Vec3Json = { x: 53, y: 61, z: 26 }
+const STEP_N: Vec3Json = { x: 54, y: 61, z: 25 }
 
 const isProductive = (candidate: Candidate): boolean =>
   candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE'
@@ -281,10 +281,10 @@ function main(): void {
   // (C) Genericity + authority: a different, unrelated level step yields the same
   // fact family, and no deterministic selection/priority/ranking is injected.
   {
-    const other = worldState({ descent: [openLevelStep('W', -1, 0, STEP_W)] })
+    const other = worldState({ descent: [openLevelStep('N', 0, -1, STEP_N)] })
     const grounded = applyReachabilityGate([waitCandidate(other.tick), unreachableMove(other.tick)], other, optionsWith())
     const continuation = grounded.candidates.find(
-      (candidate) => candidate.kind === 'MOVE' && candidate.target?.x === STEP_W.x && candidate.target?.z === STEP_W.z,
+      (candidate) => candidate.kind === 'MOVE' && candidate.target?.x === STEP_N.x && candidate.target?.z === STEP_N.z,
     )
     const acquisitions = grounded.candidates.filter((candidate) => candidate.meta.capabilityAcquisition === true)
     const carriesSelection = acquisitions.some((candidate) =>

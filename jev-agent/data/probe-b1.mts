@@ -6,7 +6,7 @@
 //   3. run stock `mineflayer-collectblock` on a fresh drop and time it
 //   4. run a manual control-walk nudge onto the drop and time it
 //
-// Run: npx tsx data/probe-b1.mts --username AI_B1P
+// Run: bun data/probe-b1.mts --username AI_B1P
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { plugin as collectBlockPlugin } from 'mineflayer-collectblock'

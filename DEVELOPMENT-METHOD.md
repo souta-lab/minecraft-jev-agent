@@ -112,7 +112,7 @@ git -C /tmp/opencode/wt-<task> push -u origin task/<name>
 git fetch && git merge --no-ff origin/task/<name> && git push
 
 # sync the shared tree (only a main checkout may be reset)
-node tools/sync-shared-tree.mjs
+bun tools/sync-shared-tree.mjs
 
 # when the shared tree holds another task's WIP and cannot be touched
 git push origin HEAD:refs/heads/tools/verify-mercury
@@ -151,7 +151,7 @@ elements, or state clearly that it is incomplete ("成功偽装の禁止", fakin
 | # | Required proof | Concrete command / source | Example found in repo |
 |---|---|---|---|
 | a | Code exists at the changed location | `grep -rn '<symbol>' <file>` | `TODO.md` line 136 mandates it; commits cite file+symbol |
-| b | Full test suite green, with counts | `npm run typecheck`, `guard-test`, `gating-test`, `loop-test`, `m1-test`, `audit-test`, `step-pipeline-test`, `movement-patch:check` (`jev-agent/package.json`) | `TODO.md` line 167: `typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10` |
+| b | Full test suite green, with counts | `bun run typecheck`, `guard-test`, `gating-test`, `loop-test`, `m1-test`, `audit-test`, `step-pipeline-test`, `movement-patch:check` (`jev-agent/package.json`) | `TODO.md` line 167: `typecheck / throttle 15/15 / audit 9/9 / guard 12/12 / loop 7/7 / m1 5/5 / issue43 11/11 / retrieval-body 10/10` |
 | c | Branch actually pushed | `git ls-remote origin` | `AGENTS.md` line 136 mandates it; lane branches present under `refs/heads/task/*` |
 | d | Live log lines for behaviour changes | grep `buddy-driver/buddy.log` for the named marker | see marker table below |
 | e | Explicit statement of what remains | lane report must say if incomplete | `TODO.md` line 136; `ARCHITECTURE.md` lines 406-409 |
@@ -231,7 +231,7 @@ OBSERVED    Run `run-mu5qd4ah-3xdh` acceptance record: `listenerLeak=true`, `phy
             2 -> 3 (`listenerCurrent.physicsTick=3` vs `listenerBaseline.physicsTick=2`). Some
             reload lines elsewhere show `listenerLeak=false`, so the marker value is not stable.
 COMPLIANCE  FAIL for that run, and UNKNOWN for any run without a run-scoped record.
-            Command: `node tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh`.
+            Command: `bun tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh`.
 ```
 
 Lesson: "`listenerLeak=false` observed once" does not close #13; closure needs a run-scoped
@@ -248,7 +248,7 @@ IMPLEMENTED `LADDER_PREREQ` replaces the generation head from live inventory; ga
 OBSERVED    Run `run-mu67vfhn-8a18`, run-scoped (1290 lines in `runs/run-mu67vfhn-8a18/evidence.log`):
             `LADDER_PREREQ=24`, `raw_iron=8`, `evidence maxTicks=33`, `gensLast5min=6`.
 COMPLIANCE  FAIL (4/6): `generation_survives_100_ticks` and `churn_reduced` both fail.
-            Command: `node tools/verify-issue12.mjs` -> `evidence: run-artifact (runId=run-mu67vfhn-8a18)`.
+            Command: `bun tools/verify-issue12.mjs` -> `evidence: run-artifact (runId=run-mu67vfhn-8a18)`.
 ```
 
 Lesson: the same run shows a positive resource signal (`raw_iron=8`) and negative
@@ -275,7 +275,7 @@ All tools are read-only, print no secrets, and live under `tools/`.
 
 | Tool | What it measures | Decision it gates | Key evidence |
 |---|---|---|---|
-| `tools/buddy-status.mjs` | Host process count (`pgrep -af 'node agent-runner.mts'`, excluding bash wrappers), control-socket `report`, generations/reloads/recoveries/reconnects, `listenerLeak`, wedge, world memory, marker counts, latest acceptance/freeze artifact, last commit | Is the resident healthy and single-instance? Does it look stuck? | lines 19-27 (host filter), 47-50 (marker list), 105-126 |
+| `tools/buddy-status.mjs` | Host process count (`pgrep -af 'bun agent-runner.mts'`, excluding bash wrappers), control-socket `report`, generations/reloads/recoveries/reconnects, `listenerLeak`, wedge, world memory, marker counts, latest acceptance/freeze artifact, last commit | Is the resident healthy and single-instance? Does it look stuck? | lines 19-27 (host filter), 47-50 (marker list), 105-126 |
 | `tools/verify-issue12.mjs` | 6 checks: `ladder_prereq_present`, `no_1tick_rotation`, `generation_survives_100_ticks`, `digging_resumed`, `raw_iron_obtained`, `churn_reduced`. Prefers `runs/<runId>/evidence.log` (or a runId slice) and labels the all-time shared log `FALLBACK`. | Is #12 (precondition chain) accepted? | lines 69-76; recent 10-min window; `--run <runId>`; §4.2 |
 | `tools/verify-issue13.mjs` | Samples the control socket `--samples` times; asserts no event listener count exceeds baseline, and `listenerLeak` is false in all samples | Is the #13 listener leak closed? | lines 35-62 |
 | `tools/verify-mercury.mjs` | Mercury call records + advisor log: successful calls, no cache-hit-with-empty-plan, at least one non-empty plan, retry accounting present, no cached-strategy loop (`maxConsecutiveSameStrategy <= 2`). Prefers the run's `mercury-calls.jsonl` + `evidence.log`; labels all-time inputs `FALLBACK`. | Are #15/#30/#18 accepted? | `--run <runId>`; §4.2 |
@@ -348,7 +348,7 @@ only then fall back to all-time counts — which they label
 Real capture (issue #63 acceptance #4):
 
 ```bash
-node tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh
+bun tools/run-artifacts.mjs capture run-mu5qd4ah-3xdh
 # -> runs/run-mu5qd4ah-3xdh/{manifest.json,acceptance.json,evidence.log,mercury-calls.jsonl}
 ```
 
@@ -480,7 +480,7 @@ How issues are closed or kept open:
 
 | Issue | Outcome | Evidence |
 |---|---|---|
-| `#15` cached-strategy loop | Claim was "closed as green"; GitHub state stayed OPEN at the #63 audit. Run-scoped re-check on 2026-09-18 is FAIL: `no_cached_strategy_loop` reports `maxConsecutiveSameStrategy=9` for `run-mu5qd4ah-3xdh`. | `node tools/verify-mercury.mjs --run run-mu5qd4ah-3xdh`; `TODO.md` lines 178-184 |
+| `#15` cached-strategy loop | Claim was "closed as green"; GitHub state stayed OPEN at the #63 audit. Run-scoped re-check on 2026-09-18 is FAIL: `no_cached_strategy_loop` reports `maxConsecutiveSameStrategy=9` for `run-mu5qd4ah-3xdh`. | `bun tools/verify-mercury.mjs --run run-mu5qd4ah-3xdh`; `TODO.md` lines 178-184 |
 | `#13` listener leak | OPEN. `listenerLeak=false` observed on some reloads, but the run-scoped `run-mu5qd4ah-3xdh` record shows `listenerLeak=true` (physicsTick 2 -> 3). Observation != closure. | `runs/run-mu5qd4ah-3xdh/acceptance.json`; `verify-issue13.mjs` is the gate |
 | `#12` precondition chain | Kept open | `TODO.md` line 151: gate 5/6, only `raw_iron_obtained` remains |
 | `#44` replan spin | Landed (churn 27 -> 1) | `TODO.md` lines 163-169 |

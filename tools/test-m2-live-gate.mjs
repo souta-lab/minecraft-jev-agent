@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for the current M2 executable gate. The historical iron-age
 // m2-watch/m2-acceptance fixtures are intentionally not used as acceptance.
 import assert from 'node:assert/strict'

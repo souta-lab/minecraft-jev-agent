@@ -7,7 +7,7 @@
 // capability-acquisition candidates are offered instead, and that a proven
 // target is suppressed while its state fingerprint is unchanged.
 //
-// Run: npx tsx test-reachability.mts  (wired as `npm run reachability-test`)
+// Run: bun test-reachability.mts  (wired as `bun run reachability-test`)
 import { createRequire } from 'node:module'
 import { applyReachabilityGate, blockId, craftIngredientPrereq, defaultCandidateOptions, formatCraftIngredientPrereq, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
@@ -861,7 +861,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     const grounded = generateGroundedCandidates(state, craftOptions)
     // simulate the controller pruning every locomotion candidate (move-fail memory)
     const afterControllerFilters = grounded.candidates.filter(
-      (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE',
+      (candidate) => candidate.kind !== 'MOVE' && candidate.kind !== 'RETRIEVE' && candidate.kind !== 'CRAFT',
     )
     const blockedBy = goalStarvationBlockedBy(null, { kind: 'craft', targetItem: 'wooden_pickaxe' }, grounded.withheld)
     const missing = candidateStarvationMissing(grounded.withheld)

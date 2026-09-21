@@ -16,7 +16,7 @@
 //
 // No behaviour change is asserted or introduced.
 //
-// Run: npm run pillar-takeoff-instrumentation-test
+// Run: bun run pillar-takeoff-instrumentation-test
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'

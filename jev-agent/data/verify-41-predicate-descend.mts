@@ -2,7 +2,7 @@
 // a predicate goal (`descend_to:Y=<n>`, success = bot position.y <= n) and the
 // controller reaches that Y instead of collecting a cobblestone quota.
 //
-// Run: npx tsx data/verify-41-predicate-descend.mts [username] [seconds]
+// Run: bun data/verify-41-predicate-descend.mts [username] [seconds]
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'

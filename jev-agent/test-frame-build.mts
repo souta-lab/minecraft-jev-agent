@@ -19,7 +19,7 @@
 // Red-first: this file is added before the source changes and fails (missing
 // exports / unmet assertions), then passes.
 //
-// Run: npm run frame-build-test
+// Run: bun run frame-build-test
 import { readFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

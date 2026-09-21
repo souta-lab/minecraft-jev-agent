@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Stock Mineflayer bot for the local Leaf (Paper fork) Minecraft 26.1.2 server.
 // No account, no patches: the published mineflayer/minecraft-protocol stack
 // supports MC 26.1.2 (protocol 775) out of the box.
@@ -12,7 +12,7 @@ const opt = (name, fallback) => {
 }
 
 if (has('help')) {
-  console.log(`Usage: node bot.mjs [options]
+  console.log(`Usage: bun bot.mjs [options]
 
   --host <addr>      server address        (default 127.0.0.1)
   --port <n>         server port           (default 25565)

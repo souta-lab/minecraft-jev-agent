@@ -2,7 +2,7 @@
 // bounded replan (never an infinite WAIT), and a resource that cannot exist at
 // the current depth yields a grounded RETRIEVE candidate. No bot, no network.
 //
-// Run: npx tsx test-issue43.mts  (wired as `npm run issue43-test`)
+// Run: bun test-issue43.mts  (wired as `bun run issue43-test`)
 import { defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { evaluateWaitWedge } from './src/controller.ts'

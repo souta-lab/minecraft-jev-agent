@@ -8,7 +8,7 @@
 //   4. the goal queue consumes a plan in order and advances on completion;
 //   5. `evaluateSummonConditions` maps exception conditions to LLM summon reasons.
 //
-// Run: npm run loop-test
+// Run: bun run loop-test
 import type { Candidate } from './src/candidates.ts'
 import { buildQuestions, AUTHORITATIVE_QUESTION_NAMES, QUESTION_NAMES, questionNamesFor, SAFETY_QUESTION_NAMES, SHADOW_QUESTION_NAMES } from './src/jev.ts'
 import type { JevAnswer, JevQuestionType, JevResult } from './src/jev.ts'

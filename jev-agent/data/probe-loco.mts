@@ -11,7 +11,7 @@
 // Movements (canDig=false, allowParkour=true, allow1by1towers=true) and every
 // pathfinder event plus the resulting position change is printed.
 //
-// Run: npx tsx data/probe-loco.mts --username AI_P2
+// Run: bun data/probe-loco.mts --username AI_P2
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 

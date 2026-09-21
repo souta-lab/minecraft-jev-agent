@@ -4,7 +4,7 @@
 // loop: find tree -> build candidates -> Jev picks oak_log -> pathfinder ->
 // guard -> dig -> verify.
 //
-// Run: npx tsx demo.mts        (or: npm run demo)
+// Run: bun demo.mts        (or: bun run demo)
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import mineflayer from 'mineflayer'
@@ -43,7 +43,7 @@ function parseTriggers(raw: string | undefined): readonly DecisionTrigger[] {
 function parseArgs(argv: string[]): Args {
   const has = (name: string): boolean => argv.includes(`--${name}`)
   if (has('help')) {
-    process.stdout.write(`Usage: npx tsx demo.mts [options]
+    process.stdout.write(`Usage: bun demo.mts [options]
 
   --host <addr>      server address          (default 127.0.0.1)
   --port <n>         server port             (default 25565)

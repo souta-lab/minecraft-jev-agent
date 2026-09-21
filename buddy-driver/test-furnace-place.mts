@@ -1,6 +1,6 @@
 // test-furnace-place.mts - M2 blocker #46 regression suite.
 //
-// Run: node ../jev-agent/node_modules/.bin/tsx test-furnace-place.mts
+// Run: bun test ./test-furnace-place.mts
 //
 // Covers the three acceptance behaviours:
 //   (a) the furnace option is not abandoned while it is the prerequisite of the

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // test-m2-gate: RED-FIRST evidence for the run-scoped current-M2 gate.
 //
 // MILESTONE-CONTRACT.json M2 ("Diamond-to-Nether-gate closed loop") has four

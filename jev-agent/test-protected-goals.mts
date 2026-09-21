@@ -14,7 +14,7 @@
 //   (h) a READY iron smelt keeps the head over a re-inserted protected goal
 //       (#46 regression), with (i) as the non-ready control.
 //
-// Run: node ../jev-agent/node_modules/.bin/tsx test-protected-goals.mts
+// Run: bun test ./test-protected-goals.mts
 import { GoalQueue, READY_HEAD_PRIORITY } from './src/goalQueue.ts'
 import type { PlannedGoal, QueuedGoal } from './src/goalQueue.ts'
 import { compilePlannedGoal, compilePlannedGoals, isOptionStartable, makeOptionSnapshot, optionSpecsToPlannedGoals } from './src/optionSpec.ts'

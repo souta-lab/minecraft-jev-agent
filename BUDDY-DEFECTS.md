@@ -56,7 +56,7 @@ RELOAD ok=false trigger=source-changed ms=313 message=smoke test failed: empty p
 ## 併せて有効な既出要件
 - **2ブロック壁**: 候補生成で `stepUpHeight > 1` を除外／迂回 or 階段化のみ／反復ジャンプは wedge（`CLIMB_FAIL wallHeight=2 attempts=N`）。物理: jump apex 1.2522。
 - **作業台**: 既存（約20個）をスキャン→再利用。新規設置は皆無時のみ。撤去しない。
-- **バンドラ**: esbuild 既定（安定性優先）。Bun は移行ゲート通過時のみ。
+- **バンドラ**: Bun.build 既定。residentの世代bundleはBun 1.4.2で生成する。
 - **クラフト**: `bot.openContainer(tableBlock)` の window/`craftingTable` を `bot.craft(recipe,count,table)` に渡す。材料・レシピを事前検証し、失敗時は wedge せずクリーンに失敗。
 - 常駐アーキテクチャ・状態持ち越し・制御チャネル・凍結/再開の詳細は `/home/s0u7a/mc-ai/RESIDENT-MODE.md`。
 
@@ -118,4 +118,3 @@ MOVE_OSCILLATE / DETOUR のログ出現数 = 0（＝検知・迂回は未実装�
 3. 可視化: `JUMP_ATTEMPT dy=1 ok=false` / `JUMP_FAIL attempts=N` / `DETOUR via=...`。
 4. pathfinder の `canJump` が有効であることを起動時にログ（`MOVEMENTS canJump=true canDig=false`）。
 5. 2ブロック以上の段差は従来どおり**迂回 or 階段化のみ**（`stepUpHeight>1` は候補から除外、反復ジャンプは `CLIMB_FAIL`）。
-

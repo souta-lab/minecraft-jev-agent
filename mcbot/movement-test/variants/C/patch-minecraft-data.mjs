@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // variants/C patch-minecraft-data.mjs
 //
 // Mineflayer PR #4128 gates its tick_end sending on a minecraft-data feature
@@ -12,13 +12,13 @@
 // minecraft-data copy so unmodified PR #4128 code resolves and sends tick_end.
 //
 // Usage (must pass a path inside the variant, never the shared mcbot tree):
-//   node ../patch-minecraft-data.mjs ./node_modules/minecraft-data
+//   bun ../patch-minecraft-data.mjs ./node_modules/minecraft-data
 import fs from 'node:fs'
 import path from 'node:path'
 
 const arg = process.argv[2]
 if (!arg) {
-  console.error('usage: node patch-minecraft-data.mjs <path-to-variant>/node_modules/minecraft-data')
+  console.error('usage: bun patch-minecraft-data.mjs <path-to-variant>/node_modules/minecraft-data')
   process.exit(2)
 }
 const mcdDir = path.resolve(arg)

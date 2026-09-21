@@ -3,7 +3,7 @@
 // craft-and-place), the exact PREREQ_OPTION and PREREQ_SWITCH log lines, the
 // stall-triggered path switch, and that the parent goal stays protected.
 //
-// Run: npx tsx test-prereq-option.mts
+// Run: bun test-prereq-option.mts
 import {
   decideFurnacePrereqObservation,
   evaluatePrereqStall,

@@ -6,7 +6,7 @@
 // and proves a `STEP` candidate is offered, passes the guard, removes the upper
 // face block, and leaves a 1-block step that the actuator can climb.
 //
-// Run: npx tsx data/step-cut-test.mts --username AI_STEP
+// Run: bun data/step-cut-test.mts --username AI_STEP
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import {

@@ -3,7 +3,7 @@
 // The active smelt Option must retain the selected furnace route and the
 // safety/control escape hatch, but it must not admit an untagged semantic
 // candidate such as CRAFT:stick.  Run with:
-//   npx tsx test-furnace-prereq-gate.mts
+//   bun test-furnace-prereq-gate.mts
 import { FURNACE_PREREQUISITE_ROLE } from './src/candidates.ts'
 import { filterFurnacePrerequisiteCandidates } from './src/controller.ts'
 import type { Candidate, CandidateKind } from './src/candidates.ts'

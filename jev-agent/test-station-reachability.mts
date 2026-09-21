@@ -21,7 +21,7 @@
 // supplies (`CandidateOptions.reachability.stationApproach`); the controller
 // wires it to the live bot, tests inject it.
 //
-// Run: node --test test-station-reachability.mts
+// Run: bun --test test-station-reachability.mts
 import { readFileSync } from 'node:fs'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
@@ -268,7 +268,7 @@ async function main(): Promise<void> {
   // the live #244 interaction-stand + bounded path verdict.
   {
     const candidates = source('./src/candidates.ts')
-    const controller = source('./src/controller.ts')
+    const controller = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
     const reachability = source('./src/reachability.ts')
     const wired =
       candidates.includes('function stationApproachReachable') &&

@@ -6,7 +6,7 @@
 // diamond/netherite harvest tools, so an obsidian descent/step/headroom route
 // was refused even while holding the diamond pickaxe the block actually needs.
 //
-//   npm run minecraft-truth-test
+//   bun run minecraft-truth-test
 import { loadGameData, requiredPickaxeRank0, resolveHarvest } from './src/gameData.ts'
 import { isBreakableSolidBlock } from './src/state.ts'
 

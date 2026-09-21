@@ -22,7 +22,7 @@
 //   C. `moveFailureReason` never records a timeout / unrelated action error as
 //      the durable `unreachable` claim.
 //
-// npm run truth-causal-test
+// bun run truth-causal-test
 import {
   hasObservableProgress,
   truthfulActionOutcome,

@@ -8,8 +8,8 @@
 //   * total Jev calls for the run and the verified digs,
 //   * cost accounting at $0.04 / 1M input tokens (output free).
 //
-// Run: npm run analyze              (defaults to logs/)
-//      npx tsx analyze-run.mts --log-dir logs
+// Run: bun run analyze              (defaults to logs/)
+//      bun analyze-run.mts --log-dir logs
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 

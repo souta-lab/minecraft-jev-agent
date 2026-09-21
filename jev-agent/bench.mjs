@@ -1,7 +1,7 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Jev latency/cost benchmark through the Vercel AI Gateway.
 //
-//   node bench.mjs [--calls N] [--bucket name[,name...]] [--out file] [--append] [--seed N] [--calibrate]
+//   bun bench.mjs [--calls N] [--bucket name[,name...]] [--out file] [--append] [--seed N] [--calibrate]
 //
 // Path: ai SDK v7 -> experimental_evaluate -> model 'typesafe-ai/jev'.
 // The gateway key is read from a 0600 file and is NEVER printed or logged.

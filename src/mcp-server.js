@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 'use strict'
 
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js')

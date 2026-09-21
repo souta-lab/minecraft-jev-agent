@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // m2-acceptance: historical iron-age compatibility check against the live
 // resident control socket. Prints PASS/FAIL per criterion with observed
 // numbers. It is retained for regression/evidence replay only; the current M2

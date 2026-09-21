@@ -8,7 +8,6 @@
 //
 // `packages: 'external'` keeps mineflayer / pathfinder / prismarine shared, so
 // `new Movements(bot)` inside the generation is the SAME class the host loaded.
-import { build } from 'esbuild'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -28,30 +27,30 @@ export interface BuildResult {
 export async function buildGeneration(): Promise<BuildResult> {
   const started = Date.now()
   await mkdir(OUTDIR, { recursive: true })
-  const result = await build({
-    entryPoints: [join(HERE, 'generation-entry.ts')],
-    bundle: true,
+  const result = await Bun.build({
+    entrypoints: [join(HERE, 'generation-entry.ts')],
     format: 'esm',
-    platform: 'node',
-    target: 'node22',
+    target: 'bun',
     packages: 'external',
-    write: false,
-    logLevel: 'silent',
     sourcemap: 'inline',
-    absWorkingDir: HERE,
   })
-  const output = result.outputFiles[0]
-  if (output === undefined) throw new Error('esbuild produced no output')
-  const hash = createHash('sha256').update(output.contents).digest('hex').slice(0, 12)
+  if (!result.success) {
+    const details = result.logs.map((log) => log.message).join('\n')
+    throw new Error(`Bun.build failed${details === '' ? '' : `: ${details}`}`)
+  }
+  const output = result.outputs[0]
+  if (output === undefined) throw new Error('Bun.build produced no output')
+  const contents = new Uint8Array(await output.arrayBuffer())
+  const hash = createHash('sha256').update(contents).digest('hex').slice(0, 12)
   const outfile = join(OUTDIR, `gen-${hash}.mjs`)
   const existing = await readFile(outfile).catch(() => null)
   if (existing === null) {
     const tmp = `${outfile}.${process.pid}.tmp`
-    await writeFile(tmp, output.contents)
+    await writeFile(tmp, contents)
     await rename(tmp, outfile)
   }
   await pruneOld(outfile)
-  return { outfile, hash, bytes: output.contents.byteLength, ms: Date.now() - started }
+  return { outfile, hash, bytes: contents.byteLength, ms: Date.now() - started }
 }
 
 async function pruneOld(justWritten: string): Promise<void> {

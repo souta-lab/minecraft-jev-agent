@@ -164,9 +164,9 @@ A single clean listener snapshot does not prove a 20-reload soak requirement. Th
 Before taking new work:
 
 ```bash
-npm run frontier
-npm run current-status
-npm run lane-guard
+bun run frontier
+bun run current-status
+bun run lane-guard
 ```
 
 Pick only from `NOW` unless the orchestrator explicitly promotes another item. Before creating another issue, search existing open/closed issues and prefer adding evidence or a regression to the existing acceptance boundary.

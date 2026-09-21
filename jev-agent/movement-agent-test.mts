@@ -6,7 +6,7 @@
 // climbs a 1-block step. It is the evidence that the ported recipe works inside
 // the agent, not just in the harness.
 //
-// Run: npx tsx movement-agent-test.mts --username AI_V1b
+// Run: bun movement-agent-test.mts --username AI_V1b
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'

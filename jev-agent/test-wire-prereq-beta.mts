@@ -153,7 +153,7 @@ const heldDecision = planPrereqOptions(prereqInput)
 // --- 1. static wiring --------------------------------------------------------
 
 addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path', () => {
-  const text = source('./src/controller.ts')
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
   const missing = [
     'const unreachableStations = this.unreachableStationKeys(state)',
     'candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)',
@@ -168,7 +168,7 @@ addCase('#63: controller.ts calls applyFurnacePrereq on the tick candidate path'
 })
 
 addCase('#63: controller.ts invokes planPrereqOptions / formatPrereqSwitch / formatPrereqOptionFor', () => {
-  const text = source('./src/controller.ts')
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
   const missing = ['planPrereqOptions(input)', 'formatPrereqSwitch(', 'formatPrereqOptionFor(decision, chosen)'].filter(
     (needle) => !text.includes(needle),
   )
@@ -182,12 +182,14 @@ addCase('#63: candidates.ts tags prereq candidates via planPrereqOptions + meta.
 })
 
 addCase('#63: controller.ts gates beta adoption behind the verdict + betaAuthority', () => {
-  const text = source('./src/controller.ts')
+  const text = `${source('./src/controller.ts')}\n${source('./src/controller-legacy.ts')}`
   const pass =
     text.includes('betaAuthorityDecision({') &&
     text.includes('classifyAbandonRequest({') &&
-    text.includes('this.abandonVerdict(result, optionId, planId)') &&
-    text.includes('return this.adoptAbandon(result)')
+    text.includes('private abandonVerdict(') &&
+    text.includes('private applyAbandon(') &&
+    text.includes('this.options.betaAuthority') &&
+    text.includes('return { adopt: vote.adopt')
   return { pass, detail: pass ? 'betaAuthorityDecision + abandonVerdict + authority path present' : 'beta gate missing' }
 })
 
@@ -235,7 +237,7 @@ addCase('#58: a stalled place_held switches to use_known_station instead of repe
 
 addCase('#22: betaAuthority=false means beta=1 can never adopt (protected path)', () => {
   const vote = betaAuthorityDecision({
-    betaAuthority: resolveBetaAuthority({}),
+    betaAuthority: resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' }),
     abandonRequested: true,
     actionId: 'RETRIEVE:known:station:furnace:b29_61_35',
     goals: [smeltGoal],
@@ -255,7 +257,7 @@ addCase('#22: betaAuthority=false means beta=1 can never adopt (protected path)'
 
 addCase('#22: betaAuthority=false means beta=1 cannot adopt even unprotected', () => {
   const vote = betaAuthorityDecision({
-    betaAuthority: resolveBetaAuthority({}),
+    betaAuthority: resolveBetaAuthority({ BUDDY_BETA_AUTHORITY: 'shadow' }),
     abandonRequested: true,
     actionId: 'MINE:b10_64_0',
     goals: [collectGoal],

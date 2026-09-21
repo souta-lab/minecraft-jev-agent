@@ -353,7 +353,7 @@ addCase('mercury cache bypasses after MAX_CACHE_REPLAYS into a fatal, never a nu
   }
 })
 
-addCase('mercury grounding refuses a smelt-first plan with no held input', () => {
+addCase('mercury grounding reports a missing smelt input without replacing the semantic plan', () => {
   const plan = { op: 'replace' as const, goals: [{ item: 'iron_ingot', count: 3 }], reason: 'smelt it' }
   const refused = groundMercuryPlan(plan, { inventory: {} })
   const applicable = groundMercuryPlan(plan, { inventory: { raw_iron: 3 } })
@@ -361,7 +361,7 @@ addCase('mercury grounding refuses a smelt-first plan with no held input', () =>
   return {
     pass:
       refused.refused !== null &&
-      refused.plan.goals[0]?.item === 'raw_iron' &&
+      refused.plan.goals[0]?.item === 'iron_ingot' &&
       validated.ok &&
       applicable.refused === null,
     detail: `refused=${JSON.stringify(refused.refused)} goals=${JSON.stringify(refused.plan.goals)}`,

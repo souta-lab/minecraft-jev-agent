@@ -1,11 +1,11 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // tools/test-lane-guard.mjs — offline fixtures for tools/lane-guard.mjs.
 //
 // No network, no real gh/git: every source is injected through a fake runner.
 // Verifies the four acceptance cases: duplicate worktrees, a single lane, a
 // branch with no issue ref, and unreadable gh output.
 //
-// Usage: node tools/test-lane-guard.mjs
+// Usage: bun tools/test-lane-guard.mjs
 
 import assert from 'node:assert/strict'
 import process from 'node:process'

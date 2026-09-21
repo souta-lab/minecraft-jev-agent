@@ -15,7 +15,7 @@
 //      retires it; the retrieval-stall timer resets on every candidate id change,
 //      so the collect-log plan loops through the same unreachable list.
 //
-//   npm run move-stuck-stale-test
+//   bun run move-stuck-stale-test
 import type { Candidate } from './src/candidates.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import { filterKnownResources, shouldRetireKnownRetrieve } from './src/controller.ts'

@@ -19,53 +19,51 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Bun workspace
+        run: bun install --frozen-lockfile
+      - name: Verify movement patch
+        run: bun run movement-patch:check
+      - name: Bun migration residue gate
+        run: bun run bun-residue-check
       - name: Frontier fixtures
-        run: npm run frontier-test
+        run: bun run frontier-test
       - name: Issue-state fixtures
-        run: npm run issue-state-test
+        run: bun run issue-state-test
       - name: Issue graph fixtures
-        run: npm run issue-graph-test
+        run: bun run issue-graph-test
       - name: Current-status fixtures
-        run: npm run current-status-test
+        run: bun run current-status-test
       - name: Lane-guard fixtures
-        run: npm run lane-guard-test
+        run: bun run lane-guard-test
       - name: Milestone contract fixtures
-        run: npm run milestone-status:check && npm run milestone-status-test
+        run: bun run milestone-status:check && bun run milestone-status-test
       - name: M2 evidence tooling fixtures
-        run: npm run m2-watch-test && npm run m2-acceptance-test && npm run m2-live-gate-test && npm run m2-gate-test
+        run: bun run m2-watch-test && bun run m2-acceptance-test && bun run m2-live-gate-test && bun run m2-gate-test
       - name: Live issue-routing invariant
-        run: npm run frontier:check
+        run: bun run frontier:check
       - name: Live issue-evidence invariant
-        run: npm run issue-state:check
+        run: bun run issue-state:check
 
   authority-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: jev-agent/package-lock.json
-      - name: Install Jev toolchain
-        working-directory: jev-agent
-        run: npm ci
-      - name: Install resident dependencies
-        working-directory: buddy-driver
-        run: npm install --ignore-scripts
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Bun workspace
+        run: bun install --frozen-lockfile
+      - name: Verify movement patch
+        run: bun run movement-patch:check
       - name: Resident typecheck
         working-directory: buddy-driver
-        run: npm run typecheck
+        run: bun run typecheck
       - name: System2 and Jev authority swap points
         working-directory: buddy-driver
-        run: npm run authority-test
+        run: bun run authority-test
       - name: Jev-owned anti-flap commitment
         working-directory: jev-agent
-        run: npx tsx test-anti-flap.mts
+        run: bun test ./test-anti-flap.mts
 
   core-deterministic:
     runs-on: ubuntu-latest
@@ -75,24 +73,24 @@ jobs:
         working-directory: jev-agent
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: jev-agent/package-lock.json
-      - name: Install
-        run: npm ci
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Bun workspace
+        working-directory: .
+        run: bun install --frozen-lockfile
+      - name: Verify movement patch
+        working-directory: .
+        run: bun run movement-patch:check
       - name: Typecheck
-        run: npm run typecheck
+        run: bun run typecheck
       - name: Mechanics truth
-        run: npm run game-data-test && npm run minecraft-truth-test
+        run: bun run game-data-test && bun run minecraft-truth-test
       - name: Option and verification semantics
-        run: npm run option-spec-test && npm run action-verify-test && npm run truth-causal-test && npm run protected-goals-test
+        run: bun run option-spec-test && bun run action-verify-test && bun run truth-causal-test && bun run protected-goals-test
       - name: Truthful retrieve outcome
-        run: npm run retrieve-truthful-outcome-test
+        run: bun run retrieve-truthful-outcome-test
       - name: Retrieve failure memory
-        run: npm run retrieve-failure-memory-test
+        run: bun run retrieve-failure-memory-test
       - name: Grounded reachability
-        run: npm run reachability-test
+        run: bun run reachability-test
       - name: Recovery policy regressions
-        run: npm run candidate-policy-test && npm run move-failmem-test && npm run pit-escape-test && npm run pillar-search-test && npm run hop-policy-test && npm run pillar-jump-test && npm run pillar-apex-test
+        run: bun run candidate-policy-test && bun run move-failmem-test && bun run pit-escape-test && bun run pillar-search-test && bun run hop-policy-test && bun run pillar-jump-test && bun run pillar-apex-test

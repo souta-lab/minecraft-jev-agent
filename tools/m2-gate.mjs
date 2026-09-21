@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // m2-gate: run-scoped PASS/FAIL/UNKNOWN gate for the CURRENT M2 contract
 // (MILESTONE-CONTRACT.json M2 "Diamond-to-Nether-gate closed loop").
 //

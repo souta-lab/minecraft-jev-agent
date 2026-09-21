@@ -2,7 +2,7 @@
 // step on this Leaf server: is it pathfinder planning, Mineflayer physics, or the
 // server rejecting the jump+forward contact?
 //
-// Run: npx tsx stock-step-probe.mts [--username AI_R2S2]
+// Run: bun stock-step-probe.mts [--username AI_R2S2]
 import mineflayer from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 

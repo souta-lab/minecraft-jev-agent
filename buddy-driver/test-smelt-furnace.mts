@@ -1,7 +1,7 @@
 // test-smelt-furnace.mts - M2 smelt pipeline: deterministic furnace acquisition,
 // plan ordering, and a fixture run of the production furnace-window smelt.
 //
-// Run: node ../jev-agent/node_modules/.bin/tsx test-smelt-furnace.mts
+// Run: bun test ./test-smelt-furnace.mts
 import { defaultCandidateOptions, generateCandidates } from '../jev-agent/src/candidates.ts'
 import type { Candidate } from '../jev-agent/src/candidates.ts'
 import { executeFurnaceSmelt, formatSmeltLog } from '../jev-agent/src/executor.ts'

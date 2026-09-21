@@ -62,16 +62,16 @@ Dependencies are plain published packages (no patches, no `postinstall`):
 
 ```bash
 cd /home/s0u7a/mc-ai/mcbot
-npm install mineflayer
+bun install mineflayer
 ```
 
 Then:
 
 ```bash
-node bot.mjs --seconds 20     # connect, report, chat, disconnect after 20s
-node bot.mjs                  # stay connected until Ctrl+C
-node bot.mjs --username Steve --seconds 5
-node bot.mjs --help
+bun bot.mjs --seconds 20     # connect, report, chat, disconnect after 20s
+bun bot.mjs                  # stay connected until Ctrl+C
+bun bot.mjs --username Steve --seconds 5
+bun bot.mjs --help
 ```
 
 Options: `--host` (default `127.0.0.1`), `--port` (`25565`), `--username`
@@ -108,7 +108,7 @@ choice — nothing is required server-side.
 - **`UnsupportedClassVersionError` / `Unsupported Java detected`** — use the
   Temurin 25 GA JRE (default in `start.sh`).
 - **`Server version '26.1.2' is not supported`** — should not happen with the
-  published packages; check `npm ls mineflayer minecraft-protocol minecraft-data`.
+  published packages; check `bun pm ls mineflayer minecraft-protocol minecraft-data`.
 - **Port 25565 already in use** — stop the old server
   (`kill "$(pgrep -f leaf-26.1.2-3.jar)"`) or change `server-port`.
 - **World files** — live in `/home/s0u7a/mc-server/world`. The previous
