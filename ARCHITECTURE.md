@@ -444,10 +444,10 @@ Full detail: `buddy-driver/ARCHITECTURE.md`.
 # UPDATE 2026-09-18 01:58 JST (autonomous run) — what actually changed
 
 ## Now working (verified with evidence)
-- **Mercury 2.5 is live as System2Brain** (exception-driven only):
+- **`meta/muse-spark-1.3-contributor` is live as System2Brain** (the semantic WHAT layer; exception-driven plus the drained-queue consult):
   `ADVISOR source=mercury reason=no_candidate strategy=mercury_continue_collect_raw_iron cost=0.000329 ms=6870`
   followed by `STRATEGY_SET ... source=mercury goals=["collect 3 x raw_iron"]`. Transport: Vercel AI Gateway,
-  model id `inception/mercury-2.5`, same gateway key as Jev. Call records: `buddy-driver/logs/jev/mercury-calls.jsonl`
+  model id `meta/muse-spark-1.3-contributor`, same gateway key as Jev. Call records: `buddy-driver/logs/jev/mercury-calls.jsonl` (historical ids `inception/mercury-2.5` / `-2` remain priced for old records)
   (schema: record, callId, ts, model, stage, latencyMs, retries, state, prompt, response, usage, cost, error).
   An earlier failure mode `aborted due to timeout` at latencyMs=52 was fixed (realistic timeout + retry).
 - **Hot reload is healthy**: reloads with changing hashes at 150-300 ms, watcher covers `jev-agent/src`.

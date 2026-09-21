@@ -1,4 +1,10 @@
-// mercury-system2.ts - a REAL System2Brain backed by Inception Mercury 2.5.
+// mercury-system2.ts - a REAL System2Brain (the semantic WHAT layer).
+//
+// The live model is `meta/muse-spark-1.3-contributor` (see MUSE_SPARK_MODEL /
+// SYSTEM2_MODEL_DEFAULT). The module keeps the historical `Mercury*` names for the
+// transport/marker surface because run artifacts and logs reference them; the MODEL it
+// talks to is muse-spark. Earlier revisions used `inception/mercury-2.5` (and
+// `inception/mercury-2`), which are retained in the price table for old call records.
 //
 // This is the EXCEPTION-DRIVEN high-level planner. It is only consulted when the
 // resident is stuck (no productive candidate / 3 consecutive WAITs / no progress /
@@ -814,6 +820,13 @@ interface ModelPrice {
 }
 
 export const MERCURY_PRICES: Readonly<Record<string, ModelPrice>> = {
+  // The live semantic layer model. Without this entry `mercuryCostUsd` returned 0 for
+  // every live call, so run artifacts recorded no cost at all for the model that is
+  // actually in use. Prices are the gateway catalog values (USD per token).
+  'meta/muse-spark-1.3-contributor': { input: 0.0000001, output: 0.0000002 },
+  'meta/muse-spark-1.2': { input: 0.00000125, output: 0.00000425 },
+  'meta/muse-spark-1.1': { input: 0.00000125, output: 0.00000425 },
+  // Historical ids kept so old call records still price correctly.
   'inception/mercury-2.5': { input: 0.00000004, output: 0.00000015 },
   'inception/mercury-2': { input: 0.00000025, output: 0.00000075 },
 }
