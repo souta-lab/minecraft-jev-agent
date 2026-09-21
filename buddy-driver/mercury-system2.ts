@@ -137,9 +137,71 @@ export const MERCURY_PLAN_SCHEMA = z
 export type MercuryPlanGoalJson = z.infer<typeof MERCURY_PLAN_SCHEMA>['goals'][number]
 export type MercuryPlanJson = z.infer<typeof MERCURY_PLAN_SCHEMA>
 
+/**
+ * A mechanically-filled optional field (MERCURY_DEFAULT_COUNT today). Reported
+ * instead of silently rewritten so `MERCURY_FIELD_DEFAULT` can show exactly what
+ * code supplied and on whose authority.
+ */
+export interface MercuryFieldDefault {
+  readonly path: string
+  readonly value: string
+  readonly why: string
+}
+
+/**
+ * Structured form of the FIRST rejection. The corrective retry and the
+ * `MERCURY_SCHEMA_REJECT` marker both read this, so the model is told the exact
+ * field path and expectation instead of a bare Zod message.
+ */
+export interface MercuryPlanReject {
+  /** schema field path, `<root>` when the whole plan object was absent, or `goals.N` for grounding. */
+  readonly path: string
+  /** what the schema/grounding expected at that path. */
+  readonly expected: string
+  readonly stage: 'schema' | 'capability' | 'plan'
+}
+
 export type MercuryValidation =
-  | { ok: true; plan: MercuryPlanJson }
-  | { ok: false; error: string }
+  | { ok: true; plan: MercuryPlanJson; repairs: readonly MercuryFieldDefault[] }
+  | { ok: false; error: string; reject: MercuryPlanReject; repairs: readonly MercuryFieldDefault[] }
+
+/**
+ * Turn the first Zod issue into a path + expectation. A missing plan object is
+ * reported by Zod as an empty-path `invalid_type` on `object` with the message
+ * `Required`; that is exactly the live `schema:  Required` rejection (the model's
+ * text response contained no parseable plan object at all), so it is reported as
+ * `<root>` with an explicit "no plan object was produced" expectation instead of
+ * an empty field path the model cannot act on.
+ */
+export function describeMercurySchemaIssue(
+  issue:
+    | { path: readonly (string | number)[]; code: string; expected?: unknown; received?: unknown; message: string }
+    | undefined,
+): MercuryPlanReject {
+  const path = (issue?.path ?? []).map((segment) => String(segment)).join('.')
+  if (path.length > 0) {
+    const expected = issue?.expected === undefined ? (issue?.code ?? 'a valid value') : String(issue.expected)
+    return { path, expected, stage: 'schema' }
+  }
+  if (issue?.code === 'invalid_type' && issue.received === 'undefined') {
+    return {
+      path: '<root>',
+      expected: 'a JSON plan object { op, goals, reason } (no plan object was produced)',
+      stage: 'schema',
+    }
+  }
+  const expected = issue?.expected === undefined ? (issue?.code ?? 'a valid plan') : String(issue.expected)
+  return { path: '<root>', expected, stage: 'schema' }
+}
+
+/** Render the exact corrective text fed back to the model for a rejection. */
+export function describeMercuryReject(reject: MercuryPlanReject, issueMessage: string | undefined): string {
+  if (reject.path === '<root>' && reject.expected.includes('no plan object was produced')) {
+    return `schema: ${reject.path} expected ${reject.expected}`
+  }
+  const detail = issueMessage === undefined || issueMessage.length === 0 ? '' : ` (${issueMessage})`
+  return `schema: ${reject.path} expected ${reject.expected}${detail}`
+}
 
 function collectableItems(): ReadonlySet<string> {
   return new Set(MERCURY_ALLOWED_GOALS.collect)
@@ -211,13 +273,32 @@ export function normalizeMercuryGoal(goal: MercuryPlanGoalJson): MercuryPlanGoal
 
 /** Normalize every goal in a parsed plan; returns the same object when nothing changed. */
 export function normalizeMercuryPlan(plan: MercuryPlanJson): MercuryPlanJson {
+  return normalizeMercuryPlanDetailed(plan).plan
+}
+
+/**
+ * Normalize and REPORT every mechanically-filled field. The plan is never
+ * reordered, invented or dropped; only a missing optional count is supplied.
+ */
+export function normalizeMercuryPlanDetailed(plan: MercuryPlanJson): {
+  plan: MercuryPlanJson
+  repairs: readonly MercuryFieldDefault[]
+} {
+  const repairs: MercuryFieldDefault[] = []
   let changed = false
-  const goals = plan.goals.map((goal) => {
+  const goals = plan.goals.map((goal, index) => {
     const normalized = normalizeMercuryGoal(goal)
-    if (normalized !== goal) changed = true
+    if (normalized !== goal) {
+      changed = true
+      repairs.push({
+        path: `goals.${index}.count`,
+        value: String(normalized.count),
+        why: 'mechanical-minimum (MERCURY_DEFAULT_COUNT); omission is already schema-valid',
+      })
+    }
     return normalized
   })
-  return changed ? { ...plan, goals } : plan
+  return { plan: changed ? { ...plan, goals } : plan, repairs }
 }
 
 function validateItemGoal(
@@ -324,31 +405,47 @@ export function validateMercuryPlan(value: unknown): MercuryValidation {
   const parsed = MERCURY_PLAN_SCHEMA.safeParse(value)
   if (!parsed.success) {
     const issue = parsed.error.issues[0]
-    return { ok: false, error: `schema: ${issue?.path.join('.') ?? '?'} ${issue?.message ?? 'invalid'}` }
+    const reject = describeMercurySchemaIssue(issue)
+    return { ok: false, error: describeMercuryReject(reject, issue?.message), reject, repairs: [] }
   }
-  const plan = normalizeMercuryPlan(parsed.data)
+  const normalized = normalizeMercuryPlanDetailed(parsed.data)
+  const plan = normalized.plan
   if ((plan.op === 'abort' || plan.op === 'complete') && plan.goals.length !== 0) {
-    return { ok: false, error: `${plan.op} plans must not contain goals` }
+    return {
+      ok: false,
+      error: `${plan.op} plans must not contain goals`,
+      reject: { path: 'goals', expected: `no goals for op=${plan.op}`, stage: 'plan' },
+      repairs: normalized.repairs,
+    }
   }
   for (let index = 0; index < plan.goals.length; index += 1) {
     const goal = plan.goals[index]
     if (goal === undefined) continue
     const error = validateMercuryGoal(index, goal)
-    if (error !== null) return { ok: false, error }
+    if (error !== null) {
+      return {
+        ok: false,
+        error,
+        reject: { path: `goals.${index}`, expected: 'a grounded kind x target pair from allowedGoals', stage: 'capability' },
+        repairs: normalized.repairs,
+      }
+    }
   }
-  return { ok: true, plan }
+  return { ok: true, plan, repairs: normalized.repairs }
 }
 
 /** A rejected plan that is retryable WHEN the exact rejection is fed back to the model. */
 export class MercuryPlanValidationError extends Error {
   readonly validationError: string
   readonly rawPlan: unknown
+  readonly reject: MercuryPlanReject | null
 
-  constructor(validationError: string, rawPlan: unknown) {
+  constructor(validationError: string, rawPlan: unknown, reject: MercuryPlanReject | null = null) {
     super(`invalid plan: ${validationError}`)
     this.name = 'MercuryPlanValidationError'
     this.validationError = validationError
     this.rawPlan = rawPlan
+    this.reject = reject
   }
 }
 
@@ -369,6 +466,21 @@ export function isRetryableMercuryAttempt(error: unknown): boolean {
 export const MERCURY_SCHEMA_CORRECTIVE_HINT =
   "Every collect/craft/smelt goal MUST name a real allowed item AND include an integer count in [1,64]; a legacy item goal must be exactly { item, count }."
 
+/**
+ * The transport could not find a plan object in the model's text response (the
+ * live `schema:  Required` rejection). The generic count hint is useless here:
+ * the model must emit one bare JSON object before any field can be corrected.
+ */
+export const MERCURY_NO_PLAN_OBJECT_HINT =
+  'Your response text contained NO parseable JSON plan object. Return exactly ONE JSON object in the response text (no prose, no markdown fence, no tool call) with keys op, goals and reason.'
+
+/** Select the corrective hint that matches the exact rejection. */
+export function mercuryCorrectiveHint(validationError: string): string {
+  return validationError.includes('no plan object was produced')
+    ? MERCURY_NO_PLAN_OBJECT_HINT
+    : MERCURY_SCHEMA_CORRECTIVE_HINT
+}
+
 /** Append the exact validation rejection + a repair instruction to the next attempt's prompt. */
 export function buildCorrectivePrompt(basePrompt: string, validationError: string): string {
   return [
@@ -376,7 +488,7 @@ export function buildCorrectivePrompt(basePrompt: string, validationError: strin
     '',
     'CORRECTION REQUIRED: your previous emitPlan call was rejected by local validation:',
     `  ${validationError}`,
-    `Fix exactly that problem and re-emit the emitPlan tool call. ${MERCURY_SCHEMA_CORRECTIVE_HINT}`,
+    `Fix exactly that problem and re-emit the emitPlan tool call. ${mercuryCorrectiveHint(validationError)}`,
     'Do not repeat the rejected goal unchanged.',
   ].join('\n')
 }
@@ -933,6 +1045,19 @@ export interface MercuryTransportToolCall {
 export interface MercuryTransportResult {
   readonly toolCalls: readonly MercuryTransportToolCall[]
   readonly usage: unknown
+  /**
+   * Transport-level shape repairs applied while obtaining the tool call
+   * (json-text path only). Reported so `MERCURY_JSON_TEXT_REPAIRED` /
+   * `MERCURY_JSON_TEXT_UNPARSED` make the recovery observable instead of silent.
+   */
+  readonly repairs?: readonly MercuryTransportRepair[]
+}
+
+export interface MercuryTransportRepair {
+  readonly kind: 'json-text'
+  readonly shape: MercuryJsonTextShape
+  readonly objects: number
+  readonly chars: number
 }
 
 export type MercuryTransport = (request: MercuryTransportRequest) => Promise<MercuryTransportResult>
@@ -968,25 +1093,121 @@ export function mercuryTransportMode(model: string): MercuryTransportMode {
 }
 
 
-/** Extract one JSON object from a model's text response without repairing it. */
-export function parseMercuryJsonText(text: string): unknown | null {
-  const trimmed = text.trim()
-  if (trimmed.length === 0) return null
-  const candidates: string[] = [trimmed]
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]
-  if (fenced !== undefined) candidates.push(fenced.trim())
-  const first = trimmed.indexOf('{')
-  const last = trimmed.lastIndexOf('}')
-  if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1))
-  for (const candidate of candidates) {
-    try {
-      const parsed: unknown = JSON.parse(candidate)
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
-    } catch {
-      // The caller turns null into the normal schema rejection/corrective retry.
+/**
+ * How a json-text response yielded its plan object.
+ *   exact       - the whole trimmed text is the JSON object
+ *   fenced      - a ```json ... ``` fence body
+ *   embedded    - one balanced `{...}` object found inside prose
+ *   multi-final - several balanced objects parsed; the LAST one carrying an
+ *                 `op` key was taken (a reasoning model emits drafts, then its
+ *                 final answer). Purely envelope selection: the local schema and
+ *                 capability grounding still own acceptance.
+ *   none        - no parseable plain object was found
+ */
+export type MercuryJsonTextShape = 'exact' | 'fenced' | 'embedded' | 'multi-final' | 'none'
+
+export interface MercuryJsonTextParse {
+  readonly value: unknown | null
+  readonly shape: MercuryJsonTextShape
+  /** number of balanced top-level `{...}` objects seen in the text */
+  readonly objects: number
+}
+
+/** All balanced top-level `{...}` substrings, string-literal aware. */
+function balancedJsonObjects(text: string): string[] {
+  const found: string[] = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (depth > 0 && inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"' && depth > 0) {
+      inString = true
+      continue
+    }
+    if (char === '{') {
+      if (depth === 0) start = index
+      depth += 1
+      continue
+    }
+    if (char === '}') {
+      if (depth === 0) continue
+      depth -= 1
+      if (depth === 0 && start >= 0) {
+        found.push(text.slice(start, index + 1))
+        start = -1
+      }
     }
   }
-  return null
+  return found
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseJsonObject(candidate: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(candidate)
+    return isPlainObject(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function fencedBlocks(text: string): string[] {
+  const blocks: string[] = []
+  const pattern = /```(?:json)?\s*([\s\S]*?)\s*```/gi
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    const body = match[1]
+    if (body !== undefined && body.trim().length > 0) blocks.push(body.trim())
+  }
+  return blocks
+}
+
+/**
+ * Extract one plan object from a reasoning model's text response. This is a
+ * transport-shape repair only: it never edits the object, and the same strict
+ * `MERCURY_PLAN_SCHEMA` + capability grounding validate the result. It exists
+ * because the live failure was `schema:  Required` with an EMPTY field path:
+ * the response contained no object the old first-`{`..last-`}` extractor could
+ * parse, so the model was told nothing actionable and burned all 3 attempts.
+ */
+export function parseMercuryJsonTextDetailed(text: string): MercuryJsonTextParse {
+  const raw = typeof text === 'string' ? text : ''
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return { value: null, shape: 'none', objects: 0 }
+  const objects = balancedJsonObjects(trimmed)
+  const exact = parseJsonObject(trimmed)
+  if (exact !== null) return { value: exact, shape: 'exact', objects: objects.length }
+  for (const block of fencedBlocks(trimmed)) {
+    const fenced = parseJsonObject(block)
+    if (fenced !== null) return { value: fenced, shape: 'fenced', objects: objects.length }
+  }
+  const parsedObjects = objects.map(parseJsonObject).filter((value): value is Record<string, unknown> => value !== null)
+  if (parsedObjects.length === 0) return { value: null, shape: 'none', objects: objects.length }
+  const withOp = parsedObjects.filter((value) => 'op' in value)
+  if (withOp.length > 1) {
+    // Several candidates look like a plan envelope: take the model's LAST
+    // emission (reasoning models narrate drafts before the final answer).
+    return { value: withOp[withOp.length - 1] ?? null, shape: 'multi-final', objects: objects.length }
+  }
+  if (withOp.length === 1) return { value: withOp[0] ?? null, shape: 'embedded', objects: objects.length }
+  const fallback = parsedObjects[parsedObjects.length - 1] ?? null
+  return { value: fallback, shape: objects.length > 1 ? 'multi-final' : 'embedded', objects: objects.length }
+}
+
+/** Backward-compatible value-only view of {@link parseMercuryJsonTextDetailed}. */
+export function parseMercuryJsonText(text: string): unknown | null {
+  return parseMercuryJsonTextDetailed(text).value
 }
 
 // AI SDK 7.0.107 exposes a deeply recursive FlexibleSchema type. Keeping the
@@ -1020,8 +1241,21 @@ function defaultMercuryTransport(model: string): MercuryTransport {
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(timeoutMs),
       })
-      const parsed = parseMercuryJsonText(result.text)
-      return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage: result.usage }
+      const parsed = parseMercuryJsonTextDetailed(result.text)
+      const repair: MercuryTransportRepair = {
+        kind: 'json-text',
+        shape: parsed.shape,
+        objects: parsed.objects,
+        chars: result.text.length,
+      }
+      if (parsed.value === null) {
+        return { toolCalls: [], usage: result.usage, repairs: [repair] }
+      }
+      return {
+        toolCalls: [{ input: parsed.value }],
+        usage: result.usage,
+        repairs: parsed.shape === 'exact' ? [] : [repair],
+      }
     }
   }
   return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
@@ -1197,7 +1431,12 @@ export interface MercuryAttemptOptions<T> {
   readonly call: (context: MercuryAttemptContext) => Promise<T>
   readonly isRetryable: (error: unknown) => boolean
   readonly onRetry: (detail: MercuryRetryDetail) => void
-  /** Turn a failed attempt into corrective feedback for the next attempt; null when none applies. */
+  /**
+   * Turn a failed attempt into corrective feedback for the next attempt. A
+   * non-null result replaces the pending correction; null/undefined keeps the
+   * previous one, so a transport/rate-limit failure cannot erase a schema
+   * correction and leave the next attempt to guess.
+   */
   readonly feedbackFor?: (error: unknown) => string | null
   /**
    * Backoff before a retryable failure is retried. Mirrors the planner-authority
@@ -1243,7 +1482,14 @@ export async function runMercuryAttempts<T>(options: MercuryAttemptOptions<T>): 
       }
       previousError = error
       hasPreviousError = true
-      feedback = options.feedbackFor?.(error) ?? null
+      // Only a NEW correction replaces the pending one. A transport/rate-limit
+      // failure carries none, and erasing the last schema correction there would
+      // make the next attempt repeat the shape mistake blind. That is the live
+      // `mercury-1-mub33nuq` sequence: attempt 1 schema reject, attempt 2 gateway
+      // 5xx (corrective=false), attempt 3 re-emitted an unparseable response and
+      // the resident terminated fail-loud.
+      const nextFeedback = options.feedbackFor?.(error)
+      if (nextFeedback !== null && nextFeedback !== undefined) feedback = nextFeedback
       const delay = options.retryDelayMs?.(attempt) ?? 0
       if (delay > 0) await mercurySleep(delay)
     }
@@ -1535,10 +1781,49 @@ export class MercurySystem2 implements System2Brain {
         maxOutputTokens: this.maxOutputTokens,
         timeoutMs: this.timeoutMs,
       })
+      for (const repair of result.repairs ?? []) {
+        if (repair.shape === 'none') {
+          this.log('MERCURY_JSON_TEXT_UNPARSED', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            shape: repair.shape,
+            objects: repair.objects,
+            chars: repair.chars,
+            model: this.model,
+          })
+        } else {
+          this.log('MERCURY_JSON_TEXT_REPAIRED', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            shape: repair.shape,
+            objects: repair.objects,
+          })
+        }
+      }
       const toolCall = result.toolCalls[0]
       const raw = toolCall === undefined ? undefined : toolCall.input
       const validated = validateMercuryPlan(raw)
+      for (const repair of validated.repairs) {
+        this.log('MERCURY_FIELD_DEFAULT', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          path: repair.path,
+          value: repair.value,
+          why: repair.why,
+        })
+      }
       if (!validated.ok) {
+        this.log('MERCURY_SCHEMA_REJECT', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          stage: validated.reject.stage,
+          path: validated.reject.path,
+          expected: validated.reject.expected,
+        })
         rejectedAttempts.push({
           attempt: context.attempt,
           prompt,
@@ -1554,7 +1839,7 @@ export class MercurySystem2 implements System2Brain {
           attempt: context.attempt,
           corrective: context.feedback !== null,
         })
-        throw new MercuryPlanValidationError(validated.error, raw ?? null)
+        throw new MercuryPlanValidationError(validated.error, raw ?? null, validated.reject)
       }
       return { plan: validated.plan, usage: result.usage, prompt }
     }
