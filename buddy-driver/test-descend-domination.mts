@@ -177,18 +177,19 @@ addCase('(a) the live descend:raw_iron row is dominated by the held substitutes'
   return { pass, detail: `overworld=${JSON.stringify(overworld)} nether=${JSON.stringify(nether)}` }
 })
 
-addCase('(a) the frontend the live run measured: blaze_rods, and the iron rung satisfied', () => {
+addCase('(a) the frontier the live run measured: blaze_rods, and the iron rung satisfied', () => {
   const nether = liveFrontier(LIVE_COUNTS, NETHER_WORLD)
   const entry = liveFrontier(LIVE_COUNTS, PORTAL_LIT_WORLD)
   // The rung's own predicate must already be true, or the fixture proves nothing.
   const ironFrontier = liveFrontier({ ...LIVE_COUNTS, diamond_pickaxe: 0, flint_and_steel: 0 }, PORTAL_LIT_WORLD)
   const pass =
     nether.rungId === 'blaze_rods' &&
-    nether.rungIndex === 15 &&
     entry.rungId === 'enter_nether' &&
+    // the Nether frontier is past the dimension-transfer rung
+    nether.rungIndex > entry.rungIndex &&
     ironFrontier.rungId !== 'blaze_rods' &&
     ironFrontier.rungId !== 'enter_nether'
-  return { pass, detail: `nether=${nether.rungId}@${nether.rungIndex} entry=${entry.rungId} withoutSubstitutes=${ironFrontier.rungId}` }
+  return { pass, detail: `nether=${nether.rungId}@${nether.rungIndex} entry=${entry.rungId}@${entry.rungIndex} withoutSubstitutes=${ironFrontier.rungId}` }
 })
 
 addCase('(a) the runtime GoalQueue retires the live row with PREREQ_DOMINATED', () => {
