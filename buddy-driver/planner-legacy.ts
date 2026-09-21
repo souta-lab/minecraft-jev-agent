@@ -492,7 +492,15 @@ export const RUNGS: readonly Rung[] = [
     // M2 transition: done only once the lit nether_portal block actually exists.
     // The previous flint_and_steel predicate declared the rung satisfied before a
     // frame was ever built, so the ladder skipped build/light/verify entirely.
-    satisfied: (c, w) => has(c, 'nether_portal') || w.portalVerified === true,
+    // Once the body is IN the Nether the overworld gate has demonstrably been
+    // built, lit and used, so this rung must not keep the frontier here. Live
+    // (M3 hand-off): `detectLivePortalVerification` only reads overworld truth, so
+    // standing in the Nether made `portalVerified` false, this earlier rung became
+    // unsatisfied and the ladder flapped between `front_nether_portal` and
+    // `front_enter_nether` forever instead of advancing to `blaze_rods`/`ender_pearls`.
+    // Returning to the overworld with no verified portal re-activates it.
+    satisfied: (c, w) =>
+      has(c, 'nether_portal') || w.portalVerified === true || w.dimension === 'minecraft:the_nether',
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
