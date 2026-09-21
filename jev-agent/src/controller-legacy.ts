@@ -4047,6 +4047,19 @@ export class JevController {
    * System 2 (suppressed in single-shot mode).
    */
   private syncQueue(trigger: DecisionTrigger): void {
+    // Live diagnosis (M2 hand-off): the queue's light row re-ignited thousands of
+    // times without ever completing, and `portalLitTruth` (the row's completion
+    // predicate) never ran. Record what the controller believes the current row is
+    // so the gap is decided by evidence.
+    {
+      const row = this.queue.current
+      this.logger.info(
+        'queue',
+        `SYNC_QUEUE trigger=${trigger} current=${row === null ? 'none' : `${row.id}|kind=${row.kind}|pred=${row.targetPredicate ?? 'none'}|status=${row.status ?? 'n/a'}`} depth=${this.queue.size}`,
+        { current: row?.id ?? null, kind: row?.kind ?? null, predicate: row?.targetPredicate ?? null },
+        this.tickCounter,
+      )
+    }
     const current = this.queue.current
     if (current === null) return
     if (current.kind === 'descend') {
