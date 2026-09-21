@@ -141,6 +141,14 @@ export interface ReplanInputs {
    * N, so ordinary repeated failures still cannot churn a replan per tick.
    */
   actionFailureExhausted?: string | null
+  /**
+   * Issue #327 follow-up: the `wait|goal|count` fingerprint of an actionable
+   * WAIT streak that has JUST reached its bound, else null. A model that keeps
+   * choosing the no-op WAIT while real candidates are offered is itself a
+   * zero-progress loop; the controller surfaces the exhaustion here so the
+   * replan gate releases the wake instead of suppressing it as `no_new_info`.
+   */
+  waitStreakExhausted?: string | null
 }
 
 /** Canonical, order-independent inventory signature (counts > 0 only). */
@@ -165,6 +173,7 @@ export function hashReplanInputs(inputs: ReplanInputs): string {
     capabilityGap: inputs.capabilityGap,
     goal: inputs.goalKey ?? null,
     actionFailureExhausted: inputs.actionFailureExhausted ?? null,
+    waitStreakExhausted: inputs.waitStreakExhausted ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -187,6 +196,7 @@ export function replanInputsChanged(
   if (previous.capabilityGap !== current.capabilityGap) return true
   if ((previous.goalKey ?? null) !== (current.goalKey ?? null)) return true
   if ((previous.actionFailureExhausted ?? null) !== (current.actionFailureExhausted ?? null)) return true
+  if ((previous.waitStreakExhausted ?? null) !== (current.waitStreakExhausted ?? null)) return true
   if (inventorySignature(previous.inventory) !== inventorySignature(current.inventory)) return true
   if (previous.knownResources !== current.knownResources) return true
   if (previous.failureSignature !== current.failureSignature) return true
@@ -233,6 +243,7 @@ function cloneInputs(inputs: ReplanInputs): ReplanInputs {
     capabilityGap: inputs.capabilityGap,
     goalKey: inputs.goalKey ?? null,
     actionFailureExhausted: inputs.actionFailureExhausted ?? null,
+    waitStreakExhausted: inputs.waitStreakExhausted ?? null,
   }
 }
 
@@ -378,6 +389,143 @@ export class ActionFailureEscalation {
   }
 
   /** Reset on observed progress, a handled escalation, or a world-state change. */
+  reset(): void {
+    this.streak = null
+    this.exhausted = null
+  }
+}
+
+/**
+ * Bounded escalation for an actionable WAIT streak (#327 follow-up).
+ *
+ * Measured live on `449cedd` (m3-live, planId=g3:collect:flint):
+ *
+ *   ACTION n=640..645 id=WAIT kind=WAIT phase=waiting
+ *   JEV_HEADS action=WAIT abandon=0.37 decision=continue
+ *   LOCAL_RECOVERY_NO_PROGRESS=0  LOCAL_RECOVERY_EXHAUSTED=0
+ *   ACTION_FAILURE_REPEAT=0       ACTION_FAILURE_EXHAUSTED=0
+ *   CANDIDATE_SET_DEGENERATE=0    (actionable >= 2: real candidates WERE offered)
+ *
+ * Real actionable candidates were offered and the policy itself chose the no-op
+ * WAIT on every decision. The existing counters cannot see that loop:
+ *   - the #44/#78 replan counters only advance on a SUPPRESSED replan;
+ *   - `ActionFailureEscalation` only advances on a typed ACTION failure;
+ *   - the #43 WAIT wedge requires an UNCHANGED state fingerprint, but the live
+ *     body keeps collecting junk (dirt / leaf_litter / cobblestone), so the
+ *     fingerprint changes every tick and `evaluateWedgeRepeat` suppresses the
+ *     count as `fingerprint_changed` forever.
+ *
+ * This counter bounds the no-op selection itself, keyed only on the plan/goal:
+ * it counts CONSECUTIVE chosen WAIT decisions while at least one actionable
+ * (non-WAIT/non-ESCALATE) candidate was offered. It is NOT a preference between
+ * the real candidates - it never says which action should win - it only bounds
+ * the selection of the do-nothing action. On the Nth the local recovery is
+ * exhausted and System2 is woken (`WAIT_EXHAUSTED`), mirroring #326/#337.
+ *
+ * Reset (so it cannot hot-loop):
+ *   - any chosen non-WAIT action resets the streak;
+ *   - actionable === 0 (WAIT is the only option) is not a streak at all;
+ *   - a different goal/plan resets the streak;
+ *   - the streak is cleared on the Nth decision, so the next escalation needs N
+ *     fresh WAITs, and `escalate()`/`summonLlm` cooldowns bound the wake rate.
+ */
+export const WAIT_STREAK_ESCALATE_CYCLES_DEFAULT = 6
+
+/** `BUDDY_WAIT_STREAK_ESCALATE_CYCLES` overrides N; invalid values fall back. */
+export function resolveWaitStreakEscalateCycles(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  const raw = Number(env.BUDDY_WAIT_STREAK_ESCALATE_CYCLES ?? WAIT_STREAK_ESCALATE_CYCLES_DEFAULT)
+  return Number.isInteger(raw) && raw >= 1 ? raw : WAIT_STREAK_ESCALATE_CYCLES_DEFAULT
+}
+
+export const WAIT_STREAK_MARKER = 'WAIT_STREAK'
+export const WAIT_EXHAUSTED_MARKER = 'WAIT_EXHAUSTED'
+
+export interface WaitStreakDecision {
+  /** true on exactly the Nth consecutive actionable WAIT decision */
+  escalate: boolean
+  /** consecutive actionable WAIT decisions including the current one */
+  count: number
+  /** the bounded N this streak is measured against */
+  limit: number
+  goalKey: string
+  /** actionable (non-WAIT/non-ESCALATE) candidates offered for this decision */
+  actionable: number
+}
+
+/** Counter marker: the `count`-th consecutive chosen WAIT with real alternatives. */
+export function formatWaitStreak(decision: WaitStreakDecision): string {
+  return `${WAIT_STREAK_MARKER} count=${decision.count}/${decision.limit} goal=${decision.goalKey} actionable=${decision.actionable}`
+}
+
+/** Escalation marker: N actionable WAITs exhausted the local recovery. */
+export function formatWaitExhausted(decision: WaitStreakDecision): string {
+  return `${WAIT_EXHAUSTED_MARKER} count=${decision.count}/${decision.limit} goal=${decision.goalKey} -> wake System2`
+}
+
+interface WaitStreak {
+  goalKey: string
+  count: number
+}
+
+/**
+ * Bounded, pure counter for a chosen no-op WAIT while real actions exist.
+ * See the block comment above for the reset conditions and the authority
+ * boundary (it bounds the no-op; it never ranks the real candidates).
+ */
+export class WaitStreakEscalation {
+  private readonly limit: number
+  private streak: WaitStreak | null = null
+  private exhausted: WaitStreakDecision | null = null
+
+  constructor(limit: number = WAIT_STREAK_ESCALATE_CYCLES_DEFAULT) {
+    this.limit = Number.isInteger(limit) && limit >= 1 ? limit : WAIT_STREAK_ESCALATE_CYCLES_DEFAULT
+  }
+
+  /**
+   * Record one chosen action. Only `WAIT` chosen while `actionable > 0` extends
+   * the streak; every other choice, an empty actionable set, or a different
+   * goal clears it.
+   */
+  noteChoice(chosenId: string, actionable: number, goalKey: string): WaitStreakDecision {
+    const degenerate = chosenId === 'WAIT' && actionable > 0
+    if (!degenerate) {
+      this.streak = null
+      this.exhausted = null
+      return { escalate: false, count: 0, limit: this.limit, goalKey, actionable }
+    }
+    const same = this.streak !== null && this.streak.goalKey === goalKey
+    const count = same ? (this.streak?.count ?? 0) + 1 : 1
+    const decision: WaitStreakDecision = {
+      escalate: count >= this.limit,
+      count,
+      limit: this.limit,
+      goalKey,
+      actionable,
+    }
+    this.streak = decision.escalate ? null : { goalKey, count }
+    this.exhausted = decision.escalate ? decision : null
+    return decision
+  }
+
+  /** The escalation awaiting handling, or null. Non-mutating. */
+  pendingExhaustion(): WaitStreakDecision | null {
+    return this.exhausted
+  }
+
+  /** Stable fingerprint of the pending escalation, or null. */
+  pendingKey(): string | null {
+    const pending = this.exhausted
+    return pending === null ? null : `wait|${pending.goalKey}|${pending.count}`
+  }
+
+  /** Consecutive actionable WAITs recorded so far (0 when none). */
+  count(): number {
+    return this.streak?.count ?? 0
+  }
+
+  /** Reset on progress, a plan/goal change, or after the escalation is handled. */
   reset(): void {
     this.streak = null
     this.exhausted = null
