@@ -211,6 +211,8 @@ export function describeActionPostcondition(kind: string): string {
       return 'target block removed and the descend step is reachable'
     case 'STEP':
       return 'the face block was removed'
+    case 'EQUIP':
+      return 'the armor piece is worn in its slot (the live armor slot names it)'
     case 'ESCALATE':
       return 'control-plane hand-off to System 2 (no physical post-condition)'
     case 'WAIT':
@@ -277,6 +279,7 @@ const SELF_EVIDENT_VERIFIED_KINDS: ReadonlySet<string> = new Set([
   'DESCEND',
   'STEP',
   'EAT',
+  'EQUIP',
   'ATTACK',
 ])
 

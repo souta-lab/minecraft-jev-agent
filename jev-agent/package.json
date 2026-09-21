@@ -44,6 +44,7 @@
     "skill-candidate-test": "bun test ./test-skill-candidate.mts",
     "observability-test": "bun test ./test-observability.mts",
     "action-verify-test": "bun test ./test-action-verify.mts",
+    "equip-affordance-test": "bun ./test-equip-affordance.mts",
     "truth-causal-test": "bun test ./test-truth-causal.mts",
     "minecraft-truth-test": "bun test ./test-minecraft-truth.mts",
     "pillar-search-test": "bun test ./test-pillar-search.mts",

@@ -125,6 +125,8 @@ export function guardCandidate(
       return guardAttack(candidate, state)
     case 'EAT':
       return guardEat(candidate, state)
+    case 'EQUIP':
+      return guardEquip(candidate, state)
     case 'WAIT':
     case 'ESCALATE':
       return { ok: true, candidate }
@@ -420,6 +422,26 @@ function guardEat(candidate: Candidate, state: WorldState): GuardResult {
   }
   if ((state.inventory.counts[itemName] ?? 0) <= 0) {
     return deny(candidate.id, 'EMPTY_HAND', `${itemName} is not in the inventory`)
+  }
+  return { ok: true, candidate }
+}
+
+/**
+ * EQUIP is mechanically valid only while the carried piece is still in the
+ * inventory and the candidate names one of the four armor destinations. Which
+ * slot wins is Jev's choice; this guard only refuses a stale/foreign candidate.
+ */
+function guardEquip(candidate: Candidate, state: WorldState): GuardResult {
+  const itemName = candidate.itemName
+  if (itemName === null) {
+    return deny(candidate.id, 'EMPTY_HAND', 'EQUIP candidate carries no item name')
+  }
+  if ((state.inventory.counts[itemName] ?? 0) <= 0) {
+    return deny(candidate.id, 'EMPTY_HAND', `${itemName} is not in the inventory`)
+  }
+  const slot = readMetaString(candidate, 'slot')
+  if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
+    return deny(candidate.id, 'TARGET_GONE', `EQUIP candidate names no valid armor slot (${slot ?? 'none'})`)
   }
   return { ok: true, candidate }
 }
@@ -743,6 +765,7 @@ export const ACTING_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'ENTER_PORTAL',
   'ATTACK',
   'EAT',
+  'EQUIP',
   'RETREAT',
   'STEP',
   'RETRIEVE',

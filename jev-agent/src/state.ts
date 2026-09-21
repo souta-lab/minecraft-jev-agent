@@ -26,6 +26,8 @@ import {
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
+import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
+import type { ArmorSlot } from './gearPlan.ts'
 
 export type Vec3Json = {
   x: number
@@ -111,6 +113,17 @@ export type HeldItemState = {
   slot: number
 }
 
+/**
+ * Worn armor per destination. Built from the mineflayer player-window armor
+ * slots (5-8), which `bot.inventory.items()` deliberately excludes: a WORN
+ * piece is not a carried item, so `inventory.counts` never double-counts it.
+ * `null` means nothing is worn in that slot.
+ */
+export type ArmorState = Record<ArmorSlot, HeldItemState | null>
+
+/** All armor slots empty. Exported so pure fixtures need not repeat the shape. */
+export const EMPTY_ARMOR: ArmorState = { head: null, torso: null, legs: null, feet: null }
+
 export type SelfState = {
   username: string
   position: Vec3Json
@@ -124,6 +137,12 @@ export type SelfState = {
   dimension: string
   isDay: boolean
   heldItem: HeldItemState | null
+  /**
+   * Worn armor per destination. Optional so pure fixtures that predate the
+   * armor affordance need not restate it; `buildWorldState` always populates it
+   * and consumers treat an absent value as all slots empty.
+   */
+  armor?: ArmorState
 }
 
 export type InventorySlotState = {
@@ -631,7 +650,26 @@ function buildSelf(bot: Bot): SelfState {
     dimension: bot.game.dimension,
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
+    armor: buildArmor(bot),
   }
+}
+
+/**
+ * Read the four armor destinations from the live player window. Mineflayer
+ * window 0 slots 5-8 are armor head->feet; a fake bot without `slots` reports
+ * every slot empty rather than throwing.
+ */
+function buildArmor(bot: Bot): ArmorState {
+  const slots = (bot.inventory as { slots?: ReadonlyArray<{ name?: string; count?: number; slot?: number } | null> })
+    .slots
+  const armor = { ...EMPTY_ARMOR }
+  for (const slot of ARMOR_SLOTS) {
+    const index = ARMOR_SLOT_INDEX[slot]
+    const item = slots?.[index]
+    if (item === undefined || item === null || typeof item.name !== 'string') continue
+    armor[slot] = { name: item.name, count: item.count ?? 1, slot: item.slot ?? index }
+  }
+  return armor
 }
 
 function buildInventory(bot: Bot): InventoryState {

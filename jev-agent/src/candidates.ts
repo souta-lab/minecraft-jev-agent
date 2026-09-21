@@ -54,6 +54,8 @@ import {
   serializePortalCells,
 } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
+import { armorEquipOffers, armorEquipRefusals } from './gearPlan.ts'
+import type { ArmorRefusal } from './gearPlan.ts'
 
 export type CandidateKind =
   | 'MINE'
@@ -68,6 +70,7 @@ export type CandidateKind =
   | 'RETRIEVE'
   | 'ATTACK'
   | 'EAT'
+  | 'EQUIP'
   | 'RETREAT'
   | 'WAIT'
   | 'ESCALATE'
@@ -297,6 +300,12 @@ export interface GroundedCandidatesResult {
    * requested and withheld).
    */
   entryRefusal: PortalEntryRefusal | null
+  /**
+   * Carried armor pieces that produce no EQUIP offer because they are not
+   * strictly better than what is worn. Non-empty means "nothing better is
+   * held" was surfaced explicitly instead of silently churning.
+   */
+  armorRefusals: ArmorRefusal[]
 }
 
 /**
@@ -714,7 +723,15 @@ export function generateGroundedCandidates(
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
   const raw = generateRawCandidates(state, options)
-  return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal, raw.entryRefusal)
+  return applyReachabilityGate(
+    raw.candidates,
+    state,
+    options,
+    raw.placeRefusal,
+    raw.ignitionRefusal,
+    raw.entryRefusal,
+    raw.armorRefusals,
+  )
 }
 
 /**
@@ -736,12 +753,45 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
     case 'ATTACK':
     case 'RETREAT':
     case 'EAT':
+    case 'EQUIP':
       return false
     case 'DESCEND':
       return candidate.meta.grounded === true
     default:
       return true
   }
+}
+
+/**
+ * Armor-equip affordance. For every carried armor piece that is STRICTLY better
+ * than what is worn in its slot, offer one EQUIP candidate to that slot's
+ * destination. This is CAN enumeration: the generator reports the mechanically
+ * possible equips and Jev chooses whether to take one; a piece that is only
+ * equal-or-worse than what is worn yields no candidate (no churn). The executor
+ * owns the post-condition (the piece is actually worn).
+ */
+function armorEquipCandidates(state: WorldState): Candidate[] {
+  return armorEquipOffers(state.self.armor, state.inventory.counts).map((offer) => ({
+    id: `EQUIP:${offer.slot}:${offer.itemName}`,
+    kind: 'EQUIP' as const,
+    label: `equip ${offer.itemName} to ${offer.slot} (currently worn: ${offer.replaced ?? 'none'})`,
+    targetName: offer.itemName,
+    target: null,
+    targetEntityId: null,
+    itemName: offer.itemName,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      slot: offer.slot,
+      itemName: offer.itemName,
+      replaced: offer.replaced ?? 'none',
+      itemTier: offer.itemTier,
+      wornTier: offer.wornTier,
+    },
+  }))
 }
 
 function generateRawCandidates(
@@ -752,6 +802,7 @@ function generateRawCandidates(
   let placeRefusal: PlaceRefusal | null = null
   let ignitionRefusal: IgnitionRefusal | null = null
   let entryRefusal: PortalEntryRefusal | null = null
+  const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
   const goalKind = current?.kind ?? 'collect'
@@ -875,6 +926,11 @@ function generateRawCandidates(
     })
   }
 
+  // Armor-equip affordance: offered alongside the other local self-care actions
+  // (EAT/ATTACK/RETREAT), independent of the active goal. The generator reports
+  // CAN; Jev owns whether the body puts on better armor this tick.
+  candidates.push(...armorEquipCandidates(state))
+
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
   const hostile = nearestHostile(state, IMMEDIATE_HOSTILE_RANGE)
   const retreat = pickRetreat(state, state.terrain.standable, danger, hostile, options.blacklistedMoveTargets)
@@ -915,7 +971,8 @@ function generateRawCandidates(
       candidate.kind !== 'ESCALATE' &&
       candidate.kind !== 'ATTACK' &&
       candidate.kind !== 'RETREAT' &&
-      candidate.kind !== 'EAT',
+      candidate.kind !== 'EAT' &&
+      candidate.kind !== 'EQUIP',
   )
   if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
 
@@ -975,7 +1032,7 @@ function generateRawCandidates(
     })
   }
 
-  return { candidates, placeRefusal, ignitionRefusal, entryRefusal }
+  return { candidates, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals }
 }
 
 /** The candidate id of the dig-access MOVE for a block (kind MOVE, explicit prerequisite). */
@@ -2153,6 +2210,8 @@ interface RawCandidatesResult {
   placeRefusal: PlaceRefusal | null
   ignitionRefusal: IgnitionRefusal | null
   entryRefusal: PortalEntryRefusal | null
+  /** carried armor pieces that are not better than what is worn (no churn) */
+  armorRefusals: ArmorRefusal[]
 }
 
 /**
@@ -3970,6 +4029,7 @@ export function applyReachabilityGate(
   placeRefusal: PlaceRefusal | null = null,
   ignitionRefusal: IgnitionRefusal | null = null,
   entryRefusal: PortalEntryRefusal | null = null,
+  armorRefusals: ArmorRefusal[] = [],
 ): GroundedCandidatesResult {
   const context: ReachabilityGateContext = {
     state,
@@ -4030,8 +4090,15 @@ export function applyReachabilityGate(
 
   // Last-resort candidate-local ladder: one unreachable remembered station must
   // not starve a craft goal whose own recipe inputs are all held - the step that
-  // crafts/places the station from those inputs is satisfiable NOW.
-  if (presented.every((candidate) => candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE')) {
+  // crafts/places the station from those inputs is satisfiable NOW. EQUIP is a
+  // local self-care action like WAIT/ESCALATE here: offering it must never hide
+  // the inputs-held craft step from Jev.
+  if (
+    presented.every(
+      (candidate) =>
+        candidate.kind === 'WAIT' || candidate.kind === 'ESCALATE' || candidate.kind === 'EQUIP',
+    )
+  ) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
     run(selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
   }
@@ -4053,6 +4120,7 @@ export function applyReachabilityGate(
       candidate.kind !== 'ATTACK' &&
       candidate.kind !== 'RETREAT' &&
       candidate.kind !== 'EAT' &&
+      candidate.kind !== 'EQUIP' &&
       candidate.meta.capabilityAcquisition !== true &&
       candidate.meta.clearance !== true,
   )
@@ -4076,7 +4144,7 @@ export function applyReachabilityGate(
   ) {
     candidates.push(escalateRefusal(state, withheld))
   }
-  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal }
+  return { candidates, reachability, withheld, placeRefusal, ignitionRefusal, entryRefusal, armorRefusals }
 }
 
 /** null when the candidate carries no capability precondition of its own. */
