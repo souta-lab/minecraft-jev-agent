@@ -16,6 +16,7 @@ import { formatFurnaceReady } from './src/placementGuard.ts'
 import {
   evaluateRetrieveAbandon,
   formatPrereqOptionDetail,
+  knownStationKey,
   planPrereqOptions,
   prereqOptionReason,
   prereqRank,
@@ -193,24 +194,42 @@ addCase('(b) an unverified zero-progress retrieve is abandoned after the bound',
   return { pass, detail: `after4="${fourth.line ?? 'none'}" nudge=${nudge.state.unverified} rearmed=${productive.state.unverified}` }
 })
 
-addCase('(b) abandoning the world path makes the next option run', () => {
+// Re-pinned (owner decision 2026-09-21, station-use-before-craft): abandoning the
+// world path used to make the DUPLICATE craft run while the remembered furnace was
+// still usable - the operator-reported preference. A usable, non-blacklisted
+// station now makes craft_and_place ineligible, so the craft fallback runs only
+// once the station is genuinely retired. The fixture retires the remembered furnace
+// through the explicit reachability blacklist (the same shape the live
+// move-failure memory feeds), which keeps this case's intent: the world path stops
+// being usable and the next option - the craft route - runs instead of stalling.
+addCase('(b) retiring the world path makes the next option run', () => {
   const state = world({
     inventory: { cobblestone: 119, raw_iron: 8, coal: 7 },
     signals: { knownResources: [{ name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } }] },
   })
   state.craftingTables = [{ x: 39, y: 10, z: 34, source: 'sensed' }]
-  const input = furnacePrereqInputFromState(state, defaultCandidateOptions)
+  const options = {
+    ...defaultCandidateOptions,
+    unreachableStations: new Set([
+      knownStationKey({ name: 'furnace', position: { x: 29, y: 61, z: 35 } }),
+    ]),
+  }
+  const input = furnacePrereqInputFromState(state, options)
   const decision = planPrereqOptions(input)
   const next = selectPrereqPath(decision, new Set(['use_known_station']))
-  const kept = generateCandidates(state, defaultCandidateOptions).filter(
-    (candidate) => candidate.meta.prereqPath === next,
-  )
+  const kept = generateCandidates(state, options).filter((candidate) => candidate.meta.prereqPath === next)
+  const known = decision.options.find((option) => option.path === 'use_known_station')
   const pass =
     next === 'craft_and_place' &&
     decision.chosen === 'craft_and_place' &&
+    known?.feasible === false &&
+    known.reason === 'known_station_unreachable' &&
     kept.some((candidate) => candidate.id === 'CRAFT:furnace') &&
     kept.every((candidate) => candidate.meta.prereqPath !== 'use_known_station')
-  return { pass, detail: `next=${String(next)} kept=${kept.map((c) => c.id).join(',') || 'none'}` }
+  return {
+    pass,
+    detail: `next=${String(next)} known=${known?.reason ?? 'missing'} kept=${kept.map((c) => c.id).join(',') || 'none'}`,
+  }
 })
 
 // --- (c) oscillation detector fires and escapes ------------------------------

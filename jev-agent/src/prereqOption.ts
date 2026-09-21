@@ -12,7 +12,13 @@
 //   use_known_station - a remembered coordinate exists (walk cost + vertical gap)
 //   craft_and_place   - the recipe materials are held (craft step + place)
 //
-// The chosen path is logged as `PREREQ_OPTION chosen=<a> over=[<b>,<c>] reason=`.
+// Cost orders the ELIGIBLE paths; eligibility itself is world truth (TRUE/CAN).
+// OPERATOR RULE (station-use-before-craft, measured live 2026-09-21): a usable,
+// non-blacklisted station of the needed kind already exists -> crafting a
+// duplicate is INELIGIBLE, not merely expensive (see `craftAndPlaceOption`).
+//
+// The chosen path is logged as `PREREQ_OPTION chosen=<a> over=[<b>,<c>] reason=`
+// and a withheld duplicate craft as `PREREQ_STATION_ALREADY_KNOWN station=...`.
 // When it makes no progress for N ticks (default 40) the caller switches to the
 // next-best feasible path with `PREREQ_SWITCH from=<a> to=<b> reason=no_progress`
 // and must NOT abandon the parent goal (the guards in placementGuard.ts keep the
@@ -58,8 +64,10 @@ export const PREREQ_COSTS = {
    * Fixed access cost of a remembered world station: the coordinate is stale
    * knowledge, so the journey must be made AND the station verified on arrival
    * (the measured #78 loop burned a full retrieve on an unverified station).
-   * Keeps `place_held` (and `craft_and_place`) cheaper unless the station is
-   * genuinely closer than the inventory-sourced geometry.
+   * Keeps `place_held` cheaper unless the station is genuinely closer than the
+   * inventory-sourced geometry. It no longer decides against `craft_and_place`:
+   * when a usable station exists that path is ineligible outright
+   * (see `craftAndPlaceOption`), so the walk is the route rather than the loser.
    */
   worldStationAccess: 4,
 } as const
@@ -154,6 +162,33 @@ export interface PrereqOption {
   /** finite when feasible, +Infinity otherwise */
   cost: number
   reason: string
+}
+
+/**
+ * Typed reason of an INELIGIBLE `craft_and_place`: a usable station of the
+ * needed kind already exists, so that station is not crafted again (OPERATOR RULE
+ * station-use-before-craft; see `craftAndPlaceOption`).
+ */
+export const STATION_ALREADY_KNOWN_REASON = 'station_already_known'
+
+/**
+ * `PREREQ_STATION_ALREADY_KNOWN`: the typed fact behind a withheld
+ * `craft_and_place`, mirrored next to `PREREQ_OPTION`. It names the station that
+ * makes the craft ineligible, where that station is, and which path runs instead,
+ * so a withheld duplicate craft is a typed decision in the run log rather than a
+ * silent absence (the smelt-side mirror of candidates.ts#CRAFT_STATION_ALREADY_KNOWN).
+ */
+export const PREREQ_STATION_ALREADY_KNOWN = 'PREREQ_STATION_ALREADY_KNOWN'
+
+export function formatPrereqStationKnown(
+  station: KnownStationLike,
+  held: number,
+  next: PrereqPath | null,
+): string {
+  const x = Math.round(station.position.x)
+  const y = Math.round(station.position.y)
+  const z = Math.round(station.position.z)
+  return `${PREREQ_STATION_ALREADY_KNOWN} station=${station.name} at=${x},${y},${z} held=${held} next=${next ?? 'none'}`
 }
 
 export interface PrereqDecision {
@@ -278,6 +313,20 @@ export function formatPrereqOptionFor(decision: PrereqDecision, chosen: PrereqPa
   const option = decision.options.find((entry) => entry.path === chosen && entry.feasible)
   if (option === undefined) return formatPrereqOption(chosen, over, `${chosen} forced`)
   return formatPrereqOption(chosen, over, `${chosen} cost=${round1(option.cost)}`)
+}
+
+/**
+ * The `craft_and_place` option this decision made INELIGIBLE because the world
+ * model already holds a usable station of the needed kind, or null when the craft
+ * path is eligible (or lost for another reason). The controller renders
+ * `formatPrereqStationKnown` from it, so the mirrored marker and the option list
+ * can never disagree.
+ */
+export function prereqWithheldCraft(decision: PrereqDecision): PrereqOption | null {
+  const craft = decision.options.find((option) => option.path === 'craft_and_place')
+  return craft !== undefined && !craft.feasible && craft.reason === STATION_ALREADY_KNOWN_REASON
+    ? craft
+    : null
 }
 
 /**
@@ -455,6 +504,33 @@ function knownStationOption(input: PrereqInput): PrereqOption {
 function craftAndPlaceOption(input: PrereqInput): PrereqOption {
   if (input.heldCount > 0) {
     return { path: 'craft_and_place', feasible: false, cost: Number.POSITIVE_INFINITY, reason: 'furnace_already_held' }
+  }
+  // OPERATOR RULE (station-use-before-craft; measured live 2026-09-21): "it
+  // crafts a crafting table / furnace even though one is nearby". A usable
+  // station of the needed kind EXISTS (a known cell the reachability blacklist
+  // has not retired), so crafting another one is not a valid route - the plan
+  // must use or walk to that station.
+  //
+  // This is eligibility (CAN/TRUE), not preference, which is why it cannot live
+  // in the cost model: `craftStep + placeStep` is 4 while every walk carries
+  // `worldStationAccess` (4) plus its distance, so craft was structurally
+  // cheaper than ANY existing station and the cost ordering could never express
+  // "it already exists" (#58/#78 cost model, measured residual). The same
+  // predicate `knownStationOption` uses proves `use_known_station` feasible
+  // here, so the decision always keeps a feasible path (#11 v2: never collapse
+  // to WAIT) and Jev/System2 still owns WHICH of the remaining paths runs.
+  //
+  // A BLACKLISTED cell is NOT usable: a station proven unreachable/retired is
+  // exactly the case where the craft path becomes legitimate again, which is the
+  // escape hatch that keeps a genuinely unreachable station from starving the
+  // goal (pinned by buddy-driver/test-furnace-place and test-prereq-option).
+  if (knownStationOption(input).feasible) {
+    return {
+      path: 'craft_and_place',
+      feasible: false,
+      cost: Number.POSITIVE_INFINITY,
+      reason: STATION_ALREADY_KNOWN_REASON,
+    }
   }
   if (!input.tableAvailable) {
     return { path: 'craft_and_place', feasible: false, cost: Number.POSITIVE_INFINITY, reason: 'no_crafting_table' }
