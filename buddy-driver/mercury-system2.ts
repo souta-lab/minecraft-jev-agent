@@ -1356,6 +1356,10 @@ export class MercurySystem2 implements System2Brain {
     return this.fallbacks
   }
 
+  get postDeathRecoveryPending(): boolean {
+    return this.postDeathPending
+  }
+
   /** Standalone System2Brain entry point. Fatals when Mercury cannot answer. */
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const trigger = this.deriveTrigger(request)
