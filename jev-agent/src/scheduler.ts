@@ -34,6 +34,7 @@ export const DECISION_TRIGGERS = [
   'path_stuck',
   'path_no_path',
   'llm_plan',
+  'human_intent',
 ] as const
 
 export type DecisionTrigger = (typeof DECISION_TRIGGERS)[number]
@@ -112,6 +113,7 @@ export const TRIGGER_PRIORITY: Record<DecisionTrigger, number> = {
   path_stuck: 7,
   path_no_path: 7,
   action_timeout: 7,
+  human_intent: 7,
   inventory_changed: 6,
   block_broken: 5,
   path_completed: 4,

@@ -36,9 +36,11 @@ import {
   resolveRungSourceOfTruth,
   upperAccessRecoveryApplies,
 } from './planner-legacy.ts'
-import type { PlanOption, PlannerOptions } from './planner-legacy.ts'
+import type { PlanOption, PlannerOptions as LegacyPlannerOptions } from './planner-legacy.ts'
 
-export type PlannerMode = 'llm' | 'deterministic'
+export type PlannerMode = 'llm' | 'deterministic' | 'local-mercury'
+
+type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & { mode?: PlannerMode }
 
 /**
  * Model authority is the resident default. Deterministic planning is an
@@ -51,7 +53,8 @@ export function resolvePlannerMode(
   const raw = (env.BUDDY_PLANNER ?? '').trim().toLowerCase()
   if (raw === '' || raw === 'auto' || raw === 'llm' || raw === 'jev' || raw === 'on' || raw === 'model') return 'llm'
   if (raw === 'deterministic' || raw === 'off' || raw === 'fallback' || raw === 'none') return 'deterministic'
-  throw new Error(`invalid BUDDY_PLANNER=${JSON.stringify(env.BUDDY_PLANNER)}; expected llm|auto|deterministic|off`)
+  if (raw === 'local-mercury' || raw === 'local_mercury' || raw === 'local') return 'local-mercury'
+  throw new Error(`invalid BUDDY_PLANNER=${JSON.stringify(env.BUDDY_PLANNER)}; expected llm|auto|deterministic|off|local-mercury`)
 }
 
 /** Backoff between bounded model retries (see withModelRetries call below). */
@@ -130,7 +133,12 @@ const EMPTY_QUEUE_CONSULT_INTERVAL_MS = 5 * 60_000
 const MERCURY_INTENT_TTL_MS = 10 * 60_000
 const MERCURY_INTENT_MAX_USES = 3
 
-function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | null {
+function mercuryTriggerFor(request: System2PlanRequest, mercury?: MercurySystem2): MercuryTriggerReason | null {
+  // nekomario28 extension: a pending post-death recovery is itself a semantic
+  // moment, so route it to Mercury without waiting for a WAIT streak. This is
+  // checked before the drained-queue/stall branches so death never loses to them.
+  if (mercury?.postDeathRecoveryPending === true) return 'post_death'
+
   let waitStreak = 0
   for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
     const outcome = request.recentOutcomes[i]
@@ -271,7 +279,7 @@ export class PlannerBrain implements System2Brain {
   private lastAuthorityModel: string
   private calls = 0
 
-  constructor(options: PlannerOptions) {
+  constructor(options: ModelPlannerOptions) {
     this.mode = options.mode ?? resolvePlannerMode()
     this.bot = options.bot
     this.world = options.world
@@ -282,18 +290,16 @@ export class PlannerBrain implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
     this.refreshLiveFacts = options.refreshLiveFacts
-    // The planner authority asks an EVALUATION question through
-    // `experimental_evaluate`, and the gateway only serves that API for
-    // evaluation models. Verified directly against this gateway:
-    //   evaluate('meta/muse-spark-1.3-contributor') -> "Model ... is a language
-    //     model, not an evaluation model. Use the language generation API instead."
-    //   evaluate('typesafe-ai/jev')                 -> OK (choice + probabilities)
-    // So the planner keeps the evaluation-capable default while the
-    // language-generation roles (Mercury plan repair, advisor) use
-    // DEFAULT_LLM_MODEL. Override with BUDDY_PLANNER_MODEL only for another
-    // evaluation-capable model.
-    this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    // The normal planner authority uses experimental_evaluate and therefore
+    // keeps the evaluation-capable Jev default. Language-generation System2 is
+    // owned by MercurySystem2; local-mercury intentionally reports that model.
+
     this.mercury = options.mercury
+    const configuredPlannerModel = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    this.model = this.mode === 'local-mercury' && this.mercury !== undefined ? this.mercury.model : configuredPlannerModel
+    if (this.mode === 'local-mercury' && this.mercury === undefined) {
+      throw new Error('BUDDY_PLANNER=local-mercury requires Mercury (set BUDDY_SYSTEM2=mercury)')
+    }
     this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
     this.lastAuthorityModel = this.mode === 'deterministic' ? this.model : 'none'
 
@@ -319,6 +325,9 @@ export class PlannerBrain implements System2Brain {
 
   get authorityStack(): { provider: string; model: string } {
     if (this.mode === 'deterministic') return { provider: 'deterministic', model: this.model }
+    if (this.mode === 'local-mercury') {
+      return { provider: 'local-mercury', model: `deterministic|mercury:${this.mercury!.model}` }
+    }
     if (this.mercury === undefined) return { provider: 'typesafe-ai', model: this.model }
     return { provider: 'hybrid', model: `typesafe-ai:${this.model}|${this.mercury.provider}:${this.mercury.model}` }
   }
@@ -326,6 +335,7 @@ export class PlannerBrain implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     this.refreshLiveFacts?.()
     if (this.mode === 'deterministic') return this.legacy.plan(request)
+    if (this.mode === 'local-mercury') return this.planWithLocalMercury(request)
     return this.planWithModelAuthority(request)
   }
 
@@ -356,6 +366,82 @@ export class PlannerBrain implements System2Brain {
     return uniqueOptions(options)
   }
 
+  private async planWithLocalMercury(request: System2PlanRequest): Promise<System2Plan> {
+    const mercuryTrigger = mercuryTriggerFor(request, this.mercury)
+    if (mercuryTrigger !== null) return this.planWithMercuryAuthority(request, mercuryTrigger)
+
+    this.lastAuthorityProvider = 'deterministic'
+    this.lastAuthorityModel = 'deterministic-ladder'
+    this.log('SYSTEM2_AUTHORITY_INPUT', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: 'local-mercury-floor',
+      reason: request.reason,
+    })
+    const plan = await this.legacy.plan(request)
+    this.log('SYSTEM2_AUTHORITY_DECISION', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: 'local-mercury-floor',
+      reason: request.reason,
+      op: plan.op,
+      goals: plan.goals.map((goal) => goal.description),
+    })
+    return plan
+  }
+
+  private async planWithMercuryAuthority(
+    request: System2PlanRequest,
+    mercuryTrigger: MercuryTriggerReason,
+  ): Promise<System2Plan> {
+    if (this.mercury === undefined) return this.fatal('mercury-unavailable', `no Mercury configured for trigger=${mercuryTrigger}`)
+    this.lastAuthorityProvider = this.mode === 'local-mercury' ? 'mercury' : this.mercury.provider
+    this.lastAuthorityModel = this.mercury.model
+    this.log('SYSTEM2_AUTHORITY_INPUT', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: this.provider,
+      trigger: mercuryTrigger,
+      reason: request.reason,
+    })
+    const repair = await this.mercury.tryRepair(request, mercuryTrigger)
+    if (repair === null) {
+      // Fail loud. `tryRepair` returns null ONLY for provider/transport/budget/key
+      // failure (5xx, timeout, missing key); a shape-invalid answer is the typed
+      // `ungrounded` outcome handled inside MercurySystem2. Per the operator there is
+      // no fallback: a drained queue must not be degraded into the deterministic option
+      // path, and a provider outage is fail-loud. The one exception is a generation that
+      // is no longer current, where the fork's lifecycle hardening discards the stale
+      // result instead of terminating the replacement generation.
+      if (!this.mercury.generationCurrent) {
+        this.log('SYSTEM2_STALE_DISCARD', {
+          provider: this.provider,
+          model: this.authorityModel,
+          trigger: mercuryTrigger,
+          reason: request.reason,
+        })
+        return { op: 'continue', goals: [], note: `stale Mercury result discarded (${mercuryTrigger})` }
+      }
+      return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+    }
+    // #359: keep the semantic layer's intent so a drained queue continues the
+    // thread instead of immediately re-drawing the ladder menu. Bounded by TTL
+    // and reuse count so a stale plan cannot loop.
+    this.lastMercuryPlan = repair.plan
+    this.lastMercuryPlanAtMs = Date.now()
+    this.lastMercuryPlanUses = 0
+    this.log('SYSTEM2_AUTHORITY_DECISION', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: this.provider,
+      trigger: mercuryTrigger,
+      op: repair.op,
+      strategy: repair.strategy,
+      goals: repair.goals.map((goal) => goal.description),
+    })
+    return repair.plan
+  }
+
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
     // One-line diagnosis for #359: the decision line reports `reason=queue_empty`,
     // but the request's own field is what the trigger reads (and `trigger=no_candidate`
@@ -366,7 +452,7 @@ export class PlannerBrain implements System2Brain {
       this.lastLoggedPlanReason = reasonValue
       this.log('SYSTEM2_PLAN_REQUEST_REASON', { reason: reasonValue })
     }
-    let mercuryTrigger = mercuryTriggerFor(request)
+    let mercuryTrigger = mercuryTriggerFor(request, this.mercury)
     if (this.mercury !== undefined && mercuryTrigger === 'no_candidate') {
       // A drained queue is a fresh planning moment, not a repeated stall. Keying it
       // on the wait-limit stall identity silenced it entirely: the same-stall rule
@@ -383,14 +469,6 @@ export class PlannerBrain implements System2Brain {
       }
     }
     if (this.mercury !== undefined && mercuryTrigger === 'wait_limit') {
-      // The `wait_limit` trigger is counter-shaped: an unchanged stall keeps
-      // incrementing the trailing WAIT streak, so a consultation that produced
-      // no plan would otherwise re-fire identically and spend the hourly
-      // semantic budget linearly (measured live: 18/20 calls on one stall).
-      // The durable gate raises the bar. When it suppresses, the request is
-      // handled by the normal System2 authority path below - never by the
-      // deterministic ladder - and the budget-exhausted fail-loud contract is
-      // untouched because no provider call is made here.
       const gate = this.mercury.evaluateWaitLimitTrigger({
         request,
         stallKey: waitLimitStallKey(request),
@@ -399,41 +477,10 @@ export class PlannerBrain implements System2Brain {
       if (!gate.allow) mercuryTrigger = null
     }
     if (this.mercury !== undefined && mercuryTrigger !== null) {
-      this.lastAuthorityProvider = this.mercury.provider
-      this.lastAuthorityModel = this.mercury.model
-      this.log('SYSTEM2_AUTHORITY_INPUT', {
-        provider: this.provider,
-        model: this.authorityModel,
-        source: this.provider,
-        trigger: mercuryTrigger,
-        reason: request.reason,
-      })
-      const repair = await this.mercury.tryRepair(request, mercuryTrigger)
-      if (repair === null) {
-        // Fail loud. `tryRepair` now returns null ONLY for provider/transport/budget/key
-        // failure (5xx, timeout, missing key); a shape-invalid answer is the typed
-        // `ungrounded` outcome handled below. Per the operator there is no fallback: a
-        // drained queue must not be degraded into the deterministic option path, and a
-        // provider outage is fail-loud.
-        return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
-      } else {
-        // #359: keep the semantic layer's intent so a drained queue continues the
-        // thread instead of immediately re-drawing the ladder menu. Bounded by TTL
-        // and reuse count so a stale plan cannot loop.
-        this.lastMercuryPlan = repair.plan
-        this.lastMercuryPlanAtMs = Date.now()
-        this.lastMercuryPlanUses = 0
-        this.log('SYSTEM2_AUTHORITY_DECISION', {
-          provider: this.provider,
-          model: this.authorityModel,
-          source: this.provider,
-          trigger: mercuryTrigger,
-          op: repair.op,
-          strategy: repair.strategy,
-          goals: repair.goals.map((goal) => goal.description),
-        })
-        return repair.plan
-      }
+      // One call path for both the gateway (llm) and local-endpoint Mercury
+      // transports; the transport is an endpoint/config decision inside
+      // MercurySystem2, not a second fork of this authority path.
+      return this.planWithMercuryAuthority(request, mercuryTrigger)
     }
     // #359: a drained queue right after a semantic proposal continues that proposal
     // (up to the TTL and reuse bound) rather than replacing the thread with a fresh

@@ -38,6 +38,18 @@
 // `tool_choice`, so we get provider-enforced structured output by forcing a single
 // tool call whose `inputSchema` is the strict Zod plan schema. Model id:
 // `inception/mercury-2.5`.
+//
+// LOCAL ENDPOINT: when BUDDY_MERCURY_BASE_URL is set (e.g.
+// http://127.0.0.1:8080/v1 for llama.cpp), Mercury posts to that
+// OpenAI-compatible chat-completions endpoint directly, using
+// BUDDY_MERCURY_MODEL as the served model name. The Vercel AI Gateway key is
+// never required in this mode. Small local models cannot be trusted with a
+// named tool choice, so the response is parsed as strict JSON text and the
+// exact same local schema/capability validation (and corrective retry loop)
+// stays authoritative. Reasoning models (Qwen3/Bonsai family) need
+// BUDDY_MERCURY_LOCAL_NO_THINK=1 so hidden thinking cannot eat the output
+// budget, and a longer BUDDY_SYSTEM2_TIMEOUT_MS (local inference is slower
+// than the gateway default of 25s).
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -384,6 +396,8 @@ export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): s
       }
       return null
     }
+    case 'recover_death_site':
+      return validatePortalParameterlessGoal(index, 'recover_death_site', goal, { allowDimension: false })
     case 'descend_to': {
       if (typeof goal.y !== 'number' || !Number.isInteger(goal.y) || goal.y < -59 || goal.y > 320) {
         return `goal[${index}] descend_to needs an integer y in [-59,320]`
@@ -483,6 +497,13 @@ export class MercuryPlanValidationError extends Error {
   }
 }
 
+class StaleMercuryGenerationError extends Error {
+  constructor() {
+    super('generation is no longer current')
+    this.name = 'StaleMercuryGenerationError'
+  }
+}
+
 /** The exact corrective text for the next attempt, or null for non-validation errors. */
 export function mercuryRetryFeedback(error: unknown): string | null {
   return error instanceof MercuryPlanValidationError ? error.validationError : null
@@ -536,7 +557,10 @@ export function buildCorrectivePrompt(basePrompt: string, validationError: strin
  *   explore cave             -> `descend` predicate (existing cave/ore descent)
  *   explore surface          -> `collect log` (existing surface body-change plan)
  */
-function compileMercuryGoalRaw(goal: MercuryPlanGoalJson): PlannedGoal | null {
+function compileMercuryGoalRaw(
+  goal: MercuryPlanGoalJson,
+  state?: Pick<MercuryStateSummary, 'dimension' | 'postDeath'>,
+): PlannedGoal | null {
   if (goal.kind === undefined) {
     const item = goal.item ?? 'unknown'
     const count = goal.count ?? 1
@@ -571,6 +595,24 @@ function compileMercuryGoalRaw(goal: MercuryPlanGoalJson): PlannedGoal | null {
         targetItem: item,
         requiredCount: 1,
         detail: `mercury ${goal.kind}:${item}`,
+      }
+    }
+    case 'recover_death_site': {
+      const postDeath = state?.postDeath ?? null
+      const target = postDeath?.latestDeathPoint ?? null
+      if (target === null) return null
+      const deathDimension = postDeath?.dimension ?? ''
+      const liveDimension = state?.dimension ?? ''
+      if (deathDimension.replace(/^minecraft:/, '') !== liveDimension.replace(/^minecraft:/, '')) return null
+      return {
+        kind: 'goto',
+        description: 'return to the latest death site to recover dropped inventory',
+        targetItem: null,
+        requiredCount: 1,
+        targetPosition: { ...target },
+        targetPredicate: 'death_site_recovery',
+        dimension: deathDimension,
+        detail: 'mercury recover_death_site',
       }
     }
     case 'descend_to':
@@ -643,6 +685,8 @@ function semanticizeMercuryGoal(source: MercuryPlanGoalJson, compiled: PlannedGo
       ? `${compiled.kind}:${item ?? source.item ?? 'unknown'}`
       : source.kind === 'goto' || source.kind === 'goto_resource'
         ? `goto:${item ?? 'unknown'}`
+        : source.kind === 'recover_death_site'
+          ? 'recover_death_site'
         : source.kind === 'explore'
           ? `explore:${source.mode ?? 'unknown'}`
           : source.kind === 'descend_to'
@@ -668,17 +712,23 @@ function semanticizeMercuryGoal(source: MercuryPlanGoalJson, compiled: PlannedGo
   }
 }
 
-export function compileMercuryGoal(goal: MercuryPlanGoalJson): PlannedGoal | null {
-  const compiled = compileMercuryGoalRaw(goal)
+export function compileMercuryGoal(
+  goal: MercuryPlanGoalJson,
+  state?: Pick<MercuryStateSummary, 'dimension' | 'postDeath'>,
+): PlannedGoal | null {
+  const compiled = compileMercuryGoalRaw(goal, state)
   return compiled === null ? null : semanticizeMercuryGoal(goal, compiled)
 }
 
 /** Map the validated plan onto the queue's PlannedGoal records. */
-export function plannedGoalsFromMercury(plan: MercuryPlanJson): PlannedGoal[] {
+export function plannedGoalsFromMercury(
+  plan: MercuryPlanJson,
+  state?: Pick<MercuryStateSummary, 'dimension' | 'postDeath'>,
+): PlannedGoal[] {
   if (plan.op === 'abort' || plan.op === 'complete') return []
   const goals: PlannedGoal[] = []
   for (const goal of plan.goals) {
-    const compiled = compileMercuryGoal(goal)
+    const compiled = compileMercuryGoal(goal, state)
     if (compiled !== null) goals.push(compiled)
   }
   return goals
@@ -725,6 +775,27 @@ export function groundMercuryPlan(
   }
 }
 
+/** State-dependent grounding that keeps model-selected recovery semantic while
+ * requiring the resident host to own the actual death coordinate. */
+export function validateMercuryPlanAgainstState(
+  plan: MercuryPlanJson,
+  state: Pick<MercuryStateSummary, 'dimension' | 'postDeath'>,
+): string | null {
+  for (let index = 0; index < plan.goals.length; index += 1) {
+    const goal = plan.goals[index]
+    if (goal?.kind !== 'recover_death_site') continue
+    const postDeath = state.postDeath ?? null
+    if (postDeath?.latestDeathPoint === null || postDeath?.latestDeathPoint === undefined) {
+      return `goal[${index}] recover_death_site unavailable: no latest death point`
+    }
+    const liveDimension = state.dimension ?? ''
+    if (postDeath.dimension.replace(/^minecraft:/, '') !== liveDimension.replace(/^minecraft:/, '')) {
+      return `goal[${index}] recover_death_site unavailable: death dimension ${postDeath.dimension} != live ${liveDimension}`
+    }
+  }
+  return null
+}
+
 /** Stable cache key for a Mercury state summary. Exported so tests can seed the cache. */
 export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCacheIdentity = mercuryCacheIdentity()): string {
   const payload = {
@@ -743,6 +814,7 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     hasImpossible: state.queue.hasImpossible,
     wait: Math.min(state.consecutiveWait, 3),
     failures: state.recentFailures,
+    postDeath: state.postDeath ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -783,7 +855,7 @@ export interface MercuryEnablement {
  * The Gateway key is NEVER consulted here.
  */
 export function resolveMercuryEnablement(
-  plannerMode: 'llm' | 'deterministic',
+  plannerMode: 'llm' | 'deterministic' | 'local-mercury',
   configPath: string,
 ): MercuryEnablement {
   const raw = (process.env.BUDDY_SYSTEM2 ?? '').trim().toLowerCase()
@@ -829,6 +901,17 @@ export interface MercuryStateSummary {
   queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
   objective: { targetItem: string; requiredCount: number; haveCount: number; complete: boolean }
   deathHistory: string[]
+  postDeath?: {
+    latestDeathPoint: { x: number; y: number; z: number } | null
+    dimension: string
+    cause: string
+    lostInventory: Record<string, number>
+    itemsLost: number
+    nearbyHostiles: Array<{ name: string; distance: number }>
+    recentDeathCount: number
+    recentDeathWindowSec: number
+    recoveryChoices: readonly ['recover_death_site', 'rebuild_equipment', 'leave_danger_area']
+  } | null
   allowedGoals: {
     collect: string[]
     craft: string[]
@@ -878,8 +961,8 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 // ---------------------------------------------------------------------------
 
 /** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
-export const MERCURY_CACHE_SCHEMA_VERSION = 3
-const MERCURY_CACHE_FILE_VERSION = 3
+export const MERCURY_CACHE_SCHEMA_VERSION = 5
+const MERCURY_CACHE_FILE_VERSION = 5
 
 export interface MercuryWorldKey {
   serverId: string
@@ -942,6 +1025,8 @@ interface MercuryCacheFile {
 
 const MAX_CACHE_ENTRIES = 60
 const HOUR_MS = 60 * 60 * 1000
+const REMOTE_MERCURY_MAX_PER_HOUR_DEFAULT = 20
+export const LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT = 1_000_000
 /** A cached plan may be replayed at most this many times before it is bypassed. */
 export const MAX_CACHE_REPLAYS = 2
 /** Consecutive cached plans with the same strategy before the cache is bypassed. */
@@ -1000,7 +1085,11 @@ export interface MercuryCallRecord {
   retries: number
   /** 1-based index of the attempt this record describes (retry audit trail). */
   attempt?: number
-  outcome: 'success' | 'plan_rejected' | 'fallback' | 'budget_exhausted' | 'ungrounded'
+  // NOTE: our main added the typed `ungrounded` outcome (an NL answer that grounds
+  // onto nothing is a valid model answer, not an error); the fork added
+  // `stale_discarded` for a result from a generation that is no longer current.
+  // Both are real outcomes, so the union keeps both contracts.
+  outcome: 'success' | 'plan_rejected' | 'fallback' | 'budget_exhausted' | 'ungrounded' | 'stale_discarded'
   state: unknown
   prompt: { system: string; user: string }
   response: unknown
@@ -1089,8 +1178,17 @@ export interface MercurySystem2Options {
   resolveKey?: () => KeyResolution | null
   /** true when this generation was created fresh because the bot died. */
   postDeathRecovery?: boolean
+  /** generation-lifecycle guard; false means the answer is stale and must never be applied. */
+  isCurrent?: () => boolean
+  /** optional generation id for stale-discard audit lines. */
+  generationId?: string
   /** transport seam for tests; defaults to the AI SDK `generateText` tool call. */
   transport?: MercuryTransport
+  /**
+   * Local OpenAI-compatible endpoint seam. `undefined` resolves from
+   * BUDDY_MERCURY_BASE_URL; an explicit null forces the AI Gateway path.
+   */
+  localEndpoint?: MercuryLocalEndpoint | null
 }
 
 export interface MercuryTransportRequest {
@@ -1160,6 +1258,36 @@ export function mercuryTransportMode(model: string): MercuryTransportMode {
   return isMuseSparkModel(model) ? 'json-text' : 'tool-call'
 }
 
+// ---------------------------------------------------------------------------
+// local OpenAI-compatible endpoint (llama.cpp / Ollama / vLLM)
+// ---------------------------------------------------------------------------
+
+export const MERCURY_LOCAL_BASE_URL_ENV = 'BUDDY_MERCURY_BASE_URL'
+export const MERCURY_LOCAL_API_KEY_ENV = 'BUDDY_MERCURY_API_KEY'
+export const MERCURY_LOCAL_NO_THINK_ENV = 'BUDDY_MERCURY_LOCAL_NO_THINK'
+
+export interface MercuryLocalEndpoint {
+  /** OpenAI-compatible base URL without a trailing slash, e.g. http://127.0.0.1:8080/v1 */
+  readonly baseUrl: string
+  /** Bearer token; llama.cpp accepts any non-empty value, so it defaults to 'local'. */
+  readonly apiKey: string
+  /** Optional chat-template controls understood by local reasoning servers. */
+  readonly chatTemplateKwargs?: Record<string, unknown>
+}
+
+/** BUDDY_MERCURY_BASE_URL is the explicit opt-in for local System2 transport. */
+export function resolveMercuryLocalEndpoint(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): MercuryLocalEndpoint | null {
+  const raw = (env[MERCURY_LOCAL_BASE_URL_ENV] ?? '').trim()
+  if (raw === '') return null
+  const noThink = ['1', 'true', 'on', 'yes'].includes((env[MERCURY_LOCAL_NO_THINK_ENV] ?? '').trim().toLowerCase())
+  return {
+    baseUrl: raw.replace(/\/+$/, ''),
+    apiKey: (env[MERCURY_LOCAL_API_KEY_ENV] ?? '').trim() || 'local',
+    ...(noThink ? { chatTemplateKwargs: { enable_thinking: false } } : {}),
+  }
+}
 
 // AI SDK 7.0.107 exposes a deeply recursive FlexibleSchema type. Keeping the
 // already-validated Zod schema behind the concrete transport input type avoids
@@ -1181,10 +1309,69 @@ export const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
   'If you include it, "op" must be one of continue, patch, replace, abandon, complete or abort (default patch), and each collect/craft/smelt goal needs an integer count in [1,64]. ' +
   'Never invent items or actions outside allowedGoals. Do not emit coordinates, block ids, entity ids, paths, action names or motor instructions.'
 
+interface LocalChatCompletion {
+  choices?: Array<{ message?: { content?: string | null } | null } | null>
+  usage?: { prompt_tokens?: number; completion_tokens?: number } | null
+}
+
+/** Direct OpenAI-compatible chat-completions transport for local servers. */
+export function localMercuryTransport(model: string, endpoint: MercuryLocalEndpoint): MercuryTransport {
+  return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+    const response = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${endpoint.apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}` },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: maxOutputTokens,
+        temperature: 0,
+        stream: false,
+        ...(endpoint.chatTemplateKwargs !== undefined ? { chat_template_kwargs: endpoint.chatTemplateKwargs } : {}),
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`local mercury endpoint HTTP ${response.status}: ${detail.slice(0, 200)}`)
+    }
+    const payload = (await response.json()) as LocalChatCompletion
+    const content = payload.choices?.[0]?.message?.content
+    const parsed = typeof content === 'string' ? parseMercuryJsonTextDetailed(content) : { value: null, shape: 'none' as const, objects: 0 }
+    const usage =
+      payload.usage == null
+        ? null
+        : {
+            inputTokens: payload.usage.prompt_tokens ?? null,
+            outputTokens: payload.usage.completion_tokens ?? null,
+          }
+    const repair: MercuryTransportRepair = {
+      kind: 'json-text',
+      shape: parsed.shape,
+      objects: parsed.objects,
+      chars: typeof content === 'string' ? content.length : 0,
+    }
+    if (parsed.value === null) return { toolCalls: [], usage, repairs: [repair] }
+    return {
+      toolCalls: [{ input: parsed.value }],
+      usage,
+      repairs: parsed.shape === 'exact' ? [] : [repair],
+    }
+  }
+}
+
 const TOOL_CALL_TRANSPORT_INSTRUCTIONS =
   'Return ONLY via the emitPlan tool. Do not answer in response text.'
 
+
 function defaultMercuryTransport(model: string): MercuryTransport {
+  const local = resolveMercuryLocalEndpoint()
+  if (local !== null) return localMercuryTransport(model, local)
   if (mercuryTransportMode(model) === 'json-text') {
     return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
       // Muse Spark is the default System2 model. Do not route it through the
@@ -1258,6 +1445,7 @@ operations (e.g. craft furnace vs place furnace):
 - { kind: 'smelt', item, count }     allowed items: allowedGoals.smelt
 - { kind: 'place', item }            allowed stations: allowedGoals.place (count optional, default 1)
 - { kind: 'goto_resource', item }    known-resource retrieval; allowed: allowedGoals.goto_resources
+- { kind: 'recover_death_site' }     return to the host-grounded latest death point; post_death only, takes NO coordinates
 - { kind: 'descend_to', y }          integer y in [-59, 320]; optional dimension, defaults to overworld
 - { kind: 'explore', mode }          mode is 'cave' or 'surface'
 - { kind: 'build_portal_frame' }     build the standard 4x5 obsidian Nether portal frame; takes NO item, count, y, dimension or coordinates (the site and cell geometry are code-owned)
@@ -1269,6 +1457,16 @@ Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names,
 Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.
 If a furnace is held but the world has no placed furnace, emit { kind: 'place', item: 'furnace' } so the placement is a first-class planned step.
 Choose the smallest plan change that can unblock progress.
+
+When trigger=post_death, inspect postDeath before choosing WHAT NEXT. Treat its
+recoveryChoices as candidate intents: recover_death_site, rebuild_equipment, or
+leave_danger_area. Use lostInventory, nearbyHostiles, and recentDeathCount to
+decide among them. Repeated deaths or nearby hostiles are strong evidence that
+the previous area is unsafe; valuable losses with low observed danger support a
+recovery attempt; missing basic tools may justify rebuilding first. Express the
+chosen intent through the grounded goals available below. Use
+{ kind: 'recover_death_site' } only when postDeath.latestDeathPoint exists in the
+current dimension. Never invent a death-site coordinate or motor command.
 
 When wakeDetail includes a grounded blocker or missing capabilities such as
 no_path, no_standable_approach, or open_path, treat that as evidence that the
@@ -1509,8 +1707,11 @@ export class MercurySystem2 implements System2Brain {
   private readonly maxAttempts: number
   private readonly maxOutputTokens: number
   private readonly transport: MercuryTransport
+  private readonly localEndpoint: MercuryLocalEndpoint | null
   private readonly terminate: (() => never) | undefined
   private readonly resolveKey: () => KeyResolution | null
+  private readonly isCurrent: () => boolean
+  private readonly generationId: string | null
   private cache: MercuryCacheFile
   private callCounter = 0
   private calls = 0
@@ -1524,34 +1725,42 @@ export class MercurySystem2 implements System2Brain {
     this.cachePath = options.cachePath
     this.model = options.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? SYSTEM2_MODEL_DEFAULT
     this.authorityModel = this.model
+    this.localEndpoint = options.localEndpoint !== undefined ? options.localEndpoint : resolveMercuryLocalEndpoint()
     const configuredMaxPerHour = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
     this.maxPerHour =
       options.maxPerHour ??
-      (configuredMaxPerHour !== undefined
+      (configuredMaxPerHour !== undefined && configuredMaxPerHour.trim() !== ''
         ? Number(configuredMaxPerHour)
-        : mercuryTransportMode(this.model) === 'json-text'
-          ? Number.POSITIVE_INFINITY
-          : 20)
+        : this.localEndpoint !== null
+          ? LOCAL_MERCURY_MAX_PER_HOUR_DEFAULT
+          : mercuryTransportMode(this.model) === 'json-text'
+            ? Number.POSITIVE_INFINITY
+            : REMOTE_MERCURY_MAX_PER_HOUR_DEFAULT)
     this.waitLimitBackoffBaseMs = options.waitLimitBackoffBaseMs ?? resolveMercuryWaitLimitBackoffBaseMs()
     this.waitLimitBackoffMaxMs = options.waitLimitBackoffMaxMs ?? resolveMercuryWaitLimitBackoffMaxMs()
-    // Provider calls stay bounded by timeout/retry. The durable repeated-stall
-    // trigger backoff is model-agnostic; the old Mercury hourly cost guard is
-    // disabled by default for Muse Spark and remains opt-in via env/options.
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? SYSTEM2_TIMEOUT_DEFAULT_MS)
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
-    // `meta/muse-spark-1.3-contributor` is a reasoning model: a trivial probe
-    // (one small JSON object) already spent 796-1599 reasoning tokens before
-    // emitting ~16 tokens of text, and the json-text transport needs the plan
-    // object to reach the output. 3000 was tight for a real prompt, and a
-    // truncated answer costs a schema rejection plus up to two more attempts,
-    // each charged to the hourly budget. A ceiling, not a spend.
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 4096)
-    this.transport = options.transport ?? defaultMercuryTransport(this.model)
+    this.transport =
+      options.transport ??
+      (this.localEndpoint === null ? defaultMercuryTransport(this.model) : localMercuryTransport(this.model, this.localEndpoint))
+
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
+    this.isCurrent = options.isCurrent ?? (() => true)
+    this.generationId = options.generationId ?? null
     this.postDeathPending = options.postDeathRecovery === true
     this.cacheIdentity = mercuryCacheIdentity(options.worldKey)
     this.cache = this.loadCache()
+    if (this.localEndpoint !== null) {
+      this.log('ADVISOR_TRANSPORT', {
+        source: 'mercury',
+        transport: 'local-openai-compatible',
+        baseUrl: this.localEndpoint.baseUrl,
+        model: this.model,
+        maxPerHour: this.maxPerHour,
+      })
+    }
     this.log('ADVISOR_CACHE_GUARD', {
       active: true,
       version: MERCURY_CACHE_SCHEMA_VERSION,
@@ -1578,7 +1787,16 @@ export class MercurySystem2 implements System2Brain {
     return this.fallbacks
   }
 
+  get postDeathRecoveryPending(): boolean {
+    return this.postDeathPending
+  }
+
+  get generationCurrent(): boolean {
+    return this.isCurrent()
+  }
+
   /** Standalone System2Brain entry point. Fatals when the configured model cannot answer. */
+
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const trigger = this.deriveTrigger(request)
     const started = Date.now()
@@ -1671,6 +1889,14 @@ export class MercurySystem2 implements System2Brain {
   async tryRepair(request: System2PlanRequest, trigger: MercuryTriggerReason): Promise<MercuryRepairResult | null> {
     const started = Date.now()
     if (trigger === 'post_death') this.postDeathPending = false
+    if (!this.isCurrent()) {
+      this.log('MERCURY_STALE_DISCARD', {
+        trigger,
+        stage: 'before_summary',
+        generationId: this.generationId,
+      })
+      return null
+    }
     const state = this.summarize(request, trigger)
     const stateHash = this.hashState(state)
 
@@ -1691,12 +1917,13 @@ export class MercurySystem2 implements System2Brain {
       // label with empty goals. A stale schema or a repeated no-progress hit is
       // invalidated instead of replayed.
       const restored = validateMercuryPlan({ op: cached.op, goals: cached.goals, reason: cached.reason })
-      if (restored.ok && !replayLimit && !consecutiveLimit) {
+      const restoredGroundingError = restored.ok ? validateMercuryPlanAgainstState(restored.plan, state) : null
+      if (restored.ok && restoredGroundingError === null && !replayLimit && !consecutiveLimit) {
         cached.replays = replays + 1
         this.bumpConsecutive(cached.strategy)
         this.saveCache()
         const plan = restored.plan
-        const goals = plannedGoalsFromMercury(plan)
+        const goals = plannedGoalsFromMercury(plan, state)
         const ms = Date.now() - started
         this.log('ADVISOR', {
           source: this.provider,
@@ -1717,7 +1944,13 @@ export class MercurySystem2 implements System2Brain {
           cached: true,
         }
       }
-      const bypass = replayLimit ? 'repeat_no_progress' : consecutiveLimit ? 'consecutive_same_strategy' : 'stale_schema'
+      const bypass = replayLimit
+        ? 'repeat_no_progress'
+        : consecutiveLimit
+          ? 'consecutive_same_strategy'
+          : restoredGroundingError !== null
+            ? 'stale_grounding'
+            : 'stale_schema'
       this.log('ADVISOR_CACHE bypass', {
         reason: bypass,
         strategy: cached.strategy,
@@ -1731,10 +1964,12 @@ export class MercurySystem2 implements System2Brain {
       this.saveCache()
     }
 
-    const key = this.resolveKey()
-    if (key === null) return this.modelFailure(trigger, started, state, 'no gateway key resolved')
-    // The gateway provider reads this at request time; the value is never logged.
-    process.env.AI_GATEWAY_API_KEY = key.key
+    if (this.localEndpoint === null) {
+      const key = this.resolveKey()
+      if (key === null) return this.modelFailure(trigger, started, state, 'no gateway key resolved')
+      // The gateway provider reads this at request time; the value is never logged.
+      process.env.AI_GATEWAY_API_KEY = key.key
+    }
 
     const userPrompt = JSON.stringify(state)
     const callId = `mercury-${++this.callCounter}-${started.toString(36)}`
@@ -1750,6 +1985,7 @@ export class MercurySystem2 implements System2Brain {
         maxOutputTokens: this.maxOutputTokens,
         timeoutMs: this.timeoutMs,
       })
+      if (!this.isCurrent()) throw new StaleMercuryGenerationError()
       for (const repair of result.repairs ?? []) {
         if (repair.shape === 'none') {
           this.log('MERCURY_JSON_TEXT_UNPARSED', {
@@ -1839,7 +2075,23 @@ export class MercurySystem2 implements System2Brain {
         }
       }
       const validated = stripped === null ? null : validateMercuryPlan(stripped.value)
-      if (validated !== null && validated.ok) {
+      // nekomario28 death-recovery hardening: `recover_death_site` is admissible only
+      // when the HOST owns a latest death point in the live dimension. State-dependent
+      // grounding is applied to the OPTIONAL enrichment here and to the NL grounding
+      // below, so neither route can smuggle in an ungrounded death-site goal.
+      const enrichmentStateError =
+        validated !== null && validated.ok ? validateMercuryPlanAgainstState(validated.plan, state) : null
+      if (enrichmentStateError !== null) {
+        this.log('MERCURY_ENRICHMENT_UNUSABLE', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          stage: 'state',
+          path: 'goals',
+          expected: enrichmentStateError,
+        })
+      }
+      if (validated !== null && validated.ok && enrichmentStateError === null) {
         for (const repair of validated.repairs) {
           this.log('MERCURY_FIELD_DEFAULT', {
             callId,
@@ -1889,32 +2141,42 @@ export class MercurySystem2 implements System2Brain {
         // validator, so grounding can never bypass a CAN/TRUE/SAFE gate.
         const safe = validateMercuryPlan(constructed)
         if (safe.ok) {
-          this.log('MERCURY_INTENT_GROUNDED', {
+          const stateError = validateMercuryPlanAgainstState(safe.plan, state)
+          if (stateError === null) {
+            this.log('MERCURY_INTENT_GROUNDED', {
+              callId,
+              attempt: context.attempt,
+              trigger,
+              source: 'intent',
+              matched: grounding.matched.slice(0, 8),
+              goals: safe.plan.goals.map((goal) => goal.kind ?? 'item'),
+            })
+            return {
+              plan: safe.plan,
+              usage: result.usage,
+              prompt,
+              intent: extraction.intent,
+              rawText,
+              intentSource: 'intent',
+              droppedKeys: [],
+              renamedKeys: [],
+              matched: grounding.matched,
+            }
+          }
+          this.log('MERCURY_INTENT_UNGROUNDED', {
             callId,
             attempt: context.attempt,
             trigger,
-            source: 'intent',
-            matched: grounding.matched.slice(0, 8),
-            goals: safe.plan.goals.map((goal) => goal.kind ?? 'item'),
+            reason: stateError,
           })
-          return {
-            plan: safe.plan,
-            usage: result.usage,
-            prompt,
-            intent: extraction.intent,
-            rawText,
-            intentSource: 'intent',
-            droppedKeys: [],
-            renamedKeys: [],
-            matched: grounding.matched,
-          }
+        } else {
+          this.log('MERCURY_INTENT_UNGROUNDED', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            reason: `grounded goal rejected by capability validation: ${safe.error}`,
+          })
         }
-        this.log('MERCURY_INTENT_UNGROUNDED', {
-          callId,
-          attempt: context.attempt,
-          trigger,
-          reason: `grounded goal rejected by capability validation: ${safe.error}`,
-        })
       } else {
         this.log('MERCURY_INTENT_UNGROUNDED', {
           callId,
@@ -1953,6 +2215,7 @@ export class MercurySystem2 implements System2Brain {
       const attemptRun = await runMercuryAttempts({
         maxAttempts: this.maxAttempts,
         reserveAttempt: (attempt) => {
+          if (!this.isCurrent()) throw new StaleMercuryGenerationError()
           const now = Date.now()
           const budgeted = Number.isFinite(this.maxPerHour)
           if (budgeted) {
@@ -1991,6 +2254,20 @@ export class MercurySystem2 implements System2Brain {
       attempts = attemptRun.attempts
       failures = attemptRun.failures
       retriesUsed = Math.max(0, attempts - 1)
+      if (!this.isCurrent() || (!attemptRun.ok && attemptRun.error instanceof StaleMercuryGenerationError)) {
+        return this.staleDiscard(
+          trigger,
+          started,
+          state,
+          callId,
+          attempts,
+          failures,
+          retriesUsed,
+          userPrompt,
+          attemptRun.ok ? attemptRun.result.plan : null,
+          attemptRun.ok ? attemptRun.result.usage : null,
+        )
+      }
       if (!attemptRun.ok) {
         const error = attemptRun.error
         const budgetExhausted = isBudgetExhaustedError(error)
@@ -2110,7 +2387,7 @@ export class MercurySystem2 implements System2Brain {
         })
       }
       const strategy = mercuryStrategyLabel(plan)
-      const goals = plannedGoalsFromMercury(plan)
+      const goals = plannedGoalsFromMercury(plan, state)
       this.cache.entries[stateHash] = {
         op: plan.op,
         goals: plan.goals.map((goal) => ({ ...goal })),
@@ -2170,6 +2447,9 @@ export class MercurySystem2 implements System2Brain {
         cached: false,
       }
     } catch (error) {
+      if (error instanceof StaleMercuryGenerationError || !this.isCurrent()) {
+        return this.staleDiscard(trigger, started, state, callId, attempts, failures, retriesUsed, userPrompt, null, null)
+      }
       // modelFailure() already wrote the authoritative record; do not fabricate a 'fallback'.
       if (error instanceof FatalModelError) throw error
       const latencyMs = Date.now() - started
@@ -2197,6 +2477,48 @@ export class MercurySystem2 implements System2Brain {
       })
       return this.modelFailure(trigger, started, state, message, latencyMs)
     }
+  }
+
+  private staleDiscard(
+    trigger: MercuryTriggerReason,
+    started: number,
+    state: MercuryStateSummary,
+    callId: string,
+    attempts: number,
+    failures: number,
+    retriesUsed: number,
+    prompt: string,
+    response: unknown,
+    usage: unknown,
+  ): null {
+    const latencyMs = Date.now() - started
+    this.log('MERCURY_STALE_DISCARD', {
+      callId,
+      trigger,
+      generationId: this.generationId,
+      attempts,
+      ms: latencyMs,
+    })
+    this.writeCall({
+      record: 'mercury-call',
+      callId,
+      ts: new Date().toISOString(),
+      model: this.model,
+      stage: trigger,
+      latencyMs,
+      attempts,
+      failures,
+      retries: retriesUsed,
+      attempt: attempts,
+      outcome: 'stale_discarded',
+      state,
+      prompt: { system: SYSTEM_PROMPT, user: prompt },
+      response,
+      usage,
+      cost: 0,
+      error: 'generation is no longer current',
+    })
+    return null
   }
 
   private modelFailure(

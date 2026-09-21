@@ -60,7 +60,9 @@
     "world-state-test": "bun tools/test-world-player-state.mjs",
     "resident-supervisor-test": "bun tools/test-resident-supervisor.mjs",
     "resident-watchdog": "bun tools/resident-watchdog.mjs",
-    "resident-watchdog-test": "bun tools/test-resident-watchdog.mjs"
+    "resident-watchdog-test": "bun tools/test-resident-watchdog.mjs",
+    "buddy-observer": "bun tools/buddy-observer.mjs",
+    "buddy-observer-test": "bun tools/test-buddy-observer.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

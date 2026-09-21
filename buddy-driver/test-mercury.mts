@@ -181,14 +181,15 @@ addCase('env BUDDY_SYSTEM2=mercury enables it, deterministic planner overrides',
   const previous = process.env.BUDDY_SYSTEM2
   process.env.BUDDY_SYSTEM2 = 'mercury'
   const enabled = resolveMercuryEnablement('llm', '/nonexistent.json')
+  const localEnabled = resolveMercuryEnablement('local-mercury', '/nonexistent.json')
   const overridden = resolveMercuryEnablement('deterministic', '/nonexistent.json')
   process.env.BUDDY_SYSTEM2 = 'off'
   const forcedOff = resolveMercuryEnablement('llm', '/nonexistent.json')
   if (previous === undefined) delete process.env.BUDDY_SYSTEM2
   else process.env.BUDDY_SYSTEM2 = previous
   return {
-    pass: enabled.enabled && !overridden.enabled && !forcedOff.enabled,
-    detail: `enabled=${enabled.source} deterministic=${overridden.source} off=${forcedOff.source}`,
+    pass: enabled.enabled && localEnabled.enabled && !overridden.enabled && !forcedOff.enabled,
+    detail: `enabled=${enabled.source} local=${localEnabled.source} deterministic=${overridden.source} off=${forcedOff.source}`,
   }
 })
 

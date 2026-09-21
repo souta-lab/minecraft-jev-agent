@@ -37,10 +37,10 @@ import {
   stableOptionInstanceId,
 } from './optionSpec.ts'
 
-export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
+export type GoalKind = 'collect' | 'craft' | 'place' | 'smelt' | 'goto' | 'explore' | 'recover' | 'descend' | 'surface' | 'unknown'
 
 /** Where a goal came from, for the decision log / debugging. */
-export type GoalOrigin = 'bootstrap' | 'llm' | 'mechanical'
+export type GoalOrigin = 'bootstrap' | 'llm' | 'mechanical' | 'human'
 
 export type GoalStatus = 'pending' | 'active' | 'done' | 'impossible'
 
@@ -186,6 +186,8 @@ export interface QueuedGoal {
   semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
+  /** Code-grounded navigation target. System2 selects the semantic goal but never supplies these coordinates. */
+  targetPosition?: PlacementCell | null
   /** how many relevant items the bot held when the goal was created */
   startCount: number
   /** live progress toward `requiredCount` (collect goals) */
@@ -222,6 +224,8 @@ export interface PlannedGoal {
   semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
+  /** Code-grounded navigation target. System2 selects the semantic goal but never supplies these coordinates. */
+  targetPosition?: PlacementCell | null
   detail?: string
   /** Issue #55: deterministic prerequisite; a patch/replace may not drop it. */
   protected?: boolean
@@ -278,6 +282,7 @@ export interface GoalQueueCurrentLog {
   haveCount: number
   requiredCount: number
   targetY: number | null
+  targetPosition?: PlacementCell | null
   optionInstanceId?: string | null
   optionTemplateId?: string | null
   semanticOptionInstanceId?: string | null
@@ -308,6 +313,7 @@ export function toGoalQueueStateLog(state: GoalQueueState): GoalQueueStateLog {
             haveCount: state.current.haveCount,
             requiredCount: state.current.requiredCount,
             targetY: state.current.targetY ?? null,
+            targetPosition: state.current.targetPosition ?? null,
             optionInstanceId: state.current.optionInstanceId ?? null,
             optionTemplateId: state.current.optionTemplateId ?? null,
             semanticOptionInstanceId: state.current.semanticOptionInstanceId ?? null,
@@ -407,6 +413,13 @@ export class GoalQueue {
   ): QueuedGoal[] {
     const audit = options.onPrereqRetired ?? options.onPrereqReordered ?? options.onProtection
     if (audit !== undefined) this.lifecycleSink = audit
+    const humanActive = this.goals.some(
+      (goal) => goal.origin === 'human' && (goal.status === 'pending' || goal.status === 'active'),
+    )
+    if (origin === 'llm' && humanActive) {
+      options.onOperationRejected?.(`PLAN_OP_REJECTED op=${op} reason=human_interrupt_active`)
+      return []
+    }
     let effectiveOp = op
     let abandonedCurrentId: string | null = null
     if (op === 'complete') {
@@ -479,7 +492,15 @@ export class GoalQueue {
       }
       const retiredIds = new Set(retiredProtected.map((goal) => goal.id))
       const protectedForMerge = unfinishedProtected.filter((goal) => !retiredIds.has(goal.id))
-      const { dropped } = splitProtectedGoals(protectedForMerge, planned)
+      const partition = splitProtectedGoals(protectedForMerge, planned)
+      // Human intent is stronger provenance than an equivalent System2 goal.
+      // Even when the model proposes the same kind/item, keep the exact human
+      // row so requested count/order/origin cannot be silently rewritten.
+      const dropped = [...partition.dropped]
+      for (const goal of protectedForMerge) {
+        if (goal.origin !== 'human' || dropped.some((entry) => entry.id === goal.id)) continue
+        dropped.push(goal)
+      }
       if (planned.length === 0 && dropped.length > 0) {
         for (const goal of dropped) {
           options.onProtection?.(formatProtectedGoalDroppedRejected(goal, effectiveOp, options.reason ?? 'empty_replan'))
@@ -542,6 +563,65 @@ export class GoalQueue {
     return added
   }
 
+  /**
+   * Insert explicit human work ahead of autonomous unfinished work without
+   * deleting the mission. Multiple human requests are FIFO. Human rows are
+   * protected so asynchronous System2 repairs cannot replace the player's WHAT.
+   */
+  interruptWithHumanPlan(planned: readonly PlannedGoal[], options: Pick<ApplyPlanOptions, 'onDuplicate'> = {}): QueuedGoal[] {
+    if (planned.length === 0) return []
+    const now = Date.now()
+    const humanInstances = new Set(
+      this.goals
+        .filter((goal) => goal.origin === 'human' && (goal.status === 'pending' || goal.status === 'active'))
+        .map((goal) => goalInstanceKey(goal)),
+    )
+    const current = this.nextRef()
+    const firstAutonomous = this.goals.findIndex(
+      (goal) => goal.origin !== 'human' && (goal.status === 'pending' || goal.status === 'active'),
+    )
+    const insertionIndex = firstAutonomous < 0 ? this.goals.length : firstAutonomous
+    const originalLength = this.goals.length
+    const added: QueuedGoal[] = []
+    for (const plan of planned) {
+      const humanPlan: PlannedGoal = { ...plan, protected: true }
+      const key = goalInstanceKey(humanPlan)
+      if (humanInstances.has(key)) {
+        options.onDuplicate?.(formatDuplicateGoalSkipped(humanPlan))
+        continue
+      }
+      humanInstances.add(key)
+      added.push(this.enqueue(humanPlan, 'human', now))
+    }
+    if (added.length === 0) return []
+    const appended = this.goals.splice(originalLength)
+    if (current !== undefined && current.origin !== 'human' && current.status === 'active') {
+      current.status = 'pending'
+      current.updatedAt = now
+    }
+    this.goals.splice(insertionIndex, 0, ...appended)
+    this.activate()
+    this.queueRevision += 1
+    return added
+  }
+
+  /** Cancel unfinished human interrupts only; completed history and mission rows remain. */
+  clearHumanInterrupts(reason = 'human free'): QueuedGoal[] {
+    const now = Date.now()
+    const cleared: QueuedGoal[] = []
+    for (const goal of this.goals) {
+      if (goal.origin !== 'human' || (goal.status !== 'pending' && goal.status !== 'active')) continue
+      goal.status = 'impossible'
+      goal.detail = `cancelled by human: ${reason}`
+      goal.updatedAt = now
+      cleared.push({ ...goal })
+    }
+    if (cleared.length === 0) return []
+    this.activate()
+    this.queueRevision += 1
+    return cleared
+  }
+
   /** Build the queued form of an incoming planned goal, assigning its id. */
   private enqueue(plan: PlannedGoal, origin: GoalOrigin, now: number): QueuedGoal {
     const spec = plan.optionSpec ?? compilePlannedGoal(plan)
@@ -565,6 +645,9 @@ export class GoalQueue {
       ...(plan.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: plan.semanticOptionTemplateId }),
       ...(plan.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: plan.semanticOptionIntent }),
       ...(plan.placementCells === undefined ? {} : { placementCells: [...plan.placementCells] }),
+      ...(plan.targetPosition === undefined
+        ? {}
+        : { targetPosition: plan.targetPosition === null ? null : { ...plan.targetPosition } }),
       startCount: 0,
       haveCount: 0,
       status: 'pending',

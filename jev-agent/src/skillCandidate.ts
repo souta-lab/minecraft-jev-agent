@@ -555,6 +555,8 @@ export function dependencySkillForPredicate(predicate: Predicate, source: SkillS
       // Option, not an independently startable skill. The body remains
       // grounded by the recovery goal's log retrieval candidate.
       return null
+    case 'positionNear':
+      return null
     case 'custom':
       if (predicate.id.startsWith(KNOWN_RESOURCE_PREDICATE)) {
         const item = predicate.id.slice(KNOWN_RESOURCE_PREDICATE.length)
@@ -643,6 +645,8 @@ function describePredicateSafe(predicate: Predicate): string {
       return `y <= ${predicate.y}`
     case 'levelAtLeast':
       return `y >= ${predicate.y}`
+    case 'positionNear':
+      return `position within ${predicate.distance} of ${predicate.position.x},${predicate.position.y},${predicate.position.z}`
     case 'healthAtLeast':
       return `health >= ${predicate.health}`
     case 'custom':

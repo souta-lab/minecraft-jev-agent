@@ -21,6 +21,8 @@ const cases: Case[] = [
   { name: 'auto requests model authority', planner: 'auto', gatewayKey: 'fixture-gateway-key', expected: 'llm' },
   { name: 'empty value behaves like unset', planner: '', gatewayKey: 'fixture-gateway-key', expected: 'llm' },
   { name: 'explicit deterministic baseline', planner: 'deterministic', gatewayKey: 'fixture-gateway-key', expected: 'deterministic' },
+  { name: 'explicit local Mercury hybrid', planner: 'local-mercury', gatewayKey: undefined, expected: 'local-mercury' },
+  { name: 'local alias selects local Mercury hybrid', planner: 'local', gatewayKey: undefined, expected: 'local-mercury' },
   { name: 'off alias is explicit baseline', planner: 'off', gatewayKey: 'fixture-gateway-key', expected: 'deterministic' },
   { name: 'fallback alias is explicit baseline', planner: 'fallback', gatewayKey: 'fixture-gateway-key', expected: 'deterministic' },
   { name: 'none alias is explicit baseline', planner: 'none', gatewayKey: 'fixture-gateway-key', expected: 'deterministic' },

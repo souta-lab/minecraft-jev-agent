@@ -1207,6 +1207,8 @@ function preconditionCauseName(predicate: Predicate): string {
       return `y<=${predicate.y}`
     case 'levelAtLeast':
       return `y>=${predicate.y}`
+    case 'positionNear':
+      return `position:${predicate.position.x},${predicate.position.y},${predicate.position.z}`
     case 'healthAtLeast':
       return 'health'
     case 'custom':
@@ -1782,6 +1784,48 @@ export class JevController {
   /** Swap in a real long-horizon model. The interface is system2.ts#System2Brain. */
   setSystem2(brain: System2Brain): void {
     this.system2 = brain
+  }
+
+  /**
+   * Explicit player intent owns WHAT and therefore bypasses System2 selection,
+   * but still flows through the normal GoalQueue -> Jev -> Guard -> Executor.
+   * The autonomous mission is preserved behind the human interrupt queue.
+   */
+  submitHumanPlan(goals: readonly PlannedGoal[], requestedBy: string): QueuedGoal[] {
+    const previous = this.queue.current
+    const added = this.queue.interruptWithHumanPlan(goals, {
+      onDuplicate: (line) => this.logger.info('human', line, { requestedBy }, this.tickCounter),
+    })
+    if (added.length === 0) return []
+    this.semanticStateGeneration += 1
+    if (previous !== null && previous.origin !== 'human') {
+      this.executor.cancelCurrent(`human intent from ${requestedBy}`)
+    }
+    this.logger.warn(
+      'human',
+      `HUMAN_INTENT_APPLIED requestedBy=${requestedBy} goals=${added.length}`,
+      { requestedBy, goals: added.map((goal) => goal.description), queueDepth: this.queue.state.depth },
+      this.tickCounter,
+    )
+    this.requestDecision('human_intent', { requestedBy, goals: added.map((goal) => goal.id) })
+    return added
+  }
+
+  /** Clear only human-owned unfinished rows and resume the preserved mission. */
+  clearHumanPlan(requestedBy: string, reason = 'free'): QueuedGoal[] {
+    const currentWasHuman = this.queue.current?.origin === 'human'
+    const cleared = this.queue.clearHumanInterrupts(reason)
+    if (cleared.length === 0) return []
+    this.semanticStateGeneration += 1
+    if (currentWasHuman) this.executor.cancelCurrent(`human ${reason} from ${requestedBy}`)
+    this.logger.warn(
+      'human',
+      `HUMAN_INTENT_CLEARED requestedBy=${requestedBy} reason=${reason} goals=${cleared.length}`,
+      { requestedBy, reason, goals: cleared.map((goal) => goal.id), queueDepth: this.queue.state.depth },
+      this.tickCounter,
+    )
+    this.requestDecision('human_intent', { requestedBy, reason, cleared: cleared.map((goal) => goal.id) })
+    return cleared
   }
 
   /** Must be called before start(). Rebuilds every derived object. */
@@ -4213,6 +4257,54 @@ export class JevController {
     }
     const current = this.queue.current
     if (current === null) return
+    if (current.kind === 'goto') {
+      const target = current.targetPosition ?? null
+      if (target === null) {
+        const impossible = this.queue.markImpossible(`goto goal '${current.id}' has no code-grounded target position`)
+        if (impossible !== null) {
+          this.recentEvents.push(`goal impossible: ${impossible.description}`)
+          this.summonLlm('action_impossible', `current goal is not executable: ${impossible.description}`)
+        }
+        return
+      }
+      const goalDimension = (current.dimension ?? '').replace(/^minecraft:/, '')
+      const liveDimension = this.currentDimension().replace(/^minecraft:/, '')
+      if (goalDimension.length > 0 && goalDimension !== liveDimension) {
+        const impossible = this.queue.markImpossible(
+          `goto goal '${current.id}' belongs to dimension ${current.dimension ?? 'unknown'} but live dimension is ${this.currentDimension()}`,
+        )
+        if (impossible !== null) {
+          this.recentEvents.push(`goal impossible: ${impossible.description}`)
+          this.summonLlm('action_impossible', `current goal is not executable: ${impossible.description}`)
+        }
+        return
+      }
+      const position = this.bot.entity.position
+      const distanceToTarget = Math.hypot(position.x - target.x, position.y - target.y, position.z - target.z)
+      if (distanceToTarget > 2.5) return
+      const beforeId = current.id
+      const beforeDescription = current.description
+      this.queue.markDone()
+      const after = this.queue.current
+      this.pendingTransition = {
+        fromId: beforeId,
+        fromDescription: beforeDescription,
+        toId: after?.id ?? null,
+        toDescription: after?.description ?? null,
+        trigger,
+        inventory: this.inventorySnapshot(),
+      }
+      this.lastProgressAt = Date.now()
+      this.lastProgress = 0
+      this.logger.warn(
+        'queue',
+        `subgoal COMPLETE [${beforeDescription}] -> [${after?.description ?? 'plan complete'}] trigger=${trigger} distance=${Math.round(distanceToTarget * 100) / 100}`,
+        { from: beforeId, to: after?.id ?? null, trigger, distance: distanceToTarget, target },
+        this.tickCounter,
+      )
+      if (after !== null) this.logSubgoalStart(after, this.pendingTransition.inventory, `advance:${trigger}`)
+      return
+    }
     if (current.kind === 'descend') {
       // The plan was supplied before the smelt inputs were held, so the ore
       // descent that preceded the smelt is now a stale prerequisite. Retire it
@@ -4886,6 +4978,15 @@ export class JevController {
    */
   private summonLlm(reason: LlmSummonReason, detail: string): DecisionLlmResummonLog | null {
     if (!this.running) return null
+    if (this.queue.current?.origin === 'human') {
+      this.logger.info(
+        'system2',
+        `HUMAN_INTENT_SYSTEM2_SUPPRESSED reason=${reason}`,
+        { reason, detail, current: this.queue.current.description },
+        this.tickCounter,
+      )
+      return { triggered: false, reason, detail: 'human intent owns WHAT until the interrupt completes or is cleared' }
+    }
     if (this.protectedReplanSuppressed(reason)) {
       return { triggered: false, reason, detail: 'protected prerequisite: replan suppressed (#46)' }
     }
@@ -5036,6 +5137,16 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
+        if (!this.running) {
+          this.logger.warn(
+            'system2',
+            'SYSTEM2_STALE_DISCARD reason=controller_stopped',
+            { reason, requestId: requestContext.requestId, note: plan.note, op: plan.op ?? 'replace' },
+            this.tickCounter,
+          )
+          this.llmInFlight = false
+          return
+        }
         const current = this.queue.state
         const currentContext: System2ApplyState = {
           queueRevision: this.queue.revision,
@@ -5108,6 +5219,15 @@ export class JevController {
       })
       .catch((error: unknown) => {
         this.llmInFlight = false
+        if (!this.running) {
+          this.logger.warn(
+            'system2',
+            'SYSTEM2_STALE_DISCARD reason=controller_stopped_error',
+            { reason, requestId: requestContext.requestId, error: describeFailure(error) },
+            this.tickCounter,
+          )
+          return
+        }
         const fatal = error instanceof FatalModelError ? error : new FatalModelError('system2-plan', 1, describeFailure(error))
         failLoud(fatal, (event, detail) => this.logger.error('system2', event, { reason, ...(detail ?? {}) }, this.tickCounter), this.options.terminateOnModelFailure)
       })

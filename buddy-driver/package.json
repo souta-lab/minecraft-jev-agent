@@ -38,10 +38,14 @@
     "system2-causal-authority-test": "bun test ./test-system2-causal-authority.mts",
     "mercury-count-budget-test": "bun test ./test-mercury-count-budget.mts",
     "mercury-portal-capabilities-test": "bun test ./test-mercury-portal-capabilities.mts",
+    "mercury-local-transport-test": "bun test ./test-mercury-local-transport.mts",
+    "post-death-context-test": "bun test ./test-post-death-context.mts",
     "advisor-cache-test": "bun test ./test-advisor-cache.mts",
     "plan-tail-test": "bun test ./test-plan-tail.mts",
     "m2-snapshot-test": "bun test ./test-m2-snapshot.mts",
-    "mercury:last": "bun -e 'const text = await Bun.file(\"logs/jev/mercury-calls.jsonl\").text(); console.log(JSON.stringify(JSON.parse(text.trim().split(\"\\n\").at(-1)), null, 2))'"
+    "mercury:last": "bun -e 'const text = await Bun.file(\"logs/jev/mercury-calls.jsonl\").text(); console.log(JSON.stringify(JSON.parse(text.trim().split(\"\\n\").at(-1)), null, 2))'",
+    "local-mercury-authority-test": "bun test ./test-local-mercury-authority.mts",
+    "human-intent-test": "bun test ./test-human-intent.mts"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

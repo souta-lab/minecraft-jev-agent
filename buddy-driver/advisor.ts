@@ -51,11 +51,11 @@ const STRATEGY_CRITERIA: Record<AdvisorStrategy, string> = {
 const COST_PER_TOKEN_USD = 0.04 / 1_000_000
 
 /** `BUDDY_ADVISOR=llm|deterministic|auto` (auto follows the planner mode). */
-export function resolveAdvisorMode(plannerMode: 'llm' | 'deterministic'): 'llm' | 'deterministic' {
+export function resolveAdvisorMode(plannerMode: 'llm' | 'deterministic' | 'local-mercury'): 'llm' | 'deterministic' {
   const raw = (process.env.BUDDY_ADVISOR ?? 'auto').trim().toLowerCase()
   if (raw === 'off' || raw === 'fallback' || raw === 'deterministic' || raw === 'none') return 'deterministic'
   if (raw === 'on' || raw === 'llm') return 'llm'
-  return plannerMode
+  return plannerMode === 'llm' ? 'llm' : 'deterministic'
 }
 
 export interface AdvisorState {

@@ -91,6 +91,8 @@ export interface OptionTarget {
   targetY?: number
   /** dimension the targetY predicate must be evaluated in */
   dimension?: string
+  /** code-grounded navigation target; never model-authored */
+  position?: Vec3Json
 }
 
 /**
@@ -107,6 +109,7 @@ export type Predicate =
   | { readonly kind: 'dimensionIs'; readonly dimension: string }
   | { readonly kind: 'levelAtMost'; readonly y: number }
   | { readonly kind: 'levelAtLeast'; readonly y: number }
+  | { readonly kind: 'positionNear'; readonly position: Vec3Json; readonly distance: number }
   | { readonly kind: 'healthAtLeast'; readonly health: number }
   | { readonly kind: 'custom'; readonly id: string }
 
@@ -321,6 +324,19 @@ export function evaluatePredicateTruth(
     case 'levelAtLeast':
       if (snapshot.position === null) return { truth: 'unknown', unknownInputs: ['position'] }
       return { truth: snapshot.position.y >= predicate.y ? 'true' : 'false', unknownInputs: [] }
+    case 'positionNear':
+      if (snapshot.position === null) return { truth: 'unknown', unknownInputs: ['position'] }
+      return {
+        truth:
+          Math.hypot(
+            snapshot.position.x - predicate.position.x,
+            snapshot.position.y - predicate.position.y,
+            snapshot.position.z - predicate.position.z,
+          ) <= predicate.distance
+            ? 'true'
+            : 'false',
+        unknownInputs: [],
+      }
     case 'healthAtLeast':
       if (snapshot.health === null) return { truth: 'unknown', unknownInputs: ['health'] }
       return { truth: snapshot.health >= predicate.health ? 'true' : 'false', unknownInputs: [] }
@@ -433,6 +449,8 @@ export function describePredicate(predicate: Predicate): string {
       return `y <= ${predicate.y}`
     case 'levelAtLeast':
       return `y >= ${predicate.y}`
+    case 'positionNear':
+      return `position within ${predicate.distance} of ${predicate.position.x},${predicate.position.y},${predicate.position.z}`
     case 'healthAtLeast':
       return `health >= ${predicate.health}`
     case 'custom':
@@ -574,6 +592,8 @@ export function stableOptionInstanceId(spec: OptionSpec): string {
   if (typeof dimension === 'string' && dimension.length > 0) parts.push(`d${slug(dimension)}`)
   const targetY = spec.target.targetY
   if (typeof targetY === 'number' && Number.isFinite(targetY)) parts.push(`y${targetY}`)
+  const position = spec.target.position
+  if (position !== undefined) parts.push(`pos${position.x}_${position.y}_${position.z}`)
   const predicate = spec.target.predicate
   if (typeof predicate === 'string' && predicate.length > 0) parts.push(`p${slug(predicate)}`)
   return parts.length === 0 ? spec.id : `${spec.id}#${parts.join('~')}`
@@ -589,6 +609,8 @@ export function optionKindForGoal(kind: GoalKind): OptionKind {
       return 'place'
     case 'smelt':
       return 'smelt'
+    case 'goto':
+      return 'goto'
     case 'explore':
       return 'explore'
     case 'descend':
@@ -621,7 +643,7 @@ export function goalKindForOption(kind: OptionKind): GoalKind {
     case 'combat':
       return 'recover'
     case 'goto':
-      return 'explore'
+      return 'goto'
     case 'custom':
       return 'unknown'
   }
@@ -958,6 +980,18 @@ function successForGoal(goal: PlannedGoal): Predicate[] {
       const resource = item === null ? [] : ([{ kind: 'inventoryAtLeast', item, count }] as const)
       return [vertical, ...resource]
     }
+    case 'goto': {
+      const position = goal.targetPosition
+      const spatial =
+        position === undefined || position === null
+          ? ({ kind: 'custom', id: 'goto:missing_position' } as const)
+          : ({ kind: 'positionNear', position: { ...position }, distance: 2.5 } as const)
+      const dimension =
+        typeof goal.dimension === 'string' && goal.dimension.length > 0
+          ? ([{ kind: 'dimensionIs', dimension: goal.dimension }] as const)
+          : []
+      return [...dimension, spatial]
+    }
     case 'explore':
       // #57: an explore goal qualified by a dimension is the typed `dimensionIs`
       // predicate, never a prose completion. This keeps the deterministic target
@@ -983,6 +1017,7 @@ export function compilePlannedGoal(goal: PlannedGoal, snapshot?: OptionWorldSnap
   if (typeof goal.targetItem === 'string' && goal.targetItem.length > 0) target.item = goal.targetItem
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) target.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) target.dimension = goal.dimension
+  if (goal.targetPosition !== undefined && goal.targetPosition !== null) target.position = { ...goal.targetPosition }
   if (typeof goal.targetPredicate === 'string' && goal.targetPredicate.length > 0) target.predicate = goal.targetPredicate
   const compiled: OptionSpec = {
     id: stableOptionId(goal),
@@ -1044,6 +1079,9 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: goal.semanticOptionTemplateId }),
     ...(goal.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: goal.semanticOptionIntent }),
     ...(goal.placementCells === undefined ? {} : { placementCells: [...goal.placementCells] }),
+    ...(goal.targetPosition === undefined
+      ? {}
+      : { targetPosition: goal.targetPosition === null ? null : { ...goal.targetPosition } }),
   }
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) planned.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) planned.dimension = goal.dimension
@@ -1413,6 +1451,8 @@ export function dependencyGoalForPredicate(
         targetY: predicate.y,
       }
     case 'levelAtLeast':
+      return null
+    case 'positionNear':
       return null
     case 'dimensionIs':
       return {

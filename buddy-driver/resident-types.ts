@@ -80,6 +80,21 @@ export interface DeathHazard {
   source?: HazardSource
 }
 
+/** Snapshot of the immediately preceding real death, owned by the resident
+ * host and handed only to the fresh post-death generation. It is intentionally
+ * ephemeral: the durable hazard map remains the long-lived coordinate memory. */
+export interface DeathRecoveryContext {
+  occurredAt: number
+  position: Vec3Json | null
+  dimension: string
+  cause: string
+  lostInventory: Record<string, number>
+  itemsLost: number
+  nearbyHostiles: Array<{ name: string; distance: number }>
+  recentDeathCount: number
+  recentDeathWindowMs: number
+}
+
 /** Durable world model that must survive reloads/reconnects. Inventory and
  * position are NOT mirrored here - they are SERVER TRUTH, live on the bot, and
  * are re-observed from sensors after every reload/reconnect, never restored from
@@ -1054,6 +1069,8 @@ export interface GenerationContext {
   goalCount: number
   /** why this generation was created fresh (e.g. "death"); drives LADDER_RESET. */
   resetReason: string | null
+  /** host-captured facts for the immediately preceding real death. */
+  deathRecovery?: DeathRecoveryContext | null
   /** resident runId (host-lifetime identity); scopes the run-scoped M2 snapshot. */
   runId?: string
   /** git commit the resident booted from (BOOT `source`). */
