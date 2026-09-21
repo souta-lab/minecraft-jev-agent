@@ -430,19 +430,18 @@ export const RUNGS: readonly Rung[] = [
     goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
   },
   // --- M3 (owner definition): 12 ender_eye (Eye of Ender). ---
-  // Crafting 12 eyes needs 12 ender_pearl + 12 blaze_powder, so the M3 road is:
-  //   ender_pearls (endermen, hostile-mob difficulty)
-  //   -> nether_portal (M2 gate)
+  // Crafting 12 eyes needs 12 ender_pearl + 12 blaze_powder. The Nether supplies
+  // BOTH (fortress blazes, warped-forest endermen), so the M3 road enters the
+  // Nether first:
+  //   nether_portal (M2 gate; obsidian route landed in #322)
   //   -> blaze_rods (Nether fortress)
+  //   -> ender_pearls (warped-forest endermen, or overworld endermen)
   //   -> ender_eyes (terminal: ender_eye>=12)
-  // Pearls are farmed first because they need no Nether access, while the live M2
-  // blocker is a missing grounded route to obsidian (`collect:obsidian` produced
-  // only zero-progress MOVE candidates).
-  {
-    id: 'ender_pearls',
-    satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
-    goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
-  },
+  // Live evidence for this order: with the pearl rung first the resident stalled —
+  // the only sensed enderman was >50 blocks away and 38 blocks below, outside
+  // sensor/combat range, so `collect 12 x ender_pearl` had no grounded target and
+  // the agent only wandered. The obsidian perception fix (#322) makes the portal
+  // rung actionable, and the Nether is the dense source for both remaining items.
   // --- M2 portal transition ---
   {
     id: 'nether_portal',
@@ -453,11 +452,16 @@ export const RUNGS: readonly Rung[] = [
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
-  // --- M3 continued: Nether blaze rods -> Eyes of Ender. ---
+  // --- M3 continued: Nether blaze rods -> pearls -> Eyes of Ender. ---
   {
     id: 'blaze_rods',
     satisfied: (c) => (c['blaze_rod'] ?? 0) >= 7,
     goals: () => [{ kind: 'collect', description: 'collect 7 x blaze_rod', targetItem: 'blaze_rod', requiredCount: 7 }],
+  },
+  {
+    id: 'ender_pearls',
+    satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
+    goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
   },
   {
     id: 'ender_eyes',

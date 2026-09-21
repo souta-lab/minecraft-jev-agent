@@ -338,8 +338,8 @@ addCase('(l) the M3 ender-pearl frontier still supplies the typed nether-portal 
   const noArmour = !targetItems(floor.goals).some((item) => ARMOUR_ITEMS.includes(item))
   return {
     pass:
-      resume.rungId === 'ender_pearls' &&
-      floor.rungId === 'ender_pearls' &&
+      resume.rungId === 'nether_portal' &&
+      floor.rungId === 'nether_portal' &&
       floor.supplied &&
       operationKinds === 'build_portal_frame,light_portal,verify_portal' &&
       everyPostcondition &&

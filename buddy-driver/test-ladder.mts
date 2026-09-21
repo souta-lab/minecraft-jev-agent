@@ -134,11 +134,11 @@ addCase('a diamond-pickaxe frontier resumes at the M3 ender-pearl rung with M2 s
   const pearlGoal = ladder.goals.some((goal) => goal.kind === 'collect' && goal.targetItem === 'ender_pearl')
   const portalGoal = ladder.goals.some((goal) => goal.kind === 'place' || goal.targetItem === 'nether_portal')
   return {
-    // M3 (ender_pearls) is the frontier; the M2 portal rung immediately follows it,
-    // so the portal plan must still be emitted by the same ladder build.
+    // Nether-first M3 order: the portal rung is the frontier, and the same ladder
+    // build still emits the blaze/pearl/eye goals ahead of it.
     pass:
-      resume.rungId === 'ender_pearls' &&
-      ladder.rungId === 'ender_pearls' &&
+      resume.rungId === 'nether_portal' &&
+      ladder.rungId === 'nether_portal' &&
       !hasHistoricalGoal &&
       pearlGoal &&
       portalGoal,
@@ -154,19 +154,21 @@ addCase('a live verified portal closes the rung without an inventory portal item
   const frontier = computeFrontier(counts, live).rungId
   const portalGoal = ladder.goals.some((goal) => goal.targetItem === 'obsidian' || goal.targetItem === 'nether_portal')
   return {
-    // The portal rung is closed. M3 (ender_pearls) is the next executable rung, so
-    // the ladder is no longer "complete" here — it advances to the pearl rung.
+    // The portal rung is closed. With the Nether-first M3 order the next executable
+    // rung is blaze_rods (the Nether supplies blaze rods and ender pearls).
     pass:
-      resume.rungId === 'ender_pearls' &&
-      ladder.rungId === 'ender_pearls' &&
-      frontier === 'ender_pearls' &&
+      resume.rungId === 'blaze_rods' &&
+      ladder.rungId === 'blaze_rods' &&
+      frontier === 'blaze_rods' &&
       !portalGoal,
     detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} frontier=${frontier} goals=${ladder.goals.length} portalGoal=${portalGoal}`,
   }
 })
 
 addCase('M3 ender_pearls is an executable rung with a 12-pearl collect goal', () => {
-  const counts = { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1 }
+  // Nether-first order: after the portal is verified and the blaze rods are held,
+  // the pearl rung is the next executable M3 rung.
+  const counts = { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, blaze_rod: 7 }
   const live = world({ portalVerified: true })
   const resume = deriveResumeRung(counts, live)
   const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
