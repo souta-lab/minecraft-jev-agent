@@ -498,8 +498,8 @@ HOST↔generation contract versionは `RESIDENT-MODE.md §4-A` が正典。
 ```text
 M1: 3 log -> crafting_table -> wooden_pickaxe -> cobblestone
 M2: diamond×3 -> diamond_pickaxe -> flint_and_steel -> obsidian×10 -> Nether gate built/lit/verified
-M3: ender_pearl×12
-M4: enter Nether -> blaze rods -> ender_eye×12 -> stronghold -> End -> dragon
+M3: ender_pearl×12 + blaze rods -> ender_eye×12
+M4: stronghold -> End -> dragon
 ```
 
 各段で一次ログ＋inventory/predicateをrun-scoped evidenceとして残し、ARCHITECTURE.mdとissueを更新する。
@@ -573,7 +573,7 @@ M4: enter Nether -> blaze rods -> ender_eye×12 -> stronghold -> End -> dragon
 
 ## 7. M4設定blocker
 
-現在difficulty=peaceful。M2のネザーゲート構築まではpeacefulで進められる。M3は`ender_pearl×12`と定義され、エンダーマン（敵対mob）のドロップが必須になるため、M3着手前にdifficulty変更をproduct decisionとして明示し、変更runを証拠化する（ブレイズはM4のeyes of ender×12で必要になる）。
+現在difficulty=peaceful。M2のネザーゲート構築まではpeacefulで進められる。M3は`ender_eye×12`と定義され、`ender_eye = ender_pearl + blaze_powder`なので、エンダーマン（敵対mob）のドロップとネザー（ブレイズ）の両方が必須になる。したがってM3着手前にdifficulty変更とmob spawn有効化をproduct decisionとして明示し、変更runを証拠化する。ライブ設定は server.properties の `difficulty=normal` / `spawn-monsters=true`、gamerule は `spawn_mobs=true` / `advance_time=false`（夜固定）である。
 それまではresident/Option/M2（ダイヤからゲートまで）の検証を進める。
 
 ## 8. 設計判定ルール

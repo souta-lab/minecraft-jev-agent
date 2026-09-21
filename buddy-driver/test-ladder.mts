@@ -182,6 +182,35 @@ addCase('M3 ender_pearls is an executable rung with a 12-pearl collect goal', ()
   }
 })
 
+addCase('M3 terminal ender_eyes is an executable rung with a 12-eye craft goal', () => {
+  const counts = {
+    diamond: 3,
+    diamond_pickaxe: 1,
+    flint_and_steel: 1,
+    obsidian: 10,
+    nether_portal: 1,
+    blaze_rod: 7,
+    ender_pearl: 12,
+  }
+  const live = world({ portalVerified: true })
+  const resume = deriveResumeRung(counts, live)
+  const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
+  const eyeGoal = ladder.goals.find((goal) => goal.targetItem === 'ender_eye')
+  const eyesExecutable = RUNGS.some((r) => r.id === 'ender_eyes' && r.future !== true)
+  const blazeExecutable = RUNGS.some((r) => r.id === 'blaze_rods' && r.future !== true)
+  return {
+    // M3 = ender_eye>=12. The eye craft is the terminal rung, and blaze_rods must
+    // also be executable because 12 eyes need 12 blaze_powder.
+    pass:
+      eyesExecutable &&
+      blazeExecutable &&
+      ladder.rungId === 'ender_eyes' &&
+      eyeGoal?.kind === 'craft' &&
+      eyeGoal.requiredCount === 12,
+    detail: `eyes=${eyesExecutable} blaze=${blazeExecutable} rung=${ladder.rungId} goal=${eyeGoal?.kind}:${eyeGoal?.targetItem}:${eyeGoal?.requiredCount}`,
+  }
+})
+
 addCase('with coal held and no charcoal the ladder targets the charcoal rung, never skips it', () => {
   const counts = { coal: 7, furnace: 1, cobblestone: 112, crafting_table: 1, stone_pickaxe: 1 }
   const ladder = buildLadder(counts, world(), undefined, { placedFurnacesNear: 1 })

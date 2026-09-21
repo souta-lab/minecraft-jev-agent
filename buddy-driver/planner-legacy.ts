@@ -429,14 +429,15 @@ export const RUNGS: readonly Rung[] = [
     satisfied: (c) => has(c, 'diamond_pickaxe'),
     goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
   },
-  // --- M3 (owner definition): 12 ender pearls. ---
-  // Pearls drop from endermen, so this rung needs hostile-mob difficulty and does
-  // NOT require the Nether. It precedes the M2 portal rung because the two
-  // capabilities are independent and M3 is the current objective: the live M2
-  // blocker is a missing grounded route to obsidian (`collect:obsidian` only
-  // produced zero-progress MOVE candidates), and pearls do not depend on it.
-  // M2's portal rung follows immediately, and Nether -> blaze -> ender_eye stays
-  // in the future M4 route below.
+  // --- M3 (owner definition): 12 ender_eye (Eye of Ender). ---
+  // Crafting 12 eyes needs 12 ender_pearl + 12 blaze_powder, so the M3 road is:
+  //   ender_pearls (endermen, hostile-mob difficulty)
+  //   -> nether_portal (M2 gate)
+  //   -> blaze_rods (Nether fortress)
+  //   -> ender_eyes (terminal: ender_eye>=12)
+  // Pearls are farmed first because they need no Nether access, while the live M2
+  // blocker is a missing grounded route to obsidian (`collect:obsidian` produced
+  // only zero-progress MOVE candidates).
   {
     id: 'ender_pearls',
     satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
@@ -452,16 +453,14 @@ export const RUNGS: readonly Rung[] = [
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
-  // --- M4 route (future): Nether -> blaze -> ender eyes -> stronghold -> end -> dragon ---
+  // --- M3 continued: Nether blaze rods -> Eyes of Ender. ---
   {
     id: 'blaze_rods',
-    future: true,
     satisfied: (c) => (c['blaze_rod'] ?? 0) >= 7,
     goals: () => [{ kind: 'collect', description: 'collect 7 x blaze_rod', targetItem: 'blaze_rod', requiredCount: 7 }],
   },
   {
     id: 'ender_eyes',
-    future: true,
     satisfied: (c) => (c['ender_eye'] ?? 0) >= 12,
     goals: () => [{ kind: 'craft', description: 'craft 12 x ender_eye', targetItem: 'ender_eye', requiredCount: 12 }],
   },
