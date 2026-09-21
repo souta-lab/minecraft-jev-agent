@@ -33,7 +33,9 @@ import {
   classifyAbandonReason,
   evaluatePlaceRetry,
   formatAbandonReason,
+  PLACE_RETRIES_EXHAUSTED,
   PLACE_RETRY_LIMIT,
+  PlaceRetryLedger,
   prerequisiteProtection,
   shouldAdoptAbandon,
 } from '../jev-agent/src/placementGuard.ts'
@@ -813,6 +815,86 @@ addCase('(b) a failed spot rotates the next PLACE retry a few blocks away', () =
   const candidate = generateCandidates(state, defaultCandidateOptions).find((entry) => entry.kind === 'PLACE')
   const pass = candidate !== undefined && candidate.id === 'PLACE:furnace:p31_61_35'
   return { pass, detail: candidate === undefined ? 'no PLACE' : candidate.id }
+})
+
+// --- (b2) the bound is AUTHORITATIVE: it retires, it does not keep counting ---
+// Live 2026-09-21 (gen-mubgovmf-x6b5rr): PLACE_RETRY reported limit=5 while the
+// count reached 18 because nothing retired the candidate. These cases pin the
+// contract: the ordinal clamps at limit+1, one typed PLACE_RETRIES_EXHAUSTED is
+// emitted, the item family is retired, and the generator refuses it afterwards.
+
+addCase('(b2) the retry ordinal clamps at the bound and reports exhausted', () => {
+  const at: Vec3Json = { x: 26, y: 66, z: 9 }
+  const decisions = Array.from({ length: 18 }, (_, index) =>
+    evaluatePlaceRetry({ at, reason: 'verify_failed', priorRetries: index, actionId: 'PLACE:obsidian:build:4@p26_66_9', item: 'obsidian' }),
+  )
+  const retries = decisions.filter((decision) => decision.retry).length
+  const exhausted = decisions.filter((decision) => decision.exhausted)
+  const pass =
+    retries === PLACE_RETRY_LIMIT &&
+    exhausted.length === 13 &&
+    decisions[17]?.count === PLACE_RETRY_LIMIT + 1 &&
+    decisions.every((decision) => decision.count <= PLACE_RETRY_LIMIT + 1) &&
+    decisions[PLACE_RETRY_LIMIT]?.exhausted === true &&
+    decisions[PLACE_RETRY_LIMIT - 1]?.exhausted === false &&
+    (decisions[PLACE_RETRY_LIMIT]?.exhaustedLine ?? '').startsWith(
+      `${PLACE_RETRIES_EXHAUSTED} at=26,66,9 item=obsidian count=6/5 actionId=PLACE:obsidian:build:4@p26_66_9 reason=verify_failed`,
+    )
+  return {
+    pass,
+    detail: `retries=${retries} exhausted=${exhausted.length} lastCount=${decisions[17]?.count} line=${decisions[PLACE_RETRY_LIMIT]?.exhaustedLine}`,
+  }
+})
+
+addCase('(b2) the ledger emits PLACE_RETRIES_EXHAUSTED once and retires item + candidate', () => {
+  const ledger = new PlaceRetryLedger()
+  const at: Vec3Json = { x: 26, y: 66, z: 9 }
+  const lines: string[] = []
+  let retries = 0
+  for (let attempt = 0; attempt < 18; attempt += 1) {
+    const outcome = ledger.noteFailure({ item: 'obsidian', actionId: 'PLACE:obsidian:build:4@p26_66_9', at, reason: 'verify_failed' })
+    if (outcome.retry) retries += 1
+    if (outcome.exhaustedLine !== null) lines.push(outcome.exhaustedLine)
+  }
+  const after = ledger.noteFailure({ item: 'obsidian', actionId: 'PLACE:obsidian:build:4@p26_66_9', at, reason: 'verify_failed' })
+  const pass =
+    retries === PLACE_RETRY_LIMIT &&
+    lines.length === 1 &&
+    after.exhaustedLine === null &&
+    after.count === PLACE_RETRY_LIMIT + 1 &&
+    ledger.isItemRetired('obsidian') === true &&
+    ledger.isActionRetired('PLACE:obsidian:build:4@p26_66_9') === true &&
+    ledger.anyExhausted() === true &&
+    ledger.retiredItemSet().has('obsidian') === true
+  return { pass, detail: `retries=${retries} lines=${lines.length} after=${after.count} retired=${ledger.isItemRetired('obsidian')} line=${lines[0]}` }
+})
+
+addCase('(b2) a verified placement clears the retirement so the family is usable again', () => {
+  const ledger = new PlaceRetryLedger()
+  const at: Vec3Json = { x: 26, y: 66, z: 9 }
+  for (let attempt = 0; attempt < 7; attempt += 1) {
+    ledger.noteFailure({ item: 'obsidian', actionId: 'PLACE:obsidian:build:4@p26_66_9', at, reason: 'verify_failed' })
+  }
+  const retiredBefore = ledger.isItemRetired('obsidian')
+  ledger.noteVerified('obsidian')
+  const outcome = ledger.noteFailure({ item: 'obsidian', actionId: 'PLACE:obsidian:build:6@p25_67_9', at, reason: 'verify_failed' })
+  const pass =
+    retiredBefore === true &&
+    ledger.isItemRetired('obsidian') === false &&
+    ledger.anyExhausted() === false &&
+    outcome.retry === true &&
+    outcome.count === 1
+  return { pass, detail: `retiredBefore=${retiredBefore} afterVerified=${ledger.isItemRetired('obsidian')} count=${outcome.count}` }
+})
+
+addCase('(b2) the candidate generator refuses a retired placement item', () => {
+  const a: Vec3Json = { x: 28, y: 61, z: 35 }
+  const live = worldState({ inventory: heldFurnaceInventory, placementSpots: [a], signals: signals() })
+  const retired = generateCandidates(live, { ...defaultCandidateOptions, retiredPlaceItems: new Set(['furnace']) }).find(
+    (entry) => entry.kind === 'PLACE',
+  )
+  const pass = retired === undefined
+  return { pass, detail: `retiredPlace=${retired?.id ?? 'none'}` }
 })
 
 // --- (c) one-line abandon reason --------------------------------------------

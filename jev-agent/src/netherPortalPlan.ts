@@ -50,6 +50,19 @@ export const PORTAL_LIGHT_REFUSED = 'PORTAL_LIGHT_REFUSED'
 export const PORTAL_ENTERED = 'PORTAL_ENTERED'
 /** Entry was refused before any movement (no lit portal / no safe approach). */
 export const PORTAL_ENTER_REFUSED = 'PORTAL_ENTER_REFUSED'
+/**
+ * A multi-cell frame build finished its batch but the complete 10-edge shape is
+ * still not present. This is a typed terminal cause: the batch was real work,
+ * yet the frame is not verifiable, so the endless `verify_failed` retry that
+ * measured 152 `PORTAL_BLOCK_PLACED` with zero `PORTAL_FRAME_READY` cannot recur.
+ */
+export const FRAME_BUILD_INCOMPLETE = 'FRAME_BUILD_INCOMPLETE'
+/**
+ * The planned frame cells do not belong to any 4x5 portal layout. The build is
+ * geometrically ungrounded (a stale/foreign site) and must fail once instead of
+ * placing into the void.
+ */
+export const FRAME_BUILD_UNGROUNDED = 'FRAME_BUILD_UNGROUNDED'
 
 /**
  * The queue-level predicate that names the ignition operation. Both the
@@ -571,6 +584,27 @@ export function formatPortalBlockPlaced(pos: PortalBlockPosition): string {
   return `${PORTAL_BLOCK_PLACED} pos=${formatPos(pos)}`
 }
 
+/** Typed terminal cause for a batch that could not complete the 10-edge frame. */
+export function formatFrameBuildIncomplete(input: {
+  planned: number
+  placed: number
+  missing: readonly PortalBlockPosition[]
+  actionId?: string
+}): string {
+  const cells = input.missing
+    .slice(0, 4)
+    .map(formatPos)
+    .join(';')
+  const action = input.actionId === undefined ? '' : ` actionId=${input.actionId}`
+  return `${FRAME_BUILD_INCOMPLETE} planned=${input.planned} placed=${input.placed} missing=${input.missing.length} cells=${cells}${action}`
+}
+
+/** Typed terminal cause for a batch that maps to no 4x5 layout at all. */
+export function formatFrameBuildUngrounded(planned: number, actionId?: string): string {
+  const action = actionId === undefined ? '' : ` actionId=${actionId}`
+  return `${FRAME_BUILD_UNGROUNDED} planned=${planned}${action}`
+}
+
 export interface BlockPlacementStep {
   readonly item: string
   readonly cell: PortalBlockPosition
@@ -695,6 +729,54 @@ export function groundPortalFrame(
     // it on every newly observed site before candidate grounding.
     temporarySupportRequired: selected.temporarySupportRequired === true,
   }
+}
+
+/**
+ * Recover the 4x5 layout a PARTIAL placement batch belongs to. Unlike
+ * `validatePortalFrame`, this does not require the whole edge ring to be
+ * present: it only requires every planned cell to be a frame edge. That is the
+ * exact case where a build still needs a temporary scaffold (`ensurePortalFrameSupport`),
+ * so requiring a complete frame there would make the support step unreachable.
+ *
+ * When several layouts contain the batch, the one with the most live obsidian
+ * edges wins, so a continuation stays on the sensed frame instead of drifting to
+ * a neighbouring empty footprint.
+ */
+export function partialPortalFrameLayout(
+  plannedCells: readonly PortalBlockPosition[],
+  widthAxis: PortalWidthAxis,
+  obsidianAt: (position: PortalBlockPosition) => boolean = () => false,
+): PortalFrameLayout | null {
+  if (plannedCells.length === 0) return null
+  let best: { layout: PortalFrameLayout; existing: number; distance: number } | null = null
+  const seen = new Set<string>()
+  for (const cell of plannedCells) {
+    const width = widthAxis === 'x' ? cell.x : cell.z
+    const normal = widthAxis === 'x' ? cell.z : cell.x
+    for (let originWidth = width - (PORTAL_FRAME_WIDTH - 1); originWidth <= width; originWidth += 1) {
+      for (let originY = cell.y - (PORTAL_FRAME_HEIGHT - 1); originY <= cell.y; originY += 1) {
+        const origin =
+          widthAxis === 'x'
+            ? { x: originWidth, y: originY, z: normal }
+            : { x: normal, y: originY, z: originWidth }
+        const originKey = cellKey(origin)
+        if (seen.has(originKey)) continue
+        seen.add(originKey)
+        const layout = portalFrameLayout(origin, widthAxis)
+        const frame = new Set(layout.frame.map(cellKey))
+        if (!plannedCells.every((planned) => frame.has(cellKey(planned)))) continue
+        const existing = layout.frame.filter((frameCell) => obsidianAt(frameCell)).length
+        const distance = plannedCells.reduce(
+          (sum, planned) => sum + Math.hypot(planned.x - origin.x, planned.y - origin.y, planned.z - origin.z),
+          0,
+        )
+        if (best === null || existing > best.existing || (existing === best.existing && distance < best.distance)) {
+          best = { layout, existing, distance }
+        }
+      }
+    }
+  }
+  return best?.layout ?? null
 }
 
 // ---------------------------------------------------------------------------

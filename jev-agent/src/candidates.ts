@@ -276,6 +276,14 @@ export interface CandidateOptions {
   descendFailureLimit?: number
   /** failures at one placement spot before a fallback spot is used (default 2) */
   placeSpotRetryLimit?: number
+  /**
+   * Items whose bounded PLACE attempts are exhausted (`PLACE_RETRIES_EXHAUSTED`).
+   * Passed by the controller from its `PlaceRetryLedger` so the generator cannot
+   * re-offer a retired placement family. This is the enforcement half of the
+   * bounded-attempt contract: without it the counter is advisory and the same
+   * candidate is re-selected (measured 2026-09-21: count=18 against limit=5).
+   */
+  retiredPlaceItems?: ReadonlySet<string>
   /** affordance gate facts: pathfinder probe + state-fingerprint suppression memory */
   reachability?: ReachabilityGateOptions | null
   /**
@@ -3010,11 +3018,46 @@ function placementAxisFor(cells: readonly Vec3Json[]): 'x' | 'z' {
 }
 
 /**
+ * Deterministic CAN truth for a starved `place obsidian` goal whose frame
+ * grounding exists but whose remaining cells exceed the held material. Without
+ * this the generator returns an empty candidate set with no named cause and the
+ * starvation evidence reads `missing=[]` (live 2026-09-21: `CANDIDATE_STARVATION
+ * ... goal=place:obsidian:10 blockedBy=no_productive_action missing=[] repeat=21`).
+ *
+ * Returns null when the grounding itself is absent (no site to build on) or when
+ * the held material is sufficient; the caller names the no-site case separately.
+ */
+export function frameBuildMaterialGap(
+  state: WorldState,
+  focusItem: string,
+): { missing: number; held: number } | null {
+  if (focusItem !== OBSIDIAN) return null
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'place' || current.targetItem !== OBSIDIAN) return null
+  const grounding = frameBuildGrounding(state)
+  if (grounding === null) return null
+  const held = state.inventory.counts[focusItem] ?? 0
+  if (held >= grounding.cells.length) return null
+  return { missing: grounding.cells.length, held }
+}
+
+/** The grounding exists for the active frame goal, regardless of material. */
+export function frameBuildGrounded(state: WorldState, focusItem: string): boolean {
+  if (focusItem !== OBSIDIAN) return false
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'place' || current.targetItem !== OBSIDIAN) return false
+  return frameBuildGrounding(state) !== null
+}
+
+/**
  * PLACE candidate for a `place` subgoal (e.g. the M2 furnace). The item is in
  * the inventory and there is a grounded placement spot within reach.
  */
 function placeCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
+  // A placement family whose bounded attempts are exhausted must not be
+  // re-offered: the ledger already retired it with a typed PLACE_RETRIES_EXHAUSTED.
+  if (options.retiredPlaceItems?.has(focusItem) === true) return []
   if ((state.inventory.counts[focusItem] ?? 0) <= 0) return []
   const sequence = placeSequenceCells(state, focusItem)
   if (sequence !== null) {

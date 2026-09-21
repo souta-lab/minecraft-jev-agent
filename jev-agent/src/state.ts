@@ -1835,19 +1835,19 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
             (cell) => at(cell.x, cell.y, cell.z)?.name ?? null,
             NETHER_PORTAL,
           )
+          // Bottom support is only required for the bottom EDGE cells the build
+          // still has to place. The two bottom corners are optional (a valid
+          // minimal frame omits them), so their columns never gate the site: an
+          // agent that mined the support row under the corners can still see and
+          // continue the four edge cells it actually placed. A bottom edge that
+          // is already obsidian needs no support because nothing is placed there.
           let supported = true
-          for (let w = 0; w < 4; w += 1) {
-            const bottom =
-              widthAxis === 'x'
-                ? { x: origin.x + w, y: origin.y, z: origin.z }
-                : { x: origin.x, y: origin.y, z: origin.z + w }
+          for (const bottom of layout.frame) {
+            if (bottom.y !== origin.y) continue
+            if (existingFrame.some((cell) => portalCellKey(cell) === portalCellKey(bottom))) continue
             if (!solid(bottom.x, bottom.y - 1, bottom.z)) {
-              const bottomCell = layout.frame.find((cell) => cell.x === bottom.x && cell.y === bottom.y && cell.z === bottom.z)
-              const alreadyBuilt = bottomCell !== undefined && existingFrame.some((cell) => portalCellKey(cell) === portalCellKey(bottomCell))
-              if (!alreadyBuilt) {
-                supported = false
-                break
-              }
+              supported = false
+              break
             }
           }
           if (!supported) continue

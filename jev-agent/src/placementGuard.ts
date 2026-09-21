@@ -149,16 +149,51 @@ export function formatFurnaceReady(source: string, at: Vec3Json): string {
   return `FURNACE_READY source=${source} at=${at.x},${at.y},${at.z}`
 }
 
+/**
+ * Typed retirement marker for the bounded-attempt contract. `PLACE_RETRY` is a
+ * counter line; `PLACE_RETRIES_EXHAUSTED` is the terminal line that proves the
+ * option/candidate was actually retired instead of being re-offered forever.
+ * Measured live 2026-09-21 (gen-mubgovmf-x6b5rr): `PLACE_RETRY ... limit=5`
+ * reached `count=18` because the counter kept advancing past the bound and no
+ * layer retired the candidate (`PLACE:obsidian:build:4@p26_66_9`).
+ */
+export const PLACE_RETRIES_EXHAUSTED = 'PLACE_RETRIES_EXHAUSTED'
+
 export function formatPlaceRetry(at: Vec3Json, reason: string): string {
   return `PLACE_RETRY at=${at.x},${at.y},${at.z} reason=${reason}`
+}
+
+/** One retire line per exhausted candidate/option, never per retry. */
+export function formatPlaceRetriesExhausted(input: {
+  at: Vec3Json
+  actionId: string
+  item: string | null
+  count: number
+  limit: number
+  reason: string
+}): string {
+  const item = input.item ?? 'unknown'
+  return `${PLACE_RETRIES_EXHAUSTED} at=${input.at.x},${input.at.y},${input.at.z} item=${item} count=${input.count}/${input.limit} actionId=${input.actionId} reason=${input.reason} -> retire candidate`
 }
 
 export interface PlaceRetryDecision {
   /** true while the placement may be retried at a nearby spot. */
   retry: boolean
-  /** 1-based retry ordinal. */
+  /**
+   * true on the first decision past the bound. The caller MUST retire the
+   * candidate/option here; otherwise the counter is advisory and the contract
+   * is not enforced.
+   */
+  exhausted: boolean
+  /**
+   * 1-based retry ordinal. Clamped at `limit + 1` so a retired family cannot
+   * keep counting to 18 (or beyond) after it should have stopped.
+   */
   count: number
+  limit: number
   line: string
+  /** `PLACE_RETRIES_EXHAUSTED ...` when exhausted, null while retrying. */
+  exhaustedLine: string | null
 }
 
 /**
@@ -171,8 +206,126 @@ export function evaluatePlaceRetry(input: {
   reason: string
   priorRetries: number
   limit?: number
+  actionId?: string
+  item?: string | null
 }): PlaceRetryDecision {
   const limit = input.limit ?? PLACE_RETRY_LIMIT
-  const count = input.priorRetries + 1
-  return { retry: count <= limit, count, line: formatPlaceRetry(input.at, input.reason) }
+  const retry = input.priorRetries < limit
+  const exhausted = !retry
+  const count = Math.min(input.priorRetries + 1, limit + 1)
+  return {
+    retry,
+    exhausted,
+    count,
+    limit,
+    line: formatPlaceRetry(input.at, input.reason),
+    exhaustedLine: exhausted
+      ? formatPlaceRetriesExhausted({
+          at: input.at,
+          actionId: input.actionId ?? 'unknown',
+          item: input.item ?? null,
+          count,
+          limit,
+          reason: input.reason,
+        })
+      : null,
+  }
+}
+
+/**
+ * The bounded-attempt ledger for placement families. It owns the whole contract
+ * in ONE place so `PLACE_RETRY` (still retrying) and
+ * `PLACE_RETRIES_EXHAUSTED` (retired) cannot diverge:
+ *
+ *  - counts are per item (a failed spot relocates and retries the same item);
+ *  - counts clamp at `limit + 1`, so the ordinal cannot grow past the bound;
+ *  - the first past-bound failure retires the item family AND the exact
+ *    candidate id, and returns the retire line exactly once;
+ *  - a verified placement clears both the counter and the retirement, so a
+ *    later legitimate attempt for the same item is not permanently blocked.
+ */
+export class PlaceRetryLedger {
+  private readonly limit: number
+  private readonly counts = new Map<string, number>()
+  private readonly retiredItems = new Set<string>()
+  private readonly retiredActions = new Set<string>()
+  private readonly announced = new Set<string>()
+
+  constructor(limit: number = PLACE_RETRY_LIMIT) {
+    this.limit = Number.isInteger(limit) && limit >= 1 ? limit : PLACE_RETRY_LIMIT
+  }
+
+  /** Record one failed placement attempt and return the bounded decision. */
+  noteFailure(input: {
+    item: string | null
+    actionId: string
+    at: Vec3Json
+    reason: string
+  }): PlaceRetryDecision & { actionId: string; item: string | null } {
+    const key = input.item ?? input.actionId
+    const prior = this.counts.get(key) ?? 0
+    const decision = evaluatePlaceRetry({
+      at: input.at,
+      reason: input.reason,
+      priorRetries: prior,
+      limit: this.limit,
+      actionId: input.actionId,
+      item: input.item,
+    })
+    this.counts.set(key, decision.count)
+    if (decision.exhausted) {
+      this.retiredActions.add(input.actionId)
+      if (input.item !== null) this.retiredItems.add(input.item)
+    }
+    // The retire line is emitted once per exhausted family, never once per
+    // subsequent failure (which is what made the live counter look advisory).
+    const exhaustedLine = decision.exhaustedLine !== null && !this.announced.has(key) ? decision.exhaustedLine : null
+    if (exhaustedLine !== null) this.announced.add(key)
+    return { ...decision, exhaustedLine, actionId: input.actionId, item: input.item }
+  }
+
+  /** A verified placement ends the failure run for this item. */
+  noteVerified(item: string | null): void {
+    if (item === null) return
+    this.counts.delete(item)
+    this.retiredItems.delete(item)
+    this.announced.delete(item)
+  }
+
+  /** true when the item family has exhausted its bounded placement attempts. */
+  isItemRetired(item: string | null): boolean {
+    return item !== null && this.retiredItems.has(item)
+  }
+
+  isActionRetired(actionId: string): boolean {
+    return this.retiredActions.has(actionId)
+  }
+
+  /** The retired item set the candidate generator must not offer again. */
+  retiredItemSet(): ReadonlySet<string> {
+    return this.retiredItems
+  }
+
+  /** true when ANY placement family is past its bound (the protection release). */
+  anyExhausted(): boolean {
+    for (const count of this.counts.values()) {
+      if (count > this.limit) return true
+    }
+    return false
+  }
+
+  countFor(item: string | null): number {
+    return item === null ? 0 : (this.counts.get(item) ?? 0)
+  }
+
+  limitFor(): number {
+    return this.limit
+  }
+
+  reset(): void {
+    this.counts.clear()
+    this.retiredItems.clear()
+    this.retiredActions.clear()
+    this.announced.clear()
+  }
 }

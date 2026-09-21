@@ -103,8 +103,11 @@ import type { JumpBotLike, PillarJumpTrace, SolidAt } from './pillarJump.ts'
 import { formatHopPlan, planVerticalHop } from './hopPolicy.ts'
 import {
   OBSIDIAN,
+  formatFrameBuildIncomplete,
+  formatFrameBuildUngrounded,
   formatPortalBlockPlaced,
   formatPortalFrameReady,
+  partialPortalFrameLayout,
   portalFrameLayout,
   validatePortalFrame,
 } from './netherPortalPlan.ts'
@@ -147,6 +150,8 @@ export type FailureCode =
   | 'target_gone'
   | 'verify_failed'
   | 'pickup_failed'
+  | 'frame_build_incomplete'
+  | 'frame_build_ungrounded'
   | 'cancelled'
   | 'unknown_event'
 
@@ -4282,12 +4287,39 @@ export class Executor {
       // `cells` is normally only the missing suffix of a sensed partial
       // frame. Validating that suffix alone can never prove a 10-edge frame,
       // so include the live obsidian edges that preceded this action.
-      const validation = this.portalFramePlacementValidation(cells, candidate.placementAxis ?? 'x')
+      const widthAxis = candidate.placementAxis ?? 'x'
+      const validation = this.portalFramePlacementValidation(cells, widthAxis)
       if (validation === null || validation.shape !== 'ok') {
-        throw new ExecutorError(
-          'verify_failed',
-          `frame build over ${cells.length} cells did not validate (${placedCells.length} placed)`,
+        // This is a TYPED terminal cause, not a generic `verify_failed` retry.
+        // The live M2 defect placed 152 obsidian cells and emitted zero
+        // PORTAL_FRAME_READY because every batch ended in the untyped retry
+        // loop. Name the layout that is still short and the cells still missing.
+        const layout =
+          validation !== null && validation.origin !== null
+            ? portalFrameLayout(validation.origin, validation.widthAxis)
+            : partialPortalFrameLayout(cells, widthAxis, (position) => this.currentBlockAt(position)?.name === OBSIDIAN)
+        if (layout === null) {
+          const line = formatFrameBuildUngrounded(cells.length, candidate.id)
+          this.logger.warn('agent', line, { actionId: candidate.id, planned: cells.length })
+          throw new ExecutorError('frame_build_ungrounded', line)
+        }
+        const planned = new Set(cells.map(portalCellKey))
+        const missing = layout.frame.filter(
+          (frameCell) => !planned.has(portalCellKey(frameCell)) && this.currentBlockAt(frameCell)?.name !== OBSIDIAN,
         )
+        const line = formatFrameBuildIncomplete({
+          planned: cells.length,
+          placed: placedCells.length,
+          missing,
+          actionId: candidate.id,
+        })
+        this.logger.warn('agent', line, {
+          actionId: candidate.id,
+          planned: cells.length,
+          placed: placedCells.length,
+          missing: missing.length,
+        })
+        throw new ExecutorError('frame_build_incomplete', line)
       }
       const ready = formatPortalFrameReady(validation)
       this.logger.info('agent', ready, {
@@ -4443,10 +4475,26 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<void> {
-    const validation = this.portalFramePlacementValidation(cells, candidate.placementAxis ?? 'x')
-    if (validation === null || validation.shape !== 'ok' || validation.origin === null) return
-    const layout = portalFrameLayout(validation.origin, validation.widthAxis)
+    const widthAxis = candidate.placementAxis ?? 'x'
+    // Support is needed ONLY when the cell has no adjacent reference; cells that
+    // already have one place normally.
     if (this.findPlaceReference(cell) !== null) return
+    // Support is needed precisely while the frame is INCOMPLETE. Deriving the
+    // layout from the full-frame validation first (the old gate) made this step
+    // unreachable for every partial frame: `PORTAL_SUPPORT_PLACED=0` with a
+    // declared `temporarySupportRequired` site (live 2026-09-21). Prefer the
+    // validated layout when the batch does complete a frame; otherwise fall back
+    // to the partial layout that contains the planned cells.
+    const validation = this.portalFramePlacementValidation(cells, widthAxis)
+    const layout =
+      validation !== null && validation.shape === 'ok' && validation.origin !== null
+        ? portalFrameLayout(validation.origin, validation.widthAxis)
+        : partialPortalFrameLayout(cells, widthAxis, (position) => this.currentBlockAt(position)?.name === OBSIDIAN)
+    if (layout === null) {
+      const line = formatFrameBuildUngrounded(cells.length, candidate.id)
+      this.logger.warn('agent', line, { actionId: candidate.id, planned: cells.length, axis: widthAxis })
+      throw new ExecutorError('frame_build_ungrounded', line)
+    }
     // The minimal frame omits all four corners. Pick a corner adjacent to the
     // current target first; a merely placeable lower corner cannot support a
     // disconnected top-edge placement.

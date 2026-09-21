@@ -26,6 +26,8 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import {
+  FRAME_BUILD_INCOMPLETE,
+  FRAME_BUILD_UNGROUNDED,
   OBSIDIAN,
   NETHER_PORTAL,
   PORTAL_BLOCK_PLACED,
@@ -33,6 +35,7 @@ import {
   formatPortalBlockPlaced,
   formatPortalFrameReady,
   orderedPlacementCells,
+  partialPortalFrameLayout,
   planBlockPlacements,
   planNetherPortal,
   groundPortalFrame,
@@ -45,8 +48,9 @@ import {
 import type { QueuedGoal } from './src/goalQueue.ts'
 import type { GoalQueueState } from './src/goalQueue.ts'
 import type { WorldState, Vec3Json, SelfState, InventoryState, AgentSignals } from './src/state.ts'
+import { buildPortalFrameSites, defaultSensorOptions } from './src/state.ts'
 import type { PortalFrameSite } from './src/netherPortalPlan.ts'
-import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import { defaultCandidateOptions, frameBuildGrounded, frameBuildMaterialGap, generateGroundedCandidates } from './src/candidates.ts'
 import { Executor } from './src/executor.ts'
 import {
   FRAME_PLACE_ITEMS,
@@ -398,6 +402,142 @@ function worldState(overrides: {
     (pass ? 'PASS' : 'FAIL') + '  (3d) missing frame support is a typed prerequisite, not an executor-time PLACE retry\n' +
       '      prereq=' + (prereq?.id ?? 'none') + ' role=' + (prereq?.meta.prerequisiteRole ?? 'none') +
       ' place=' + (place?.id ?? 'none') + ' natural=' + naturalSupport + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+// ---------------------------------------------------------------------------
+// (3e) the LIVE 2026-09-21 partial frame: four placed edges, obsidian=8 held
+// ---------------------------------------------------------------------------
+//
+// gen-mubgovmf-x6b5rr mined the frame support row (y=65 air) and placed four
+// edges: 26,66,9 / 27,66,9 / 28,67,9 / 28,68,9. `buildPortalFrameSites` rejected
+// the origin (25,66,9, axis x) because its four-bottom support loop demanded
+// ground under the two OPTIONAL bottom corners, which are never in
+// `layout.frame` and so were never exempted. The scan therefore reported
+// `PORTAL_FRAME_PROGRESS blocks=0`, grounding fell back to a fresh 10-cell
+// footprint, `placeSequenceCells` demanded 10 obsidian while the agent held 8,
+// and the goal starved with `missing=[]` for 21 repeats.
+const LIVE_ORIGIN: Vec3Json = { x: 25, y: 66, z: 9 }
+const LIVE_PLACED: readonly Vec3Json[] = [
+  { x: 26, y: 66, z: 9 },
+  { x: 27, y: 66, z: 9 },
+  { x: 28, y: 67, z: 9 },
+  { x: 28, y: 68, z: 9 },
+]
+
+/** Minimal mutable vector: `buildPortalFrameSites` clones and `.set()`s a scratch. */
+function liveVec(x: number, y: number, z: number) {
+  return {
+    x,
+    y,
+    z,
+    clone(): { x: number; y: number; z: number; clone: () => unknown; set: (a: number, b: number, c: number) => unknown } {
+      return liveVec(this.x, this.y, this.z)
+    },
+    set(nx: number, ny: number, nz: number) {
+      this.x = nx
+      this.y = ny
+      this.z = nz
+      return this
+    },
+  }
+}
+
+/** A bot whose only ground is at y<=64, so the y=65 support row is air. */
+function makeLiveFrameBot(): Bot {
+  const grid = new Map<string, string>()
+  for (let x = LIVE_ORIGIN.x - 2; x <= LIVE_ORIGIN.x + 6; x += 1) {
+    for (let z = LIVE_ORIGIN.z - 2; z <= LIVE_ORIGIN.z + 2; z += 1) {
+      for (let y = 60; y <= 70; y += 1) grid.set(`${x},${y},${z}`, y <= 64 ? 'stone' : 'air')
+    }
+  }
+  for (const cell of LIVE_PLACED) grid.set(key(cell), OBSIDIAN)
+  const blockAt = (v: { x: number; y: number; z: number }) => {
+    const name = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
+    if (name === undefined) return null
+    return {
+      name,
+      boundingBox: name === 'air' ? ('empty' as const) : ('block' as const),
+      position: liveVec(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)),
+    }
+  }
+  const position = liveVec(26.7, 66, 10.1)
+  return {
+    registry,
+    entity: { position, width: 0.6, height: 1.8, clone: () => position.clone() },
+    blockAt,
+    inventory: { items: () => [] },
+  } as unknown as Bot
+}
+
+{
+  const bot = makeLiveFrameBot()
+  const liveSelf = self({ x: 26.7, y: 66, z: 10.1 })
+  const sites = buildPortalFrameSites(bot, defaultSensorOptions, liveSelf)
+  const site = sites.find(
+    (candidate) =>
+      candidate.origin.x === LIVE_ORIGIN.x &&
+      candidate.origin.y === LIVE_ORIGIN.y &&
+      candidate.origin.z === LIVE_ORIGIN.z &&
+      candidate.widthAxis === 'x',
+  )
+  const grounding = groundPortalFrame(sites, { x: 26.7, y: 66, z: 10.1 })
+  const state = worldState({
+    position: { x: 26.7, y: 66, z: 10.1 },
+    inventory: inventory({ obsidian: 8, cobblestone: 64, diamond_pickaxe: 1 }),
+    goalQueue: queueWith({ ...queuedPlace(OBSIDIAN, []), placementCells: undefined, requiredCount: 10 }),
+    portalFrameSites: sites,
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE')
+  const pass =
+    site?.existingFrame?.length === 4 &&
+    grounding !== null &&
+    grounding.cells.length === 6 &&
+    place?.id === 'PLACE:obsidian:build:6@p25_67_9' &&
+    place?.placementCells?.length === 6 &&
+    place.placementAxis === 'x'
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (3e) the live 4/10 partial frame is a continuation site -> build the remaining 6\n' +
+      '      siteExisting=' + (site?.existingFrame?.length ?? 'none') + ' groundingCells=' + (grounding?.cells.length ?? 'none') +
+      ' candidate=' + (place?.id ?? 'none') + ' cells=' + (place?.placementCells?.length ?? 0) + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+// (3f) the starved frame goal names its typed gap instead of `missing=[]`
+{
+  const partialSite: PortalFrameSite = {
+    origin: LIVE_ORIGIN,
+    widthAxis: 'x',
+    safe: true,
+    reachable: true,
+    existingFrame: LIVE_PLACED,
+  }
+  const shortState = worldState({
+    position: { x: 26.7, y: 66, z: 10.1 },
+    inventory: inventory({ obsidian: 5, cobblestone: 64, diamond_pickaxe: 1 }),
+    goalQueue: queueWith({ ...queuedPlace(OBSIDIAN, []), placementCells: undefined, requiredCount: 10 }),
+    portalFrameSites: [partialSite],
+  })
+  const ungroundedState = worldState({
+    position: { x: 26.7, y: 66, z: 10.1 },
+    inventory: inventory({ obsidian: 5 }),
+    goalQueue: queueWith({ ...queuedPlace(OBSIDIAN, []), placementCells: undefined, requiredCount: 10 }),
+    portalFrameSites: [],
+  })
+  const gap = frameBuildMaterialGap(shortState, OBSIDIAN)
+  const pass =
+    frameBuildGrounded(shortState, OBSIDIAN) === true &&
+    gap?.missing === 6 &&
+    gap?.held === 5 &&
+    frameBuildGrounded(ungroundedState, OBSIDIAN) === false &&
+    frameBuildMaterialGap(ungroundedState, OBSIDIAN) === null
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (3f) a starved frame goal exposes a typed material/site gap\n' +
+      '      grounded=' + frameBuildGrounded(shortState, OBSIDIAN) + ' gap=' + JSON.stringify(gap) +
+      ' noSiteGrounded=' + frameBuildGrounded(ungroundedState, OBSIDIAN) + '\n',
   )
   if (!pass) failures += 1
 }
@@ -802,6 +942,148 @@ function placeCallsPlacedEveryCell(calls: readonly Vec3Json[], cells: readonly V
   process.stdout.write(
     `${pass ? 'PASS' : 'FAIL'}  (5b) an unmet place post-condition emits NO markers and fails the action\n` +
       `      status=${result.status} failure=${result.failure} placed=${placed.length} ready=${ready.length}\n`,
+  )
+  if (!pass) failures += 1
+}
+
+// ---------------------------------------------------------------------------
+// (5d) the LIVE continuation completes; a short batch fails ONCE with a typed cause
+// ---------------------------------------------------------------------------
+/**
+ * The live geometry (ground only at y<=64, four edges present) with the live
+ * inventory shape: obsidian=8, cobblestone=64. `placeBlock` records the call and
+ * applies the block so the real post-condition checks read it back.
+ */
+function makeLivePlaceBot(existing: readonly Vec3Json[]) {
+  const grid = new Map<string, string>()
+  for (let x = LIVE_ORIGIN.x - 2; x <= LIVE_ORIGIN.x + 6; x += 1) {
+    for (let z = LIVE_ORIGIN.z - 2; z <= LIVE_ORIGIN.z + 2; z += 1) {
+      for (let y = 60; y <= 70; y += 1) grid.set(`${x},${y},${z}`, y <= 64 ? 'stone' : 'air')
+    }
+  }
+  for (const cell of existing) grid.set(key(cell), OBSIDIAN)
+  const blockAt = (v: { x: number; y: number; z: number }) => {
+    const name = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
+    if (name === undefined) return null
+    return {
+      name,
+      boundingBox: name === 'air' ? ('empty' as const) : ('block' as const),
+      position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)),
+    }
+  }
+  const position = new P(26.7, 66, 10.1)
+  const obsidianId = (registry.itemsByName as Record<string, { id: number }>).obsidian?.id ?? 0
+  const cobbleId = (registry.itemsByName as Record<string, { id: number }>).cobblestone?.id ?? 0
+  const placeCalls: Vec3Json[] = []
+  let heldName: string | null = null
+  const bot = {
+    registry,
+    entity: {
+      position,
+      yaw: 0,
+      pitch: 0,
+      onGround: true,
+      width: 0.6,
+      height: 1.8,
+      offset: (x: number, y: number, z: number) => position.offset(x, y, z),
+      clone: () => position.clone(),
+      distanceTo: (other: { x: number; y: number; z: number }) => position.distanceTo(other),
+    },
+    _client: { write: () => true },
+    physicsEnabled: true,
+    entities: {},
+    inventory: {
+      count: (id: number) => (id === obsidianId ? 8 : id === cobbleId ? 64 : 0),
+      items: (): Array<{ name: string; type: number; count: number }> => [
+        { name: OBSIDIAN, type: obsidianId, count: 8 },
+        { name: 'cobblestone', type: cobbleId, count: 64 },
+      ],
+    },
+    get heldItem(): { name: string } | null {
+      return heldName === null ? null : { name: heldName }
+    },
+    blockAt,
+    on: () => undefined,
+    removeListener: () => undefined,
+    setControlState: () => undefined,
+    lookAt: async () => undefined,
+    equip: async (item: { name: string }) => {
+      heldName = item.name
+    },
+    canDigBlock: () => true,
+    dig: async () => undefined,
+    placeBlock: async (block: { position: { x: number; y: number; z: number } }, face: { x: number; y: number; z: number }) => {
+      const target = { x: block.position.x + face.x, y: block.position.y + face.y, z: block.position.z + face.z }
+      placeCalls.push(target)
+      grid.set(key(target), heldName ?? OBSIDIAN)
+    },
+    pathfinder: {
+      movements: null as unknown,
+      setMovements: () => undefined,
+      setGoal: () => undefined,
+      stop: () => undefined,
+      getPathTo: () => ({ status: 'noPath', path: [] }),
+    },
+  }
+  return { bot: bot as unknown as Bot, grid, placeCalls, blockAt }
+}
+
+async function runLiveFrameBuild(existing: readonly Vec3Json[], planned: readonly Vec3Json[]) {
+  const fixture = makeLivePlaceBot(existing)
+  const dir = mkdtempSync(join(tmpdir(), 'frame-build-live-'))
+  const logPath = join(dir, 'agent.jsonl')
+  const logger = new EventLogger(new JsonlWriter(logPath), false)
+  const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet' })
+  const result = await executor.claim(placeFrameCandidate(planned, OBSIDIAN)).completion
+  const messages = readFileSync(logPath, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => (JSON.parse(line) as { message?: string }).message ?? '')
+  return { fixture, result, messages }
+}
+
+{
+  const layout = portalFrameLayout(LIVE_ORIGIN, 'x')
+  const missing = layout.frame.filter((cell) => !LIVE_PLACED.some((placed) => key(placed) === key(cell)))
+  const { fixture, result, messages } = await runLiveFrameBuild(LIVE_PLACED, missing)
+  const ready = messages.filter((line) => line.startsWith(PORTAL_FRAME_READY))
+  const support = messages.filter((line) => line.startsWith('PORTAL_SUPPORT_PLACED'))
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    ready.length === 1 &&
+    ready[0] === `${PORTAL_FRAME_READY} blocks=10 shape=ok` &&
+    support.length >= 1 &&
+    layout.frame.every((cell) => fixture.grid.get(key(cell)) === OBSIDIAN)
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (5d) the live 4/10 frame continues to a verified PORTAL_FRAME_READY\n' +
+      '      status=' + result.status + ' verified=' + result.verified + ' missing=' + missing.length +
+      ' support=' + support.length + ' ready=[' + (ready[0] ?? 'none') + '] failure=' + (result.failure ?? 'none') + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+{
+  // Only three of the six remaining edges are planned: the batch is real work
+  // but cannot complete the frame. It must fail ONCE with the typed cause and
+  // never emit a frame-ready marker.
+  const shortBatch = [
+    { x: 25, y: 67, z: 9 },
+    { x: 25, y: 68, z: 9 },
+    { x: 25, y: 69, z: 9 },
+  ]
+  const { result, messages } = await runLiveFrameBuild(LIVE_PLACED, shortBatch)
+  const ready = messages.filter((line) => line.startsWith(PORTAL_FRAME_READY))
+  const typed = messages.filter((line) => line.startsWith(FRAME_BUILD_INCOMPLETE))
+  const pass =
+    result.status === 'failed' &&
+    result.failure === 'frame_build_incomplete' &&
+    typed.length === 1 &&
+    ready.length === 0 &&
+    typed[0]?.startsWith(`${FRAME_BUILD_INCOMPLETE} planned=3 placed=3`) === true
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (5d-typed) a short frame batch fails once with FRAME_BUILD_INCOMPLETE\n' +
+      '      status=' + result.status + ' failure=' + result.failure + ' typed=[' + (typed[0] ?? 'none') + '] ready=' + ready.length + '\n',
   )
   if (!pass) failures += 1
 }

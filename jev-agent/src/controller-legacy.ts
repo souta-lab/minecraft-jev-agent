@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, exploredCellKey, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -112,10 +112,10 @@ import { evaluateSpatialPredicate, predicateForGoal } from './predicateGoal.ts'
 import type { PredicateEvaluation } from './predicateGoal.ts'
 import {
   classifyAbandonReason,
-  evaluatePlaceRetry,
   formatAbandonReason,
   isFurnacePrerequisiteOption,
-  PLACE_RETRY_LIMIT,
+  PLACE_RETRIES_EXHAUSTED,
+  PlaceRetryLedger,
   prerequisiteOptionName,
   shouldAdoptAbandon,
 } from './placementGuard.ts'
@@ -1023,6 +1023,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'RETURN_TO_SURFACE',
   'PRECONDITION_PROTECTED',
   'PLACE_RETRY',
+  // Bounded-attempt terminal + typed frame-build causes are run-scoped
+  // acceptance evidence: they prove the option was retired and the frame build
+  // failed ONCE with a named cause instead of looping on `verify_failed`.
+  'PLACE_RETRIES_EXHAUSTED',
+  'FRAME_BUILD_INCOMPLETE',
+  'FRAME_BUILD_UNGROUNDED',
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
@@ -1615,8 +1621,13 @@ export class JevController {
   private previousMoveTarget: { dimension: string; position: Vec3Json } | null = null
   private lastOscillationPair: string | null = null
   private lastOscillationAt = 0
-  /** #46: bounded PLACE retries per item, so a bad spot never abandons the option. */
-  private readonly placementRetries = new Map<string, number>()
+  /**
+   * #46: bounded PLACE retries per item, so a bad spot never abandons the option.
+   * The ledger owns the whole contract: after the bound it retires the item
+   * family (so the generator stops re-offering it) and emits one typed
+   * `PLACE_RETRIES_EXHAUSTED`. A verified placement clears it.
+   */
+  private readonly placementRetries = new PlaceRetryLedger()
   /**
    * Stations this generation verified placing. They are selectable and reachable
    * for the rest of the generation (the durable WorldMemory path only lands on a
@@ -2290,6 +2301,7 @@ export class JevController {
         state.portalFrame,
         this.searchedSurfaceTargets,
         portalEntry,
+        this.placementRetries.retiredItemSet(),
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -2413,6 +2425,29 @@ export class JevController {
         if (grounded.sourceGap !== null) {
           const sourceToken = `resource:${grounded.sourceGap.item}:${grounded.sourceGap.reason}`
           if (!missing.includes(sourceToken)) missing.push(sourceToken)
+        }
+        // A starved `place obsidian` frame goal must NAME its typed gap. The
+        // live defect reported `missing=[]` for 21 repeats while the agent paced
+        // around the destroyed frame, so the blocker (retired family, no grounded
+        // site, or insufficient obsidian) stayed invisible to the escalation
+        // boundary. `state` is the post-merge world the candidates were built
+        // from, so the frame facts here match the offered set.
+        const placeGoal = this.queue.current?.kind === 'place' ? this.queue.current : null
+        const placeFocus = placeGoal?.targetItem ?? null
+        if (placeFocus === OBSIDIAN) {
+          if (this.placementRetries.isItemRetired(OBSIDIAN)) {
+            const token = `place_retries_exhausted:${OBSIDIAN}`
+            if (!missing.includes(token)) missing.push(token)
+          } else if (!frameBuildGrounded(state, OBSIDIAN)) {
+            const token = 'portal_frame_site:none'
+            if (!missing.includes(token)) missing.push(token)
+          } else {
+            const gap = frameBuildMaterialGap(state, OBSIDIAN)
+            if (gap !== null) {
+              const token = `portal_frame_material:${OBSIDIAN}:${gap.held}/${gap.missing}`
+              if (!missing.includes(token)) missing.push(token)
+            }
+          }
         }
         this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
@@ -2566,6 +2601,7 @@ export class JevController {
                 freshState.portalFrame,
                 this.searchedSurfaceTargets,
                 this.portalEntryPlan(freshState),
+                this.placementRetries.retiredItemSet(),
               ),
             ).candidates,
             freshState,
@@ -3148,15 +3184,11 @@ export class JevController {
   }
 
   private placeRetryExhausted(): boolean {
-    for (const count of this.placementRetries.values()) {
-      if (count > PLACE_RETRY_LIMIT) return true
-    }
-    return false
+    return this.placementRetries.anyExhausted()
   }
 
   private placeRetryCount(item: string | null): number {
-    if (item === null) return 0
-    return this.placementRetries.get(item) ?? 0
+    return this.placementRetries.countFor(item)
   }
 
   /** Unfinished goals in plan order; the protection guard spans the whole plan. */
@@ -3403,8 +3435,11 @@ export class JevController {
 
   /**
    * #46 requirement 2: a placement failure at one spot is NOT an abandon. Log
-   * PLACE_RETRY, retire the spot so the next decision relocates a few blocks,
-   * and only give up after PLACE_RETRY_LIMIT attempts.
+   * PLACE_RETRY while the bounded attempts remain, then RETIRE the candidate
+   * family with one typed `PLACE_RETRIES_EXHAUSTED` so it cannot be re-offered
+   * forever. The ledger clamps the ordinal at limit+1 and the retired item set
+   * is threaded into the candidate generator, which is what makes the limit
+   * authoritative instead of advisory (measured live: count=18 against limit=5).
    */
   private schedulePlaceRetry(result: ExecutionResult, candidate: Candidate): boolean {
     const at =
@@ -3415,14 +3450,30 @@ export class JevController {
         z: Math.floor(this.bot.entity.position.z),
       } satisfies Vec3Json)
     const item = candidate.itemName
-    const prior = this.placeRetryCount(item)
-    const decision = evaluatePlaceRetry({ at, reason: result.failure ?? 'place_failed', priorRetries: prior })
-    if (item !== null) this.placementRetries.set(item, decision.count)
+    const decision = this.placementRetries.noteFailure({
+      item,
+      actionId: result.actionId,
+      at,
+      reason: result.failure ?? 'place_failed',
+    })
     if (!decision.retry) {
+      // The retire line is emitted exactly once by the ledger. If the ledger
+      // already announced this family, keep the existing `retry_exhausted` audit
+      // line for the repeated failure but never report the bound as still live.
+      const line =
+        decision.exhaustedLine ??
+        `${PLACE_RETRIES_EXHAUSTED} at=${at.x},${at.y},${at.z} item=${item ?? 'unknown'} count=${decision.count}/${decision.limit} actionId=${result.actionId} reason=${result.failure} (already retired)`
       this.logger.warn(
         'agent',
-        `${decision.line} retry_exhausted=${prior}/${PLACE_RETRY_LIMIT} -> allow replan`,
-        { actionId: result.actionId, count: prior, limit: PLACE_RETRY_LIMIT, reason: result.failure },
+        line,
+        {
+          actionId: result.actionId,
+          item,
+          count: decision.count,
+          limit: decision.limit,
+          reason: result.failure,
+          retired: this.placementRetries.isItemRetired(item),
+        },
         this.tickCounter,
       )
       return false
@@ -3430,7 +3481,7 @@ export class JevController {
     this.logger.warn(
       'agent',
       decision.line,
-      { actionId: result.actionId, count: decision.count, limit: PLACE_RETRY_LIMIT, reason: result.failure },
+      { actionId: result.actionId, count: decision.count, limit: decision.limit, reason: result.failure },
       this.tickCounter,
     )
     return true
@@ -3813,7 +3864,7 @@ export class JevController {
 
     if (result.status === 'done') {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
-        this.placementRetries.delete(candidate.itemName)
+        this.placementRetries.noteVerified(candidate.itemName)
         if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
           const registered = registerPlacedStation(this.placedStations, candidate.itemName, candidate.target)
           if (registered.added) {
@@ -7603,6 +7654,7 @@ function candidateOptions(
   portalFrame: PortalFrameValidation | null = null,
   searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
   portalEntry: PortalEntryPlan | null = null,
+  retiredPlaceItems: ReadonlySet<string> = new Set<string>(),
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -7614,6 +7666,7 @@ function candidateOptions(
     reachability,
     portalFrame,
     portalEntry,
+    retiredPlaceItems,
     prereqRankPolicy: options.prereqRankPolicy,
   }
 }
