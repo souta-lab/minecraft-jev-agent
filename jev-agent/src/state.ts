@@ -19,7 +19,9 @@ import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
 import {
   detectPortalVerification,
+  isPortalIgnitionPostconditionMet,
   NETHER_PORTAL,
+  portalFrameCoreLiveStructureMembers,
   portalFrameLayout,
   portalFrameLiveStructureMembers,
   portalFrameNeedsTemporarySupport,
@@ -1681,7 +1683,22 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
           // A lit portal replaces the interior air with `nether_portal`. Keep
           // the frame site observable so the controller can re-check that
           // post-condition from live world truth instead of a stale queue bit.
-          if (!validFootprint || !layout.interior.every((cell) => clear(cell.x, cell.y, cell.z) || at(cell.x, cell.y, cell.z)?.name === NETHER_PORTAL)) continue
+          const interiorNames = layout.interior.map((cell) => at(cell.x, cell.y, cell.z)?.name ?? null)
+          const interiorClearOrLit = interiorNames.every(
+            (name) => name !== null && (REPLACEABLE_AIR.has(name) || name === NETHER_PORTAL),
+          )
+          if (!validFootprint || !interiorClearOrLit) continue
+          // The structure's functional core is its COMPLETE lit interior (the same
+          // predicate `detectPortalVerification` / `portalLitTruth` use). A frame
+          // missing a required edge is still the live structure while its interior
+          // is fully lit, so membership can protect it without a perfect 10/10
+          // shape. Requiring the whole interior also rejects a spurious candidate
+          // origin whose interior merely overlaps a portal block from a real site.
+          const coreIntact = isPortalIgnitionPostconditionMet(
+            layout.interior,
+            (cell) => at(cell.x, cell.y, cell.z)?.name ?? null,
+            NETHER_PORTAL,
+          )
           let supported = true
           for (let w = 0; w < 4; w += 1) {
             const bottom =
@@ -1712,6 +1729,7 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
             safe: true,
             reachable: true,
             temporarySupportRequired,
+            coreIntact,
             ...(existingFrame.length === 0 ? {} : { existingFrame }),
           })
         }
@@ -1819,22 +1837,42 @@ function mergePortalFrameSites(live: readonly PortalFrameSite[], remembered: rea
 }
 
 /**
- * The live-structure membership fact for every site whose required geometry
- * validates. Exported so any layer that re-derives `portalFrameSites` (for
- * example the controller's in-memory frame memory) can recompute the same fact
- * instead of leaving a stale membership set behind.
+ * The live-structure membership fact for every site that is currently LIVE.
+ *
+ * GENERAL predicate (structure-agnostic; the portal module only supplies its
+ * footprint and its core fact):
+ *
+ *   live(site) := functionalCoreIntact(site) OR fullRequiredGeometryValid(site)
+ *
+ * A structure contributes its whole footprint as membership while its functional
+ * core is intact, even when shell cells are missing - so removing one edge from
+ * a lit portal cannot empty the membership set and let the agent finish
+ * dismantling the structure it depends on. A site with no core fact must still
+ * validate its full required geometry, which preserves the legitimate
+ * "damaged/unlit structure is mineable" behaviour.
+ *
+ * Exported so any layer that re-derives `portalFrameSites` (for example the
+ * controller's in-memory frame memory) can recompute the same fact instead of
+ * leaving a stale membership set behind.
  */
 export function liveStructureMembersForSites(sites: readonly PortalFrameSite[]): LiveStructureMember[] {
   const members: LiveStructureMember[] = []
   const seen = new Set<string>()
   for (const site of sites) {
-    const blocks = site.existingFrame ?? []
-    // Fewer than the ten required edges cannot validate; skip without calling
-    // the validator so a partial frame never contributes membership.
-    if (blocks.length < 10) continue
-    const validation = validatePortalFrame({ blocks, widthAxis: site.widthAxis })
-    if (validation.shape !== 'ok') continue
-    for (const member of portalFrameLiveStructureMembers(validation)) {
+    let contribution: LiveStructureMember[]
+    if (site.coreIntact === true) {
+      contribution = portalFrameCoreLiveStructureMembers(site.origin, site.widthAxis)
+    } else {
+      const blocks = site.existingFrame ?? []
+      // Fewer than the ten required edges cannot validate; skip without calling
+      // the validator so a partial frame without a functional core never
+      // contributes membership.
+      if (blocks.length < 10) continue
+      const validation = validatePortalFrame({ blocks, widthAxis: site.widthAxis })
+      if (validation.shape !== 'ok') continue
+      contribution = portalFrameLiveStructureMembers(validation)
+    }
+    for (const member of contribution) {
       const key = liveStructureCellKey(member.position)
       if (seen.has(key)) continue
       seen.add(key)

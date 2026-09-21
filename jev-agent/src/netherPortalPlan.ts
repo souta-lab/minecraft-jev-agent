@@ -127,6 +127,16 @@ export interface PortalFrameSite {
    * This is an affordance fact, not a semantic preference.
    */
   readonly temporarySupportRequired?: boolean
+  /**
+   * Live FUNCTIONAL-CORE fact used by the general structure-liveness predicate:
+   * the structure's interior currently holds the blocks that make it work (for a
+   * Nether portal, lit `nether_portal` blocks). The sensor sets this from live
+   * world truth, and durable memory must never carry it forward. When true the
+   * site contributes its whole footprint as live-structure membership even if
+   * required shell cells are missing; when absent/false the site must fully
+   * validate its required geometry to count as live.
+   */
+  readonly coreIntact?: boolean
 }
 
 function normalizeDimension(dimension: string): string {
@@ -396,23 +406,61 @@ export function portalFrameLayout(origin: PortalBlockPosition, widthAxis: Portal
 }
 
 /**
- * The full cell footprint of a VALIDATED frame, contributed to the world model
- * as live-structure membership. The portal module's only responsibility here is
- * the membership fact (which cells the live structure occupies); the generic
- * source-protection predicate in `blockSafety.ts` owns the refusal and the
- * candidate layer never learns the word "portal".
- *
- * A `shape: 'bad'` validation contributes nothing: an incomplete or damaged
- * frame is not a live structure, so its obsidian stays an ordinary source (this
- * is the legitimate-deconstruction case).
+ * The full cell footprint of a frame at `origin`: the ten required edge cells,
+ * the four optional corners, and the interior. This is the cell set the portal
+ * module contributes to the world model; it says nothing about WHY the
+ * structure counts as live.
  */
-export function portalFrameLiveStructureMembers(frame: PortalFrameValidation): LiveStructureMember[] {
-  if (frame.shape !== 'ok' || frame.origin === null) return []
-  const layout = portalFrameLayout(frame.origin, frame.widthAxis)
-  return [...layout.frame, ...layout.corners, ...layout.interior].map((cell) => ({
+export function portalFrameFootprint(
+  origin: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+): PortalBlockPosition[] {
+  const layout = portalFrameLayout(origin, widthAxis)
+  return [...layout.frame, ...layout.corners, ...layout.interior]
+}
+
+function portalFrameFootprintMembers(origin: PortalBlockPosition, widthAxis: PortalWidthAxis): LiveStructureMember[] {
+  return portalFrameFootprint(origin, widthAxis).map((cell) => ({
     kind: 'nether_portal',
     position: { x: cell.x, y: cell.y, z: cell.z },
   }))
+}
+
+/**
+ * The membership fact for a frame whose FULL required geometry validates. The
+ * portal module's only responsibility here is the membership fact (which cells
+ * the live structure occupies); the generic source-protection predicate in
+ * `blockSafety.ts` owns the refusal and the candidate layer never learns the
+ * word "portal".
+ *
+ * A `shape: 'bad'` validation contributes nothing on its own. Together with
+ * `portalFrameCoreLiveStructureMembers` this implements the general liveness
+ * predicate: a structure is live while its functional core is intact OR its
+ * full required geometry validates.
+ */
+export function portalFrameLiveStructureMembers(frame: PortalFrameValidation): LiveStructureMember[] {
+  if (frame.shape !== 'ok' || frame.origin === null) return []
+  return portalFrameFootprintMembers(frame.origin, frame.widthAxis)
+}
+
+/**
+ * The membership fact for a frame whose FUNCTIONAL CORE is intact even though
+ * shell cells may be missing. For a Nether portal the core is its lit interior:
+ * while `nether_portal` blocks fill the interior the portal is the live
+ * structure the agent depends on, and a single mined edge must not empty its
+ * membership (the defect where 10/10 -> 9/10 let the source guard collapse and
+ * the agent finished dismantling its own gate).
+ *
+ * The core fact is supplied by the caller from LIVE world truth (the sensor's
+ * `PortalFrameSite.coreIntact`); it is never persisted, so a portal that is
+ * already broken/unlit contributes nothing here and its obsidian stays an
+ * ordinary source (the legitimate-deconstruction case).
+ */
+export function portalFrameCoreLiveStructureMembers(
+  origin: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+): LiveStructureMember[] {
+  return portalFrameFootprintMembers(origin, widthAxis)
 }
 
 export interface PortalFrameValidation {

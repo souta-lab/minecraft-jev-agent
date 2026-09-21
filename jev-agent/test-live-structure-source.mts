@@ -180,9 +180,13 @@ function ground(): Vec3Json[] {
   return out
 }
 
-function perceiveSensed(sensedObsidian: Vec3Json[], known: KnownResource[] = []): WorldState {
+function perceiveSensed(
+  sensedObsidian: Vec3Json[],
+  known: KnownResource[] = [],
+  extraSensed: Record<string, Vec3Json[]> = {},
+): WorldState {
   return buildWorldState(
-    fakeBot({ obsidian: sensedObsidian }, { diamond_pickaxe: 1 }, ORIGIN, ground()),
+    fakeBot({ obsidian: sensedObsidian, ...extraSensed }, { diamond_pickaxe: 1 }, ORIGIN, ground()),
     {
       tick: 1,
       goal: makeGoal('obsidian', 10),
@@ -391,6 +395,129 @@ addCase('(e) invalidating the remembered structure frees its retrieval route aga
   return {
     pass: (state.liveStructureMembers ?? []).length === 0 && freed.length > 0,
     detail: `members=${(state.liveStructureMembers ?? []).length} freed=${freed.join(',') || 'none'}`,
+  }
+})
+
+// --- functional-core liveness: a lit portal survives losing an edge -------------
+//
+// The measured defect (live run run-mubg1zz4-mn4b): the agent mined ONE edge of
+// the lit portal it had just built and used. The frame became 9/10, the strict
+// shape validation failed, membership became EMPTY, and the source guard stopped
+// excluding those cells - so the agent mined the rest and destroyed the gate.
+// The fix separates liveness from perfect geometry: while the interior is lit the
+// frame ring + interior stay protected, missing shell cells and all. Once the
+// portal is unlit, its obsidian is an ordinary source again (the M2 case above).
+
+/** The live frame's six interior cells, currently lit (`nether_portal`). */
+const LIT_INTERIOR: Vec3Json[] = FRAME_LAYOUT.interior.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z }))
+/** The live frame minus one required edge - the exact 10/10 -> 9/10 defect step. */
+const DAMAGED_FRAME_CELLS: Vec3Json[] = FRAME_CELLS.slice(0, FRAME_CELLS.length - 1)
+/** Canonical footprint size: ten edges + four corners + six interior cells. */
+const FOOTPRINT_SIZE = FRAME_LAYOUT.frame.length + FRAME_LAYOUT.corners.length + FRAME_LAYOUT.interior.length
+
+function memberKeySet(state: WorldState): Set<string> {
+  return new Set(
+    (state.liveStructureMembers ?? []).map((member) => `${member.position.x},${member.position.y},${member.position.z}`),
+  )
+}
+
+function protectedFrameCells(state: WorldState, cells: readonly Vec3Json[]): number {
+  const keys = memberKeySet(state)
+  return cells.filter((cell) => keys.has(`${cell.x},${cell.y},${cell.z}`)).length
+}
+
+/** The lit damaged frame: nine sensed edges plus a fully lit interior. */
+function litDamagedState(): WorldState {
+  return perceiveSensed([...DAMAGED_FRAME_CELLS, OUTSIDE_POS], [], { nether_portal: LIT_INTERIOR })
+}
+
+addCase('(a) a lit portal missing one edge still protects its ring and interior', () => {
+  const state = litDamagedState()
+  const keys = memberKeySet(state)
+  const ringProtected = protectedFrameCells(state, FRAME_LAYOUT.frame) === FRAME_LAYOUT.frame.length
+  const interiorProtected = protectedFrameCells(state, FRAME_LAYOUT.interior) === FRAME_LAYOUT.interior.length
+  const coreFlag = (state.portalFrameSites ?? []).some((site) => site.coreIntact === true)
+  return {
+    pass:
+      ringProtected &&
+      interiorProtected &&
+      coreFlag &&
+      // Liveness must not fake strict frame readiness: 9/10 is still not `shape=ok`.
+      state.portalFrame === null,
+    detail: `members=${keys.size}/${FOOTPRINT_SIZE} ring=${ringProtected} interior=${interiorProtected} coreIntact=${coreFlag} strictFrame=${state.portalFrame?.shape ?? 'none'}`,
+  }
+})
+
+addCase('(a) collect-obsidian candidates targeting the lit damaged frame are refused', () => {
+  const state = litDamagedState()
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const ids = [
+    ...grounded.candidates.map((candidate) => candidate.id),
+    ...grounded.withheld.map((entry) => entry.candidate.id),
+  ]
+  const leaked = ids.filter((id) => FRAME_LAYOUT.frame.some((cell) => id.includes(cellToken(cell))))
+  const exclusions = resourceSourceExclusions(state)
+  const lines = exclusions.map(formatResourceSourceExclusion)
+  const excludedFrame = exclusions.filter((exclusion) =>
+    DAMAGED_FRAME_CELLS.some(
+      (cell) => cell.x === exclusion.cell.x && cell.y === exclusion.cell.y && cell.z === exclusion.cell.z,
+    ),
+  )
+  const outsideStillOffered = grounded.candidates.some((candidate) => candidate.id.includes(cellToken(OUTSIDE_POS)))
+  return {
+    pass:
+      leaked.length === 0 &&
+      excludedFrame.length === DAMAGED_FRAME_CELLS.length &&
+      lines.every((line) => line.includes('RESOURCE_SOURCE_EXCLUDED item=obsidian') && line.endsWith('reason=live_structure')) &&
+      outsideStillOffered,
+    detail: `leaked=${leaked.join(',') || 'none'} excludedFrame=${excludedFrame.length}/${DAMAGED_FRAME_CELLS.length} outside=${outsideStillOffered}`,
+  }
+})
+
+addCase('(b) an unlit damaged frame with no lit interior is still an ordinary source', () => {
+  const state = perceiveSensed([...DAMAGED_FRAME_CELLS, OUTSIDE_POS])
+  const coreFlags = (state.portalFrameSites ?? []).every((site) => site.coreIntact !== true)
+  const offered = offeredCandidates(state)
+  const offeredFrame = offered.filter((id) => DAMAGED_FRAME_CELLS.some((cell) => id.includes(cellToken(cell))))
+  return {
+    pass:
+      (state.liveStructureMembers ?? []).length === 0 &&
+      coreFlags &&
+      offeredFrame.length > 0 &&
+      resourceSourceExclusions(state).length === 0,
+    detail: `members=${(state.liveStructureMembers ?? []).length} coreIntact=${!coreFlags} offeredFrame=${offeredFrame.length}`,
+  }
+})
+
+addCase('(c) a fully valid lit portal behaves as before (validates and is protected)', () => {
+  const state = perceiveSensed([...FRAME_CELLS, OUTSIDE_POS], [], { nether_portal: LIT_INTERIOR })
+  const keys = memberKeySet(state)
+  const frameExclusions = resourceSourceExclusions(state).filter((exclusion) =>
+    FRAME_CELLS.some(
+      (cell) => cell.x === exclusion.cell.x && cell.y === exclusion.cell.y && cell.z === exclusion.cell.z,
+    ),
+  )
+  const leaked = offeredCandidates(state).filter((id) => FRAME_CELLS.some((cell) => id.includes(cellToken(cell))))
+  return {
+    pass:
+      state.portalFrame?.shape === 'ok' &&
+      keys.size === FOOTPRINT_SIZE &&
+      frameExclusions.length === FRAME_CELLS.length &&
+      leaked.length === 0,
+    detail: `strictFrame=${state.portalFrame?.shape ?? 'none'} members=${keys.size}/${FOOTPRINT_SIZE} excludedFrame=${frameExclusions.length}/${FRAME_CELLS.length} leaked=${leaked.join(',') || 'none'}`,
+  }
+})
+
+addCase('(d) invalidating the portal (lit -> unlit) frees the damaged cells again', () => {
+  const lit = litDamagedState()
+  const dead = perceiveSensed([...DAMAGED_FRAME_CELLS, OUTSIDE_POS])
+  const litProtected = (lit.liveStructureMembers ?? []).length > 0
+  const freed = offeredCandidates(dead).filter((id) =>
+    DAMAGED_FRAME_CELLS.some((cell) => id.includes(cellToken(cell))),
+  )
+  return {
+    pass: litProtected && (dead.liveStructureMembers ?? []).length === 0 && freed.length > 0,
+    detail: `litMembers=${(lit.liveStructureMembers ?? []).length} deadMembers=${(dead.liveStructureMembers ?? []).length} freed=${freed.length}`,
   }
 })
 

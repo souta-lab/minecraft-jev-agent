@@ -4941,7 +4941,11 @@ export class JevController {
 
     const merged: PortalFrameSite[] = []
     const seen = new Set<string>()
-    for (const site of [...this.rememberedPortalFrameSites.values(), ...(state.portalFrameSites ?? [])]) {
+    // LIVE sites win over remembered copies: the live functional-core fact
+    // (`coreIntact`) is current world truth, and a remembered geometry-only copy
+    // must never shadow it. Memory only fills sites the sensor did not observe
+    // this tick, matching `mergePortalFrameSites` in the sensor.
+    for (const site of [...(state.portalFrameSites ?? []), ...this.rememberedPortalFrameSites.values()]) {
       const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
       if (seen.has(key)) continue
       seen.add(key)
@@ -4967,8 +4971,15 @@ export class JevController {
     for (const site of sites) {
       if ((site.existingFrame?.length ?? 0) === 0) continue
       const key = `${site.origin.x},${site.origin.y},${site.origin.z}|${site.widthAxis}`
+      // Durable memory keeps geometry only. `coreIntact` is a volatile live-world
+      // verdict (the portal's lit interior) and must be re-observed, never
+      // replayed, or a destroyed portal's obsidian would stay protected forever.
       this.rememberedPortalFrameSites.set(key, {
-        ...site,
+        origin: { ...site.origin },
+        widthAxis: site.widthAxis,
+        safe: site.safe,
+        reachable: site.reachable,
+        temporarySupportRequired: site.temporarySupportRequired,
         existingFrame: site.existingFrame === undefined ? undefined : site.existingFrame.map((cell) => ({ ...cell })),
       })
     }
