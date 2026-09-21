@@ -82,7 +82,7 @@ import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, W
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
-import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import { ActionFailureEscalation, evaluateCapabilityGap, formatActionFailureExhausted, formatActionFailureRepeat, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveActionFailureEscalateCycles, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
@@ -323,6 +323,15 @@ export interface JevAgentOptions {
    */
   replanNoInfoEscalateCycles: number
   /**
+   * Issue #78 follow-up: consecutive identical typed ACTION failures for the
+   * same `(plan, actionId, failureReason)` after which the local recovery is
+   * declared exhausted and System2 is woken (`ACTION_FAILURE_EXHAUSTED`).
+   * `BUDDY_ACTION_FAILURE_ESCALATE_CYCLES` overrides it. Distinct from the
+   * replan-throttle bound above: that one counts suppressed replans, this one
+   * counts the same action failing the same way inside the executor.
+   */
+  actionFailureEscalateCycles: number
+  /**
    * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
    * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
@@ -374,6 +383,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   replanThrottleMs: resolveReplanThrottleMs(),
   replanPositionDelta: resolveReplanPositionDelta(),
   replanNoInfoEscalateCycles: resolveReplanNoInfoEscalateCycles(),
+  actionFailureEscalateCycles: resolveActionFailureEscalateCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
   worldEpoch: 0,
 }
@@ -1378,6 +1388,12 @@ export class JevController {
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
+  /**
+   * Issue #78 follow-up: bounded counter for the SAME typed action failure being
+   * re-offered for the same plan. Separate instance and separate streak from
+   * `replanThrottle`'s #44/#78 no-progress counter by construction.
+   */
+  private readonly actionFailureEscalation: ActionFailureEscalation
   private readonly loggedStaleResources = new Set<string>()
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
@@ -1503,6 +1519,7 @@ export class JevController {
       this.options.replanPositionDelta,
       this.options.replanNoInfoEscalateCycles,
     )
+    this.actionFailureEscalation = new ActionFailureEscalation(this.options.actionFailureEscalateCycles)
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.recipeIndex = createRecipeIndex(bot.registry)
@@ -3125,6 +3142,9 @@ export class JevController {
       this.semanticStateGeneration += 1
       this.lastProgress += 1
       this.lastProgressAt = Date.now()
+      // Observed progress (body/search/goal) resets the typed-action-failure
+      // streak: the same action failing again is no longer one unbroken run.
+      this.actionFailureEscalation.reset()
     }
     this.recentOutcomes.push({
       actionId: result.actionId,
@@ -3218,6 +3238,8 @@ export class JevController {
     } else if (truth.status === 'done' && truth.verified) {
       const settledPlanId = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? null
       if (settledPlanId !== null) this.actionUnverified.delete(settledPlanId)
+      // A verified success ends the run of typed failures for this plan/action.
+      this.actionFailureEscalation.reset()
     }
 
     if (completedOptionId !== null) {
@@ -3371,6 +3393,13 @@ export class JevController {
         this.noteCandidateFailure(result.actionId)
         this.recordMoveFailure(candidate, moveFailureReason(result.failure))
         this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
+        // #78 follow-up: bound the OTHER loop - the same plan re-offered with its
+        // action failing the same typed way. `onUnverifiedAction` owns unverified
+        // postconditions with its own budget, and a PLACE retry was handled above,
+        // so neither reaches here as an unhandled typed failure.
+        if (result.unverifiedPostcondition === undefined && result.failure !== null) {
+          this.noteTypedActionFailure(result.failure, result.actionId, pending)
+        }
       } else {
         this.logger.info(
           'agent',
@@ -4597,6 +4626,66 @@ export class JevController {
     }
   }
 
+  /**
+   * Issue #78 follow-up: bounded escalation for a typed ACTION failure that
+   * repeats identically. `recordFailure` charges every typed failure, but the
+   * local-recovery route failures (`path_stuck`, `path_no_path`, ...) are
+   * deliberately excluded from `same_failure_3x`, and the #44/#78 replan
+   * throttle only advances on suppressed replans. Nothing therefore bounded the
+   * loop where the SAME plan is re-offered and its action fails the SAME way.
+   *
+   * Counts consecutive identical `(plan, actionId, reason)` failures. On the Nth
+   * the failure is reclassified as a semantic boundary: `ACTION_FAILURE_EXHAUSTED`
+   * is logged and the existing `same_failure_3x -> action_impossible` escalation
+   * vocabulary is used. The pending streak is exposed through `replanInputs()`
+   * so the #44 throttle cannot suppress this one wake as `no_new_info`; that
+   * keeps it "exactly like #326" rather than a parallel wake path.
+   *
+   * The counter resets on a different plan/action/reason (in the counter), on
+   * any observed progress (in `onActionComplete`), and here after the escalation
+   * is handed off, so it cannot hot-loop. Failures already owned by another
+   * handler (a verified/done action, a scheduled PLACE retry, or an unverified
+   * postcondition handled by `onUnverifiedAction`) never reach this method.
+   */
+  private noteTypedActionFailure(reason: string, actionId: string, pending: PendingDecision | undefined): void {
+    const planKey = pending?.record.goalQueueState.current?.id ?? this.queue.current?.id ?? this.currentGoalKey()
+    const decision = this.actionFailureEscalation.noteFailure(planKey, actionId, reason)
+    this.logger.warn(
+      'agent',
+      formatActionFailureRepeat(decision),
+      {
+        planId: planKey,
+        actionId,
+        reason,
+        count: decision.count,
+        limit: decision.limit,
+      },
+      this.tickCounter,
+    )
+    if (!decision.escalate) return
+    this.logger.warn(
+      'agent',
+      formatActionFailureExhausted(decision),
+      {
+        planId: planKey,
+        actionId,
+        reason,
+        count: decision.count,
+        limit: decision.limit,
+        boundary: 'semantic_boundary',
+      },
+      this.tickCounter,
+    )
+    // Reuse the existing escalation vocabulary. `replanInputs()` carries the
+    // exhausted streak, so the throttle releases this one wake; #78's own bound
+    // remains the backstop if the throttle still refuses it.
+    this.escalate(
+      'same_failure_3x',
+      `ACTION_FAILURE_EXHAUSTED plan=${planKey} action=${actionId} reason=${reason} count=${decision.count}/${decision.limit}`,
+    )
+    this.actionFailureEscalation.reset()
+  }
+
   private failureSnapshot(): Record<string, number> {
     const now = Date.now()
     const snapshot: Record<string, number> = {}
@@ -5252,6 +5341,10 @@ export class JevController {
       failureSignature,
       capabilityGap: this.capabilityGapActive ? this.capabilityGapSignature : null,
       goalKey: this.currentGoalKey(),
+      // The Nth identical typed action failure is proof the local recovery is
+      // exhausted, so it is genuine new information for the replan gate even
+      // though the cheap world inputs are identical. Null at every count < N.
+      actionFailureExhausted: this.actionFailureEscalation.pendingKey(),
     }
   }
 
