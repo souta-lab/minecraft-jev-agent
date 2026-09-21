@@ -6635,16 +6635,17 @@ export class JevController {
    * `use_known_station`, the blacklist filter removes every candidate of that
    * path, and the resident collapses to WAIT.
    *
-   * The sensor's remembered furnace entries are included because a placed-by-us
-   * furnace is evicted from `signals.knownResources` once the move-failure
-   * memory blacklists its cell, yet it is still offered by `knownFurnaces`; an
-   * unblacklisted copy would re-issue the failing RETRIEVE forever.
+   * The sensor's remembered station entries are included because a placed-by-us
+   * furnace or crafting table is evicted from `signals.knownResources` once the
+   * move-failure memory blacklists its cell, yet it is still offered by the
+   * corresponding station projection; an unblacklisted copy would re-issue the
+   * failing RETRIEVE forever.
    *
-   * SENSED furnaces are considered too: a furnace the bot placed and then cannot
-   * path back to is blacklisted by a SMELT guard NO_PATH (SMELT is a tracked
-   * target kind). Skipping sensed entries here would leave `smeltCandidates`
-   * re-offering the unreachable furnace while the acquisition ladder it needs
-   * never runs (the live charcoal-starve loop).
+   * SENSED furnaces and crafting tables are considered too: a station the bot
+   * placed and then cannot path back to is blacklisted by a guard NO_PATH
+   * (SMELT/CRAFT is a tracked target kind). Skipping sensed entries here would
+   * leave the station ladder re-offering the unreachable cell while its local
+   * fallback never runs.
    */
   private unreachableStationKeys(state: WorldState): ReadonlySet<string> {
     const keys = new Set<string>()
@@ -6660,6 +6661,9 @@ export class JevController {
     }
     for (const station of state.furnaces ?? []) {
       consider('furnace', station)
+    }
+    for (const station of state.craftingTables ?? []) {
+      consider('crafting_table', station)
     }
     return keys
   }
