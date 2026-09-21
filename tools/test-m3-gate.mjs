@@ -223,7 +223,9 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
 // ---------------------------------------------------------------------------
 {
   // Run A has only 4 pearls; run B proves the full 12 eyes.
-  const mixed = [boot(RUN), inv({ ender_pearl: 4 }), boot(OTHER_RUN), EYES_READY]
+  // M3 also requires live proof of Nether arrival, so each run in this fixture records the dimension
+  // it observed; the cross-run negative below is about run binding, not about the Nether.
+  const mixed = [boot(RUN), inv({ ender_pearl: 4 }), boot(OTHER_RUN), heartbeat('minecraft:the_nether'), EYES_READY]
   const asA = await judge({ lines: mixed, expectedRunId: RUN })
   assert.equal(asA.code, 2, asA.text)
   assert.match(asA.text, /ender_eye_ready: UNKNOWN/, asA.text)

@@ -243,6 +243,21 @@ export function evaluateM3Gate({ expectedRunId = null, evidence = null, policy =
       facts,
     })
   }
+  // The PASS branch must not bypass the required-condition list: before this, `eyes.ready &&
+  // authorityPass` returned PASS regardless of any other required condition, which is how a run
+  // could have claimed M3 while `nether_reached` was still UNKNOWN.
+  const unmetRequired = M3_REQUIRED_CONDITIONS.filter((condition) => conditions[condition] !== 'PASS')
+  if (eyes.ready && authorityPass && unmetRequired.length > 0) {
+    return verdict({
+      status: 'UNKNOWN',
+      code: 2,
+      reason: `m3_stages_incomplete:${unmetRequired.join(',')}`,
+      runId: expectedRunId,
+      conditions,
+      sources: perSource,
+      facts,
+    })
+  }
   if (eyes.ready && authorityPass) {
     return verdict({
       status: 'PASS',

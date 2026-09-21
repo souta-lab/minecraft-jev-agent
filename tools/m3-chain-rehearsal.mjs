@@ -796,6 +796,28 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
     },
   })
   details.noEyes = noEyes
+
+  // The M3 definition requires live proof of Nether arrival, so the same endgame inventory with the run's
+  // only observed dimension the OVERWORLD must never PASS: twelve eyes are not a milestone by themselves.
+  const noNether = gateCase({
+    missing,
+    write,
+    caseName: 'eyes_without_nether',
+    runs: [{ runId: RUN_ID, samples: endgame.inventoryTrace, dimension: 'minecraft:overworld' }],
+    expectedRunId: RUN_ID,
+    expect: (result) => {
+      const problems = []
+      if (result.status === 'PASS' || result.exitCode === 0) {
+        problems.push(`status=${result.status} exit=${result.exitCode} must never PASS`)
+      }
+      if (result.status !== 'UNKNOWN') problems.push(`status=${result.status} expected UNKNOWN`)
+      if (!String(result.reason ?? '').includes('nether_reached')) {
+        problems.push(`reason=${result.reason} must name nether_reached`)
+      }
+      return problems
+    },
+  })
+  details.noNether = noNether
   // The real path's terminal inventory must itself carry the contract count; the
   // 11-eye negative above is that same shape with exactly one eye removed.
   if ((terminalSample[ENDER_EYE] ?? 0) !== ENDER_EYE_REQUIRED) missing.push(`terminal_sample_eyes=${terminalSample[ENDER_EYE] ?? 0}`)
@@ -888,6 +910,8 @@ export function runRehearsal({ write = () => {}, cleanup = true } = {}) {
     `11eyes:${eyes11.status}`,
     `norun:${noRunId.status}`,
     `noeyes:${noEyes.status}`,
+    `nonether:${noNether.status}`,
+    `nonether_reason:${noNether.reason ?? 'none'}`,
     `wrongitem:${wrongItemName.status}`,
     `foreign:${foreign.status}`,
     `mixed:${mixedAsRun.status}`,

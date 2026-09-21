@@ -133,6 +133,9 @@ function fullLog(runId, { terminalEye }) {
         '"ender_pearl":12,"blaze_rod":8,"blaze_powder":16,"ender_eye":0} pos=0.5,64.0,0.5',
     ),
     ...PORTAL_CHAIN.map((body, index) => line(11 + index, body)),
+    // M3 requires live proof of Nether arrival, so the endgame fixture records the transition the way
+    // the resident does (a marker carrying `dimension=`), which the gate reads as a run-scoped fact.
+    line(19, 'HEARTBEAT pos=0.5,64.0,0.5 health=20 dimension=minecraft:the_nether'),
     line(
       20,
       `MILESTONE name=ender_eye frontier=true index=15 queueDone=0 inventory={"ender_eye":0,"ender_pearl":12,` +
@@ -206,7 +209,13 @@ assert.equal(passArtifact.inventory.milestoneItems.ender_pearl.max, 12)
 assert.equal(passArtifact.environment.difficulty.value, 'normal')
 assert.equal(passArtifact.environment.mobSpawning.value, true)
 assert.deepEqual(passArtifact.environment.gamerules.value, { advanceTime: false, keepInventory: true, spawnMobs: true })
-assert.deepEqual(passArtifact.environment.dimensions.observed, ['minecraft:overworld'])
+// The endgame run observed the overworld gate and then the Nether, which is what M3 requires; the
+// artifact reports both, in observation order.
+assert.deepEqual(passArtifact.environment.dimensions.observed, [
+  'minecraft:overworld',
+  'minecraft:the_nether',
+])
+assert.deepEqual(passArtifact.verdicts.M3.conditions.nether_reached, 'PASS')
 assert.equal(passArtifact.authority.plannerMode, 'llm')
 assert.equal(passArtifact.authority.policyProvider, 'typesafe-ai')
 assert.equal(passArtifact.authority.policyModel, 'typesafe-ai/jev')
