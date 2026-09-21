@@ -399,8 +399,17 @@ export const RUNGS: readonly Rung[] = [
     // M2 is diamond-to-Nether-gate: full iron armour + sword is a real affordance
     // but NOT a mandatory prerequisite of the diamond / portal route.
     optional: true,
+    // The rung's intent is "wear a full protective set and carry a sword". A
+    // strictly better tier already satisfies that intent: with diamond armour and
+    // a diamond sword held, re-offering the iron set spends System2's choice on a
+    // dominated detour (observed live: the model chose `iron_gear` over
+    // `front_ender_pearls` while already wearing full diamond gear).
     satisfied: (c) =>
-      has(c, 'iron_chestplate') && has(c, 'iron_leggings') && has(c, 'iron_helmet') && has(c, 'iron_boots') && has(c, 'iron_sword'),
+      (has(c, 'iron_chestplate') || has(c, 'diamond_chestplate')) &&
+      (has(c, 'iron_leggings') || has(c, 'diamond_leggings')) &&
+      (has(c, 'iron_helmet') || has(c, 'diamond_helmet')) &&
+      (has(c, 'iron_boots') || has(c, 'diamond_boots')) &&
+      (has(c, 'iron_sword') || has(c, 'diamond_sword')),
     goals: (c) =>
       climb(26, c, [
         ['iron_chestplate', 1],

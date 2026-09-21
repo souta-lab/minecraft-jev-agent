@@ -282,6 +282,29 @@ addCase('(k) iron_gear is an explicit optional rung, not a mandatory prerequisit
   }
 })
 
+addCase('(k2) full diamond gear satisfies the optional iron_gear rung and stops offering it', () => {
+  const gear = RUNGS.find((rung) => rung.id === 'iron_gear')
+  const diamondCounts = {
+    diamond_chestplate: 1,
+    diamond_leggings: 1,
+    diamond_helmet: 1,
+    diamond_boots: 1,
+    diamond_sword: 1,
+    diamond: 3,
+    diamond_pickaxe: 1,
+    flint_and_steel: 1,
+  }
+  // Live failure this pins: with full diamond gear held the model was still offered
+  // `iron_gear` and chose it over `front_ender_pearls`, spending the run on a
+  // dominated 26-raw_iron detour.
+  const satisfiedByDiamond = gear?.satisfied(diamondCounts, emptyWorldMemory()) === true
+  const offered = buildPlanOptions(diamondCounts, emptyWorldMemory()).some((option) => option.id === 'iron_gear')
+  return {
+    pass: satisfiedByDiamond && !offered,
+    detail: `satisfiedByDiamond=${satisfiedByDiamond} offered=${offered}`,
+  }
+})
+
 addCase('(l) the M3 ender-pearl frontier still supplies the typed nether-portal build/light/verify plan', () => {
   const counts = {
     crafting_table: 1,
