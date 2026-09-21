@@ -3414,6 +3414,35 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
 }
 
 /**
+ * Feasibility (CAN) rule for the known-resource RETRIEVE arm, mirroring
+ * {@link mineDropAdvancesFocus} for MINEs.
+ *
+ * A remembered-coordinate trip is a real body change (it walks/pillars/digs to
+ * the cell), so offering one for an item that cannot advance the ACTIVE focus is
+ * a live zero-progress loop: `planId=g3:collect:flint` had Jev select
+ * `RETRIEVE:known:obsidian:b28_67_9` (obsidian sits at y=67), pillar up to it,
+ * then a DESCEND step pulled the body back down -- a depth oscillation that never
+ * reached the gravel the flint goal needed. The MINE arm already withholds
+ * non-advancing drops; the RETRIEVE arm did not.
+ *
+ * Same reasoning and the same proof obligation as the MINE rule: keep the trip
+ * when the needed item IS the focus (or satisfies its class), when it is a
+ * material in the focus's achievable recipe chain (`ender_eye` -> blaze_powder
+ * -> blaze_rod), or when the focus is a resource class / absent / has no recipe
+ * index. Withhold only on proof that the trip cannot advance the focus. This is
+ * a withholding rule, never a ranking: the remaining candidates keep their
+ * order, and if the only retrieval is withheld the exploration fallback for the
+ * focus is still generated.
+ */
+function retrievalWantAdvancesFocus(
+  focusItem: string | null,
+  want: RetrievalWant,
+  recipes: RecipeIndex | null,
+): boolean {
+  return mineDropAdvancesFocus(focusItem, want.item, recipes)
+}
+
+/**
  * Issue #14: offer a grounded return-to-known candidate for the earliest need
  * in the queue that has a remembered coordinate but no visible block. Returns
  * only the first satisfiable need so the probe stays bounded.
@@ -3424,7 +3453,9 @@ function retrievalCandidates(
   focusItem: string | null,
   includeQueued = true,
 ): Candidate[] {
+  const recipes = options.recipes ?? null
   for (const want of retrievalNeeds(state, focusItem, includeQueued)) {
+    if (!retrievalWantAdvancesFocus(focusItem, want, recipes)) continue
     const candidates = retrievalCandidatesForWant(state, options, want)
     if (candidates.length > 0) return candidates
   }
