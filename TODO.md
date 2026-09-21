@@ -53,7 +53,7 @@
 
 ## 環境・運用の前提（忘れがち）
 ```
-・difficulty=peaceful では敵対mobが出ず blaze_rod / ender_pearl が入手不能 → M3（ender_pearl×12）の前に normal へ切替が必要
+・difficulty=peaceful では敵対mobが出ず blaze_rod / ender_pearl が入手不能 → M3（ender_eye×12）の前に normal へ切替が必要
   （ops.json に s0u7a と AI_Buddy を level 4 で登録済み。次回再起動後に有効）
 ・RCONはLeafでは実際にはlistenしない → ops.json 方式で運用
 ・Java は 21.0.13-ea のため `-DPaper.IgnoreJavaVersion=true` 必須
@@ -64,7 +64,7 @@
 
 ## 長期方針: 戦闘（peaceful解除）と高速制御（ユーザー指示 2026-09-18）
 ```
-前提: 現状 peaceful だが M3（エンダーパール×12）以降は敵対mobが必須 → 遅かれ早かれ解除する。
+前提: 現状 peaceful だが M3（ender_eye×12 = ender_pearl + blaze_powder）以降は敵対mobが必須 → 遅かれ早かれ解除する。
       解除後は「ゆっくりでも攻略は可能」だが、**戦える品質には tick レベルの高速制御が必要**。
 ```
 要件（解除前に設計だけ固めておく）:
@@ -121,8 +121,8 @@
 ## 標準指令（2026-09-18 追加・ユーザー指示）
 ```
 ★最終的な停止条件: 「ネザーゲートが完成し、かつ open issue が全て解決する」まで作業を止めない。
-  （M2 → M3: ダイヤ→火打石→黒曜石/ポータル枠→着火→verify。M3 = ender_pearl×12。
-    ネザー踏破・blaze・eyes は M4（ender_dragon）の前提として継続）
+  （M2 → M3: ダイヤ→火打石→黒曜石/ポータル枠→着火→verify。M3 = ender_pearl×12 →
+    ネザー踏破 → blaze rods → ender_eye×12。以降 M4（ender_dragon）も継続）
 ★replan で目標を捨てさせない:
   ・優先目標の前提（例: smelt のための furnace 設置）は replan/β の abandon 対象から保護する
     （PRECONDITION_PROTECTED。代替手段が前提を満たす場合のみ差し替え可）
