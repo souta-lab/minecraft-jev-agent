@@ -165,12 +165,37 @@ export interface KnownStation extends Vec3Json {
 
 export type StationStatus = 'known' | 'verified' | 'missing' | 'unreachable' | 'invalidated'
 
+/**
+ * Durable "where things are" memory that must survive reloads/respawns/host
+ * restarts. Inventory and position are NOT mirrored here - they are SERVER TRUTH,
+ * live on the bot, and are re-observed from sensors after every reload/reconnect,
+ * never restored from JSON. All coordinates are DTOs.
+ *
+ * WRITE PATHS (audited in `test-longterm-memory.mts`, task/longterm-memory):
+ *   craftingTables     generation-entry scan validation + STATION runtime events
+ *   furnaces           generation-entry scan validation + STATION runtime events
+ *   discoveredOres     generation-entry ore scan (names only, per world key)
+ *   knownResources     generation-entry ore/log/obsidian scan + #14 stale eviction
+ *   knownPortalSites   generation-entry `syncPortalSiteMemory` (#80, CAN-only)
+ *   moveFailures       controller `onMoveFailureMemoryChange`
+ *   hazards            HOST `registerDeathHazard` on a production death (#26)
+ *   mined              NO runtime producer: merge/persist machinery exists, but no
+ *                      caller emits a `mined` delta (depletion model never wired)
+ *   traversalFailures  NO runtime producer: same as `mined` (the thin P4 wall
+ *                      memory was never wired to the current controller)
+ * `mined`/`traversalFailures` round-trip correctly but stay empty in live state.
+ *
+ * Every field is namespaced by `serverId|dimension|worldEpoch` and every write is
+ * merged through the single `mergeWorldMemoryDelta`, so the staged commit point
+ * and the live runtime delta path cannot diverge.
+ */
 export interface ResidentWorldMemory {
   /** placed crafting_table stations discovered by scanning the loaded world (#31: validated records) */
   craftingTables: KnownStation[]
   /** placed furnace stations discovered by scanning the loaded world (#31: validated records) */
   furnaces: KnownStation[]
-  /** "x,y,z:block" -> times mined (depletion model, best-effort) */
+  /** "x,y,z:block" -> times mined (depletion model, best-effort). No runtime
+   * producer yet - see the interface doc; always empty in live state. */
   mined: Record<string, number>
   /** ore block names seen at least once in the world state */
   discoveredOres: string[]
@@ -185,7 +210,8 @@ export interface ResidentWorldMemory {
    * on a world-epoch change.
    */
   knownPortalSites: KnownPortalSiteJson[]
-  /** thin 2-block-wall / stuck memory; suppress repeat attempts */
+  /** thin 2-block-wall / stuck memory; suppress repeat attempts. No runtime
+   * producer yet - see the interface doc; always empty in live state. */
   traversalFailures: TraversalFailure[]
   /** coordinate-level movement failure memory; survives generation recovery (#12) */
   moveFailures: MoveFailEntry[]
