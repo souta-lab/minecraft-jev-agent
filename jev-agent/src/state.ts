@@ -674,12 +674,19 @@ export function resolveBlockHarvest(
   return resolveHarvest((bot.registry ?? {}) as GameDataRegistry, blockName)
 }
 
-function blockVisible(bot: Bot, block: { position: { x: number; y: number; z: number } }, inReach: boolean): boolean {
+/**
+ * #376: line of sight fails CLOSED. An exception from `canSeeBlock` is an observation
+ * failure, not evidence of visibility - returning true here manufactured line of sight
+ * (and therefore MINE/MOVE affordances) for blocks the sensor could not actually see.
+ * Unknown is not "visible", the same rule every other observation boundary follows.
+ * Exported for the fixture that pins the boundary.
+ */
+export function blockVisible(bot: Bot, block: { position: { x: number; y: number; z: number } }, inReach: boolean): boolean {
   if (!inReach) return false
   try {
     return bot.canSeeBlock(block as never)
   } catch {
-    return true
+    return false
   }
 }
 
