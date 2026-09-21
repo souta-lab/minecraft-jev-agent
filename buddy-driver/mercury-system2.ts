@@ -942,10 +942,22 @@ export type MercuryTransport = (request: MercuryTransportRequest) => Promise<Mer
  */
 export const MUSE_SPARK_MODEL = 'muse-spark-1.3-contributor'
 
+/**
+ * Model ids arrive either bare (`muse-spark-1.3-contributor`) or with the
+ * gateway provider prefix (`meta/muse-spark-1.3-contributor`). The live config
+ * uses the prefixed form, so an exact-string comparison silently sent muse down
+ * the forced tool-choice path — which it rejects
+ * (`GatewayInternalServerError: only "auto" is supported for tool_choice`), so
+ * every Mercury consultation failed 3/3 and the resident terminated fail-loud.
+ */
+export function isMuseSparkModel(model: string): boolean {
+  return model === MUSE_SPARK_MODEL || model.endsWith(`/${MUSE_SPARK_MODEL}`)
+}
+
 export type MercuryTransportMode = 'tool-call' | 'json-text'
 
 export function mercuryTransportMode(model: string): MercuryTransportMode {
-  return model === MUSE_SPARK_MODEL ? 'json-text' : 'tool-call'
+  return isMuseSparkModel(model) ? 'json-text' : 'tool-call'
 }
 
 /** Extract one JSON object from a model's text response without repairing it. */
