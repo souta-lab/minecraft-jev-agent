@@ -366,7 +366,6 @@ export class PlannerBrain implements System2Brain {
       this.lastLoggedPlanReason = reasonValue
       this.log('SYSTEM2_PLAN_REQUEST_REASON', { reason: reasonValue })
     }
-    const drainedQueueConsult = String((request as { reason?: unknown }).reason ?? '') === 'queue_empty'
     let mercuryTrigger = mercuryTriggerFor(request)
     if (this.mercury !== undefined && mercuryTrigger === 'no_candidate') {
       // A drained queue is a fresh planning moment, not a repeated stall. Keying it
@@ -411,37 +410,12 @@ export class PlannerBrain implements System2Brain {
       })
       const repair = await this.mercury.tryRepair(request, mercuryTrigger)
       if (repair === null) {
-        // A drained queue is a ROUTINE planning moment, not a stall: when the semantic
-        // layer cannot answer, fall back to the grounded option path (code still owns
-        // CAN/TRUE/SAFE/DONE) instead of terminating the resident. Genuine stall
-        // triggers keep the fail-loud contract below.
-        //
-        // NOTE (2026-09-22): `null` now means ONLY provider unavailability (5xx,
-        // timeout, budget, missing key). The schema-shaped `no plan object` /
-        // `unrecognized_keys` rejections that used to reach here are gone: an
-        // answer that grounds onto nothing is the typed `ungrounded` outcome below.
-        if (drainedQueueConsult) {
-          this.log('MERCURY_DEFERRED', { reason: 'queue_empty', trigger: mercuryTrigger })
-          mercuryTrigger = null
-        } else {
-          return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
-        }
-      } else if (repair.ungrounded !== undefined) {
-        // The semantic layer ANSWERED in natural language but the answer grounded
-        // onto no capability. That is a typed outcome, not unavailability: leave
-        // WHAT to the next layer (the typed choice over grounded options below)
-        // and carry the model's own words into that question. Terminating the
-        // resident here was the crash loop the drained-queue stopgap worked around.
-        this.lastMercuryIntent = repair.ungrounded.intent
-        this.lastMercuryIntentAtMs = Date.now()
-        this.log('MERCURY_INTENT_UNGROUNDED', {
-          provider: this.provider,
-          model: this.authorityModel,
-          trigger: mercuryTrigger,
-          reason: repair.ungrounded.reason,
-          intent: repair.ungrounded.intent.slice(0, 240),
-        })
-        mercuryTrigger = null
+        // Fail loud. `tryRepair` now returns null ONLY for provider/transport/budget/key
+        // failure (5xx, timeout, missing key); a shape-invalid answer is the typed
+        // `ungrounded` outcome handled below. Per the operator there is no fallback: a
+        // drained queue must not be degraded into the deterministic option path, and a
+        // provider outage is fail-loud.
+        return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
       } else {
         // #359: keep the semantic layer's intent so a drained queue continues the
         // thread instead of immediately re-drawing the ladder menu. Bounded by TTL

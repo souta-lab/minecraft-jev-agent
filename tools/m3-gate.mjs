@@ -31,7 +31,9 @@
 // below 12. A run merely short of inputs is UNKNOWN, not FAIL.
 //
 // Exit: 0 = PASS, 1 = FAIL (materials complete, eyes short), 2 = UNKNOWN.
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   M2_GATE_CONTROL_SOCK,
   M2_GATE_DECISIONS,
@@ -291,11 +293,20 @@ export async function runM3Gate({
   let rawPolicy = policyEvidence
   if (scoped && rawPolicy === null) {
     const socketBinding = policySocket === undefined ? await readPolicySocketBinding(controlSocketPath) : policySocket
+    // Same run-binding fallback as the M2 gate: the resident is normally started detached,
+    // so `runner.out` often does not exist while `buddy.log` carries the identical
+    // `[ISO] BOOT ... runId=...` lines. Without this the acceptance verdict degrades to
+    // `decisions_evidence_unavailable`, which says nothing about the run.
+    const repoRoot = fileURLToPath(new URL('..', import.meta.url))
+    const runnerOutForScan =
+      runnerOutPath !== null && runnerOutPath !== undefined && existsSync(runnerOutPath)
+        ? runnerOutPath
+        : join(repoRoot, 'buddy-driver', 'buddy.log')
     rawPolicy = await loadPolicy({
       runId: expectedRunId,
       socket: socketBinding?.runId === expectedRunId ? socketBinding : null,
       decisionsPath,
-      runnerOutPath,
+      runnerOutPath: runnerOutForScan,
     })
   }
   const policy = scoped
