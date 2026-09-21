@@ -386,6 +386,19 @@ export interface GroundedCandidatesResult {
    * is said", never a silent WAIT.
    */
   exploreRouteBlocked: ExploreRouteBlocked | null
+  /**
+   * The typed "no available source for the active collect focus" fact, or null
+   * when a grounded source route was offered (or the focus has no name-scanned
+   * source at all). Mirrored as `RESOURCE_SOURCE_NONE ...`.
+   *
+   * SOURCE-side fact: which remembered/sensed sources exist, how many the loaded
+   * world falsified, and whether the generator already offers a grounded
+   * exploration body-change (`next=explore`) or the starvation/escalation path
+   * must take over (`next=escalate`). It is orthogonal to `exploreRouteBlocked`
+   * (MOVEMENT-side: the exploration arm itself was blocked); on a full dead end
+   * both fire, and each names its own half of the reason.
+   */
+  sourceGap: ResourceSourceGap | null
 }
 
 /**
@@ -437,6 +450,60 @@ export const RESOURCE_SOURCE_EXCLUDED = 'RESOURCE_SOURCE_EXCLUDED'
 
 export function formatResourceSourceExclusion(exclusion: ResourceSourceExclusion): string {
   return `${RESOURCE_SOURCE_EXCLUDED} item=${exclusion.item} cell=${exclusion.cell.x},${exclusion.cell.y},${exclusion.cell.z} reason=${exclusion.reason}`
+}
+
+/**
+ * The typed "this collect goal has no available source" fact. It is the honest
+ * replacement for a silent stale-retarget loop: when the world offers neither a
+ * sensed source block nor a remembered coordinate that survived the live-world
+ * probe, the mechanical layer says so and names what little it CAN still do.
+ *
+ * This is a capability gap (TRUE), not a choice (WHAT): `reason` is derived from
+ * counts of ground facts and `next` only reports whether the generator could
+ * already offer a grounded exploration body-change (`explore`) or whether the
+ * existing starvation/escalation path must take over (`escalate`). Obsidian is
+ * the measured case, but nothing here names obsidian - the same marker fires for
+ * gravel/flint and any other name-scanned source.
+ */
+export type ResourceSourceGapReason =
+  /** the source is declared in the scan table but neither sensed nor remembered */
+  | 'no_source_sensed'
+  /** every remembered matching cell was disproved by the loaded world */
+  | 'remembered_falsified'
+  /** the only matching cells are members of a live structure */
+  | 'live_structure'
+  /** matching cells exist, but every offered route was withheld (tool/reach/path) */
+  | 'source_withheld'
+
+export interface ResourceSourceGap {
+  item: string
+  reason: ResourceSourceGapReason
+  /** sensed source blocks matching the focus */
+  sensed: number
+  /** remembered matching coordinates that survived the world probe */
+  remembered: number
+  /** remembered matching cells the loaded world disproved */
+  falsified: number
+  /** matching cells withheld as live-structure members */
+  excluded: number
+  /** the grounded next step the mechanical layer can offer right now */
+  next: 'explore' | 'escalate'
+}
+
+export const RESOURCE_SOURCE_NONE = 'RESOURCE_SOURCE_NONE'
+
+export function formatResourceSourceGap(gap: ResourceSourceGap): string {
+  return `${RESOURCE_SOURCE_NONE} item=${gap.item} reason=${gap.reason} sensed=${gap.sensed} remembered=${gap.remembered} falsified=${gap.falsified} excluded=${gap.excluded} next=${gap.next}`
+}
+
+/** Remembered matching cells the loaded world proved are no longer the resource. */
+function falsifiedKnownCellKeys(state: WorldState): ReadonlySet<string> {
+  const out = new Set<string>()
+  for (const evidence of state.knownResourceEvidence ?? []) {
+    if (evidence.status !== 'falsified') continue
+    out.add(`${evidence.position.x},${evidence.position.y},${evidence.position.z}`)
+  }
+  return out
 }
 
 /** The live-structure membership index for this world state (empty when none). */
@@ -493,6 +560,79 @@ export function resourceSourceExclusions(state: WorldState): ResourceSourceExclu
     }
   }
   return out
+}
+
+/**
+ * True when a candidate is an actual source route for the active want: a sensed
+ * MINE/MOVE onto the source block, or the remembered-coordinate RETRIEVE. This
+ * is how the gap detector distinguishes "no source at all" from "a source route
+ * exists"; it never ranks candidates.
+ */
+function sourceRouteForWant(candidate: Candidate, want: RetrievalWant): boolean {
+  if (candidate.kind === 'RETRIEVE') return candidate.meta.resource === want.item
+  if (candidate.kind === 'MINE' || candidate.kind === 'MOVE') {
+    const yieldItem = candidate.meta.yieldItem
+    if (typeof yieldItem === 'string' && resourceMatches(yieldItem, want.item)) return true
+    return candidate.targetName !== null && want.blockNames.includes(candidate.targetName)
+  }
+  return false
+}
+
+/**
+ * The typed no-source gap for the active collect focus, computed from ground
+ * facts the generator already has (sensed source blocks, surviving remembered
+ * coordinates, falsified evidence, live-structure exclusions) plus whether any
+ * source route survived into the offered set. Returns null when a source route
+ * exists or the focus has no name-scanned source. Pure; no candidate is changed.
+ */
+export function resourceSourceGapFor(
+  state: WorldState,
+  candidates: readonly Candidate[],
+  exclusions: readonly ResourceSourceExclusion[],
+): ResourceSourceGap | null {
+  const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  const want = retrievalWant(focusItem)
+  if (want === null || want.kind !== 'ore') return null
+  if (candidates.some((candidate) => sourceRouteForWant(candidate, want))) return null
+  const liveStructures = liveStructureIndexOf(state)
+  const sensedBlocks = state.blocks.filter(
+    (block) =>
+      (block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore') &&
+      (resourceMatches(block.yield, want.item) || want.blockNames.includes(block.name)),
+  )
+  const rememberedResources = (state.signals.knownResources ?? []).filter(
+    (resource) =>
+      resourceDimensionMatches(resource, state.self.dimension) && want.blockNames.includes(resource.name),
+  )
+  // A cell that is a live-structure member is not a source (see
+  // `resourceSourceExclusions`); count it as protected so the gap reason can name
+  // the real blocker instead of claiming "nothing was ever there".
+  const sensedOpen = sensedBlocks.filter((block) => !isLiveStructureMember(liveStructures, block.position)).length
+  const rememberedOpen = rememberedResources.filter(
+    (resource) => !isLiveStructureMember(liveStructures, resource.position),
+  ).length
+  const excluded = exclusions.filter((exclusion) => exclusion.item === want.item).length
+  const falsified = (state.knownResourceEvidence ?? []).filter((evidence) => evidence.status === 'falsified').length
+  const reason: ResourceSourceGapReason =
+    sensedOpen > 0 || rememberedOpen > 0
+      ? 'source_withheld'
+      : falsified > 0
+        ? 'remembered_falsified'
+        : excluded > 0
+          ? 'live_structure'
+          : 'no_source_sensed'
+  const next: ResourceSourceGap['next'] = candidates.some((candidate) => candidate.meta.explore === true)
+    ? 'explore'
+    : 'escalate'
+  return {
+    item: want.item,
+    reason,
+    sensed: sensedBlocks.length,
+    remembered: rememberedResources.length,
+    falsified,
+    excluded,
+    next,
+  }
 }
 
 /**
@@ -4209,6 +4349,7 @@ function knownResourceFor(
 ): KnownResource | null {
   const known = state.signals.knownResources ?? []
   const liveStructures = liveStructureIndexOf(state)
+  const falsified = falsifiedKnownCellKeys(state)
   let best: KnownResource | null = null
   for (const resource of known) {
     if (!resourceDimensionMatches(resource, state.self.dimension)) continue
@@ -4226,6 +4367,9 @@ function knownResourceFor(
     // and keep looking, so a farther ordinary cell is still preferred over
     // dismantling the asset.
     if (isLiveStructureMember(liveStructures, resource.position)) continue
+    // #14-world-proof: the loaded world proved this cell no longer holds the
+    // remembered resource, so it is not a route (see state.ts#probeKnownResources).
+    if (falsified.has(`${resource.position.x},${resource.position.y},${resource.position.z}`)) continue
     if (resourceDepleted(state, resource)) continue
     if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, resource.position)) continue
     if (best === null || distance(resource.position, state.self.position) < distance(best.position, state.self.position)) {
@@ -4607,6 +4751,10 @@ function exploreMoveCandidate(
       x: spot.x,
       y: spot.y,
       z: spot.z,
+      // Grounded exploration marker: this MOVE is a search body-change toward
+      // unexplored terrain, not a route to a sensed source. The typed no-source
+      // gap reads it to report `next=explore` instead of `next=escalate`.
+      explore: true,
       ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
     },
   }
@@ -4956,6 +5104,7 @@ export function applyReachabilityGate(
     surfaceAscentRefusal,
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
+    sourceGap: resourceSourceGapFor(state, candidates, exclusions),
   }
 }
 

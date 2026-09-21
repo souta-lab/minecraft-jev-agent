@@ -112,6 +112,34 @@ export type KnownResource = {
   frameCells?: readonly Vec3Json[]
 }
 
+/**
+ * Live-world verdict for ONE remembered resource cell (see
+ * `probeKnownResources`). Positive replacement evidence, not absence:
+ *
+ *  - `present`   the remembered block is still there;
+ *  - `replaced`  a same-family variant occupies the cell (iron_ore ->
+ *                deepslate_iron_ore); the coordinate is still a valid route;
+ *  - `falsified` a DIFFERENT, non-proving block occupies the cell. This is the
+ *                world disproving the memory (the measured M2 case: remembered
+ *                obsidian cells now read as stone);
+ *  - `unknown`   no verdict: the chunk is unloaded, the cell is air/fluid (a
+ *                mined-out cell is not distinguishable from a not-yet-sent
+ *                section here), or the read failed.
+ *
+ * The verdict is world truth (CAN/TRUE), never a preference. It exists so a
+ * collect goal cannot keep re-targeting a memory the loaded world contradicts.
+ */
+export type KnownResourceEvidenceStatus = 'present' | 'replaced' | 'falsified' | 'unknown'
+
+export interface KnownResourceEvidence {
+  /** block name the durable memory asserted */
+  name: string
+  position: Vec3Json
+  /** live block name at the cell, or null when the chunk is unloaded */
+  observed: string | null
+  status: KnownResourceEvidenceStatus
+}
+
 export type HeldItemState = {
   name: string
   count: number
@@ -437,6 +465,14 @@ export type WorldState = {
    * unchanged.
    */
   liveStructureMembers?: LiveStructureMember[]
+  /**
+   * #14-world-proof: the live-world verdict for remembered resource cells that
+   * match the active focus. A `falsified` cell has already been removed from
+   * `signals.knownResources` by the sensor, so no candidate family can offer it;
+   * this list is the typed evidence the controller mirrors. Absent in old replay
+   * fixtures means "no probe ran", which keeps them behaviourally unchanged.
+   */
+  knownResourceEvidence?: KnownResourceEvidence[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
@@ -1180,6 +1216,98 @@ function buildScannedResourceBlocks(
   return out.slice(0, 48)
 }
 
+/**
+ * Blocks that can occupy a remembered resource cell without disproving the
+ * memory: air/fluids are indistinguishable from a not-yet-sent chunk section
+ * here, so they stay `unknown`. Only a DIFFERENT solid block is positive proof
+ * that the remembered resource is gone.
+ */
+const NON_PROVING_CELL_BLOCKS: ReadonlySet<string> = new Set([
+  'air',
+  'cave_air',
+  'void_air',
+  'water',
+  'flowing_water',
+  'lava',
+  'flowing_lava',
+])
+
+function sameRememberedFamily(remembered: string, observed: string): boolean {
+  return (
+    (remembered.endsWith('_ore') && observed.endsWith('_ore')) ||
+    (remembered.endsWith('_log') && observed.endsWith('_log'))
+  )
+}
+
+/** Does a remembered cell belong to the active focus's scanned source names? */
+function rememberedMatchesFocus(focusItem: string | null, name: string): boolean {
+  if (focusItem === null) return false
+  const sources = scannedBlockNames(focusItem)
+  if (sources !== undefined) return sources.includes(name)
+  if (
+    focusItem === 'log' ||
+    focusItem === 'charcoal' ||
+    focusItem === 'planks' ||
+    focusItem === 'fuel' ||
+    focusItem.endsWith('_log')
+  ) {
+    return name.endsWith('_log')
+  }
+  return false
+}
+
+/**
+ * #14-world-proof: positive live-world evidence for the remembered resource
+ * cells the active focus would otherwise retrieve.
+ *
+ * The durable staleness eviction (`generation-entry.ts#evictStaleKnownResources`)
+ * only probes cells inside a 24-block "definitely loaded" radius. A memory that
+ * the loaded world contradicts farther away (the measured M2 case: remembered
+ * obsidian cells that now read as stone, ~50 blocks from the resident) therefore
+ * stayed a live `RETRIEVE:known:obsidian` route forever and the body kept walking
+ * to it. This probe reads the actual block at the cell: `bot.blockAt` returns
+ * null for an unloaded chunk, so a far-but-loaded replacement is provable while
+ * an unloaded one stays `unknown`. It is world truth only (CAN/TRUE): the sensor
+ * removes `falsified` cells from `signals.knownResources` and reports the typed
+ * evidence; no goal, action or ranking is decided here.
+ */
+export function probeKnownResources(
+  bot: Bot,
+  focusItem: string | null,
+  remembered: readonly KnownResource[],
+): KnownResourceEvidence[] {
+  if (focusItem === null) return []
+  const focusSources = scannedBlockNames(focusItem)
+  const out: KnownResourceEvidence[] = []
+  for (const resource of remembered) {
+    if (resource.kind !== 'ore' && resource.kind !== 'log') continue
+    if (!rememberedMatchesFocus(focusItem, resource.name)) continue
+    const position = resource.position
+    let block: { name?: string; boundingBox?: string } | null = null
+    try {
+      block = (bot.blockAt(new Vec3(position.x, position.y, position.z)) ?? null) as {
+        name?: string
+        boundingBox?: string
+      } | null
+    } catch {
+      block = null
+    }
+    const observed = typeof block?.name === 'string' ? block.name : null
+    let status: KnownResourceEvidenceStatus
+    if (observed === null) status = 'unknown'
+    else if (observed === resource.name) status = 'present'
+    // A same-family variant (ore -> deepslate ore) or another declared source
+    // name for this focus (nether_bricks -> nether_brick_fence) still serves the
+    // want, so the cell stays a valid route and is reported as `replaced`.
+    else if (sameRememberedFamily(resource.name, observed) || focusSources?.includes(observed) === true)
+      status = 'replaced'
+    else if (NON_PROVING_CELL_BLOCKS.has(observed) || block?.boundingBox === 'empty') status = 'unknown'
+    else status = 'falsified'
+    out.push({ name: resource.name, position: { x: position.x, y: position.y, z: position.z }, observed, status })
+  }
+  return out
+}
+
 function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
   const out: BlockState[] = []
   const positions = stableFindBlocks(bot, `hazards:${options.hazardRadius}:32`, {
@@ -1919,6 +2047,27 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const self = buildSelf(bot)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
+  // #14-world-proof: falsify remembered resource cells the loaded world
+  // contradicts before any candidate family can see them.
+  const knownResourceEvidence = probeKnownResources(
+    bot,
+    input.focusItem ?? null,
+    input.signals.knownResources ?? [],
+  )
+  const falsifiedKnownCells = new Set(
+    knownResourceEvidence
+      .filter((evidence) => evidence.status === 'falsified')
+      .map((evidence) => `${evidence.position.x},${evidence.position.y},${evidence.position.z}`),
+  )
+  const liveKnownResources =
+    falsifiedKnownCells.size === 0
+      ? input.signals.knownResources
+      : (input.signals.knownResources ?? []).filter(
+          (resource) =>
+            !falsifiedKnownCells.has(`${resource.position.x},${resource.position.y},${resource.position.z}`),
+        )
+  const signals =
+    falsifiedKnownCells.size === 0 ? input.signals : { ...input.signals, knownResources: liveKnownResources }
   const portalFrameSites = mergePortalFrameSites(
     buildPortalFrameSites(bot, options, self),
     rememberedPortalFrameSites(rememberedStations),
@@ -1945,6 +2094,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     portalFrameSites,
     portalFrame,
     liveStructureMembers: liveStructureMembersForSites(portalFrameSites),
+    knownResourceEvidence,
     descent: buildDescent(bot, options, self),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),
@@ -1953,7 +2103,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     currentOption: input.currentOption ?? null,
     recentOutcomes: [...(input.recentOutcomes ?? [])].slice(-8),
     recentEvents: input.recentEvents.slice(-12),
-    signals: input.signals,
+    signals,
   }
 }
 

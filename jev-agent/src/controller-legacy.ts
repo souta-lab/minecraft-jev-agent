@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -1038,6 +1038,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
+  'RESOURCE_SOURCE_NONE',
   'LOG_ROUTE',
   'WEDGE_SUPPRESSED',
   PROTECTION_ABANDON_CONFLICT,
@@ -1588,6 +1589,8 @@ export class JevController {
   private lastExploreRouteBlockedKey: string | null = null
   /** the current tick's typed explore dead end, fed into the starvation `missing` evidence. */
   private exploreRouteBlockedThisTick: ExploreRouteBlocked | null = null
+  /** Dedupe key for the last mirrored `RESOURCE_SOURCE_NONE` line. */
+  private lastSourceGapKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -2277,6 +2280,7 @@ export class JevController {
       this.logArmorRefusal(grounded.armorRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
+      this.logResourceSourceGap(grounded.sourceGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logSmeltRouteGap(state, groundingOptions)
@@ -2382,6 +2386,13 @@ export class JevController {
         if (this.exploreRouteBlockedThisTick !== null) {
           const exploreToken = `explore_route_blocked:${this.exploreRouteBlockedThisTick.reason}`
           if (!missing.includes(exploreToken)) missing.push(exploreToken)
+        }
+        // The typed no-source fact rides the same starvation/escalation evidence
+        // so a starvation line never says only `no_productive_action` when the
+        // real blocker is "the focus has no source left".
+        if (grounded.sourceGap !== null) {
+          const sourceToken = `resource:${grounded.sourceGap.item}:${grounded.sourceGap.reason}`
+          if (!missing.includes(sourceToken)) missing.push(sourceToken)
         }
         this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
@@ -6925,6 +6936,21 @@ export class JevController {
       { goal: blocked.goal, item: blocked.item, reason: blocked.reason },
       this.tickCounter,
     )
+  }
+
+  /**
+   * The typed "this collect focus has no available source" fact (SOURCE-side,
+   * orthogonal to the MOVEMENT-side `EXPLORE_ROUTE_BLOCKED`). Emitted once per
+   * distinct gap (deduped like the live-structure exclusions) so the semantic
+   * layer sees WHY no route exists instead of the plan silently re-targeting a
+   * stale remembered cell.
+   */
+  private logResourceSourceGap(gap: ResourceSourceGap | null): void {
+    const key = gap === null ? null : formatResourceSourceGap(gap)
+    if (key === this.lastSourceGapKey) return
+    this.lastSourceGapKey = key
+    if (gap === null) return
+    this.logger.warn('agent', formatResourceSourceGap(gap), { ...gap }, this.tickCounter)
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */
