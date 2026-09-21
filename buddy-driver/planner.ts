@@ -20,7 +20,7 @@ import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { Bot } from 'mineflayer'
 import type { System2Brain, System2Plan, System2PlanRequest } from '../jev-agent/src/system2.ts'
-import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
+import { DEFAULT_LLM_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, describeFailure, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
@@ -226,7 +226,7 @@ export class PlannerBrain implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
     this.refreshLiveFacts = options.refreshLiveFacts
-    this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_LLM_MODEL
     this.mercury = options.mercury
     this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
     this.lastAuthorityModel = this.mode === 'deterministic' ? this.model : 'none'

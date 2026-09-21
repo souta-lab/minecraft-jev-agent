@@ -696,6 +696,17 @@ export const JEV_KEY_FILE = '/home/s0u7a/.config/kimaki-secrets/vercel-ai-gatewa
 
 export const DEFAULT_JEV_MODEL = 'typesafe-ai/jev'
 
+/**
+ * #11 role split. Jev (pi/beta) owns grounded action choice and keeps
+ * `DEFAULT_JEV_MODEL` — it is not swappable for the LLM. Every *semantic*
+ * upper-layer role is the LLM side and shares this default: the System2 planning
+ * authority, Mercury plan repair, and the advisor. They must not silently fall
+ * back to Jev's model, which would collapse the two authorities into one.
+ * Override per role with BUDDY_PLANNER_MODEL / BUDDY_MERCURY_MODEL /
+ * BUDDY_ADVISOR_MODEL.
+ */
+export const DEFAULT_LLM_MODEL = 'meta/muse-spark-1.3-contributor'
+
 export interface KeyResolution {
   key: string
   /** human-readable description of where the key came from (never the key) */

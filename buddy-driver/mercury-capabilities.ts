@@ -27,7 +27,10 @@
 //
 // A pair is only added once the deterministic executor can actually ground it.
 
-export const MERCURY_MODEL_DEFAULT = 'inception/mercury-2.5'
+// #11 LLM-side default, kept as a literal because this module is
+// deliberately dependency-free. Must match DEFAULT_LLM_MODEL in
+// jev-agent/src/jev-legacy.ts.
+export const MERCURY_MODEL_DEFAULT = 'meta/muse-spark-1.3-contributor'
 
 /** Explicit, code-owned capability kinds. Mercury never invents one. */
 export const MERCURY_TYPED_GOAL_KINDS = [
