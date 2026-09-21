@@ -24,6 +24,7 @@ import type {
   KnownPortalSiteJson,
   KnownResourceJson,
   KnownStructureSiteJson,
+  KnownTraversalJson,
   LedgerProposalEnvelope,
   LedgerReconciliationProposal,
   KnownStation,
@@ -32,7 +33,7 @@ import type {
   WorldMemoryDelta,
   WorldKey,
 } from './resident-types.ts'
-import { mergeKnownResourcesInto } from './resident-types.ts'
+import { mergeKnownResourcesInto, mergeKnownTraversalsInto } from './resident-types.ts'
 import { normalizeStation, stationKey } from './station-memory.ts'
 import { acceptsWorldMemoryProposal } from './world-epoch.ts'
 
@@ -351,6 +352,20 @@ export function removeKnownStructureSiteDtos(target: KnownStructureSiteJson[], g
 }
 
 /**
+ * #354: HOST-authoritative traversal-fact merge. Delegates to the ONE bounded
+ * merge in resident-types.ts (same cap/eviction order as known resources), so
+ * the staged commit point and the live runtime delta path cannot diverge. A
+ * re-observed leg refreshes/supersedes the remembered outcome.
+ */
+export function mergeKnownTraversalDtos(
+  target: KnownTraversalJson[],
+  found: readonly KnownTraversalJson[],
+  log?: ProposalLog,
+): number {
+  return mergeKnownTraversalsInto(target, found, { log }).added
+}
+
+/**
  * Merge ONE world-memory delta into the live memory. This is the only merge
  * implementation: the staged commit point AND the live `proposeWorldMemory`
  * runtime path both route through it, so the two paths can never diverge. It
@@ -385,6 +400,7 @@ export function mergeWorldMemoryDelta(memory: ResidentWorldMemory, delta: WorldM
   if (delta.removeKnownStructureSites !== undefined) {
     removeKnownStructureSiteDtos(memory.knownStructureSites, delta.removeKnownStructureSites)
   }
+  if (delta.knownTraversals !== undefined) mergeKnownTraversalDtos(memory.knownTraversals, delta.knownTraversals, log)
   if (delta.mined !== undefined) {
     for (const [key, count] of Object.entries(delta.mined)) {
       memory.mined[key] = (memory.mined[key] ?? 0) + count

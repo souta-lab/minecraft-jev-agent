@@ -197,6 +197,14 @@ function cloneMemory(memory: ResidentWorldMemory): ResidentWorldMemory {
       ...site,
       ...(site.blocks === undefined ? {} : { blocks: [...site.blocks] }),
     })),
+    // #354: the durable traversal facts must ride the generation seed too, or the
+    // candidate consumer never sees the remembered connectivity (the #80 omission
+    // class this clone exists to prevent).
+    knownTraversals: normal.knownTraversals.map((traversal) => ({
+      ...traversal,
+      from: { ...traversal.from },
+      to: { ...traversal.to },
+    })),
     traversalFailures: normal.traversalFailures.map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: normal.moveFailures.map((entry) => ({ ...entry })),
     hazards: normal.hazards.map((h) => ({ ...h })),
@@ -1852,6 +1860,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
         furnaces: memory.furnaces.length,
         discoveredOres: memory.discoveredOres,
         traversalFailures: memory.traversalFailures.length,
+        knownTraversals: memory.knownTraversals.length,
         hazards: memory.hazards.length,
         hardHazards: memory.hazards.filter((h) => h.count >= 2).length,
       },
