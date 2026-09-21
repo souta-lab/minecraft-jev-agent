@@ -420,7 +420,7 @@ export const RUNGS: readonly Rung[] = [
     satisfied: (c) => has(c, 'diamond_pickaxe'),
     goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
   },
-  // --- M2 portal transition + M3/M4 future route ---
+  // --- M2 portal transition ---
   {
     id: 'nether_portal',
     // M2 transition: done only once the lit nether_portal block actually exists.
@@ -430,17 +430,21 @@ export const RUNGS: readonly Rung[] = [
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
+  // --- M3 (owner definition): 12 ender pearls. ---
+  // Pearls drop from endermen, so this rung needs hostile-mob difficulty and does
+  // NOT require the Nether. The M2 portal rung above stays the earlier frontier;
+  // Nether -> blaze -> ender_eye stays in the future M4 route below.
+  {
+    id: 'ender_pearls',
+    satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
+    goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
+  },
+  // --- M4 route (future): Nether -> blaze -> ender eyes -> stronghold -> end -> dragon ---
   {
     id: 'blaze_rods',
     future: true,
     satisfied: (c) => (c['blaze_rod'] ?? 0) >= 7,
     goals: () => [{ kind: 'collect', description: 'collect 7 x blaze_rod', targetItem: 'blaze_rod', requiredCount: 7 }],
-  },
-  {
-    id: 'ender_pearls',
-    future: true,
-    satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
-    goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
   },
   {
     id: 'ender_eyes',

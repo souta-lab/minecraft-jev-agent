@@ -149,8 +149,31 @@ addCase('a live verified portal closes the rung without an inventory portal item
   const frontier = computeFrontier(counts, live).rungId
   const portalGoal = ladder.goals.some((goal) => goal.targetItem === 'obsidian' || goal.targetItem === 'nether_portal')
   return {
-    pass: resume.rungId === 'complete' && ladder.rungId === 'complete' && frontier === 'complete' && !portalGoal,
+    // The portal rung is closed. M3 (ender_pearls) is the next executable rung, so
+    // the ladder is no longer "complete" here — it advances to the pearl rung.
+    pass:
+      resume.rungId === 'ender_pearls' &&
+      ladder.rungId === 'ender_pearls' &&
+      frontier === 'ender_pearls' &&
+      !portalGoal,
     detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} frontier=${frontier} goals=${ladder.goals.length} portalGoal=${portalGoal}`,
+  }
+})
+
+addCase('M3 ender_pearls is an executable rung with a 12-pearl collect goal', () => {
+  const counts = { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1 }
+  const live = world({ portalVerified: true })
+  const resume = deriveResumeRung(counts, live)
+  const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
+  const pearlGoal = ladder.goals.find((goal) => goal.targetItem === 'ender_pearl')
+  const executable = RUNGS.some((r) => r.id === 'ender_pearls' && r.future !== true)
+  return {
+    pass:
+      executable &&
+      ladder.rungId === 'ender_pearls' &&
+      pearlGoal?.kind === 'collect' &&
+      pearlGoal.requiredCount === 12,
+    detail: `executable=${executable} rung=${ladder.rungId} goal=${pearlGoal?.kind}:${pearlGoal?.targetItem}:${pearlGoal?.requiredCount}`,
   }
 })
 
