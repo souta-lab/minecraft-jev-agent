@@ -745,7 +745,22 @@ function guardRetrieve(candidate: Candidate, state: WorldState, context: GuardCo
     return guardPathComputable(candidate, context, target)
   }
   const known = (state.signals.knownResources ?? []).some((resource) => samePosition(resource.position, target))
-  if (!known) {
+  // A STATION retrieve is validated against the station memory, not the resource memory.
+  // Stations live in `craftingTables`/`furnaces` (sensed near-field, then remembered), so
+  // requiring `knownResources` denied every station retrieve whose cell was not also an
+  // ore/resource: live, `RETRIEVE:known:station:furnace:b10_65_-9` was denied with
+  // `TARGET_GONE reason=no remembered resource at (10,65,-9)` while the same furnace was a
+  // KNOWN station two blocks away, stalling `smelt:charcoal` without bound.
+  const stationKnown =
+    candidate.id.startsWith('RETRIEVE:known:station:') &&
+    [...(state.craftingTables ?? []), ...(state.furnaces ?? [])].some((station) => {
+      const entry = station as unknown as { position?: unknown }
+      const position = (entry?.position ?? station) as { x?: unknown; y?: unknown; z?: unknown } | null
+      if (position === null || typeof position !== 'object') return false
+      if (typeof position.x !== 'number' || typeof position.y !== 'number' || typeof position.z !== 'number') return false
+      return samePosition({ x: position.x, y: position.y, z: position.z }, target)
+    })
+  if (!known && !stationKnown) {
     return deny(candidate.id, 'TARGET_GONE', `no remembered resource at (${target.x},${target.y},${target.z})`)
   }
   const hazard = nearestHazardTo(state, target)
