@@ -101,6 +101,160 @@ export interface KnownResourceJson {
 }
 
 /**
+ * Bounded size of the durable known-resource store. The generation scan and the
+ * HOST delta merge all honour this same cap through `mergeKnownResourcesInto`,
+ * so memory stays bounded while it keeps learning.
+ */
+export const KNOWN_RESOURCE_CAP = 256
+
+/** Exact-coordinate identity of a remembered cell: `name@round(x),round(y),round(z)`. */
+function knownResourceKey(resource: { name: string; x: number; y: number; z: number }): string {
+  return `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+function knownResourceAt(resource: { x: number; y: number; z: number }): string {
+  return `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+}
+
+/**
+ * Capacity-eviction rule for the durable known-resource store.
+ *
+ * The store is a bounded "where things are" memory, not a ranked plan: when it
+ * is full a newly observed cell must displace the remembered cell that is
+ * cheapest to re-derive, rather than be dropped for the lifetime of the world
+ * key. The value proxy is recency of PROOF (`lastSeenAt`), which the scan and
+ * refresh paths already maintain:
+ *
+ *  - the OLDEST proof is evicted first;
+ *  - entries with no `lastSeenAt` predate the bookkeeping field (legacy durable
+ *    JSON) and are treated as the oldest, so they are evicted first;
+ *  - ties break toward the earliest array position (stable and deterministic).
+ *
+ * Returns the victim index, or -1 when nothing can be evicted.
+ */
+export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): number {
+  let victim = -1
+  let victimSeenAt = Number.NEGATIVE_INFINITY
+  for (let index = 0; index < known.length; index += 1) {
+    const entry = known[index]
+    if (entry === undefined) continue
+    const seenAt =
+      typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt) ? entry.lastSeenAt : Number.NEGATIVE_INFINITY
+    if (victim < 0 || seenAt < victimSeenAt) {
+      victim = index
+      victimSeenAt = seenAt
+    }
+  }
+  return victim
+}
+
+export interface MergeKnownResourcesOptions {
+  log?: (event: string, detail?: Record<string, unknown>) => void
+  /** worldEpoch stamped onto the `KNOWN_RESOURCE` insert marker */
+  worldEpoch?: number
+  /** store bound; defaults to `KNOWN_RESOURCE_CAP` */
+  cap?: number
+  /** Emit the `KNOWN_RESOURCE` insert marker. The generation scan owns that
+   * marker; the HOST delta merge only reports capacity evictions/drops. */
+  emitInsertMarker?: boolean
+}
+
+export interface MergeKnownResourcesResult {
+  /** inserts, unchanged meaning (duplicates/refreshes are not inserts) */
+  added: number
+  evicted: KnownResourceJson[]
+  /** sightings refused because the store was full and nothing was evictable */
+  dropped: number
+}
+
+/**
+ * Insert observed cells into a bounded durable known-resource store.
+ *
+ * Contracts preserved from the original scan merge:
+ *  - dedupe is exact-coordinate `name@round(x),round(y),round(z)`;
+ *  - a re-observation REFRESHES `lastSeenAt` instead of inserting or evicting;
+ *  - inserts stamp rounded coordinates, `dimension` and `worldEpoch`;
+ *  - the array never exceeds `cap`.
+ *
+ * Capacity (`KNOWN_RESOURCE_EVICTED name=<n> at=<x,y,z> reason=capacity ageMs=<n>`):
+ * at the cap the oldest entry is evicted to make room (see
+ * `selectKnownResourceEvictionVictim`). If no victim exists the sighting is
+ * refused with `KNOWN_RESOURCE_FULL cap=<n> dropped=<n>` - never silently.
+ */
+export function mergeKnownResourcesInto(
+  target: KnownResourceJson[],
+  found: KnownResourceJson[],
+  options: MergeKnownResourcesOptions = {},
+): MergeKnownResourcesResult {
+  const cap = options.cap ?? KNOWN_RESOURCE_CAP
+  const log = options.log
+  const emitInsertMarker = options.emitInsertMarker ?? false
+  const byKey = new Map<string, KnownResourceJson>()
+  for (const resource of target) {
+    const key = knownResourceKey(resource)
+    if (!byKey.has(key)) byKey.set(key, resource)
+  }
+  const evicted: KnownResourceJson[] = []
+  let added = 0
+  let dropped = 0
+  const now = Date.now()
+  for (const resource of found) {
+    const key = knownResourceKey(resource)
+    const existing = byKey.get(key)
+    if (existing !== undefined) {
+      // Re-observation is free proof the cell is still valuable: refresh recency
+      // instead of inserting a duplicate or spending an eviction on it.
+      if (typeof resource.lastSeenAt === 'number' && Number.isFinite(resource.lastSeenAt)) {
+        existing.lastSeenAt = resource.lastSeenAt
+      }
+      continue
+    }
+    if (target.length >= cap) {
+      const victimIndex = selectKnownResourceEvictionVictim(target)
+      const victim = victimIndex < 0 ? undefined : target[victimIndex]
+      if (victim === undefined) {
+        dropped += 1
+        continue
+      }
+      target.splice(victimIndex, 1)
+      byKey.delete(knownResourceKey(victim))
+      evicted.push(victim)
+      log?.('KNOWN_RESOURCE_EVICTED', {
+        item: victim.name,
+        name: victim.name,
+        at: knownResourceAt(victim),
+        reason: 'capacity',
+        ageMs:
+          typeof victim.lastSeenAt === 'number' && Number.isFinite(victim.lastSeenAt) ? now - victim.lastSeenAt : null,
+      })
+    }
+    const stored: KnownResourceJson = {
+      name: resource.name,
+      kind: resource.kind,
+      x: Math.round(resource.x),
+      y: Math.round(resource.y),
+      z: Math.round(resource.z),
+      ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
+      ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
+      ...(resource.lastSeenAt === undefined ? {} : { lastSeenAt: resource.lastSeenAt }),
+    }
+    target.push(stored)
+    byKey.set(key, stored)
+    added += 1
+    if (emitInsertMarker) {
+      log?.('KNOWN_RESOURCE', {
+        item: stored.name,
+        kind: stored.kind,
+        at: knownResourceAt(stored),
+        ...(options.worldEpoch === undefined ? {} : { worldEpoch: options.worldEpoch }),
+      })
+    }
+  }
+  if (dropped > 0) log?.('KNOWN_RESOURCE_FULL', { cap, dropped })
+  return { added, evicted, dropped }
+}
+
+/**
  * Issue #80: a durable, world-keyed record that a VERIFIED lit nether portal
  * frame exists at these overworld coordinates. It is deliberately NOT a verdict:
  * `portalVerified` stays a live server-truth projection re-observed after every
