@@ -25,7 +25,7 @@
     "M3": {
       "title": "12 Eyes of Ender",
       "requires": ["ender_eye>=12"],
-      "evaluator": { "type": "manual", "reason": "M3 is defined by one terminal inventory predicate: ender_eye>=12 (the item id is ender_eye, display 'Eye of Ender'; eye_of_ender is the thrown projectile entity and must not be used). Crafting 12 eyes needs 12 ender_pearl plus 12 blaze_powder, so M3 requires BOTH a hostile-mob difficulty change (enderman drops) and Nether access (blaze rods). No run-scoped executable gate is wired for M3 yet." }
+      "evaluator": { "type": "command", "script": "tools/m3-gate.mjs", "scopeArg": "--run" }
     },
     "M4": {
       "title": "Ender Dragon",

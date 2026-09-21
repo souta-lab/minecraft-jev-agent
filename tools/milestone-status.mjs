@@ -47,6 +47,11 @@ function parseM2Status(text) {
   return matches.at(-1)?.[1] ?? null
 }
 
+function parseM3Status(text) {
+  const matches = [...text.matchAll(/(?:M3_RUN_RESULT|M3_LIVE_RESULT)\s+status=(PASS|FAIL|UNKNOWN)\b/g)]
+  return matches.at(-1)?.[1] ?? null
+}
+
 export function evaluateMilestone(contract, id, options = {}) {
   const milestone = contract.milestones[id]
   if (milestone === undefined) return { id, status: 'UNKNOWN', reason: 'unknown_milestone' }
@@ -68,7 +73,7 @@ export function evaluateMilestone(contract, id, options = {}) {
   const run = options.runCommand ?? ((argv) => spawnSync(process.execPath, argv, { cwd: ROOT, encoding: 'utf8' }))
   const result = run(args)
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-  const parsed = id === 'M2' ? parseM2Status(output) : null
+  const parsed = id === 'M2' ? parseM2Status(output) : id === 'M3' ? parseM3Status(output) : null
   if (parsed !== null && STATUS.has(parsed)) return { id, status: parsed, reason: `delegated:${evaluator.script}`, output }
   if (result.error !== undefined) return { id, status: 'UNKNOWN', reason: `gate_error:${result.error.message}`, output }
   return { id, status: 'UNKNOWN', reason: 'gate_emitted_no_machine_status', output }
@@ -107,7 +112,9 @@ function main() {
     return
   }
   if (args.milestone === null) throw new Error('usage: milestone-status --milestone M0|M1|M2|M3|M4 [--run runId] [--since ISO] [--json]')
-  const runId = args.run ?? process.env.M2_RUN_ID ?? null
+  // The run scope is milestone-scoped: `--run` wins, otherwise <ID>_RUN_ID for
+  // this milestone only, so an M2 run can never be reused as M3 evidence.
+  const runId = args.run ?? process.env[`${args.milestone}_RUN_ID`] ?? null
   const result = evaluateMilestone(contract, args.milestone, { since: args.since, runId })
   if (args.json) process.stdout.write(`${JSON.stringify(result)}\n`)
   else process.stdout.write(`MILESTONE_RESULT id=${result.id} status=${result.status} reason=${JSON.stringify(result.reason)}\n`)
