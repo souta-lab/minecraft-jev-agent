@@ -1230,7 +1230,7 @@ export function parseMercuryJsonText(text: string): unknown | null {
 type MercuryPlanTool = Tool<MercuryPlanJson, never, never>
 const MERCURY_PLAN_TOOL_SCHEMA = MERCURY_PLAN_SCHEMA as unknown as MercuryPlanTool['inputSchema']
 
-const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
+export const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
   // The response is consumed by a parser, not a human. Live measurement (M3
   // hand-off) showed this model spending its answer on analysis and returning no
   // parseable object, so every repair was rejected with
@@ -1300,7 +1300,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
   }
 }
 
-const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
+export const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
 Produce exactly one high-level plan matching this schema: op, goals, reason.
