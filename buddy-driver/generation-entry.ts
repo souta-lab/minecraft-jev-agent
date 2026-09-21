@@ -117,6 +117,28 @@ function assertCraftCapability(bot: Bot, log: (event: string, detail?: Record<st
 
 export { debugFrontier }
 
+/**
+ * Compatibility projection for the controller's legacy scalar `goalItem/goalCount`.
+ * The GoalQueue/System2 frontier is authoritative; this scalar exists only because
+ * the current controller still requires a non-null root GoalState before the queue
+ * is populated. Seed it from the first grounded ladder goal instead of the host's
+ * historical `iron_ingot x3` default so an empty queue cannot leak a stale mission
+ * into candidate grounding or a System2 state fingerprint.
+ */
+export function compatibilityRootGoal(
+  goals: readonly PlannedGoal[],
+  fallback: { goalItem: string; goalCount: number },
+): { goalItem: string; goalCount: number } {
+  const projected = goals.find(
+    (goal) => typeof goal.targetItem === 'string' && goal.targetItem.length > 0,
+  )
+  if (projected?.targetItem === null || projected?.targetItem === undefined) return fallback
+  return {
+    goalItem: projected.targetItem,
+    goalCount: Math.max(1, projected.requiredCount ?? 1),
+  }
+}
+
 const STATION_VALIDATION_RADIUS = 48
 
 type StationLog = (event: string, detail?: Record<string, unknown>) => void
@@ -1750,9 +1772,21 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     ctx.log('TRAVERSAL_HINT', { waypoint: traversalCellKey(hint.waypoint), source: 'memory' })
   }
 
+  const rootGoal = compatibilityRootGoal(ladder.goals, { goalItem: ctx.goalItem, goalCount: ctx.goalCount })
+  if (rootGoal.goalItem !== ctx.goalItem || rootGoal.goalCount !== ctx.goalCount) {
+    ctx.log('ROOT_GOAL_PROJECTED', {
+      source: 'ladder-frontier',
+      goalItem: rootGoal.goalItem,
+      goalCount: rootGoal.goalCount,
+      legacyGoalItem: ctx.goalItem,
+      legacyGoalCount: ctx.goalCount,
+      rungId: ladder.rungId,
+    })
+  }
+
   const options: Partial<JevAgentOptions> = {
-    goalItem: ctx.goalItem,
-    goalCount: ctx.goalCount,
+    goalItem: rootGoal.goalItem,
+    goalCount: rootGoal.goalCount,
     heartbeatMs: 3000,
     // A resident never stops on a timer and never aborts a wedge: the host would
     // have to restart the generation, so make the controller self-heal instead.

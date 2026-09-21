@@ -1,7 +1,7 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
 import { buildLadder, computeFrontier, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungBehindInventory, rungGoalsWithPrereq, RUNGS } from './planner.ts'
-import { selectLedgerSnapshot, snapshotGoals } from './generation-entry.ts'
+import { selectLedgerSnapshot, snapshotGoals, compatibilityRootGoal } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
@@ -26,6 +26,29 @@ const M2_LIVE = {
   charcoal: 1,
   oak_log: 2,
 }
+
+addCase('legacy scalar root goal projects from the live ladder frontier, never stale iron_ingot', () => {
+  const goals: PlannedGoal[] = [
+    { kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 },
+    { kind: 'place', description: 'build the portal', targetItem: 'obsidian', requiredCount: 10 },
+  ]
+  const root = compatibilityRootGoal(goals, { goalItem: 'iron_ingot', goalCount: 3 })
+  return {
+    pass: root.goalItem === 'ender_pearl' && root.goalCount === 12,
+    detail: `root=${root.goalItem}:${root.goalCount}`,
+  }
+})
+
+addCase('legacy scalar root goal keeps its fallback only when no item projection exists', () => {
+  const goals: PlannedGoal[] = [
+    { kind: 'explore', description: 'locate a structure', targetItem: null, requiredCount: 1 },
+  ]
+  const root = compatibilityRootGoal(goals, { goalItem: 'mission', goalCount: 1 })
+  return {
+    pass: root.goalItem === 'mission' && root.goalCount === 1,
+    detail: `root=${root.goalItem}:${root.goalCount}`,
+  }
+})
 
 addCase('the cobblestone rung uses the concrete stone drop, not the semantic class', () => {
   const goals = rung('cobblestone').goals(M2_LIVE, world())
