@@ -116,36 +116,66 @@ function knownResourceAt(resource: { x: number; y: number; z: number }): string 
   return `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
 }
 
+/** A resource identity whose LAST coordinate is a durable route anchor. */
+function knownResourceIdentity(resource: KnownResourceJson): string {
+  const dimension = (resource.dimension ?? '').replace(/^minecraft:/, '').toLowerCase()
+  const epoch = resource.worldEpoch ?? 'legacy'
+  return `${resource.name}|${dimension}|${epoch}`
+}
+
 /**
  * Capacity-eviction rule for the durable known-resource store.
  *
- * The store is a bounded "where things are" memory, not a ranked plan: when it
- * is full a newly observed cell must displace the remembered cell that is
- * cheapest to re-derive, rather than be dropped for the lifetime of the world
- * key. The value proxy is recency of PROOF (`lastSeenAt`), which the scan and
- * refresh paths already maintain:
+ * The store is a bounded "where things are" memory, not a ranked plan. A dense
+ * vein can contribute dozens of adjacent coal/copper cells while a rare route
+ * may have only one remembered coordinate. Pure oldest-first eviction therefore
+ * destroys information diversity: the live M3 run evicted every remembered
+ * obsidian cell under local coal/copper scan pressure, after which the agent had
+ * no bearing and paced locally.
  *
- *  - the OLDEST proof is evicted first;
- *  - entries with no `lastSeenAt` predate the bookkeeping field (legacy durable
- *    JSON) and are treated as the oldest, so they are evicted first;
+ * Compression rule:
+ *  - first evict the OLDEST REDUNDANT coordinate from an identity that still has
+ *    another coordinate (`name + dimension + worldEpoch`);
+ *  - this preserves the last route anchor for every identity while any redundant
+ *    cell exists elsewhere in the store;
+ *  - legacy entries without `lastSeenAt` are still the oldest within the chosen
+ *    pool;
+ *  - if every identity is already a singleton, fall back to global oldest so the
+ *    bounded store can still learn a genuinely new identity;
  *  - ties break toward the earliest array position (stable and deterministic).
  *
- * Returns the victim index, or -1 when nothing can be evicted.
+ * This is retention/compression truth only: it does not know the active goal or
+ * rank resources by mission value. Returns the victim index, or -1 when empty.
  */
 export function selectKnownResourceEvictionVictim(known: KnownResourceJson[]): number {
-  let victim = -1
-  let victimSeenAt = Number.NEGATIVE_INFINITY
-  for (let index = 0; index < known.length; index += 1) {
-    const entry = known[index]
-    if (entry === undefined) continue
-    const seenAt =
-      typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt) ? entry.lastSeenAt : Number.NEGATIVE_INFINITY
-    if (victim < 0 || seenAt < victimSeenAt) {
-      victim = index
-      victimSeenAt = seenAt
-    }
+  if (known.length === 0) return -1
+  const counts = new Map<string, number>()
+  for (const entry of known) {
+    const identity = knownResourceIdentity(entry)
+    counts.set(identity, (counts.get(identity) ?? 0) + 1)
   }
-  return victim
+
+  const selectOldest = (redundantOnly: boolean): number => {
+    let victim = -1
+    let victimSeenAt = Number.POSITIVE_INFINITY
+    for (let index = 0; index < known.length; index += 1) {
+      const entry = known[index]
+      if (entry === undefined) continue
+      if (redundantOnly && (counts.get(knownResourceIdentity(entry)) ?? 0) <= 1) continue
+      const seenAt =
+        typeof entry.lastSeenAt === 'number' && Number.isFinite(entry.lastSeenAt)
+          ? entry.lastSeenAt
+          : Number.NEGATIVE_INFINITY
+      if (victim < 0 || seenAt < victimSeenAt) {
+        victim = index
+        victimSeenAt = seenAt
+      }
+    }
+    return victim
+  }
+
+  const redundant = selectOldest(true)
+  return redundant >= 0 ? redundant : selectOldest(false)
 }
 
 export interface MergeKnownResourcesOptions {
@@ -177,8 +207,9 @@ export interface MergeKnownResourcesResult {
  *  - the array never exceeds `cap`.
  *
  * Capacity (`KNOWN_RESOURCE_EVICTED name=<n> at=<x,y,z> reason=capacity ageMs=<n>`):
- * at the cap the oldest entry is evicted to make room (see
- * `selectKnownResourceEvictionVictim`). If no victim exists the sighting is
+ * at the cap a redundant coordinate is evicted before the last anchor of a
+ * resource identity (then global-oldest only if every identity is a singleton;
+ * see `selectKnownResourceEvictionVictim`). If no victim exists the sighting is
  * refused with `KNOWN_RESOURCE_FULL cap=<n> dropped=<n>` - never silently.
  */
 export function mergeKnownResourcesInto(

@@ -4,10 +4,12 @@
 // Live defect (source 75efa49): the store saturated at KNOWN_RESOURCE_CAP (256)
 // and every later sighting was silently dropped for the lifetime of the world
 // key. The resident mined gravel live (flint came from it) yet no gravel cell was
-// ever remembered. These cases pin the replacement rule: at the cap a newly
-// observed cell EVICTS the least valuable remembered cell (oldest `lastSeenAt`
-// proof; lastSeenAt-less legacy entries are treated as oldest) instead of being
-// dropped, while the store stays within the cap. Every drop is observable.
+// ever remembered. The first replacement rule used global oldest-first eviction,
+// which fixed that gap but created a worse one: dense local coal/copper scans
+// evicted every far obsidian coordinate, deleting the only route bearing. These
+// cases pin diversity-preserving compression: evict an old REDUNDANT coordinate
+// before the last anchor of any resource identity, while the store stays bounded
+// and keeps learning. Every eviction/drop remains observable.
 import type { Bot } from 'mineflayer'
 import { KNOWN_RESOURCE_CAP, evictStaleKnownResources, mergeKnownResources } from './generation-entry.ts'
 import { mergeWorldMemoryDelta } from './proposal-staging.ts'
@@ -122,15 +124,52 @@ addCase('the store never exceeds the cap across repeated at-cap inserts', () => 
   return { pass, detail: `peak=${peak} len=${store.length} added=${totalAdded} evictions=${evictions}` }
 })
 
-// --- (d) legacy entries without lastSeenAt -------------------------------------
+// --- (d) preserve the last route anchor under noisy scan pressure ---------------
 
-addCase('lastSeenAt-less legacy entries are evictable first, with ageMs=null and no crash', () => {
+addCase('capacity churn preserves a singleton obsidian route while redundant local ore exists', () => {
   const store: KnownResourceJson[] = []
   for (let index = 0; index < KNOWN_RESOURCE_CAP - 1; index += 1) {
+    store.push(cell('coal_ore', index, 64, 0, { lastSeenAt: T0 + index }))
+  }
+  const obsidian = cell('obsidian', 28, 67, 9, { lastSeenAt: T0 - 10_000_000 })
+  store.push(obsidian)
+  const log: LogEntry[] = []
+  let added = 0
+  for (let index = 0; index < 300; index += 1) {
+    added += mergeKnownResources(
+      store,
+      [cell(index % 2 === 0 ? 'copper_ore' : 'coal_ore', 10_000 + index, 40, index, { lastSeenAt: T0 + 1_000_000 + index })],
+      (event, detail) => log.push({ event, detail }),
+      EPOCH,
+    )
+  }
+  const anchor = store.find(
+    (resource) => resource.name === 'obsidian' && resource.x === 28 && resource.y === 67 && resource.z === 9,
+  )
+  const obsidianEvictions = log.filter(
+    (entry) => entry.event === 'KNOWN_RESOURCE_EVICTED' && entry.detail?.name === 'obsidian',
+  )
+  const pass =
+    added === 300 &&
+    store.length === KNOWN_RESOURCE_CAP &&
+    anchor !== undefined &&
+    obsidianEvictions.length === 0
+  return {
+    pass,
+    detail: `added=${added} len=${store.length} anchor=${JSON.stringify(anchor)} obsidianEvictions=${obsidianEvictions.length}`,
+  }
+})
+
+// --- (e) legacy entries without lastSeenAt -------------------------------------
+
+addCase('a lastSeenAt-less redundant legacy cell is evicted first, but its identity keeps one anchor', () => {
+  const store: KnownResourceJson[] = []
+  for (let index = 0; index < KNOWN_RESOURCE_CAP - 2; index += 1) {
     store.push(cell('coal_ore', index, 30, 0, { lastSeenAt: T0 + index }))
   }
   // Legacy durable JSON predates the bookkeeping field: no lastSeenAt at all.
   store.push({ name: 'oak_log', kind: 'log', x: 777, y: 70, z: 777, dimension: DIM, worldEpoch: EPOCH })
+  store.push({ name: 'oak_log', kind: 'log', x: 778, y: 70, z: 777, dimension: DIM, worldEpoch: EPOCH })
   const log: LogEntry[] = []
   const added = mergeKnownResources(
     store,
@@ -138,21 +177,42 @@ addCase('lastSeenAt-less legacy entries are evictable first, with ageMs=null and
     (event, detail) => log.push({ event, detail }),
     EPOCH,
   )
-  const legacy = store.find((resource) => resource.name === 'oak_log')
+  const legacyLogs = store.filter((resource) => resource.name === 'oak_log')
   const evicted = log.find((entry) => entry.event === 'KNOWN_RESOURCE_EVICTED')
   const pass =
     added === 1 &&
     store.length === KNOWN_RESOURCE_CAP &&
-    legacy === undefined &&
+    legacyLogs.length === 1 &&
     evicted?.detail?.name === 'oak_log' &&
+    evicted?.detail?.at === '777,70,777' &&
     evicted?.detail?.ageMs === null
   return {
     pass,
-    detail: `added=${added} len=${store.length} legacy=${JSON.stringify(legacy)} evicted=${JSON.stringify(evicted?.detail)}`,
+    detail: `added=${added} len=${store.length} legacyLogs=${legacyLogs.length} evicted=${JSON.stringify(evicted?.detail)}`,
   }
 })
 
-// --- (e) a full store with nothing evictable is never a silent drop ------------
+addCase('when every identity is a singleton, capacity falls back to global oldest and still learns', () => {
+  const store: KnownResourceJson[] = [
+    cell('coal_ore', 1, 20, 1, { lastSeenAt: T0 }),
+    cell('iron_ore', 2, 20, 2, { lastSeenAt: T0 + 10 }),
+  ]
+  const log: LogEntry[] = []
+  const result = mergeKnownResourcesInto(
+    store,
+    [cell('gravel', 3, 20, 3, { lastSeenAt: T0 + 20 })],
+    { cap: 2, log: (event, detail) => log.push({ event, detail }) },
+  )
+  const pass =
+    result.added === 1 &&
+    store.length === 2 &&
+    !store.some((resource) => resource.name === 'coal_ore') &&
+    store.some((resource) => resource.name === 'iron_ore') &&
+    store.some((resource) => resource.name === 'gravel')
+  return { pass, detail: `store=${store.map((entry) => entry.name).join(',')} evicted=${result.evicted[0]?.name ?? 'none'}` }
+})
+
+// --- (f) a full store with nothing evictable is never a silent drop ------------
 
 addCase('a store with no eviction candidate reports KNOWN_RESOURCE_FULL instead of dropping silently', () => {
   const store: KnownResourceJson[] = []
@@ -172,7 +232,7 @@ addCase('a store with no eviction candidate reports KNOWN_RESOURCE_FULL instead 
   return { pass, detail: `added=${result.added} dropped=${result.dropped} len=${store.length} full=${JSON.stringify(full?.detail)}` }
 })
 
-// --- (f) evictStaleKnownResources is unchanged ---------------------------------
+// --- (g) evictStaleKnownResources is unchanged ---------------------------------
 
 addCase('evictStaleKnownResources still drops a gone cell and refreshes a live one under the cap rule', () => {
   const known: KnownResourceJson[] = [
@@ -207,7 +267,7 @@ addCase('evictStaleKnownResources still drops a gone cell and refreshes a live o
   return { pass, detail: `evicted=${evicted.length} kept=${JSON.stringify(kept)} log=${JSON.stringify(log[0]?.detail)}` }
 })
 
-// --- (g) the HOST durable merge obeys the same rule -----------------------------
+// --- (h) the HOST durable merge obeys the same rule -----------------------------
 
 addCase('the HOST durable merge at cap evicts the oldest cell and stores the new sighting', () => {
   const memory = emptyWorldMemory()

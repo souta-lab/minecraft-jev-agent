@@ -239,8 +239,8 @@ function removeStationDtos(target: KnownStation[], gone: KnownStation[], kind: '
 
 /**
  * HOST-authoritative known-resource merge. Delegates to the ONE bounded merge in
- * resident-types.ts: at the cap the oldest remembered cell is evicted
- * (`KNOWN_RESOURCE_EVICTED`) to make room for the new sighting instead of the
+ * resident-types.ts: at the cap an old redundant coordinate is evicted first
+ * (`KNOWN_RESOURCE_EVICTED`), preserving the last anchor per resource identity when possible instead of the
  * sighting being dropped for the lifetime of the world key. The insert marker
  * stays owned by the generation scan, so this path emits only capacity events.
  */

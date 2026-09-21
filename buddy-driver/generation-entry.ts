@@ -245,8 +245,8 @@ const LOG_BLOCK_NAMES = [
 export { KNOWN_RESOURCE_CAP }
 /**
  * Scan-side merge into the generation's replica of the durable store. Delegates
- * to the ONE bounded merge: at the cap the oldest remembered cell is evicted
- * (`KNOWN_RESOURCE_EVICTED`) to make room for the new sighting instead of the
+ * to the ONE bounded merge: at the cap an old redundant coordinate is evicted first
+ * (`KNOWN_RESOURCE_EVICTED`), preserving the last anchor per resource identity when possible instead of the
  * sighting being dropped for the lifetime of the world key. Returns the number
  * of INSERTS (`added`), unchanged.
  */
