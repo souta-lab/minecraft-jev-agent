@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation } from './state.ts'
+import { PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
@@ -1105,7 +1105,7 @@ function mineCandidates(
     mineActions.length === 0 &&
     (moveActions.length > 0 || accessActions.length > 0) &&
     focusItem !== null &&
-    (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined)
+    (STONE_YIELDS.has(focusItem) || scannedBlockNames(focusItem) !== undefined)
   ) {
     // A visible underground target can be mechanically valid but still too far
     // below the current floor for the MOVE stand spot to be useful.  Preserve
@@ -1281,7 +1281,7 @@ function descendCandidates(
   }
   const knownStoneY = state.signals.knownStoneY ?? null
   const goalIsUnderground =
-    focusItem !== null && (STONE_YIELDS.has(focusItem) || ORE_SOURCES[focusItem] !== undefined)
+    focusItem !== null && (STONE_YIELDS.has(focusItem) || scannedBlockNames(focusItem) !== undefined)
   const stoneGoal = focusItem !== null && STONE_YIELDS.has(focusItem)
   const targetBelow = target !== null && target.position.y < feet.y
   const knownStoneBelow = knownStoneY !== null && knownStoneY < feet.y && goalIsUnderground
@@ -2807,8 +2807,8 @@ interface RetrievalWant {
 
 function retrievalWant(focusItem: string | null): RetrievalWant | null {
   if (focusItem === null) return null
-  const ores = ORE_SOURCES[focusItem]
-  if (ores !== undefined) return { item: focusItem, kind: 'ore', blockNames: ores }
+  const blocks = scannedBlockNames(focusItem)
+  if (blocks !== undefined) return { item: focusItem, kind: 'ore', blockNames: blocks }
   if (
     focusItem === 'charcoal' ||
     focusItem === 'log' ||
