@@ -1906,6 +1906,22 @@ function advisorReasonFor(reason: PlannerReason, waitStreak: number): AdvisorRea
 }
 
 /**
+ * A drained queue is the moment the next WHAT is decided. On the live planner path
+ * (`advisorReasonFor` -> `mercuryTriggerFor`) that moment mapped to `null`, so the
+ * next goal was chosen only from the ladder's fixed option menu and goals the menu
+ * cannot express ("find obsidian where lava meets water", "stock food before the
+ * Nether", "build the return portal") were never proposed; the frontier flapped
+ * between menu entries while Mercury's `explore_cave` repair was the only proposal
+ * pointing anywhere useful (live #359).
+ *
+ * Mapping it to `no_candidate` opens that space. `EMPTY_QUEUE_CONSULT_COOLDOWN_MS`
+ * keeps the rate bounded so an unchanged situation cannot spend the hourly semantic
+ * budget linearly (the 0dd100b lesson); the gate is a cooldown, not a veto - a real
+ * situation change after it may consult again.
+ */
+const EMPTY_QUEUE_CONSULT_COOLDOWN_MS = 10 * 60_000
+
+/**
  * The resident high-level planner. It is constructed per generation and handed to
  * `JevController.setSystem2()`. The controller calls `plan()` only on replan
  * boundaries (queue empty / goal impossible / stall), never on the hot path.
@@ -1915,6 +1931,8 @@ export class PlannerBrain implements System2Brain {
   private readonly bot: Bot
   /** Live world-truth refresh (dimension / portal verdict) injected by the host. */
   private readonly refreshLiveFacts?: () => void
+  /** last drained-queue semantic consultation (bounded by EMPTY_QUEUE_CONSULT_COOLDOWN_MS) */
+  private lastEmptyQueueConsultMs = 0
   private readonly world: ResidentWorldMemory
   private readonly log: (event: string, detail?: Record<string, unknown>) => void
   private readonly cachePath: string
@@ -2020,7 +2038,13 @@ export class PlannerBrain implements System2Brain {
 
     const waitStreak = trailingWaitStreak(request.recentOutcomes)
     const stalled = waitStreak >= 3
-    const adviseReason = advisorReasonFor(reason, waitStreak)
+    const emptyQueueConsultDue =
+      reason !== 'queue_empty' || Date.now() - this.lastEmptyQueueConsultMs >= EMPTY_QUEUE_CONSULT_COOLDOWN_MS
+    const adviseReason =
+      reason === 'queue_empty' && emptyQueueConsultDue && waitStreak < 3
+        ? 'no_candidate'
+        : advisorReasonFor(reason, waitStreak)
+    if (reason === 'queue_empty' && adviseReason === 'no_candidate') this.lastEmptyQueueConsultMs = Date.now()
     const mercuryTrigger = this.mercuryTriggerFor(adviseReason)
     const stalledOption = stalled
       ? buildBodyChangeOption(counts, this.world, {
