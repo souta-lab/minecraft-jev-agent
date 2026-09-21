@@ -12,6 +12,8 @@ export const OSCILLATION_LIMIT = 3
 export interface OscillationState {
   /** inventory/goal signature; a change re-arms the detector */
   signature: string
+  /** goal key only: the real progress boundary (see the churn note below) */
+  goal: string | null
   lastPosition: string
   /** canonical `a->b` pair of the two positions being swapped */
   pair: string | null
@@ -36,25 +38,37 @@ export function evaluateOscillation(input: {
   signature: string
   previous: OscillationState | null
   limit?: number
+  /** goal key, separate from the churning inventory part of `signature` */
+  goal?: string | null
 }): OscillationDecision {
   const limit = input.limit ?? OSCILLATION_LIMIT
   const previous = input.previous
-  if (previous === null || previous.signature !== input.signature) {
+  const goal = input.goal ?? null
+  // The signature includes an inventory snapshot so that genuine progress
+  // (finding the item) re-arms the detector. Live, that made the detector blind:
+  // the pacing body kept picking up junk (`dirt`, `leaf_litter`) so the snapshot
+  // changed every cycle, the count reset, and the observed A<->B walk (live
+  // `MOVE:p197` <-> `MOVE:p199`, cycling for minutes) was never reported. The
+  // goal key is the real boundary: re-arm on a goal change, and when only the
+  // inventory part churned allow twice the limit before firing, so an ordinary
+  // pickup cannot mask a positional loop while a real progress event still does.
+  if (previous === null || previous.goal !== goal) {
     return {
-      state: { signature: input.signature, lastPosition: input.position, pair: null, cycles: 0 },
+      state: { signature: input.signature, goal, lastPosition: input.position, pair: null, cycles: 0 },
       detected: false,
       line: null,
     }
   }
   if (previous.lastPosition === input.position) {
-    return { state: { ...previous, lastPosition: input.position }, detected: false, line: null }
+    return { state: { ...previous, signature: input.signature, lastPosition: input.position }, detected: false, line: null }
   }
   const from = previous.lastPosition
   const to = input.position
   const pair = from < to ? `${from}->${to}` : `${to}->${from}`
   const cycles = previous.pair === pair ? previous.cycles + 1 : 1
-  const state: OscillationState = { signature: input.signature, lastPosition: input.position, pair, cycles }
-  if (cycles > limit) {
+  const state: OscillationState = { signature: input.signature, goal, lastPosition: input.position, pair, cycles }
+  const threshold = previous.signature === input.signature ? limit : limit * 2
+  if (cycles > threshold) {
     return {
       state,
       detected: true,

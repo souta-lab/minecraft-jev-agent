@@ -3886,6 +3886,9 @@ export class JevController {
       position: positionKey(position),
       signature: this.oscillationSignature(),
       previous: this.oscillationState,
+      // The goal key is passed separately so junk pickups (which change the
+      // inventory part of the signature) cannot re-arm the loop detector.
+      goal: this.currentGoalKey(),
     })
     this.oscillationState = decision.state
     if (!decision.detected || decision.line === null) return
