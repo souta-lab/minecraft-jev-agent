@@ -101,6 +101,24 @@ function mercuryState(overrides: Partial<MercuryStateSummary> = {}): MercuryStat
   }
 }
 
+addCase('Mercury cache identity separates every model-visible recovery input', () => {
+  const base = mercuryState()
+  const variants = [
+    mercuryState({ wakeDetail: 'no_path at portal approach' }),
+    mercuryState({ rungIndex: 14 }),
+    mercuryState({ position: { x: 28, y: 62, z: 9 } }),
+    mercuryState({ health: 8 }),
+    mercuryState({ queue: { ...base.queue, done: 4 } }),
+    mercuryState({ objective: { ...base.objective, targetItem: 'obsidian' } }),
+    mercuryState({ deathHistory: ['lava@28,62,9x1'] }),
+    mercuryState({ allowedGoals: { ...base.allowedGoals, explore_modes: ['cave'] } }),
+  ]
+  const baseHash = hashMercuryState(base)
+  const hashes = variants.map((state) => hashMercuryState(state))
+  const pass = hashes.every((hash) => hash !== baseHash)
+  return { pass, detail: `base=${baseHash} variants=${hashes.join(',')}` }
+})
+
 function seedAdvisorCache(
   cachePath: string,
   entries: Record<string, { strategy: AdvisorStrategy; goals: PlannedGoal[]; replays: number }>,

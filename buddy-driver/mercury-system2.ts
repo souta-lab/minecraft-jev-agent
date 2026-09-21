@@ -798,23 +798,37 @@ export function validateMercuryPlanAgainstState(
 
 /** Stable cache key for a Mercury state summary. Exported so tests can seed the cache. */
 export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCacheIdentity = mercuryCacheIdentity()): string {
+  const allowedGoals = {
+    collect: [...state.allowedGoals.collect].sort(),
+    craft: [...state.allowedGoals.craft].sort(),
+    smelt: [...state.allowedGoals.smelt].sort(),
+    place: [...(state.allowedGoals.place ?? [])].sort(),
+    goto_resources: [...(state.allowedGoals.goto_resources ?? [])].sort(),
+    explore_modes: [...(state.allowedGoals.explore_modes ?? [])].sort(),
+  }
   const payload = {
     worldKey: identity.worldKey,
     worldEpoch: identity.worldEpoch,
     schemaVersion: identity.schemaVersion,
-    dimension: state.dimension,
     trigger: state.trigger,
+    wakeReason: state.wakeReason,
+    wakeDetail: state.wakeDetail,
     rung: state.rung,
+    rungIndex: state.rungIndex,
+    position: state.position,
+    dimension: state.dimension,
+    health: state.health,
     inventory: state.inventory,
     toolRank: state.toolRank,
     stations: state.stations,
     ores: [...state.knownOres].sort(),
-    current: state.queue.current,
-    depth: state.queue.depth,
-    hasImpossible: state.queue.hasImpossible,
+    queue: state.queue,
+    objective: state.objective,
     wait: Math.min(state.consecutiveWait, 3),
     failures: state.recentFailures,
+    deathHistory: state.deathHistory,
     postDeath: state.postDeath ?? null,
+    allowedGoals,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
