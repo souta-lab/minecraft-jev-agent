@@ -39,7 +39,7 @@ import type { ResourceClass } from '../jev-agent/src/resourceClass.ts'
 import { hasBodyDelta, parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
 import { oreDescentTargetY } from '../jev-agent/src/predicateGoal.ts'
 import type { KnownOrePosition } from '../jev-agent/src/predicateGoal.ts'
-import { netherPortalEntryGoal, netherPortalRungGoals } from '../jev-agent/src/netherPortalPlan.ts'
+import { NETHER, netherPortalEntryGoal, netherPortalRungGoals, normalizePortalDimension } from '../jev-agent/src/netherPortalPlan.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import type { Vec3Json } from '../jev-agent/src/state.ts'
 import {
@@ -343,6 +343,28 @@ function heldFoodCount(c: Counts): number {
   return total
 }
 
+/**
+ * Being in the Nether is live proof that the overworld -> Nether portal
+ * transition is already behind the resident. This is planner capability closure,
+ * not durable portal truth: `portalVerified` remains an overworld-only live fact
+ * and M2 acceptance still requires its own exact-run evidence.
+ *
+ * The comparison MUST normalize. Mineflayer strips the `minecraft:` prefix from
+ * `bot.game.dimension` (`lib/plugins/game.js`), so the live value here is
+ * `the_nether`, while the durable world key and the portal postcondition use the
+ * namespaced form. A raw `=== 'minecraft:the_nether'` therefore never matched
+ * live and the ladder flapped between `nether_portal` and `enter_nether` after a
+ * successful transfer (the #352 symptom), which blocked the M3 rungs.
+ */
+function inNether(world: ResidentWorldMemory): boolean {
+  const dimension = world.dimension
+  return (
+    typeof dimension === 'string' &&
+    dimension.length > 0 &&
+    normalizePortalDimension(dimension) === normalizePortalDimension(NETHER)
+  )
+}
+
 /** The ordered capability ladder. Each rung states its own completion in inventory/world terms. */
 export const RUNGS: readonly Rung[] = [
   {
@@ -499,20 +521,21 @@ export const RUNGS: readonly Rung[] = [
     // unsatisfied and the ladder flapped between `front_nether_portal` and
     // `front_enter_nether` forever instead of advancing to `blaze_rods`/`ender_pearls`.
     // Returning to the overworld with no verified portal re-activates it.
+    // `inNether` normalizes because mineflayer reports the bare `the_nether`.
     satisfied: (c, w) =>
-      has(c, 'nether_portal') || w.portalVerified === true || w.dimension === 'minecraft:the_nether',
+      has(c, 'nether_portal') || w.portalVerified === true || inNether(w),
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
   // --- M2 -> M3 transition: step through the lit portal into the Nether. ---
   // Satisfied by the code-owned dimension truth (`dimensionIs`), never by an
   // inventory count: the executor's `runEnterPortal` walks into the lit interior
-  // and the postcondition is `bot.game.dimension == minecraft:the_nether`.
+  // and the postcondition is the normalized `bot.game.dimension == the_nether`.
   // Without this rung the ladder jumped straight to Nether-only goals
   // (`blaze_rods`) while the bot was still in the overworld.
   {
     id: 'enter_nether',
-    satisfied: (_c, w) => w.dimension === 'minecraft:the_nether',
+    satisfied: (_c, w) => inNether(w),
     goals: () => [netherPortalEntryGoal()],
   },
   // --- M3 continued: Nether blaze rods -> pearls -> Eyes of Ender. ---
