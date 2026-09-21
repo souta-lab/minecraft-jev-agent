@@ -1378,11 +1378,13 @@ export class MercurySystem2 implements System2Brain {
       this.waitLimitBackoffMaxMs,
     )
     if (decision.allow) {
-      if (decision.state.consultations > 1) {
+      // Announce the raised bar as soon as a consultation is recorded, so the
+      // next identical ask is observably suppressed rather than equally likely.
+      if (nextWaitMs > 0) {
         this.log(MERCURY_TRIGGER_BACKOFF_MARKER, {
           trigger: 'wait_limit',
           reason: decision.reason,
-          consecutiveNoPlan: decision.consecutiveNoPlan,
+          consecutiveNoPlan: decision.state.consultations,
           waitMs: nextWaitMs,
           stallKey: input.stallKey,
           stateHash: this.hashState(state),

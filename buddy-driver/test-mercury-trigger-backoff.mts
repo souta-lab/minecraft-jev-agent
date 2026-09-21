@@ -62,6 +62,26 @@ function waitOutcome(): System2Outcome {
   return { actionId: 'WAIT', status: 'done', failure: null, verified: true, detail: '', control: 'wait' }
 }
 
+/** Minimal well-formed QueuedGoal for the preserved queue head. */
+function currentGoal(id: string, targetItem: string, optionId: string) {
+  return {
+    id,
+    kind: 'collect' as const,
+    description: `collect 1 x ${targetItem}`,
+    targetItem,
+    requiredCount: 1,
+    semanticOptionInstanceId: optionId,
+    semanticOptionTemplateId: optionId,
+    startCount: 0,
+    haveCount: 0,
+    status: 'pending' as const,
+    origin: 'llm' as const,
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
 function waitLimitRequest(authorityEpoch = 0): System2PlanRequest {
   return {
     reason: 'no_progress',
@@ -69,15 +89,7 @@ function waitLimitRequest(authorityEpoch = 0): System2PlanRequest {
     tick: 100,
     goalQueueState: {
       depth: 5,
-      current: {
-        id: 'g3',
-        kind: 'collect',
-        description: 'collect 1 x raw_iron',
-        targetItem: 'raw_iron',
-        requiredCount: 1,
-        semanticOptionInstanceId: 'goto:raw_iron',
-        semanticOptionTemplateId: 'goto:raw_iron',
-      },
+      current: currentGoal('g3', 'raw_iron', 'goto:raw_iron'),
       empty: false,
       hasImpossible: false,
       done: 4,
@@ -303,6 +315,11 @@ addCase('planner: repeat wait_limit does not reach Mercury; progress does', asyn
   const progressed = await capture(waitLimitRequest(1))
   const afterProgress = transportCalls
   const suppressed = logs.some((line) => line.startsWith('MERCURY_TRIGGER_SUPPRESSED trigger=wait_limit'))
+  const backedOff = logs.some((line) =>
+    line.startsWith('MERCURY_TRIGGER_BACKOFF trigger=wait_limit') &&
+    /consecutiveNoPlan=\d+/.test(line) &&
+    /waitMs=\d+/.test(line),
+  )
   return {
     pass:
       first?.context === 'mercury:wait_limit' &&
@@ -313,8 +330,9 @@ addCase('planner: repeat wait_limit does not reach Mercury; progress does', asyn
       second?.context === 'planner-key' &&
       progressed?.context === 'mercury:wait_limit' &&
       afterProgress === 2 &&
-      suppressed,
-    detail: `first=${first?.context} afterFirst=${afterFirst} second=${second?.context} afterSecond=${afterSecond} progressed=${progressed?.context} afterProgress=${afterProgress} suppressedMarker=${suppressed}`,
+      suppressed &&
+      backedOff,
+    detail: `first=${first?.context} afterFirst=${afterFirst} second=${second?.context} afterSecond=${afterSecond} progressed=${progressed?.context} afterProgress=${afterProgress} suppressedMarker=${suppressed} backoffMarker=${backedOff}`,
   }
 })
 
@@ -349,15 +367,7 @@ addCase('budget_exhausted stays fail-loud after the backoff re-allows a call', a
     objective: { targetItem: 'log', requiredCount: 1, haveCount: 0, complete: false },
     goalQueueState: {
       ...waitLimitRequest(0).goalQueueState,
-      current: {
-        id: 'g9',
-        kind: 'collect',
-        description: 'collect 1 x log',
-        targetItem: 'log',
-        requiredCount: 1,
-        semanticOptionInstanceId: 'collect:log',
-        semanticOptionTemplateId: 'collect:log',
-      },
+      current: currentGoal('g9', 'log', 'collect:log'),
     },
   }
   // A different stall is allowed by the gate immediately (fresh_stall)...
