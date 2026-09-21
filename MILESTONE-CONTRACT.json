@@ -23,14 +23,14 @@
       "evaluator": { "type": "command", "script": "tools/m2-gate.mjs", "scopeArg": "--run" }
     },
     "M3": {
-      "title": "Nether access + 12 ender pearls",
-      "requires": ["dimension=minecraft:the_nether", "ender_pearl>=12"],
-      "evaluator": { "type": "manual", "reason": "M3 is defined by one terminal inventory predicate: ender_pearl>=12, the pearl half of the 12 Eyes of Ender that M4 needs. It requires Nether access from the M2 gate and a hostile-mob difficulty change, because peaceful mode disables the endermen that drop the pearls. No run-scoped executable gate is wired for M3 yet." }
+      "title": "12 ender pearls",
+      "requires": ["ender_pearl>=12"],
+      "evaluator": { "type": "manual", "reason": "M3 is defined by one terminal inventory predicate: ender_pearl>=12, the pearl half of the 12 Eyes of Ender that M4 needs. Pearls drop from endermen, so M3 requires a hostile-mob difficulty change (peaceful disables enderman spawns). Nether traversal is NOT part of M3; it is an M4 prerequisite because blaze_rod>=7 needs the Nether. No run-scoped executable gate is wired for M3 yet." }
     },
     "M4": {
       "title": "Ender Dragon",
       "requires": ["blaze_rod>=7", "eye_of_ender>=12", "stronghold_reached", "end_portal_verified", "dimension=minecraft:the_end", "dragon_killed_verified"],
-      "evaluator": { "type": "manual", "reason": "No run-scoped M4 artifact gate is wired yet." }
+      "evaluator": { "type": "manual", "reason": "M4 is the Ender Dragon milestone: reaching and killing the dragon in minecraft:the_end. The listed prerequisites are the path (Nether -> blaze rods -> eyes of ender -> stronghold -> end portal). No run-scoped M4 artifact gate is wired yet." }
     }
   }
 }
