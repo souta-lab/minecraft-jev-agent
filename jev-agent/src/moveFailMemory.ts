@@ -44,7 +44,17 @@ export interface MoveFailEntry {
   lastReason: MoveFailureReason
   /** epoch ms until which the coordinate is skipped; 0 = selectable */
   blacklistedUntil: number
+  /**
+   * #360: how many times an oscillation escape has suppressed this coordinate. The
+   * escape cooldown escalates with repetition so a state-recurring loop is not
+   * released back into the same neighbourhood every few seconds. Durable (it lives
+   * on the entry), so a reload does not reset the escalation.
+   */
+  oscillationStrikes?: number
 }
+
+/** Upper bound for the escalation applied by repeated oscillation escapes (#360). */
+const MAX_OSCILLATION_COOLDOWN_MS = 10 * 60_000
 
 export interface MoveFailMemoryOptions {
   /** failures before a coordinate is blacklisted (default 3) */
@@ -230,7 +240,10 @@ export class MoveFailMemory {
     base.attempts = attempts
     base.lastReason = reason
     base.lastFailedAt = now
-    base.blacklistedUntil = now + this.cooldownMs
+    const strikes = (base.oscillationStrikes ?? 0) + 1
+    base.oscillationStrikes = strikes
+    const escalated = Math.min(this.cooldownMs * 2 ** (strikes - 1), MAX_OSCILLATION_COOLDOWN_MS)
+    base.blacklistedUntil = now + escalated
     this.entries.set(base.key, base)
     this.evictIfNeeded()
     return { entry: base, blacklisted: true, newlyBlacklisted: first || base.attempts === this.failureLimit }
