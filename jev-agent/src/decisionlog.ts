@@ -113,6 +113,8 @@ export interface DecisionRecord {
   chainId: string | null
   /** #36: OptionSpec id compiled from the plan row driving this decision */
   optionId: string | null
+  /** Canonical semantic Option instance selected by System2 for this decision. */
+  semanticOptionInstanceId: string | null
   /** #36: high-level strategy/plan provenance that produced the row */
   strategy: string | null
   candidates: DecisionCandidateLog[]
@@ -205,6 +207,7 @@ export interface DecisionRecordInput {
   stateHash: string
   chainId?: string | null
   optionId?: string | null
+  semanticOptionInstanceId?: string | null
   strategy?: string | null
   candidates: readonly Candidate[]
   failedCandidates: Record<string, number>
@@ -232,6 +235,8 @@ export function makeDecisionRecord(input: DecisionRecordInput): DecisionRecord {
     source: input.jev.source,
     chainId: input.chainId ?? null,
     optionId: input.optionId ?? null,
+    semanticOptionInstanceId:
+      input.semanticOptionInstanceId ?? input.goalQueueState.current?.semanticOptionInstanceId ?? input.goalQueueState.current?.optionInstanceId ?? null,
     strategy: input.strategy ?? null,
     candidates: logCandidates(input.candidates, input.failedCandidates),
     jev: input.jev,

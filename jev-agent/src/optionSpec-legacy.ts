@@ -172,6 +172,14 @@ export interface OptionSpec {
   protected?: boolean
   /** Issue #55: core/rung Option that a replan must not drop. */
   core?: boolean
+  /**
+   * Canonical System2 semantic owner. Prerequisite specs retain their own
+   * executable id/kind, while this identity names the parent WHAT selected by
+   * System2 and is carried through the Option compiler.
+   */
+  semanticOptionInstanceId?: string
+  semanticOptionTemplateId?: string
+  semanticOptionIntent?: string
 }
 
 /** Runtime facts attached to the exact queue instance of a compiled Option. */
@@ -189,6 +197,11 @@ export interface OptionRuntimeState {
 export interface CurrentOptionContext {
   instanceId: string
   templateId: string
+  /** Semantic owner used by beta/System2; instanceId/templateId remain the
+   * executable queue row identity for mechanical diagnostics. */
+  semanticInstanceId?: string
+  semanticTemplateId?: string
+  semanticIntent?: string
   kind: OptionKind
   target: OptionTarget
   preconditions: Predicate[]
@@ -196,6 +209,20 @@ export interface CurrentOptionContext {
   allowedSkills: string[]
   abortThreshold: number
   runtime: OptionRuntimeState
+}
+
+/**
+ * Skills that are always inside an Option's execution envelope.
+ *
+ * SAFETY and CONTROL are cross-cutting execution capabilities. PREREQUISITE
+ * is the typed bridge for a mechanically proven acquisition that makes the
+ * current semantic Option startable or executable. They are not semantic
+ * ranking rules and do not select a candidate.
+ */
+export const OPTION_ENVELOPE_SKILLS = ['SAFETY', 'CONTROL', 'PREREQUISITE'] as const
+
+export function optionSkillEnvelope(skills: readonly string[]): string[] {
+  return [...new Set([...OPTION_ENVELOPE_SKILLS, ...skills])]
 }
 
 /** The beta threshold used when a spec does not override it. */
@@ -951,7 +978,7 @@ export function compilePlannedGoal(goal: PlannedGoal, snapshot?: OptionWorldSnap
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) target.targetY = goal.targetY
   if (typeof goal.dimension === 'string' && goal.dimension.length > 0) target.dimension = goal.dimension
   if (typeof goal.targetPredicate === 'string' && goal.targetPredicate.length > 0) target.predicate = goal.targetPredicate
-  return {
+  const compiled: OptionSpec = {
     id: stableOptionId(goal),
     intent: goal.description,
     kind,
@@ -964,6 +991,30 @@ export function compilePlannedGoal(goal: PlannedGoal, snapshot?: OptionWorldSnap
     ...(goal.protected === true ? { protected: true } : {}),
     ...(goal.core === true ? { core: true } : {}),
   }
+  // A System2 semantic Option may be executed by a lower-level queue kind
+  // (for example `goto:raw_iron` is mechanically compiled to retrieval). Keep
+  // its canonical id/intent/skill envelope while refreshing code-owned
+  // preconditions and success predicates against the current snapshot. This
+  // prevents the executor-facing kind from destroying the selected WHAT.
+  const semanticOptionInstanceId =
+    goal.semanticOptionInstanceId ?? goal.optionSpec?.semanticOptionInstanceId ?? goal.optionInstanceId ?? stableOptionInstanceId(compiled)
+  const semanticOptionTemplateId =
+    goal.semanticOptionTemplateId ?? goal.optionSpec?.semanticOptionTemplateId ?? goal.optionTemplateId ?? compiled.id
+  const semanticOptionIntent =
+    goal.semanticOptionIntent ?? goal.optionSpec?.semanticOptionIntent ?? goal.description
+  if (goal.optionSpec !== undefined) {
+    return {
+      ...goal.optionSpec,
+      target: { ...goal.optionSpec.target, ...compiled.target },
+      preconditions: compiled.preconditions,
+      success: compiled.success,
+      skills: [...goal.optionSpec.skills],
+      semanticOptionInstanceId,
+      semanticOptionTemplateId,
+      semanticOptionIntent,
+    }
+  }
+  return { ...compiled, semanticOptionInstanceId, semanticOptionTemplateId, semanticOptionIntent }
 }
 
 export function compilePlannedGoals(goals: readonly PlannedGoal[], snapshot?: OptionWorldSnapshot): OptionSpec[] {
@@ -983,6 +1034,9 @@ export function queuedToPlanned(goal: QueuedGoal): PlannedGoal {
     ...(goal.optionInstanceId === undefined ? {} : { optionInstanceId: goal.optionInstanceId }),
     ...(goal.optionTemplateId === undefined ? {} : { optionTemplateId: goal.optionTemplateId }),
     ...(goal.optionSpec === undefined ? {} : { optionSpec: goal.optionSpec }),
+    ...(goal.semanticOptionInstanceId === undefined ? {} : { semanticOptionInstanceId: goal.semanticOptionInstanceId }),
+    ...(goal.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: goal.semanticOptionTemplateId }),
+    ...(goal.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: goal.semanticOptionIntent }),
     ...(goal.placementCells === undefined ? {} : { placementCells: [...goal.placementCells] }),
   }
   if (typeof goal.targetY === 'number' && Number.isFinite(goal.targetY)) planned.targetY = goal.targetY
@@ -1002,14 +1056,23 @@ export function currentOptionContextForQueuedGoal(
 ): CurrentOptionContext | null {
   if (goal === null || goal === undefined || typeof goal.optionInstanceId !== 'string' || goal.optionInstanceId.length === 0) return null
   const spec = optionSpecForQueuedGoal(goal)
+  const semanticInstanceId =
+    goal.semanticOptionInstanceId ?? spec.semanticOptionInstanceId ?? goal.optionInstanceId
+  const semanticTemplateId =
+    goal.semanticOptionTemplateId ?? spec.semanticOptionTemplateId ?? goal.optionTemplateId ?? spec.id
   return {
     instanceId: goal.id,
-    templateId: goal.optionTemplateId ?? spec.id,
+    templateId: semanticTemplateId ?? goal.optionTemplateId ?? spec.id,
+    ...(semanticInstanceId === undefined ? {} : { semanticInstanceId }),
+    ...(semanticTemplateId === undefined ? {} : { semanticTemplateId }),
+    ...(goal.semanticOptionIntent === undefined && spec.semanticOptionIntent === undefined
+      ? {}
+      : { semanticIntent: goal.semanticOptionIntent ?? spec.semanticOptionIntent }),
     kind: spec.kind,
     target: { ...spec.target },
     preconditions: [...spec.preconditions],
     success: [...spec.success],
-    allowedSkills: [...spec.skills],
+    allowedSkills: optionSkillEnvelope(spec.skills),
     abortThreshold: spec.abortThreshold,
     runtime: {
       startedAt: runtime.startedAt ?? goal.createdAt,
@@ -1225,6 +1288,15 @@ export function optionSpecToPlannedGoal(spec: OptionSpec): PlannedGoal {
   if (spec.core === true) goal.core = true
   goal.optionInstanceId = stableOptionInstanceId(spec)
   goal.optionTemplateId = spec.id
+  if (typeof spec.semanticOptionInstanceId === 'string' && spec.semanticOptionInstanceId.length > 0) {
+    goal.semanticOptionInstanceId = spec.semanticOptionInstanceId
+  }
+  if (typeof spec.semanticOptionTemplateId === 'string' && spec.semanticOptionTemplateId.length > 0) {
+    goal.semanticOptionTemplateId = spec.semanticOptionTemplateId
+  }
+  if (typeof spec.semanticOptionIntent === 'string' && spec.semanticOptionIntent.length > 0) {
+    goal.semanticOptionIntent = spec.semanticOptionIntent
+  }
   goal.optionSpec = {
     ...spec,
     target: { ...spec.target },
@@ -1419,6 +1491,12 @@ export function expandOptionDependencies(
   const added: string[] = []
   const blocked: string[] = []
   const blockedOptions: BlockedOptionEntry[] = []
+  const semanticOwner = {
+    semanticOptionInstanceId: spec.semanticOptionInstanceId ?? stableOptionInstanceId(spec),
+    semanticOptionTemplateId: spec.semanticOptionTemplateId ?? spec.id,
+    semanticOptionIntent: spec.semanticOptionIntent ?? spec.intent,
+  }
+  const withSemanticOwner = (candidate: OptionSpec): OptionSpec => ({ ...candidate, ...semanticOwner })
 
   const recordBlock = (option: string, blockedBy: string, reason: string): void => {
     if (blockedOptions.some((entry) => entry.option === option && entry.blockedBy === blockedBy && entry.reason === reason)) return
@@ -1455,7 +1533,7 @@ export function expandOptionDependencies(
         blockedReasons.push(describePredicate(predicate))
         continue
       }
-      const dependencySpec = compilePlannedGoal(dependency, snapshot)
+      const dependencySpec = withSemanticOwner(compilePlannedGoal(dependency, snapshot))
       if (dependencySpec.id === current.id) continue
       dependencies.push(dependencySpec)
     }
@@ -1485,7 +1563,7 @@ export function expandOptionDependencies(
     }
   }
 
-  walk(spec, 0, null)
+  walk(withSemanticOwner(spec), 0, null)
   return { specs: ordered, expanded: added.length > 0 || blocked.length > 0, added, blocked, blockedOptions }
 }
 

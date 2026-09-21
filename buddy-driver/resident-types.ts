@@ -15,7 +15,7 @@
 // This file is imported with `import type` only, so the host's native TypeScript
 // stripping removes it completely (no runtime import, no cycle).
 import type { Bot } from 'mineflayer'
-import type { GoalQueueSnapshot, GoalQueueState } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
@@ -149,6 +149,11 @@ export interface ResidentWorldMemory {
   moveFailures: MoveFailEntry[]
   /** death coordinates; a coordinate that kills twice is excluded (hard hazard) */
   hazards: DeathHazard[]
+  /**
+   * Live server-truth projection; deliberately absent from WorldMemoryDelta and
+   * re-observed after every generation/world change.
+   */
+  portalVerified?: boolean
 }
 
 export function emptyWorldMemory(): ResidentWorldMemory {
@@ -315,8 +320,15 @@ export interface ActuationLease {
 export interface GenerationStatus {
   running: boolean
   policyKind: string
+  policyProvider: string
   policyModel: string
+  system2Provider: string
   system2Model: string
+  /** Configured System2 authority stack; separate from the last answering authority. */
+  system2AuthorityStack?: { provider: string; model: string }
+  /** Last provider/model that actually answered a System2 request. */
+  system2LastAuthority?: { provider: string; model: string }
+  deterministicFallbackEnabled: boolean
   queue: GoalQueueState
   currentAction: { id: string; kind: string; phase: string; startedAt: number } | null
   /** SERVER TRUTH, DTO only */
@@ -327,6 +339,8 @@ export interface GenerationStatus {
   rungIndex: number
   /** id of that rung */
   rungId: string
+  /** live basis attached to host heartbeat ledger commits */
+  ledgerBasis?: LedgerBasis
   /** true once start() has run and no irreversible action can happen before the lease */
   ready: boolean
   contractVersion: number

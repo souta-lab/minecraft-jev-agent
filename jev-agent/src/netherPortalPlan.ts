@@ -105,6 +105,13 @@ export interface PortalFrameSite {
   readonly reachable?: boolean
   /** Required edge cells already occupied by obsidian in the live world. */
   readonly existingFrame?: readonly PortalBlockPosition[]
+  /**
+   * Live placement geometry fact: the minimal ten-edge sequence needs a
+   * temporary solid block to place at least one cell, because the optional
+   * corners are absent and no natural neighbour can serve as a reference.
+   * This is an affordance fact, not a semantic preference.
+   */
+  readonly temporarySupportRequired?: boolean
 }
 
 function normalizeDimension(dimension: string): string {
@@ -467,6 +474,41 @@ export function planBlockPlacements(item: string, cells: readonly PortalBlockPos
   return orderedPlacementCells(cells).map((cell) => ({ item, cell }))
 }
 
+/**
+ * Determine whether the minimal frame sequence has a placement cell with no
+ * natural or already-placed reference block. The executor may then place an
+ * optional corner scaffold, but that action requires a held solid block.
+ *
+ * This is deliberately a pure geometry/affordance predicate. It does not
+ * choose a scaffold item or a semantic Option; the candidate layer owns the
+ * typed prerequisite route and the executor owns the actual placement.
+ */
+export function portalFrameNeedsTemporarySupport(
+  origin: PortalBlockPosition,
+  widthAxis: PortalWidthAxis = 'x',
+  existingFrame: readonly PortalBlockPosition[] = [],
+  solidAt: (position: PortalBlockPosition) => boolean = () => false,
+): boolean {
+  const layout = portalFrameLayout(origin, widthAxis)
+  const occupied = new Set(existingFrame.map(cellKey))
+  const neighbours = (cell: PortalBlockPosition): PortalBlockPosition[] => [
+    { x: cell.x - 1, y: cell.y, z: cell.z },
+    { x: cell.x + 1, y: cell.y, z: cell.z },
+    { x: cell.x, y: cell.y - 1, z: cell.z },
+    { x: cell.x, y: cell.y + 1, z: cell.z },
+    { x: cell.x, y: cell.y, z: cell.z - 1 },
+    { x: cell.x, y: cell.y, z: cell.z + 1 },
+  ]
+
+  for (const cell of orderedPlacementCells(layout.frame)) {
+    if (occupied.has(cellKey(cell))) continue
+    const referenceExists = neighbours(cell).some((neighbour) => occupied.has(cellKey(neighbour)) || solidAt(neighbour))
+    if (!referenceExists) return true
+    occupied.add(cellKey(cell))
+  }
+  return false
+}
+
 /** The executable frame-build sequence at `origin` (geometry from portalFrameLayout). */
 export function portalFramePlacementSteps(
   origin: PortalBlockPosition,
@@ -481,6 +523,7 @@ export interface PortalFrameGrounding {
   readonly origin: PortalBlockPosition
   readonly widthAxis: PortalWidthAxis
   readonly cells: PortalBlockPosition[]
+  readonly temporarySupportRequired: boolean
 }
 
 export function groundPortalFrame(
@@ -531,7 +574,15 @@ export function groundPortalFrame(
   const existing = new Set((selected.existingFrame ?? []).map(cellKey))
   const missing = layout.frame.filter((cell) => !existing.has(cellKey(cell)))
   if (missing.length === 0) return null
-  return { origin: selected.origin, widthAxis: selectedAxis, cells: orderedPlacementCells(missing) }
+  return {
+    origin: selected.origin,
+    widthAxis: selectedAxis,
+    cells: orderedPlacementCells(missing),
+    // Older persisted site records do not carry this optional fact. Treat
+    // those records as the compatibility baseline; the live sensor populates
+    // it on every newly observed site before candidate grounding.
+    temporarySupportRequired: selected.temporarySupportRequired === true,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +737,24 @@ export function isPortalIgnitionPostconditionMet(
 ): boolean {
   if (expectedCells.length === 0) return false
   return expectedCells.every((cell) => blockAt(cell) === expectedBlock)
+}
+
+/**
+ * Read the portal predicate from live world truth. `nether_portal` is a block,
+ * not an inventory item that can be carried across a resident restart.
+ */
+export function detectPortalVerification(
+  dimension: string | null | undefined,
+  sites: readonly PortalFrameSite[],
+  blockAt: PortalBlockLookup,
+): boolean {
+  if (dimension !== undefined && dimension !== null && normalizeDimension(dimension) !== normalizeDimension(OVERWORLD)) return false
+  for (const site of sites) {
+    const validation = validatePortalFrame({ blocks: site.existingFrame ?? [], widthAxis: site.widthAxis })
+    if (validation.shape !== 'ok') continue
+    if (isPortalIgnitionPostconditionMet(validation.interior, blockAt)) return true
+  }
+  return false
 }
 
 /** Encode the expected portal cells for a candidate's primitive-only `meta`. */

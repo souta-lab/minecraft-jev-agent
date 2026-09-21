@@ -4,7 +4,8 @@
 // inline module constants, and the generator honors the configured value.
 //
 //   npm run candidate-policy-test
-import { blockId, defaultCandidateOptions, generateCandidates } from './src/candidates.ts'
+import { blockId, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, generateCandidates, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat } from './src/candidates.ts'
+import type { Candidate } from './src/candidates.ts'
 import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
@@ -115,6 +116,23 @@ const moveIds = (state: WorldState, options = defaultCandidateOptions): string[]
     .filter((candidate) => candidate.kind === 'MOVE')
     .map((candidate) => candidate.id)
 
+function policyCandidate(id: string): Candidate {
+  return {
+    id,
+    kind: 'MINE',
+    label: `candidate ${id}`,
+    targetName: 'dirt',
+    target: { x: 0, y: 10, z: 0 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 1 },
+  }
+}
+
 addCase('the generator policy struct carries the audited retry budgets explicitly', () => {
   const pass =
     defaultCandidateOptions.moveFailureLimit === 4 &&
@@ -136,6 +154,91 @@ addCase('the configured MOVE budget suppresses the same spot when set to 2', () 
   const ids = moveIds(exploreState(2), { ...defaultCandidateOptions, moveFailureLimit: 2 })
   const pass = !ids.includes(`MOVE:${blockId('p', EXPLORE_SPOT)}`)
   return { pass, detail: `moveIds=[${ids.join(',')}]` }
+})
+
+addCase('an immediate hostile threat removes work actions but leaves Jev ATTACK/RETREAT authority', () => {
+  const work: Candidate = { ...policyCandidate('MINE:work'), kind: 'MINE', label: 'mine unrelated dirt' }
+  const attack: Candidate = { ...policyCandidate('ATTACK:e1'), kind: 'ATTACK', targetEntityId: 1, label: 'attack zombie' }
+  const retreat: Candidate = { ...policyCandidate('RETREAT:p1'), kind: 'RETREAT', label: 'retreat to safety' }
+  const kept = restrictCandidatesDuringImmediateThreat(
+    { entities: [{ hostile: true, distance: 0.7 }] } as never,
+    [work, attack, retreat],
+  )
+  const ids = kept.map((entry) => entry.id)
+  const pass = ids.join('|') === 'ATTACK:e1|RETREAT:p1'
+  return { pass, detail: `kept=[${ids.join(',')}]` }
+})
+
+addCase('critical health grounds a retreat from the sensed hostile and removes ATTACK by hard safety', () => {
+  const state = exploreState(0)
+  state.self = { ...state.self, health: CRITICAL_COMBAT_HEALTH - 1 }
+  state.entities = [
+    {
+      id: 7,
+      name: 'zombie',
+      kind: 'mob',
+      username: null,
+      position: { x: 3.5, y: 10, z: 0.5 },
+      distance: 3,
+      hostile: true,
+    },
+  ]
+  state.terrain = { standable: [SELF, { x: -3, y: 10, z: 0.5 }] }
+  const generated = generateCandidates(state)
+  const safe = restrictCandidatesAtCriticalHealth(state, generated)
+  const attacks = generated.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  const retreats = safe.filter((candidate) => candidate.kind === 'RETREAT').map((candidate) => candidate.id)
+  const pass = attacks.length === 1 && retreats.length === 1 && safe.every((candidate) => candidate.kind !== 'ATTACK')
+  return { pass, detail: `health=${state.self.health} attacks=[${attacks.join(',')}] safeRetreats=[${retreats.join(',')}]` }
+})
+
+addCase('a remote hostile is observed but not offered as a purposeless combat route', () => {
+  const state = exploreState(0)
+  state.entities = [
+    {
+      id: 8,
+      name: 'skeleton',
+      kind: 'mob',
+      username: null,
+      position: { x: 22, y: 10, z: 0.5 },
+      distance: 22,
+      hostile: true,
+    },
+  ]
+  const candidates = generateCandidates(state)
+  const attackIds = candidates.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  return { pass: attackIds.length === 0, detail: `remoteDistance=22 attackIds=[${attackIds.join(',')}]` }
+})
+
+addCase('protected station cells are not emitted as DESCEND or STEP dig affordances', () => {
+  const state = exploreState(0)
+  state.goal.targetItem = 'cobblestone'
+  state.goalQueue.current = { ...state.goalQueue.current!, targetItem: 'cobblestone' }
+  state.descent = [
+    {
+      dir: 'E',
+      mode: 'level',
+      dx: 1,
+      dz: 0,
+      step: { x: 1, y: 10, z: 0 },
+      wall: { x: 1, y: 10, z: 0 },
+      head: { x: 1, y: 11, z: 0 },
+      floor: { x: 1, y: 9, z: 0 },
+      wallSolid: true,
+      headSolid: false,
+      floorSolid: true,
+      safe: true,
+      reason: 'safe',
+      digName: 'crafting_table',
+      diggable: true,
+      digHarvestTool: null,
+      digHarvestTier: null,
+    },
+  ]
+  state.stepCuts = [{ dir: 'E', dx: 1, dz: 0, cut: { x: 1, y: 10, z: 0 }, step: { x: 1, y: 10, z: 0 }, name: 'furnace', safe: true, reason: 'safe' }]
+  const candidates = generateCandidates(state)
+  const unsafe = candidates.filter((candidate) => candidate.kind === 'DESCEND' || candidate.kind === 'STEP')
+  return { pass: unsafe.length === 0, detail: `digCandidates=[${unsafe.map((candidate) => candidate.id).join(',')}]` }
 })
 
 let failures = 0

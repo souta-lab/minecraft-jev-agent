@@ -17,7 +17,7 @@
 //      node --test test-retrieve-approach-stall.mts
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { classifyRetrieveApproach, ExecutorError, isAtRequiredLevel, RETRIEVE_ARRIVAL_RADIUS } from './src/executor.ts'
+import { classifyRetrieveApproach, ExecutorError, isAtRequiredLevel, RETRIEVE_ARRIVAL_RADIUS, shouldAbortUnproductivePillar } from './src/executor.ts'
 import type { RetrieveApproachInput } from './src/executor.ts'
 
 interface Case {
@@ -186,6 +186,28 @@ addCase('a grounded entity on the target floor is a completed vertical step', ()
   const oneFloorAbove = { x: 29.58, y: 63.92, z: 6.5 }
   const pass = isAtRequiredLevel(grounded, target) && !isAtRequiredLevel(oneFloorAbove, target)
   return { pass, detail: `grounded=${isAtRequiredLevel(grounded, target)} oneFloorAbove=${isAtRequiredLevel(oneFloorAbove, target)}` }
+})
+
+addCase('an unproductive pillar leg fails immediately instead of replaying the same jump', () => {
+  const pass = shouldAbortUnproductivePillar({
+    vertical: 'pillar',
+    verticalStep: false,
+    startY: 64,
+    currentY: 64.74,
+    targetY: 72,
+  })
+  return { pass, detail: `abort=${pass} startY=64 currentY=64.74 targetY=72` }
+})
+
+addCase('a pillar leg with durable height remains a valid bounded continuation', () => {
+  const pass = !shouldAbortUnproductivePillar({
+    vertical: 'pillar',
+    verticalStep: true,
+    startY: 64,
+    currentY: 65,
+    targetY: 72,
+  })
+  return { pass, detail: `abort=${!pass} startY=64 currentY=65 targetY=72` }
 })
 
 addCase('vertical executor steps require level-verified path completion', () => {

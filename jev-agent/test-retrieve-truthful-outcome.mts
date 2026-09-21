@@ -18,7 +18,9 @@ import { classifyRetrieveOutcome } from './src/executor.ts'
 import type { RetrieveOutcomeInput, RetrieveOutcome } from './src/executor.ts'
 import { decideRetrieveMemory } from './src/controller.ts'
 import { MoveFailMemory, moveFailureKey } from './src/moveFailMemory.ts'
-import { describeActionPostcondition, hasObservableProgress, truthfulActionOutcome } from './src/actionPostcondition.ts'
+import { classifyActionOutcome, describeActionPostcondition, hasObservableProgress, truthfulActionOutcome } from './src/actionPostcondition.ts'
+import { surfaceSearchKey, surfaceSpot } from './src/candidates.ts'
+import type { WorldState } from './src/state.ts'
 
 interface Case {
   name: string
@@ -201,6 +203,63 @@ addCase('the truth layer accepts a RETRIEVE with a measured distance closure', (
   })
   const pass = truth.verified === true && truth.status === 'done' && truth.resetsFailureMemory === true
   return { pass, detail: `verified=${truth.verified} status=${truth.status} reset=${truth.resetsFailureMemory}` }
+})
+
+addCase('a surface waypoint arrival is search progress, not resource completion', () => {
+  const truth = truthfulActionOutcome({
+    kind: 'RETRIEVE',
+    status: 'done',
+    verified: true,
+    itemsGained: 0,
+    blockRemoved: false,
+    progressed: false,
+    arrived: false,
+    distanceClosed: false,
+    searchArrived: true,
+  })
+  const pass =
+    truth.verified === true &&
+    truth.status === 'done' &&
+    truth.observableProgress === true &&
+    truth.replanProgress === true &&
+    truth.resetsFailureMemory === false
+  return {
+    pass,
+    detail: `verified=${truth.verified} status=${truth.status} observable=${truth.observableProgress} replan=${truth.replanProgress} reset=${truth.resetsFailureMemory}`,
+  }
+})
+
+addCase('surface waypoint evidence is typed as search progress', () => {
+  const taxonomy = classifyActionOutcome({
+    kind: 'RETRIEVE',
+    status: 'done',
+    verified: true,
+    itemsGained: 0,
+    blockRemoved: false,
+    arrived: true,
+    searchArrived: true,
+  })
+  const pass = taxonomy.progress === 'search' && taxonomy.progressKinds.includes('search')
+  return { pass, detail: `progress=${taxonomy.progress} kinds=${JSON.stringify(taxonomy.progressKinds)}` }
+})
+
+addCase('a reached surface waypoint advances the deterministic search frontier', () => {
+  const state = {
+    self: { position: { x: 0, y: 53, z: 0 }, dimension: 'overworld' },
+    terrain: { standable: [{ x: 2, y: 54, z: 0 }, { x: 3, y: 55, z: 0 }] },
+    signals: { failedCandidates: {} },
+  } as unknown as WorldState
+  const first = surfaceSpot(state, 'log', 3, undefined, new Set())
+  const firstKey = first === null ? null : surfaceSearchKey(state.self.dimension, first)
+  const second = firstKey === null ? null : surfaceSpot(state, 'log', 3, undefined, new Set([firstKey]))
+  const pass =
+    first !== null &&
+    second !== null &&
+    surfaceSearchKey(state.self.dimension, first) !== surfaceSearchKey(state.self.dimension, second)
+  return {
+    pass,
+    detail: `first=${first === null ? 'null' : JSON.stringify(first)} second=${second === null ? 'null' : JSON.stringify(second)}`,
+  }
 })
 
 let failures = 0

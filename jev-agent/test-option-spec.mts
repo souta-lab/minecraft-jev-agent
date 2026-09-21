@@ -435,7 +435,7 @@ addCase('compileGoalQueue compiles the current goal then every pending goal in o
   return { pass: ids(specs).join(',') === 'collect:log,craft:crafting_table,place:furnace', detail: `ids=[${ids(specs).join(',')}] depth=${queue.state.depth}` }
 })
 
-addCase('flag: BUDDY_OPTION_COMPILER gates replacement and stays opt-in', () => {
+addCase('flag: BUDDY_OPTION_COMPILER is ON by default and explicit OFF is the baseline', () => {
   const planned: PlannedGoal[] = [{ kind: 'smelt', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }]
   const snapshot = makeOptionSnapshot({ inventory: { coal: 1 }, knownStations: ['furnace'], toolRank: 2 })
   const off = applyCompiledPlan(planned, snapshot, { enabled: false })
@@ -445,7 +445,7 @@ addCase('flag: BUDDY_OPTION_COMPILER gates replacement and stays opt-in', () => 
   const envDefault = resolveOptionCompilerEnabled({})
   const envOn = resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: '1' })
   const envOff = resolveOptionCompilerEnabled({ BUDDY_OPTION_COMPILER: '0' })
-  return { pass: offUnchanged && onExpanded && !envDefault && envOn && !envOff, detail: `offGoals=${off.goals.length} onGoals=[${on.goals.map((g) => g.targetItem).join(',')}] default=${envDefault} on=${envOn} off=${envOff}` }
+  return { pass: offUnchanged && onExpanded && envDefault && envOn && !envOff, detail: `offGoals=${off.goals.length} onGoals=[${on.goals.map((g) => g.targetItem).join(',')}] default=${envDefault} on=${envOn} off=${envOff}` }
 })
 
 addCase('snapshotFromResident maps WorldMemory stations into predicate state', () => {
@@ -988,7 +988,7 @@ addCase('(#56) compiled Option context survives queue persistence and reaches Je
     context?.target.predicate === spec.target.predicate &&
     context?.preconditions[0]?.kind === 'custom' &&
     successId === 'landmark_ready' &&
-    context?.allowedSkills.join(',') === spec.skills.join(',') &&
+    context?.allowedSkills.join(',') === ['SAFETY', 'CONTROL', 'PREREQUISITE', ...spec.skills].join(',') &&
     context?.abortThreshold === spec.abortThreshold &&
     context?.runtime.verifiedProgress === 0
   return {

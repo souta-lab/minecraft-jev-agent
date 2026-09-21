@@ -38,7 +38,8 @@ export type GoalOrigin = 'bootstrap' | 'llm' | 'mechanical'
 
 export type GoalStatus = 'pending' | 'active' | 'done' | 'impossible'
 
-export type PlanOp = 'continue' | 'patch' | 'replace' | 'abort'
+/** Typed semantic operations returned by System2. */
+export type PlanOp = 'continue' | 'patch' | 'replace' | 'abandon' | 'complete' | 'abort'
 
 export type GoalStrategy =
   | 'descend_to_y16'
@@ -61,6 +62,10 @@ export interface ApplyPlanOptions {
    * Returning null keeps the normal #55 reinsertion contract unchanged.
    */
   protectedGoalRetireReason?: (goal: QueuedGoal, incoming: readonly PlannedGoal[]) => string | null
+  /** Code-owned DONE proof required before a `complete` operation can mutate the queue. */
+  verifyCurrentComplete?: (goal: QueuedGoal) => boolean
+  /** Audit sink for rejected lifecycle operations. */
+  onOperationRejected?: (line: string) => void
 }
 
 export const DUPLICATE_GOAL_SKIPPED = 'DUPLICATE_GOAL_SKIPPED'
@@ -72,6 +77,7 @@ export const DUPLICATE_GOAL_SKIPPED = 'DUPLICATE_GOAL_SKIPPED'
  * rather than the `gN:` runtime id, which changes on every enqueue.
  */
 export function goalInstanceKey(goal: PlannedGoal | QueuedGoal): string {
+  if (typeof goal.optionInstanceId === 'string' && goal.optionInstanceId.length > 0) return goal.optionInstanceId
   return stableOptionInstanceId(compilePlannedGoal('id' in goal ? queuedToPlanned(goal) : goal))
 }
 
@@ -121,6 +127,14 @@ export interface QueuedGoal {
   optionTemplateId?: string
   /** Issue #56: the full plain-data spec survives queue persistence/restart. */
   optionSpec?: OptionSpec
+  /**
+   * Canonical System2 semantic owner of this execution row. A prerequisite
+   * row keeps its own executable Option identity above, but these fields keep
+   * the parent WHAT visible through compilation, recovery, beta, and evidence.
+   */
+  semanticOptionInstanceId?: string
+  semanticOptionTemplateId?: string
+  semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
   /** how many relevant items the bot held when the goal was created */
@@ -153,6 +167,10 @@ export interface PlannedGoal {
   optionTemplateId?: string
   /** Issue #56: the full plain-data spec survives queue persistence/restart. */
   optionSpec?: OptionSpec
+  /** Canonical System2 semantic owner retained while this row executes. */
+  semanticOptionInstanceId?: string
+  semanticOptionTemplateId?: string
+  semanticOptionIntent?: string
   /** ordered cells a multi-cell `place` goal must fill with `targetItem` */
   placementCells?: readonly PlacementCell[]
   detail?: string
@@ -197,6 +215,8 @@ export interface GoalQueueState {
   hasImpossible: boolean
   done: number
   goals: QueuedGoal[]
+  /** Monotonic semantic queue revision; omitted only by legacy fixtures. */
+  revision?: number
 }
 
 /** The compact projection written into every decision record. */
@@ -209,6 +229,10 @@ export interface GoalQueueCurrentLog {
   haveCount: number
   requiredCount: number
   targetY: number | null
+  optionInstanceId?: string | null
+  optionTemplateId?: string | null
+  semanticOptionInstanceId?: string | null
+  semanticOptionTemplateId?: string | null
 }
 
 export interface GoalQueueStateLog {
@@ -235,19 +259,37 @@ export function toGoalQueueStateLog(state: GoalQueueState): GoalQueueStateLog {
             haveCount: state.current.haveCount,
             requiredCount: state.current.requiredCount,
             targetY: state.current.targetY ?? null,
+            optionInstanceId: state.current.optionInstanceId ?? null,
+            optionTemplateId: state.current.optionTemplateId ?? null,
+            semanticOptionInstanceId: state.current.semanticOptionInstanceId ?? null,
+            semanticOptionTemplateId: state.current.semanticOptionTemplateId ?? null,
           },
     pending: state.goals.filter((goal) => goal.status === 'pending').map((goal) => goal.id),
   }
 }
 
 export function emptyGoalQueueState(): GoalQueueState {
-  return { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [] }
+  return { depth: 0, current: null, empty: true, hasImpossible: false, done: 0, goals: [], revision: 0 }
 }
 
 /** A durable copy of the queue so a phase boundary can persist progress. */
 export interface GoalQueueSnapshot {
   counter: number
   goals: QueuedGoal[]
+  revision?: number
+  /**
+   * Live semantic frontier at the time this durable queue was committed.
+   * Missing basis means a legacy snapshot whose unfinished semantic state is
+   * not safe to restore across a fresh generation.
+   */
+  basis?: LedgerBasis
+}
+
+/** Minimal live context used to validate a durable semantic queue on restore. */
+export interface LedgerBasis {
+  worldKey: string
+  frontierRungId: string
+  frontierRungIndex: number
 }
 
 /**
@@ -261,6 +303,11 @@ export interface GoalQueueSnapshot {
 export class GoalQueue {
   private goals: QueuedGoal[] = []
   private counter = 0
+  private queueRevision = 0
+
+  get revision(): number {
+    return this.queueRevision
+  }
 
   get size(): number {
     return this.goals.length
@@ -290,6 +337,7 @@ export class GoalQueue {
       hasImpossible: this.goals.some((goal) => goal.status === 'impossible'),
       done: this.goals.filter((goal) => goal.status === 'done').length,
       goals: this.goals.map((goal) => ({ ...goal })),
+      revision: this.queueRevision,
     }
   }
 
@@ -306,6 +354,44 @@ export class GoalQueue {
     op: PlanOp = 'replace',
     options: ApplyPlanOptions = {},
   ): QueuedGoal[] {
+    let effectiveOp = op
+    let abandonedCurrentId: string | null = null
+    if (op === 'complete') {
+      const current = this.nextRef()
+      if (current === undefined || options.verifyCurrentComplete?.(current) !== true) {
+        options.onOperationRejected?.(
+          `PLAN_OP_REJECTED op=complete current=${current?.id ?? 'none'} reason=code_completion_not_verified`,
+        )
+        return []
+      }
+      current.status = 'done'
+      current.haveCount = Math.max(current.haveCount, current.requiredCount)
+      current.updatedAt = Date.now()
+      this.activate()
+      this.queueRevision += 1
+      // `complete` is a lifecycle transition for the current Option only. The
+      // existing pending tail is still valid and must not be erased as though
+      // this were an empty `replace`.
+      return []
+    }
+    if (op === 'abandon') {
+      const current = this.nextRef()
+      if (current !== undefined && isProtectedGoal(current)) {
+        options.onOperationRejected?.(`PLAN_OP_REJECTED op=abandon current=${current.id} reason=protected_goal`)
+        return []
+      }
+      if (current === undefined) {
+        options.onOperationRejected?.('PLAN_OP_REJECTED op=abandon current=none reason=no_current_option')
+        return []
+      }
+      current.status = 'impossible'
+      current.detail = abandonDetail(options.reason ?? 'system2 abandon', false)
+      current.updatedAt = Date.now()
+      abandonedCurrentId = current.id
+      // `abandon` is a typed semantic switch: retain the abandoned row as audit
+      // history, discard the old pending tail, and install the returned plan.
+      effectiveOp = 'replace'
+    }
     if (op === 'abort') {
       const now = Date.now()
       for (const goal of this.goals) {
@@ -317,10 +403,11 @@ export class GoalQueue {
         if (protect) options.onProtection?.(formatProtectedGoalAbandoned(goal, options.reason ?? 'abort'))
       }
       this.activate()
+      this.queueRevision += 1
       return []
     }
     const reinserted: QueuedGoal[] = []
-    if (op === 'continue') {
+    if (effectiveOp === 'continue') {
       // keep every existing goal (done and unfinished) and append the new tail
     } else {
       const unfinishedProtected = this.goals.filter(
@@ -342,17 +429,19 @@ export class GoalQueue {
       const { dropped } = splitProtectedGoals(protectedForMerge, planned)
       if (planned.length === 0 && dropped.length > 0) {
         for (const goal of dropped) {
-          options.onProtection?.(formatProtectedGoalDroppedRejected(goal, op, options.reason ?? 'empty_replan'))
+          options.onProtection?.(formatProtectedGoalDroppedRejected(goal, effectiveOp, options.reason ?? 'empty_replan'))
         }
         this.activate()
         return []
       }
       const droppedQueued = protectedForMerge.filter((goal) => dropped.some((found) => found.id === goal.id))
-      if (op === 'patch') {
+      if (effectiveOp === 'patch') {
         // keep completed history and the currently active goal; replace the pending tail
         this.goals = this.goals.filter((goal) => goal.status === 'done' || goal.status === 'active' || retiredIds.has(goal.id))
       } else {
-        this.goals = this.goals.filter((goal) => goal.status === 'done' || retiredIds.has(goal.id))
+        this.goals = this.goals.filter(
+          (goal) => goal.status === 'done' || goal.id === abandonedCurrentId || retiredIds.has(goal.id),
+        )
       }
       const keptIds = new Set(this.goals.map((goal) => goal.id))
       for (const original of droppedQueued) {
@@ -387,7 +476,7 @@ export class GoalQueue {
       insert(readyHead)
     }
     for (const original of reinserted) {
-      options.onProtection?.(formatProtectedGoalReinserted(original, op, options.reason ?? 'not_in_replacement'))
+      options.onProtection?.(formatProtectedGoalReinserted(original, effectiveOp, options.reason ?? 'not_in_replacement'))
       this.goals.push(original)
       unfinishedInstances.add(goalInstanceKey(original))
     }
@@ -396,11 +485,15 @@ export class GoalQueue {
       insert(plan)
     }
     this.activate()
+    this.queueRevision += 1
     return added
   }
 
   /** Build the queued form of an incoming planned goal, assigning its id. */
   private enqueue(plan: PlannedGoal, origin: GoalOrigin, now: number): QueuedGoal {
+    const spec = plan.optionSpec ?? compilePlannedGoal(plan)
+    const optionTemplateId = plan.optionTemplateId ?? spec.id
+    const optionInstanceId = plan.optionInstanceId ?? stableOptionInstanceId(spec)
     this.counter += 1
     const goal: QueuedGoal = {
       id: `g${this.counter}:${plan.kind}${plan.targetItem != null ? `:${plan.targetItem}` : ''}`,
@@ -412,9 +505,12 @@ export class GoalQueue {
       targetY: plan.targetY ?? null,
       dimension: plan.dimension ?? null,
       ...(plan.targetPredicate === undefined ? {} : { targetPredicate: plan.targetPredicate ?? null }),
-      ...(plan.optionInstanceId === undefined ? {} : { optionInstanceId: plan.optionInstanceId }),
-      ...(plan.optionTemplateId === undefined ? {} : { optionTemplateId: plan.optionTemplateId }),
-      ...(plan.optionSpec === undefined ? {} : { optionSpec: plan.optionSpec }),
+      optionInstanceId,
+      optionTemplateId,
+      optionSpec: spec,
+      ...(plan.semanticOptionInstanceId === undefined ? {} : { semanticOptionInstanceId: plan.semanticOptionInstanceId }),
+      ...(plan.semanticOptionTemplateId === undefined ? {} : { semanticOptionTemplateId: plan.semanticOptionTemplateId }),
+      ...(plan.semanticOptionIntent === undefined ? {} : { semanticOptionIntent: plan.semanticOptionIntent }),
       ...(plan.placementCells === undefined ? {} : { placementCells: [...plan.placementCells] }),
       startCount: 0,
       haveCount: 0,
@@ -435,12 +531,16 @@ export class GoalQueue {
     const goal = this.nextRef()
     if (goal === undefined) return
     if (goal.kind !== 'collect' && goal.kind !== 'craft' && goal.kind !== 'smelt') return
-    goal.haveCount = Math.max(0, haveCount)
+    const nextHave = Math.max(0, haveCount)
+    const wasStatus = goal.status
+    if (nextHave === goal.haveCount && !(nextHave >= goal.requiredCount && wasStatus !== 'done')) return
+    goal.haveCount = nextHave
     goal.updatedAt = Date.now()
     if (goal.haveCount >= goal.requiredCount) {
       goal.status = 'done'
       this.activate()
     }
+    this.queueRevision += 1
   }
 
   /** Mark the current goal impossible (the PoC cannot execute it) and advance. */
@@ -452,6 +552,7 @@ export class GoalQueue {
     goal.updatedAt = Date.now()
     const clone = { ...goal }
     this.activate()
+    this.queueRevision += 1
     return clone
   }
 
@@ -463,20 +564,30 @@ export class GoalQueue {
     goal.haveCount = Math.max(goal.haveCount, goal.requiredCount)
     goal.updatedAt = Date.now()
     this.activate()
+    this.queueRevision += 1
   }
 
   reset(): void {
     this.goals = []
     this.counter = 0
+    this.queueRevision += 1
   }
 
   snapshot(): GoalQueueSnapshot {
-    return { counter: this.counter, goals: this.goals.map((goal) => ({ ...goal })) }
+    return { counter: this.counter, goals: this.goals.map((goal) => ({ ...goal })), revision: this.queueRevision }
   }
 
   restore(snapshot: GoalQueueSnapshot): void {
     this.counter = snapshot.counter
-    this.goals = snapshot.goals.map((goal) => ({ ...goal }))
+    this.goals = snapshot.goals.map((goal) => {
+      const copy = { ...goal }
+      const spec = copy.optionSpec ?? compilePlannedGoal(queuedToPlanned(copy as QueuedGoal))
+      copy.optionSpec = spec
+      copy.optionTemplateId = copy.optionTemplateId ?? spec.id
+      copy.optionInstanceId = copy.optionInstanceId ?? stableOptionInstanceId(spec)
+      return copy
+    })
+    this.queueRevision = Math.max(this.queueRevision + 1, snapshot.revision ?? 0)
     this.activate()
   }
 

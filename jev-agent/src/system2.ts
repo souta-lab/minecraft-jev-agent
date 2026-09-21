@@ -29,6 +29,7 @@
 // so the queue is exercised end to end today without a live model.
 import type { GoalQueueState, PlanOp, PlannedGoal } from './goalQueue.ts'
 import type { JsonlWriter } from './jev.ts'
+import type { System2RequestContext } from './system2Authority.ts'
 
 /** Why the long-horizon layer was woken up. */
 export type LlmSummonReason =
@@ -61,6 +62,12 @@ export interface System2Outcome {
   failure: string | null
   verified: boolean
   detail: string
+  /** Typed outcome evidence; optional for old/replayed records. */
+  execution?: 'success' | 'failure' | 'cancelled' | 'control'
+  verification?: 'verified' | 'unverified' | 'not_applicable'
+  progress?: 'goal' | 'body' | 'search' | 'none'
+  progressKinds?: string[]
+  control?: 'none' | 'wait' | 'escalate'
 }
 
 export interface System2PlanRequest {
@@ -71,12 +78,17 @@ export interface System2PlanRequest {
   objective: System2Objective
   recentEvents: string[]
   recentOutcomes: System2Outcome[]
+  /** Identity of the semantic state read by this asynchronous request. */
+  requestContext?: System2RequestContext
 }
 
 export interface System2Plan {
   goals: PlannedGoal[]
   note: string
-  /** continue | patch | replace the remaining plan, or abort the goal (P1-8). */
+  /**
+   * Typed semantic lifecycle operation. Natural-language notes are explanatory
+   * only; GoalQueue owns the transition represented by this value.
+   */
   op?: PlanOp
 }
 
@@ -86,7 +98,21 @@ export interface System2Plan {
  */
 export interface System2Brain {
   readonly model: string
+  /** Transport/authority provider, explicit in resident reports. */
+  readonly provider?: string
+  /** Effective model that actually owns semantic System2 decisions. */
+  readonly authorityModel?: string
+  /** Configured authority stack, distinct from the last provider that answered. */
+  readonly authorityStack?: { provider: string; model: string }
   plan(request: System2PlanRequest): Promise<System2Plan>
+}
+
+/** One explicit DTO for audit/report code; never infer authority from `model`. */
+export function system2AuthorityIdentity(brain: Pick<System2Brain, 'model' | 'provider' | 'authorityModel'>): {
+  provider: string
+  model: string
+} {
+  return { provider: brain.provider ?? 'unknown', model: brain.authorityModel ?? brain.model }
 }
 
 export interface System2PlanRecord {
@@ -96,6 +122,9 @@ export interface System2PlanRecord {
   latencyMs: number
   stub: boolean
   model: string
+  provider?: string
+  authorityModel?: string
+  requestContext?: System2RequestContext
   /** 1-based invocation index of this brain instance (single-shot plans on 1) */
   callNumber: number
   reason: LlmSummonReason
@@ -253,6 +282,8 @@ export function buildStubPlan(request: System2PlanRequest): PlannedGoal[] {
 
 export class StubSystem2 implements System2Brain {
   readonly model = STUB_SYSTEM2_MODEL
+  readonly provider = 'stub'
+  readonly authorityModel = STUB_SYSTEM2_MODEL
   private readonly writer: JsonlWriter | null
 
   constructor(writer: JsonlWriter | null) {
@@ -273,6 +304,9 @@ export class StubSystem2 implements System2Brain {
       latencyMs: Date.now() - requestedAt,
       stub: true,
       model: this.model,
+      provider: this.provider,
+      authorityModel: this.authorityModel,
+      ...(request.requestContext === undefined ? {} : { requestContext: request.requestContext }),
       callNumber: 1,
       reason: request.reason,
       detail: request.detail,
@@ -299,6 +333,8 @@ export const SINGLE_SHOT_PLANNER_MODEL = 'stub-single-shot-planner'
  */
 export class FixedPlanSystem2 implements System2Brain {
   readonly model = SINGLE_SHOT_PLANNER_MODEL
+  readonly provider = 'stub'
+  readonly authorityModel = SINGLE_SHOT_PLANNER_MODEL
   private readonly writer: JsonlWriter | null
   private readonly plannedGoals: readonly PlannedGoal[]
   private readonly note: string
@@ -326,6 +362,9 @@ export class FixedPlanSystem2 implements System2Brain {
       latencyMs: 0,
       stub: true,
       model: this.model,
+      provider: this.provider,
+      authorityModel: this.authorityModel,
+      ...(request.requestContext === undefined ? {} : { requestContext: request.requestContext }),
       callNumber: this.calls,
       reason: request.reason,
       detail: request.detail,

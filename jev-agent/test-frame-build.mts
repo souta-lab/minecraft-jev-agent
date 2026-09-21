@@ -36,6 +36,7 @@ import {
   planBlockPlacements,
   planNetherPortal,
   groundPortalFrame,
+  portalFrameNeedsTemporarySupport,
   portalFrameLayout,
   portalFramePlacementSteps,
   portalStepToPlannedGoal,
@@ -212,6 +213,7 @@ function worldState(overrides: {
   inventory?: InventoryState
   goalQueue: GoalQueueState
   portalFrameSites?: PortalFrameSite[]
+  blocks?: WorldState['blocks']
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -220,7 +222,7 @@ function worldState(overrides: {
     self: self(overrides.position),
     inventory: overrides.inventory ?? inventory({ obsidian: 10 }),
     entities: [],
-    blocks: [],
+    blocks: overrides.blocks ?? [],
     terrain: { standable: [overrides.position] },
     craftingTables: [],
     furnaces: [],
@@ -347,6 +349,55 @@ function worldState(overrides: {
     (pass ? 'PASS' : 'FAIL') + '  (3c) a more-complete continuation site outranks a nearby partial site\n' +
       '      selected=' + JSON.stringify(grounding) + ' advanced=' + (advancedSite.existingFrame?.length ?? 0) +
       ' nearby=' + (nearbySite.existingFrame?.length ?? 0) + ' candidateCells=' + (place?.placementCells?.length ?? 0) + '\n',
+  )
+  if (!pass) failures += 1
+}
+
+// ---------------------------------------------------------------------------
+// (3d) a grounded frame exposes a typed support prerequisite before PLACE
+// ---------------------------------------------------------------------------
+{
+  const supportSite: PortalFrameSite = {
+    origin: { x: 20, y: 64, z: 3 },
+    widthAxis: 'x',
+    safe: true,
+    reachable: true,
+    temporarySupportRequired: true,
+  }
+  const producer = {
+    kind: 'stone' as const,
+    name: 'stone',
+    position: { x: 7, y: 64, z: 1 },
+    distance: 1,
+    diggable: true,
+    inReach: true,
+    hasAdjacentStandable: true,
+    adjacentStandable: { x: 7, y: 64, z: 0 },
+    yield: 'cobblestone',
+    harvestTool: 'pickaxe' as const,
+    harvestTier: 1,
+  }
+  const state = worldState({
+    position: { x: 6.5, y: 64, z: -1.5 },
+    inventory: inventory({ obsidian: 10, diamond_pickaxe: 1 }),
+    goalQueue: queueWith({ ...queuedPlace(OBSIDIAN, []), requiredCount: 10 }),
+    portalFrameSites: [supportSite],
+    blocks: [producer],
+  })
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const prereq = grounded.candidates.find((candidate) => candidate.meta.prerequisiteRole === 'portal_frame_support')
+  const place = grounded.candidates.find((candidate) => candidate.kind === 'PLACE')
+  const naturalSupport = portalFrameNeedsTemporarySupport(ORIGIN, 'x', [], () => true)
+  const pass =
+    grounded.candidates.length > 0 &&
+    (prereq?.kind === 'MINE' || prereq?.kind === 'MOVE') &&
+    prereq.meta.optionSkill === 'PREREQUISITE' &&
+    place === undefined &&
+    naturalSupport === false
+  process.stdout.write(
+    (pass ? 'PASS' : 'FAIL') + '  (3d) missing frame support is a typed prerequisite, not an executor-time PLACE retry\n' +
+      '      prereq=' + (prereq?.id ?? 'none') + ' role=' + (prereq?.meta.prerequisiteRole ?? 'none') +
+      ' place=' + (place?.id ?? 'none') + ' natural=' + naturalSupport + '\n',
   )
   if (!pass) failures += 1
 }

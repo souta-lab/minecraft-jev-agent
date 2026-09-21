@@ -1,6 +1,6 @@
 // test-ladder.mts - #12 regression: a missing rung precondition becomes a
 // LADDER_PREREQ plan replacement, never a generation stop. Pure, no bot.
-import { buildLadder, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungBehindInventory, rungGoalsWithPrereq, RUNGS } from './planner.ts'
+import { buildLadder, computeFrontier, deriveResumeRung, goalsForStrategy, orderPlanGoalsByReadiness, prerequisiteUnsatisfiable, rungBehindInventory, rungGoalsWithPrereq, RUNGS } from './planner.ts'
 import { selectLedgerSnapshot, snapshotGoals } from './generation-entry.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { ResidentWorldMemory } from './resident-types.ts'
@@ -115,6 +115,42 @@ addCase('charcoal alone satisfies the charcoal rung', () => {
   return {
     pass: rung('charcoal').satisfied(counts, world()) === true,
     detail: `satisfied=${rung('charcoal').satisfied(counts, world())}`,
+  }
+})
+
+addCase('a diamond-pickaxe frontier resumes at the current M2 portal rung', () => {
+  const counts = {
+    diamond: 3,
+    diamond_pickaxe: 1,
+    flint_and_steel: 1,
+    obsidian: 10,
+  }
+  const resume = deriveResumeRung(counts, world())
+  const ladder = buildLadder(counts, world(), undefined, { resumeRungIndex: resume.rungIndex })
+  const historicalTargets = new Set(['charcoal', 'raw_iron', 'iron_ingot', 'iron_pickaxe'])
+  const hasHistoricalGoal = ladder.goals.some(
+    (goal) => typeof goal.targetItem === 'string' && historicalTargets.has(goal.targetItem),
+  )
+  return {
+    pass:
+      resume.rungId === 'nether_portal' &&
+      ladder.rungId === 'nether_portal' &&
+      !hasHistoricalGoal &&
+      ladder.goals.some((goal) => goal.kind === 'place' && goal.targetItem === 'obsidian'),
+    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} goals=[${ladder.goals.map((goal) => goal.description).join(' -> ')}]`,
+  }
+})
+
+addCase('a live verified portal closes the rung without an inventory portal item', () => {
+  const counts = { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1 }
+  const live = world({ portalVerified: true })
+  const resume = deriveResumeRung(counts, live)
+  const ladder = buildLadder(counts, live, undefined, { resumeRungIndex: resume.rungIndex })
+  const frontier = computeFrontier(counts, live).rungId
+  const portalGoal = ladder.goals.some((goal) => goal.targetItem === 'obsidian' || goal.targetItem === 'nether_portal')
+  return {
+    pass: resume.rungId === 'complete' && ladder.rungId === 'complete' && frontier === 'complete' && !portalGoal,
+    detail: `resume=${resume.rungId}@${resume.rungIndex} ladder=${ladder.rungId} frontier=${frontier} goals=${ladder.goals.length} portalGoal=${portalGoal}`,
   }
 })
 

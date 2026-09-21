@@ -29,13 +29,23 @@ export const AUTHORITY_PRIMARY_INSTRUCTIONS =
   'action list: the action that best advances the CURRENT Option in the CURRENT world state. Every id is executable ' +
   'candidate data supplied by deterministic code; answer with the id verbatim and never invent an id. Candidate cost, ' +
   'distance, failure history, reachability, and prerequisite-path metadata are evidence. They are not universal ranking ' +
-  'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives.'
+  'rules: reason over the whole state, current Option contract, recent outcomes, and available alternatives. When an ' +
+  'ATTACK candidate is present, ATTACK versus MOVE, RETREAT, or WAIT is your pi decision: weigh the target identity and ' +
+  'distance, health, food, equipment, immediate danger, current Option, and available alternatives. Do not attack merely ' +
+  'because a mob exists, and do not ignore ATTACK merely because movement is cheaper. Deterministic code may ground and ' +
+  'safety-check the candidate, but it must not choose attack for you or replace your valid attack choice with a different ' +
+  'semantic action. The current Option allowedSkills is an envelope: SAFETY, CONTROL, and PREREQUISITE are always ' +
+  'available when code has grounded them, alongside the Option-declared skills. A typed optionSkill=PREREQUISITE ' +
+  'candidate is an actionable dependency route for the current Option, not an unrelated mission and not a reason to ' +
+  'choose WAIT. Use the typed role/missing-capability facts as evidence, while retaining authority over WHICH candidate.'
 
 const BETA_INSTRUCTIONS =
   'You are Jev beta. Decide whether the CURRENT Option should end now. Use its explicit preconditions/success facts, ' +
-  'verified progress, recent outcomes, and current grounded alternatives. True means end/abandon this Option and ask ' +
-  'System 2 for WHAT comes next. False means keep the current Option. Do not end it merely because one action failed if ' +
-  'the Option remains viable.'
+  'typed recent outcomes, and current grounded alternatives. True means end/abandon this Option and ask System 2 for ' +
+  'WHAT comes next. False means keep the current Option. WAIT and ESCALATE are control-plane outcomes, not productive ' +
+  'goal progress; body/search progress is real progress even when the goal item is unchanged. A local path failure is ' +
+  'recovery evidence, not semantic exhaustion. Do not end the Option merely because one action failed if the Option ' +
+  'remains viable.'
 
 const RETREAT_INSTRUCTIONS =
   'Should the bot retreat immediately for safety based on the current observed threats, health, and grounded escape actions?'
@@ -45,8 +55,20 @@ const DANGER_INSTRUCTIONS =
 
 type Questions = Partial<Record<QuestionName, Experimental_EvaluationQuestion>>
 
+function candidateCriteria(candidate: Candidate): string {
+  const tags: string[] = []
+  const optionSkill = candidate.meta.optionSkill
+  const prerequisiteRole = candidate.meta.prerequisiteRole
+  const missingCapability = candidate.meta.missingCapability
+  if (typeof optionSkill === 'string') tags.push(`optionSkill=${optionSkill}`)
+  if (typeof prerequisiteRole === 'string') tags.push(`prerequisiteRole=${prerequisiteRole}`)
+  if (typeof missingCapability === 'string') tags.push(`missingCapability=${missingCapability}`)
+  if (candidate.meta.capabilityAcquisition === true) tags.push('capabilityAcquisition=true')
+  return tags.length === 0 ? candidate.label : `${candidate.label} [${tags.join(' ')}]`
+}
+
 export interface AuthorityDecisionMeta {
-  /** Exact runtime Option row Jev beta voted on; null only before/without an Option runtime. */
+  /** Canonical semantic Option instance Jev beta voted on; null before an Option exists. */
   optionInstanceId: string | null
   /** Stable semantic template id of that Option. */
   optionTemplateId: string | null
@@ -68,7 +90,7 @@ export function buildAuthorityQuestions(
   const out: Questions = {}
   if (requested.has('action')) {
     const criteria: Record<string, string> = {}
-    for (const candidate of candidates) criteria[candidate.id] = candidate.label
+    for (const candidate of candidates) criteria[candidate.id] = candidateCriteria(candidate)
     out.action = { type: 'choice', instructions: AUTHORITY_PRIMARY_INSTRUCTIONS, criteria }
   }
   if (requested.has('abandon_option')) {
@@ -185,7 +207,7 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
   const probability = answers.abandon_option?.probability
   const betaProbability = typeof probability === 'number' && Number.isFinite(probability) ? probability : null
   return {
-    optionInstanceId: option?.instanceId ?? null,
+    optionInstanceId: option?.semanticInstanceId ?? option?.instanceId ?? null,
     optionTemplateId: option?.templateId ?? null,
     betaThreshold: threshold,
     betaProbability,
@@ -210,6 +232,7 @@ function authorityState(request: JevRequest): Record<string, unknown> {
       current: state.goalQueue.current,
     },
     currentOption: state.currentOption ?? null,
+    recentOutcomes: (state.recentOutcomes ?? []).slice(-8),
     candidates: request.candidates.map((candidate) => ({
       id: candidate.id,
       kind: candidate.kind,

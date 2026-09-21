@@ -74,6 +74,7 @@ function decisionRecord(answers: Record<string, JevAnswer>): DecisionRecord {
     stateHash: 'sha256:test',
     chainId: 'chain-1',
     optionId: 'collect:raw_iron',
+    semanticOptionInstanceId: 'system2:front_raw_iron',
     strategy: 'llm:collect',
     candidates: [],
     failedCandidates: {},
@@ -113,6 +114,33 @@ addCase('#32: raw 0.08 survives API parse -> result -> decision record JSONL', (
     json.includes('"probability":0.08') &&
     record.jev.answers.abandon_option?.value === 0.08
   return { pass, detail: `probability=${estimate?.probability} atHalf=${estimate?.atHalf} would=${estimate?.would} jsonHasRaw=${json.includes('"probability":0.08')}` }
+})
+
+addCase('#56: completion preserves the canonical semantic Option instance', () => {
+  const record = decisionRecord({ abandon_option: boolAnswer('abandon_option', 0.08) })
+  const chain = completeCausalChain(
+    {
+      chainId: record.chainId ?? 'missing',
+      optionId: record.optionId,
+      semanticOptionInstanceId: record.semanticOptionInstanceId,
+      planId: record.goalQueueState.current?.id ?? 'g3:collect:raw_iron',
+      strategy: record.strategy,
+    },
+    {
+      candidateId: 'MINE:b1_64_0',
+      actionId: 'MINE:b1_64_0',
+      verified: true,
+      status: 'done',
+      progressDelta: 1,
+      observable: true,
+    },
+  )
+  const json = JSON.stringify(causalRecord(chain))
+  const pass =
+    chain.optionId === 'collect:raw_iron' &&
+    chain.semanticOptionInstanceId === 'system2:front_raw_iron' &&
+    json.includes('"semanticOptionInstanceId":"system2:front_raw_iron"')
+  return { pass, detail: `option=${chain.optionId} semanticInstance=${chain.semanticOptionInstanceId}` }
 })
 
 addCase('#32: values around 0.5 stay distinguishable (0.01/0.49/0.51/0.99)', () => {

@@ -46,6 +46,18 @@ export class OptionCompilingSystem2 implements System2Brain {
     return this.inner.model
   }
 
+  get provider(): string | undefined {
+    return this.inner.provider
+  }
+
+  get authorityModel(): string | undefined {
+    return this.inner.authorityModel
+  }
+
+  get authorityStack(): { provider: string; model: string } | undefined {
+    return this.inner.authorityStack
+  }
+
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const plan = await this.inner.plan(request)
     if (!this.enabled || plan.goals.length === 0) return plan
@@ -60,6 +72,8 @@ export class OptionCompilingSystem2 implements System2Brain {
       compiled: result.goals.map((goal) => goal.description),
       specs: result.specs.map((spec) => spec.id),
       instanceIds: result.specs.map((spec) => stableOptionInstanceId(spec)),
+      semanticOptionInstanceIds: result.specs.map((spec) => spec.semanticOptionInstanceId ?? null),
+      semanticOptionTemplateIds: result.specs.map((spec) => spec.semanticOptionTemplateId ?? null),
       added: result.added,
       blocked: result.blocked,
       blockedOptions: result.blockedOptions,

@@ -5,7 +5,8 @@
 import { emptyWorldMemory } from './resident-types.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { GoalKind, GoalQueueSnapshot, GoalStatus, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import { ledgerIsConsistent, selectLedgerSnapshot } from './generation-entry.ts'
+import { evaluateLedgerRestoreBasis, ledgerIsConsistent, selectLedgerSnapshot } from './generation-entry.ts'
+import type { LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 
 interface Case {
   name: string
@@ -105,6 +106,46 @@ const BUG_LEDGER = ledgerOf([
 ])
 
 const cases: Case[] = [
+  {
+    name: 'legacy unfinished ledger is not authoritative without a live frontier basis',
+    expected: false,
+    observed: evaluateLedgerRestoreBasis(snapshot('collect', 'log'), {
+      worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+      frontierRungId: 'nether_portal',
+      frontierRungIndex: 12,
+    }).accept,
+  },
+  {
+    name: 'same world and frontier preserve an unfinished semantic ledger',
+    expected: true,
+    observed: (() => {
+      const basis: LedgerBasis = {
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        frontierRungId: 'charcoal',
+        frontierRungIndex: 6,
+      }
+      return evaluateLedgerRestoreBasis({ ...snapshot('smelt', 'charcoal'), basis }, basis).accept
+    })(),
+  },
+  {
+    name: 'frontier advancement invalidates the unfinished old semantic ledger',
+    expected: false,
+    observed: evaluateLedgerRestoreBasis(
+      {
+        ...snapshot('smelt', 'charcoal'),
+        basis: {
+          worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+          frontierRungId: 'charcoal',
+          frontierRungIndex: 6,
+        },
+      },
+      {
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        frontierRungId: 'nether_portal',
+        frontierRungIndex: 12,
+      },
+    ).accept,
+  },
   {
     name: 'active craft:furnace is stale when raw iron and two known furnaces are present',
     expected: false,

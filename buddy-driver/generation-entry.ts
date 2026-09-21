@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { Vec3 } from 'vec3'
 import { JevController } from '../jev-agent/src/controller.ts'
 import type { JevAgentOptions, RunSummary } from '../jev-agent/src/controller.ts'
-import type { GoalQueueSnapshot, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, LedgerBasis, PlannedGoal, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { System2Brain, System2PlanRequest } from '../jev-agent/src/system2.ts'
 import { resolveOptionCompilerEnabled } from '../jev-agent/src/optionSpec.ts'
 import { Advisor, resolveAdvisorMode } from './advisor.ts'
@@ -35,7 +35,7 @@ import type { MercuryStateSummary, MercuryTriggerReason } from './mercury-system
 import { installDescendAwarePolicy } from './system-one-policy.ts'
 import { assertActuationSurfaceCovered, createActuationPort, withActuationLease } from './resident-safety.ts'
 import { ACTUATION_PORT_OPERATIONS } from '../jev-agent/src/actuationPort.ts'
-import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
+import { countSensedPortalFrameBlocks, detectLivePortalVerification } from '../jev-agent/src/state.ts'
 import {
   PlannerBrain,
   RUNGS,
@@ -485,6 +485,28 @@ export function selectLedgerSnapshot(
   return null
 }
 
+/**
+ * A durable queue is semantic state, not an all-time action history. It may be
+ * restored only when its live world and mandatory frontier still match the
+ * state from which it was committed. Legacy snapshots without a basis are
+ * accepted only when they contain no unfinished work; otherwise the current
+ * generation must re-ground instead of reviving an old Option.
+ */
+export function evaluateLedgerRestoreBasis(
+  snapshot: GoalQueueSnapshot,
+  live: LedgerBasis,
+): { accept: boolean; reasons: string[] } {
+  const unfinished = snapshot.goals.some((goal) => goal.status === 'active' || goal.status === 'pending')
+  if (!unfinished) return { accept: true, reasons: [] }
+  const basis = snapshot.basis
+  if (basis === undefined) return { accept: false, reasons: ['missing_frontier_basis'] }
+  const reasons: string[] = []
+  if (basis.worldKey !== live.worldKey) reasons.push('world_key_changed')
+  if (basis.frontierRungIndex !== live.frontierRungIndex) reasons.push('frontier_index_changed')
+  if (basis.frontierRungId !== live.frontierRungId) reasons.push('frontier_id_changed')
+  return { accept: reasons.length === 0, reasons }
+}
+
 interface LedgerReconciliationDecision {
   usablePath: string | null
   reason: string | null
@@ -539,6 +561,7 @@ function restoreLedgerIntoController(
   ledgerPath: string | null,
   counts: Record<string, number>,
   world: ResidentWorldMemory,
+  liveBasis: LedgerBasis,
   log: (event: string, detail?: Record<string, unknown>) => void,
 ): void {
   let derivedSnapshot: GoalQueueSnapshot | null = null
@@ -557,13 +580,31 @@ function restoreLedgerIntoController(
     }
     return
   }
+  const basisDecision = evaluateLedgerRestoreBasis(chosen.snapshot, liveBasis)
+  if (!basisDecision.accept) {
+    log('LEDGER_RESTORE_DISCARDED', {
+      source: chosen.source,
+      reasons: basisDecision.reasons,
+      liveBasis,
+      snapshotBasis: chosen.snapshot.basis ?? null,
+      unfinished: chosen.snapshot.goals.filter((goal) => goal.status === 'active' || goal.status === 'pending').length,
+    })
+    return
+  }
   try {
     const holder = controller as unknown as { queue: { restore(snapshot: GoalQueueSnapshot): void } }
     holder.queue.restore(chosen.snapshot)
     const goals = snapshotGoals(chosen.snapshot)
     const done = goals.filter((goal) => goal.status === 'done').length
     const current = goals.find((goal) => goal.status === 'active' || goal.status === 'pending')
-    log('LEDGER_RESTORED', { source: chosen.source, done, total: goals.length, current: current?.description ?? null, reopened: chosen.reopened.length })
+    log('LEDGER_RESTORED', {
+      source: chosen.source,
+      done,
+      total: goals.length,
+      current: current?.description ?? null,
+      reopened: chosen.reopened.length,
+      basis: chosen.snapshot.basis ?? null,
+    })
     if (chosen.reopened.length > 0) {
       log('LEDGER_GOAL_REOPENED', { reason: 'live predicate unmet', goals: chosen.reopened })
     }
@@ -638,6 +679,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     traversalFailures: (ctx.worldMemory.traversalFailures ?? []).map((t) => ({ ...t, from: { ...t.from }, toward: { ...t.toward } })),
     moveFailures: (ctx.worldMemory.moveFailures ?? []).map((entry) => ({ ...entry })),
     hazards: (ctx.worldMemory.hazards ?? []).map((h) => ({ ...h })),
+    portalVerified: detectLivePortalVerification(ctx.bot),
+  }
+  const refreshLiveFacts = (reason: string): void => {
+    const next = detectLivePortalVerification(ctx.bot)
+    if (next === world.portalVerified) return
+    world.portalVerified = next
+    ctx.log('PORTAL_TRUTH', { verified: next, reason, source: 'live-world' })
   }
   const id = `gen-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const m2Snapshot =
@@ -652,8 +700,15 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
           worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
           dir: ctx.m2SnapshotDir,
           readInventory: () => inventoryCounts(ctx.bot),
+          initialInventory: counts,
           log: (event, detail) => ctx.log(event, detail),
         })
+  ctx.log('M2_SNAPSHOT_INIT', {
+    enabled: m2Snapshot !== null,
+    runId: ctx.runId ?? null,
+    dir: ctx.m2SnapshotDir ?? null,
+    path: m2Snapshot?.path ?? null,
+  })
   const bot = withActuationLease(ctx.bot, ctx.lease, id, ctx.resources, ctx.log)
   // #38: the generation actuates through this allowlist capability. Every method
   // asserts the lease; the raw Bot is not the actuation contract. The dev-only
@@ -937,6 +992,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     // Real Jev policy by default (key from the gateway key file or
     // AI_GATEWAY_API_KEY); deterministic fallback only when explicitly requested.
     forceFallbackPolicy: (process.env.BUDDY_POLICY ?? '').trim().toLowerCase() === 'fallback',
+    worldEpoch: ctx.worldKey.worldEpoch,
     terminateOnModelFailure: terminateResident,
     actuation: 'pathfinder',
     actuationPort,
@@ -945,7 +1001,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     verbose: true,
     eventSink: (event, detail) => {
       ctx.log(event, { ...detail, generationId: id })
-      m2Snapshot?.recordMarker(event)
+      m2Snapshot?.recordMarker(event, detail)
       const actionId = typeof detail.actionId === 'string' ? detail.actionId : null
       const verified = detail.verified === true
       const status = typeof detail.status === 'string' ? detail.status : null
@@ -996,7 +1052,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
   installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
-  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, ctx.log)
+  const liveLedgerBasis: LedgerBasis = {
+    worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+    frontierRungId: resume.rungId,
+    frontierRungIndex: resume.rungIndex,
+  }
+  restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
   const brain = new PlannerBrain({
     bot,
     world,
@@ -1008,6 +1069,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     mercury,
     terminate: terminateResident,
     postDeathRecovery,
+    refreshLiveFacts: () => refreshLiveFacts('system2-grounding'),
   })
 
   // #21: opt-in Option compiler. OFF by default, so the planner output continues
@@ -1030,7 +1092,14 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     rungId: ladder.rungId,
     goals: ladder.goals.map((goal) => goal.description),
     policy: controller.policyKind,
+    policyProvider: controller.policyProvider,
     model: controller.policyModel,
+    policyModel: controller.policyModel,
+    system2Provider: controller.system2Provider,
+    system2Model: controller.system2Model,
+    system2AuthorityStack: controller.system2AuthorityStack,
+    system2LastAuthority: { provider: controller.system2Provider, model: controller.system2Model },
+    deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
     planner: brain.mode,
     plannerModel: brain.model,
     plannerCache: cachePath,
@@ -1096,7 +1165,13 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function proposeLedger(): void {
     try {
       const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
-      ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: holder.queue.snapshot() })
+      const current = deriveResumeRung(inventoryCounts(bot), world)
+      const basis: LedgerBasis = {
+        worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+        frontierRungId: current.rungId,
+        frontierRungIndex: current.rungIndex,
+      }
+      ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: { ...holder.queue.snapshot(), basis } })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       ctx.log('ERROR', { id, where: 'proposeLedger', message })
@@ -1117,14 +1192,20 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   function status(): GenerationStatus {
+    refreshLiveFacts('status')
     const truth = readTruth()
     const frontier = deriveResumeRung(truth.inventory, world)
     const current = controller.agent.current
     return {
       running: controller.isRunning,
       policyKind: controller.policyKind,
+      policyProvider: controller.policyProvider,
       policyModel: controller.policyModel,
+      system2Provider: controller.system2Provider,
       system2Model: controller.system2Model,
+      system2AuthorityStack: controller.system2AuthorityStack,
+      system2LastAuthority: { provider: controller.system2Provider, model: controller.system2Model },
+      deterministicFallbackEnabled: controller.deterministicFallbackEnabled,
       queue: controller.goalQueueState,
       currentAction:
         current === null ? null : { id: current.id, kind: current.kind, phase: current.phase, startedAt: current.startedAt },
@@ -1132,6 +1213,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       plannedGoals: ladder.goals.length,
       rungIndex: frontier.rungIndex,
       rungId: frontier.rungId,
+      ledgerBasis: {
+        worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+        frontierRungId: frontier.rungId,
+        frontierRungIndex: frontier.rungIndex,
+      },
       ready,
       contractVersion: CONTRACT_VERSION,
       worldKey: ctx.worldKey,

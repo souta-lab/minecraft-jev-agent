@@ -277,6 +277,33 @@ addCase('a log outside sensor range with no route falls back to exploration', ()
   }
 })
 
+addCase('after a known retrieve retry budget is spent, exploration still approaches the known resource', () => {
+  const feet: Vec3Json = { x: 0, y: 52, z: 0 }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 0, y: 69, z: 4 } }
+  const knownId = `RETRIEVE:known:log:b${known.position.x}_${known.position.y}_${known.position.z}`
+  const state = worldState({
+    position: feet,
+    inventory: inventory({ cobblestone: 16, diamond_pickaxe: 1 }),
+    signals: signals({ knownResources: [known], failedCandidates: { [knownId]: 4 } }),
+    standable: [feet, { x: 0, y: 52, z: 2 }, { x: 4, y: 52, z: 0 }],
+    goalQueue: queueWith(queuedGoal({})),
+  })
+  const grounded = generateGroundedCandidates(state, options())
+  const route = logRouteOf(grounded.candidates)
+  const routeCandidate = grounded.candidates.find((candidate) => candidate.id === route?.candidateId)
+  const distance = (a: Vec3Json, b: Vec3Json): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+  const pass =
+    route?.mode === 'explore' &&
+    routeCandidate?.kind === 'MOVE' &&
+    routeCandidate.target !== null &&
+    distance(routeCandidate.target, known.position) < distance(feet, known.position) &&
+    routeCandidate.target.z === 2
+  return {
+    pass,
+    detail: `route=${route === null ? 'none' : formatLogRoute(route)} candidate=${routeCandidate?.id ?? 'none'} target=${JSON.stringify(routeCandidate?.target ?? null)}`,
+  }
+})
+
 // (3) a sensed log in reach -> mine_sensed, no exploration on top -----------------
 addCase('a sensed log in reach presents mine_sensed', () => {
   const feet: Vec3Json = { x: 0, y: 60, z: 0 }

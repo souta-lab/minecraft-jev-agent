@@ -25,6 +25,7 @@ import { formatActionUnverified } from './actionPostcondition.ts'
 import { abandonRequested } from './jev.ts'
 import type { JevResult } from './jev.ts'
 import type { WorldState } from './state.ts'
+import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
 
 type ApplyFurnacePrereq = (
   state: WorldState,
@@ -49,7 +50,7 @@ type AbandonVerdictLike = {
     shadowed: boolean
     protection: unknown
   }
-  optionId: string
+  optionId: string | null
   planId: string | null
 }
 
@@ -65,7 +66,8 @@ type LegacyInternals = {
   retireFailedKnownRetrieve?: (candidate: Candidate, result: ExecutionResult) => void
   abandonRetrieveOption?: (line: string, candidate: Candidate, unverified: number) => void
   onUnverifiedAction?: (result: ExecutionResult, postcondition: string, pending: PendingLike | undefined) => void
-  abandonVerdict?: (decision: JevResult, optionId: string, planId: string | null) => AbandonVerdictLike
+  abandonVerdict?: (decision: JevResult, optionId: string | null, planId: string | null) => AbandonVerdictLike
+  betaTerminationBoundary?: (decision: JevResult, optionId: string | null) => BetaTerminationBoundaryDecision
   protectedReplanSuppressed?: (reason: string) => boolean
   filterMoveCandidates?: (candidates: readonly Candidate[], state: WorldState, log?: boolean) => Candidate[]
   blacklistedMoveTargets?: (state: WorldState) => ReadonlySet<string>
@@ -372,13 +374,38 @@ export class JevController extends LegacyJevController {
       internals.abandonVerdict = (decision, optionId, planId) => {
         const baseline = legacyAbandonVerdict(decision, optionId, planId)
         if (!betaIsAuthoritative(internals)) return baseline
+        // With no current semantic Option there is nothing beta can end. Preserve
+        // the non-authoritative baseline so telemetry and mutation stay aligned.
+        if (optionId === null) return baseline
+
+        const boundary = internals.betaTerminationBoundary?.(decision, optionId)
+        if (abandonRequested(decision) && boundary !== undefined && !boundary.adopt) {
+          const probability = decision.answers.abandon_option?.probability ?? null
+          internals.logger?.warn(
+            'heads',
+            `BETA_DEFERRED option=${optionId} reason=${boundary.reason} beta=${probability}`,
+            { optionId, planId, beta: probability, reason: boundary.reason, action: decision.answers.action?.value ?? null },
+            internals.tickCounter,
+          )
+          return {
+            ...baseline,
+            adopt: false,
+            enforced: false,
+            suppressed: true,
+            vote: {
+              ...baseline.vote,
+              adopt: false,
+              shadowed: false,
+            },
+          }
+        }
 
         // #11 beta v2: semantic termination has one owner. The legacy verdict is
         // retained only to preserve typed logging metadata; its attempt counts,
         // protection ladder and enforced/suppressed classification cannot alter
         // the live decision. Deterministic completion/hard invalidity still live
         // outside beta in the ordinary queue/guard/VERIFY path.
-        const adopt = abandonRequested(decision)
+        const adopt = abandonRequested(decision) && (boundary?.adopt ?? true)
         return {
           ...baseline,
           adopt,

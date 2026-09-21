@@ -1080,6 +1080,104 @@ function blockNameAt(b: Bot, x: number, y: number, z: number): string {
   }
 }
 
+const STATE_HAZARDS = new Set([
+  'cactus', 'campfire', 'fire', 'lava', 'magma_block', 'powder_snow',
+  'pointed_dripstone', 'soul_campfire', 'soul_fire', 'sweet_berry_bush',
+])
+
+/** Read-only host-side world truth for the external world-player-state tool. */
+function liveStateSnapshot(b: Bot, status: GenerationStatus | null, radius: number, verticalRadius: number): Record<string, unknown> {
+  const entity = b.entity
+  const position = entity === undefined ? null : { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+  const truth = status?.truth ?? {
+    position,
+    health: b.health ?? null,
+    food: b.food ?? null,
+    dimension: normalizeDimension(b.game?.dimension),
+    onGround: null,
+    inventory: inventorySummary(b),
+  }
+  const center = position === null ? null : new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z))
+  const counts: Record<string, number> = {}
+  const hazards: Array<Record<string, unknown>> = []
+  const portals: Array<Record<string, number>> = []
+  let unknown = 0
+  if (center !== null) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      for (let dy = -verticalRadius; dy <= verticalRadius; dy += 1) {
+        for (let dz = -radius; dz <= radius; dz += 1) {
+          const x = center.x + dx
+          const y = center.y + dy
+          const z = center.z + dz
+          const name = blockNameAt(b, x, y, z)
+          if (name === 'unknown') {
+            unknown += 1
+            continue
+          }
+          counts[name] = (counts[name] ?? 0) + 1
+          if (STATE_HAZARDS.has(name)) hazards.push({ name, position: { x, y, z } })
+          if (name === 'nether_portal') portals.push({ x, y, z })
+        }
+      }
+    }
+  }
+  const support = center === null
+    ? { name: null, position: null }
+    : { name: blockNameAt(b, center.x, center.y - 1, center.z), position: { x: center.x, y: center.y - 1, z: center.z } }
+  const entities: Array<Record<string, unknown>> = []
+  if (center !== null) {
+    for (const candidate of Object.values(b.entities)) {
+      const candidatePosition = candidate.position
+      if (candidatePosition === undefined) continue
+      const distance = Math.hypot(candidatePosition.x - center.x, candidatePosition.y - center.y, candidatePosition.z - center.z)
+      if (distance > radius) continue
+      entities.push({
+        id: candidate.id,
+        username: candidate.username ?? null,
+        name: candidate.name ?? candidate.mobType ?? null,
+        type: candidate.type ?? null,
+        kind: candidate.kind ?? null,
+        distance: Number(distance.toFixed(3)),
+        position: { x: candidatePosition.x, y: candidatePosition.y, z: candidatePosition.z },
+        health: Number.isFinite(candidate.health) ? candidate.health : null,
+      })
+    }
+  }
+  entities.sort((a, b2) => Number(a.distance ?? Infinity) - Number(b2.distance ?? Infinity))
+  return {
+    capturedAt: new Date().toISOString(),
+    runId,
+    generationHash,
+    generationId: leaseManager.activeId.length > 0 ? leaseManager.activeId : null,
+    worldKey: currentWorldKey(),
+    truth,
+    world: {
+      dimension: normalizeDimension(b.game?.dimension),
+      version: b.version ?? null,
+      serverBrand: b.game?.serverBrand ?? null,
+      levelType: b.game?.levelType ?? null,
+      timeOfDay: b.time?.timeOfDay ?? null,
+      day: b.time?.day ?? null,
+      raining: typeof b.isRaining === 'boolean' ? b.isRaining : null,
+      thunderState: b.thunderState ?? null,
+    },
+    area: {
+      radius,
+      verticalRadius,
+      blocks: {
+        counts,
+        unknown,
+        hazards,
+        portals,
+        portalInteriorCount: portals.length,
+        obsidianCount: counts.obsidian ?? 0,
+        support,
+      },
+      entities,
+    },
+  }
+}
+
 /** Best-effort death cause from the pre-death position and surroundings. */
 function inferDeathCause(b: Bot, pos: Vec3Json | null, healthBefore: number | null): string {
   if (pos === null) return 'unknown'
@@ -1442,7 +1540,7 @@ setInterval(() => {
       action: status.currentAction?.kind ?? 'idle',
       inv: shortInv(truth.inventory),
     })
-    commitHostLedger(goalQueueSnapshotFromState(status.queue), 'heartbeat')
+    commitHostLedger(goalQueueSnapshotFromState(status.queue, status.ledgerBasis), 'heartbeat')
   }
 }, OBSERVE_MS)
 
@@ -1784,6 +1882,19 @@ function freezeReport(reason: string, status: unknown): string {
 
 async function handleControl(request: ControlRequest, socket: Socket): Promise<void> {
   const cmd = request.cmd ?? ''
+  if (cmd === 'state') {
+    if (bot === null || bot.entity === undefined) {
+      controlReply(socket, request, false, { error: 'no live bot' })
+      return
+    }
+    const rawRadius = Number(request.args?.radius ?? 8)
+    const rawVerticalRadius = Number(request.args?.verticalRadius ?? 4)
+    const radius = Number.isFinite(rawRadius) ? Math.max(1, Math.min(16, Math.floor(rawRadius))) : 8
+    const verticalRadius = Number.isFinite(rawVerticalRadius) ? Math.max(1, Math.min(8, Math.floor(rawVerticalRadius))) : 4
+    const status = generation === null ? null : generation.status()
+    controlReply(socket, request, true, liveStateSnapshot(bot, status, radius, verticalRadius))
+    return
+  }
   if (cmd === 'report' || cmd === 'status') {
     const status = generation === null ? null : generation.status()
     const memory = keyedMemory()

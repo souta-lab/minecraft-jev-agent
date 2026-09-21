@@ -91,6 +91,54 @@ function fakeBot(sensed: Record<string, Vec3Json[]>): Bot {
   } as never
 }
 
+/** Sensor double for the mechanical prerequisite scan. */
+function fakeStonePrerequisiteBot(): Bot {
+  const position = new Vec3(29.12, 47.75, 34.19)
+  const blocks = new Map<string, { name: string; boundingBox: string; diggable: boolean }>([
+    ['31,47,34', { name: 'stone', boundingBox: 'block', diggable: true }],
+    ['30,46,34', { name: 'stone', boundingBox: 'block', diggable: true }],
+    // This producer is in the same column below a buried stone cell. The
+    // capability scan must retain it even though the exposed-column scan stops
+    // at the buried cell.
+    ['30,47,35', { name: 'andesite', boundingBox: 'block', diggable: true }],
+  ])
+  const key = (p: { x: number; y: number; z: number }): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
+  const blockAt = (p: { x: number; y: number; z: number }) =>
+    blocks.get(key(p)) ?? { name: 'air', boundingBox: 'empty', diggable: false }
+  const findBlocks = (options: {
+    matching: (block: { name: string }) => boolean
+    maxDistance: number
+    count: number
+  }): unknown[] => {
+    const origin = new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z))
+    return [...blocks.entries()]
+      .filter(([, block]) => options.matching(block))
+      .map(([cell]) => {
+        const [x, y, z] = cell.split(',').map(Number)
+        return new Vec3(x, y, z)
+      })
+      .filter((block) => block.distanceTo(origin) <= options.maxDistance)
+      .slice(0, options.count)
+  }
+  return {
+    username: 'AI_PERC_STONE',
+    entity: { id: 2, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: null,
+    health: 20,
+    food: 20,
+    game: { gameMode: 'survival', dimension: 'overworld', minY: -64, height: 384 },
+    time: { isDay: true },
+    registry: require('minecraft-data')('1.21.11'),
+    entities: {},
+    inventory: {
+      items: () => [{ name: 'diamond_pickaxe', count: 1, slot: 0 }],
+    },
+    blockAt,
+    canSeeBlock: () => true,
+    findBlocks,
+  } as never
+}
+
 function signals(overrides: Partial<AgentSignals> = {}): AgentSignals {
   return {
     consecutiveFailures: 0,
@@ -207,6 +255,44 @@ addCase('(1) omitting rememberedStations falls back to signals.knownResources', 
   )
   const pass = state.craftingTables.some((entry) => entry.source === 'remembered' && entry.x === 31)
   return { pass, detail: JSON.stringify(state.craftingTables) }
+})
+
+addCase('(1) a missing placeable capability keeps a grounded stone producer in perception', () => {
+  const state = buildWorldState(
+    fakeStonePrerequisiteBot(),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const stones = state.blocks.filter((block) => block.kind === 'stone' && block.yield === 'cobblestone')
+  const pass = stones.some((stone) => stone.position.x === 31 && stone.position.y === 47 && stone.position.z === 34)
+  return { pass, detail: `stones=${JSON.stringify(stones)} blocks=${state.blocks.length}` }
+})
+
+addCase('(1) a near placeable producer below a buried column cell remains sensed', () => {
+  const state = buildWorldState(
+    fakeStonePrerequisiteBot(),
+    {
+      tick: 1,
+      goal: makeGoal('log', 1),
+      goalQueue: emptyGoalQueueState(),
+      focusItem: 'log',
+      recentEvents: [],
+      signals: signals(),
+    },
+    defaultSensorOptions,
+  )
+  const producer = state.blocks.find(
+    (block) => block.kind === 'stone' && block.name === 'andesite' && block.position.x === 30 && block.position.y === 47 && block.position.z === 35,
+  )
+  const pass = producer !== undefined && producer.inReach
+  return { pass, detail: `producer=${JSON.stringify(producer ?? null)}` }
 })
 
 // --- (2) remembered coordinates never satisfy an in-reach predicate ------------

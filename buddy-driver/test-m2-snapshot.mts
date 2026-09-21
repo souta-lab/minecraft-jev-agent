@@ -25,7 +25,13 @@ const addCase = (name: string, run: Case['run']): void => {
 const RUN_A = 'run-aaaa'
 const RUN_B = 'run-bbbb'
 
-function recorders(dir: string, runId: string, inventory: () => Counts, generationId = 'gen-one') {
+function recorders(
+  dir: string,
+  runId: string,
+  inventory: () => Counts,
+  generationId = 'gen-one',
+  initialInventory?: Counts,
+) {
   let clock = Date.parse('2026-09-19T18:21:50.000Z')
   const recorder = new M2SnapshotRecorder({
     runId,
@@ -36,6 +42,7 @@ function recorders(dir: string, runId: string, inventory: () => Counts, generati
     worldKey: '127.0.0.1:25565|minecraft:overworld|3',
     dir,
     readInventory: inventory,
+    ...(initialInventory === undefined ? {} : { initialInventory }),
     now: () => (clock += 1000),
   })
   return recorder
@@ -243,6 +250,39 @@ addCase('the valid chain keeps the first FURNACE_READY sample when a repeat cons
         furnace?.inventory.charcoal === 1 &&
         smelt?.inventory.iron_ingot === 3,
       detail: `chain=${snapshot?.chain.status} furnaceCharcoal=${furnace?.inventory.charcoal} smeltIngot=${smelt?.inventory.iron_ingot}`,
+    }
+  }),
+)
+
+addCase('the current diamond-to-Nether portal chain keeps typed marker details and initial inventory', () =>
+  withTempDir((dir) => {
+    const recorder = recorders(
+      dir,
+      RUN_A,
+      () => ({ flint_and_steel: 1 }),
+      'gen-portal',
+      { diamond: 3, diamond_pickaxe: 1, flint_and_steel: 1, obsidian: 10 },
+    )
+    recorder.recordMarker('PORTAL_BLOCK_PLACED', { target: { x: 7, y: 68, z: 5 } })
+    recorder.recordMarker('PORTAL_FRAME_READY', { at: '7,72,5', blocks: 10, shape: 'ok' })
+    recorder.recordMarker('PORTAL_LIT', {
+      target: { x: 7, y: 69, z: 5 },
+      dimension: 'minecraft:overworld',
+    })
+    recorder.recordMarker('PORTAL_VERIFIED', { verified: true, dimension: 'minecraft:overworld' })
+    const snapshot = readM2SnapshotFile(RUN_A, dir)
+    const frame = snapshot?.markers.find((marker) => marker.name === 'PORTAL_FRAME_READY')
+    const lit = snapshot?.markers.find((marker) => marker.name === 'PORTAL_LIT')
+    const verified = snapshot?.markers.find((marker) => marker.name === 'PORTAL_VERIFIED')
+    return {
+      pass:
+        snapshot?.initialInventory?.obsidian === 10 &&
+        snapshot?.markers.length === 4 &&
+        frame?.blocks === 10 &&
+        frame.shape === 'ok' &&
+        lit?.dimension === 'minecraft:overworld' &&
+        verified?.verified === true,
+      detail: `initial=${JSON.stringify(snapshot?.initialInventory)} frame=${JSON.stringify(frame)} lit=${JSON.stringify(lit)} verified=${JSON.stringify(verified)}`,
     }
   }),
 )

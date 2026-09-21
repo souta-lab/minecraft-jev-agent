@@ -24,7 +24,7 @@ import { DEFAULT_JEV_MODEL, resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, describeFailure, failLoud, withModelRetries } from '../jev-agent/src/modelFailure.ts'
 import { parseCapabilityGap } from '../jev-agent/src/replanThrottle.ts'
-import type { ResidentWorldMemory } from './resident-types.ts'
+import type { KnownStation, ResidentWorldMemory } from './resident-types.ts'
 import type { MercurySystem2, MercuryTriggerReason } from './mercury-system2.ts'
 import { countSensedPortalFrameBlocks } from '../jev-agent/src/state.ts'
 import {
@@ -74,6 +74,48 @@ function uniqueOptions(options: readonly PlanOption[]): PlanOption[] {
     out.push(option)
   }
   return out
+}
+
+/**
+ * System2 grounding must use current server truth for nearby stations, not only
+ * the durable station memory. A remembered station can be invalidated as stale
+ * while the same live block is already loaded near the bot; using memory alone
+ * then invents a false `crafting_table`/`furnace` prerequisite and changes the
+ * semantic option set. This helper only augments CAN/TRUE facts; it does not
+ * choose, rank, or synthesize a semantic goal.
+ */
+function liveStationFacts(bot: Bot, names: ReadonlySet<string>, maxDistance: number, count: number): KnownStation[] {
+  try {
+    const positions = bot.findBlocks({
+      matching: (block) => names.has(block.name),
+      maxDistance,
+      count,
+    })
+    return positions.map((position) => ({ x: position.x, y: position.y, z: position.z }))
+  } catch {
+    return []
+  }
+}
+
+export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWorldMemory): ResidentWorldMemory {
+  const tables = liveStationFacts(bot, new Set(['crafting_table']), 48, 64)
+  const furnaces = liveStationFacts(bot, new Set(['furnace', 'blast_furnace', 'smoker']), 48, 32)
+  const merge = (remembered: readonly KnownStation[], sensed: readonly KnownStation[]): KnownStation[] => {
+    const out = [...remembered]
+    const seen = new Set(out.map((station) => `${station.x},${station.y},${station.z}`))
+    for (const station of sensed) {
+      const key = `${station.x},${station.y},${station.z}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(station)
+    }
+    return out
+  }
+  return {
+    ...world,
+    craftingTables: merge(world.craftingTables, tables),
+    furnaces: merge(world.furnaces, furnaces),
+  }
 }
 
 /** Mercury is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
@@ -162,8 +204,11 @@ export class PlannerBrain implements System2Brain {
   private readonly maxCalls: number
   private readonly resolveKey: () => KeyResolution | null
   private readonly terminate: (() => never) | undefined
+  private readonly refreshLiveFacts: (() => void) | undefined
   private readonly legacy: LegacyPlannerBrain
   private readonly mercury: MercurySystem2 | undefined
+  private lastAuthorityProvider: string
+  private lastAuthorityModel: string
   private calls = 0
 
   constructor(options: PlannerOptions) {
@@ -176,8 +221,11 @@ export class PlannerBrain implements System2Brain {
     this.maxCalls = options.maxCalls ?? Number(process.env.BUDDY_PLANNER_MAX_CALLS ?? 200)
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
+    this.refreshLiveFacts = options.refreshLiveFacts
     this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.mercury = options.mercury
+    this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
+    this.lastAuthorityModel = this.mode === 'deterministic' ? this.model : 'none'
 
     // Baseline is intentionally hermetic: no Advisor/Mercury/model exception path
     // may run when the owner explicitly selected deterministic mode.
@@ -190,19 +238,36 @@ export class PlannerBrain implements System2Brain {
     })
   }
 
+  /** Provider and model that actually own the current System2 semantic choice. */
+  get provider(): string {
+    return this.lastAuthorityProvider
+  }
+
+  get authorityModel(): string {
+    return this.lastAuthorityModel
+  }
+
+  get authorityStack(): { provider: string; model: string } {
+    if (this.mode === 'deterministic') return { provider: 'deterministic', model: this.model }
+    if (this.mercury === undefined) return { provider: 'typesafe-ai', model: this.model }
+    return { provider: 'hybrid', model: `typesafe-ai:${this.model}|mercury:${this.mercury.model}` }
+  }
+
   async plan(request: System2PlanRequest): Promise<System2Plan> {
+    this.refreshLiveFacts?.()
     if (this.mode === 'deterministic') return this.legacy.plan(request)
     return this.planWithModelAuthority(request)
   }
 
   private groundedOptions(request: System2PlanRequest): PlanOption[] {
     const counts = inventoryCounts(this.bot)
-    const rung = resolveRungSourceOfTruth(counts, this.world, this.log)
+    const planningWorld = augmentPlannerWorldWithLiveStations(this.bot, this.world)
+    const rung = resolveRungSourceOfTruth(counts, planningWorld, this.log)
     const portalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
     this.log('PORTAL_FRAME_PROGRESS', { blocks: portalFrameBlocks, source: 'system2-grounding' })
-    const options = buildPlanOptions(counts, this.world, {
+    const options = buildPlanOptions(counts, planningWorld, {
       placedFurnacesNear: this.placedFurnacesNear(),
-      knownFurnaces: this.world.furnaces.length,
+      knownFurnaces: planningWorld.furnaces.length,
       resumeRungIndex: rung.adoptedRungIndex,
       portalFrameBlocks,
       log: this.log,
@@ -220,17 +285,21 @@ export class PlannerBrain implements System2Brain {
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
     const mercuryTrigger = mercuryTriggerFor(request)
     if (this.mercury !== undefined && mercuryTrigger !== null) {
+      this.lastAuthorityProvider = 'mercury'
+      this.lastAuthorityModel = this.mercury.model
       this.log('SYSTEM2_AUTHORITY_INPUT', {
-        model: this.mercury.model,
-        source: 'mercury',
+        provider: this.provider,
+        model: this.authorityModel,
+        source: this.provider,
         trigger: mercuryTrigger,
         reason: request.reason,
       })
       const repair = await this.mercury.tryRepair(request, mercuryTrigger)
       if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
       this.log('SYSTEM2_AUTHORITY_DECISION', {
-        model: this.mercury.model,
-        source: 'mercury',
+        provider: this.provider,
+        model: this.authorityModel,
+        source: this.provider,
         trigger: mercuryTrigger,
         op: repair.op,
         strategy: repair.strategy,
@@ -238,6 +307,8 @@ export class PlannerBrain implements System2Brain {
       })
       return repair.plan
     }
+    this.lastAuthorityProvider = 'typesafe-ai'
+    this.lastAuthorityModel = this.model
     const options = this.groundedOptions(request)
     if (options.length === 0) return this.fatal('planner-no-grounded-options', 'System2 has no grounded semantic options')
     if (this.calls >= this.maxCalls) return this.fatal('planner-budget', `model call budget exhausted (${this.maxCalls})`)
@@ -259,7 +330,8 @@ export class PlannerBrain implements System2Brain {
     } satisfies Record<string, Experimental_EvaluationQuestion>
 
     this.log('SYSTEM2_AUTHORITY_INPUT', {
-      model: this.model,
+      provider: this.provider,
+      model: this.authorityModel,
       reason: request.reason,
       optionIds: options.map((option) => option.id),
       capabilityGap: parseCapabilityGap(request.recentEvents),
@@ -291,7 +363,8 @@ export class PlannerBrain implements System2Brain {
       )
       this.calls += 1
       this.log('SYSTEM2_AUTHORITY_DECISION', {
-        model: this.model,
+        provider: this.provider,
+        model: this.authorityModel,
         reason: request.reason,
         chosen: selected.id,
         goals: selected.goals.map((goal) => goal.description),
@@ -301,9 +374,16 @@ export class PlannerBrain implements System2Brain {
       // fallback, advisor override, queue_empty override, or stall override.
       // Mechanical compilation/guards may reject a goal later; WHAT remains the
       // model's exact grounded choice.
+      const semanticOptionTemplateId = selected.id
+      const semanticOptionInstanceId = `system2:${selected.id}`
       return {
         op: 'replace',
-        goals: selected.goals.map((goal) => ({ ...goal })),
+        goals: selected.goals.map((goal) => ({
+          ...goal,
+          semanticOptionInstanceId,
+          semanticOptionTemplateId,
+          semanticOptionIntent: selected.title,
+        })),
         note: `model-authoritative System2 chose ${selected.id}`,
       }
     } catch (error) {

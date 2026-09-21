@@ -26,7 +26,7 @@ import { applyReachabilityGate, defaultCandidateOptions } from './src/candidates
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { capabilityKey } from './src/reachability.ts'
-import type { DescentOption, GoalState, InventoryState, StepCut, Vec3Json, WorldState } from './src/state.ts'
+import type { BlockState, DescentOption, GoalState, InventoryState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 
 let failures = 0
 function check(label: string, ok: boolean, detail: string): void {
@@ -175,6 +175,41 @@ function unreachableMove(tick: number): Candidate {
   }
 }
 
+/** A local safety action that must not suppress semantic route recovery. */
+function attackCandidate(tick: number): Candidate {
+  return {
+    id: 'ATTACK:e42',
+    kind: 'ATTACK',
+    label: 'attack the nearby hostile entity',
+    targetName: 'zombie',
+    target: { x: 2, y: 60, z: 0 },
+    targetEntityId: 42,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick, entityId: 42, distance: 2 },
+  }
+}
+
+function reachableGoalRoute(tick: number): Candidate {
+  return {
+    id: 'RETRIEVE:known:furnace:b3_60_0',
+    kind: 'RETRIEVE',
+    label: 'return to the remembered furnace for the active goal',
+    targetName: 'furnace',
+    target: FRONTIER,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { tick, resource: 'furnace', resourceKind: 'station' },
+  }
+}
+
 /** `no_path` for the withheld target only; the frontier stays reachable. */
 const pathProbe = (position: Vec3Json): 'no_path' | 'reachable' =>
   position.x === OPEN_TARGET.x && position.z === OPEN_TARGET.z ? 'no_path' : 'reachable'
@@ -223,6 +258,29 @@ function downDescent(): DescentOption {
   }
 }
 
+function levelDescent(dir: 'E' | 'W', step: Vec3Json): DescentOption {
+  const wall = { x: step.x, y: step.y, z: step.z }
+  return {
+    dir,
+    mode: 'level',
+    dx: dir === 'E' ? 1 : -1,
+    dz: 0,
+    step,
+    wall,
+    head: { x: step.x, y: step.y + 1, z: step.z },
+    floor: { x: step.x, y: step.y - 1, z: step.z },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: null,
+    digHarvestTool: null,
+    digHarvestTier: null,
+    diggable: true,
+  }
+}
+
 function main(): void {
   process.stdout.write('candidate recovery: an unreachable locomotion target still yields route-opening facts\n')
   process.stdout.write('-'.repeat(78) + '\n')
@@ -232,6 +290,59 @@ function main(): void {
     goalQueue: queueWith(queuedGoal('furnace', 'place')),
     stepCuts: [safeStepCut()],
   })
+
+  // A vertical retrieval can be mechanically valid except for the held
+  // pillar block.  The capability gate must expose a nearby stone producer as
+  // a typed prerequisite, rather than collapsing the active Option to
+  // WAIT/ESCALATE.
+  {
+    const stone: BlockState = {
+      kind: 'stone',
+      name: 'stone',
+      position: { x: 1, y: 60, z: 0 },
+      distance: 1,
+      diggable: true,
+      inReach: true,
+      hasAdjacentStandable: true,
+      adjacentStandable: BOT,
+      yield: 'cobblestone',
+      harvestTool: 'pickaxe',
+      harvestTier: 0,
+      visible: true,
+    }
+    const ascentState = worldState({
+      goal: goal('log'),
+      goalQueue: queueWith(queuedGoal('log', 'collect')),
+      inventory: inventory({ diamond_pickaxe: 1 }),
+      blocks: [stone],
+    })
+    const blockedRetrieve: Candidate = {
+      id: 'RETRIEVE:known:log:b0_70_0',
+      kind: 'RETRIEVE',
+      label: 'return to remembered log',
+      targetName: 'oak_log',
+      target: { x: 0, y: 70, z: 0 },
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: false,
+      hasStandableAdjacent: true,
+      meta: { tick: ascentState.tick, retrieval: 'known', resource: 'log', resourceKind: 'log' },
+    }
+    const grounded = applyReachabilityGate([waitCandidate(ascentState.tick), blockedRetrieve], ascentState, optionsWith())
+    const prerequisite = grounded.candidates.find(
+      (candidate) => candidate.meta.missingCapability === 'placeable_block',
+    )
+    check(
+      '(f) a missing placeable block exposes a stone producer as a typed prerequisite',
+      prerequisite?.kind === 'MINE' &&
+        prerequisite.meta.capabilityAcquisition === true &&
+        prerequisite.meta.optionSkill === 'PREREQUISITE' &&
+        prerequisite.meta.prerequisiteRole === 'placeable_block',
+      `prerequisite=${prerequisite?.id ?? 'none'} role=${String(prerequisite?.meta.prerequisiteRole ?? 'none')} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+    )
+  }
 
   // (a) RED on 928601f: open_path contributed no enabling candidates, so the
   // only family on offer was WAIT. The generic STEP + explore-MOVE must appear.
@@ -300,6 +411,23 @@ function main(): void {
     )
   }
 
+  // (b2) A nearby hostile entity may add a local safety choice, but that
+  // choice is not a grounded route for the active semantic goal. Keeping it
+  // in Jev's set must not hide the generic route-opening facts.
+  {
+    const grounded = applyReachabilityGate(
+      [waitCandidate(placeGoalState.tick), attackCandidate(placeGoalState.tick), unreachableMove(placeGoalState.tick)],
+      placeGoalState,
+      optionsWith(),
+    )
+    const recovery = grounded.candidates.filter((candidate) => candidate.meta.capabilityAcquisition === true)
+    check(
+      '(b2) ATTACK does not suppress semantic route recovery',
+      grounded.candidates.some((candidate) => candidate.id === 'ATTACK:e42') && recovery.length >= 2,
+      `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] recovery=[${recovery.map((candidate) => candidate.id).join(',')}]`,
+    )
+  }
+
   // (c) Generic: the same arm exposes the DESCEND family for a collect goal with
   // a proven safe down step. No item/coordinate special-casing.
   {
@@ -320,6 +448,59 @@ function main(): void {
       '(c) a collect goal with a safe down step yields the DESCEND recovery candidate',
       descend !== undefined && descend.meta.missingCapability === 'open_path' && descend.meta.safe === true,
       `descend=${descend === undefined ? 'none' : `${descend.id} -> ${String(descend.target?.x)},${String(descend.target?.y)},${String(descend.target?.z)}`} candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+    )
+  }
+
+  // (d) A route-continuation MOVE must remain tied to the refused target.  The
+  // live underground loop alternated between nearby level steps that did not
+  // converge on the remembered log.  Keep the generic STEP/DESCEND families,
+  // but withdraw the non-convergent MOVE facts so Jev cannot select a local
+  // walk forever after the first useful step.
+  {
+    const routeState = worldState({
+      goal: goal('furnace'),
+      goalQueue: queueWith(queuedGoal('furnace', 'place')),
+      descent: [
+        levelDescent('E', { x: 3, y: 60, z: 0 }),
+        levelDescent('W', { x: -3, y: 60, z: 0 }),
+      ],
+      standable: [BOT],
+    })
+    const grounded = applyReachabilityGate(
+      [waitCandidate(routeState.tick), unreachableMove(routeState.tick)],
+      routeState,
+      optionsWith(),
+    )
+    const acquisitions = grounded.candidates.filter(
+      (candidate) => candidate.meta.capabilityAcquisition === true && candidate.kind === 'MOVE',
+    )
+    const convergent = acquisitions.some((candidate) => candidate.target?.x === 3)
+    const divergent = acquisitions.some((candidate) => candidate.target?.x === -3)
+    check(
+      '(d) route recovery keeps a MOVE that closes on the withheld target',
+      convergent,
+      `moves=[${acquisitions.map((candidate) => candidate.id).join(',')}] target=${OPEN_TARGET.x},${OPEN_TARGET.y},${OPEN_TARGET.z}`,
+    )
+    check(
+      '(d) route recovery removes a MOVE that increases target distance',
+      !divergent,
+      `moves=[${acquisitions.map((candidate) => candidate.id).join(',')}] divergent=${divergent}`,
+    )
+  }
+
+  // (e) Once the active goal already has a grounded direct route, generic
+  // open_path recovery must not compete with it and trigger a jump/pillar loop.
+  {
+    const grounded = applyReachabilityGate(
+      [waitCandidate(7), reachableGoalRoute(7), unreachableMove(7)],
+      placeGoalState,
+      optionsWith(),
+    )
+    const recovery = grounded.candidates.filter((candidate) => candidate.meta.capabilityAcquisition === true)
+    check(
+      '(e) a grounded goal route suppresses competing generic locomotion recovery',
+      recovery.length === 0 && grounded.candidates.some((candidate) => candidate.id === reachableGoalRoute(7).id),
+      `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] recovery=[${recovery.map((candidate) => candidate.id).join(',')}]`,
     )
   }
 

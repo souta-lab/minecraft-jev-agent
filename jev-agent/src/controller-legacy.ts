@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatSmeltInputPrereq, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, logRouteOf, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, ReachabilityGateOptions } from './candidates.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
 import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
@@ -75,7 +75,7 @@ import type { JevPolicy, JevResult, QuestionSetKind } from './jev.ts'
 import { guardDecision, guardRejectionChargesOption } from './policy.ts'
 import { formatMoveUnreachable, MOVE_VERTICAL_GAP_LIMIT, unreachableMove } from './policy.ts'
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
-import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, TRIGGER_PRIORITY } from './scheduler.ts'
+import { DECISION_TRIGGERS, DecisionScheduler, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { buildWorldState, defaultSensorOptions, isSensedStation, makeGoal, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
@@ -140,9 +140,18 @@ import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
-import { evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import type { ActionOutcomeTaxonomy } from './actionPostcondition.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
+import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
+import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
+import {
+  evaluateBetaTerminationBoundary,
+  evaluateCandidateStarvationBoundary,
+  shouldWakeSystem2AfterLocalFailure,
+} from './system2Escalation.ts'
+import type { BetaTerminationBoundaryDecision } from './system2Escalation.ts'
 
 export type EscalationReason =
   | 'low_confidence'
@@ -310,8 +319,10 @@ export interface JevAgentOptions {
    * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
    * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
-   */
+  */
   prereqRankPolicy: PrereqRankPolicy
+  /** resident world epoch captured when this controller generation was created */
+  worldEpoch: number
 }
 
 export const defaultJevAgentOptions: JevAgentOptions = {
@@ -356,6 +367,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   replanThrottleMs: resolveReplanThrottleMs(),
   replanPositionDelta: resolveReplanPositionDelta(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
+  worldEpoch: 0,
 }
 
 export interface RunSummary {
@@ -644,8 +656,8 @@ export function decideKnownRetrieve(input: KnownRetrieveDecisionInput): KnownRet
  * vertical chunk. Clearing on that chunk re-armed the live
  * `RETRIEVE:known:raw_iron` loop: `PATH_CALLBACK ... outcome=stuck` followed by
  * `verified=true status=done` and `MOVE_FAILMEM_RESET`, forever. Surface
- * (explore) retrieves and known retrieves that actually arrived keep the old
- * clear behaviour.
+ * waypoints are a separate search frontier and never own an active resource
+ * stall track, so they must not clear this memory.
  */
 export function shouldClearActiveRetrieval(input: {
   retrieval: unknown
@@ -653,7 +665,7 @@ export function shouldClearActiveRetrieval(input: {
   arrived: boolean
 }): boolean {
   if (!input.hasObservableProgress) return false
-  if (input.retrieval !== 'known') return true
+  if (input.retrieval !== 'known') return false
   return input.arrived
 }
 
@@ -860,7 +872,7 @@ interface AbandonVerdict {
   suppressed: boolean
   classification: AbandonClassification
   vote: BetaAuthorityDecision
-  optionId: string
+  optionId: string | null
   planId: string | null
 }
 
@@ -899,11 +911,19 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'OSCILLATION_DETECTED',
   'RETURN_TO_KNOWN_RESOURCE',
   'RETRIEVE_STALLED',
+  'LOCAL_RETRIEVAL_STALL',
+  'LOCAL_RETRIEVE_RECOVERY',
+  'LOCAL_DESCEND_STALL',
+  'LOCAL_OSCILLATION_ESCAPE',
+  'LOCAL_PROGRESS_STALL',
+  'LOCAL_MOVE_OSCILLATION',
+  'LOCAL_WAIT_RECOVERY',
   'KNOWN_RESOURCE_STALE',
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
   'CAPABILITY_GAP',
+  'LOCAL_CAPABILITY_GAP',
   'CAPABILITY_GAP_POLICY',
   'CAPABILITY_GAP_CLEARED',
   'RETURN_TO_SURFACE',
@@ -919,6 +939,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SMELT_DONE',
   'SMELT_INPUT_PREREQ',
   'CRAFT_INGREDIENT_PREREQ',
+  // Portal milestones are run-scoped acceptance evidence as well as human
+  // diagnostics. Keep them on the same mirrored event path so the host-owned
+  // M2 snapshot recorder receives the structured detail object; reconstructing
+  // these markers from the all-time JSONL would lose run/generation authority.
+  'PORTAL_SUPPORT_PLACED',
+  'PORTAL_BLOCK_PLACED',
+  'PORTAL_FRAME_READY',
+  'PORTAL_LIT',
+  'PORTAL_VERIFIED',
+  'PORTAL_LIGHT_REFUSED',
   'OSCILLATION_DETECTED',
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
@@ -930,7 +960,21 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   PROTECTION_ABANDON_CONFLICT,
   CANDIDATE_FLAP,
   CANDIDATE_COMMIT_RELEASED,
+  'BETA_DEFERRED',
 ])
+
+/**
+ * Return the canonical host-event name for a marker-prefixed log message.
+ * `PORTAL_VERIFIED=true` is a value-bearing marker in the human-readable line,
+ * but the host recorder owns the boolean in `detail.verified` and must receive
+ * the stable semantic event name `PORTAL_VERIFIED`.
+ */
+export function mirroredEventToken(message: string): string | null {
+  const token = message.split(' ')[0]
+  if (token === undefined) return null
+  if (token.startsWith('PORTAL_VERIFIED=')) return 'PORTAL_VERIFIED'
+  return MIRRORED_MARKERS.has(token) ? token : null
+}
 
 /**
  * Starvation marker: the candidate set offered to the policy has no productive
@@ -1206,8 +1250,8 @@ class MirroringEventLogger extends EventLogger {
     tick: number | null = null,
   ): void {
     super.log(source, level, message, detail, tick)
-    const token = message.split(' ')[0]
-    if (token !== undefined && MIRRORED_MARKERS.has(token)) this.sink(token, detail)
+    const token = mirroredEventToken(message)
+    if (token !== null) this.sink(token, detail)
   }
 }
 
@@ -1219,6 +1263,11 @@ class MirroringEventLogger extends EventLogger {
  */
 export function controllerUnreachableMoveReason(candidate: Candidate, state: WorldState): ReturnType<typeof unreachableMove> {
   return unreachableMove(candidate, state)
+}
+
+/** Beta is semantic authority only when one canonical current Option exists. */
+export function canAuthoritativelyAbandonOption(optionId: string | null): optionId is string {
+  return typeof optionId === 'string' && optionId.length > 0
 }
 
 export class JevController {
@@ -1317,11 +1366,15 @@ export class JevController {
   private noProductiveRepeats = 0
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
+  /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
+  private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
   private readonly replanThrottle: ReplanThrottle
   private readonly loggedStaleResources = new Set<string>()
   private retrievalTrack: { id: string; best: number; ticks: number; bestGap?: number } | null = null
   private activeRetrieval: { id: string; resource: string; knownName: string; target: Vec3Json } | null = null
+  /** Surface waypoints reached without finding the requested resource. */
+  private readonly searchedSurfaceTargets = new Set<string>()
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
   /**
@@ -1402,6 +1455,8 @@ export class JevController {
   private commitmentProgressEpoch = 0
   /** Semantic per-tick fingerprint (inventory/world/topology), never the clock. */
   private lastStateFingerprint = ''
+  /** Monotonic semantic authority generation used to invalidate stale System2 responses. */
+  private semanticStateGeneration = 0
   /** The fingerprint that produced each abandoned prerequisite-path fact. */
   private readonly abandonedPrereqFingerprints = new Map<string, string>()
 
@@ -1488,7 +1543,26 @@ export class JevController {
   }
 
   get system2Model(): string {
-    return this.system2.model
+    return this.system2.authorityModel ?? this.system2.model
+  }
+
+  get system2Provider(): string {
+    return this.system2.provider ?? 'unknown'
+  }
+
+  get system2AuthorityStack(): { provider: string; model: string } {
+    return this.system2.authorityStack ?? {
+      provider: this.system2.provider ?? 'unknown',
+      model: this.system2.authorityModel ?? this.system2.model,
+    }
+  }
+
+  get policyProvider(): string {
+    return this.jev.kind === 'typesafe' ? 'typesafe-ai' : 'deterministic'
+  }
+
+  get deterministicFallbackEnabled(): boolean {
+    return this.options.forceFallbackPolicy || this.jev.kind !== 'typesafe'
   }
 
   get isRunning(): boolean {
@@ -1507,6 +1581,8 @@ export class JevController {
     this.moveFailMemory = this.createMoveFailMemory()
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.harvestedGoalCount = 0
+    this.semanticStateGeneration = 0
+    this.lastStateFingerprint = ''
     this.queue = new GoalQueue()
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
@@ -1576,11 +1652,14 @@ export class JevController {
 
     this.logger.info(
       'agent',
-      `jev-agent started policy=${this.jev.kind} model=${this.jev.model} system2=${this.system2.model} goal="${this.goal.description}"`,
+      `jev-agent started policy=${this.jev.kind} provider=${this.policyProvider} model=${this.jev.model} system2Provider=${this.system2Provider} system2=${this.system2Model} goal="${this.goal.description}"`,
       {
         policy: this.jev.kind,
         model: this.jev.model,
-        system2Model: this.system2.model,
+        system2Provider: this.system2Provider,
+        system2Model: this.system2Model,
+        policyProvider: this.policyProvider,
+        deterministicFallbackEnabled: this.deterministicFallbackEnabled,
         goal: this.goal.description,
         heartbeatMs: this.options.heartbeatMs,
         llmCooldownMs: this.options.llmCooldownMs,
@@ -1674,9 +1753,10 @@ export class JevController {
     const current = this.queue.current
     this.logger.warn(
       'system2',
-      `bootstrap plan applied model=${this.system2.model} call=1 goals=${added.length} depth=${this.queue.state.depth} :: ${plan.note}`,
+      `bootstrap plan applied provider=${this.system2Provider} model=${this.system2Model} call=1 goals=${added.length} depth=${this.queue.state.depth} :: ${plan.note}`,
       {
-        model: this.system2.model,
+        provider: this.system2Provider,
+        model: this.system2Model,
         planCalls: this.planCalls,
         goals: added.map((goal) => goal.description),
         note: plan.note,
@@ -1731,6 +1811,31 @@ export class JevController {
     const inFlight = this.executor.current
     if (inFlight !== null) {
       if (PREEMPTIVE_TRIGGERS.has(trigger)) {
+        // ATTACK is a Jev-selected combat lease.  Damage/entity events are
+        // expected while the selected attack is being aimed and delivered;
+        // asking Jev again on every hit cancels the attack before its next
+        // cooldown and lets a nearby zombie turn the agent into a MOVE/WAIT
+        // loop.  Keep the selected attack mechanics together and replay the
+        // highest-priority threat trigger immediately after the short lease.
+        if (inFlight.kind === 'ATTACK') {
+          if (shouldInterruptAttackLease(trigger, this.bot.health, CRITICAL_COMBAT_HEALTH)) {
+            this.logger.warn(
+              'scheduler',
+              `trigger=${trigger} interrupts ATTACK lease#${inFlight.epoch} ${inFlight.id} at critical health=${this.bot.health}`,
+              detail,
+              this.tickCounter,
+            )
+            this.scheduleTick(event)
+            return
+          }
+          this.deferredTrigger = pickHigherPriority(this.deferredTrigger, event)
+          this.logger.info(
+            'scheduler',
+            `trigger=${trigger} deferred during ATTACK lease#${inFlight.epoch} ${inFlight.id}`,
+            detail,
+          )
+          return
+        }
         this.logger.info(
           'scheduler',
           `trigger=${trigger} preempts action#${inFlight.epoch} ${inFlight.id}`,
@@ -1863,6 +1968,7 @@ export class JevController {
           goal: this.goal,
           goalQueue: this.queue.state,
           currentOption: this.currentOptionContext(),
+          recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
@@ -1891,6 +1997,7 @@ export class JevController {
         this.reachabilityGateOptions(),
         blacklistedMoveTargets,
         state.portalFrame,
+        this.searchedSurfaceTargets,
       )
       const grounded = generateGroundedCandidates(state, groundingOptions)
       this.withheldCandidateIds = new Set(grounded.withheld.map((entry) => entry.candidate.id))
@@ -1907,6 +2014,8 @@ export class JevController {
       // candidate. Backfill the deterministic craft step for the current craft
       // goal here so an inputs-held craft is never reported as starved.
       candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
+      candidates = restrictCandidatesDuringImmediateThreat(state, candidates)
+      candidates = restrictCandidatesAtCriticalHealth(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -1956,6 +2065,7 @@ export class JevController {
         const preconditionCause = this.currentGoalPreconditionCause(state)
         const blockedBy = goalStarvationBlockedBy(preconditionCause, this.queue.current, grounded.withheld)
         const missing = candidateStarvationMissing(grounded.withheld)
+        this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
           candidates,
           this.currentGoalKey(),
@@ -1985,14 +2095,38 @@ export class JevController {
           this.tickCounter,
         )
         if (this.noProductiveRepeats >= this.options.waitLimit) {
-          this.escalate(
-            'all_candidates_invalid',
-            `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x with no state change on goal "${this.currentGoalKey()}"`,
-          )
+          const boundary = evaluateCandidateStarvationBoundary({
+            activeOption: this.queue.current !== null,
+            blockedBy,
+            missing,
+            semanticExhausted: false,
+            semanticInvalid: false,
+            semanticAbandoned: false,
+          })
+          if (boundary.wake) {
+            this.escalate(
+              'all_candidates_invalid',
+              `NO_PRODUCTIVE_CANDIDATE repeated ${this.noProductiveRepeats}x after semantic boundary on goal "${this.currentGoalKey()}" blocker=${blockedBy}${missing.length > 0 ? ` missing=${JSON.stringify(missing)}` : ''}`,
+            )
+          } else {
+            this.logger.warn(
+              'agent',
+              `LOCAL_CANDIDATE_STARVATION repeat=${this.noProductiveRepeats}/${this.options.waitLimit} system2=false reason=${boundary.reason} goal="${this.currentGoalKey()}" blocker=${blockedBy}`,
+              {
+                repeat: this.noProductiveRepeats,
+                goal: this.currentGoalKey(),
+                blocker: blockedBy,
+                missing,
+                boundary: boundary.reason,
+              },
+              this.tickCounter,
+            )
+          }
         }
       } else {
         this.noProductiveRepeats = 0
         this.noProductiveKey = null
+        this.starvationContext = null
       }
       this.breakFailureDeadlock(candidates)
 
@@ -2047,6 +2181,7 @@ export class JevController {
           goal: this.goal,
           goalQueue: this.queue.state,
           currentOption: this.currentOptionContext(),
+          recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
           recentEvents: this.recentEvents,
           signals: this.signals,
@@ -2055,20 +2190,27 @@ export class JevController {
         sensorOptions(this.options),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
-      const freshCandidates = this.filterMoveCandidates(
-        generateGroundedCandidates(
-          freshState,
-          candidateOptions(
-            this.options,
-            this.recipeIndex,
-            this.unreachableStationKeys(freshState),
-            this.reachabilityGateOptions(),
-            this.blacklistedMoveTargets(freshState),
-            freshState.portalFrame,
-          ),
-        ).candidates,
+      const freshCandidates = restrictCandidatesAtCriticalHealth(
         freshState,
-        false,
+        restrictCandidatesDuringImmediateThreat(
+          freshState,
+          this.filterMoveCandidates(
+            generateGroundedCandidates(
+              freshState,
+              candidateOptions(
+                this.options,
+                this.recipeIndex,
+                this.unreachableStationKeys(freshState),
+                this.reachabilityGateOptions(),
+                this.blacklistedMoveTargets(freshState),
+                freshState.portalFrame,
+                this.searchedSurfaceTargets,
+              ),
+            ).candidates,
+            freshState,
+            false,
+          ),
+        ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
@@ -2097,6 +2239,7 @@ export class JevController {
         stateHash: stableStateHash(state),
         chainId: causalStamp.chainId,
         optionId: causalStamp.optionId,
+        semanticOptionInstanceId: causalStamp.semanticOptionInstanceId,
         strategy: causalStamp.strategy,
         candidates,
         failedCandidates: this.failureSnapshot(),
@@ -2224,9 +2367,27 @@ export class JevController {
     )
     if (verdict.adopt) {
       const reason = this.abandonReason(action, abandon)
-      const option = action === 'WAIT' ? 'none' : prerequisiteOptionName(action)
-      this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
+      if (verdict.optionId !== null) {
+        const option = verdict.optionId
+        this.logger.warn('heads', formatAbandonReason(option, reason), { option, reason, beta: abandon, action }, this.tickCounter)
+      }
     }
+  }
+
+  /**
+   * A beta vote is semantic, but a control tick, a local route miss, or recent
+   * body/search progress is not semantic abandonment. Keep this boundary pure
+   * and auditable; it never selects the next Option.
+   */
+  private betaTerminationBoundary(decision: JevResult, optionId: string | null): BetaTerminationBoundaryDecision {
+    return evaluateBetaTerminationBoundary({
+      optionId,
+      requested: abandonRequested(decision),
+      decisionActionId: decisionIdFrom(decision),
+      latestOutcome: this.recentOutcomes.at(-1) ?? null,
+      semanticExhausted: false,
+      semanticInvalid: false,
+    })
   }
 
   /**
@@ -2235,9 +2396,30 @@ export class JevController {
    * in shadow mode while a DEMONSTRABLY UNPRODUCTIVE one (attempts >= limit with
    * verified=false && progress=0) is enforced regardless of `betaAuthority`.
    */
-  private abandonVerdict(decision: JevResult, optionId: string, planId: string | null): AbandonVerdict {
+  private abandonVerdict(decision: JevResult, optionId: string | null, planId: string | null): AbandonVerdict {
     const requested = abandonRequested(decision)
     const now = Date.now()
+    if (!canAuthoritativelyAbandonOption(optionId)) {
+      const classification = classifyAbandonRequest({
+        abandonRequested: requested,
+        betaAuthority: false,
+        attempts: 0,
+        lastVerified: false,
+        lastProgressDelta: 0,
+        attemptLimit: this.options.unproductiveAttemptLimit,
+        alreadyAbandoned: false,
+      })
+      const vote = this.betaDecision(decision)
+      if (requested) {
+        this.logger.warn(
+          'heads',
+          `BETA_NONAUTHORITATIVE option=none reason=no_current_option beta=${decision.answers.abandon_option?.probability ?? 'null'}`,
+          { optionId: null, planId, reason: 'no_current_option', beta: decision.answers.abandon_option?.probability ?? null },
+          this.tickCounter,
+        )
+      }
+      return { adopt: false, enforced: false, suppressed: requested, classification, vote, optionId: null, planId }
+    }
     const state = this.optionAttempts.stateFor(optionId, planId)
     const classification = classifyAbandonRequest({
       abandonRequested: requested,
@@ -2261,6 +2443,7 @@ export class JevController {
 
   private applyAbandon(result: JevResult, verdict: AbandonVerdict): boolean {
     if (verdict.enforced) {
+      if (verdict.optionId === null) return false
       const probability = result.answers.abandon_option?.probability ?? null
       this.logger.warn(
         'heads',
@@ -2287,7 +2470,14 @@ export class JevController {
       this.enforceUnproductiveAbandon(verdict.optionId, verdict.planId, verdict.classification.attempts, probability)
       return true
     }
-    if (this.options.betaAuthority) return this.adoptAbandon(result)
+    if (verdict.optionId === null) return false
+    if (this.options.betaAuthority) {
+      if (!verdict.adopt) return false
+      const probability = result.answers.abandon_option?.probability ?? null
+      this.markOptionAbandoned(verdict.optionId, 'authority')
+      this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
+      return true
+    }
     if (verdict.suppressed && abandonRequested(result)) {
       this.logger.info(
         'heads',
@@ -2444,14 +2634,25 @@ export class JevController {
    */
   private adoptAbandon(decision: JevResult): boolean {
     if (!abandonRequested(decision)) return false
+    const current = this.queue.current
+    const optionId = current === null ? null : optionIdForGoal(current)
+    if (!canAuthoritativelyAbandonOption(optionId)) {
+      this.logger.warn(
+        'heads',
+        'BETA_NONAUTHORITATIVE option=none reason=no_current_option',
+        { optionId: null, reason: 'no_current_option', beta: decision.answers.abandon_option?.probability ?? null },
+        this.tickCounter,
+      )
+      return false
+    }
     const vote = this.betaDecision(decision)
     const probability = decision.answers.abandon_option?.probability ?? null
     if (vote.adopt) {
-      this.markOptionAbandoned(decisionIdFrom(decision), 'authority')
+      this.markOptionAbandoned(optionId, 'authority')
       this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
       return true
     }
-    const protection = this.reconciledProtection(vote.protection, decisionIdFrom(decision) ?? 'abandon')
+    const protection = this.reconciledProtection(vote.protection, optionId)
     if (protection.protect && !this.placeRetryExhausted()) {
       this.logger.warn(
         'heads',
@@ -2461,7 +2662,7 @@ export class JevController {
       )
       return false
     }
-    this.markOptionAbandoned(decisionIdFrom(decision), 'authority')
+    this.markOptionAbandoned(optionId, 'authority')
     this.summonLlm('no_progress', `abandon_option=${probability} crossed the replan threshold`)
     return true
   }
@@ -2535,8 +2736,9 @@ export class JevController {
       .map((station) => `${station.x},${station.y},${station.z}`)
       .sort()
       .join(';')
-    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}`
-    return `fp1|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
+    const current = state.goalQueue?.current
+    const goal = `${this.currentGoalKey()}|depth=${state.goalQueue?.depth ?? 0}|revision=${state.goalQueue?.revision ?? this.queue.revision}|optionInstance=${current?.semanticOptionInstanceId ?? current?.optionInstanceId ?? 'none'}|optionTemplate=${current?.semanticOptionTemplateId ?? current?.optionTemplateId ?? 'none'}`
+    return `fp2|epoch=${this.options.worldEpoch}|pos=${position}|inv=${inventory}|stations=${stations}|furnaces=${furnaces}|goal=${goal}`
   }
 
   /**
@@ -2763,7 +2965,7 @@ export class JevController {
         this.tickCounter,
       )
       const planGoal = state.goalQueue.current
-      const optionId = optionIdForGoal(planGoal) ?? this.currentGoalKey()
+      const optionId = optionIdForGoal(planGoal)
       const planId = planRevisionForGoal(planGoal)
       const verdict = this.abandonVerdict(result, optionId, planId)
       this.logHeads(result, verdict, chainId)
@@ -2854,7 +3056,6 @@ export class JevController {
   }
 
   private onActionComplete(result: ExecutionResult, decision: JevResult, candidate: Candidate): void {
-    if (result.itemsGained > 0 || result.blockRemoved) this.progressEpoch += 1
     const moved =
       this.actionStart === null
         ? 0
@@ -2865,7 +3066,9 @@ export class JevController {
           )
     const moveArrived =
       (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
-    const retrieveArrived = result.kind === 'RETRIEVE' && this.retrievalArrived(candidate)
+    const surfaceSearchArrived = result.kind === 'RETRIEVE' && this.surfaceSearchArrived(candidate)
+    const retrieveArrived = result.kind === 'RETRIEVE' && !surfaceSearchArrived && this.retrievalArrived(candidate)
+    const retrieveDistanceClosed = result.kind === 'RETRIEVE' && !surfaceSearchArrived && result.distanceClosed
     const truth = truthfulActionOutcome({
       kind: result.kind,
       status: result.status,
@@ -2874,15 +3077,45 @@ export class JevController {
       blockRemoved: result.blockRemoved,
       progressed: result.progressed,
       arrived: moveArrived || retrieveArrived,
-      distanceClosed: result.distanceClosed,
+      distanceClosed: retrieveDistanceClosed,
+      searchArrived: surfaceSearchArrived,
       requiresPickup: candidate.meta.requiresPickup === true,
     })
+    const semanticProgress =
+      result.itemsGained > 0 ||
+      (truth.verified && (result.kind === 'CRAFT' || result.kind === 'SMELT' || result.kind === 'PLACE' || result.kind === 'IGNITE'))
+    const taxonomy: ActionOutcomeTaxonomy = classifyActionOutcome({
+      kind: result.kind,
+      status: result.status,
+      verified: truth.verified,
+      itemsGained: result.itemsGained,
+      blockRemoved: result.blockRemoved,
+      progressed: result.progressed,
+      arrived: moveArrived || retrieveArrived || surfaceSearchArrived,
+      distanceClosed: retrieveDistanceClosed,
+      searchArrived: surfaceSearchArrived,
+      semanticProgress,
+    })
+    if (surfaceSearchArrived && result.itemsGained === 0 && !result.blockRemoved) {
+      this.recordSurfaceSearch(candidate)
+    }
+    if (taxonomy.progressKinds.some((kind) => kind === 'body' || kind === 'search' || kind === 'goal')) {
+      this.progressEpoch += 1
+      this.semanticStateGeneration += 1
+      this.lastProgress += 1
+      this.lastProgressAt = Date.now()
+    }
     this.recentOutcomes.push({
       actionId: result.actionId,
       status: result.status,
       failure: result.failure,
       verified: truth.verified,
       detail: result.detail,
+      execution: taxonomy.execution,
+      verification: taxonomy.verification,
+      progress: taxonomy.progress,
+      progressKinds: taxonomy.progressKinds,
+      control: taxonomy.control,
     })
     if (this.recentOutcomes.length > 16) this.recentOutcomes.shift()
     this.noteAscendOutcome(result, candidate)
@@ -2922,6 +3155,7 @@ export class JevController {
         {
           chainId: pending.record.chainId ?? 'unknown',
           optionId: pending.record.optionId,
+          semanticOptionInstanceId: pending.record.semanticOptionInstanceId,
           planId: pending.record.goalQueueState.current?.id ?? null,
           strategy: pending.record.strategy,
         },
@@ -2933,6 +3167,7 @@ export class JevController {
           resource: result.yieldItem ?? result.targetName ?? null,
           progressDelta: result.itemsGained,
           observable: truth.observableProgress,
+          taxonomy,
         },
       )
       this.logger.info('causal', formatCausalLine(chain), causalRecord(chain), this.tickCounter)
@@ -2970,7 +3205,10 @@ export class JevController {
           optionId: completedOptionId,
           planId: completedPlanId,
           verified: truth.verified,
-          progressDelta: result.itemsGained,
+          // Beta's option productivity is semantic/goal progress only. Body or
+          // search progress remains visible in the typed taxonomy and resets the
+          // strategic stall clock, but it must not masquerade as Option DONE.
+          progressDelta: taxonomy.progress === 'goal' ? 1 : 0,
         },
         Date.now(),
       )
@@ -3101,16 +3339,25 @@ export class JevController {
         }
       }
       this.actionStart = null
-      if (!truth.downgraded) {
+      if (!truth.downgraded && result.kind !== 'WAIT' && result.kind !== 'ESCALATE') {
         this.failureStreak = 0
         this.signals.consecutiveFailures = 0
       }
     } else if (result.kind === 'PLACE' && this.schedulePlaceRetry(result, candidate)) {
       this.noteCandidateFailure(result.actionId)
     } else {
-      this.noteCandidateFailure(result.actionId)
-      this.recordMoveFailure(candidate, moveFailureReason(result.failure))
-      this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
+      if (result.kind !== 'ESCALATE' && result.kind !== 'WAIT') {
+        this.noteCandidateFailure(result.actionId)
+        this.recordMoveFailure(candidate, moveFailureReason(result.failure))
+        this.recordFailure(result.failure, `${result.actionId}: ${result.detail}`)
+      } else {
+        this.logger.info(
+          'agent',
+          `CONTROL_OUTCOME kind=${result.kind} status=${result.status} failure=${result.failure ?? 'null'} not_charged_as_physical_failure`,
+          { actionId: result.actionId, status: result.status, failure: result.failure, control: result.kind === 'ESCALATE' ? 'escalate' : 'wait' },
+          this.tickCounter,
+        )
+      }
     }
 
     const completionTrigger: DecisionTrigger = isActionTimeout(result) ? 'action_timeout' : 'action_completed'
@@ -3160,10 +3407,27 @@ export class JevController {
         this.tickCounter,
       )
     }
-    if (!switched) {
+    if (budget.abandon) {
+      // This is now a semantic boundary: the current Option exhausted its
+      // code-owned postcondition budget. A single local verification miss is
+      // evidence for Jev/Skill recovery, not a new System2 mission.
       this.summonLlm(
-        budget.abandon ? 'action_impossible' : 'no_progress',
-        `action_unverified planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+        'action_impossible',
+        `semantic option exhausted after unverified outcome planId=${key} attempts=${attempts} strategy=${strategy ?? 'null'}`,
+      )
+    } else if (switched) {
+      this.logger.info(
+        'agent',
+        `LOCAL_PREREQ_RECOVERY planId=${key} attempts=${attempts} next_path_selected=true system2=false`,
+        { planId: key, attempts, strategy, postcondition },
+        this.tickCounter,
+      )
+    } else {
+      this.logger.info(
+        'agent',
+        `LOCAL_VERIFY_RECOVERY planId=${key} attempts=${attempts} system2=false`,
+        { planId: key, attempts, strategy, postcondition },
+        this.tickCounter,
       )
     }
   }
@@ -3279,7 +3543,12 @@ export class JevController {
     this.prereqProgress = null
     this.prereqLoggedKey = null
     this.retrievalEscalationPending = true
-    this.escalate('progress_stall', `position oscillation ${state.pair ?? 'pair'} cycles=${state.cycles}; escaping the loop`)
+    this.logger.warn(
+      'agent',
+      `LOCAL_OSCILLATION_ESCAPE pair=${state.pair ?? 'pair'} cycles=${state.cycles} system2=false`,
+      { pair: state.pair, cycles: state.cycles, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
   }
 
   private logDescendPlan(candidate: Candidate): void {
@@ -3973,28 +4242,49 @@ export class JevController {
     this.tickLlmCalls += 1
     this.llmSummonReasons.push(reason)
 
+    const groundedDetail =
+      this.noProductiveThisTick && this.starvationContext !== null
+        ? `${detail}; grounded blocker=${this.starvationContext.blockedBy}${this.starvationContext.missing.length > 0 ? ` missing=${JSON.stringify(this.starvationContext.missing)}` : ''}`
+        : detail
     const queueState = this.queue.state
+    const currentOption = queueState.current
+    const requestContext: System2RequestContext = {
+      requestId: randomUUID(),
+      queueRevision: this.queue.revision,
+      optionInstanceId: currentOption?.semanticOptionInstanceId ?? currentOption?.optionInstanceId ?? null,
+      optionTemplateId: currentOption?.semanticOptionTemplateId ?? currentOption?.optionTemplateId ?? null,
+      worldEpoch: this.options.worldEpoch,
+      stateFingerprint: this.lastStateFingerprint || 'unobserved',
+      // Local semantic progress and critical threat changes both invalidate an
+      // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
+      // events that are intentionally absent from the compact world fingerprint.
+      authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+    }
     const request: System2PlanRequest = {
       reason,
-      detail,
+      detail: groundedDetail,
       tick: this.tickCounter,
       goalQueueState: queueState,
       objective: this.objectiveState(),
       recentEvents: this.recentEvents.slice(-8),
       recentOutcomes: this.recentOutcomes.slice(-8),
+      requestContext,
     }
-    const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail }
+    const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail: groundedDetail }
     this.tickResummonLog.push(resummon)
 
     this.logger.warn(
       'system2',
-      `SUMMON LLM reason=${reason} queueDepth=${queueState.depth} current=${queueState.current?.description ?? 'none'} :: ${detail}`,
+      `SUMMON LLM reason=${reason} queueDepth=${queueState.depth} current=${queueState.current?.description ?? 'none'} :: ${groundedDetail}`,
       {
         reason,
         queueDepth: queueState.depth,
         currentGoal: queueState.current?.description ?? null,
-        detail,
-        model: this.system2.model,
+        detail: groundedDetail,
+        model: this.system2Model,
+        provider: this.system2Provider,
+        requestId: requestContext.requestId,
+        requestContext,
       },
       this.tickCounter,
     )
@@ -4002,12 +4292,47 @@ export class JevController {
     void this.system2
       .plan(request)
       .then((plan) => {
+        const current = this.queue.state
+        const currentContext: System2ApplyState = {
+          queueRevision: this.queue.revision,
+          optionInstanceId: current.current?.semanticOptionInstanceId ?? current.current?.optionInstanceId ?? null,
+          optionTemplateId: current.current?.semanticOptionTemplateId ?? current.current?.optionTemplateId ?? null,
+          worldEpoch: this.options.worldEpoch,
+          stateFingerprint: this.lastStateFingerprint || 'unobserved',
+          // Local semantic progress and critical threat changes both invalidate an
+          // asynchronous WHAT decision. `criticalStateVersion` covers health/mob
+          // events that are intentionally absent from the compact world fingerprint.
+          authorityEpoch: this.semanticStateGeneration + this.criticalStateVersion,
+          actionInFlight: system2BodyOwned(this.executor.current?.kind ?? null),
+        }
+        const validity = evaluateSystem2Apply(requestContext, currentContext)
+        if (!validity.apply) {
+          const line = formatSystem2Discard(requestContext, validity.reasons)
+          this.logger.warn(
+            'system2',
+            line,
+            {
+              requestId: requestContext.requestId,
+              reasons: validity.reasons,
+              requestContext,
+              currentContext,
+              note: plan.note,
+              op: plan.op ?? 'replace',
+            },
+            this.tickCounter,
+          )
+          this.llmInFlight = false
+          this.requestDecision('llm_plan', { reason, discarded: true, reasons: validity.reasons })
+          return
+        }
         const depthBefore = this.queue.state.depth
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
           reason: plan.note,
           onProtection: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
           onDuplicate: (line) => this.logger.warn('agent', line, { op: plan.op ?? 'replace', reason, phase: 'runtime' }, this.tickCounter),
           protectedGoalRetireReason: (goal, incoming) => this.protectedGoalRetireReason(goal, incoming),
+          verifyCurrentComplete: (goal) => this.verifyQueuedGoalComplete(goal),
+          onOperationRejected: (line) => this.logger.warn('system2', line, { requestId: requestContext.requestId, op: plan.op ?? 'replace' }, this.tickCounter),
         })
         this.logQueueDepthDelta(depthBefore, plan.op ?? 'replace', `summon:${reason}`)
         this.waitReplans = 0
@@ -4022,9 +4347,12 @@ export class JevController {
         if (this.llmNotes.length > 12) this.llmNotes.shift()
         this.logger.info(
           'system2',
-          `LLM plan applied model=${this.system2.model}: ${added.length} goal(s) depth=${this.queue.state.depth} :: ${plan.note}`,
+          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} :: ${plan.note}`,
           {
-            model: this.system2.model,
+            provider: this.system2Provider,
+            model: this.system2Model,
+            requestId: requestContext.requestId,
+            requestContext,
             queueDepth: this.queue.state.depth,
             goals: added.map((goal) => goal.description),
             note: plan.note,
@@ -4094,11 +4422,28 @@ export class JevController {
       { detail },
       this.tickCounter,
     )
-    if (code === 'path_no_path') this.escalate('pathfinder_no_path', detail)
-    else if (code === 'path_stuck') this.escalate('pathfinder_stuck', detail)
-    else if (code === 'unknown_event') this.escalate('unknown_event', detail)
-    else if (code === 'verify_failed') this.escalate('unexpected_world_state', detail)
-    if (this.failureStreak >= this.options.failureStreakLimit) {
+    const boundary = shouldWakeSystem2AfterLocalFailure({
+      failureCode: code,
+      activeOption: this.queue.current !== null,
+      semanticExhausted: false,
+      semanticInvalid: false,
+      semanticAbandoned: false,
+    })
+    const localRouteFailure = code === 'path_no_path' || code === 'path_stuck' || code === 'no_path' || code === 'no_standable_approach' || code === 'open_path'
+    if (localRouteFailure && !boundary.wake && boundary.reason === 'local_recovery') {
+      // A local route failure is evidence for grounded Jev/Skill recovery. It is
+      // not a semantic mission boundary and must not summon System2 by itself.
+      this.logger.info(
+        'agent',
+        `LOCAL_ROUTE_FAILURE code=${code ?? 'unknown'} system2=false detail=${detail}`,
+        { code, detail, failureStreak: this.failureStreak, boundary: boundary.reason },
+        this.tickCounter,
+      )
+    } else if (code === 'unknown_event') this.escalate('unknown_event', detail)
+    else if (code === 'verify_failed') {
+      this.logger.info('agent', `LOCAL_VERIFY_FAILURE system2=false detail=${detail}`, { code, detail }, this.tickCounter)
+    }
+    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure && code !== 'verify_failed') {
       this.escalate('same_failure_3x', `${code ?? 'unknown'} failed ${this.failureStreak}x: ${detail}`)
     }
   }
@@ -4156,6 +4501,18 @@ export class JevController {
       (candidate) => this.candidateFailureCount(candidate.id) >= this.options.candidateFailureLimit,
     )
     if (!allExhausted) return
+    const localRouteOnly = actionable.every(
+      (candidate) => candidate.kind === 'MOVE' || candidate.kind === 'RETRIEVE' || candidate.kind === 'DESCEND' || candidate.kind === 'STEP',
+    )
+    if (localRouteOnly) {
+      this.logger.warn(
+        'agent',
+        `LOCAL_CANDIDATES_EXHAUSTED count=${actionable.length} system2=false grounded_recovery=true`,
+        { candidates: actionable.map((candidate) => candidate.id), limit: this.options.candidateFailureLimit },
+        this.tickCounter,
+      )
+      return
+    }
     this.escalate(
       'all_candidates_invalid',
       `all ${actionable.length} actionable candidate(s) exceeded ${this.options.candidateFailureLimit} failures; letting decay/suppression reroute instead of clearing memory`,
@@ -4167,7 +4524,19 @@ export class JevController {
     const stalledMs = Date.now() - this.lastProgressAt
     this.signals.stalledMs = stalledMs
     if (!this.goal.complete && stalledMs > this.options.stallMs) {
-      this.escalate('progress_stall', `no goal progress for ${stalledMs}ms`)
+      const boundary = shouldWakeSystem2AfterLocalFailure({
+        failureCode: 'path_stuck',
+        activeOption: this.queue.current !== null,
+        semanticExhausted: false,
+        semanticInvalid: false,
+        semanticAbandoned: false,
+      })
+      this.logger.warn(
+        'agent',
+        `LOCAL_PROGRESS_STALL stalledMs=${stalledMs} system2=false reason=${boundary.reason}`,
+        { stalledMs, goal: this.currentGoalKey(), boundary: boundary.reason },
+        this.tickCounter,
+      )
     }
     if (!this.goal.complete && stalledMs > this.options.wedgeStallMs) {
       this.abortWedge(`goal progress stayed 0 for ${stalledMs}ms`)
@@ -4242,7 +4611,19 @@ export class JevController {
       )
     }
     this.ensureCapabilityGapSignal(marker)
-    this.summonLlm('no_progress', `capability gap: ${marker} -> strategic replan`)
+    const boundary = shouldWakeSystem2AfterLocalFailure({
+      failureCode: 'path_stuck',
+      activeOption: this.queue.current !== null,
+      semanticExhausted: false,
+      semanticInvalid: false,
+      semanticAbandoned: false,
+    })
+    this.logger.warn(
+      'agent',
+      `LOCAL_CAPABILITY_GAP target_y=${Math.round(decision.targetY ?? 0)} attempts=${decision.attempts} system2=false reason=${boundary.reason}`,
+      { attempts: decision.attempts, targetY: decision.targetY, boundary: boundary.reason },
+      this.tickCounter,
+    )
   }
 
   /** Keep the gap marker the newest recent event so the planner sees it. */
@@ -4384,13 +4765,16 @@ export class JevController {
       this.tickCounter,
     )
     // Strategy switch: forget the latched descent budget and chosen direction so
-    // the next tick can pick a different column/step, then wake System 2.
+    // the next tick can pick a different column/step. This is local mechanical
+    // recovery; a stalled actuator is not a semantic Option boundary.
     this.digMemory.markResourceProgress()
     this.descendProgress = { bestY: y, ticks: 0 }
     this.descendStallTicks = 0
-    this.escalate(
-      'progress_stall',
-      `descend goal ${current.id} stuck at y=${Math.floor(y)} (target ${targetY}) for ${stallTicks} ticks; switching strategy`,
+    this.logger.warn(
+      'agent',
+      `LOCAL_DESCEND_STALL goal=${current.id} y=${Math.floor(y)} target_y=${targetY} ticks=${stallTicks} system2=false`,
+      { goal: current.id, y, targetY, stallTicks, boundary: 'local_recovery' },
+      this.tickCounter,
     )
   }
 
@@ -4452,7 +4836,12 @@ export class JevController {
     this.activeRetrieval = null
     this.retrievalTrack = null
     this.retrievalEscalationPending = true
-    this.escalate('pathfinder_stuck', `retrieval stalled at ${Math.round(current)}m for ${ticks} ticks`)
+    this.logger.warn(
+      'agent',
+      `LOCAL_RETRIEVAL_STALL target=${active.target.x},${active.target.y},${active.target.z} dist=${Math.round(current)} ticks=${ticks} system2=false`,
+      { target: active.target, dist: Math.round(current), ticks, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
   }
 
   private dropUnreachableResource(
@@ -4593,17 +4982,29 @@ export class JevController {
     this.waitGoalKey = wait.goalKey
     if (wait.outcome === 'below-limit') return
     if (wait.outcome === 'replan') {
-      const summon = this.summonLlm(
-        'no_progress',
-        `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; requesting a replan`,
-      )
+      const boundary = shouldWakeSystem2AfterLocalFailure({
+        failureCode: 'path_stuck',
+        activeOption: this.queue.current !== null,
+        semanticExhausted: false,
+        semanticInvalid: false,
+        semanticAbandoned: false,
+      })
+      // WAIT is a control outcome, not evidence that the current semantic
+      // Option should be replaced. Keep the local recovery loop bounded by
+      // candidate/state changes; a repeated WAIT cannot itself summon WHAT.
+      const summon = boundary.wake
+        ? this.summonLlm(
+            'no_progress',
+            `WAIT chosen ${wait.n}x on goal "${goalKey}" with no verified progress; semantic boundary=${boundary.reason}`,
+          )
+        : null
       const counted = summon?.triggered === true
       if (counted) this.waitReplans += 1
       this.waitStreak = 0
       this.wedgeRepeats = 0
       this.logger.warn(
         'agent',
-        `WAIT_LIMIT n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}${counted ? '' : ' THROTTLED'}`,
+        `${boundary.wake ? 'WAIT_LIMIT' : 'LOCAL_WAIT_RECOVERY'} n=${wait.n} -> replan (${this.waitReplans}/${WAIT_REPLAN_LIMIT}) goal="${goalKey}"${this.noProductiveThisTick ? ' NO_PRODUCTIVE_CANDIDATE' : ''}${counted ? '' : ' SYSTEM2=false'}`,
         {
           actionId,
           count: wait.n,
@@ -4611,6 +5012,7 @@ export class JevController {
           waitReplans: this.waitReplans,
           llmSummoned: counted,
           throttled: !counted,
+          boundary: boundary.reason,
         },
         this.tickCounter,
       )
@@ -4626,13 +5028,25 @@ export class JevController {
   private currentOptionContext(): CurrentOptionContext | null {
     const current = this.queue.state.current
     if (current === null || typeof current.optionInstanceId !== 'string' || current.optionInstanceId.length === 0) return null
-    const optionId = current.optionTemplateId ?? optionIdForGoal(current) ?? this.currentGoalKey()
+    const optionId = current.semanticOptionTemplateId ?? current.optionTemplateId ?? optionIdForGoal(current) ?? this.currentGoalKey()
     const attempts = this.optionAttempts.stateFor(optionId, current.id)
     return currentOptionContextForQueuedGoal(current, {
       failures: attempts.attempts,
       verifiedProgress: current.haveCount,
       lastProgressAt: current.updatedAt,
     })
+  }
+
+  /** Code-owned completion proof for the typed System2 `complete` operation. */
+  private verifyQueuedGoalComplete(goal: QueuedGoal): boolean {
+    const snapshot = this.queuePreconditionSnapshot()
+    const spec = goal.optionSpec ?? compilePlannedGoal(queuedToPlanned(goal), snapshot)
+    const predicate = evaluatePredicates(spec.success, snapshot)
+    if (predicate.ok) return true
+    if ((goal.kind === 'collect' || goal.kind === 'craft' || goal.kind === 'smelt') && goal.targetItem !== null) {
+      return (snapshot.inventory[goal.targetItem] ?? 0) >= goal.requiredCount
+    }
+    return false
   }
 
   private currentGoalKey(): string {
@@ -4718,9 +5132,14 @@ export class JevController {
   }
 
   private retrievalDistance(target: Vec3Json | null): number | null {
+    const exact = this.retrievalDistanceExact(target)
+    return exact === null ? null : Math.round(exact)
+  }
+
+  private retrievalDistanceExact(target: Vec3Json | null): number | null {
     const entity = this.bot.entity
     if (target === null || entity === undefined) return null
-    return Math.round(Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z))
+    return Math.hypot(entity.position.x - target.x, entity.position.y - target.y, entity.position.z - target.z)
   }
 
   /**
@@ -4730,9 +5149,33 @@ export class JevController {
    * `shouldClearActiveRetrieval`; this only measures the live body.
    */
   private retrievalArrived(candidate: Candidate): boolean {
-    if (candidate.target === null) return true
-    const distance = this.retrievalDistance(candidate.target)
+    if (candidate.meta.retrieval !== 'known' || candidate.target === null) return false
+    const distance = this.retrievalDistanceExact(candidate.target)
     return distance !== null && distance <= 2
+  }
+
+  /**
+   * A surface RETRIEVE is a search waypoint, not a remembered resource. Its
+   * postcondition is local arrival so the search frontier can advance; arrival
+   * must never be treated as acquisition of the parent collect Option.
+   */
+  private surfaceSearchArrived(candidate: Candidate): boolean {
+    if (candidate.meta.retrieval !== 'surface' || candidate.target === null) return false
+    const distance = this.retrievalDistanceExact(candidate.target)
+    return distance !== null && distance <= 2
+  }
+
+  private recordSurfaceSearch(candidate: Candidate): void {
+    if (candidate.target === null) return
+    const key = surfaceSearchKey(this.currentDimension(), candidate.target)
+    if (this.searchedSurfaceTargets.has(key)) return
+    this.searchedSurfaceTargets.add(key)
+    this.logger.info(
+      'agent',
+      `SURFACE_SEARCH_RECORDED target=${candidate.target.x},${candidate.target.y},${candidate.target.z}`,
+      { target: candidate.target, key, frontier: 'advanced', resource: candidate.meta.resource ?? null },
+      this.tickCounter,
+    )
   }
 
   /**
@@ -4747,6 +5190,9 @@ export class JevController {
    */
   private retrieveCompleted(candidate: Candidate, result: ExecutionResult): boolean {
     if (result.itemsGained > 0) return true
+    // Surface arrival proves only that a search waypoint was visited. The
+    // requested resource is still absent until the next sensor/MINE cycle.
+    if (candidate.meta.retrieval !== 'known') return false
     const arrived = this.retrievalArrived(candidate)
     if (arrived) return true
     return shouldClearActiveRetrieval({
@@ -4882,6 +5328,8 @@ export class JevController {
         unreachableStations,
         this.reachabilityGateOptions(),
         this.blacklistedMoveTargets(state),
+        null,
+        this.searchedSurfaceTargets,
       ),
     )
     const decision = planPrereqOptions(input)
@@ -5033,7 +5481,12 @@ export class JevController {
     this.prereqProgress = null
     this.prereqLoggedKey = null
     this.retrievalEscalationPending = true
-    this.escalate('pathfinder_stuck', `${candidate.id} unverified progress=0 x${unverified}; abandoned option`)
+    this.logger.warn(
+      'agent',
+      `LOCAL_RETRIEVE_RECOVERY candidate=${candidate.id} unverified=${unverified} system2=false`,
+      { candidate: candidate.id, unverified, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
   }
 
   private logStaleKnownResources(state: WorldState): void {
@@ -5085,13 +5538,58 @@ export class JevController {
   }
 
   private logCandidates(candidates: readonly Candidate[], state: WorldState): void {
-    const signature = candidates.map((candidate) => candidate.id).join('|')
+    const option = state.currentOption
+    const signature = JSON.stringify({
+      optionInstanceId: option?.instanceId ?? null,
+      optionTemplateId: option?.templateId ?? null,
+      allowedSkills: option?.allowedSkills ?? [],
+      queueRevision: this.queue.revision,
+      candidates: candidates.map((candidate) => ({
+        id: candidate.id,
+        optionSkill: candidate.meta.optionSkill ?? null,
+        prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
+        missingCapability: candidate.meta.missingCapability ?? null,
+      })),
+    })
     if (signature === this.lastCandidateSignature) return
     this.lastCandidateSignature = signature
     this.logger.info(
       'candidates',
       `generated ${candidates.length} executable candidate(s); skipped ${countBlockedLogs(state)} blocked log(s) (canDig=false, no walk-up access)`,
-      { ids: candidates.map((candidate) => candidate.id), detail: candidates.map((candidate) => candidate.label) },
+      {
+        ids: candidates.map((candidate) => candidate.id),
+        detail: candidates.map((candidate) => candidate.label),
+        option: option === undefined || option === null
+          ? null
+          : {
+              instanceId: option.instanceId,
+              templateId: option.templateId,
+              allowedSkills: [...option.allowedSkills],
+              queueRevision: this.queue.revision,
+            },
+        candidateEvidence: candidates.map((candidate) => ({
+          id: candidate.id,
+          kind: candidate.kind,
+          optionSkill: candidate.meta.optionSkill ?? null,
+          prerequisiteRole: candidate.meta.prerequisiteRole ?? null,
+          missingCapability: candidate.meta.missingCapability ?? null,
+          capabilityAcquisition: candidate.meta.capabilityAcquisition === true,
+          included: true,
+          exclusionReason: null,
+        })),
+        sensorBlocks: state.blocks
+          .filter((block) => block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore')
+          .slice(0, 32)
+          .map((block) => ({
+            kind: block.kind,
+            name: block.name,
+            yield: block.yield ?? null,
+            position: block.position,
+            inReach: block.inReach,
+            hasAdjacentStandable: block.hasAdjacentStandable,
+            adjacentStandable: block.adjacentStandable,
+          })),
+      },
       this.tickCounter,
     )
   }
@@ -5528,21 +6026,30 @@ export class JevController {
       { from: fromKey, to: toKey, cycles: detection.cycles, action: 'blacklist' },
       this.tickCounter,
     )
-    const target = this.lastMoveTarget
-    if (target !== null) {
-      const result = this.moveFailMemory.blacklist(target.dimension, target.position, 'no_progress')
-      const key = moveFailureKey(target.dimension, target.position)
+    // Blacklist both ends of the observed loop.  Blacklisting only the last
+    // selected target leaves the opposite endpoint available, so Jev can
+    // immediately choose A after B was retired and keep walking A<->B.
+    const dimension = this.currentDimension()
+    const seen = new Set<string>()
+    for (const position of [detection.from, detection.to]) {
+      if (position === null) continue
+      const key = moveFailureKey(dimension, position)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const result = this.moveFailMemory.blacklist(dimension, position, 'no_progress')
       this.logger.warn(
         'agent',
         formatMoveTargetSkipped(key, result.entry.attempts, Math.ceil(this.moveFailMemory.cooldownMs / 1000)),
         { key, attempts: result.entry.attempts, reason: 'oscillation', cooldown: Math.ceil(this.moveFailMemory.cooldownMs / 1000) },
         this.tickCounter,
       )
-      this.notifyMoveFailureMemory()
     }
-    this.escalate(
-      'progress_stall',
-      `OSCILLATION_DETECTED from=${fromKey} to=${toKey} cycles=${detection.cycles}; blacklisting the movement target`,
+    if (seen.size > 0) this.notifyMoveFailureMemory()
+    this.logger.warn(
+      'agent',
+      `LOCAL_MOVE_OSCILLATION from=${fromKey} to=${toKey} cycles=${detection.cycles} system2=false`,
+      { from: fromKey, to: toKey, cycles: detection.cycles, boundary: 'local_recovery' },
+      this.tickCounter,
     )
   }
 
@@ -5704,6 +6211,7 @@ function candidateOptions(
   reachability: ReachabilityGateOptions | null = null,
   blacklistedMoveTargets: ReadonlySet<string> = new Set<string>(),
   portalFrame: PortalFrameValidation | null = null,
+  searchedSurfaceTargets: ReadonlySet<string> = new Set<string>(),
 ): CandidateOptions {
   return {
     ...defaultCandidateOptions,
@@ -5711,6 +6219,7 @@ function candidateOptions(
     recipes,
     unreachableStations,
     blacklistedMoveTargets,
+    searchedSurfaceTargets,
     reachability,
     portalFrame,
     prereqRankPolicy: options.prereqRankPolicy,

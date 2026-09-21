@@ -426,7 +426,7 @@ export const RUNGS: readonly Rung[] = [
     // M2 transition: done only once the lit nether_portal block actually exists.
     // The previous flint_and_steel predicate declared the rung satisfied before a
     // frame was ever built, so the ladder skipped build/light/verify entirely.
-    satisfied: (c) => has(c, 'nether_portal'),
+    satisfied: (c, w) => has(c, 'nether_portal') || w.portalVerified === true,
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
   },
@@ -720,6 +720,36 @@ export function inventoryUsableEmpty(counts: Counts): boolean {
  */
 export function rungBehindInventory(rung: Rung, counts: Counts, world: ResidentWorldMemory): boolean {
   if (rung.satisfied(counts, world)) return true
+  /**
+   * A diamond pickaxe is a durable capability frontier, not merely one more
+   * inventory item.  The current M2 contract starts at the diamond-to-Nether
+   * transition; the furnace/charcoal/iron ladder is retained as a lower
+   * prerequisite path and historical evidence.  Once the live inventory proves
+   * the diamond-pickaxe frontier, a reset must not resurrect those historical
+   * rungs just because their consumable markers are absent.
+   *
+   * This is capability closure, not semantic ranking: it only answers whether
+   * an earlier executable rung is already behind the observed frontier.  It
+   * never chooses among two current semantic Options.
+   */
+  const hasDiamondPickaxe = bestPickaxeRank(counts) >= 4 || has(counts, 'diamond_pickaxe')
+  if (
+    hasDiamondPickaxe &&
+    new Set([
+      'wood',
+      'crafting_table',
+      'wooden_pickaxe',
+      'cobblestone',
+      'furnace',
+      'stone_pickaxe',
+      'charcoal',
+      'raw_iron',
+      'iron_ingot',
+      'iron_pickaxe',
+    ]).has(rung.id)
+  ) {
+    return true
+  }
   switch (rung.id) {
     case 'wood':
       return bestPickaxeRank(counts) >= 1 || countClass(counts, 'stone') >= 1
@@ -909,7 +939,11 @@ export function computeFrontier(counts: Counts, world: ResidentWorldMemory): { r
   for (let i = 0; i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || !isMandatoryRung(rung)) continue
-    if (!rung.satisfied(counts, world)) return { rungIndex: i, rungId: rung.id }
+    // Frontier and resume must use the same capability-closure predicate. A
+    // higher-tier capability (or a live world predicate such as a lit portal)
+    // proves earlier rungs are behind the resident; checking only the rung's
+    // local inventory predicate resurrects historical work after completion.
+    if (!rungBehindInventory(rung, counts, world)) return { rungIndex: i, rungId: rung.id }
   }
   return { rungIndex: RUNGS.length, rungId: 'complete' }
 }
@@ -1708,6 +1742,8 @@ export interface PlannerOptions {
   maxAttempts?: number
   /** resident process terminator; absent in tests (the fatal error is thrown) */
   terminate?: () => never
+  /** Refresh live server predicates before grounding a System2 request. */
+  refreshLiveFacts?: () => void
   /** key resolver seam for tests; defaults to `resolveJevApiKey` */
   resolveKey?: () => KeyResolution | null
 }

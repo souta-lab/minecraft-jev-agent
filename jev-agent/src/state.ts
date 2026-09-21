@@ -9,13 +9,23 @@
 //   2. written to the JSONL calibration log,
 //   3. replayed in the pure guard unit test with no bot at all.
 import type { Bot } from 'mineflayer'
+import { Vec3 } from 'vec3'
 import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
+import type { System2Outcome } from './system2.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
-import { NETHER_PORTAL, portalFrameLayout, validatePortalFrame } from './netherPortalPlan.ts'
+import {
+  detectPortalVerification,
+  NETHER_PORTAL,
+  portalFrameLayout,
+  portalFrameNeedsTemporarySupport,
+  validatePortalFrame,
+} from './netherPortalPlan.ts'
 import type { PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
+import { isProtectedStationBlock } from './blockSafety.ts'
+import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
 
 export type Vec3Json = {
   x: number
@@ -325,6 +335,8 @@ export type WorldState = {
   goalQueue: GoalQueueState
   /** #56: the exact compiled Option instance currently being evaluated by Jev */
   currentOption?: CurrentOptionContext | null
+  /** Typed settled outcomes; Jev beta must see control vs body/search evidence. */
+  recentOutcomes?: System2Outcome[]
   recentEvents: string[]
   signals: AgentSignals
 }
@@ -361,6 +373,7 @@ export interface SensorInput {
   goalQueue: GoalQueueState
   /** #56: the exact compiled Option instance currently being evaluated by Jev */
   currentOption?: CurrentOptionContext | null
+  recentOutcomes?: readonly System2Outcome[]
   /** the item the current subgoal targets, used to focus the block scan */
   focusItem?: string | null
   recentEvents: string[]
@@ -714,8 +727,10 @@ function buildBuriedStoneBlocks(
   options: SensorOptions,
   self: SelfState,
   focusItem: string | null,
+  scanAllStone = false,
 ): BlockState[] {
-  if (focusItem === null || !STONE_YIELDS.has(focusItem)) return []
+  if (focusItem === null && !scanAllStone) return []
+  if (focusItem !== null && !STONE_YIELDS.has(focusItem)) return []
   const radius = Math.min(options.scanRadius, 24)
   const positions = bot.findBlocks({
     matching: (block) => STONE_LIKE.has(block.name),
@@ -747,6 +762,51 @@ function buildBuriedStoneBlocks(
   }
   out.sort((a, b) => a.distance - b.distance)
   return out.slice(0, options.maxStoneBlocks)
+}
+
+/**
+ * Keep a bounded near-field envelope of every grounded block that can provide
+ * a placeable item. `buildStoneBlocks` intentionally keeps the topmost exposed
+ * stone per column for route planning; that invariant is wrong for capability
+ * acquisition because a nearby producer can be exposed below a buried block
+ * in the same column (live pocket: andesite at (4,54,13) below buried stone).
+ *
+ * This is sensor truth only. It does not choose a block or add a semantic goal;
+ * `mineCandidates` still applies reach, visibility, pickup and tool guards and
+ * the prerequisite envelope tags the resulting candidate.
+ */
+function buildNearbyPlaceableProducers(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
+  const positions = bot.findBlocks({
+    matching: (block) => STONE_LIKE.has(block.name),
+    maxDistance: Math.max(options.reach + 2, 8),
+    count: 256,
+  })
+  const out: BlockState[] = []
+  for (const position of positions) {
+    const block = bot.blockAt(position)
+    if (block === null) continue
+    const pos = vecJson(position)
+    const harvest = resolveBlockHarvest(bot, block.name)
+    if (typeof harvest.yield !== 'string' || !PILLAR_PLACE_PRIORITY.includes(harvest.yield)) continue
+    const inReach = distance(pos, self.eyePosition) <= options.reach
+    const adjacentStandable = findAdjacentStandable(bot, pos)
+    out.push({
+      kind: 'stone',
+      name: block.name,
+      position: pos,
+      distance: round2(distance(pos, self.position)),
+      diggable: block.diggable,
+      inReach,
+      hasAdjacentStandable: adjacentStandable !== null,
+      adjacentStandable,
+      yield: harvest.yield,
+      harvestTool: harvest.harvestTool,
+      harvestTier: harvest.harvestTier,
+      visible: blockVisible(bot, { position: pos }, inReach),
+    })
+  }
+  out.sort((a, b) => a.distance - b.distance || b.position.y - a.position.y)
+  return out.slice(0, Math.max(options.maxStoneBlocks, 64))
 }
 
 /**
@@ -823,13 +883,56 @@ function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): B
   return out
 }
 
-function buildBlocks(bot: Bot, options: SensorOptions, self: SelfState, focusItem: string | null): BlockState[] {
+function buildBlocks(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  focusItem: string | null,
+  inventoryCounts: Readonly<Record<string, number>>,
+): BlockState[] {
   const logs = buildLogBlocks(bot, options, self)
-  const stones = focusItem !== null && STONE_YIELDS.has(focusItem) ? buildStoneBlocks(bot, options, self, focusItem) : []
-  const buried = buildBuriedStoneBlocks(bot, options, self, focusItem)
+  const stoneFocus = focusItem !== null && STONE_YIELDS.has(focusItem) ? focusItem : null
+  // A vertical Skill can be mechanically blocked by the absence of a held
+  // placeable block while the parent Option is collecting/crafting something
+  // else (the live log route is the canonical example).  The prerequisite
+  // solver is deliberately allowed to acquire cobblestone from grounded stone
+  // producers, but that requires the sensor to retain those producers outside
+  // the current semantic focus.  This is perception of a mechanical fact, not
+  // a semantic goal switch: keep the extra scan bounded and only enable it
+  // while the capability is actually missing.
+  const scanPrerequisiteStone = stoneFocus === null && selectPlaceableBlock(inventoryCounts) === null
+  const stoneScanOptions = scanPrerequisiteStone
+    ? { ...options, maxStoneBlocks: Math.max(options.maxStoneBlocks, 64) }
+    : options
+  const stones =
+    stoneFocus !== null
+      ? buildStoneBlocks(bot, options, self, stoneFocus)
+      : scanPrerequisiteStone
+        ? buildStoneBlocks(bot, stoneScanOptions, self, null)
+        : []
+  const nearbyPlaceableProducers = scanPrerequisiteStone
+    ? buildNearbyPlaceableProducers(bot, stoneScanOptions, self)
+    : []
+  const buried =
+    stoneFocus !== null
+      ? buildBuriedStoneBlocks(bot, options, self, stoneFocus)
+      : scanPrerequisiteStone
+        ? buildBuriedStoneBlocks(bot, stoneScanOptions, self, null, true)
+        : []
   const ores = buildOreBlocks(bot, options, self, focusItem)
   const hazards = buildHazardBlocks(bot, options, self)
-  return [...logs, ...stones, ...buried, ...ores, ...hazards]
+  // Keep the bounded capability envelope ahead of the broad route-planning
+  // stone scan. This is not a semantic ranking: `mineCandidates` applies a
+  // typed placeable-producer filter, but its mechanical candidate cap must not
+  // be consumed by unrelated stone cells before the near producer is seen.
+  const blocks = [...logs, ...nearbyPlaceableProducers, ...stones, ...buried, ...ores, ...hazards]
+  const seen = new Set<string>()
+  return blocks.filter((block) => {
+    const key = `${block.kind}:${block.position.x},${block.position.y},${block.position.z}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /**
@@ -982,7 +1085,11 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
     const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
     let reason = 'safe'
-    if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
+    const protectedDig = [wall, head, floor]
+      .map((cell) => at(cell.x, cell.y, cell.z))
+      .find((block) => block !== null && isProtectedStationBlock(block.name))
+    if (protectedDig !== undefined && protectedDig !== null) reason = `${protectedDig.name} is a protected station`
+    else if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
     else if (!headOk) reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
     else if (!floorOk) reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
     else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
@@ -1094,7 +1201,8 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
       const step = { x, y: top, z }
       const name = at(x, top, z)?.name ?? 'unknown'
       let reason = 'safe'
-      if (!diggableSolid(x, top, z)) reason = `${name} is not breakable`
+      if (isProtectedStationBlock(name)) reason = `${name} is a protected station`
+      else if (!diggableSolid(x, top, z)) reason = `${name} is not breakable`
       else if (!solid(x, top - 1, z)) reason = 'no solid landing under the cut'
       else if (!clear(x, top + 1, z) || !clear(x, top + 2, z)) reason = 'no headroom above the new step'
       else if (hazardsAround(hazardous, cut, step, { x, y: top - 1, z })) reason = 'lava/water in the step column'
@@ -1124,7 +1232,10 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
     const name = block.name
     let safe = true
     let reason = 'safe'
-    if (!isBreakableSolidBlock(block)) {
+    if (isProtectedStationBlock(name)) {
+      safe = false
+      reason = `${name} is a protected station`
+    } else if (!isBreakableSolidBlock(block)) {
       safe = false
       reason = `${name} is not breakable`
     } else if (PROBE_HAZARDS.has(name) || PROBE_FLUIDS.has(name)) {
@@ -1261,6 +1372,12 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
             }
           }
           if (!supported) continue
+          const temporarySupportRequired = portalFrameNeedsTemporarySupport(
+            origin,
+            widthAxis,
+            existingFrame,
+            (position) => solid(position.x, position.y, position.z),
+          )
           const first = { x: origin.x + 0.5, y: origin.y, z: origin.z + 0.5 }
           if (distance(first, body) < 1.0) continue
           sites.push({
@@ -1268,6 +1385,7 @@ export function buildPortalFrameSites(bot: Bot, _options: SensorOptions, self: S
             widthAxis,
             safe: true,
             reachable: true,
+            temporarySupportRequired,
             ...(existingFrame.length === 0 ? {} : { existingFrame }),
           })
         }
@@ -1306,6 +1424,21 @@ export function countSensedPortalFrameBlocks(bot: Bot): number {
   return Math.max(0, ...sites.map((site) => site.existingFrame?.length ?? 0))
 }
 
+/**
+ * Live server-truth projection for the ladder frontier. It is never persisted:
+ * an externally broken portal must become unsatisfied on the next read.
+ */
+export function detectLivePortalVerification(bot: Bot): boolean {
+  const dimension = String(bot.game?.dimension ?? 'minecraft:overworld')
+  if (dimension !== 'minecraft:overworld' && dimension !== 'overworld') return false
+  const sites = sensedPortalFrameSites(bot)
+  return detectPortalVerification(
+    dimension,
+    sites,
+    (position) => bot.blockAt(new Vec3(position.x, position.y, position.z))?.name ?? null,
+  )
+}
+
 function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
   const found: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
@@ -1331,6 +1464,7 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
  */
 export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOptions = defaultSensorOptions): WorldState {
   const self = buildSelf(bot)
+  const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   const portalFrameSites = buildPortalFrameSites(bot, options, self)
   const portalFrame =
@@ -1345,9 +1479,9 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     tick: input.tick,
     timestampMs: Date.now(),
     self,
-    inventory: buildInventory(bot),
+    inventory,
     entities: buildEntities(bot, options, self.position),
-    blocks: buildBlocks(bot, options, self, input.focusItem ?? null),
+    blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
     terrain: { standable: buildTerrain(bot, options, self) },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
@@ -1360,6 +1494,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
     goal: input.goal,
     goalQueue: input.goalQueue,
     currentOption: input.currentOption ?? null,
+    recentOutcomes: [...(input.recentOutcomes ?? [])].slice(-8),
     recentEvents: input.recentEvents.slice(-12),
     signals: input.signals,
   }
