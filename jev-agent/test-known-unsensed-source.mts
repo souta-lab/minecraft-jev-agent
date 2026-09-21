@@ -260,6 +260,19 @@ addCase('(a) the declared-but-unsensed flint set offers no RETRIEVE and no inven
   }
 })
 
+addCase('(a) a remembered stone level below does not re-hide the flint exploration fallback', () => {
+  // Live shape: the body has tunnelled, so `signals.knownStoneY` is set below the
+  // feet. A remembered STONE level is not a remembered GRAVEL coordinate, so it
+  // must not make the blind DESCEND count as a route for the flint goal.
+  const state = build({ focus: 'flint', description: 'collect 1 x flint (from gravel)', withDescent: true })
+  state.signals.knownStoneY = 40
+  const all = actionable(state)
+  return {
+    pass: all.length >= 3 && all.some(isExploration),
+    detail: `actionable=${all.length} exploration=${all.filter(isExploration).length} ids=${ids(all)}`,
+  }
+})
+
 // --- (b) a sensed source still mines -------------------------------------------
 
 addCase('(b) a sensed gravel block yields the MINE for the flint goal', () => {

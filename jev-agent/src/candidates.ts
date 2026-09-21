@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, ORE_SOURCES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
@@ -721,7 +721,8 @@ export function generateGroundedCandidates(
  * True when a candidate is an actual ROUTE for the active focus: a sensed
  * MINE/MOVE/dig-access, a remembered RETRIEVE, a craft/smelt/place/portal step,
  * or a DESCEND the world grounds (a sensed/tunnel target, a remembered stone
- * level below, a stone-class focus, or an explicit `descend_to` predicate).
+ * level below an ORE source, a stone-class focus, or an explicit `descend_to`
+ * predicate).
  *
  * A blind DESCEND carries none of those facts: it exists only because the focus
  * item has a declared scanned source, which is perception truth rather than a
@@ -1645,10 +1646,13 @@ function descendCandidates(
 
   const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
   // A DESCEND is a ROUTE only when the world grounds it: a sensed/tunnel target,
-  // an explicit predicate, a remembered stone level below (for an underground
-  // source), or a stone-class focus. Otherwise it is a blind search step, and
-  // the declared-source exploration fallback may run beside it.
-  const grounded = descendToY || hasGoalTarget || knownStoneBelow || stoneGoal
+  // an explicit predicate, a stone-class focus, or (for a source that genuinely
+  // generates underground) a remembered stone level below. A remembered stone
+  // level does NOT ground a descent toward a surface-sourced item such as
+  // `flint -> gravel`, so it must not hide the declared-source exploration
+  // fallback there.
+  const focusIsOreSource = focusItem !== null && ORE_SOURCES[focusItem] !== undefined
+  const grounded = descendToY || hasGoalTarget || stoneGoal || (knownStoneBelow && focusIsOreSource)
   const choice = selectDigTool(
     {
       name: best.digName ?? '',
