@@ -39,11 +39,13 @@ import {
 import {
   PORTAL_SITE_PROOF_DISTANCE,
   evaluateLedgerRestoreBasis,
+  portalVerdictForTick,
   reconcileLedgerGoals,
   selectLedgerSnapshot,
   syncKnownPortalSites,
 } from './generation-entry.ts'
 import type { LedgerBasis } from '../jev-agent/src/goalQueue.ts'
+import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import { emptyWorldMemory } from './resident-types.ts'
 import type { GoalQueueSnapshot, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
 import type { KnownPortalSiteJson, ResidentWorldMemory } from './resident-types.ts'
@@ -304,25 +306,32 @@ addCase('(c) blind-from-below: the durable record survives and still yields the 
   }
 })
 
-// (a6) THE PERSISTED SHAPE: the durable ledger the old code actually left behind
-// (an ACTIVE `mine 10 x obsidian` row plus pending `place obsidian` /
-// `place nether_portal` rows, all stamped with the completed
-// `system2:front_nether_portal` Option, committed against basis enter_nether@14).
-// Restoring it must retire those rows instead of putting construction back at
-// the queue head.
-addCase('(a6) restore: persisted pending construction rows are retired, not restored', () => {
-  const world = liveWorld({ knownPortalSites: [{ ...PORTAL_SITE }] })
-  const live = [
-    { ...constructionLedger().goals[0]!, id: 'g4:collect:obsidian', description: 'mine 10 x obsidian with diamond_pickaxe', requiredCount: 10, status: 'active' as const },
-    { ...constructionLedger().goals[3]!, id: 'g5:place:obsidian', status: 'pending' as const },
-    { ...constructionLedger().goals[4]!, id: 'g6:place:nether_portal', status: 'pending' as const, targetPredicate: 'portal_lit' },
-  ]
-  const snapshot: GoalQueueSnapshot = {
+/**
+ * The durable ledger the reopen bug actually left behind for this run
+ * (`buddy-ledger.json`): an ACTIVE `mine 10 x obsidian` row plus pending
+ * `place obsidian` / `place nether_portal` rows, all stamped with the
+ * already-completed `system2:front_nether_portal` Option, committed against
+ * basis enter_nether@14.
+ */
+function persistedLiveLedger(): GoalQueueSnapshot {
+  const base = constructionLedger().goals
+  return {
     counter: 30,
     revision: 9000,
-    goals: live,
+    goals: [
+      { ...base[0]!, id: 'g4:collect:obsidian', description: 'mine 10 x obsidian with diamond_pickaxe', requiredCount: 10, status: 'active' },
+      { ...base[3]!, id: 'g5:place:obsidian', status: 'pending' },
+      { ...base[4]!, id: 'g6:place:nether_portal', status: 'pending', targetPredicate: 'portal_lit' },
+    ],
     basis: { worldKey: WORLD_KEY_STRING, frontierRungId: 'enter_nether', frontierRungIndex: 14 },
   }
+}
+
+// (a6) THE PERSISTED SHAPE. Restoring it must retire those rows instead of
+// putting construction back at the queue head.
+addCase('(a6) restore: persisted pending construction rows are retired, not restored', () => {
+  const world = liveWorld({ knownPortalSites: [{ ...PORTAL_SITE }] })
+  const snapshot = persistedLiveLedger()
   const reconciled = reconcileLedgerGoals(snapshot, LIVE_INVENTORY, world)
   const stillUnfinished = reconciled.snapshot.goals.filter(
     (goal) => goal.status === 'active' || goal.status === 'pending',
@@ -338,6 +347,48 @@ addCase('(a6) restore: persisted pending construction rows are retired, not rest
   return {
     pass,
     detail: `achieved=[${reconciled.achieved.map((entry) => `${entry.id}<-${entry.rungIds.join('+')}`).join(' ')}] unfinished=${stillUnfinished.length}`,
+  }
+})
+
+// (a9) FOLLOW-THROUGH: after the retirement the real queue has no unfinished row,
+// so the frontier's entry row owns the plan slot, and the record-anchored entry
+// grounding emits the candidate the executor walks into (`ENTER:27,67,9`).
+addCase('(a9) follow-through: empty queue -> entry row owns the slot -> ENTER:27,67,9', () => {
+  const world = liveWorld({ knownPortalSites: [{ ...PORTAL_SITE }] })
+  const reconciled = reconcileLedgerGoals(persistedLiveLedger(), LIVE_INVENTORY, world)
+  const queue = new GoalQueue()
+  queue.restore(reconciled.snapshot)
+  const unfinished = queue
+    .snapshot()
+    .goals.filter((goal) => goal.status === 'active' || goal.status === 'pending')
+  const resume = deriveResumeRung(LIVE_INVENTORY, world)
+  const entryGoal = buildLadder(LIVE_INVENTORY, world, undefined, { resumeRungIndex: resume.rungIndex }).goals.find(
+    (goal) => goal.targetPredicate === 'portal_entered',
+  )
+  const sites = rememberedPortalFrameSites(
+    portalSiteKnownResources([{ ...PORTAL_SITE }]) as unknown as Parameters<typeof rememberedPortalFrameSites>[0],
+  )
+  const plan = planPortalEntry({
+    site: sites[0]!,
+    self: { x: Math.floor(BODY_BELOW.x), y: Math.floor(BODY_BELOW.y), z: Math.floor(BODY_BELOW.z) },
+    blockAt: (cell) =>
+      PORTAL_LAYOUT.interior.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z)
+        ? 'nether_portal'
+        : 'obsidian',
+    isStandable: (cell) =>
+      PORTAL_LAYOUT.interior.some((entry) => entry.x === cell.x && entry.y === cell.y && entry.z === cell.z),
+    fromDimension: 'minecraft:overworld',
+    dimension: 'minecraft:the_nether',
+  })
+  const pass =
+    unfinished.length === 0 &&
+    queue.current === null &&
+    entryGoal !== undefined &&
+    plan.ok === true &&
+    plan.candidate.id === 'ENTER:27,67,9'
+  return {
+    pass,
+    detail: `unfinished=${unfinished.length} queueCurrent=${queue.current?.id ?? 'none'} entryGoal=${entryGoal?.description ?? 'none'} candidate=${plan.ok ? plan.candidate.id : plan.line}`,
   }
 })
 
@@ -392,6 +443,63 @@ addCase('(a8) the entry route grounds from the record while the body is below th
     pass,
     detail: `sites=${sites.length} ok=${plan.ok} ${plan.ok ? `enterCell=${plan.candidate.enterCell.x},${plan.candidate.enterCell.y},${plan.candidate.enterCell.z}` : plan.line}`,
   }
+})
+
+// (a10) VERDICT STABILITY: the live log measured `PORTAL_TRUTH verified=true`
+// alternating with `verified=false` every ~2s while the gate stood lit, which
+// flapped the rung and re-created `collect obsidian` work. Once the run's own
+// record stands, a tick whose scan sees nothing must not un-verify it.
+addCase('(a10) verdict: a blind tick cannot un-verify the run’s standing record', () => {
+  const blindTick = portalVerdictForTick({
+    liveSighted: false,
+    recheckConfirmed: false,
+    recordedSites: 1,
+    positivelyRevoked: false,
+  })
+  const sighted = portalVerdictForTick({
+    liveSighted: true,
+    recheckConfirmed: false,
+    recordedSites: 1,
+    positivelyRevoked: false,
+  })
+  const rechecked = portalVerdictForTick({
+    liveSighted: false,
+    recheckConfirmed: true,
+    recordedSites: 1,
+    positivelyRevoked: false,
+  })
+  const pass =
+    blindTick.verified === true &&
+    blindTick.source === 'durable-site-record' &&
+    sighted.source === 'live-world' &&
+    rechecked.source === 'durable-site-recheck'
+  return {
+    pass,
+    detail: `blind=${blindTick.verified}/${blindTick.source} sighted=${sighted.source} rechecked=${rechecked.source}`,
+  }
+})
+
+// (a11) REVOCATION stays positive: only disproof of the record's own cells (or a
+// world-epoch/dimension change, which drops the record) clears the verdict.
+addCase('(a11) verdict: only positive world truth revokes it', () => {
+  const revoked = portalVerdictForTick({
+    liveSighted: false,
+    recheckConfirmed: false,
+    recordedSites: 0,
+    positivelyRevoked: true,
+  })
+  const noEvidence = portalVerdictForTick({
+    liveSighted: false,
+    recheckConfirmed: false,
+    recordedSites: 0,
+    positivelyRevoked: false,
+  })
+  const pass =
+    revoked.verified === false &&
+    revoked.source === 'world-truth-revoked' &&
+    noEvidence.verified === false &&
+    noEvidence.source === 'no-evidence'
+  return { pass, detail: `revoked=${revoked.verified}/${revoked.source} none=${noEvidence.verified}/${noEvidence.source}` }
 })
 
 // (b) THE M2 BUILD CASE MUST NOT BREAK: no verified outcome -> the construction

@@ -591,6 +591,58 @@ export function syncKnownPortalSites(input: {
   return { known: kept, added, removed, removalReasons, confirmed }
 }
 
+/** Provenance of the live portal verdict, recorded on every `PORTAL_TRUTH` change. */
+export type PortalVerdictSource =
+  /** the body-relative search saw a lit site this tick */
+  | 'live-world'
+  /** the run's own durable record was read back as a valid lit portal this tick */
+  | 'durable-site-recheck'
+  /** the run's durable verified-portal record still stands (no fresh observation needed) */
+  | 'durable-site-record'
+  /** world truth disproved the recorded site's own cells this tick */
+  | 'world-truth-revoked'
+  /** nothing observed and no record: no evidence either way */
+  | 'no-evidence'
+
+/**
+ * The live portal verdict for ONE tick.
+ *
+ * `portalVerified` is server truth, but it is NOT re-derived from a single
+ * momentary scan. Once this run has observed a valid lit gate - through the
+ * body-relative search OR through a coordinate-anchored recheck of its own
+ * durable record - a later tick whose scan happens to see nothing must not
+ * un-observe it. Measured live (`run-mubhx20x-pie2`, 17:41Z): `PORTAL_TRUTH`
+ * alternated true/false every ~2s while the gate stood lit and the body idled
+ * below it, which flapped the `nether_portal` rung, re-summoned System2 with
+ * `action_impossible`, and re-created `collect obsidian` work whose only source
+ * was the protected gate (`RESOURCE_SOURCE_NONE item=obsidian
+ * reason=live_structure sensed=10`).
+ *
+ * A durable record is not an immortal verdict: `syncKnownPortalSites` revokes it
+ * by POSITIVE world truth (its own cells read back broken/unlit, or a
+ * world-epoch/dimension change), and that same tick clears the verdict. Absence
+ * from a search is never proof, so it never clears anything.
+ */
+export function portalVerdictForTick(input: {
+  /** the body-relative search found a lit site this tick */
+  liveSighted: boolean
+  /** the durable record's own cells were read back as a valid lit portal this tick */
+  recheckConfirmed: boolean
+  /** durable verified-portal records still standing after this tick's reconciliation */
+  recordedSites: number
+  /** this tick positively disproved a record's own cells (frame broken / no longer lit) */
+  positivelyRevoked: boolean
+}): { verified: boolean; source: PortalVerdictSource } {
+  const observed = input.liveSighted || input.recheckConfirmed
+  if (observed || input.recordedSites > 0) {
+    return {
+      verified: true,
+      source: input.liveSighted ? 'live-world' : observed ? 'durable-site-recheck' : 'durable-site-record',
+    }
+  }
+  return { verified: false, source: input.positivelyRevoked ? 'world-truth-revoked' : 'no-evidence' }
+}
+
 /**
  * #80: expose durable portal sites as CAN-only known-resource entries. The
  * `'portal'` kind is inert to the ore/log/station retrieval matches; the sensor
@@ -1508,6 +1560,19 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
    * drops a record only when its OWN cells read as broken/unlit, or on a
    * world-epoch/dimension change.
    */
+  const applyPortalVerdict = (reason: string, liveSighted: boolean, result: PortalSiteSyncResult): void => {
+    const verdict = portalVerdictForTick({
+      liveSighted,
+      recheckConfirmed: result.confirmed.length > 0,
+      recordedSites: result.known.length,
+      positivelyRevoked: result.removalReasons.some(
+        (entry) => entry.reason === 'frame_broken' || entry.reason === 'observed_unlit',
+      ),
+    })
+    if (verdict.verified === world.portalVerified) return
+    world.portalVerified = verdict.verified
+    ctx.log('PORTAL_TRUTH', { verified: verdict.verified, reason, source: verdict.source })
+  }
   const syncPortalSiteMemory = (reason: string): PortalSiteSyncResult => {
     const liveVerified = sensedVerifiedPortalSites(ctx.bot).map((site) => ({
       origin: { x: site.origin.x, y: site.origin.y, z: site.origin.z },
@@ -1517,9 +1582,18 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     }))
     const entity = ctx.bot.entity
     if (entity === undefined) {
-      // No body = nothing observed. Never revoke on an observation that was not
-      // taken, and never invent one.
-      return { known: world.knownPortalSites, added: [], removed: [], removalReasons: [], confirmed: [] }
+      // No body = nothing observed this tick. Never revoke on an observation that
+      // was not taken and never invent one: the run's standing record still
+      // carries the verdict.
+      const result: PortalSiteSyncResult = {
+        known: world.knownPortalSites,
+        added: [],
+        removed: [],
+        removalReasons: [],
+        confirmed: [],
+      }
+      applyPortalVerdict(reason, false, result)
+      return result
     }
     const result = syncKnownPortalSites({
       known: world.knownPortalSites,
@@ -1530,17 +1604,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     })
     world.knownPortalSites = result.known
     const liveSighted = liveVerified.length > 0
-    const next = liveSighted || result.confirmed.length > 0
-    if (next !== world.portalVerified) {
-      world.portalVerified = next
-      ctx.log('PORTAL_TRUTH', {
-        verified: next,
-        reason,
-        // Provenance is explicit: the body-relative search this tick, or a
-        // coordinate-anchored recheck of the run's own durable record.
-        source: liveSighted ? 'live-world' : 'durable-site-recheck',
-      })
-    }
+    applyPortalVerdict(reason, liveSighted, result)
     const changedMemory = result.added.length > 0 || result.removed.length > 0
     if (changedMemory) {
       ctx.proposeWorldMemory({
