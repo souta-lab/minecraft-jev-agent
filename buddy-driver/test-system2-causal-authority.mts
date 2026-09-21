@@ -414,7 +414,7 @@ const reportBrain = new PlannerBrain({
   log: () => undefined,
   cachePath: join(mkdtempSync(join(tmpdir(), 'system2-authority-report-')), 'cache.json'),
   mode: 'llm',
-  mercury: { model: 'inception/mercury-2.5' } as never,
+  mercury: { model: 'inception/mercury-2.5', provider: 'mercury' } as never,
 })
 
 const liveStationWorld = augmentPlannerWorldWithLiveStations(

@@ -9,7 +9,7 @@
 // HARD RULES (mirrors AGENTS.md):
 //   * The LLM returns ONLY plan data: { op, goals: [{item,count}], reason }.
 //     System One remains the sole action authority - no action ids, no coordinates.
-//   * Enabling Mercury is EXPLICIT config (BUDDY_SYSTEM2=mercury or
+//   * Enabling System2 is EXPLICIT config (BUDDY_SYSTEM2=on/system2; legacy mercury spelling or
 //     system2.config.json { "mercury": true }). The mere presence of a Gateway key
 //     never enables it (issue #4). The planner-mode `deterministic` always wins.
 //   * Every call is written to logs/jev/mercury-calls.jsonl with the SAME schema
@@ -61,10 +61,11 @@ import {
   MERCURY_ALLOWED_GOALS,
   MERCURY_EXPLORE_MODES,
   MERCURY_MODEL_DEFAULT,
+  SYSTEM2_MODEL_DEFAULT,
   MERCURY_TYPED_GOAL_KINDS,
 } from './mercury-capabilities.ts'
 
-export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS }
+export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS, SYSTEM2_MODEL_DEFAULT }
 
 /** Why Mercury was consulted. Exception-driven, never per-tick. */
 export type MercuryTriggerReason =
@@ -616,6 +617,8 @@ export function mercuryStrategyLabel(plan: MercuryPlanJson): string {
 // ---------------------------------------------------------------------------
 
 export interface MercuryConfigFile {
+  system2?: boolean
+  /** Legacy compatibility key from the old Mercury-only adapter. */
   mercury?: boolean
 }
 
@@ -625,11 +628,11 @@ export interface MercuryEnablement {
 }
 
 /**
- * Resolve whether Mercury is enabled. Precedence:
- *   1. BUDDY_SYSTEM2=off|none|fallback|deterministic  -> disabled
- *   2. BUDDY_SYSTEM2=mercury|on|llm                    -> enabled (unless planner=deterministic)
- *   3. config file { "mercury": true }                 -> enabled (unless planner=deterministic)
- *   4. otherwise                                       -> disabled
+ * Resolve whether the sparse System2 gateway is enabled. Precedence:
+ *   1. BUDDY_SYSTEM2=off|none|fallback|deterministic -> disabled
+ *   2. BUDDY_SYSTEM2=on|llm|system2|muse             -> enabled
+ *   3. config file { "system2": true }              -> enabled
+ *   4. legacy `mercury` env/config spellings remain accepted for compatibility
  * The Gateway key is NEVER consulted here.
  */
 export function resolveMercuryEnablement(
@@ -640,13 +643,13 @@ export function resolveMercuryEnablement(
   if (raw === 'off' || raw === 'none' || raw === 'fallback' || raw === 'deterministic') {
     return { enabled: false, source: 'env:BUDDY_SYSTEM2=off' }
   }
-  const explicitOn = raw === 'mercury' || raw === 'on' || raw === 'llm'
+  const explicitOn = raw === 'on' || raw === 'llm' || raw === 'system2' || raw === 'muse' || raw === 'mercury'
   let configured = explicitOn
   if (!configured) {
     try {
       if (existsSync(configPath)) {
         const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as MercuryConfigFile
-        configured = parsed.mercury === true
+        configured = parsed.system2 === true || parsed.mercury === true
       }
     } catch {
       configured = false
@@ -654,7 +657,7 @@ export function resolveMercuryEnablement(
   }
   if (!configured) return { enabled: false, source: 'default-off' }
   if (plannerMode === 'deterministic') return { enabled: false, source: 'deterministic-planner-override' }
-  return { enabled: true, source: explicitOn ? 'env:BUDDY_SYSTEM2=mercury' : `config:${configPath}` }
+  return { enabled: true, source: explicitOn ? `env:BUDDY_SYSTEM2=${raw}` : `config:${configPath}` }
 }
 
 // ---------------------------------------------------------------------------
@@ -940,7 +943,7 @@ export type MercuryTransport = (request: MercuryTransportRequest) => Promise<Mer
  * emits only a high-level plan, and the exact same local schema/capability
  * validation remains authoritative after transport parsing.
  */
-export const MUSE_SPARK_MODEL = 'muse-spark-1.3-contributor'
+export const MUSE_SPARK_MODEL = SYSTEM2_MODEL_DEFAULT
 
 /**
  * Model ids arrive either bare (`muse-spark-1.3-contributor`) or with the
@@ -951,7 +954,9 @@ export const MUSE_SPARK_MODEL = 'muse-spark-1.3-contributor'
  * every Mercury consultation failed 3/3 and the resident terminated fail-loud.
  */
 export function isMuseSparkModel(model: string): boolean {
-  return model === MUSE_SPARK_MODEL || model.endsWith(`/${MUSE_SPARK_MODEL}`)
+  const id = model.trim().toLowerCase()
+  const leaf = 'muse-spark-1.3-contributor'
+  return id === MUSE_SPARK_MODEL || id === leaf || id.endsWith(`/${leaf}`)
 }
 
 export type MercuryTransportMode = 'tool-call' | 'json-text'
@@ -959,6 +964,7 @@ export type MercuryTransportMode = 'tool-call' | 'json-text'
 export function mercuryTransportMode(model: string): MercuryTransportMode {
   return isMuseSparkModel(model) ? 'json-text' : 'tool-call'
 }
+
 
 /** Extract one JSON object from a model's text response without repairing it. */
 export function parseMercuryJsonText(text: string): unknown | null {
@@ -989,33 +995,29 @@ type MercuryPlanTool = Tool<MercuryPlanJson, never, never>
 const MERCURY_PLAN_TOOL_SCHEMA = MERCURY_PLAN_SCHEMA as unknown as MercuryPlanTool['inputSchema']
 
 const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
-  'This model cannot use a named tool choice. Prefer one emitPlan tool call when supported; otherwise return exactly one JSON object in the response text, with no prose or markdown. ' +
+  'Return exactly one JSON object in the response text, with no prose, markdown, or tool call. ' +
   'The top-level op must be exactly one of continue, patch, replace, abandon, complete, or abort. ' +
   'Use goals for the typed goal objects; never use a goal kind as op. For complete and abort, goals MUST be empty; abandon may carry the replacement plan. ' +
   'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
 
+const TOOL_CALL_TRANSPORT_INSTRUCTIONS =
+  'Return ONLY via the emitPlan tool. Do not answer in response text.'
+
 function defaultMercuryTransport(model: string): MercuryTransport {
   if (mercuryTransportMode(model) === 'json-text') {
     return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
+      // Muse Spark is the default System2 model. Do not route it through the
+      // old Mercury-specific named-tool contract: the gateway rejects named
+      // tool_choice for this model. Ask for strict JSON text and keep the same
+      // local schema/capability validator as the authority boundary.
       const result = await generateText({
         model,
         system: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
         prompt,
-        tools: {
-          emitPlan: tool({
-            description: 'Emit the bounded high-level Minecraft goal-queue repair plan',
-            inputSchema: MERCURY_PLAN_TOOL_SCHEMA,
-          }),
-        },
-        // muse rejects a named tool choice but accepts the provider-neutral
-        // auto mode. If it spends its output budget reasoning without a tool
-        // call, the strict JSON-text parser below is the non-semantic fallback.
-        toolChoice: 'auto',
         maxOutputTokens,
         maxRetries: 0,
         abortSignal: AbortSignal.timeout(timeoutMs),
       })
-      if (result.toolCalls.length > 0) return { toolCalls: result.toolCalls, usage: result.usage }
       const parsed = parseMercuryJsonText(result.text)
       return { toolCalls: parsed === null ? [] : [{ input: parsed }], usage: result.usage }
     }
@@ -1023,7 +1025,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
   return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
     const result = await generateText({
       model,
-      system,
+      system: `${system}\n\n${TOOL_CALL_TRANSPORT_INSTRUCTIONS}`,
       prompt,
       tools: {
         emitPlan: tool({
@@ -1043,7 +1045,7 @@ function defaultMercuryTransport(model: string): MercuryTransport {
 const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
-Return ONLY via the emitPlan tool, matching its schema exactly: op, goals, reason.
+Produce exactly one high-level plan matching this schema: op, goals, reason.
 A goal is EITHER a legacy item goal { item, count } (the verb is inferred locally) OR an explicit typed goal. Use an explicit kind when the same noun needs different operations (e.g. craft furnace vs place furnace):
 - { kind: 'collect', item, count }   allowed items: allowedGoals.collect
 - { kind: 'craft', item, count }     allowed items: allowedGoals.craft
@@ -1270,13 +1272,12 @@ function trailingWaitStreak(outcomes: readonly System2Outcome[]): number {
 }
 
 /**
- * A real System2Brain over the AI Gateway (Mercury 2.5). `plan()` throws when the
- * model is unavailable; the integrated PlannerBrain uses `tryRepair()` instead,
- * which never throws and always falls back to the deterministic ladder.
+ * A real sparse System2Brain over the AI Gateway. Muse Spark is the default model.
+ * `plan()` fails loud when the model is unavailable; no deterministic semantic
+ * fallback is introduced by this adapter.
  */
 export class MercurySystem2 implements System2Brain {
   readonly model: string
-  readonly provider = 'mercury'
   readonly authorityModel: string
   private readonly summarize: MercurySystem2Options['summarize']
   private readonly log: MercurySystem2Options['log']
@@ -1303,14 +1304,21 @@ export class MercurySystem2 implements System2Brain {
     this.log = options.log
     this.callsPath = options.callsPath
     this.cachePath = options.cachePath
-    this.model = options.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT
+    this.model = options.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? SYSTEM2_MODEL_DEFAULT
     this.authorityModel = this.model
-    this.maxPerHour = options.maxPerHour ?? Number(process.env.BUDDY_SYSTEM2_MAX_PER_HOUR ?? 20)
+    const configuredMaxPerHour = process.env.BUDDY_SYSTEM2_MAX_PER_HOUR
+    this.maxPerHour =
+      options.maxPerHour ??
+      (configuredMaxPerHour !== undefined
+        ? Number(configuredMaxPerHour)
+        : mercuryTransportMode(this.model) === 'json-text'
+          ? Number.POSITIVE_INFINITY
+          : 20)
     this.waitLimitBackoffBaseMs = options.waitLimitBackoffBaseMs ?? resolveMercuryWaitLimitBackoffBaseMs()
     this.waitLimitBackoffMaxMs = options.waitLimitBackoffMaxMs ?? resolveMercuryWaitLimitBackoffMaxMs()
-    // Mercury is a reasoning model: a correct plan routinely takes several seconds
-    // of hidden reasoning, so the timeout must comfortably exceed that. The
-    // observed failure mode was an abort at ~50ms, so we also retry once.
+    // Provider calls stay bounded by timeout/retry. The durable repeated-stall
+    // trigger backoff is model-agnostic; the old Mercury hourly cost guard is
+    // disabled by default for Muse Spark and remains opt-in via env/options.
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_SYSTEM2_TIMEOUT_MS ?? 25000)
     this.maxAttempts = 1 + Math.max(0, options.retries ?? Number(process.env.BUDDY_SYSTEM2_RETRIES ?? 2))
     this.maxOutputTokens = options.maxOutputTokens ?? Number(process.env.BUDDY_SYSTEM2_MAX_OUTPUT_TOKENS ?? 3000)
@@ -1325,10 +1333,17 @@ export class MercurySystem2 implements System2Brain {
       version: MERCURY_CACHE_SCHEMA_VERSION,
       maxReplays: MAX_CACHE_REPLAYS,
       maxConsecutive: MAX_CONSECUTIVE_CACHED,
-      source: 'mercury',
+      source: this.provider,
       world: this.cacheIdentity.worldKey,
       epoch: this.cacheIdentity.worldEpoch,
     })
+  }
+
+  /** Runtime authority label reflects the selected model, not the legacy class name. */
+  get provider(): string {
+    if (mercuryTransportMode(this.model) === 'json-text') return 'muse-spark'
+    if (this.model.toLowerCase().includes('mercury')) return 'mercury'
+    return 'gateway-system2'
   }
 
   get callCount(): number {
@@ -1339,7 +1354,7 @@ export class MercurySystem2 implements System2Brain {
     return this.fallbacks
   }
 
-  /** Standalone System2Brain entry point. Fatals when Mercury cannot answer. */
+  /** Standalone System2Brain entry point. Fatals when the configured model cannot answer. */
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     const trigger = this.deriveTrigger(request)
     const started = Date.now()
@@ -1437,7 +1452,7 @@ export class MercurySystem2 implements System2Brain {
 
     const cached = this.cache.entries[stateHash]
     this.log('PLANNER_CACHE', {
-      source: 'mercury',
+      source: this.provider,
       key: stateHash,
       world: this.cacheIdentity.worldKey,
       epoch: this.cacheIdentity.worldEpoch,
@@ -1460,7 +1475,7 @@ export class MercurySystem2 implements System2Brain {
         const goals = plannedGoalsFromMercury(plan)
         const ms = Date.now() - started
         this.log('ADVISOR', {
-          source: 'mercury',
+          source: this.provider,
           reason: trigger,
           strategy: cached.strategy,
           cost: 0,
@@ -1524,7 +1539,7 @@ export class MercurySystem2 implements System2Brain {
           error: `invalid plan: ${validated.error}`,
         })
         this.log('PLAN_REJECTED', {
-          source: 'mercury',
+          source: this.provider,
           reason: validated.error,
           stage: trigger,
           callId,
@@ -1545,19 +1560,22 @@ export class MercurySystem2 implements System2Brain {
         maxAttempts: this.maxAttempts,
         reserveAttempt: (attempt) => {
           const now = Date.now()
-          this.cache.callTimes = this.cache.callTimes.filter((time) => now - time < HOUR_MS)
-          if (this.cache.callTimes.length >= this.maxPerHour) {
-            throw new Error(`hourly budget exhausted (${this.maxPerHour}/h)`)
+          const budgeted = Number.isFinite(this.maxPerHour)
+          if (budgeted) {
+            this.cache.callTimes = this.cache.callTimes.filter((time) => now - time < HOUR_MS)
+            if (this.cache.callTimes.length >= this.maxPerHour) {
+              throw new Error(`hourly budget exhausted (${this.maxPerHour}/h)`)
+            }
+            this.cache.callTimes.push(now)
+            this.saveCache()
           }
-          this.cache.callTimes.push(now)
-          this.saveCache()
           this.log('MERCURY_ATTEMPT', {
             callId,
             attempt,
             maxAttempts: this.maxAttempts,
             trigger,
-            budgetUsed: this.cache.callTimes.length,
-            budgetMax: this.maxPerHour,
+            budgetUsed: budgeted ? this.cache.callTimes.length : null,
+            budgetMax: budgeted ? this.maxPerHour : 'unbounded',
           })
         },
         call: callOnce,
@@ -1657,7 +1675,7 @@ export class MercurySystem2 implements System2Brain {
           reason: grounded.refused.reason,
           goal: grounded.refused.goal,
           replacement: grounded.refused.replacement,
-          source: 'mercury',
+          source: this.provider,
         })
       }
       const strategy = mercuryStrategyLabel(plan)
@@ -1698,7 +1716,7 @@ export class MercurySystem2 implements System2Brain {
       })
 
       this.log('ADVISOR', {
-        source: 'mercury',
+        source: this.provider,
         reason: trigger,
         strategy,
         cost: Number(costUsd.toFixed(6)),
@@ -1822,7 +1840,7 @@ export class MercurySystem2 implements System2Brain {
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as Partial<MercuryCacheFile>
       if (parsed.version !== MERCURY_CACHE_FILE_VERSION) {
         this.log('PLANNER_CACHE_INVALIDATED', {
-          source: 'mercury',
+          source: this.provider,
           reason: 'schema',
           cachedVersion: parsed.version ?? null,
           version: MERCURY_CACHE_FILE_VERSION,
@@ -1831,7 +1849,7 @@ export class MercurySystem2 implements System2Brain {
       }
       if (parsed.schemaVersion !== identity.schemaVersion) {
         this.log('PLANNER_CACHE_INVALIDATED', {
-          source: 'mercury',
+          source: this.provider,
           reason: 'schema',
           cachedSchema: parsed.schemaVersion ?? null,
           schemaVersion: identity.schemaVersion,
@@ -1840,7 +1858,7 @@ export class MercurySystem2 implements System2Brain {
       }
       if (parsed.worldKey !== identity.worldKey || parsed.worldEpoch !== identity.worldEpoch) {
         this.log('PLANNER_CACHE_INVALIDATED', {
-          source: 'mercury',
+          source: this.provider,
           reason: 'world',
           cachedWorld: parsed.worldKey ?? null,
           world: identity.worldKey,

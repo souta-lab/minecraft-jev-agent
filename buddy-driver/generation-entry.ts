@@ -1563,7 +1563,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     plannerModel: brain.model,
     plannerCache: cachePath,
     advisor: mercuryEnablement.enabled
-      ? `mercury:${mercury?.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT}`
+      ? `${mercury?.provider ?? 'gateway-system2'}:${mercury?.model ?? process.env.BUDDY_SYSTEM2_MODEL ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT}`
       : resolveAdvisorMode(plannerMode),
     advisorSource: mercuryEnablement.source,
     optionCompiler: optionCompilerEnabled,

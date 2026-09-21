@@ -122,7 +122,7 @@ export function augmentPlannerWorldWithLiveStations(bot: Bot, world: ResidentWor
   }
 }
 
-/** Mercury is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
+/** The gateway System2 model is the sparse WHAT-NEXT repair path; Jev remains the normal grounded selector. */
 function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | null {
   let waitStreak = 0
   for (let i = request.recentOutcomes.length - 1; i >= 0; i -= 1) {
@@ -273,7 +273,7 @@ export class PlannerBrain implements System2Brain {
   get authorityStack(): { provider: string; model: string } {
     if (this.mode === 'deterministic') return { provider: 'deterministic', model: this.model }
     if (this.mercury === undefined) return { provider: 'typesafe-ai', model: this.model }
-    return { provider: 'hybrid', model: `typesafe-ai:${this.model}|mercury:${this.mercury.model}` }
+    return { provider: 'hybrid', model: `typesafe-ai:${this.model}|${this.mercury.provider}:${this.mercury.model}` }
   }
 
   async plan(request: System2PlanRequest): Promise<System2Plan> {
@@ -324,7 +324,7 @@ export class PlannerBrain implements System2Brain {
       if (!gate.allow) mercuryTrigger = null
     }
     if (this.mercury !== undefined && mercuryTrigger !== null) {
-      this.lastAuthorityProvider = 'mercury'
+      this.lastAuthorityProvider = this.mercury.provider
       this.lastAuthorityModel = this.mercury.model
       this.log('SYSTEM2_AUTHORITY_INPUT', {
         provider: this.provider,
