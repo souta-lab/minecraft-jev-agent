@@ -420,6 +420,19 @@ export const RUNGS: readonly Rung[] = [
     satisfied: (c) => has(c, 'diamond_pickaxe'),
     goals: () => [{ kind: 'craft', description: 'craft 1 x diamond_pickaxe', targetItem: 'diamond_pickaxe', requiredCount: 1 }],
   },
+  // --- M3 (owner definition): 12 ender pearls. ---
+  // Pearls drop from endermen, so this rung needs hostile-mob difficulty and does
+  // NOT require the Nether. It precedes the M2 portal rung because the two
+  // capabilities are independent and M3 is the current objective: the live M2
+  // blocker is a missing grounded route to obsidian (`collect:obsidian` only
+  // produced zero-progress MOVE candidates), and pearls do not depend on it.
+  // M2's portal rung follows immediately, and Nether -> blaze -> ender_eye stays
+  // in the future M4 route below.
+  {
+    id: 'ender_pearls',
+    satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
+    goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
+  },
   // --- M2 portal transition ---
   {
     id: 'nether_portal',
@@ -429,15 +442,6 @@ export const RUNGS: readonly Rung[] = [
     satisfied: (c, w) => has(c, 'nether_portal') || w.portalVerified === true,
     // #80: typed deterministic portal plan (obsidian tool gate -> frame -> light -> verify).
     goals: (c) => netherPortalRungGoals(c, bestPickaxeRank(c)),
-  },
-  // --- M3 (owner definition): 12 ender pearls. ---
-  // Pearls drop from endermen, so this rung needs hostile-mob difficulty and does
-  // NOT require the Nether. The M2 portal rung above stays the earlier frontier;
-  // Nether -> blaze -> ender_eye stays in the future M4 route below.
-  {
-    id: 'ender_pearls',
-    satisfied: (c) => (c['ender_pearl'] ?? 0) >= 12,
-    goals: () => [{ kind: 'collect', description: 'collect 12 x ender_pearl', targetItem: 'ender_pearl', requiredCount: 12 }],
   },
   // --- M4 route (future): Nether -> blaze -> ender eyes -> stronghold -> end -> dragon ---
   {
