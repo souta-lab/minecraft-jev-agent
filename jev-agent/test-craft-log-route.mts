@@ -26,7 +26,7 @@
 // must not reduce the policy to WAIT; the exploration fallback is aimed at the
 // log bearing rather than at the craft item.
 
-import { craftStationGap, defaultCandidateOptions, formatCraftStationGap, generateGroundedCandidates, logRouteOf } from './src/candidates.ts'
+import { craftStationGap, defaultCandidateOptions, formatCraftStationGap, generateGroundedCandidates, logRouteOf, optionsWithWithheldStationRetirements } from './src/candidates.ts'
 import { createRequire } from 'node:module'
 import { createRecipeIndex } from './src/crafting.ts'
 import type { AgentSignals, BlockState, GoalState, InventoryState, KnownResource, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
@@ -198,13 +198,13 @@ function world(
   }
 }
 
-// (0) A remembered table below the current level is not allowed to starve a
-// craft goal. OPERATOR RULE (station-use-before-craft, superseding the earlier
-// "craft a local table anyway" fallback): the world model already holds that
-// station, so crafting a duplicate table is NOT a route - the retrieval is
-// offered and the reachability gate withholds it with its own typed reason
-// (`needs_descend`), while `CRAFT_STATION_ALREADY_KNOWN` names the withheld
-// station craft and the route the generator offered instead.
+// (0) A remembered table below the current level must not starve a craft goal.
+// A withdrawn station retrieve is a cell that CANNOT be reached this decision, so
+// it is not usable and no longer suppresses the local 2x2 table craft: the gate
+// offers `CRAFT:crafting_table` (materials held) while the station keeps its own
+// typed withholding (`needs_descend`). This restores the local-table recovery for
+// the retired-station case (live: run-mubobiq6-12onv idled with table materials
+// in hand; pinned by test-tool-recovery).
 {
   const grounded = generateGroundedCandidates(
     world({ birch_planks: 4, stick: 2 }),
@@ -212,18 +212,18 @@ function world(
   )
   const duplicateCraft = grounded.candidates.find((candidate) => candidate.id === 'CRAFT:crafting_table')
   const withheldStation = grounded.withheld.find((entry) => entry.candidate.meta.resourceKind === 'station')
-  const gap = craftStationGap(world({ birch_planks: 4, stick: 2 }), { ...defaultCandidateOptions, recipes })
+  const gap = craftStationGap(
+    world({ birch_planks: 4, stick: 2 }),
+    optionsWithWithheldStationRetirements({ ...defaultCandidateOptions, recipes }, grounded.withheld),
+  )
   const gapLine = gap === null ? 'none' : formatCraftStationGap(gap)
   const pass =
-    duplicateCraft === undefined &&
+    duplicateCraft !== undefined &&
     withheldStation !== undefined &&
     withheldStation.result.reason === 'needs_descend' &&
-    gap !== null &&
-    gap.next === 'use_known_station' &&
-    gapLine.startsWith('CRAFT_STATION_ALREADY_KNOWN') &&
-    gapLine.includes('station=crafting_table')
+    gap === null
   process.stdout.write(
-    `craft station duplicate withheld (unreachable remembered table): ${pass ? 'PASS' : 'FAIL'} ` +
+    `craft station recovery for an unreachable remembered table: ${pass ? 'PASS' : 'FAIL'} ` +
       `candidates=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] ` +
       `withheld=${withheldStation?.result.reason ?? 'none'} duplicate=${duplicateCraft?.id ?? 'none'} gap=${gapLine}\n`,
   )

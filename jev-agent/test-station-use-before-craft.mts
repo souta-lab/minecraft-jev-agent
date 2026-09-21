@@ -477,8 +477,11 @@ function main(): void {
     )
   }
 
-  // (d) the remembered station is retired (blacklisted / proven unreachable): the
-  // typed gap is the answer, never a silent duplicate craft.
+  // (d) the remembered station is retired (blacklisted / proven unreachable): it
+  // is NOT USABLE, so it must not suppress making a new one. The measured live
+  // shape (run-mubobiq6-12onv) idled forever because the retired table still
+  // counted as "already known"; a retired cell is exactly the case where the
+  // local craft becomes legitimate again (pinned by test-tool-recovery).
   {
     const table = station('crafting_table', 0)
     const blacklist = new Set([knownStationKey({ name: 'crafting_table', position: table.position })])
@@ -488,13 +491,26 @@ function main(): void {
     const gap = craftStationGap(state, options(blacklist))
     const line = gap === null ? 'none' : formatCraftStationGap(gap)
     check(
-      '(d) a retired remembered table yields the typed gap, not a duplicate craft',
-      !candidateIds.some((id) => id === 'CRAFT:crafting_table') &&
-        gap !== null &&
-        gap.reason === 'known_station_unreachable' &&
-        gap.next === 'capability_gap' &&
-        line.includes('unreachable_stations=[40,59,30]'),
+      '(d) a retired remembered table no longer suppresses the local craft',
+      candidateIds.some((id) => id === 'CRAFT:crafting_table') && gap === null,
       `ids=[${ids(grounded.candidates)}] line=${line}`,
+    )
+  }
+
+  // (d1) the same retired cell with NO craft materials: no duplicate craft is
+  // invented (nothing is craftable), and the retired cell is not reported as a
+  // usable station either.
+  {
+    const table = station('crafting_table', 0)
+    const blacklist = new Set([knownStationKey({ name: 'crafting_table', position: table.position })])
+    const state = world(queued({}), { cobblestone: 200 }, [table])
+    const grounded = generateGroundedCandidates(state, options(blacklist))
+    const candidateIds = grounded.candidates.map((candidate) => candidate.id)
+    check(
+      '(d1) a retired table with no planks yields no unexecutable table craft',
+      !candidateIds.some((id) => id === 'CRAFT:crafting_table') &&
+        !grounded.candidates.some((candidate) => candidate.kind === 'RETRIEVE'),
+      `ids=[${ids(grounded.candidates)}]`,
     )
   }
 

@@ -135,6 +135,16 @@ export interface PrereqInput {
   stoneCount: number
   /** a crafting table is available for the 3x3 furnace recipe */
   tableAvailable: boolean
+  /**
+   * a `crafting_table` is not usable but can be MADE from the held inventory
+   * (its own 2x2 inventory-grid recipe), so the 3x3 furnace recipe is still
+   * reachable through `craft table -> place table -> craft furnace` instead of
+   * being refused `no_crafting_table`. Optional so pure fixtures that only model
+   * an in-place table keep their historical behaviour; the live adapter
+   * (`candidates.ts#furnacePrereqInputFromState`) resolves it from the same
+   * recipe planner the craft path uses.
+   */
+  tableCraftable?: boolean
   /** nearest grounded placement cell, null when the sensor found none */
   placementSpot: Vec3Json | null
   /** nearest remembered station coordinate, null when none is known */
@@ -532,7 +542,7 @@ function craftAndPlaceOption(input: PrereqInput): PrereqOption {
       reason: STATION_ALREADY_KNOWN_REASON,
     }
   }
-  if (!input.tableAvailable) {
+  if (!input.tableAvailable && input.tableCraftable !== true) {
     return { path: 'craft_and_place', feasible: false, cost: Number.POSITIVE_INFINITY, reason: 'no_crafting_table' }
   }
   const missing = Math.max(0, FURNACE_STONE_COST - input.stoneCount)
@@ -544,8 +554,12 @@ function craftAndPlaceOption(input: PrereqInput): PrereqOption {
       reason: `need_${missing}_more_stone`,
     }
   }
-  const cost = PREREQ_COSTS.craftStep + PREREQ_COSTS.placeStep
-  return { path: 'craft_and_place', feasible: true, cost, reason: `craft+place stone=${input.stoneCount}` }
+  // A table that must itself be made and placed is one extra craft+place leg; the
+  // cost model keeps `use_known_station`/`place_held` preferred when they exist.
+  const tableLeg = input.tableAvailable ? 0 : PREREQ_COSTS.craftStep + PREREQ_COSTS.placeStep
+  const cost = PREREQ_COSTS.craftStep + PREREQ_COSTS.placeStep + tableLeg
+  const table = input.tableAvailable ? 'table=usable' : 'table=craft'
+  return { path: 'craft_and_place', feasible: true, cost, reason: `craft+place stone=${input.stoneCount} ${table}` }
 }
 
 /**
@@ -662,6 +676,6 @@ export function prereqProgressSignature(path: PrereqPath, input: PrereqInput): s
         ? 'no_known_station'
         : `dist=${Math.round(distance(input.self, input.knownStation.position))}`
     case 'craft_and_place':
-      return `stone=${input.stoneCount} fur=${input.heldCount} placed=${input.placedCount}`
+      return `stone=${input.stoneCount} fur=${input.heldCount} placed=${input.placedCount} table=${input.tableAvailable ? 1 : 0}`
   }
 }

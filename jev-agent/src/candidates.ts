@@ -4440,8 +4440,8 @@ export interface StationWorldTruth {
   cells: KnownStationLike[]
   /**
    * the DURABLE cells of `cells`: projection entries the host remembered plus
-   * `signals.knownResources` records. These are the cells that block a duplicate
-   * station craft (see `stationCraftAllowed`).
+   * `signals.knownResources` records. A cell here blocks a duplicate station
+   * craft only while it is USABLE (not in `unreachable`); see `stationCraftAllowed`.
    */
   remembered: KnownStationLike[]
   /** the cells of `cells` the explicit reachability blacklist retired */
@@ -4462,9 +4462,10 @@ export interface StationWorldTruth {
  *
  * What counts as "already exists" is the DURABLE world knowledge only
  * (`remembered`, plus a held copy): those cells are real station coordinates the
- * retrieval ladder can be sent to, and a blacklisted one still EXISTS - it is
- * exactly the case the rule must not answer with a duplicate craft, so it is
- * reported as the typed `craftStationGap` instead.
+ * retrieval ladder can be sent to. What counts as USABLE is narrower still: a
+ * cell the runtime proved unreachable (the move-failure memory / the reachability
+ * gate's withheld `RETRIEVE`) does not block a new craft, because a cell that
+ * cannot be reached is not a route (`stationCraftAllowed`).
  *
  * #58 SENSED-ONLY SEMANTICS ARE KEPT LOAD-BEARING HERE: a near-field sensed cell
  * is deliberately NOT part of `remembered`. In-place station availability and the
@@ -4528,12 +4529,32 @@ export function stationWorldTruth(
 }
 
 /**
- * Crafting a station item is a correct route only when the world model holds no
- * DURABLE station of that kind and none is held (see `stationWorldTruth` for why
- * a sensed cell is not part of that decision).
+ * Crafting a station item is a correct route when no USABLE station of that kind
+ * exists and none is held (see `stationWorldTruth` for why a sensed cell is not
+ * part of that decision).
+ *
+ * A durable cell the runtime PROVED unreachable - the move-failure memory
+ * blacklisted it or the reachability gate withheld its `RETRIEVE` (`needs_descend`
+ * / `missing_tool`) - is not a usable station, so it must not suppress making a
+ * new one. This is exactly the escape hatch that keeps the craft path alive when
+ * every known cell is retired, and the same world truth `stationAcquisitionCandidates`
+ * already uses when it declines to offer a walk to a retired cell.
+ *
+ * Measured live (run-mubobiq6-12onv, source 580705a, m3-live): the body held
+ * 5 oak_planks + 64 cobblestone + 4 sticks with NO pickaxe, inside an oak-leaf
+ * canopy 7 blocks above the remembered furnace. Both known stations (furnace
+ * b8_65_24, crafting_table b17_71_-11) were withheld `reason=needs_descend
+ * missing=[tool:pickaxe@0]`, and the active `smelt:charcoal` goal starved to
+ * `CANDIDATE_STARVATION presented=2 productive=0`: the remembered-but-unreachable
+ * table blocked the 2x2 `CRAFT:crafting_table` step that would have broken the
+ * deadlock (furnace needs a table -> table needs a pickaxe to reach -> pickaxe
+ * needs a table). A cell that cannot be reached is not a route.
  */
 export function stationCraftAllowed(truth: StationWorldTruth): boolean {
-  return truth.remembered.length === 0 && truth.held === 0
+  if (truth.held > 0) return false
+  if (truth.remembered.length === 0) return true
+  const retired = new Set(truth.unreachable.map((station) => knownStationKey(station)))
+  return truth.remembered.every((station) => retired.has(knownStationKey(station)))
 }
 
 /**
@@ -4830,12 +4851,32 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
     stoneCount,
     tableAvailable:
       craftingTableSource(state, options) !== null,
+    // `tableAvailable` is a USABLE (held/reachable) station. A table that is not
+    // usable but is craftable from the held materials is still a valid route
+    // (craft the 2x2 table, place it, then craft the furnace at it), so the pure
+    // feasibility input names that fact instead of answering `no_crafting_table`
+    // and starving. Resolved through the same recipe planner the craft path uses.
+    tableCraftable: craftingTableCraftable(state, options),
     placementSpot: state.placementSpots.length > 0 ? leastFailedPlacementSpot(state, 'furnace') : null,
     knownStation: reachableFurnace ?? furnaces[0] ?? null,
     unreachableStations,
     self: state.self.position,
     rankPolicy: options.prereqRankPolicy,
   }
+}
+
+/**
+ * True when a `crafting_table` can be produced from the live inventory alone
+ * (2x2 inventory-grid recipe) or is already held. Placement geometry is a
+ * separate fact (`placementSpots` / `heldStationPlacement`); this answers only
+ * the recipe-material half, so the typed `no_crafting_table` refusal is reserved
+ * for a genuine missing-material case.
+ */
+function craftingTableCraftable(state: WorldState, options: CandidateOptions): boolean {
+  if ((state.inventory.counts.crafting_table ?? 0) > 0) return true
+  const recipes = options.recipes ?? null
+  if (recipes === null) return false
+  return planNextCraftStep(recipes, 'crafting_table', state.inventory.counts, false).op !== null
 }
 
 /** One grounded candidate for each feasible path (craft_and_place = the CRAFT step). */
@@ -4860,7 +4901,24 @@ function candidatesForPrereqPath(
 /** CRAFT/PLACE step toward a furnace: use a table in reach, walk to a remembered one, or place a held one. */
 function craftFurnaceCandidate(state: WorldState, options: CandidateOptions): Candidate[] {
   const source = craftingTableSource(state, options)
-  if (source === null) return []
+  if (source === null) {
+    // NO usable table (none held, none sensed/reachable, every remembered cell
+    // retired). That does not make the furnace unreachable: a crafting_table is
+    // itself a 2x2 INVENTORY-GRID recipe, so when its materials are held the
+    // next grounded step is making (then placing) the table. Without this arm the
+    // `craft_and_place` path returned nothing, `planPrereqOptions` reported
+    // `no_crafting_table` and the live smelt starved while the body held 5 planks
+    // + 64 cobblestone (run-mubobiq6-12onv). The plan step is resolved by the
+    // SAME pure recipe planner the craft goals use, so the furnace and its table
+    // can never disagree on the recipe chain.
+    const recipes = options.recipes ?? null
+    if (recipes === null) return []
+    const plan = planNextCraftStep(recipes, 'furnace', state.inventory.counts, false)
+    if (plan.op === null) return []
+    if (planStepCraftsKnownStation(state, options, plan.op)) return []
+    const step = craftPlanStepCandidate(state, options, plan.op, 'furnace').candidate
+    return step === null ? [] : [step]
+  }
   if (source.kind === 'held-place') {
     return [placeStationCandidate(state, options, 'crafting_table', source.spot, `craft ${FURNACE_STONE_COST} cobblestone into a furnace`)]
   }
@@ -6105,13 +6163,32 @@ export function applyReachabilityGate(
   }
 
   run(raw)
-  const acquisitions = capabilityAcquisitionCandidates(
-    state,
-    options,
-    withheld,
-    new Set(presented.map((candidate) => candidate.id)),
-  )
-  run(acquisitions)
+  // The explicit `unreachableStations` set arrives from the controller's PREVIOUS
+  // tick (its withheld ids). On the tick a station FIRST fails the gate it is
+  // still treated as usable, so the duplicate-craft guard suppresses the very
+  // craft that could acquire the missing capability, and the acquisition pass
+  // offers nothing: the measured `presented=[WAIT, ESCALATE]` starvation
+  // (run-mubobiq6-12onv). Treat this pass's own refused station retrieves as
+  // retired so the enabling craft is offered in the SAME decision.
+  //
+  // The enabling chain can itself add a refused station retrieve (to craft a
+  // pickaxe the step is `walk to the remembered table`; that walk is withheld for
+  // the very capability being acquired), so the retirement set is closed in
+  // bounded passes over the acquisition output. Each pass can only add distinct
+  // station cells, so the loop terminates.
+  let retired = retiredStationsFromWithheld(withheld)
+  let acquisitionOptions = optionsWithRetiredStations(options, retired)
+  for (let pass = 0; pass < MAX_ACQUISITION_RETIRE_PASSES; pass += 1) {
+    const seen = new Set([
+      ...presented.map((candidate) => candidate.id),
+      ...withheld.map((entry) => entry.candidate.id),
+    ])
+    run(capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen))
+    const next = retiredStationsFromWithheld(withheld)
+    if (next.size === retired.size) break
+    retired = next
+    acquisitionOptions = optionsWithRetiredStations(options, retired)
+  }
 
   // A log-class collect goal must never be left with a stationary non-yield
   // MINE as its only productive action (live wedge on 7acd849: `MINE:b30_35_35`
@@ -6143,7 +6220,7 @@ export function applyReachabilityGate(
     )
   ) {
     const seen = new Set([...presented.map((candidate) => candidate.id), ...withheld.map((entry) => entry.candidate.id)])
-    run(selfContainedCraftCandidates(state, options).filter((candidate) => !seen.has(candidate.id)))
+    run(selfContainedCraftCandidates(state, acquisitionOptions).filter((candidate) => !seen.has(candidate.id)))
   }
 
   // A generic route-opening candidate is an enabling alternative only while
@@ -6576,6 +6653,66 @@ export function deriveReachabilityAbilities(
   }
 }
 
+/**
+ * Bounded closure passes over the capability-acquisition output (see
+ * `applyReachabilityGate`). Each pass can only add distinct station cells to the
+ * retirement set, so a small fixed bound terminates and cannot loop.
+ */
+export const MAX_ACQUISITION_RETIRE_PASSES = 3
+
+/** `options` with `retired` merged into its explicit unreachable-station set. */
+function optionsWithRetiredStations(
+  options: CandidateOptions,
+  retired: ReadonlySet<string>,
+): CandidateOptions {
+  if (retired.size === 0) return options
+  return {
+    ...options,
+    unreachableStations: new Set([...(options.unreachableStations ?? []), ...retired]),
+  }
+}
+
+/**
+ * `options` whose explicit unreachable-station set also names every station cell
+ * this decision's withheld retrieves proved unreachable. The gate uses it to
+ * derive the capability-acquisition candidates, and the controller uses it for
+ * the mirrored `craftStationGap` fact so the offered recovery and the logged
+ * marker can never disagree (both read the SAME withheld set).
+ */
+export function optionsWithWithheldStationRetirements(
+  options: CandidateOptions,
+  withheld: readonly CandidateReachability[],
+): CandidateOptions {
+  return optionsWithRetiredStations(options, retiredStationsFromWithheld(withheld))
+}
+
+/**
+ * The durable station cells THIS gate pass just proved unreachable: a
+ * `RETRIEVE:known:station:<kind>:<cell>` whose reachability verdict refused it
+ * (`needs_descend`, `missing_tool`, `no_path`, ...). The controller's explicit
+ * `unreachableStations` set is derived from the PREVIOUS tick's withheld ids, so
+ * on the tick a station first fails there is a one-decision window where it still
+ * counts as "usable" - exactly long enough for the duplicate-station-craft guard
+ * to suppress the craft that would acquire the missing capability, leaving
+ * `presented=[WAIT, ESCALATE]` forever (run-mubobiq6-12onv). Observing the pass's
+ * own withheld retrieves closes that window inside the same decision. World truth
+ * only: the cell is still remembered, it just cannot be reached right now, so it
+ * must not block making a new station.
+ */
+function retiredStationsFromWithheld(withheld: readonly CandidateReachability[]): ReadonlySet<string> {
+  const retired = new Set<string>()
+  for (const entry of withheld) {
+    const candidate = entry.candidate
+    if (candidate.kind !== 'RETRIEVE' || candidate.target === null) continue
+    if (candidate.meta.resourceKind !== 'station') continue
+    const name =
+      typeof candidate.meta.resource === 'string' ? candidate.meta.resource : candidate.targetName
+    if (name !== 'furnace' && name !== 'crafting_table') continue
+    retired.add(knownStationKey({ name, position: candidate.target }))
+  }
+  return retired
+}
+
 /** Grounded candidates that would acquire a withheld target's missing capability. */
 function capabilityAcquisitionCandidates(
   state: WorldState,
@@ -6613,8 +6750,15 @@ function capabilityAcquisitionCandidates(
           (block) => typeof block.yield === 'string' && PILLAR_PLACE_PRIORITY.includes(block.yield),
         )
       } else if (capability.kind === 'tool') {
-        const item = toolItemForCapability(capability)
-        if (item !== null) source = craftCandidates(state, options, item).candidates
+        // Enumerate every tier-satisfying tool the inventory can actually make
+        // (weakest first), not only the weakest canonical name. A body holding
+        // 64 cobblestone + 4 sticks and no planks must be offered
+        // `craft:stone_pickaxe` now, not sent to collect planks for a wooden one
+        // it cannot afford (live shape, run-mubobiq6-12onv). CAN only: the list
+        // is a fact set and Jev still chooses.
+        for (const item of toolItemsForCapability(state, options, capability)) {
+          source.push(...craftCandidates(state, options, item).candidates)
+        }
       } else if (capability.kind === 'open_path' || capability.kind === 'standable_approach') {
         // A locomotion target withheld for `no_path` / `no_standable_approach`
         // must not leave Jev a barren set (live: `CANDIDATE_STARVATION
@@ -6867,13 +7011,34 @@ function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candi
   return out
 }
 
-function toolItemForCapability(capability: Capability): string | null {
-  if (capability.kind !== 'tool' || capability.tool !== 'pickaxe') return null
-  for (const name of PICKAXE_TIER_ORDER) {
-    const rank = PICKAXE_RANKS[name]
-    if (rank !== undefined && rank >= capability.tier) return name
-  }
-  return null
+/**
+ * The canonical pickaxes that satisfy a missing-tool `capability` AND whose
+ * recipe inputs the live inventory can obtain (weakest first). A tool the body
+ * cannot make is not an answer to "acquire the missing capability", so the
+ * acquisition pass enumerates every craftable-now tier instead of only the
+ * weakest canonical name. When NONE is craftable it returns the weakest
+ * satisfying name so the existing ingredient route (collect the missing
+ * material) still runs rather than collapsing to WAIT.
+ *
+ * CAN/producibility only (recipe truth), never a preference ranking: an offered
+ * `craft:<tool>` is a grounded step the model still chooses between.
+ */
+function toolItemsForCapability(
+  state: WorldState,
+  options: CandidateOptions,
+  capability: Capability,
+): string[] {
+  if (capability.kind !== 'tool' || capability.tool !== 'pickaxe') return []
+  const satisfying = PICKAXE_TIER_ORDER.filter((name) => (PICKAXE_RANKS[name] ?? -1) >= capability.tier)
+  if (satisfying.length === 0) return []
+  const recipes = options.recipes ?? null
+  if (recipes === null) return [satisfying[0]!]
+  // `tableAvailable: true` answers only "are the recipe's inputs obtainable": a
+  // table needed for a 3x3 tier is itself a grounded step the craft path owns.
+  const craftable = satisfying.filter(
+    (name) => planNextCraftStep(recipes, name, state.inventory.counts, true).op !== null,
+  )
+  return craftable.length > 0 ? craftable : [satisfying[0]!]
 }
 
 function escalateRefusal(state: WorldState, withheld: readonly CandidateReachability[]): Candidate {

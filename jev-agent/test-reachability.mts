@@ -9,7 +9,7 @@
 //
 // Run: bun test-reachability.mts  (wired as `bun run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, blockId, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, formatCraftIngredientPrereq, formatCraftStationGap, formatSmeltInputPrereq, generateGroundedCandidates, smeltInputPrereq } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, formatCraftIngredientPrereq, formatCraftStationGap, formatSmeltInputPrereq, generateGroundedCandidates, optionsWithWithheldStationRetirements, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { MIRRORED_MARKERS, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
@@ -769,12 +769,13 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   const feet = { x: Math.floor(bot.x), y: Math.floor(bot.y), z: Math.floor(bot.z) }
 
   // (a) planks + sticks held, and the ONLY remembered table is unreachable (below
-  // and above). OPERATOR RULE (station-use-before-craft) supersedes the dc54ff4
-  // "craft a local table anyway" fallback: the world model already holds that
-  // station, so a duplicate `CRAFT:crafting_table` is never offered. The station
-  // route keeps its own typed withholding (needs_descend / needs_ascend) and the
-  // state carries the typed `CRAFT_STATION_ALREADY_KNOWN` fact instead of a
-  // silent craft.
+  // and above) because its own route needs the very pickaxe being crafted. A
+  // withheld station retrieve is a cell that CANNOT be reached right now, so it
+  // is not usable and must not block the local table craft: the station ladder
+  // offers `CRAFT:crafting_table` (2x2, materials held) and the goal keeps its
+  // own typed withholding for the station. This is the dc54ff4 recovery, restored
+  // for the retired-station case and pinned live by test-tool-recovery
+  // (run-mubobiq6-12onv: the body idled forever with table materials in hand).
   {
     const held = inventory({ birch_planks: 7, stick: 2 })
     const scenarios: Array<{ label: string; known: KnownResource; descent?: DescentOption[]; standable?: Vec3Json[] }> = [
@@ -796,14 +797,13 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
         (candidate) => candidate.kind !== 'WAIT' && candidate.kind !== 'ESCALATE',
       )
       const duplicateTable = productive.find((candidate) => candidate.id === 'CRAFT:crafting_table')
-      const gap = craftStationGap(state, craftOptions)
+      // The mirrored gap reads the SAME withheld set the gate derived the
+      // recovery from, so the offered craft and the logged fact agree.
+      const gap = craftStationGap(state, optionsWithWithheldStationRetirements(craftOptions, grounded.withheld))
       check(
-        `(a) no duplicate station craft while the world model holds the table ${scenario.label}`,
-        duplicateTable === undefined &&
-          gap !== null &&
-          gap.reason === 'known_station' &&
-          gap.next === 'use_known_station',
-        `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] duplicate=${duplicateTable?.id ?? 'none'} gap=${gap === null ? 'none' : formatCraftStationGap(gap)}`,
+        `(a) an unreachable remembered table no longer suppresses the local table craft ${scenario.label}`,
+        duplicateTable !== undefined && gap === null,
+        `presented=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] recovery=${duplicateTable?.id ?? 'none'} gap=${gap === null ? 'none' : formatCraftStationGap(gap)}`,
       )
       const withheldCraft = grounded.withheld.find((entry) => entry.candidate.kind === 'CRAFT')
       const duplicateWithheld = grounded.withheld.find((entry) => entry.candidate.id === 'CRAFT:crafting_table')
