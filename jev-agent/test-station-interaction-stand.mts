@@ -95,8 +95,10 @@ function makeStationBot(feet: Vec3Json, blocks: Map<string, string>, withFloor: 
   let opened = false
   const blockAt = (v: { x: number; y: number; z: number }): FakeBlock | null => {
     const name = blocks.get(key(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)))
-    if (name === undefined) return null
-    return { name, boundingBox: name === 'air' ? 'empty' : 'block', position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)) }
+    // Loaded area, station in open air: an unlisted cell is open space, not an
+    // unloaded chunk (see #382 - null is not passable).
+    const resolved = name ?? 'air'
+    return { name: resolved, boundingBox: resolved === 'air' ? 'empty' : 'block', position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)) }
   }
   const table = blockAt(TABLE as { x: number; y: number; z: number }) as FakeBlock
   const itemsByName = registry.itemsByName as Record<string, { id: number }>

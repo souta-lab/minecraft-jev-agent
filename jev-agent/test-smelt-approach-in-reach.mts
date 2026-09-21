@@ -128,10 +128,14 @@ function makeSmeltBot(feet: Vec3Json, blocks: Map<string, string>): SmeltBotFixt
   ]
   const blockAt = (v: { x: number; y: number; z: number }): FakeBlock | null => {
     const name = blocks.get(key(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)))
-    if (name === undefined) return null
+    // This fixture models a LOADED area with a station standing in open air, so a
+    // cell it does not list is open space - not an unloaded chunk. Returning null
+    // here would (correctly, #382) count as "unknown, not passable" and the
+    // interaction-face derivation would find no free neighbouring cell.
+    const resolved = name ?? 'air'
     return {
-      name,
-      boundingBox: name === 'air' ? 'empty' : 'block',
+      name: resolved,
+      boundingBox: resolved === 'air' ? 'empty' : 'block',
       position: new P(Math.floor(v.x), Math.floor(v.y), Math.floor(v.z)),
     }
   }
