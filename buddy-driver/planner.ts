@@ -53,6 +53,10 @@ export function resolvePlannerMode(
   throw new Error(`invalid BUDDY_PLANNER=${JSON.stringify(env.BUDDY_PLANNER)}; expected llm|auto|deterministic|off`)
 }
 
+/** Backoff between bounded model retries (see withModelRetries call below). */
+const PLANNER_RETRY_BASE_MS = Number(process.env.BUDDY_PLANNER_RETRY_BASE_MS ?? 1000)
+const PLANNER_RETRY_MAX_MS = Number(process.env.BUDDY_PLANNER_RETRY_MAX_MS ?? 15000)
+
 const SYSTEM2_INSTRUCTIONS =
   'You are System 2 for an autonomous Minecraft agent. Choose exactly ONE grounded plan id from the supplied list: ' +
   'the high-level intent/Option sequence the agent should pursue next. Every listed plan was generated from executable ' +
@@ -217,7 +221,7 @@ export class PlannerBrain implements System2Brain {
     this.world = options.world
     this.log = options.log
     this.timeoutMs = options.timeoutMs ?? Number(process.env.BUDDY_PLANNER_TIMEOUT_MS ?? 9000)
-    this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_PLANNER_MAX_ATTEMPTS ?? 3)
+    this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_PLANNER_MAX_ATTEMPTS ?? 5)
     this.maxCalls = options.maxCalls ?? Number(process.env.BUDDY_PLANNER_MAX_CALLS ?? 200)
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
@@ -359,6 +363,14 @@ export class PlannerBrain implements System2Brain {
           onRetry: ({ attempt, nextAttempt, error }) => {
             this.log('SYSTEM2_AUTHORITY_RETRY', { attempt, nextAttempt, error: describeFailure(error) })
           },
+          // #226 asks for bounded retries WITH backoff on retryable transport
+          // errors. The Vercel AI Gateway returns bursts of
+          // "GatewayInternalServerError: Service temporarily unavailable", and
+          // immediate retries burned every attempt inside one burst and then
+          // terminated the resident (observed 6x in 20 minutes, each time
+          // disconnecting AI_Buddy). The bound and the fail-loud exit are
+          // unchanged; only the spacing between attempts is.
+          delayMs: (attempt) => Math.min(PLANNER_RETRY_BASE_MS * 2 ** (attempt - 1), PLANNER_RETRY_MAX_MS),
         },
       )
       this.calls += 1
