@@ -38,6 +38,16 @@ import type { System2Brain, System2Outcome, System2Plan, System2PlanRequest } fr
 import { resolveJevApiKey } from '../jev-agent/src/jev.ts'
 import type { KeyResolution } from '../jev-agent/src/jev.ts'
 import { FatalModelError, failLoud } from '../jev-agent/src/modelFailure.ts'
+import {
+  evaluateMercuryWaitLimitBackoff,
+  mercuryWaitLimitBackoffDelayMs,
+  resolveMercuryWaitLimitBackoffBaseMs,
+  resolveMercuryWaitLimitBackoffMaxMs,
+} from '../jev-agent/src/system2Escalation.ts'
+import type {
+  MercuryWaitLimitBackoffDecision,
+  MercuryWaitLimitBackoffState,
+} from '../jev-agent/src/system2Escalation.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
@@ -71,6 +81,24 @@ export const MERCURY_TRIGGER_REASONS: readonly MercuryTriggerReason[] = [
   'action_impossible',
   'post_death',
 ]
+
+/** Greppable marker: a no-plan `wait_limit` consultation raised the next-ask bar. */
+export const MERCURY_TRIGGER_BACKOFF_MARKER = 'MERCURY_TRIGGER_BACKOFF'
+/** Greppable marker: a `wait_limit` trigger was suppressed by an active backoff. */
+export const MERCURY_TRIGGER_SUPPRESSED_MARKER = 'MERCURY_TRIGGER_SUPPRESSED'
+
+/**
+ * Input to the durable `wait_limit` trigger gate. `stallKey` identifies the
+ * stalled semantic Option/objective (never the WAIT counter itself);
+ * `authorityEpoch` is the request's monotonic progress counter, used only to
+ * re-arm the gate after real progress.
+ */
+export interface MercuryWaitLimitTriggerInput {
+  request: System2PlanRequest
+  stallKey: string
+  authorityEpoch?: number | null
+  now?: number
+}
 
 /**
  * The strict plan schema (issue #19). A goal is EITHER a legacy item goal
@@ -745,6 +773,14 @@ interface MercuryCacheFile {
   callTimes: number[]
   consecutiveStrategy?: string | null
   consecutiveCount?: number
+  /**
+   * Durable `wait_limit` trigger backoff. Persisted in the same file as the
+   * call-time budget ON PURPOSE: the measured burn happened across repeated
+   * generation restarts, so an in-memory-only guard would reset with the
+   * process and re-burn the window. Optional so a pre-existing version-3 cache
+   * still loads (the budget `callTimes` must never be silently refilled).
+   */
+  triggerBackoff?: MercuryWaitLimitBackoffState | null
 }
 
 const MAX_CACHE_ENTRIES = 60
@@ -764,6 +800,30 @@ function emptyCache(identity: MercuryCacheIdentity): MercuryCacheFile {
     callTimes: [],
     consecutiveStrategy: null,
     consecutiveCount: 0,
+    triggerBackoff: null,
+  }
+}
+
+/** Validate the durable wait_limit backoff record; anything malformed is dropped. */
+function parseTriggerBackoff(value: unknown): MercuryWaitLimitBackoffState | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  if (typeof record.stallKey !== 'string' || record.stallKey.length === 0) return null
+  if (typeof record.consultations !== 'number' || !Number.isFinite(record.consultations) || record.consultations < 0) {
+    return null
+  }
+  if (typeof record.lastAt !== 'number' || !Number.isFinite(record.lastAt)) return null
+  if (typeof record.lastWaitStreak !== 'number' || !Number.isFinite(record.lastWaitStreak)) return null
+  const lastAuthorityEpoch =
+    typeof record.lastAuthorityEpoch === 'number' && Number.isFinite(record.lastAuthorityEpoch)
+      ? record.lastAuthorityEpoch
+      : null
+  return {
+    stallKey: record.stallKey,
+    consultations: Math.floor(record.consultations),
+    lastAt: record.lastAt,
+    lastWaitStreak: record.lastWaitStreak,
+    lastAuthorityEpoch,
   }
 }
 
@@ -835,6 +895,14 @@ export interface MercurySystem2Options {
   model?: string
   maxPerHour?: number
   timeoutMs?: number
+  /**
+   * Bounded backoff for the counter-shaped `wait_limit` trigger: base wait
+   * before the 2nd consecutive consultation on one unchanged stall, doubling
+   * up to `waitLimitBackoffMaxMs`. Keeps per-provider-call budget accounting
+   * intact while stopping a single stall from spending the window linearly.
+   */
+  waitLimitBackoffBaseMs?: number
+  waitLimitBackoffMaxMs?: number
   /** Extra attempts after a timeout/abort (1 = one retry). */
   retries?: number
   maxOutputTokens?: number
@@ -1204,6 +1272,8 @@ export class MercurySystem2 implements System2Brain {
   private readonly cachePath: string
   private readonly cacheIdentity: MercuryCacheIdentity
   private readonly maxPerHour: number
+  private readonly waitLimitBackoffBaseMs: number
+  private readonly waitLimitBackoffMaxMs: number
   private readonly timeoutMs: number
   private readonly maxAttempts: number
   private readonly maxOutputTokens: number
@@ -1224,6 +1294,8 @@ export class MercurySystem2 implements System2Brain {
     this.model = options.model ?? process.env.BUDDY_MERCURY_MODEL ?? MERCURY_MODEL_DEFAULT
     this.authorityModel = this.model
     this.maxPerHour = options.maxPerHour ?? Number(process.env.BUDDY_SYSTEM2_MAX_PER_HOUR ?? 20)
+    this.waitLimitBackoffBaseMs = options.waitLimitBackoffBaseMs ?? resolveMercuryWaitLimitBackoffBaseMs()
+    this.waitLimitBackoffMaxMs = options.waitLimitBackoffMaxMs ?? resolveMercuryWaitLimitBackoffMaxMs()
     // Mercury is a reasoning model: a correct plan routinely takes several seconds
     // of hidden reasoning, so the timeout must comfortably exceed that. The
     // observed failure mode was an abort at ~50ms, so we also retry once.
@@ -1276,6 +1348,67 @@ export class MercurySystem2 implements System2Brain {
       return 'no_progress'
     }
     return 'no_progress'
+  }
+
+  /**
+   * Gate the counter-shaped `wait_limit` trigger with a durable per-stall
+   * backoff. Called by the planner BEFORE `tryRepair`; when `allow` is false the
+   * caller must not consult Mercury at all (no provider call, no budget slot).
+   *
+   * Budget accounting is unchanged: this only stops TRIGGERING so many calls
+   * (the documented "accounting at the boundary immediately before each provider
+   * call" rule still owns every attempt). `baseMs = 0` disables the time gate.
+   */
+  evaluateWaitLimitTrigger(input: MercuryWaitLimitTriggerInput): MercuryWaitLimitBackoffDecision {
+    const state = this.summarize(input.request, 'wait_limit')
+    const waitStreak = trailingWaitStreak(input.request.recentOutcomes)
+    const decision = evaluateMercuryWaitLimitBackoff(this.cache.triggerBackoff ?? null, {
+      stallKey: input.stallKey,
+      waitStreak,
+      authorityEpoch: input.authorityEpoch ?? input.request.requestContext?.authorityEpoch ?? null,
+      now: input.now ?? Date.now(),
+      baseMs: this.waitLimitBackoffBaseMs,
+      maxMs: this.waitLimitBackoffMaxMs,
+    })
+    this.cache.triggerBackoff = decision.state
+    this.saveCache()
+    const nextWaitMs = mercuryWaitLimitBackoffDelayMs(
+      decision.state.consultations,
+      this.waitLimitBackoffBaseMs,
+      this.waitLimitBackoffMaxMs,
+    )
+    if (decision.allow) {
+      // Announce the raised bar as soon as a consultation is recorded, so the
+      // next identical ask is observably suppressed rather than equally likely.
+      if (nextWaitMs > 0) {
+        this.log(MERCURY_TRIGGER_BACKOFF_MARKER, {
+          trigger: 'wait_limit',
+          reason: decision.reason,
+          consecutiveNoPlan: decision.state.consultations,
+          waitMs: nextWaitMs,
+          stallKey: input.stallKey,
+          stateHash: this.hashState(state),
+          waitStreak,
+        })
+      }
+    } else {
+      this.log(MERCURY_TRIGGER_SUPPRESSED_MARKER, {
+        trigger: 'wait_limit',
+        reason: decision.reason,
+        consecutiveNoPlan: decision.consecutiveNoPlan,
+        waitMs: decision.waitMs,
+        stallKey: input.stallKey,
+        stateHash: this.hashState(state),
+        waitStreak,
+      })
+    }
+    return decision
+  }
+
+  /** Clear the durable `wait_limit` backoff (world/epoch change, tests). */
+  resetWaitLimitTriggerBackoff(): void {
+    this.cache.triggerBackoff = null
+    this.saveCache()
   }
 
   /**
@@ -1714,6 +1847,7 @@ export class MercurySystem2 implements System2Brain {
         callTimes: Array.isArray(parsed.callTimes) ? parsed.callTimes.filter((time) => typeof time === 'number') : [],
         consecutiveStrategy: typeof parsed.consecutiveStrategy === 'string' ? parsed.consecutiveStrategy : null,
         consecutiveCount: typeof parsed.consecutiveCount === 'number' ? parsed.consecutiveCount : 0,
+        triggerBackoff: parseTriggerBackoff(parsed.triggerBackoff),
       }
     } catch {
       return emptyCache(identity)

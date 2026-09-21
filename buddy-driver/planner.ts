@@ -138,6 +138,25 @@ function mercuryTriggerFor(request: System2PlanRequest): MercuryTriggerReason | 
   return null
 }
 
+/**
+ * Stable identity of the stalled semantic Option/objective, NOT the WAIT counter
+ * that keeps incrementing. The durable `wait_limit` backoff is keyed on this, so
+ * a genuine Option change (or progress, via the request authority epoch) re-arms
+ * immediately while the same stall cannot re-ask once per WAIT.
+ */
+function waitLimitStallKey(request: System2PlanRequest): string {
+  const current = request.goalQueueState.current
+  const identity =
+    current?.semanticOptionInstanceId ??
+    current?.optionInstanceId ??
+    current?.semanticOptionTemplateId ??
+    current?.optionTemplateId ??
+    current?.id ??
+    current?.description ??
+    `${request.objective.targetItem}:${request.objective.requiredCount}`
+  return `${identity}|objective:${request.objective.targetItem}:${request.objective.requiredCount}`
+}
+
 function compactPlan(option: PlanOption): Record<string, unknown> {
   return {
     id: option.id,
@@ -287,7 +306,23 @@ export class PlannerBrain implements System2Brain {
   }
 
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
-    const mercuryTrigger = mercuryTriggerFor(request)
+    let mercuryTrigger = mercuryTriggerFor(request)
+    if (this.mercury !== undefined && mercuryTrigger === 'wait_limit') {
+      // The `wait_limit` trigger is counter-shaped: an unchanged stall keeps
+      // incrementing the trailing WAIT streak, so a consultation that produced
+      // no plan would otherwise re-fire identically and spend the hourly
+      // semantic budget linearly (measured live: 18/20 calls on one stall).
+      // The durable gate raises the bar. When it suppresses, the request is
+      // handled by the normal System2 authority path below - never by the
+      // deterministic ladder - and the budget-exhausted fail-loud contract is
+      // untouched because no provider call is made here.
+      const gate = this.mercury.evaluateWaitLimitTrigger({
+        request,
+        stallKey: waitLimitStallKey(request),
+        authorityEpoch: request.requestContext?.authorityEpoch ?? null,
+      })
+      if (!gate.allow) mercuryTrigger = null
+    }
     if (this.mercury !== undefined && mercuryTrigger !== null) {
       this.lastAuthorityProvider = 'mercury'
       this.lastAuthorityModel = this.mercury.model
