@@ -107,6 +107,21 @@ check(
   `size=${dedupeMemory.size()} entries=${dedupeMemory.snapshot().map((e) => e.key).join(',')}`,
 )
 
+// (d2) the compensation is NOT authoritative on its own: after an efficient
+// verified reach `recordMoveSuccess` clears `lastMoveTarget`, so the remembered
+// list covers only ONE endpoint. The body-derived cell for the other endpoint
+// must still suppress it, otherwise the re-offered half of the loop survives.
+const partialMemory = new MoveFailMemory({ failureLimit: 3, cooldownMs: 30_000, now: () => clock })
+partialMemory.blacklist(OVERWORLD, B, 'no_progress') // only the remembered endpoint
+if (detected.from !== null) partialMemory.blacklist(OVERWORLD, detected.from, 'no_progress')
+if (detected.to !== null) partialMemory.blacklist(OVERWORLD, detected.to, 'no_progress')
+const partial = filterBlacklistedMoves(loopCandidates, partialMemory, OVERWORLD)
+check(
+  'an incomplete remembered-target list still suppresses both loop endpoints',
+  partial.kept.length === 0 && partial.skipped.length === 2,
+  `kept=[${partial.kept.map((c) => c.id).join(',')}] skipped=[${partial.skipped.map((s) => s.key).join(',')}]`,
+)
+
 // (e) escalating cooldown semantics stay intact, and the target returns only when
 // the cooldown expires or the invalidating evidence changes ----------------------
 const escalating = new MoveFailMemory({ failureLimit: 3, cooldownMs: 30_000, now: () => clock })
@@ -175,6 +190,6 @@ check(
   `over=${moveFailureKey(OVERWORLD, integerPos)} nether=${moveFailureKey(NETHER, integerPos)}`,
 )
 
-const TOTAL = 12
+const TOTAL = 13
 process.stdout.write(`\n${TOTAL - failures}/${TOTAL} move-blacklist-identity cases passed\n`)
 process.exit(failures === 0 ? 0 : 1)
