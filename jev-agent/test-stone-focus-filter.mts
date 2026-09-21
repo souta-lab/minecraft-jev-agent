@@ -440,7 +440,7 @@ function withQueue(state: WorldState, rows: QueuedGoal[]): WorldState {
 }
 
 function knownOre(name: string, position: Vec3Json): NonNullable<WorldState['signals']['knownResources']>[number] {
-  return { name, kind: 'ore', position, dimension: 'overworld', worldEpoch: 1, lastSeenAt: 0 }
+  return { name, kind: 'ore', position, dimension: 'overworld', worldEpoch: 1 }
 }
 
 function flintLeakWorld(status: QueuedGoal['status']): WorldState {
