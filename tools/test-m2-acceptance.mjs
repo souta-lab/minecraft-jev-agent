@@ -119,6 +119,34 @@ const rawDiamondOnly = {
   milestone: 'diamond',
 }
 
+// M3 terminal inventory: twelve collected ender pearls. The M4 craft result
+// `ender_eye` must not satisfy this M3 predicate by itself.
+const pearlComplete = {
+  runId: 'run-fixture',
+  status: {
+    truth: {
+      inventory: { diamond: 3, diamond_pickaxe: 1, ender_pearl: 12, ender_eye: 0 },
+    },
+    policyKind: 'typesafe',
+    policyModel: 'typesafe-ai/jev',
+  },
+  stats: { wedge: false, goalComplete: true },
+  milestone: 'ender_pearls',
+}
+
+const enderEyeOnly = {
+  runId: 'run-fixture',
+  status: {
+    truth: {
+      inventory: { diamond: 3, diamond_pickaxe: 1, ender_pearl: 0, ender_eye: 12 },
+    },
+    policyKind: 'typesafe',
+    policyModel: 'typesafe-ai/jev',
+  },
+  stats: { wedge: false, goalComplete: true },
+  milestone: 'ender_eyes',
+}
+
 const missingIngot = {
   runId: 'run-fixture',
   status: { truth: { inventory: { charcoal: 1, iron_pickaxe: 1 } } },
@@ -385,59 +413,61 @@ const missingIngot = {
   ok('M2 criteria are exactly charcoal, iron_ingot, iron_pickaxe (no diamond)')
 }
 
-// Separate M3 acceptance owns the diamond-pickaxe terminal and is not consulted
-// by the M2 pass/fail path.
+// M3 is the current ender_pearl terminal and has no M2 furnace chain.
 {
-  assert.deepEqual(M3_CAUSAL_CHAIN, ['diamond_pickaxe'])
-  assert.deepEqual(
-    M3_CRITERIA.map(({ item }) => item),
-    [...M3_CAUSAL_CHAIN],
-  )
-  assert.equal(M3_CRITERIA.at(-1).item, 'diamond_pickaxe')
-  assert.equal(M3_CRITERIA.at(-1).need, 1)
-  assert.equal(M3_CRITERIA.at(-1).requires, 'iron_pickaxe')
-  ok('M3 acceptance independently requires the diamond pickaxe')
+  assert.deepEqual(M3_CAUSAL_CHAIN, [])
+  assert.deepEqual(M3_CRITERIA.map(({ item }) => item), ['ender_pearl'])
+  assert.equal(M3_CRITERIA.at(-1).need, 12)
+  assert.equal(M3_CRITERIA.at(-1).requires, null)
+  ok('M3 acceptance owns ender_pearl>=12 without the M2 marker chain')
 }
 
 {
   const out = capture()
   const code = await runM3Acceptance({
-    request: async () => diamondComplete,
+    request: async () => pearlComplete,
+    expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
-  assert.equal(code, 0, `crafted diamond pickaxe must PASS M3 but returned ${code}:\n${out.text()}`)
+  assert.equal(code, 0, `twelve pearls must PASS M3 but returned ${code}:\n${out.text()}`)
   assert.match(out.text(), /M3 acceptance check/)
-  assert.match(out.text(), /chain: diamond_pickaxe/)
-  assert.match(out.text(), /PASS diamond_pickaxe >= 1 \(observed 1\)/)
+  assert.match(out.text(), /chain: none/)
+  assert.match(out.text(), /PASS ender_pearl >= 12 \(observed 12\)/)
+  assert.match(out.text(), /POLICY: VERIFIED/)
   assert.match(out.text(), /RESULT: PASS/)
-  ok('M3 acceptance PASSes a crafted diamond pickaxe')
+  ok('M3 acceptance PASSes twelve ender pearls in the exact run')
 }
 
 {
   const out = capture()
   const code = await runM3Acceptance({
     request: async () => contractedThree,
+    expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
   assert.equal(code, 1, `M2-only inventory must FAIL M3 but returned ${code}:\n${out.text()}`)
-  assert.match(out.text(), /FAIL diamond_pickaxe >= 1 \(observed 0\)/)
+  assert.match(out.text(), /FAIL ender_pearl >= 12 \(observed 0\)/)
   assert.match(out.text(), /RESULT: FAIL/)
-  ok('M3 acceptance FAILs inventory with diamond_pickaxe=0 even when M2 passes')
+  ok('M3 acceptance FAILs an inventory without twelve pearls')
 }
 
 {
   const out = capture()
   const code = await runM3Acceptance({
-    request: async () => rawDiamondOnly,
+    request: async () => enderEyeOnly,
+    expectedRunId: 'run-fixture',
     write: out.write,
     sockPath: '/tmp/fixture.sock',
+    policyEvidence: VERIFIED_POLICY,
   })
-  assert.equal(code, 1, `raw diamonds must not satisfy M3 but returned ${code}:\n${out.text()}`)
-  assert.match(out.text(), /FAIL diamond_pickaxe >= 1 \(observed 0\)/)
+  assert.equal(code, 1, `ender_eye alone must FAIL M3 but returned ${code}:\n${out.text()}`)
+  assert.match(out.text(), /FAIL ender_pearl >= 12 \(observed 0\)/)
   assert.match(out.text(), /RESULT: FAIL/)
-  ok('M3 acceptance requires the crafted pickaxe, not raw diamonds')
+  ok('M3 acceptance does not confuse ender_eye with ender_pearl')
 }
 
 assert.equal(M2_CONTROL_TIMEOUT_MS, 10_000)
