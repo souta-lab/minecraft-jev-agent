@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatSmeltInputPrereq, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, SurfaceAscentRefusal } from './candidates.ts'
+import { blockId, countBlockedLogs, craftIngredientPrereq, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, FURNACE_PREREQUISITE_ROLE, formatCraftIngredientPrereq, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
@@ -1601,6 +1601,12 @@ export class JevController {
   private lastPlacedFurnaceCount = 0
   /** Last mirrored `SMELT_INPUT_PREREQ` line, so a stable state logs it once. */
   private lastSmeltInputPrereqLine: string | null = null
+  /** Last mirrored typed smelt route gap, so a stable state logs it once. */
+  private lastSmeltRouteGapLine: string | null = null
+  /** The smelt route gap observed this tick, consumed by the starvation evidence. */
+  private smeltRouteGapThisTick: SmeltRouteGap | null = null
+  /** Last mirrored typed station-retry line (attempts change -> one line per retry). */
+  private lastSmeltStationRetryLine: string | null = null
   /** Last mirrored `CRAFT_INGREDIENT_PREREQ` line, so a stable state logs it once. */
   private lastCraftIngredientPrereqLine: string | null = null
   /** #58: the last scored furnace-prerequisite plan and its selected path. */
@@ -2224,6 +2230,7 @@ export class JevController {
       this.logSourceExclusions(grounded.sourceExclusions)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.logSmeltInputPrereq(state, groundingOptions)
+      this.logSmeltRouteGap(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
       let candidates = grounded.candidates
       candidates = this.applyFurnacePrereq(state, candidates, unreachableStations)
@@ -2313,6 +2320,13 @@ export class JevController {
         const preconditionCause = this.currentGoalPreconditionCause(state)
         const blockedBy = goalStarvationBlockedBy(preconditionCause, this.queue.current, grounded.withheld)
         const missing = candidateStarvationMissing(grounded.withheld)
+        // A smelt goal with no grounded route names its own typed gap in the
+        // same evidence the starvation/escalation boundary consumes, so a bare
+        // `[WAIT]` set can never be reported without saying WHAT is missing.
+        if (this.smeltRouteGapThisTick !== null) {
+          const smeltToken = `smelt:${this.smeltRouteGapThisTick.missing}`
+          if (!missing.includes(smeltToken)) missing.push(smeltToken)
+        }
         this.starvationContext = { blockedBy, missing }
         const starvation = candidateStarvationLine(
           candidates,
@@ -3494,6 +3508,7 @@ export class JevController {
     this.noteCandidateFailure(guarded.candidateId)
     const movementFailure = guardMoveFailureReason(candidate, guarded.code)
     if (candidate !== undefined && movementFailure !== null) this.recordMoveFailure(candidate, movementFailure)
+    if (candidate !== undefined) this.logSmeltStationRetry(candidate)
     this.chargeGuardRejection(record, guarded.code)
     this.recordFailure(guarded.code, guarded.reason)
   }
@@ -6779,6 +6794,59 @@ export class JevController {
     this.lastCraftIngredientPrereqLine = line
     if (entry === null || line === null) return
     this.logger.warn('agent', line, { ...entry }, this.tickCounter)
+  }
+
+  /**
+   * Mirror the typed smelt route gap once per distinct line. A smelt goal whose
+   * station/input/fuel precondition has no grounded route must SAY so instead of
+   * presenting a bare `[WAIT]` set: `SMELT_STATION_MISSING` names what is
+   * missing, how many stations are held/placed, and where the known ones are, so
+   * the same starvation/escalation evidence that wakes System2 carries a typed
+   * reason. The value is also kept for this tick's `CANDIDATE_STARVATION`.
+   */
+  private logSmeltRouteGap(state: WorldState, options: CandidateOptions): void {
+    const gap = smeltRouteGap(state, options)
+    this.smeltRouteGapThisTick = gap
+    const line = gap === null ? null : formatSmeltRouteGap(gap)
+    if (line === this.lastSmeltRouteGapLine) return
+    this.lastSmeltRouteGapLine = line
+    if (gap === null || line === null) return
+    this.logger.warn('agent', line, { ...gap }, this.tickCounter)
+  }
+
+  /**
+   * A `SMELT` candidate the guard refuses at a station the active smelt goal
+   * keeps naming must SAY which station, how many attempts it has taken there,
+   * and which grounded route the ladder offers instead. `NO_PATH` alone repeated
+   * 200+ times is evidence without a typed outcome - the silent strategic-stall
+   * family this lane closes. `next=travel` is the generic locomotion route
+   * (a remembered/registered station), `next=place` a held furnace, and
+   * `next=capability_gap` the typed no-route case.
+   */
+  private logSmeltStationRetry(candidate: Candidate): void {
+    if (candidate.kind !== 'SMELT' || candidate.target === null) return
+    const state = this.lastWorldState
+    if (state === null) return
+    const entry = smeltStationRetry(
+      state,
+      candidateOptions(
+        this.options,
+        this.recipeIndex,
+        this.unreachableStationKeys(state),
+        this.reachabilityGateOptions(),
+        this.blacklistedMoveTargets(state),
+        null,
+        this.searchedSurfaceTargets,
+      ),
+    )
+    if (entry === null) return
+    const target = candidate.target
+    if (target.x !== entry.station.x || target.y !== entry.station.y || target.z !== entry.station.z) return
+    const attempts = this.moveFailMemory.check(this.currentDimension(), target).attempts
+    const line = formatSmeltStationRetry(entry, attempts)
+    if (line === this.lastSmeltStationRetryLine) return
+    this.lastSmeltStationRetryLine = line
+    this.logger.warn('agent', line, { station: entry.station, attempts, next: entry.next }, this.tickCounter)
   }
 
   /** Gate facts, shared by both candidate generations in one tick. */

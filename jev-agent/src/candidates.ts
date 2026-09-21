@@ -2893,9 +2893,18 @@ function stationApproachReachable(
  * `SMELT_DONE` never fired. The same fact now also rejects a sensed furnace with
  * no reachable interaction stand (live RC9: `SMELT:iron_ingot` -> `path_stuck`
  * four times at the first sensed furnace before the recovery ladder ran).
+ *
+ * The station must ALSO pass the code-owned `canDig=false` verdict the executor
+ * guard enforces (`reachability.pathProbe`, the controller's `GoalBlock` walk).
+ * The interaction-stand geometry (`stationApproach`) answers a different question
+ * - "is there a stand in front of this station" - and the two disagree for a
+ * station the body can stand beside but cannot walk to. Generation must not name
+ * a direct smelt at a cell the guard will refuse: measured live, `SMELT:iron_ingot`
+ * at `(28,63,6)` was re-offered and `NO_PATH`-rejected 230+ times because the
+ * stand probe passed while the guard's walk probe failed.
  */
 function reachableSensedFurnace(state: WorldState, options: CandidateOptions): StationEntry | null {
-  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const unreachableStations = stationUnreachableSet(state, options)
   for (const entry of state.furnaces ?? []) {
     if (!isSensedStation(entry)) continue
     const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
@@ -2907,18 +2916,90 @@ function reachableSensedFurnace(state: WorldState, options: CandidateOptions): S
 }
 
 /**
+ * The station cells the smelt prerequisite must treat as unreachable: the
+ * controller's explicit move-failure/manual set PLUS every station cell the
+ * code-owned `canDig=false` probe refuses.
+ *
+ * The probe is the SAME verdict the executor guard enforces, so a station it
+ * refuses is not an alternative route and must not be offered as one. Without
+ * this the direct step was re-offered forever while the acquisition ladder
+ * (`knownFurnaces` -> `use_known_station`) named the very same refused cell as
+ * its own replacement, so a satisfiable smelt had no grounded route and no typed
+ * gap. In-reach stations are skipped: no walk is needed, so there is nothing to
+ * refuse.
+ */
+/**
+ * Upper bound on the `canDig=false` station probes one generation pass adds. The
+ * dig-approach probe budgets its own probes the same way; a station walk probe
+ * costs up to `PATH_PROBE_TIMEOUT_MS`, so the pass must not scan every
+ * remembered station.
+ */
+export const STATION_WALK_PROBE_BUDGET = 6
+
+function stationUnreachableSet(state: WorldState, options: CandidateOptions): ReadonlySet<string> {
+  const explicit = options.unreachableStations ?? EMPTY_STATIONS
+  const probe = options.reachability?.pathProbe ?? null
+  if (probe === null) return explicit
+  const walkable: { position: Vec3Json; key: string; walk: number }[] = []
+  for (const entry of state.furnaces ?? []) {
+    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+    const walk = distance(position, state.self.eyePosition)
+    if (walk <= options.reach) continue
+    walkable.push({ position, key: knownStationKey({ name: 'furnace', position }), walk })
+  }
+  walkable.sort((a, b) => a.walk - b.walk)
+  let extended: Set<string> | null = null
+  for (const station of walkable.slice(0, STATION_WALK_PROBE_BUDGET)) {
+    if (explicit.has(station.key)) continue
+    if (probe(station.position) !== 'no_path') continue
+    extended ??= new Set(explicit)
+    extended.add(station.key)
+  }
+  return extended ?? explicit
+}
+
+/**
+ * The station the DIRECT smelt step names: a sensed furnace whose interaction
+ * approach is mechanically viable (`reachableSensedFurnace`, unchanged).
+ *
+ * A REMEMBERED station is deliberately NOT a direct step even when it is within
+ * reach: `knownStationRetrievalCandidate` is the pinned route for a
+ * registered-but-not-sensed station ("walk to the remembered station, then
+ * smelt"), and `buddy-driver/test-furnace-place.mts` asserts exactly that.
+ * Keeping the split means "smelt here" (sensed, in place) and "go there"
+ * (remembered/registered) stay distinct grounded routes.
+ */
+function directSmeltFurnace(state: WorldState, options: CandidateOptions): StationEntry | null {
+  return reachableSensedFurnace(state, options)
+}
+
+/**
  * SMELT candidate for a `smelt` subgoal: a placed furnace is in sensor range,
  * the input and a fuel item are in the inventory, and the output is still short.
- * With no sensed furnace the goal is still satisfiable: the acquisition ladder
- * sources a REGISTERED furnace (durable known resource or a remembered
- * placed-by-us station) through `knownFurnaces` and offers the
- * walk-to-then-smelt RETRIEVE rather than nothing.
+ *
+ * The station is a LADDER of grounded routes, exactly like `craftingTableSource`
+ * is for a 3x3 craft, and the direct step never replaces the rest of the ladder:
+ *
+ *  1. a station the body can smelt at now (`directSmeltFurnace`) -> direct SMELT;
+ *  2. when that station is out of interaction reach the body must TRAVEL, so the
+ *     generic furnace-acquisition ladder is enumerated alongside it (walk to a
+ *     remembered/registered station, place a held furnace, craft one at a table)
+ *     through `furnaceAcquisitionCandidates`, which is the same route set the
+ *     no-station case already used;
+ *  3. with no sensed station at all the ladder alone is the answer.
+ *
+ * The union matters because the two code-owned reachability facts can disagree
+ * (measured live: `stationApproach` resolved a `GoalNear` interaction stand while
+ * the guard's `GoalBlock` probe on the same furnace returned `NO_PATH` 86x). An
+ * exclusive direct step then re-offered one unreachable furnace forever and the
+ * 15 remembered furnaces were never a candidate, leaving a degenerate
+ * `[SMELT, WAIT]` set and a silent WAIT until the semantic boundary.
  */
 function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem: string | null): Candidate[] {
   if (focusItem === null) return []
   const inputSpec = smeltInputName(focusItem)
   if (inputSpec === null) return []
-  const furnace = reachableSensedFurnace(state, options)
+  const furnace = directSmeltFurnace(state, options)
   if (furnace === null) return furnaceAcquisitionCandidates(state, options)
   const inputItem = smeltInputFor(state, focusItem)
   if (inputItem === null) {
@@ -2948,34 +3029,35 @@ function smeltCandidates(state: WorldState, options: CandidateOptions, focusItem
     return smeltPrerequisiteCandidates(state, options, 'fuel', 'smelt_fuel')
   }
 
-  return [
-    {
-      id: `SMELT:${focusItem}`,
-      kind: 'SMELT',
-      label: `smelt ${count}x ${focusItem} from ${inputItem} in the furnace at (${furnace.x},${furnace.y},${furnace.z}) using ${fuelItem}`,
-      targetName: focusItem,
-      target: furnace,
-      targetEntityId: null,
-      itemName: focusItem,
-      requiresTool: false,
-      toolName: null,
-      inReach: distance(furnace, state.self.eyePosition) <= options.reach,
-      hasStandableAdjacent: true,
-      meta: {
-        tick: state.tick,
-        furnaceX: furnace.x,
-        furnaceY: furnace.y,
-        furnaceZ: furnace.z,
-        inputItem,
-        inputCount: count,
-        fuelItem,
-        fuelCount,
-        outputItem: focusItem,
-        count,
-        ...(state.signals.heldFurnacePlacedAt === blockId('b', furnace) ? { furnaceSource: 'held' } : {}),
-      },
+  const direct: Candidate = {
+    id: `SMELT:${focusItem}`,
+    kind: 'SMELT',
+    label: `smelt ${count}x ${focusItem} from ${inputItem} in the furnace at (${furnace.x},${furnace.y},${furnace.z}) using ${fuelItem}`,
+    targetName: focusItem,
+    target: furnace,
+    targetEntityId: null,
+    itemName: focusItem,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(furnace, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      furnaceX: furnace.x,
+      furnaceY: furnace.y,
+      furnaceZ: furnace.z,
+      inputItem,
+      inputCount: count,
+      fuelItem,
+      fuelCount,
+      outputItem: focusItem,
+      count,
+      ...(state.signals.heldFurnacePlacedAt === blockId('b', furnace) ? { furnaceSource: 'held' } : {}),
     },
-  ]
+  }
+  if (direct.inReach) return [direct]
+  const travel = furnaceAcquisitionCandidates(state, options).filter((candidate) => candidate.id !== direct.id)
+  return [direct, ...travel]
 }
 
 /**
@@ -3048,7 +3130,7 @@ export function smeltInputPrereq(state: WorldState, options: CandidateOptions): 
   if (item === null) return null
   const inputSpec = smeltInputName(item)
   if (inputSpec === null) return null
-  if (reachableSensedFurnace(state, options) === null) return null
+  if (directSmeltFurnace(state, options) === null) return null
   const held = smeltInputFor(state, item)
   if (held !== null) return { item, input: held, present: true, action: 'none' }
   const route = smeltPrerequisiteCandidates(state, options, inputSpec, 'smelt_input')
@@ -3062,6 +3144,164 @@ export function smeltInputPrereq(state: WorldState, options: CandidateOptions): 
 
 export function formatSmeltInputPrereq(entry: SmeltInputPrereqLine): string {
   return `SMELT_INPUT_PREREQ item=${entry.item} input=${entry.input} present=${entry.present} action=${entry.action}`
+}
+
+/**
+ * The one-line typed capability gap for a smelt goal that has NO grounded
+ * route. `smeltCandidates` returns an empty set only when every station route
+ * (`directSmeltFurnace`, the acquisition ladder) is infeasible or the
+ * input/fuel producer route is empty. Before this marker that state was a bare
+ * `[WAIT]` set: Jev had nothing to choose, no typed reason existed, and the
+ * resident waited out the semantic boundary. The marker names what is missing
+ * and where the known stations are, so the replan can reconsider them instead
+ * of re-deriving the same dead end.
+ */
+export interface SmeltRouteGap {
+  /** the smelt output the goal wants */
+  item: string
+  /** the precondition with no grounded route */
+  missing: 'station' | 'input' | 'fuel'
+  /** how many of the station item are held */
+  heldFurnace: number
+  /** how many stations the sensor can see */
+  placedStations: number
+  /** a 3x3 station is available for the craft route */
+  tableAvailable: boolean
+  /** furnace material the craft route would use */
+  stoneCount: number
+  /** remembered/registered furnace coordinates, nearest first */
+  knownStations: string[]
+  /** known stations the move-failure memory / reachability gate has retired */
+  unreachableStations: string[]
+}
+
+/** Upper bound on the coordinates one marker line names. */
+export const MAX_GAP_STATIONS = 8
+
+/**
+ * `SMELT_STATION_MISSING` / `SMELT_INPUT_MISSING` / `SMELT_FUEL_MISSING`.
+ *
+ * Strictly derived from the same `smeltCandidates` the policy sees: a gap is
+ * reported only when that set is empty, so a satisfiable smelt can never be
+ * labelled missing.
+ */
+export function smeltRouteGap(state: WorldState, options: CandidateOptions): SmeltRouteGap | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'smelt') return null
+  const item = current.targetItem
+  if (item === null) return null
+  if (smeltInputName(item) === null) return null
+  if (smeltCandidates(state, options, item).length > 0) return null
+
+  const unreachableStations = stationUnreachableSet(state, options)
+  const input = furnacePrereqInputFromState(state, options)
+  const missing: SmeltRouteGap['missing'] =
+    directSmeltFurnace(state, options) === null
+      ? 'station'
+      : smeltInputFor(state, item) === null
+        ? 'input'
+        : 'fuel'
+  const describe = (station: KnownStationLike): string =>
+    `${station.position.x},${station.position.y},${station.position.z}`
+  return {
+    item,
+    missing,
+    heldFurnace: input.heldCount,
+    placedStations: input.placedCount,
+    tableAvailable: input.tableAvailable,
+    stoneCount: input.stoneCount,
+    knownStations: knownFurnaces(state, unreachableStations).map(describe),
+    unreachableStations: [...unreachableStations].sort(),
+  }
+}
+
+export function formatSmeltRouteGap(gap: SmeltRouteGap): string {
+  const known = gap.knownStations.slice(0, MAX_GAP_STATIONS)
+  return [
+    `SMELT_${gap.missing.toUpperCase()}_MISSING`,
+    `item=${gap.item}`,
+    `missing=${gap.missing}`,
+    `held_furnace=${gap.heldFurnace}`,
+    `placed_stations=${gap.placedStations}`,
+    `table=${gap.tableAvailable}`,
+    `stone=${gap.stoneCount}`,
+    `known_stations=[${known.join(';')}]`,
+    `unreachable_stations=[${gap.unreachableStations.slice(0, MAX_GAP_STATIONS).join(';')}]`,
+  ].join(' ')
+}
+
+/**
+ * A smelt station the pinned `canDig=false` walk keeps refusing, with the route
+ * the ladder offers instead. The retry itself is a mechanical fact (the guard's
+ * `NO_PATH`); this type is what makes the RETRY typed and bounded instead of a
+ * silent 200+-attempt loop on the same cell.
+ */
+export interface SmeltStationRetry {
+  /** the station cell the direct/leg route keeps naming */
+  station: Vec3Json
+  /** the grounded route the ladder offers instead of retrying the same cell */
+  next: 'travel' | 'place' | 'capability_gap'
+}
+
+/**
+ * The station a `smelt` goal keeps re-naming while the executor's own
+ * `canDig=false` verdict refuses the walk, plus the replacement route.
+ *
+ * The refusal fact is the SAME probe the guard uses (`reachability.pathProbe`,
+ * the controller's `GoalBlock` pathfinder verdict), so this cannot be satisfied
+ * by the looser generation-side interaction-stand probe that produced the live
+ * disagreement. A station already retired by the explicit blacklist counts too.
+ *
+ * Returns null when no refused station is in play, so a satisfiable smelt never
+ * carries a false "unreachable" marker.
+ */
+export function smeltStationRetry(state: WorldState, options: CandidateOptions): SmeltStationRetry | null {
+  const current = state.goalQueue?.current ?? null
+  if (current === null || current.kind !== 'smelt') return null
+  const item = current.targetItem
+  if (item === null || smeltInputName(item) === null) return null
+  const station = refusedSmeltStation(state, options)
+  if (station === null) return null
+  const candidates = smeltCandidates(state, options, item)
+  const next: SmeltStationRetry['next'] = candidates.some(
+    (candidate) => candidate.kind === 'PLACE' && candidate.meta.furnaceSource === 'held',
+  )
+    ? 'place'
+    : candidates.some((candidate) => candidate.kind === 'RETRIEVE' || candidate.kind === 'MOVE')
+      ? 'travel'
+      : 'capability_gap'
+  return { station, next }
+}
+
+export function formatSmeltStationRetry(entry: SmeltStationRetry, attempts: number): string {
+  return `SMELT_STATION_UNREACHABLE station=${entry.station.x},${entry.station.y},${entry.station.z} attempts=${attempts} next=${entry.next}`
+}
+
+/**
+ * The refused station the active smelt would have to walk to, in the same order
+ * the generator names them: the sensed direct target first, then the remembered
+ * stations the ladder would retrieve. In-reach stations are skipped - no walk is
+ * needed, so there is nothing to refuse.
+ */
+function refusedSmeltStation(state: WorldState, options: CandidateOptions): Vec3Json | null {
+  const unreachableStations = stationUnreachableSet(state, options)
+  const probe = options.reachability?.pathProbe ?? null
+  const refused = (position: Vec3Json): boolean =>
+    unreachableStations.has(knownStationKey({ name: 'furnace', position })) ||
+    (probe !== null && probe(position) === 'no_path')
+  for (const entry of state.furnaces ?? []) {
+    if (!isSensedStation(entry)) continue
+    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+    if (distance(position, state.self.eyePosition) <= options.reach) continue
+    if (refused(position)) return position
+  }
+  for (const station of knownFurnaces(state, unreachableStations)) {
+    const position = station.position
+    if (distance(position, state.self.eyePosition) <= options.reach) continue
+    if (!refused(position)) continue
+    return { x: position.x, y: position.y, z: position.z }
+  }
+  return null
 }
 
 /** Nearest mineable block whose yield satisfies `spec` (`oak_log` for `log`). */
@@ -3263,7 +3503,7 @@ export function furnacePrereqInputFromState(state: WorldState, options: Candidat
   for (const [name, count] of Object.entries(counts)) {
     if (count > 0 && matchesResourceClass(name, 'stone')) stoneCount += count
   }
-  const unreachableStations = options.unreachableStations ?? EMPTY_STATIONS
+  const unreachableStations = stationUnreachableSet(state, options)
   const furnaces = knownFurnaces(state, unreachableStations)
   const reachableFurnace = furnaces.find((station) => !unreachableStations.has(knownStationKey(station))) ?? null
   return {
