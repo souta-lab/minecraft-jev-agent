@@ -14,6 +14,8 @@ import type { GoalQueueState } from './goalQueue.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import type { System2Outcome } from './system2.ts'
 import type { StrategicStallEvidence } from './strategicStall.ts'
+import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
+import type { CriticalDamageEvidence } from './criticalDamage.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
@@ -260,6 +262,39 @@ export function bodyIsSubmerged(self: Pick<SelfState, 'air' | 'feetInWater' | 'e
  */
 export function bodyIsOutOfAir(self: Pick<SelfState, 'air' | 'feetInWater' | 'eyesInWater'>): boolean {
   return bodySubmersion(self).state === 'out_of_air'
+}
+
+/**
+ * SAFE: an empty hunger bar at critical health is a body that IS taking
+ * vanilla starvation damage right now (1 HP every 4 s), not an inference - the
+ * measured `run-mubj6ucc-si3e` slide from 14 HP to 1 HP carried `food:0` and an
+ * unattributed `delta:-1` on every `hp_changed`. `food` is required on
+ * `SelfState` and `buildWorldState` always populates it, so there is no
+ * pre-starvation fixture to keep unchanged by making this optional.
+ *
+ * `food <= STARVING_FOOD_LEVEL` (0) is the exact vanilla threshold for
+ * starvation damage; the health floor reuses the single critical-health number
+ * owned by `criticalDamage.ts`.
+ */
+export const STARVING_FOOD_LEVEL = 0
+
+export function bodyStarving(
+  self: Pick<SelfState, 'food' | 'health'>,
+  criticalHealth: number = CRITICAL_DAMAGE_HEALTH,
+): boolean {
+  return (
+    Number.isFinite(self.food) &&
+    self.food <= STARVING_FOOD_LEVEL &&
+    Number.isFinite(self.health) &&
+    self.health <= criticalHealth
+  )
+}
+
+/** Typed survival fact line; mirrored so a starving body is never silent. */
+export const BODY_STARVING = 'BODY_STARVING'
+
+export function formatBodyStarving(self: Pick<SelfState, 'food' | 'health'>, at: Vec3Json): string {
+  return `${BODY_STARVING} health=${self.health}/${CRITICAL_DAMAGE_HEALTH} food=${self.food} at=${at.x},${at.y},${at.z} -> only routes that can end the starvation stay offered`
 }
 
 /** Stable `x_y_z` key for a placement spot, shared by the sensor fact, guard and generator. */
@@ -517,6 +552,14 @@ export type AgentSignals = {
    * this to see a stalled Option that every other counter misses.
    */
   strategicNonProgress?: StrategicStallEvidence | null
+  /**
+   * SAFE: code-owned "the body is at critical health and one plan keeps
+   * absorbing damage without ending it" evidence for the ACTIVE plan. The
+   * candidate layer restricts the offer to routes that can end the damage and
+   * the controller crosses the System2 boundary once per exhaustion with
+   * `CRITICAL_DAMAGE_EXHAUSTED`. Optional for pure fixtures.
+   */
+  criticalDamage?: CriticalDamageEvidence | null
   /** #360: `OSCILLATION_DETECTED` count for the active Option instance. */
   oscillationsDetected?: number
   /**

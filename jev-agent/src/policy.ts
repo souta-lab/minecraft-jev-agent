@@ -12,7 +12,8 @@
 import type { Candidate, CandidateKind } from './candidates.ts'
 import { dryAwarePlacementSpots } from './candidates.ts'
 import type { Vec3Json, WorldState } from './state.ts'
-import { bodyIsOutOfAir, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
+import { bodyIsOutOfAir, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
+import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 
 export type GuardPhase = 'decision' | 'dig'
@@ -36,6 +37,15 @@ export type GuardCode =
    * to surface) stays Jev's choice.
    */
   | 'SUBMERGED'
+  /**
+   * SAFE: the body is at critical health with an empty hunger bar, so vanilla
+   * starvation damage (1 HP every 4 s) is already landing. A placement does not
+   * end starvation, so code refuses to keep the body in that work at the
+   * survival floor - the measured `run-mubj6ucc-si3e` slide from 14 HP to 1 HP
+   * happened while the plan kept offering ENTER/MOVE/WAIT and never a route to
+   * food. WHAT ends the starvation (eat / hunt / retreat) stays Jev's choice.
+   */
+  | 'STARVING'
   | 'CONFLICT_IN_FLIGHT'
 
 export interface InFlightAction {
@@ -346,6 +356,10 @@ export function guardRejectionChargesOption(code: GuardCode): boolean {
     // evidence that the option is unproductive: charging it here would abandon a
     // protected prerequisite because the bot happened to be under water.
     case 'SUBMERGED':
+    // A starving body at critical health is an environmental precondition
+    // ("eat first"), not evidence the option is unproductive: charging it here
+    // would abandon a protected prerequisite because the hunger bar was empty.
+    case 'STARVING':
       return false
   }
 }
@@ -478,6 +492,17 @@ function guardAttack(candidate: Candidate, state: WorldState): GuardResult {
       `body is out of air (${submersion.air}/${MAX_AIR}); the attack lease cannot continue under water`,
     )
   }
+  // SAFE: an empty hunger bar at critical health is already dealing starvation
+  // damage. A food-animal ATTACK is the one attack that can end it and stays
+  // allowed; every other attack keeps the body trading hits while the hunger
+  // bar kills it.
+  if (bodyStarving(state.self) && candidate.meta.foodAnimal !== true) {
+    return deny(
+      candidate.id,
+      'STARVING',
+      `body is starving (health ${state.self.health}/${CRITICAL_DAMAGE_HEALTH}, food ${state.self.food}); this attack cannot end the starvation`,
+    )
+  }
   return { ok: true, candidate }
 }
 
@@ -592,6 +617,15 @@ function guardPlace(candidate: Candidate, state: WorldState, context: GuardConte
   }
   const submersion = submergedPlacementRefusal(candidate, state, target)
   if (submersion !== null) return submersion
+  // SAFE: placing a station does not end starvation, so a body at critical
+  // health with an empty hunger bar is not kept in that work.
+  if (bodyStarving(state.self)) {
+    return deny(
+      candidate.id,
+      'STARVING',
+      `body is starving (health ${state.self.health}/${CRITICAL_DAMAGE_HEALTH}, food ${state.self.food}); eat before placing`,
+    )
+  }
   return { ok: true, candidate }
 }
 

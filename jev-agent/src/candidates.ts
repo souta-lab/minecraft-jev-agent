@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { bodyIsOutOfAir, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
@@ -254,6 +254,48 @@ export function restrictCandidatesDuringSubmersion(
 }
 
 /**
+ * SAFE: while the body is at critical health and still absorbing damage, only
+ * routes that can END the damage stay selectable. This is the same
+ * deterministic-restriction pattern as `restrictCandidatesDuringSubmersion` and
+ * `restrictCandidatesAtCriticalHealth`, extended to damage that has no
+ * attributed attacker.
+ *
+ * Measured `run-mubj6ucc-si3e` (source e37e0237): 14 HP -> 1 HP with `food:0`
+ * on every `hp_changed`, every `mob_appeared` outside reaction range, an open
+ * y=52..55 pocket, and `trigger=damage_taken -> action=WAIT` over and over. The
+ * offer held MOVE/RETREAT/ENTER/WAIT, none of which ends starvation, and the
+ * plan settled into WAIT until the body was one hit from death.
+ *
+ * The kept set is every grounded way to end the damage - movement/retreat/step
+ * (repositioning away from an environmental source), eating, a food-animal hunt
+ * (the grounded route to food), and ESCALATE (hand the situation to the
+ * semantic layer). WHICH one is taken stays Jev's choice. If perception grounds
+ * no damage-ending route at all the original set is preserved, so the missing
+ * affordance stays observable instead of silently erasing the candidate set -
+ * the controller then proves exhaustion with `CRITICAL_DAMAGE_EXHAUSTED`.
+ */
+export const CRITICAL_DAMAGE_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  ...SURVIVAL_KINDS,
+  'EAT',
+])
+
+export function restrictCandidatesDuringCriticalDamage(
+  state: Pick<WorldState, 'signals' | 'self'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const evidence = state.signals.criticalDamage ?? null
+  if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
+  const rescue = candidates.filter(
+    (candidate) =>
+      CRITICAL_DAMAGE_KINDS.has(candidate.kind) ||
+      // A food-animal ATTACK is the grounded route to food, not a combat
+      // preference: it is the one ATTACK that can end starvation.
+      (candidate.kind === 'ATTACK' && candidate.meta.foodAnimal === true),
+  )
+  return rescue.length > 0 ? rescue : [...candidates]
+}
+
+/**
  * SAFE/CAN fact: the placement spots a station may be placed from.
  *
  * A spot in `submergedPlacementSpots` has only fluid-column body access, i.e.
@@ -299,6 +341,15 @@ export interface CandidateOptions {
    * standing 9m from a cow was offered no way to obtain food at all.
    */
   foodHuntRange?: number
+  /**
+   * Grounded animal-habitat target Y supplied by the controller from remembered
+   * surface structures (a portal frame / station the resident verified above
+   * ground). The hungry-hunt ascent aims here instead of the bare sea-level
+   * floor, so the route lands on real surface rather than inside a dirt column.
+   * Absent means "no surface memory", which falls back to
+   * `ANIMAL_HABITAT_SEA_LEVEL`.
+   */
+  foodHabitatY?: number | null
   /** nearest distance (m) at which an out-of-reach block earns a MOVE candidate */
   moveMinDistance?: number
   /** furthest distance (m) at which a walk-up MOVE is offered (chained moves) */
@@ -420,6 +471,14 @@ export interface GroundedCandidatesResult {
    * 48-minute pacing loop ran in. Null when no surface ascent was requested.
    */
   surfaceAscentRefusal: SurfaceAscentRefusal | null
+  /**
+   * Typed refusal (`FOOD_HABITAT_REFUSED`) when a hungry body with no sensed
+   * food animal has no grounded vertical route up to animal habitat. Non-null
+   * means the hunt cannot progress where the body is and the reason is said,
+   * instead of an unbounded zero-progress underground hunt. Null when the body
+   * is not in that state.
+   */
+  foodHabitatRefusal: SurfaceAscentRefusal | null
   /**
    * Typed ignition refusal (`PORTAL_LIGHT_REFUSED` / `PRECONDITION_MISSING`)
    * when a portal goal's frame could not be lit. Null when no ignition was
@@ -1203,6 +1262,7 @@ export function generateGroundedCandidates(
     raw.entryRefusal,
     raw.armorRefusals,
     raw.surfaceAscentRefusal,
+    raw.foodHabitatRefusal,
     raw.sourceExclusions,
   )
 }
@@ -1345,6 +1405,10 @@ function generateRawCandidates(
   // and the clearance filter are unchanged: CAN enumeration, never an override
   // and never a rank.
   const surfaceAscent = surfaceAscentCandidates(state, options)
+  // The hungry body's vertical route to where passive animals can exist. Same
+  // CAN enumeration: appended alongside every other candidate, never an override
+  // and never a rank.
+  const foodHabitat = foodHabitatAscent(state, options)
 
   if (strategy === 'explore_cave') {
     const explore = pickExplore(
@@ -1582,6 +1646,7 @@ function generateRawCandidates(
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
   candidates.push(...surfaceAscent.candidates)
+  candidates.push(...foodHabitat.candidates)
 
   candidates.push({
     id: 'WAIT',
@@ -1622,6 +1687,7 @@ function generateRawCandidates(
     entryRefusal,
     armorRefusals,
     surfaceAscentRefusal: surfaceAscent.refusal,
+    foodHabitatRefusal: foodHabitat.refusal,
     sourceExclusions: resourceSourceExclusions(state),
   }
 }
@@ -2095,13 +2161,120 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
   const targetY =
     typeof current.targetY === 'number' && Number.isFinite(current.targetY) ? current.targetY : null
   if (targetY === null) return { candidates: [], refusal: null }
-  const self = state.self.position
-  const feet = { x: Math.floor(self.x), y: Math.floor(self.y), z: Math.floor(self.z) }
-  if (targetY - self.y <= VERTICAL_GAP) return { candidates: [], refusal: null }
-  // The same own-column target the controller's pure plan refusal uses
-  // (`ascentRefusedByPlan`), so the offered candidate and the refusal describe
-  // the same plan.
-  const target = { x: feet.x, y: targetY, z: feet.z }
+  return ascentRouteTo(state, options, {
+    targetY,
+    goalId: current.id,
+    idPrefix: 'ASCEND:surface:',
+    label: 'ascend toward the surface',
+    extraMeta: { surfaceAscent: true, surfaceGoalId: current.id },
+  })
+}
+
+/**
+ * Passive land animals (cow, pig, sheep, chicken, rabbit) spawn on grass blocks
+ * with sky access. Code-owned Minecraft spawn truth: in the 1.18+ overworld the
+ * surface - and therefore grass - does not exist below sea level (y=63). A
+ * hungry body below that band cannot be standing where animals are, so the only
+ * grounded hunt route is a vertical one.
+ *
+ * Measured `run-mubj6ucc-si3e` (source d0ab2bd): health 1 at (23.3,53.0,8.9),
+ * ledger `active g37:collect:food 0/3`, WHAT correctly chose `food`, and the
+ * hunt was pursued entirely underground (`WAIT, WAIT, DESCEND:level:W:b22_53_9`)
+ * where passive animals never spawn - so the food Option could never complete and
+ * health never regenerated.
+ */
+export const ANIMAL_HABITAT_SEA_LEVEL = 63
+
+/** Typed refusal: a hungry body with no grounded route up to animal habitat. */
+export const FOOD_HABITAT_REFUSED = 'FOOD_HABITAT_REFUSED'
+
+export function formatFoodHabitatRefused(refusal: SurfaceAscentRefusal): string {
+  return (
+    `${FOOD_HABITAT_REFUSED} goal=${refusal.goalId} reason=${refusal.reason} fromY=${refusal.fromY} ` +
+    `toY=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z} ` +
+    `-> no grounded route to animal habitat; the hunt cannot progress underground`
+  )
+}
+
+/**
+ * The hungry body's vertical route to animal habitat.
+ *
+ * Fires only when the resident is hungry, holds no food, has NO sensed food
+ * animal in range, and is below the habitat band - i.e. exactly the state where
+ * the hunt has no grounded route at all and would otherwise degenerate to
+ * WAIT/DESCEND. It reuses the SAME `planVerticalApproachDetailed` machinery (and
+ * therefore reuse/staircase-up/pillar) as the `surface` goal and the MOVE/RETRIEVE
+ * ascents, and returns the same typed refusal when no plan exists. CAN
+ * enumeration only: the route is appended alongside every other candidate and
+ * never overrides or ranks one.
+ */
+export function foodHabitatAscent(state: WorldState, options: CandidateOptions): SurfaceAscentResult {
+  const heldFood = pickFood(state)
+  if (heldFood !== null || state.self.food > options.eatBelowFood) return { candidates: [], refusal: null }
+  const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
+  const animalSensed = state.entities.some(
+    (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
+  )
+  if (animalSensed) return { candidates: [], refusal: null }
+  const hinted =
+    typeof options.foodHabitatY === 'number' && Number.isFinite(options.foodHabitatY)
+      ? options.foodHabitatY
+      : highestKnownSurfaceY(state)
+  const targetY = Math.max(ANIMAL_HABITAT_SEA_LEVEL, hinted ?? ANIMAL_HABITAT_SEA_LEVEL)
+  const current = state.goalQueue?.current ?? null
+  const goalId = current?.id ?? 'food-habitat'
+  return ascentRouteTo(state, options, {
+    targetY,
+    goalId,
+    idPrefix: 'ASCEND:habitat:',
+    label: 'ascend toward animal habitat (grass + sky)',
+    extraMeta: { foodHabitat: true, foodHabitatGoalId: goalId },
+  })
+}
+
+/**
+ * The highest Y among the surface structures the resident has itself verified
+ * (a Nether portal frame it built, a station it placed), or null when it has
+ * none. This is the grounded "I have stood above ground there" hint that turns
+ * the sea-level floor into the real surface, so a hungry ascent lands next to
+ * grass instead of inside a dirt column. Pure: it reads only sensed/remembered
+ * world state, never a global.
+ */
+function highestKnownSurfaceY(state: WorldState): number | null {
+  let best: number | null = null
+  const consider = (y: unknown): void => {
+    if (typeof y !== 'number' || !Number.isFinite(y)) return
+    best = best === null ? y : Math.max(best, y)
+  }
+  for (const site of state.portalFrameSites ?? []) consider(site.origin?.y)
+  for (const station of state.craftingTables ?? []) consider(station.y)
+  for (const station of state.furnaces ?? []) consider(station.y)
+  return best
+}
+
+/**
+ * The shared grounded vertical route: an own-column target Y, the SAME
+ * `planVerticalApproachDetailed` plan the controller's pure refusal
+ * (`ascentRefusedByPlan`) describes, and one MOVE candidate carrying the plan
+ * meta. `idPrefix`/`label`/`extraMeta` are the only per-caller differences, so a
+ * `surface` goal and a hungry hunt cannot drift into two implementations of the
+ * same ascent.
+ */
+function ascentRouteTo(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: {
+    targetY: number
+    goalId: string
+    idPrefix: string
+    label: string
+    extraMeta: Record<string, string | number | boolean>
+  },
+): SurfaceAscentResult {
+  const own = state.self.position
+  const feet = { x: Math.floor(own.x), y: Math.floor(own.y), z: Math.floor(own.z) }
+  if (spec.targetY - own.y <= VERTICAL_GAP) return { candidates: [], refusal: null }
+  const target = { x: feet.x, y: spec.targetY, z: feet.z }
   const decision = planVerticalApproachDetailed(verticalInputFor(state, target))
   if (decision.plan === null) {
     const refusal = decision.ascentRefusal
@@ -2110,7 +2283,7 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
       candidates: [],
       refusal: {
         reason: refusal.reason,
-        goalId: current.id,
+        goalId: spec.goalId,
         fromY: refusal.fromY,
         toY: refusal.toY,
         cell: refusal.cell,
@@ -2123,7 +2296,7 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
   const tunnelFallback =
     plan.kind === 'reuse' ? planVerticalApproach({ ...verticalInputFor(state, target), tunnel: null }) : null
   const verticalMeta = {
-    ...verticalPlanMeta(plan, feet.y, targetY),
+    ...verticalPlanMeta(plan, feet.y, spec.targetY),
     ...(plan.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
   }
   const digTool =
@@ -2141,9 +2314,9 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
   return {
     candidates: [
       {
-        id: `ASCEND:surface:${blockId('p', targetCell)}`,
+        id: `${spec.idPrefix}${blockId('p', targetCell)}`,
         kind: 'MOVE',
-        label: `ascend toward the surface y>=${targetY}${verticalPlanLabel(plan)}`,
+        label: `${spec.label} y>=${spec.targetY}${verticalPlanLabel(plan)}`,
         targetName: null,
         target: targetCell,
         targetEntityId: null,
@@ -2161,9 +2334,8 @@ export function surfaceAscentCandidates(state: WorldState, options: CandidateOpt
           x: targetCell.x,
           y: targetCell.y,
           z: targetCell.z,
-          surfaceAscent: true,
-          surfaceGoalId: current.id,
-          ascentTargetY: targetY,
+          ...spec.extraMeta,
+          ascentTargetY: spec.targetY,
           ...verticalMeta,
         },
       },
@@ -2958,6 +3130,8 @@ interface RawCandidatesResult {
   armorRefusals: ArmorRefusal[]
   /** typed ascent refusal for a `surface` goal with no grounded vertical route */
   surfaceAscentRefusal: SurfaceAscentRefusal | null
+  /** typed refusal for a hungry hunt with no grounded route up to animal habitat */
+  foodHabitatRefusal: SurfaceAscentRefusal | null
   /** live-structure member cells refused as sources for the active collect goal */
   sourceExclusions: ResourceSourceExclusion[]
 }
@@ -5451,6 +5625,7 @@ export function applyReachabilityGate(
   entryRefusal: PortalEntryRefusal | null = null,
   armorRefusals: ArmorRefusal[] = [],
   surfaceAscentRefusal: SurfaceAscentRefusal | null = null,
+  foodHabitatRefusal: SurfaceAscentRefusal | null = null,
   sourceExclusions: ResourceSourceExclusion[] | null = null,
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
@@ -5579,6 +5754,7 @@ export function applyReachabilityGate(
     entryRefusal,
     armorRefusals,
     surfaceAscentRefusal,
+    foodHabitatRefusal,
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),

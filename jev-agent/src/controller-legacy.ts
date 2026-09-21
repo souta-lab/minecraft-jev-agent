@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -82,7 +82,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, bodyStarving, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -167,6 +167,12 @@ import {
   resolveStrategicStallMinBodyProgress,
   StrategicStallTracker,
 } from './strategicStall.ts'
+import {
+  CriticalDamageTracker,
+  formatCriticalDamageEvidence,
+  formatCriticalDamageExhausted,
+  resolveCriticalDamageLimit,
+} from './criticalDamage.ts'
 import { computeShadowMetrics } from './shadowMetrics.ts'
 
 export type EscalationReason =
@@ -1704,6 +1710,23 @@ export class JevController {
   )
   /** #360: Option instance the recurrence evidence is currently armed on. */
   private strategicStallOptionId: string | null = null
+  /**
+   * SAFE: code-owned damage-at-critical-health evidence for the ACTIVE plan.
+   * The measured starvation slide (14 HP -> 1 HP, `food:0`, `damage_taken ->
+   * WAIT` forever) is invisible to every other counter, so this one proves the
+   * plan is not ending the damage and crosses the System2 boundary once per
+   * exhaustion with `CRITICAL_DAMAGE_EXHAUSTED`.
+   */
+  private readonly criticalDamage = new CriticalDamageTracker(resolveCriticalDamageLimit())
+  /** Signature of the last `BODY_STARVING`/`CRITICAL_DAMAGE` line, so it logs on a change, not per tick. */
+  private lastCriticalDamageLine: string | null = null
+  /** Signature of the last `FOOD_HABITAT_REFUSED` line, so it logs on a change. */
+  private lastFoodHabitatRefusalKey: string | null = null
+  /**
+   * Health the controller itself last observed, used to de-duplicate the two
+   * damage triggers so one damage event costs one `consecutiveDamage`.
+   */
+  private lastObservedHealth: number | null = null
   /** #79: unverified zero-progress attempts per planId; after the limit the same strategy is abandoned. */
   private readonly actionUnverified = new Map<string, number>()
   /**
@@ -2249,6 +2272,7 @@ export class JevController {
       this.observeRetrievalStall()
       this.observeCapabilityGap()
       this.observeThreat(trigger, detail)
+      this.observeCriticalDamage(trigger, detail)
 
       if (this.bot.entity === undefined) return
 
@@ -2345,6 +2369,7 @@ export class JevController {
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logResourceSourceGap(grounded.sourceGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
+      this.noteFoodHabitat(grounded.foodHabitatRefusal)
       this.logSmeltInputPrereq(state, groundingOptions)
       this.logSmeltRouteGap(state, groundingOptions)
       this.logCraftIngredientPrereq(state, groundingOptions)
@@ -2364,6 +2389,12 @@ export class JevController {
       // drowning fix; the guard/executor half refuses stale mechanical actions
       // and the scheduler makes the fact able to preempt an in-flight lease.
       candidates = restrictCandidatesDuringSubmersion(state, candidates)
+      // SAFE: at critical health with damage still landing, the offer collapses
+      // to the routes that can END the damage (measured starvation slide:
+      // `food:0`, `damage_taken -> WAIT` forever while ENTER/MOVE stayed on
+      // offer). The controller-side half is `observeCriticalDamage`, which
+      // proves exhaustion and wakes System2.
+      candidates = restrictCandidatesDuringCriticalDamage(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -2632,17 +2663,19 @@ export class JevController {
         sensorOptions(this.options, this.scheduler.worldRevision),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
-      const freshCandidates = restrictCandidatesDuringSubmersion(
+      const freshCandidates = restrictCandidatesDuringCriticalDamage(
         freshState,
-        restrictCandidatesAtCriticalHealth(
+        restrictCandidatesDuringSubmersion(
           freshState,
-          restrictCandidatesDuringImmediateThreat(
+          restrictCandidatesAtCriticalHealth(
             freshState,
-            this.filterMoveCandidates(
-              generateGroundedCandidates(
-                freshState,
-                candidateOptions(
-                  this.options,
+            restrictCandidatesDuringImmediateThreat(
+              freshState,
+              this.filterMoveCandidates(
+                generateGroundedCandidates(
+                  freshState,
+                  candidateOptions(
+                    this.options,
                   this.recipeIndex,
                   this.unreachableStationKeys(freshState),
                   this.reachabilityGateOptions(),
@@ -2658,6 +2691,7 @@ export class JevController {
             ),
           ),
         ),
+      ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
@@ -5772,6 +5806,89 @@ export class JevController {
   }
 
   /**
+   * SAFE: the survival fact no other counter owns. `damage_taken` / `hp_changed`
+   * carry the health step, so this records consecutive damage at critical health
+   * for the ACTIVE plan and, once the bounded count is exhausted, logs the typed
+   * `CRITICAL_DAMAGE_EXHAUSTED` (or `BODY_STARVING` when the hunger bar is
+   * empty), removes WAIT for one decision, and wakes System2 through the same
+   * `escalate()` path #326/#337 use. The choice of WHAT ends the damage stays
+   * with Jev; this only proves the current plan is not ending it.
+   *
+   * Health is de-duplicated against the controller's own last observation, not
+   * `detail.previousHealth`: both triggers can be delivered for one damage event
+   * (and the scheduler's coalescing keeps only `damage_taken`), so counting the
+   * step itself is what makes one hit cost exactly one.
+   */
+  private observeCriticalDamage(trigger: DecisionTrigger, detail: Record<string, unknown>): void {
+    if (trigger !== 'damage_taken' && trigger !== 'hp_changed') return
+    const rawHealth = typeof detail.health === 'number' && Number.isFinite(detail.health) ? detail.health : this.bot.health
+    const health = typeof rawHealth === 'number' && Number.isFinite(rawHealth) ? rawHealth : Number.NaN
+    const previousHealth = this.lastObservedHealth
+    if (Number.isFinite(health)) this.lastObservedHealth = health
+    const rawFood = typeof detail.food === 'number' && Number.isFinite(detail.food) ? detail.food : this.bot.food
+    const food = typeof rawFood === 'number' && Number.isFinite(rawFood) ? rawFood : null
+    const planKey = `${this.currentGoalKey()}|${this.queue.current?.id ?? 'none'}`
+    const evidence = this.criticalDamage.note({
+      health,
+      previousHealth,
+      planKey,
+      food,
+      sourceName: this.signals.lastDamage?.sourceName ?? null,
+    })
+    this.signals.criticalDamage = evidence
+    const goalKey = this.currentGoalKey()
+    if (!evidence.active) {
+      this.lastCriticalDamageLine = null
+      return
+    }
+    const entity = this.bot.entity
+    const at = entity === undefined ? { x: 0, y: 0, z: 0 } : entity.position
+    const line =
+      evidence.food !== null && bodyStarving({ food: evidence.food, health: evidence.health })
+        ? formatBodyStarving({ food: evidence.food, health: evidence.health }, at)
+        : formatCriticalDamageEvidence(goalKey, evidence)
+    if (line !== this.lastCriticalDamageLine) {
+      this.lastCriticalDamageLine = line
+      this.logger.warn(
+        'agent',
+        line,
+        {
+          health: evidence.health,
+          food: evidence.food,
+          source: evidence.sourceName,
+          damage: evidence.consecutiveDamage,
+          limit: evidence.limit,
+        },
+        this.tickCounter,
+      )
+    }
+    if (!evidence.exhausted) return
+    this.logger.warn(
+      'agent',
+      formatCriticalDamageExhausted(goalKey, evidence),
+      {
+        health: evidence.health,
+        food: evidence.food,
+        source: evidence.sourceName,
+        damage: evidence.consecutiveDamage,
+        limit: evidence.limit,
+        boundary: 'semantic_boundary',
+      },
+      this.tickCounter,
+    )
+    // Consume the evidence (the next boundary needs a longer run on the same
+    // plan) and force the next decision to pick a real candidate, so the body
+    // cannot settle into an unbounded WAIT while it keeps losing health.
+    this.signals.criticalDamage = this.criticalDamage.acknowledgeEscalation()
+    this.lastCriticalDamageLine = null
+    this.waitSuppressed = true
+    this.escalate(
+      'progress_stall',
+      `CRITICAL_DAMAGE_EXHAUSTED goal=${goalKey} health=${evidence.health} food=${evidence.food ?? 'unknown'} damage=${evidence.consecutiveDamage}/${evidence.limit} source=${evidence.sourceName ?? 'environment'}`,
+    )
+  }
+
+  /**
    * M2 capability trap observable. The deterministic predicate decides; this
    * method only feeds it the live y / target / refusal flag and reacts with the
    * `CAPABILITY_GAP` marker plus a strategic replan. It is not a movement
@@ -7048,6 +7165,22 @@ export class JevController {
       { ...refusal, goal: this.currentGoalKey() },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Surface the hungry hunt's typed vertical-route refusal
+   * (`FOOD_HABITAT_REFUSED reason=... -> no grounded route to animal habitat`)
+   * once per distinct refusal. Measured `run-mubj6ucc-si3e`: a health-1 body
+   * underground with no sensed animal and `collect:food 0/3` produced an
+   * unbounded `WAIT/DESCEND` hunt; with no route up, the dead end must be an
+   * explicit fact the semantic layer can re-plan on instead of silence.
+   */
+  private noteFoodHabitat(refusal: SurfaceAscentRefusal | null): void {
+    const key = refusal === null ? null : formatFoodHabitatRefused(refusal)
+    if (key === this.lastFoodHabitatRefusalKey) return
+    this.lastFoodHabitatRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn('agent', formatFoodHabitatRefused(refusal), { ...refusal, goal: this.currentGoalKey() }, this.tickCounter)
   }
 
   /**
