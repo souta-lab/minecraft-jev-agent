@@ -317,6 +317,10 @@ export function parseLog(text, { sinceMin = null, logPath = null } = {}) {
       upsertResource(out.knownResources, g[1], { kind: g[2] === 'ore' || /ore$/i.test(g[1]) ? 'ore' : 'resource', name: g[1], target: `${g[3]},${g[4]},${g[5]}`, dist: null, t: ts })
     } else if ((g = /^MILESTONE name=(\S+) done=(\w+)/.exec(body))) {
       pushRing(out.milestones, { t: ts, name: g[1], done: g[2] === 'true' }, 40)
+    } else if ((g = /^MILESTONE name=(\S+) frontier=(\w+)/.exec(body))) {
+      // The HOST logs a frontier ADVANCE (the first unsatisfied rung moved), which
+      // is not a completion claim. Keep it distinct from `done=true`.
+      pushRing(out.milestones, { t: ts, name: g[1], frontier: g[2] === 'true' }, 40)
     }
     if (body.includes('FURNACE_READY')) out.furnaceReady++
     if (/^ERROR\b/.test(body)) pushRing(out.errors, { t: ts, text: body }, 20)

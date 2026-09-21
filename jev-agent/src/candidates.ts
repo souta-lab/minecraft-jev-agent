@@ -478,12 +478,39 @@ const FOOD_ITEMS = new Set([
   'cooked_rabbit',
   'cooked_cod',
   'cooked_salmon',
+  // Raw drops are edible without a furnace. M3 needs a working health-regen path
+  // (endermen and blazes deal damage), and a hunting-only fix would be useless if
+  // the raw drop could not be eaten.
+  'beef',
+  'porkchop',
+  'chicken',
+  'mutton',
+  'rabbit',
+  'cod',
+  'salmon',
   'apple',
   'golden_apple',
   'carrot',
   'baked_potato',
   'melon_slice',
   'sweet_berries',
+])
+
+/**
+ * Passive animals whose drop is an edible item in FOOD_ITEMS. They are not
+ * `hostile`, so the hostile-only combat filter never offers them; without this
+ * list the resident has no way to acquire food and cannot regenerate health.
+ */
+const FOOD_ANIMALS = new Set([
+  'cow',
+  'mooshroom',
+  'pig',
+  'chicken',
+  'sheep',
+  'rabbit',
+  'cod',
+  'salmon',
+  'tropical_fish',
 ])
 
 const HAZARD_DANGER_RADIUS = 3
@@ -630,7 +657,19 @@ function generateRawCandidates(
   const hostiles = state.entities.filter(
     (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
   )
-  for (const entity of hostiles.slice(0, options.maxAttackCandidates)) {
+  // Food acquisition: when the resident is hungry and holds no food, offer the
+  // grounded ATTACK affordance for nearby passive food animals so Jev can choose to
+  // hunt. Code only reports CAN (a real entity, in range, reachable); the choice of
+  // WHICH action stays with Jev.
+  const heldFood = pickFood(state)
+  const huntTargets =
+    heldFood === null && state.self.food < options.eatBelowFood
+      ? state.entities.filter(
+          (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= COMBAT_CANDIDATE_RANGE,
+        )
+      : []
+  const attackTargets = [...hostiles, ...huntTargets].slice(0, options.maxAttackCandidates)
+  for (const entity of attackTargets) {
     candidates.push({
       id: `ATTACK:e${entity.id}`,
       kind: 'ATTACK',
@@ -643,11 +682,16 @@ function generateRawCandidates(
       toolName: null,
       inReach: entity.distance <= options.reach,
       hasStandableAdjacent: true,
-      meta: { tick: state.tick, entityId: entity.id, distance: entity.distance },
+      meta: {
+        tick: state.tick,
+        entityId: entity.id,
+        distance: entity.distance,
+        ...(huntTargets.includes(entity) ? { foodAnimal: true } : {}),
+      },
     })
   }
 
-  const foodName = pickFood(state)
+  const foodName = heldFood
   if (foodName !== null && state.self.food < options.eatBelowFood) {
     candidates.push({
       id: `EAT:${foodName}`,

@@ -241,6 +241,28 @@ addCase('protected station cells are not emitted as DESCEND or STEP dig affordan
   return { pass: unsafe.length === 0, detail: `digCandidates=[${unsafe.map((candidate) => candidate.id).join(',')}]` }
 })
 
+addCase('a hungry foodless resident is offered a nearby food animal as a grounded ATTACK', () => {
+  const hungry = exploreState(0)
+  hungry.self = { ...hungry.self, food: 4 }
+  hungry.entities = [
+    { id: 21, name: 'cow', kind: 'mob', username: null, position: { x: 2, y: 10, z: 0 }, distance: 2, hostile: false },
+  ]
+  const hunted = generateCandidates(hungry, defaultCandidateOptions)
+  const hunt = hunted.find((candidate) => candidate.kind === 'ATTACK' && candidate.targetName === 'cow')
+  // With food held the animal is not offered (no need), and the EAT affordance appears.
+  const fed = exploreState(0)
+  fed.self = { ...fed.self, food: 4 }
+  fed.inventory = { slots: [], counts: { beef: 2 }, totalItems: 2 }
+  fed.entities = hungry.entities
+  const fedCandidates = generateCandidates(fed, defaultCandidateOptions)
+  const fedHunt = fedCandidates.some((candidate) => candidate.kind === 'ATTACK' && candidate.targetName === 'cow')
+  const eatOffered = fedCandidates.some((candidate) => candidate.kind === 'EAT')
+  return {
+    pass: hunt !== undefined && hunt.meta?.foodAnimal === true && !fedHunt && eatOffered,
+    detail: `hunt=${hunt?.id ?? 'none'} foodAnimal=${hunt?.meta?.foodAnimal ?? 'none'} fedHunt=${fedHunt} eat=${eatOffered}`,
+  }
+})
+
 let failures = 0
 process.stdout.write('M2 heuristic audit - candidate retry policy is an explicit struct\n')
 process.stdout.write('-'.repeat(72) + '\n')

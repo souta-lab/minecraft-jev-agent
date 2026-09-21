@@ -1523,7 +1523,12 @@ setInterval(() => {
   if (status.rungIndex > state.milestoneIndex) {
     state.milestoneIndex = status.rungIndex
     state.milestone = status.rungId
-    log('MILESTONE', { name: status.rungId, done: true, index: status.rungIndex, queueDone: status.queue.done, inventory: shortInv(truth.inventory) })
+    // Frontier advance, NOT completion: `status.rungId` is the first UNSATISFIED
+    // rung, so labelling it `done=true` claimed a rung was complete while its
+    // items were still absent (observed live: `MILESTONE name=ender_pearls
+    // done=true` with zero ender_pearl). The generation's own emitMilestones()
+    // logs the truthful `done=true` for the rung it has just advanced past.
+    log('MILESTONE', { name: status.rungId, frontier: true, index: status.rungIndex, queueDone: status.queue.done, inventory: shortInv(truth.inventory) })
     saveState('milestone')
   }
 

@@ -53,6 +53,10 @@ fixtureLog.push(
   line(24, 'CAUSAL record=causal chainId=c0 optionId=craft:furnace planId=g1:craft:furnace strategy=llm:craft candidateId=PLACE:furnace:p29_61_35 actionId=PLACE:furnace:p29_61_35 verified=true status=done resource=null progressDelta=0'),
   line(25, 'KNOWN_RESOURCE item=iron_ore kind=ore at=26,8,35 worldEpoch=1'),
   line(26, 'KNOWN_RESOURCE item=furnace name=furnace target=29,61,35 dist=53 vertical=none'),
+  // Frontier ADVANCE marker: the first unsatisfied rung moved. This is NOT a
+  // completion claim (the live run emitted it for ender_pearls with zero pearls).
+  line(27, 'MILESTONE name=ender_pearls frontier=true index=13 queueDone=0 inventory={"ender_pearl":0}'),
+  line(27, 'MILESTONE name=diamond_pickaxe done=true'),
 )
 const fixtureLogText = fixtureLog.join('\n') + '\n'
 
@@ -147,6 +151,15 @@ try {
     assert.equal(report.blockers.waitLimit.count, 1)
     assert.equal(report.blockers.preconditionMissing.count, 1)
     assert.equal(report.blockers.ladderPrereq.count, 1)
+  })
+  check('MILESTONE frontier advance is recorded separately from done', () => {
+    const frontier = report.milestones.find((m) => m.name === 'ender_pearls')
+    assert.ok(frontier, 'ender_pearls frontier entry missing')
+    assert.equal(frontier.frontier, true)
+    assert.notEqual(frontier.done, true)
+    const done = report.milestones.find((m) => m.name === 'diamond_pickaxe')
+    assert.ok(done, 'diamond_pickaxe done entry missing')
+    assert.equal(done.done, true)
   })
   check('oscillation / stall blockers detected', () => {
     assert.equal(report.blockers.moveUnreachable.count, 1)
