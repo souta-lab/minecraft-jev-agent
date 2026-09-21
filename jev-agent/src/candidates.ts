@@ -4600,10 +4600,22 @@ function routeOpeningCandidates(
   //   goal could never be satisfied. Add the standable spot closest to the
   //   withheld target as one more grounded MOVE fact: still a plain locomotion
   //   candidate, no ranking, no coordinate special-casing.
-  const toward = state.terrain.standable
+  // The refused target's own neighbourhood is exactly where the body cannot go
+  // (live: `MOVE:p193_67_-15 reachable=false reason=no_path` with lava adjacent),
+  // so aiming the waypoint at it just re-creates the refusal. Prefer a standable
+  // spot that is *away* from that neighbourhood: a detour the body can actually
+  // take, still chosen for closeness to the withheld target.
+  const nearRefused = (spot: Vec3Json): boolean =>
+    Math.abs(spot.x - blockedTarget.x) <= 3 &&
+    Math.abs(spot.y - blockedTarget.y) <= 1 &&
+    Math.abs(spot.z - blockedTarget.z) <= 3
+  const candidatesForWaypoint = state.terrain.standable
     .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
     .filter((spot) => distance(spot, state.self.position) > 1)
-    .sort((a, b) => distance(a, blockedTarget) - distance(b, blockedTarget))[0]
+  const detours = candidatesForWaypoint.filter((spot) => !nearRefused(spot))
+  const toward = (detours.length > 0 ? detours : candidatesForWaypoint).sort(
+    (a, b) => distance(a, blockedTarget) - distance(b, blockedTarget),
+  )[0]
   if (toward !== undefined) {
     out.push(
       exploreMoveCandidate(
