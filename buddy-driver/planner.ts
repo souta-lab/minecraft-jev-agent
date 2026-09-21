@@ -254,6 +254,13 @@ export class PlannerBrain implements System2Brain {
   private lastMercuryPlan: System2Plan | null = null
   private lastMercuryPlanAtMs = 0
   private lastMercuryPlanUses = 0
+  /**
+   * The semantic layer's last natural-language WHAT that could not be grounded.
+   * Carried into the typed choice over grounded options so the model's own words
+   * still steer the structured decision; bounded by MERCURY_INTENT_TTL_MS.
+   */
+  private lastMercuryIntent: string | null = null
+  private lastMercuryIntentAtMs = 0
   /** last drained-queue semantic consultation (EMPTY_QUEUE_CONSULT_INTERVAL_MS) */
   private lastEmptyQueueConsultAtMs = 0
   /** dedupe for the SYSTEM2_PLAN_REQUEST_REASON diagnosis (#359) */
@@ -406,18 +413,35 @@ export class PlannerBrain implements System2Brain {
       if (repair === null) {
         // A drained queue is a ROUTINE planning moment, not a stall: when the semantic
         // layer cannot answer, fall back to the grounded option path (code still owns
-        // CAN/TRUE/SAFE/DONE) instead of terminating the resident. Live evidence: in the
-        // Nether every empty queue produced
-        //   MERCURY_SCHEMA_REJECT ... trigger=no_candidate -> MERCURY_ATTEMPT 3/3
-        //   -> MODEL_UNAVAILABLE context=mercury:no_candidate -> FATAL -> terminate-resident
-        // i.e. the queue-empty consultation itself became a crash loop. Genuine stall
+        // CAN/TRUE/SAFE/DONE) instead of terminating the resident. Genuine stall
         // triggers keep the fail-loud contract below.
+        //
+        // NOTE (2026-09-22): `null` now means ONLY provider unavailability (5xx,
+        // timeout, budget, missing key). The schema-shaped `no plan object` /
+        // `unrecognized_keys` rejections that used to reach here are gone: an
+        // answer that grounds onto nothing is the typed `ungrounded` outcome below.
         if (drainedQueueConsult) {
           this.log('MERCURY_DEFERRED', { reason: 'queue_empty', trigger: mercuryTrigger })
           mercuryTrigger = null
         } else {
           return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
         }
+      } else if (repair.ungrounded !== undefined) {
+        // The semantic layer ANSWERED in natural language but the answer grounded
+        // onto no capability. That is a typed outcome, not unavailability: leave
+        // WHAT to the next layer (the typed choice over grounded options below)
+        // and carry the model's own words into that question. Terminating the
+        // resident here was the crash loop the drained-queue stopgap worked around.
+        this.lastMercuryIntent = repair.ungrounded.intent
+        this.lastMercuryIntentAtMs = Date.now()
+        this.log('MERCURY_INTENT_UNGROUNDED', {
+          provider: this.provider,
+          model: this.authorityModel,
+          trigger: mercuryTrigger,
+          reason: repair.ungrounded.reason,
+          intent: repair.ungrounded.intent.slice(0, 240),
+        })
+        mercuryTrigger = null
       } else {
         // #359: keep the semantic layer's intent so a drained queue continues the
         // thread instead of immediately re-drawing the ladder menu. Bounded by TTL
@@ -469,10 +493,33 @@ export class PlannerBrain implements System2Brain {
     const state = compactSystem2State(this.bot, this.world, request, counts, options) as Parameters<typeof evaluate>[0]["state"]
     const criteria: Record<string, string> = {}
     for (const option of options) criteria[option.id] = `${option.title} :: ${option.goals.map((goal) => goal.description).join(' -> ')}`
+    // The semantic layer's ungrounded natural-language WHAT is fed into this typed
+    // question over grounded options: state + intent -> which grounded goal/option.
+    // Consumption is bounded by the same TTL as the continued-plan thread, so a
+    // stale sentence cannot steer later decisions.
+    const intentUseful =
+      this.lastMercuryIntent !== null &&
+      this.lastMercuryIntent.length > 0 &&
+      Date.now() - this.lastMercuryIntentAtMs < MERCURY_INTENT_TTL_MS
+    const semanticIntent = intentUseful ? this.lastMercuryIntent ?? '' : ''
+    if (intentUseful) {
+      this.lastMercuryIntent = null
+      this.lastMercuryIntentAtMs = 0
+      this.log('MERCURY_INTENT_MAPPING', {
+        provider: this.provider,
+        model: this.authorityModel,
+        reason: request.reason,
+        optionIds: options.map((option) => option.id),
+        intent: semanticIntent.slice(0, 240),
+      })
+    }
     const questions = {
       horizon: {
         type: 'choice',
-        instructions: SYSTEM2_INSTRUCTIONS,
+        instructions:
+          semanticIntent.length === 0
+            ? SYSTEM2_INSTRUCTIONS
+            : `${SYSTEM2_INSTRUCTIONS}\n\nThe semantic planner answered with this natural-language intent; choose the grounded option that best realises it:\n"${semanticIntent.slice(0, 400)}"`,
         criteria,
       },
     } satisfies Record<string, Experimental_EvaluationQuestion>

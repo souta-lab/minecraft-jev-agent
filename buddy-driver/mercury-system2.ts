@@ -13,7 +13,13 @@
 // when the ladder cannot make progress.
 //
 // HARD RULES (mirrors AGENTS.md):
-//   * The LLM returns ONLY plan data: { op, goals: [{item,count}], reason }.
+//   * The LLM returns the WHAT in NATURAL LANGUAGE. Structured plan facts
+//     (`op`/`goals`/`reason`) are OPTIONAL enrichment: they are coerced and used
+//     when present, never required as a precondition. A prose answer that grounds
+//     onto the code-owned capability matrix is equally valid; an answer that
+//     grounds onto nothing becomes a typed `ungrounded` outcome for the next
+//     layer, not a fatal model failure. Structured/typed questions over grounded
+//     options are Jev's job, not a schema imposed on this model.
 //     System One remains the sole action authority - no action ids, no coordinates.
 //   * Enabling System2 is EXPLICIT config (BUDDY_SYSTEM2=on/system2; legacy mercury spelling or
 //     system2.config.json { "mercury": true }). The mere presence of a Gateway key
@@ -70,8 +76,30 @@ import {
   SYSTEM2_MODEL_DEFAULT,
   MERCURY_TYPED_GOAL_KINDS,
 } from './mercury-capabilities.ts'
+import type { MercuryAllowedGoals } from './mercury-capabilities.ts'
+import {
+  extractMercuryIntent,
+  groundMercuryIntent,
+  parseMercuryJsonTextDetailed,
+  stripUnknownPlanKeys,
+} from './mercury-intent.ts'
+import type { MercuryIntentExtraction, MercuryJsonTextShape } from './mercury-intent.ts'
 
 export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS, SYSTEM2_MODEL_DEFAULT }
+export {
+  parseMercuryJsonText,
+  parseMercuryJsonTextDetailed,
+  stripUnknownPlanKeys,
+  groundMercuryIntent,
+  extractMercuryIntent,
+} from './mercury-intent.ts'
+export type {
+  MercuryIntentExtraction,
+  MercuryIntentGoal,
+  MercuryJsonTextParse,
+  MercuryJsonTextShape,
+  MercuryStrippedPlan,
+} from './mercury-intent.ts'
 
 /** Why Mercury was consulted. Exception-driven, never per-tick. */
 export type MercuryTriggerReason =
@@ -473,12 +501,13 @@ export const MERCURY_SCHEMA_CORRECTIVE_HINT =
   "Every collect/craft/smelt goal MUST name a real allowed item AND include an integer count in [1,64]; a legacy item goal must be exactly { item, count }."
 
 /**
- * The transport could not find a plan object in the model's text response (the
- * live `schema:  Required` rejection). The generic count hint is useless here:
- * the model must emit one bare JSON object before any field can be corrected.
+ * Legacy corrective hint, retained for the generic retry-loop utility and its
+ * fixture. The Mercury call path no longer uses it: under the natural-language
+ * contract (2026-09-22) an ungroundable answer is a typed `ungrounded` outcome,
+ * not a schema rejection, so no corrective retry is scheduled for it.
  */
 export const MERCURY_NO_PLAN_OBJECT_HINT =
-  'Your response text contained NO parseable JSON plan object. Return exactly ONE JSON object in the response text (no prose, no markdown fence, no tool call) with keys op, goals and reason.'
+  'Your previous answer named no grounded step. Name ONE real item, resource, explore mode or portal step from allowedGoals in one short natural-language sentence.'
 
 /** Select the corrective hint that matches the exact rejection. */
 export function mercuryCorrectiveHint(validationError: string): string {
@@ -971,7 +1000,7 @@ export interface MercuryCallRecord {
   retries: number
   /** 1-based index of the attempt this record describes (retry audit trail). */
   attempt?: number
-  outcome: 'success' | 'plan_rejected' | 'fallback' | 'budget_exhausted'
+  outcome: 'success' | 'plan_rejected' | 'fallback' | 'budget_exhausted' | 'ungrounded'
   state: unknown
   prompt: { system: string; user: string }
   response: unknown
@@ -980,6 +1009,16 @@ export interface MercuryCallRecord {
   error: string | null
   /** Full structured error (name, message, statusCode, responseBody, cause chain). */
   errorDetail?: unknown
+  /**
+   * The model's natural-language WHAT, verbatim. Always recorded when a call
+   * reached the model, whether or not it grounded - the language is the plan's
+   * intent, so it must survive even when no goal could be grounded.
+   */
+  intent?: string
+  /** raw assistant text (identical to `intent` for json-text; kept explicit for audit). */
+  rawText?: string
+  /** how the goals were obtained: structured enrichment, grounded prose, or none. */
+  intentSource?: 'enrichment' | 'intent' | 'ungrounded' | 'cached'
 }
 
 // ---------------------------------------------------------------------------
@@ -994,20 +1033,30 @@ export interface MercuryRepairResult {
   costUsd: number
   ms: number
   cached: boolean
+  /**
+   * Set when the model answered (in language) but the answer could not be
+   * grounded onto the capability matrix. `plan.goals` is empty. The caller must
+   * leave WHAT to the next layer (the typed option question) rather than treating
+   * this as model unavailability and terminating the resident.
+   */
+  ungrounded?: { intent: string; reason: string }
 }
 
-interface MercuryRejectedAttempt {
-  attempt: number
-  prompt: string
-  response: unknown
-  usage: unknown
-  error: string
-}
-
+/**
+ * One attempt's result. A natural-language answer that grounds nothing is a
+ * SUCCESSFUL attempt carrying `ungrounded`: it is not a schema rejection and
+ * must not consume a corrective retry.
+ */
 interface MercuryAttemptSuccess {
   plan: MercuryPlanJson
   usage: unknown
   prompt: string
+  intent: string
+  rawText: string
+  intentSource: 'enrichment' | 'intent' | 'ungrounded'
+  droppedKeys: readonly string[]
+  renamedKeys: readonly string[]
+  matched: readonly string[]
 }
 
 export interface MercurySystem2Options {
@@ -1059,6 +1108,12 @@ export interface MercuryTransportResult {
   readonly toolCalls: readonly MercuryTransportToolCall[]
   readonly usage: unknown
   /**
+   * The model's raw assistant text, verbatim. This is the natural-language WHAT
+   * and is what the plan record carries as `MERCURY_INTENT`; it is evidence, not
+   * a contract, so an empty string is a legitimate (typed) outcome.
+   */
+  readonly text?: string
+  /**
    * Transport-level shape repairs applied while obtaining the tool call
    * (json-text path only). Reported so `MERCURY_JSON_TEXT_REPAIRED` /
    * `MERCURY_JSON_TEXT_UNPARSED` make the recovery observable instead of silent.
@@ -1106,123 +1161,6 @@ export function mercuryTransportMode(model: string): MercuryTransportMode {
 }
 
 
-/**
- * How a json-text response yielded its plan object.
- *   exact       - the whole trimmed text is the JSON object
- *   fenced      - a ```json ... ``` fence body
- *   embedded    - one balanced `{...}` object found inside prose
- *   multi-final - several balanced objects parsed; the LAST one carrying an
- *                 `op` key was taken (a reasoning model emits drafts, then its
- *                 final answer). Purely envelope selection: the local schema and
- *                 capability grounding still own acceptance.
- *   none        - no parseable plain object was found
- */
-export type MercuryJsonTextShape = 'exact' | 'fenced' | 'embedded' | 'multi-final' | 'none'
-
-export interface MercuryJsonTextParse {
-  readonly value: unknown | null
-  readonly shape: MercuryJsonTextShape
-  /** number of balanced top-level `{...}` objects seen in the text */
-  readonly objects: number
-}
-
-/** All balanced top-level `{...}` substrings, string-literal aware. */
-function balancedJsonObjects(text: string): string[] {
-  const found: string[] = []
-  let depth = 0
-  let start = -1
-  let inString = false
-  let escaped = false
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]
-    if (depth > 0 && inString) {
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === '"') inString = false
-      continue
-    }
-    if (char === '"' && depth > 0) {
-      inString = true
-      continue
-    }
-    if (char === '{') {
-      if (depth === 0) start = index
-      depth += 1
-      continue
-    }
-    if (char === '}') {
-      if (depth === 0) continue
-      depth -= 1
-      if (depth === 0 && start >= 0) {
-        found.push(text.slice(start, index + 1))
-        start = -1
-      }
-    }
-  }
-  return found
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function parseJsonObject(candidate: string): Record<string, unknown> | null {
-  try {
-    const parsed: unknown = JSON.parse(candidate)
-    return isPlainObject(parsed) ? parsed : null
-  } catch {
-    return null
-  }
-}
-
-function fencedBlocks(text: string): string[] {
-  const blocks: string[] = []
-  const pattern = /```(?:json)?\s*([\s\S]*?)\s*```/gi
-  let match: RegExpExecArray | null
-  while ((match = pattern.exec(text)) !== null) {
-    const body = match[1]
-    if (body !== undefined && body.trim().length > 0) blocks.push(body.trim())
-  }
-  return blocks
-}
-
-/**
- * Extract one plan object from a reasoning model's text response. This is a
- * transport-shape repair only: it never edits the object, and the same strict
- * `MERCURY_PLAN_SCHEMA` + capability grounding validate the result. It exists
- * because the live failure was `schema:  Required` with an EMPTY field path:
- * the response contained no object the old first-`{`..last-`}` extractor could
- * parse, so the model was told nothing actionable and burned all 3 attempts.
- */
-export function parseMercuryJsonTextDetailed(text: string): MercuryJsonTextParse {
-  const raw = typeof text === 'string' ? text : ''
-  const trimmed = raw.trim()
-  if (trimmed.length === 0) return { value: null, shape: 'none', objects: 0 }
-  const objects = balancedJsonObjects(trimmed)
-  const exact = parseJsonObject(trimmed)
-  if (exact !== null) return { value: exact, shape: 'exact', objects: objects.length }
-  for (const block of fencedBlocks(trimmed)) {
-    const fenced = parseJsonObject(block)
-    if (fenced !== null) return { value: fenced, shape: 'fenced', objects: objects.length }
-  }
-  const parsedObjects = objects.map(parseJsonObject).filter((value): value is Record<string, unknown> => value !== null)
-  if (parsedObjects.length === 0) return { value: null, shape: 'none', objects: objects.length }
-  const withOp = parsedObjects.filter((value) => 'op' in value)
-  if (withOp.length > 1) {
-    // Several candidates look like a plan envelope: take the model's LAST
-    // emission (reasoning models narrate drafts before the final answer).
-    return { value: withOp[withOp.length - 1] ?? null, shape: 'multi-final', objects: objects.length }
-  }
-  if (withOp.length === 1) return { value: withOp[0] ?? null, shape: 'embedded', objects: objects.length }
-  const fallback = parsedObjects[parsedObjects.length - 1] ?? null
-  return { value: fallback, shape: objects.length > 1 ? 'multi-final' : 'embedded', objects: objects.length }
-}
-
-/** Backward-compatible value-only view of {@link parseMercuryJsonTextDetailed}. */
-export function parseMercuryJsonText(text: string): unknown | null {
-  return parseMercuryJsonTextDetailed(text).value
-}
-
 // AI SDK 7.0.107 exposes a deeply recursive FlexibleSchema type. Keeping the
 // already-validated Zod schema behind the concrete transport input type avoids
 // TS2589 during inference without weakening runtime validation: the same
@@ -1231,19 +1169,17 @@ type MercuryPlanTool = Tool<MercuryPlanJson, never, never>
 const MERCURY_PLAN_TOOL_SCHEMA = MERCURY_PLAN_SCHEMA as unknown as MercuryPlanTool['inputSchema']
 
 export const JSON_TEXT_TRANSPORT_INSTRUCTIONS =
-  // The response is consumed by a parser, not a human. Live measurement (M3
-  // hand-off) showed this model spending its answer on analysis and returning no
-  // parseable object, so every repair was rejected with
-  // `MERCURY_SCHEMA_REJECT path=<root> expected a JSON plan object` and the queue
-  // fell back to the deterministic ladder. Border and shape instructions are the
-  // cheap lever for that: they cost nothing when the model already complies.
-  'Your response is consumed by a parser, not a human: the FIRST character must be "{" and the LAST must be "}". ' +
-  'Do not write any analysis, reasoning, summary, or markdown before or after it; any text outside the object makes the whole plan invalid. ' +
-  'Example of a valid response: {"op":"patch","reason":"need obsidian for the frame","goals":[{"kind":"collect","targetItem":"obsidian","requiredCount":10}]}. ' +
-  'Return exactly one JSON object in the response text, with no prose, markdown, or tool call. ' +
-  'The top-level op must be exactly one of continue, patch, replace, abandon, complete, or abort. ' +
-  'Use goals for the typed goal objects; never use a goal kind as op. For complete and abort, goals MUST be empty; abandon may carry the replacement plan. ' +
-  'For collect, craft, and smelt goals always include an integer count from 1 to 64.'
+  // NATURAL-LANGUAGE CONTRACT (operator directive, 2026-09-22). Earlier revisions
+  // demanded a bare JSON object and rejected everything else; live measurement then
+  // showed a reasoning model returning prose or nothing and every repair being
+  // thrown away. Prose is now the expected answer: the local grounding step maps it
+  // onto the code-owned capability list, and the JSON object is optional enrichment.
+  'State the next step of the high-level plan in ONE OR TWO SHORT SENTENCES OF NATURAL LANGUAGE. ' +
+  'Say WHAT should happen next and why, naming the real Minecraft item, resource or portal step involved. ' +
+  'Prose is the expected answer and a partial or approximate sentence is fine; nothing outside the allowed capability list will be grounded. ' +
+  'You MAY append a single JSON object describing the same intent, with keys op, goals and reason, as a convenience: it is OPTIONAL enrichment, used only when it agrees with the sentence. ' +
+  'If you include it, "op" must be one of continue, patch, replace, abandon, complete or abort (default patch), and each collect/craft/smelt goal needs an integer count in [1,64]. ' +
+  'Never invent items or actions outside allowedGoals. Do not emit coordinates, block ids, entity ids, paths, action names or motor instructions.'
 
 const TOOL_CALL_TRANSPORT_INSTRUCTIONS =
   'Return ONLY via the emitPlan tool. Do not answer in response text.'
@@ -1253,8 +1189,8 @@ function defaultMercuryTransport(model: string): MercuryTransport {
     return async ({ system, prompt, maxOutputTokens, timeoutMs }) => {
       // Muse Spark is the default System2 model. Do not route it through the
       // old Mercury-specific named-tool contract: the gateway rejects named
-      // tool_choice for this model. Ask for strict JSON text and keep the same
-      // local schema/capability validator as the authority boundary.
+      // tool_choice for this model. Ask for natural language and keep the raw
+      // text as the intent; the local grounding validator is the authority.
       const result = await generateText({
         model,
         system: `${system}\n\n${JSON_TEXT_TRANSPORT_INSTRUCTIONS}`,
@@ -1271,11 +1207,12 @@ function defaultMercuryTransport(model: string): MercuryTransport {
         chars: result.text.length,
       }
       if (parsed.value === null) {
-        return { toolCalls: [], usage: result.usage, repairs: [repair] }
+        return { toolCalls: [], usage: result.usage, text: result.text, repairs: [repair] }
       }
       return {
         toolCalls: [{ input: parsed.value }],
         usage: result.usage,
+        text: result.text,
         repairs: parsed.shape === 'exact' ? [] : [repair],
       }
     }
@@ -1296,15 +1233,26 @@ function defaultMercuryTransport(model: string): MercuryTransport {
       maxRetries: 0,
       abortSignal: AbortSignal.timeout(timeoutMs),
     })
-    return { toolCalls: result.toolCalls, usage: result.usage }
+    return { toolCalls: result.toolCalls, usage: result.usage, text: result.text }
   }
 }
 
 export const SYSTEM_PROMPT = `You are System 2, the exception-driven recovery planner for an embodied Minecraft Java bot.
 You do NOT control the body. Mineflayer owns mechanics and System One owns the next grounded action. You may only repair the HIGH-LEVEL goal queue.
 
-Produce exactly one high-level plan matching this schema: op, goals, reason.
-A goal is EITHER a legacy item goal { item, count } (the verb is inferred locally) OR an explicit typed goal. Use an explicit kind when the same noun needs different operations (e.g. craft furnace vs place furnace):
+Answer in NATURAL LANGUAGE: one or two short sentences saying WHAT should happen
+next and why, naming the real Minecraft item, resource or portal step involved.
+A typed layer (System One / Jev) owns the structured choice among grounded
+options, so you do NOT have to produce perfect structure - prose that names a
+grounded capability is enough. If it is convenient you MAY append one JSON object
+with keys op, goals and reason describing the same intent; it is optional
+enrichment, never a requirement. Avoid the mistake of spending your whole answer
+on analysis and naming no grounded step at all.
+
+The grounded capability vocabulary (use these names in your sentence). A goal is
+EITHER a legacy item goal { item, count } (the verb is inferred locally) OR an
+explicit typed goal. Use an explicit kind when the same noun needs different
+operations (e.g. craft furnace vs place furnace):
 - { kind: 'collect', item, count }   allowed items: allowedGoals.collect
 - { kind: 'craft', item, count }     allowed items: allowedGoals.craft
 - { kind: 'smelt', item, count }     allowed items: allowedGoals.smelt
@@ -1790,7 +1738,6 @@ export class MercurySystem2 implements System2Brain {
 
     const userPrompt = JSON.stringify(state)
     const callId = `mercury-${++this.callCounter}-${started.toString(36)}`
-    const rejectedAttempts: MercuryRejectedAttempt[] = []
 
     // A generation swap / lease event does NOT own this promise and must not abort
     // it: the only abort signal is the per-attempt timeout below. On a timeout the
@@ -1824,21 +1771,101 @@ export class MercurySystem2 implements System2Brain {
           })
         }
       }
-      const toolCall = result.toolCalls[0]
-      const raw = toolCall === undefined ? undefined : toolCall.input
-      const validated = validateMercuryPlan(raw)
-      for (const repair of validated.repairs) {
-        this.log('MERCURY_FIELD_DEFAULT', {
+
+      // The natural-language answer is the plan's WHAT. Record it verbatim before
+      // any interpretation, so an answer that grounds nothing still survives as
+      // evidence instead of becoming an opaque "no plan object" rejection.
+      const rawText = result.text ?? ''
+      const toolInput = result.toolCalls[0]?.input
+      const fromText = parseMercuryJsonTextDetailed(rawText)
+      const extraction: MercuryIntentExtraction = extractMercuryIntent(rawText, fromText.value, toolInput)
+      this.log('MERCURY_INTENT', {
+        callId,
+        attempt: context.attempt,
+        trigger,
+        model: this.model,
+        shape: extraction.shape,
+        chars: extraction.chars,
+        empty: extraction.empty,
+        text: extraction.intent.slice(0, 400),
+      })
+
+      // 1) OPTIONAL structured enrichment. `stripUnknownPlanKeys` removes fields
+      //    the plan contract does not define and renames the provider aliases the
+      //    live model emits (`targetItem`->`item`, `requiredCount`->`count`) BEFORE
+      //    validation, so a semantically valid plan is not discarded over harmless
+      //    extras. Plan SEMANTICS are still validated by validateMercuryPlan.
+      const stripped = extraction.enrichment === null ? null : stripUnknownPlanKeys(extraction.enrichment)
+      if (stripped !== null && (stripped.notes.droppedKeys.length > 0 || stripped.notes.renamedKeys.length > 0 || stripped.notes.kindAliases.length > 0)) {
+        this.log('MERCURY_ENRICHMENT_COERCED', {
           callId,
           attempt: context.attempt,
           trigger,
-          path: repair.path,
-          value: repair.value,
-          why: repair.why,
+          droppedKeys: stripped.notes.droppedKeys.slice(0, 12),
+          renamedKeys: stripped.notes.renamedKeys.slice(0, 12),
+          kindAliases: stripped.notes.kindAliases.slice(0, 12),
         })
       }
-      if (!validated.ok) {
-        this.log('MERCURY_SCHEMA_REJECT', {
+      // Mechanically complete the two fields that are pure envelope, never WHAT:
+      //   * `op` defaults to `patch` (keep the active Option, replace only its
+      //     pending tail) - the non-destructive lifecycle choice.
+      //   * `reason` is explanatory prose; when the enrichment omits it, the
+      //     model's own natural-language answer IS the reason.
+      // Both are reported at MERCURY_FIELD_DEFAULT, so code-supplied values are
+      // visible rather than silent. No goal is ever invented or reordered here.
+      if (stripped !== null) {
+        if (stripped.value.op === undefined) {
+          stripped.value.op = 'patch'
+          this.log('MERCURY_FIELD_DEFAULT', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            path: 'op',
+            value: 'patch',
+            why: 'mechanical lifecycle default; the answer named no op',
+          })
+        }
+        const reason = stripped.value.reason
+        if (typeof reason !== 'string' || reason.trim().length === 0) {
+          stripped.value.reason = (extraction.intent.trim().length > 0 ? extraction.intent : 'mercury natural-language intent').slice(0, 400)
+          this.log('MERCURY_FIELD_DEFAULT', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            path: 'reason',
+            value: 'from-intent',
+            why: 'reason is explanatory; the natural-language answer is the reason',
+          })
+        }
+      }
+      const validated = stripped === null ? null : validateMercuryPlan(stripped.value)
+      if (validated !== null && validated.ok) {
+        for (const repair of validated.repairs) {
+          this.log('MERCURY_FIELD_DEFAULT', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            path: repair.path,
+            value: repair.value,
+            why: repair.why,
+          })
+        }
+        return {
+          plan: validated.plan,
+          usage: result.usage,
+          prompt,
+          intent: extraction.intent,
+          rawText,
+          intentSource: 'enrichment',
+          droppedKeys: stripped?.notes.droppedKeys ?? [],
+          renamedKeys: stripped?.notes.renamedKeys ?? [],
+          matched: [],
+        }
+      }
+      if (validated !== null && !validated.ok) {
+        // A semantically unusable enrichment is NOT a rejection: the prose is
+        // grounded below instead, and the reason is logged for observability.
+        this.log('MERCURY_ENRICHMENT_UNUSABLE', {
           callId,
           attempt: context.attempt,
           trigger,
@@ -1846,30 +1873,82 @@ export class MercurySystem2 implements System2Brain {
           path: validated.reject.path,
           expected: validated.reject.expected,
         })
-        rejectedAttempts.push({
-          attempt: context.attempt,
-          prompt,
-          response: raw ?? null,
-          usage: result.usage,
-          error: `invalid plan: ${validated.error}`,
-        })
-        this.log('PLAN_REJECTED', {
-          source: this.provider,
-          reason: validated.error,
-          stage: trigger,
+      }
+
+      // 2) Ground the natural-language intent onto the code-owned capability
+      //    matrix. This is grounding, not selection: every goal names a capability
+      //    the matrix already exposes, in the model's own mention order.
+      const grounding = groundMercuryIntent(extraction.intent, this.allowedGoalsFor(state))
+      if (grounding.ok) {
+        const constructed: MercuryPlanJson = {
+          op: grounding.op,
+          goals: grounding.goals as MercuryPlanJson['goals'],
+          reason: (extraction.intent.length > 0 ? extraction.intent : 'mercury natural-language intent').slice(0, 400),
+        }
+        // Defence in depth: the constructed plan goes through the SAME capability
+        // validator, so grounding can never bypass a CAN/TRUE/SAFE gate.
+        const safe = validateMercuryPlan(constructed)
+        if (safe.ok) {
+          this.log('MERCURY_INTENT_GROUNDED', {
+            callId,
+            attempt: context.attempt,
+            trigger,
+            source: 'intent',
+            matched: grounding.matched.slice(0, 8),
+            goals: safe.plan.goals.map((goal) => goal.kind ?? 'item'),
+          })
+          return {
+            plan: safe.plan,
+            usage: result.usage,
+            prompt,
+            intent: extraction.intent,
+            rawText,
+            intentSource: 'intent',
+            droppedKeys: [],
+            renamedKeys: [],
+            matched: grounding.matched,
+          }
+        }
+        this.log('MERCURY_INTENT_UNGROUNDED', {
           callId,
           attempt: context.attempt,
-          corrective: context.feedback !== null,
+          trigger,
+          reason: `grounded goal rejected by capability validation: ${safe.error}`,
         })
-        throw new MercuryPlanValidationError(validated.error, raw ?? null, validated.reject)
+      } else {
+        this.log('MERCURY_INTENT_UNGROUNDED', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          reason: grounding.reason,
+          matched: grounding.matched.slice(0, 8),
+        })
       }
-      return { plan: validated.plan, usage: result.usage, prompt }
+
+      // 3) The model answered but nothing could be grounded. This is a typed,
+      //    visible outcome - NOT a schema rejection and NOT model unavailability -
+      //    so it does not consume a corrective retry and must not terminate the
+      //    resident. The caller leaves WHAT to the next layer.
+      return {
+        plan: {
+          op: 'patch',
+          goals: [],
+          reason: (extraction.intent.length > 0 ? extraction.intent : 'mercury answered with no grounded goal').slice(0, 400),
+        },
+        usage: result.usage,
+        prompt,
+        intent: extraction.intent,
+        rawText,
+        intentSource: 'ungrounded',
+        droppedKeys: stripped?.notes.droppedKeys ?? [],
+        renamedKeys: stripped?.notes.renamedKeys ?? [],
+        matched: [],
+      }
     }
 
     let attempts = 0
     let failures = 0
     let retriesUsed = 0
-    let rejectionsFlushed = false
     try {
       const attemptRun = await runMercuryAttempts({
         maxAttempts: this.maxAttempts,
@@ -1912,17 +1991,12 @@ export class MercurySystem2 implements System2Brain {
       attempts = attemptRun.attempts
       failures = attemptRun.failures
       retriesUsed = Math.max(0, attempts - 1)
-      this.flushRejectedAttempts(callId, trigger, started, state, rejectedAttempts, attempts, failures, retriesUsed)
-      rejectionsFlushed = true
       if (!attemptRun.ok) {
         const error = attemptRun.error
-        const isValidation = error instanceof MercuryPlanValidationError
         const budgetExhausted = isBudgetExhaustedError(error)
-        const message = isValidation
-          ? error.message
-          : budgetExhausted
-            ? `budget_exhausted: ${describeError(error)}`
-            : `llm_error: ${describeError(error)}`
+        const message = budgetExhausted
+          ? `budget_exhausted: ${describeError(error)}`
+          : `llm_error: ${describeError(error)}`
         if (budgetExhausted) {
           this.log('MERCURY_BUDGET_EXHAUSTED', {
             callId,
@@ -1952,7 +2026,10 @@ export class MercurySystem2 implements System2Brain {
             error: message,
             errorDetail: describeErrorFull(error),
           })
-        } else if (rejectedAttempts.length === 0) {
+        } else {
+          // Transport/provider unavailability (5xx, timeout, rate limit, bad key):
+          // this stays FAIL LOUD. It is not a schema shape problem, so the new
+          // natural-language contract does not soften it.
           this.writeCall({
             record: 'mercury-call',
             callId,
@@ -1964,14 +2041,14 @@ export class MercurySystem2 implements System2Brain {
             failures,
             retries: retriesUsed,
             attempt: attempts,
-            outcome: isValidation ? 'plan_rejected' : 'fallback',
+            outcome: 'fallback',
             state,
             prompt: { system: SYSTEM_PROMPT, user: userPrompt },
             response: null,
             usage: null,
             cost: 0,
             error: message,
-            errorDetail: isValidation ? undefined : describeErrorFull(error),
+            errorDetail: describeErrorFull(error),
           })
         }
         return this.modelFailure(trigger, started, state, message, Date.now() - started)
@@ -1979,10 +2056,49 @@ export class MercurySystem2 implements System2Brain {
       const success = attemptRun.result
       this.calls += 1
       const latencyMs = Date.now() - started
-      const validatedPlan = success.plan
       const usage = success.usage as MercuryUsageLike
       const costUsd = mercuryCostUsd(this.model, usage)
 
+      // A natural-language answer that grounded onto nothing is a TYPED outcome,
+      // not a schema rejection and not model unavailability. Record it truthfully
+      // and hand the WHAT to the next layer instead of terminating the resident.
+      if (success.intentSource === 'ungrounded') {
+        this.saveCache()
+        this.writeCall({
+          record: 'mercury-call',
+          callId,
+          ts: new Date().toISOString(),
+          model: this.model,
+          stage: trigger,
+          latencyMs,
+          attempts,
+          failures,
+          retries: retriesUsed,
+          attempt: attempts,
+          outcome: 'ungrounded',
+          state,
+          prompt: { system: SYSTEM_PROMPT, user: success.prompt },
+          response: null,
+          usage: success.usage,
+          cost: Number(costUsd.toFixed(8)),
+          error: null,
+          intent: success.intent,
+          rawText: success.rawText,
+          intentSource: 'ungrounded',
+        })
+        return {
+          plan: { op: 'patch', goals: [], note: `mercury ungrounded: ${success.plan.reason}` },
+          strategy: 'mercury_ungrounded',
+          op: 'patch',
+          goals: [],
+          costUsd,
+          ms: latencyMs,
+          cached: false,
+          ungrounded: { intent: success.intent, reason: 'no grounded goal in the natural-language answer' },
+        }
+      }
+
+      const validatedPlan = success.plan
       const grounded = groundMercuryPlan(validatedPlan, state)
       const plan = grounded.plan
       if (grounded.refused !== null) {
@@ -2028,6 +2144,9 @@ export class MercurySystem2 implements System2Brain {
         usage: success.usage,
         cost: Number(costUsd.toFixed(8)),
         error: null,
+        intent: success.intent,
+        rawText: success.rawText,
+        intentSource: success.intentSource,
       })
 
       this.log('ADVISOR', {
@@ -2038,6 +2157,7 @@ export class MercurySystem2 implements System2Brain {
         ms: latencyMs,
         cached: false,
         note: `mercury ${plan.op}: ${plan.reason}`,
+        intentSource: success.intentSource,
       })
 
       return {
@@ -2055,9 +2175,6 @@ export class MercurySystem2 implements System2Brain {
       const latencyMs = Date.now() - started
       const kind = isRateLimitError(error) ? 'rate_limited' : 'llm_error'
       const message = `${kind}: ${describeError(error)}`
-      if (!rejectionsFlushed) {
-        this.flushRejectedAttempts(callId, trigger, started, state, rejectedAttempts, attempts, failures, retriesUsed)
-      }
       this.writeCall({
         record: 'mercury-call',
         callId,
@@ -2082,40 +2199,6 @@ export class MercurySystem2 implements System2Brain {
     }
   }
 
-  private flushRejectedAttempts(
-    callId: string,
-    trigger: MercuryTriggerReason,
-    started: number,
-    state: MercuryStateSummary,
-    rejected: readonly MercuryRejectedAttempt[],
-    attempts: number,
-    failures: number,
-    retriesUsed: number,
-  ): void {
-    for (const entry of rejected) {
-      const costUsd = mercuryCostUsd(this.model, entry.usage as MercuryUsageLike)
-      this.writeCall({
-        record: 'mercury-call',
-        callId,
-        ts: new Date().toISOString(),
-        model: this.model,
-        stage: trigger,
-        latencyMs: Date.now() - started,
-        attempts,
-        failures,
-        retries: retriesUsed,
-        attempt: entry.attempt,
-        outcome: 'plan_rejected',
-        state,
-        prompt: { system: SYSTEM_PROMPT, user: entry.prompt },
-        response: entry.response,
-        usage: entry.usage,
-        cost: Number(costUsd.toFixed(8)),
-        error: entry.error,
-      })
-    }
-  }
-
   private modelFailure(
     trigger: MercuryTriggerReason,
     started: number,
@@ -2137,6 +2220,24 @@ export class MercurySystem2 implements System2Brain {
 
   private hashState(state: MercuryStateSummary): string {
     return hashMercuryState(state, this.cacheIdentity)
+  }
+
+  /**
+   * The capability menu this state was asked to plan against. Grounding a
+   * natural-language intent must use the SAME menu the request advertised, so the
+   * summary is authoritative and the static matrix is only the fallback.
+   */
+  private allowedGoalsFor(state: MercuryStateSummary): MercuryAllowedGoals {
+    const allowed = state.allowedGoals
+    if (allowed === undefined) return MERCURY_ALLOWED_GOALS
+    return {
+      collect: allowed.collect ?? [],
+      craft: allowed.craft ?? [],
+      smelt: allowed.smelt ?? [],
+      place: allowed.place ?? [],
+      goto_resources: allowed.goto_resources ?? [],
+      explore_modes: allowed.explore_modes ?? [],
+    }
   }
 
   private writeCall(record: MercuryCallRecord): void {

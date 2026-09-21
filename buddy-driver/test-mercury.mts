@@ -619,12 +619,14 @@ addCase('corrective retry: attempt 2 gets the validation error and its corrected
   }
 })
 
-addCase('all attempts invalid ends in the loud fatal with per-attempt audit, never a fallback', async () => {
+addCase('a semantically invalid plan is a typed UNGROUNDED outcome, never a fatal schema rejection', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-exhaust-'))
   const callsPath = join(dir, 'mercury-calls.jsonl')
   const logs: string[] = []
   const prompts: string[] = []
-  // Out-of-range count stays a hard rejection (missing count no longer rejects).
+  // Out-of-range count is still not executable. Under the natural-language
+  // contract (2026-09-22) that is a typed UNGROUNDED outcome: the model answered,
+  // so the resident must NOT terminate and must NOT burn corrective retries.
   const invalidPlan = { op: 'patch', goals: [{ kind: 'collect', item: 'stone', count: 65 }], reason: 'need stone' }
   const mercury = new MercurySystem2({
     summarize: () => mercurySummary(),
@@ -635,43 +637,51 @@ addCase('all attempts invalid ends in the loud fatal with per-attempt audit, nev
     resolveKey: () => ({ key: 'test-key', origin: 'test' }),
     transport: ({ prompt }) => {
       prompts.push(prompt)
-      return Promise.resolve({ toolCalls: [{ input: invalidPlan }], usage: { inputTokens: 10, outputTokens: 5 } })
+      return Promise.resolve({
+        toolCalls: [{ input: invalidPlan }],
+        text: 'I am not sure what to do next.',
+        usage: { inputTokens: 10, outputTokens: 5 },
+      })
     },
   })
   let thrown: unknown = null
+  let result: Awaited<ReturnType<MercurySystem2['tryRepair']>> = null
   try {
-    await mercury.tryRepair(planRequest(), 'no_candidate')
+    result = await mercury.tryRepair(planRequest(), 'no_candidate')
   } catch (error) {
     thrown = error
   }
   const fatal = logs.find((line) => line.startsWith('FATAL'))
-  const rejects = logs.filter((line) => line.startsWith('PLAN_REJECTED'))
+  const ungroundedMarker = logs.find((line) => line.startsWith('MERCURY_INTENT_UNGROUNDED'))
+  const unusableMarker = logs.find((line) => line.startsWith('MERCURY_ENRICHMENT_UNUSABLE'))
+  const intentMarker = logs.find((line) => line.startsWith('MERCURY_INTENT '))
   const records = existsSync(callsPath)
     ? readFileSync(callsPath, 'utf8')
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line) as Record<string, unknown>)
     : []
-  const rejected = records.filter((record) => record.outcome === 'plan_rejected')
+  const ungrounded = records.filter((record) => record.outcome === 'ungrounded')
   const fabricatedFallback = records.filter((record) => record.outcome === 'fallback').length
   const correctivePrompts = prompts.slice(1).filter((prompt) => prompt.includes('CORRECTION REQUIRED')).length
   const degraded = logs.some((line) => line.includes('deterministic'))
   return {
     pass:
-      thrown instanceof FatalModelError &&
-      thrown.context === 'mercury:no_candidate' &&
-      thrown.reason.includes('invalid plan') &&
-      fatal !== undefined &&
-      fatal.includes('code=MODEL_UNAVAILABLE') &&
-      prompts.length === 3 &&
-      correctivePrompts === 2 &&
-      rejects.length === 3 &&
-      rejected.length === 3 &&
+      thrown === null &&
+      result !== null &&
+      result.ungrounded !== undefined &&
+      result.goals.length === 0 &&
+      prompts.length === 1 &&
+      correctivePrompts === 0 &&
+      ungroundedMarker !== undefined &&
+      unusableMarker !== undefined &&
+      intentMarker !== undefined &&
+      fatal === undefined &&
+      ungrounded.length === 1 &&
+      ungrounded[0]?.intent === 'I am not sure what to do next.' &&
       fabricatedFallback === 0 &&
-      rejected.every((record) => typeof record.error === 'string' && String(record.error).includes('invalid plan')) &&
-      rejected.every((record) => record.outcome === 'plan_rejected') &&
       !degraded,
-    detail: `thrown=${thrown instanceof FatalModelError ? thrown.context : String(thrown)} prompts=${prompts.length} corrective=${correctivePrompts} rejected=${rejected.length} rejects=${rejects.length} fabricatedFallback=${fabricatedFallback} fatal=${fatal ?? 'none'}`,
+    detail: `thrown=${thrown === null ? 'none' : String(thrown)} ungrounded=${result?.ungrounded !== undefined} prompts=${prompts.length} corrective=${correctivePrompts} ungroundedRecords=${ungrounded.length} fatal=${fatal ?? 'none'} degraded=${degraded}`,
   }
 })
 

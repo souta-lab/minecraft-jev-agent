@@ -209,6 +209,7 @@ for (let i = 0; i < N; i += 1) {
     retries: RETRIES,
     maxPerHour: 1000,
     resolveKey: () => key,
+    transport,
   })
   let kind = 'unknown'
   let detail = ''

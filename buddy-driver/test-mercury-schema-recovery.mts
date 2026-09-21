@@ -212,7 +212,13 @@ addCase(
 )
 
 // ---------------------------------------------------------------------------
-// (c) fail-loud is preserved: an unrecoverable response still terminates loudly
+// (c) a response that grounds onto nothing is TYPED and non-fatal
+//
+// CONTRACT CHANGE (operator directive, 2026-09-22): the semantic layer speaks
+// natural language, so "no plan object" is not a schema violation. The empty
+// answer is a typed UNGROUNDED outcome that leaves WHAT to the next layer; the
+// resident is not terminated and no corrective retry is burned. Genuine provider
+// unavailability still fails loud (see test-no-silent-fallback.mts).
 // ---------------------------------------------------------------------------
 const unparsedTransport: MercuryTransport = () =>
   Promise.resolve({
@@ -221,7 +227,7 @@ const unparsedTransport: MercuryTransport = () =>
     repairs: [{ kind: 'json-text', shape: 'none', objects: 0, chars: 12 }],
   })
 
-addCase('(c) an unparseable response exhausts 3 attempts and throws FatalModelError(attempts=3)', async () => {
+addCase('(c) an ungroundable/empty response is a typed UNGROUNDED outcome (no FATAL, no reject)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-schema-c-'))
   const callsPath = join(dir, 'mercury-calls.jsonl')
   const logs: string[] = []
@@ -235,30 +241,34 @@ addCase('(c) an unparseable response exhausts 3 attempts and throws FatalModelEr
     transport: unparsedTransport,
   })
   let thrown: unknown = null
+  let result: Awaited<ReturnType<MercurySystem2['tryRepair']>> = null
   try {
-    await mercury.tryRepair(planRequest(), 'action_impossible')
+    result = await mercury.tryRepair(planRequest(), 'action_impossible')
   } catch (error) {
     thrown = error
   }
+  const records = readRecords(callsPath)
   const fatal = logs.find((line) => line.startsWith('FATAL'))
+  const ungroundedMarker = logs.find((line) => line.startsWith('MERCURY_INTENT_UNGROUNDED'))
   const rejects = logs.filter((line) => line.startsWith('MERCURY_SCHEMA_REJECT'))
   const unparsed = logs.filter((line) => line.startsWith('MERCURY_JSON_TEXT_UNPARSED'))
-  const fabricatedFallback = readRecords(callsPath).filter((record) => record.outcome === 'fallback').length
-  const attempts = thrown instanceof FatalModelError ? thrown.attempts : -1
-  const named = thrown instanceof FatalModelError && thrown.reason.includes('no plan object was produced')
+  const ungroundedRecords = records.filter((record) => record.outcome === 'ungrounded')
+  const fabricatedFallback = records.filter((record) => record.outcome === 'fallback').length
   return {
     pass:
-      thrown instanceof FatalModelError &&
-      attempts === 3 &&
-      named &&
-      fatal !== undefined &&
-      fatal.includes('code=MODEL_UNAVAILABLE') &&
-      fatal.includes('attempts=3') &&
-      rejects.length === 3 &&
-      rejects.every((line) => line.includes('path=<root>') && line.includes('expected=')) &&
-      unparsed.length === 3 &&
+      thrown === null &&
+      result !== null &&
+      result.ungrounded !== undefined &&
+      result.ungrounded.reason.length > 0 &&
+      fatal === undefined &&
+      ungroundedMarker !== undefined &&
+      ungroundedMarker.includes('reason=empty_answer') &&
+      rejects.length === 0 &&
+      unparsed.length === 1 &&
+      ungroundedRecords.length === 1 &&
+      typeof ungroundedRecords[0]?.intent === 'string' &&
       fabricatedFallback === 0,
-    detail: `thrown=${thrown instanceof FatalModelError ? 'FatalModelError' : String(thrown)} attempts=${attempts} reasonNamesRoot=${named} rejects=${rejects.length} unparsed=${unparsed.length} fabricatedFallback=${fabricatedFallback} fatal=${fatal ?? 'none'}`,
+    detail: `thrown=${thrown === null ? 'none' : String(thrown)} ungrounded=${result?.ungrounded?.reason ?? 'none'} rejects=${rejects.length} unparsed=${unparsed.length} ungroundedRecords=${ungroundedRecords.length} fabricatedFallback=${fabricatedFallback} fatal=${fatal ?? 'none'}`,
   }
 })
 
@@ -314,7 +324,7 @@ addCase('(d) a transport error between attempts keeps the correction for the nex
       feedbacks[2] === first &&
       third.includes('CORRECTION REQUIRED') &&
       third.includes('no plan object was produced') &&
-      third.includes('Return exactly ONE JSON object'),
+      third.includes('named no grounded step'),
     detail: `BEFORE attempt3 corrective=false; AFTER attempt2Error=GatewayInternalServerError feedbacks=[${feedbacks.map((f) => (f === null ? 'null' : 'set')).join(',')}] attempt3CarriesCorrection=${third.includes('CORRECTION REQUIRED')} attempt1Feedback=${first === null ? 'null' : `"${first.slice(0, 80)}..."`} attempts=${result.attempts}`,
   }
 })
