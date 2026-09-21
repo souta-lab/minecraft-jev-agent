@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DIRECT_BLOCK_SOURCES, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isProtectedStationBlock } from './blockSafety.ts'
@@ -717,6 +717,33 @@ export function generateGroundedCandidates(
   return applyReachabilityGate(raw.candidates, state, options, raw.placeRefusal, raw.ignitionRefusal, raw.entryRefusal)
 }
 
+/**
+ * True when a candidate is an actual ROUTE for the active focus: a sensed
+ * MINE/MOVE/dig-access, a remembered RETRIEVE, a craft/smelt/place/portal step,
+ * or a DESCEND the world grounds (a sensed/tunnel target, a remembered stone
+ * level below, a stone-class focus, or an explicit `descend_to` predicate).
+ *
+ * A blind DESCEND carries none of those facts: it exists only because the focus
+ * item has a declared scanned source, which is perception truth rather than a
+ * route. Non-goal reactions (WAIT/ESCALATE/ATTACK/RETREAT/EAT) and clearance
+ * MINEs are never routes either.
+ */
+function hasAdvancingGoalRoute(candidate: Candidate): boolean {
+  if (candidate.meta.clearance === true) return false
+  switch (candidate.kind) {
+    case 'WAIT':
+    case 'ESCALATE':
+    case 'ATTACK':
+    case 'RETREAT':
+    case 'EAT':
+      return false
+    case 'DESCEND':
+      return candidate.meta.grounded === true
+    default:
+      return true
+  }
+}
+
 function generateRawCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
@@ -892,7 +919,27 @@ function generateRawCandidates(
   )
   if (hasGoalRoute) candidates = candidates.filter((candidate) => candidate.meta.clearance !== true)
 
-  if (candidates.length === 0) {
+  // #339 follow-up: a source declared in a static table (`flint -> gravel`) is
+  // perception truth ("which block do I scan"), never a route. A lone blind
+  // DESCEND produced only from that declaration (no sensed block, no tunnel
+  // target, no remembered coordinate, no predicate) must not suppress the
+  // grounded exploration alternatives. The DESCEND stays on offer; this only
+  // stops it from hiding the multi-cell search #339 intends when the world
+  // offers neither a sensed source nor a remembered coordinate.
+  //
+  // Scoped to collect goals over a DIRECT (non-ore) block source: an ORE source
+  // generates underground, so a blind DESCEND is itself a grounded search for
+  // it, and resource-class (`log`/`planks`) and `descend_to` goals keep their
+  // historical candidate sets.
+  const hasAdvancingRoute = candidates.some(hasAdvancingGoalRoute)
+  const declaredSourceNeedsExploration =
+    goalKind === 'collect' &&
+    descendTargetY === null &&
+    focusItem !== null &&
+    !isResourceClass(focusItem) &&
+    DIRECT_BLOCK_SOURCES[focusItem] !== undefined &&
+    retrievalWant(focusItem)?.kind === 'ore'
+  if (candidates.length === 0 || (declaredSourceNeedsExploration && !hasAdvancingRoute)) {
     candidates.push(...exploreFallbackCandidates(state, options, focusItem, goalKind))
   }
 
@@ -1146,7 +1193,21 @@ function mineCandidates(
       (block.kind === 'log' || block.kind === 'stone' || block.kind === 'ore') &&
       (blockFilter === null || blockFilter(block)),
   )
-  const matching = mineable.filter((block) => focusItem === null || resourceMatches(block.yield, focusItem))
+  // The declared scanned source names the blocks that carry the focus item
+  // (`flint -> gravel`). Mining gravel only *may* drop flint, and minecraft-data
+  // reports gravel's primary drop as gravel, so a drop-name match alone never
+  // reaches the declared source. Match the source block by name as well; this is
+  // the same perception-truth mapping the scanner used to sense it. Structure
+  // fabric is excluded (`want.kind !== 'ore'`): `nether_bricks` is a landmark
+  // that hosts blazes, never a source that yields `blaze_rod`.
+  const want = focusItem === null ? null : retrievalWant(focusItem)
+  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+  const matching = mineable.filter(
+    (block) =>
+      focusItem === null ||
+      resourceMatches(block.yield, focusItem) ||
+      (sourceNames?.includes(block.name) ?? false),
+  )
   const fallback =
     focusItem === null && matching.length === 0 ? mineable.filter((block) => block.kind === 'log') : matching
   const pool = fallback
@@ -1340,8 +1401,24 @@ function mineCandidates(
   return candidates.filter(
     (candidate) =>
       candidate.kind !== 'MINE' ||
-      mineDropAdvancesFocus(focusItem, mineCandidateDrop(state, candidate), options.recipes ?? null),
+      mineDropAdvancesFocus(focusItem, mineCandidateDrop(state, candidate), options.recipes ?? null) ||
+      mineSourceAdvancesFocus(focusItem, candidate),
   )
+}
+
+/**
+ * A MINE whose target block NAME is a declared scanned source of the focus
+ * advances the goal even when the block's own drop name differs: `flint` is
+ * sourced from `gravel`, and gravel drops gravel (flint only probabilistically).
+ * This mirrors {@link scannedBlockNames} — the same mapping the scanner used to
+ * sense the block — and is CAN/TRUE only: it never ranks among actions and it
+ * excludes structure fabric (`nether_bricks` does not yield `blaze_rod`).
+ */
+function mineSourceAdvancesFocus(focusItem: string | null, candidate: Candidate): boolean {
+  if (focusItem === null) return true
+  const want = retrievalWant(focusItem)
+  if (want === null || want.kind !== 'ore') return false
+  return typeof candidate.targetName === 'string' && want.blockNames.includes(candidate.targetName)
 }
 
 /**
@@ -1567,6 +1644,11 @@ function descendCandidates(
   if (best === null) return []
 
   const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
+  // A DESCEND is a ROUTE only when the world grounds it: a sensed/tunnel target,
+  // an explicit predicate, a remembered stone level below (for an underground
+  // source), or a stone-class focus. Otherwise it is a blind search step, and
+  // the declared-source exploration fallback may run beside it.
+  const grounded = descendToY || hasGoalTarget || knownStoneBelow || stoneGoal
   const choice = selectDigTool(
     {
       name: best.digName ?? '',
@@ -1624,6 +1706,7 @@ function descendCandidates(
         digZ: primary.z,
         diggable: true,
         safe: best.safe,
+        grounded,
       },
     },
   ]
@@ -3040,10 +3123,20 @@ function knownStationRetrievalCandidate(
 }
 
 function nearestResource(state: WorldState, focusItem: string | null): BlockState | null {
+  // Match the declared scanned source by block name as well as by drop, so the
+  // nearest `gravel` block is the bearing for a `flint` goal even though gravel's
+  // own drop is `gravel` (flint is only a probabilistic drop).
+  const want = focusItem === null ? null : retrievalWant(focusItem)
+  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
   let best: BlockState | null = null
   for (const block of state.blocks) {
     if (block.kind === 'hazard') continue
-    if (focusItem !== null && !resourceMatches(block.yield, focusItem)) continue
+    if (
+      focusItem !== null &&
+      !resourceMatches(block.yield, focusItem) &&
+      !(sourceNames?.includes(block.name) ?? false)
+    )
+      continue
     if (best === null || block.distance < best.distance) best = block
   }
   return best
@@ -3279,7 +3372,10 @@ function mineableBlockFor(state: WorldState, want: RetrievalWant): BlockState | 
   if (want.kind === 'ore') {
     return (
       state.blocks.find(
-        (block) => block.kind === 'ore' && resourceMatches(block.yield, want.item) && mineableNow(block),
+        (block) =>
+          block.kind === 'ore' &&
+          (resourceMatches(block.yield, want.item) || want.blockNames.includes(block.name)) &&
+          mineableNow(block),
       ) ?? null
     )
   }

@@ -474,14 +474,16 @@ addCase('#341 a done queue row contributes no retrieval candidate', () => {
   const ids = candidates.map((candidate) => candidate.id)
   const actionable = ids.filter((id) => !id.startsWith('WAIT'))
   // The P0 requirement is the leak: no retrieval for the resolved row. The
-  // observed actionable count is reported as a diagnostic only — in this exact
-  // shape (flint source known-but-unsensed, nothing sensed) the set is
-  // DESCEND + WAIT, i.e. the #339 exploration fallback does NOT fire because a
-  // scanned source exists. That diversity gap is a separate follow-up, not part
-  // of the #341 leak, so it is recorded here rather than asserted.
+  // diversity follow-up is fixed and asserted here: in this exact shape (flint
+  // source known-but-unsensed, nothing sensed) the #339 exploration fallback
+  // (`exploreFallbackCandidates`) now fires, so the set is DESCEND + several
+  // DISTINCT grounded frontier MOVEs + WAIT instead of DESCEND + WAIT. The
+  // declared static source is perception truth, not a route. See
+  // test-known-unsensed-source.mts for the dedicated (a)-(d) contract.
+  const distinct = new Set(actionable)
   return {
-    pass: !ids.some((id) => id.includes('raw_iron')),
-    detail: `ids=${ids.join(',')} actionable=${actionable.length}`,
+    pass: !ids.some((id) => id.includes('raw_iron')) && actionable.length >= 3 && distinct.size === actionable.length,
+    detail: `ids=${ids.join(',')} actionable=${actionable.length} distinct=${distinct.size}`,
   }
 })
 
