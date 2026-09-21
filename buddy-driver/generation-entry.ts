@@ -2006,6 +2006,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   }
 
   // A reset resumes from the LIVE inventory; `invEmpty` is computed, not assumed.
+  // On a death reset the host has already settled the post-respawn window (see
+  // LADDER_INVENTORY_SETTLE), so `counts` is the settled observation; this marker
+  // owns the reset's inventory basis, unlike the host's pending-respawn marker.
   if (ctx.resetReason !== null || resume.rungIndex > 0) {
     const resumeReason = ctx.resetReason ?? 'inventory-resume'
     const resumeGoals = snapshotGoals(ctx.ledgerSnapshot)
@@ -2024,6 +2027,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   if (ctx.resetReason !== null) {
     ctx.log('LADDER_RESET', {
       reason: ctx.resetReason,
+      inventoryBasis: 'live',
       invEmpty: resume.invEmpty,
       rungIndex: ladder.rungIndex,
       rungId: ladder.rungId,

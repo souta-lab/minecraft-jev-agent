@@ -71,6 +71,12 @@ import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, 
 import { commitLedgerProposal } from './ledger-guard.ts'
 import { ReloadArbiter } from './reload-arbiter.ts'
 import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
+import {
+  RESPAWN_INVENTORY_POLL_MS,
+  RESPAWN_INVENTORY_SETTLE_MS,
+  settleInventoryAfterRespawn,
+  shouldSettleRespawnInventory,
+} from './inventory-settle.ts'
 
 const CONTRACT_VERSION = 3
 const STATE_SCHEMA_VERSION = AGENT_SNAPSHOT_SCHEMA_VERSION
@@ -943,6 +949,28 @@ async function startGeneration(trigger: string): Promise<boolean> {
     scheduleGenerationRestart('module-unavailable')
     return false
   }
+  // A death re-creates the player entity and re-synchronizes the inventory
+  // window asynchronously. Decide the reset from the SETTLED inventory: a
+  // momentary empty read (or the client's retained pre-death window) is not
+  // durable truth. `keep_inventory` is per-world on Paper, so code cannot infer
+  // either direction - it must observe. The generation below then reads this
+  // settled bot inventory synchronously; WHICH rung follows stays with the ladder.
+  const resetReason = pendingResetReason
+  if (shouldSettleRespawnInventory(resetReason)) {
+    const settled = await settleInventoryAfterRespawn(() => inventorySummary(bot as Bot), {
+      settleWindowMs: RESPAWN_INVENTORY_SETTLE_MS,
+      pollIntervalMs: RESPAWN_INVENTORY_POLL_MS,
+    })
+    log('LADDER_INVENTORY_SETTLE', {
+      reason: resetReason,
+      readings: settled.readings,
+      changed: settled.observedChange,
+      empty: settled.empty,
+      itemCount: Object.keys(settled.counts).length,
+      waitedMs: settled.waitedMs,
+      counts: settled.counts,
+    })
+  }
   const pending = newPendingProposals()
   const ctx = makeGenerationContext(bot, pending)
   const gen = mod.createGeneration(ctx)
@@ -1243,7 +1271,13 @@ function beginDeathRecovery(b: Bot, input: DeathRecoveryInput): { pos: Vec3Json 
   saveState(simulated ? 'death-simulated' : 'death')
   log('LADDER_RESET', {
     reason: 'death',
-    invEmpty: Object.keys(lost).length === 0,
+    // The HOST cannot see the reset's inventory basis: it is read by the next
+    // generation from the SETTLED post-respawn inventory. `lost` is the pre-loss
+    // telemetry (the DEATH marker's `lostInventory`), so deriving `invEmpty` from
+    // it stated the opposite of a genuine post-drop empty reset. Report the
+    // basis honestly and let the generation's LADDER_RESET own `invEmpty`/rung.
+    inventoryBasis: 'pending-respawn',
+    lostItems: input.telemetry.itemsLost,
     cause: input.cause,
     simulated,
     ...(input.rehearsalMode === undefined ? {} : { rehearsalMode: input.rehearsalMode }),
