@@ -35,9 +35,11 @@ import {
   resolveRungSourceOfTruth,
   upperAccessRecoveryApplies,
 } from './planner-legacy.ts'
-import type { PlanOption, PlannerOptions } from './planner-legacy.ts'
+import type { PlanOption, PlannerOptions as LegacyPlannerOptions } from './planner-legacy.ts'
 
-export type PlannerMode = 'llm' | 'deterministic'
+export type PlannerMode = 'llm' | 'deterministic' | 'local-mercury'
+
+type ModelPlannerOptions = Omit<LegacyPlannerOptions, 'mode'> & { mode?: PlannerMode }
 
 /**
  * Model authority is the resident default. Deterministic planning is an
@@ -50,7 +52,8 @@ export function resolvePlannerMode(
   const raw = (env.BUDDY_PLANNER ?? '').trim().toLowerCase()
   if (raw === '' || raw === 'auto' || raw === 'llm' || raw === 'jev' || raw === 'on' || raw === 'model') return 'llm'
   if (raw === 'deterministic' || raw === 'off' || raw === 'fallback' || raw === 'none') return 'deterministic'
-  throw new Error(`invalid BUDDY_PLANNER=${JSON.stringify(env.BUDDY_PLANNER)}; expected llm|auto|deterministic|off`)
+  if (raw === 'local-mercury' || raw === 'local_mercury' || raw === 'local') return 'local-mercury'
+  throw new Error(`invalid BUDDY_PLANNER=${JSON.stringify(env.BUDDY_PLANNER)}; expected llm|auto|deterministic|off|local-mercury`)
 }
 
 /** Backoff between bounded model retries (see withModelRetries call below). */
@@ -215,7 +218,7 @@ export class PlannerBrain implements System2Brain {
   private lastAuthorityModel: string
   private calls = 0
 
-  constructor(options: PlannerOptions) {
+  constructor(options: ModelPlannerOptions) {
     this.mode = options.mode ?? resolvePlannerMode()
     this.bot = options.bot
     this.world = options.world
@@ -226,8 +229,12 @@ export class PlannerBrain implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
     this.refreshLiveFacts = options.refreshLiveFacts
-    this.model = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
     this.mercury = options.mercury
+    const configuredPlannerModel = options.model ?? process.env.BUDDY_PLANNER_MODEL ?? process.env.AI_GATEWAY_MODEL ?? DEFAULT_JEV_MODEL
+    this.model = this.mode === 'local-mercury' && this.mercury !== undefined ? this.mercury.model : configuredPlannerModel
+    if (this.mode === 'local-mercury' && this.mercury === undefined) {
+      throw new Error('BUDDY_PLANNER=local-mercury requires Mercury (set BUDDY_SYSTEM2=mercury)')
+    }
     this.lastAuthorityProvider = this.mode === 'deterministic' ? 'deterministic' : 'none'
     this.lastAuthorityModel = this.mode === 'deterministic' ? this.model : 'none'
 
@@ -253,6 +260,9 @@ export class PlannerBrain implements System2Brain {
 
   get authorityStack(): { provider: string; model: string } {
     if (this.mode === 'deterministic') return { provider: 'deterministic', model: this.model }
+    if (this.mode === 'local-mercury') {
+      return { provider: 'local-mercury', model: `deterministic|mercury:${this.mercury!.model}` }
+    }
     if (this.mercury === undefined) return { provider: 'typesafe-ai', model: this.model }
     return { provider: 'hybrid', model: `typesafe-ai:${this.model}|mercury:${this.mercury.model}` }
   }
@@ -260,6 +270,7 @@ export class PlannerBrain implements System2Brain {
   async plan(request: System2PlanRequest): Promise<System2Plan> {
     this.refreshLiveFacts?.()
     if (this.mode === 'deterministic') return this.legacy.plan(request)
+    if (this.mode === 'local-mercury') return this.planWithLocalMercury(request)
     return this.planWithModelAuthority(request)
   }
 
@@ -286,30 +297,62 @@ export class PlannerBrain implements System2Brain {
     return uniqueOptions(options)
   }
 
+  private async planWithLocalMercury(request: System2PlanRequest): Promise<System2Plan> {
+    const mercuryTrigger = mercuryTriggerFor(request)
+    if (mercuryTrigger !== null) return this.planWithMercuryAuthority(request, mercuryTrigger)
+
+    this.lastAuthorityProvider = 'deterministic'
+    this.lastAuthorityModel = 'deterministic-ladder'
+    this.log('SYSTEM2_AUTHORITY_INPUT', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: 'local-mercury-floor',
+      reason: request.reason,
+    })
+    const plan = await this.legacy.plan(request)
+    this.log('SYSTEM2_AUTHORITY_DECISION', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: 'local-mercury-floor',
+      reason: request.reason,
+      op: plan.op,
+      goals: plan.goals.map((goal) => goal.description),
+    })
+    return plan
+  }
+
+  private async planWithMercuryAuthority(
+    request: System2PlanRequest,
+    mercuryTrigger: MercuryTriggerReason,
+  ): Promise<System2Plan> {
+    if (this.mercury === undefined) return this.fatal('mercury-unavailable', `no Mercury configured for trigger=${mercuryTrigger}`)
+    this.lastAuthorityProvider = 'mercury'
+    this.lastAuthorityModel = this.mercury.model
+    this.log('SYSTEM2_AUTHORITY_INPUT', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: this.provider,
+      trigger: mercuryTrigger,
+      reason: request.reason,
+    })
+    const repair = await this.mercury.tryRepair(request, mercuryTrigger)
+    if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
+    this.log('SYSTEM2_AUTHORITY_DECISION', {
+      provider: this.provider,
+      model: this.authorityModel,
+      source: this.provider,
+      trigger: mercuryTrigger,
+      op: repair.op,
+      strategy: repair.strategy,
+      goals: repair.goals.map((goal) => goal.description),
+    })
+    return repair.plan
+  }
+
   private async planWithModelAuthority(request: System2PlanRequest): Promise<System2Plan> {
     const mercuryTrigger = mercuryTriggerFor(request)
     if (this.mercury !== undefined && mercuryTrigger !== null) {
-      this.lastAuthorityProvider = 'mercury'
-      this.lastAuthorityModel = this.mercury.model
-      this.log('SYSTEM2_AUTHORITY_INPUT', {
-        provider: this.provider,
-        model: this.authorityModel,
-        source: this.provider,
-        trigger: mercuryTrigger,
-        reason: request.reason,
-      })
-      const repair = await this.mercury.tryRepair(request, mercuryTrigger)
-      if (repair === null) return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
-      this.log('SYSTEM2_AUTHORITY_DECISION', {
-        provider: this.provider,
-        model: this.authorityModel,
-        source: this.provider,
-        trigger: mercuryTrigger,
-        op: repair.op,
-        strategy: repair.strategy,
-        goals: repair.goals.map((goal) => goal.description),
-      })
-      return repair.plan
+      return this.planWithMercuryAuthority(request, mercuryTrigger)
     }
     this.lastAuthorityProvider = 'typesafe-ai'
     this.lastAuthorityModel = this.model

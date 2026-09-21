@@ -617,7 +617,7 @@ export interface MercuryEnablement {
  * The Gateway key is NEVER consulted here.
  */
 export function resolveMercuryEnablement(
-  plannerMode: 'llm' | 'deterministic',
+  plannerMode: 'llm' | 'deterministic' | 'local-mercury',
   configPath: string,
 ): MercuryEnablement {
   const raw = (process.env.BUDDY_SYSTEM2 ?? '').trim().toLowerCase()

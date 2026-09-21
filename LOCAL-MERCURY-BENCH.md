@@ -87,7 +87,7 @@ BUDDY_MERCURY_BASE_URL=http://127.0.0.1:8081/v1 \
 BUDDY_MERCURY_MODEL=qwen3.5-9b-local \
 BUDDY_MERCURY_LOCAL_NO_THINK=1 \
 BUDDY_SYSTEM2_TIMEOUT_MS=240000 \
-BUDDY_PLANNER=llm BUDDY_SYSTEM2=mercury \
+BUDDY_POLICY=fallback BUDDY_PLANNER=local-mercury BUDDY_SYSTEM2=mercury \
 bun buddy-driver/agent-runner.mts
 ```
 
@@ -99,7 +99,8 @@ Two repo files carry the setup so it survives on another machine:
   `/data/models/Qwen3.5-9B-UD-Q4_K_XL.gguf` as alias `qwen3.5-9b-local` on
   `127.0.0.1:8081` (`--ctx-size 16384 --jinja --temp 0`, `Restart=on-failure`).
   Install with
-  `cp deploy/mercury-local-9b.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now mercury-local-9b`.
+  `cp deploy/mercury-local-9b.service ~/.config/systemd/user/ && systemctl --user daemon-reload`.
+  Start it only when needed with `systemctl --user start mercury-local-9b`; leave the unit disabled so login does not auto-start it.
 - `tools/mercury-local-preflight.mjs` — proves the endpoint is usable:
   `GET /models` lists the alias, then one `POST /chat/completions` with
   `chat_template_kwargs { enable_thinking: false }` returns a JSON object. Non-zero
@@ -107,7 +108,8 @@ Two repo files carry the setup so it survives on another machine:
 - `tools/start-local-mercury.sh` — starts the unit if the endpoint is down, runs the
   preflight, then execs the resident with
   `BUDDY_MERCURY_BASE_URL` / `BUDDY_MERCURY_MODEL` / `BUDDY_MERCURY_LOCAL_NO_THINK=1` /
-  `BUDDY_SYSTEM2_TIMEOUT_MS=240000` / `BUDDY_PLANNER=llm` / `BUDDY_SYSTEM2=mercury`.
+  `BUDDY_SYSTEM2_TIMEOUT_MS=240000` / `BUDDY_POLICY=fallback` /
+  `BUDDY_PLANNER=local-mercury` / `BUDDY_SYSTEM2=mercury`. Normal System2 decisions use the deterministic floor; exception repair (`no_progress`, impossible action, repeated WAIT) uses the local Mercury model without a TypeSafe Gateway key.
 
 Measured on this machine after installing the unit:
 

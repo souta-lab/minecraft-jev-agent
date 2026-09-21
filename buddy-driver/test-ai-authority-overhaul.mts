@@ -15,6 +15,7 @@ import { resolvePlannerMode } from './planner.ts'
 assert.equal(resolvePlannerMode({}), 'llm', 'System2 model authority must be the default')
 assert.equal(resolvePlannerMode({ BUDDY_PLANNER: 'auto' }), 'llm')
 assert.equal(resolvePlannerMode({ BUDDY_PLANNER: 'deterministic' }), 'deterministic')
+assert.equal(resolvePlannerMode({ BUDDY_PLANNER: 'local-mercury' }), 'local-mercury')
 assert.throws(() => resolvePlannerMode({ BUDDY_PLANNER: 'typo' }))
 
 assert.equal(resolveBetaAuthority({}), true, 'Jev beta must own WHETHER by default')
