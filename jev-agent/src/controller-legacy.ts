@@ -82,7 +82,7 @@ import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, W
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
-import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatReplanThrottled, ReplanThrottle, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
+import { evaluateCapabilityGap, formatCapabilityGap, formatCapabilityGapPolicy, formatLocalRecoveryExhausted, formatLocalRecoveryNoProgress, formatReplanThrottled, ReplanThrottle, resolveReplanNoInfoEscalateCycles, resolveReplanPositionDelta, resolveReplanThrottleMs } from './replanThrottle.ts'
 import type { CapabilityGapState, ReplanInputs } from './replanThrottle.ts'
 import { decayedFailureCount, failureCount, spatialFailureKey } from './failureMemory.ts'
 import {
@@ -316,6 +316,13 @@ export interface JevAgentOptions {
   /** #44: position delta in blocks that counts as new information. */
   replanPositionDelta: number
   /**
+   * #78: consecutive zero-progress (`no_new_info`) throttled replan cycles for
+   * the same (reason, goal, stateHash) after which the local recovery is
+   * declared exhausted and System2 is woken (`LOCAL_RECOVERY_EXHAUSTED`).
+   * `BUDDY_REPLAN_NO_INFO_ESCALATE_CYCLES` overrides it.
+   */
+  replanNoInfoEscalateCycles: number
+  /**
    * #11 v2: furnace-prerequisite ordering. `cost` (default) selects the cheapest
    * feasible path and shadow-logs the #78 rank order; `rank` restores the rank
    * order for A/B. `BUDDY_PREREQ_RANK_POLICY=rank` switches it.
@@ -366,6 +373,7 @@ export const defaultJevAgentOptions: JevAgentOptions = {
   actuation: 'pathfinder',
   replanThrottleMs: resolveReplanThrottleMs(),
   replanPositionDelta: resolveReplanPositionDelta(),
+  replanNoInfoEscalateCycles: resolveReplanNoInfoEscalateCycles(),
   prereqRankPolicy: resolvePrereqRankPolicy(),
   worldEpoch: 0,
 }
@@ -1490,7 +1498,11 @@ export class JevController {
     this.bot = bot
     this.options = normalizeOptions({ ...defaultJevAgentOptions, ...options })
     this.moveFailMemory = this.createMoveFailMemory()
-    this.replanThrottle = new ReplanThrottle(this.options.replanThrottleMs, this.options.replanPositionDelta)
+    this.replanThrottle = new ReplanThrottle(
+      this.options.replanThrottleMs,
+      this.options.replanPositionDelta,
+      this.options.replanNoInfoEscalateCycles,
+    )
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.recipeIndex = createRecipeIndex(bot.registry)
@@ -4316,7 +4328,51 @@ export class JevController {
           { reason, ageMs: throttle.ageMs, stateHash: throttle.stateHash, because: throttle.kind },
           this.tickCounter,
         )
+        if (throttle.kind === 'no_new_info') {
+          // #78 counter: this local recovery has now been suppressed for
+          // `count` consecutive zero-progress cycles with an unchanged
+          // fingerprint. Bounded by `noInfoLimit`; see the exhausted branch.
+          this.logger.warn(
+            'agent',
+            formatLocalRecoveryNoProgress(this.currentGoalKey(), reason, throttle),
+            {
+              reason,
+              goal: this.currentGoalKey(),
+              stateHash: throttle.stateHash,
+              noInfoStreak: throttle.noInfoStreak,
+              noInfoLimit: throttle.noInfoLimit,
+            },
+            this.tickCounter,
+          )
+        }
         return { triggered: false, reason, detail: message }
+      }
+      if (throttle.kind === 'exhausted') {
+        // #78 escalation: N consecutive zero-progress cycles prove the local
+        // recovery is itself stuck, which is a semantic boundary. The throttle
+        // released the replan above, so the System2 call below is the explicit
+        // escalation instead of an unbounded `REPLAN_THROTTLED no_new_info`.
+        this.logger.warn(
+          'agent',
+          formatLocalRecoveryExhausted(this.currentGoalKey(), reason, throttle),
+          {
+            reason,
+            goal: this.currentGoalKey(),
+            stateHash: throttle.stateHash,
+            noInfoStreak: throttle.noInfoStreak,
+            noInfoLimit: throttle.noInfoLimit,
+            boundary: 'semantic_boundary',
+          },
+          this.tickCounter,
+        )
+        // Same escalation vocabulary the rest of the controller uses, recorded
+        // inline because `escalate()` would re-enter this throttle and
+        // re-suppress the replan exhaustion just released. The throttle's own
+        // N-cycle bound rate-limits this, so a cooldown is not needed.
+        this.escalations.push('progress_stall')
+        this.lastEscalationAt.set('progress_stall', now)
+        this.lastEscalationMs = now
+        this.signals.escalationRecommended = true
       }
     } else if (now - last < this.options.llmCooldownMs) {
       this.logger.info(
@@ -5195,6 +5251,7 @@ export class JevController {
       knownResources: (this.signals.knownResources ?? []).length,
       failureSignature,
       capabilityGap: this.capabilityGapActive ? this.capabilityGapSignature : null,
+      goalKey: this.currentGoalKey(),
     }
   }
 
