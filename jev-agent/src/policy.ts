@@ -18,6 +18,7 @@ import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { isVerifiedWallEntry } from './wallEntry.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
+import { containerObservationAt, observedItemCount } from './containerAccess.ts'
 
 export type GuardPhase = 'decision' | 'dig'
 
@@ -147,6 +148,8 @@ export function guardCandidate(
       return guardEnterPortal(candidate, state, context)
     case 'SMELT':
       return guardSmelt(candidate, state, context)
+    case 'CONTAINER':
+      return guardContainer(candidate, state, context)
     case 'DESCEND':
       return guardDescend(candidate, state, context)
     case 'STEP':
@@ -736,6 +739,53 @@ function guardIgnite(candidate: Candidate, state: WorldState, context: GuardCont
       'OUT_OF_REACH',
       `light position is ${round2(distance(target, state.self.eyePosition))}m from the eyes (reach ${context.reach})`,
     )
+  }
+  return { ok: true, candidate }
+}
+
+/**
+ * CAN-feasibility for one container interaction. The guard checks only hard
+ * world truth the selection depends on: the container block still stands in the
+ * current state at the selected cell, and (for a withdraw) the item the
+ * envelope will declare is the item the selected candidate itself observed. It
+ * never chooses WHICH container to open or WHICH item is worth taking - that is
+ * Jev's decision, and this function only refuses a selection the world has
+ * already contradicted.
+ */
+function guardContainer(candidate: Candidate, state: WorldState, context: GuardContext): GuardResult {
+  const target = candidate.target
+  if (target === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'CONTAINER candidate carries no container cell')
+  }
+  const container = (state.containers ?? []).find((station) => samePosition(station, target))
+  if (container === undefined) {
+    return deny(candidate.id, 'TARGET_GONE', `no container at (${target.x},${target.y},${target.z}) in the current state`)
+  }
+  const ref = readMetaString(candidate, 'containerRef')
+  if (ref === null) {
+    return deny(candidate.id, 'TARGET_GONE', 'CONTAINER candidate carries no container reference')
+  }
+  const action = readMetaString(candidate, 'containerAction') ?? 'open'
+  if (action !== 'open' && action !== 'withdraw') {
+    return deny(candidate.id, 'TARGET_GONE', `CONTAINER candidate has an unknown action "${action}"`)
+  }
+  if (action === 'withdraw') {
+    // The item must be one the selection's OWN observation saw. A withdraw for
+    // an item nobody observed is a hallucinated transfer, never a lucky guess.
+    const item = readMetaString(candidate, 'containerItem')
+    if (item === null) {
+      return deny(candidate.id, 'EMPTY_HAND', 'CONTAINER withdraw candidate carries no item')
+    }
+    const observed = containerObservationAt(state.containerContents, target)
+    if (observed === null) {
+      return deny(candidate.id, 'TARGET_GONE', `contents of ${ref} are UNKNOWN (never observed), so no transfer can be grounded`)
+    }
+    if (observedItemCount(observed, item) <= 0) {
+      return deny(candidate.id, 'EMPTY_HAND', `${ref} was observed without ${item}`)
+    }
+  }
+  if (distance(target, state.self.eyePosition) > context.reach) {
+    return guardPathComputable(candidate, context, target)
   }
   return { ok: true, candidate }
 }

@@ -486,6 +486,21 @@ export function semanticTargetRef(candidate: Candidate): SemanticTargetRef {
       const cell = candidate.target === null ? 'none' : cellKey(candidate.target)
       return { kind: 'portal_site', key: `portal@${cell}`, label: `portal entry ${cell}` }
     }
+    case 'CONTAINER': {
+      // A container interaction is identified by the CONTAINER (its truthful
+      // `name@x,y,z` ref), never by the item chosen out of it: opening the same
+      // chest for a second stack is the same semantic target, and a different
+      // chest is a different one. The item, when there is one, is a parameter
+      // (`semanticParamKey`), not the target identity.
+      const ref = metaString(candidate, 'containerRef') ?? `${candidate.targetName ?? 'container'}@${candidate.target === null ? 'none' : cellKey(candidate.target)}`
+      const action = metaString(candidate, 'containerAction') ?? 'open'
+      const item = candidate.itemName
+      return {
+        kind: 'block',
+        key: ref,
+        label: action === 'withdraw' && item !== null ? `take ${item} from ${ref}` : `open ${ref}`,
+      }
+    }
     case 'MOVE':
     case 'RETREAT':
     case 'RETRIEVE': {

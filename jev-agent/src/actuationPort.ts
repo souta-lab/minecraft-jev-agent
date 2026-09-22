@@ -60,7 +60,23 @@ export interface ActuationPort {
   // craft
   craft(recipe: unknown, count?: number, craftingTable?: Block): Promise<void>
   // container / smelt window
-  openContainer(block: Block): Promise<unknown>
+  /**
+   * Open a container block (chest / trapped_chest / barrel / ender_chest /
+   * shulker box) and resolve with the live window. `face` is the `block_place`
+   * direction the body's own stand derives (`deriveInteractionFace`): a wrong
+   * face makes the server reject the interaction and the open only surfaces 20s
+   * later as mineflayer's `windowOpen` timeout, so it is part of the contract.
+   */
+  openContainer(block: Block, face?: Vec3): Promise<unknown>
+  /**
+   * Move `count` items out of the CURRENTLY OPEN container window into the
+   * inventory, asserting the lease at the transfer itself. Mineflayer's window
+   * object writes its slot clicks on the raw client (`window.withdraw` ->
+   * `clickWindow` -> `bot._client.write`), so without this method a transfer
+   * would be a nested actuation bypass (#38); every container transfer goes
+   * through here when the resident provides a port.
+   */
+  withdrawFromContainer(itemName: string, count: number): Promise<unknown>
   // raw movement packet + entity pose mutation (the two #38 bypasses)
   writeMovementPacket(name: string, payload: Record<string, unknown>): void
   setPose(pose: ActuationPose): void
@@ -85,6 +101,7 @@ export const ACTUATION_PORT_OPERATIONS = [
   'collect',
   'craft',
   'openContainer',
+  'withdrawFromContainer',
   'writeMovementPacket',
   'setPose',
 ] as const

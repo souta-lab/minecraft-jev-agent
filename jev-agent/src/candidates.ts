@@ -25,6 +25,8 @@ import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { containerBlockForItem, containerObservationAt, containerRef, isContainerBlockName, rollupContainerItems } from './containerAccess.ts'
+import type { ContainerItemStack, ContainerRefusal } from './containerAccess.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
@@ -76,7 +78,7 @@ import {
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
-import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
+import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
@@ -137,6 +139,7 @@ export type CandidateKind =
   | 'CRAFT'
   | 'PLACE'
   | 'SMELT'
+  | 'CONTAINER'
   | 'IGNITE'
   | 'ENTER_PORTAL'
   | 'DESCEND'
@@ -735,6 +738,10 @@ const STATIONARY_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'CRAFT',
   'PLACE',
   'SMELT',
+  // A container interaction is work done from one spot, like a smelt: it is not
+  // an answer to an attacker the body cannot see (BREAK_CONTACT_KINDS owns
+  // those), and it must be withheld with the other work actions.
+  'CONTAINER',
   'IGNITE',
   'ENTER_PORTAL',
   'RETRIEVE',
@@ -1390,6 +1397,15 @@ export interface GroundedCandidatesResult {
    * en-route acquisition has a stated mechanical cause instead of silence.
    */
   prospectRefusal: ProspectRefusal | null
+  /**
+   * Typed `CONTAINER_REFUSED reason=unreachable|empty|...` facts for the
+   * container cells this tick could not offer an interaction for: no interaction
+   * stand / no path (unreachable), a cell with no container block truth left, or
+   * a container that was opened and observed EMPTY. Empty while every candidate
+   * container was offered. Non-empty means an unopened or empty container is a
+   * NAMED fact, never a silent no-op and never mistaken for an empty inventory.
+   */
+  containerRefusals: ContainerRefusal[]
   /**
    * The typed "no available source for the active collect focus" fact, or null
    * when a grounded source route was offered (or the focus has no name-scanned
@@ -2673,6 +2689,7 @@ export function generateGroundedCandidates(
     raw.columnDescentRefusal,
     raw.prospectRefusal,
     digRefusals,
+    raw.containerRefusals,
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
@@ -2718,6 +2735,11 @@ function hasAdvancingGoalRoute(candidate: Candidate): boolean {
       return typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal'
     case 'DESCEND':
       return candidate.meta.grounded === true
+    case 'CONTAINER':
+      // A WITHDRAW of the item the goal wants is a grounded producer route; an
+      // OPEN/inspect probe carries no claim at all (its contents are UNKNOWN),
+      // so it is not an advancing route.
+      return candidate.meta.containerProducer !== undefined
     default:
       return true
   }
@@ -3044,6 +3066,7 @@ function generateRawCandidates(
   digRefusals: DigRouteRefusalSink = [],
 ): RawCandidatesResult {
   let candidates: Candidate[] = []
+  let containerRefusals: ContainerRefusal[] = []
   let placeRefusal: PlaceRefusal | null = null
   let ignitionRefusal: IgnitionRefusal | null = null
   let entryRefusal: PortalEntryRefusal | null = null
@@ -3113,6 +3136,18 @@ function generateRawCandidates(
       candidates.push(...prospect.candidates)
       break
   }
+
+  // The container family (see `containerCandidates`). A container is a supply
+  // source of UNKNOWN content, so the OPEN probe is offered only while the goal
+  // has grounded NOTHING of its own this tick (or there is no focus item at
+  // all); a container whose contents were OBSERVED offers one ordinary WITHDRAW
+  // step per stack, tagged as a producer when the stack is the focus item. This
+  // is CAN enumeration appended alongside every other family - never an
+  // override, never a rank, and never a claim about what is inside.
+  const goalHasGroundedRoute = focusItem !== null && candidates.some((candidate) => hasAdvancingGoalRoute(candidate))
+  const environment = containerCandidates(state, options, focusItem, focusItem === null || !goalHasGroundedRoute)
+  candidates.push(...environment.candidates)
+  containerRefusals = environment.refusals
 
   // A `surface` goal's vertical route (the leg the goal exists for). Computed
   // here so the typed refusal is available even when the family offers nothing,
@@ -3605,6 +3640,7 @@ function generateRawCandidates(
     digRefusals: dedupeDigRouteRefusals(digRefusals),
     prospectRefusal: prospect.refusal,
     sourceExclusions: resourceSourceExclusions(state),
+    containerRefusals,
   }
 }
 
@@ -5943,6 +5979,12 @@ interface RawCandidatesResult {
   prospectRefusal: ProspectRefusal | null
   /** live-structure member cells refused as sources for the active collect goal */
   sourceExclusions: ResourceSourceExclusion[]
+  /**
+   * Typed container refusals collected while grounding the container family
+   * (`CONTAINER_REFUSED reason=unreachable|empty|...`). Never a silent no-op: an
+   * unopened/unreachable container and an observed-empty one both name the fact.
+   */
+  containerRefusals: ContainerRefusal[]
 }
 
 /**
@@ -6200,11 +6242,18 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
   if (current !== null && current.kind === 'place' && current.targetItem === OBSIDIAN) return []
   const spot = leastFailedPlacementSpot(state, focusItem)
   if (spot === null) return []
+  // A held CONTAINER is a legal PLACE like any other block item - there is no
+  // placeable-block table gating this family - and the placement is worth
+  // naming for what it enables: once the block stands there, OPENING it is an
+  // ordinary station interaction. The cell legality is the same
+  // `placementSpots`/reference geometry every other placement uses, and the
+  // executor re-verifies the post-condition (the block must actually appear).
+  const asContainer = containerBlockForItem(focusItem)
   return [
     {
       id: `PLACE:${focusItem}:${blockId('p', spot)}`,
       kind: 'PLACE',
-      label: `place ${focusItem} at (${spot.x},${spot.y},${spot.z}), ${distance(spot, state.self.position)}m away`,
+      label: `place ${focusItem} at (${spot.x},${spot.y},${spot.z}), ${distance(spot, state.self.position)}m away${asContainer === null ? '' : ' (a container to open once placed)'}`,
       targetName: focusItem,
       target: spot,
       targetEntityId: null,
@@ -6213,7 +6262,13 @@ function placeCandidates(state: WorldState, options: CandidateOptions, focusItem
       toolName: null,
       inReach: distance(spot, state.self.eyePosition) <= options.reach,
       hasStandableAdjacent: true,
-      meta: { tick: state.tick, x: spot.x, y: spot.y, z: spot.z },
+      meta: {
+        tick: state.tick,
+        x: spot.x,
+        y: spot.y,
+        z: spot.z,
+        ...(asContainer === null ? {} : { containerPlacement: asContainer }),
+      },
     },
   ]
 }
@@ -6261,7 +6316,7 @@ function stationApproachReachable(
   state: WorldState,
   options: CandidateOptions,
   station: Vec3Json,
-  kind: 'furnace' | 'crafting_table',
+  kind: StationKindName,
 ): boolean {
   const probe = options.reachability?.stationApproach ?? null
   if (probe === null) return true
@@ -6286,6 +6341,209 @@ function stationApproachReachable(
     headroomClear: column.headroomClear,
   }
   return evaluateReachability(target, world, state.inventory.counts, abilities, fact.path ?? 'unknown').reachable
+}
+
+/**
+ * The CONTAINER family: open a sensed/remembered container, and take what its
+ * OBSERVED contents hold.
+ *
+ * A container is a SUPPLY SOURCE OF UNKNOWN CONTENT. The client cannot read a
+ * container's contents before a window is open (see `containerAccess.ts`:
+ * mineflayer's only contents surface is the opened window), so:
+ *
+ *   * contents UNKNOWN -> offer the OPEN/INSPECT step, whose label says so.
+ *     It is offered when the current goal has NO grounded source of its own
+ *     (`offerUnknown`), or when the body has no focus item at all - i.e. when a
+ *     supply source of unknown content is genuinely worth a look. Code never
+ *     assumes a container holds anything.
+ *   * contents OBSERVED -> offer one ordinary WITHDRAW step per observed
+ *     stack, tagged as a producer for the focus item when it is one. Jev picks;
+ *     code ranks nothing and withholds nothing it has grounded.
+ *   * contents observed EMPTY -> no candidate at all, plus the typed
+ *     `reason=empty` refusal, so an empty container can never look like a
+ *     silent success.
+ *   * no reachable interaction stand -> the typed `reason=unreachable` refusal
+ *     naming the measured fact, never a silent no-op.
+ *
+ * Every candidate goes through the EXISTING station-approach evaluation
+ * (`stationApproachReachable`, the same `evaluateReachability` the affordance
+ * gate uses), so hazard/vertical/approach/path still apply. Nothing here is
+ * container-specific safety: a container is a station, and it is protected from
+ * mining by `PROTECTED_STATION_BLOCKS`.
+ */
+export interface ContainerGroundingResult {
+  candidates: Candidate[]
+  refusals: ContainerRefusal[]
+}
+
+/**
+ * How many containers one tick offers, and how many stacks one container offers.
+ * A bound on enumeration, never a rank: containers are taken nearest-first as
+ * the sensor already ordered them, and a stack the goal actually wants is ALWAYS
+ * included (see the selection below) so the bound can never hide the one item
+ * the body was looking for.
+ */
+export const MAX_CONTAINER_OFFERS = 3
+export const MAX_CONTAINER_ITEM_OFFERS = 6
+
+function containerOpenCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  entry: StationEntry,
+  blockName: string,
+  ref: string,
+): Candidate {
+  const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+  return {
+    id: `CONTAINER:open:${ref}`,
+    kind: 'CONTAINER',
+    label: `open ${blockName} at (${position.x},${position.y},${position.z}), ${distance(position, state.self.position)}m away (contents unknown until opened)`,
+    targetName: blockName,
+    target: position,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(position, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      containerRef: ref,
+      containerAction: 'open',
+      containerBlock: blockName,
+      containerContents: 'unknown',
+      containerSource: entry.source,
+    },
+  }
+}
+
+function containerWithdrawCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  entry: StationEntry,
+  blockName: string,
+  ref: string,
+  item: ContainerItemStack,
+  observedCount: number,
+  focusItem: string | null,
+): Candidate {
+  const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+  const producer = focusItem !== null && focusItem === item.name
+  return {
+    id: `CONTAINER:withdraw:${ref}:${item.name}`,
+    kind: 'CONTAINER',
+    label: `take ${item.name} x${observedCount} out of ${blockName} at (${position.x},${position.y},${position.z}), ${distance(position, state.self.position)}m away${producer ? ` (a producer for ${focusItem})` : ''}`,
+    targetName: blockName,
+    target: position,
+    targetEntityId: null,
+    itemName: item.name,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(position, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      containerRef: ref,
+      containerAction: 'withdraw',
+      containerBlock: blockName,
+      containerItem: item.name,
+      containerCount: observedCount,
+      containerContents: 'known',
+      containerSource: entry.source,
+      ...(producer ? { containerProducer: focusItem } : {}),
+    },
+  }
+}
+
+function containerRefusal(
+  entry: StationEntry,
+  blockName: string,
+  ref: string,
+  reason: ContainerRefusal['reason'],
+  detail: string | null = null,
+  item: string | null = null,
+): ContainerRefusal {
+  return {
+    reason,
+    container: ref,
+    block: blockName,
+    position: { x: entry.x, y: entry.y, z: entry.z },
+    item,
+    detail,
+  }
+}
+
+/**
+ * `offerUnknown` is the "the goal has no grounded source of its own" fact,
+ * computed from the candidate set the goal already grounded. It is a WITHHOLDING
+ * rule, never a rank: it decides whether an unknown-content probe is worth
+ * offering, and it never reorders or replaces any other candidate.
+ */
+function containerCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+  offerUnknown: boolean,
+): ContainerGroundingResult {
+  const candidates: Candidate[] = []
+  const refusals: ContainerRefusal[] = []
+  let offered = 0
+  for (const entry of state.containers ?? []) {
+    if (offered >= MAX_CONTAINER_OFFERS) break
+    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+    const blockName = entry.name ?? null
+    if (blockName === null || !isContainerBlockName(blockName)) {
+      // A remembered container cell with no block truth left (unloaded chunk, or
+      // a block the durable record no longer matches) is UNREACHABLE, typed and
+      // named - never silently skipped and never treated as empty.
+      refusals.push(containerRefusal(entry, blockName ?? 'container', containerRef(blockName ?? 'container', position), 'unreachable', 'block_unknown'))
+      continue
+    }
+    const ref = containerRef(blockName, position)
+    const observed = containerObservationAt(state.containerContents, position)
+    if (observed === null) {
+      // UNKNOWN, never empty. A container nobody opened can only be offered as
+      // an inspect step, and only when the goal actually lacks a source.
+      if (!offerUnknown) continue
+      if (!stationApproachReachable(state, options, position, 'container')) {
+        refusals.push(containerRefusal(entry, blockName, ref, 'unreachable', 'no_interaction_stand_or_path'))
+        continue
+      }
+      candidates.push(containerOpenCandidate(state, options, entry, blockName, ref))
+      offered += 1
+      continue
+    }
+    if (observed.items.length === 0) {
+      // Opened and seen empty: a typed EMPTY result, never a silent success and
+      // never a withdrawal candidate.
+      refusals.push(containerRefusal(entry, blockName, ref, 'empty'))
+      continue
+    }
+    if (!stationApproachReachable(state, options, position, 'container')) {
+      refusals.push(containerRefusal(entry, blockName, ref, 'unreachable', 'no_interaction_stand_or_path'))
+      continue
+    }
+    // The goal-relevant stacks are enumerated first so the bound can never hide
+    // the item the goal wants; the remaining observed stacks follow in the
+    // order the container reported them. This is inclusion, not ranking: it
+    // never reorders two equally relevant stacks and never drops one silently
+    // in favour of a "better" one.
+    const rolled = rollupContainerItems(observed.items)
+    const relevant = focusItem === null ? [] : rolled.filter((item) => item.name === focusItem)
+    const rest = rolled.filter((item) => focusItem === null || item.name !== focusItem)
+    const selected = [...relevant, ...rest].slice(0, MAX_CONTAINER_ITEM_OFFERS)
+    for (const item of selected) {
+      candidates.push(containerWithdrawCandidate(state, options, entry, blockName, ref, item, item.count, focusItem))
+    }
+    if (selected.length > 0) offered += 1
+  }
+  return { candidates, refusals }
 }
 
 /**
@@ -10161,6 +10419,7 @@ export function applyReachabilityGate(
   columnDescentRefusal: ColumnDescentRefusal | null = null,
   prospectRefusal: ProspectRefusal | null = null,
   digRefusals: DigRouteRefusalSink = [],
+  containerRefusals: ContainerRefusal[] = [],
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -10314,6 +10573,7 @@ export function applyReachabilityGate(
     columnDescentRefusal,
     prospectRefusal,
     digRefusals: dedupeDigRouteRefusals(digRefusals),
+    containerRefusals,
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),

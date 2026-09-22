@@ -418,6 +418,7 @@ function makeIgniteFixture(frame: PortalFrameValidation, opts: { hasTool: boolea
     collect: async () => undefined,
     craft: async () => undefined,
     openContainer: async () => undefined,
+    withdrawFromContainer: async () => undefined,
     writeMovementPacket: () => undefined,
     setPose: () => undefined,
   }
