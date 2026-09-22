@@ -36,7 +36,7 @@ import {
   resolveRungSourceOfTruth,
   upperAccessRecoveryApplies,
 } from './planner-legacy.ts'
-import type { PlanOption, PlannerOptions as LegacyPlannerOptions } from './planner-legacy.ts'
+import type { DurableLadderProgress, PlanOption, PlannerOptions as LegacyPlannerOptions } from './planner-legacy.ts'
 
 export type PlannerMode = 'llm' | 'deterministic' | 'local-mercury'
 
@@ -299,6 +299,8 @@ export class PlannerBrain implements System2Brain {
   private lastLoggedPlanReason: string | null = null
   private readonly legacy: LegacyPlannerBrain
   private readonly mercury: MercurySystem2 | undefined
+  /** the run's durable ladder record (class-A ledger), when the generation owns one. */
+  private readonly durableLadderProgress: DurableLadderProgress | null
   private lastAuthorityProvider: string
   private lastAuthorityModel: string
   private calls = 0
@@ -314,6 +316,7 @@ export class PlannerBrain implements System2Brain {
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
     this.terminate = options.terminate
     this.refreshLiveFacts = options.refreshLiveFacts
+    this.durableLadderProgress = options.durableLadderProgress ?? null
     // The normal planner authority uses experimental_evaluate and therefore
     // keeps the evaluation-capable Jev default. Language-generation System2 is
     // owned by MercurySystem2; local-mercury intentionally reports that model.
@@ -366,7 +369,7 @@ export class PlannerBrain implements System2Brain {
   private groundedOptions(request: System2PlanRequest): PlanOption[] {
     const counts = inventoryCounts(this.bot)
     const planningWorld = augmentPlannerWorldWithLiveStations(this.bot, this.world)
-    const rung = resolveRungSourceOfTruth(counts, planningWorld, this.log)
+    const rung = resolveRungSourceOfTruth(counts, planningWorld, this.log, this.durableLadderProgress)
     const portalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
     this.log('PORTAL_FRAME_PROGRESS', { blocks: portalFrameBlocks, source: 'system2-grounding' })
     const options = buildPlanOptions(counts, planningWorld, {

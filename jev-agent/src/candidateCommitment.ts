@@ -303,6 +303,16 @@ export type ActionCommitReleaseReason =
   | 'deterministically_invalid'
   | 'window_elapsed'
   | 'decision_budget_exhausted'
+  /**
+   * SAFE: a hostile is inside melee reach and the CURRENT choice is a grounded
+   * threat response (ATTACK/RETREAT/ESCALATE). The hold exists to stop thrash
+   * between equivalent candidates, never to keep the body inside a hit window:
+   * measured live (2026-09-21T22:19:39-42), Jev chose ATTACK:e33467 against a
+   * zombie at 0.78 m three decisions in a row and the commitment held the
+   * in-flight RETREAT each time, so the body never swung and died 5 s later.
+   * The newer model choice wins while the body is in contact.
+   */
+  | 'contact_threat'
 
 export interface ActionCommitmentState {
   /** the held action instance identity: candidate id + executor epoch */
@@ -332,6 +342,13 @@ export interface ActionCommitmentInput {
   readonly inFlightInvalid: boolean
   /** the in-flight candidate is still in the grounded candidate set. */
   readonly inFlightOffered: boolean
+  /**
+   * SAFE: a hostile is inside melee reach AND the current choice is a grounded
+   * threat response. Code owns only the contact fact; the choice is still Jev's
+   * (the newer one). Optional: absent means "no contact threat", which keeps
+   * every pre-existing caller and fixture unchanged.
+   */
+  readonly contactThreatResponse?: boolean
 }
 
 export interface ActionCommitmentDecision {
@@ -394,7 +411,11 @@ export function evaluateActionCommitment(input: ActionCommitmentInput): ActionCo
   // (c) plan/goal change, (d) deterministic infeasibility/vanishing and the
   // bounded window/budget all release; everything else holds.
   let reason: ActionCommitReleaseReason | null = null
-  if (!sameInstance && previous !== null && previous.planKey !== input.planKey) {
+  if (input.contactThreatResponse === true) {
+    // In contact, the body answers now: a newer threat response is never held
+    // behind the previous action lease.
+    reason = 'contact_threat'
+  } else if (!sameInstance && previous !== null && previous.planKey !== input.planKey) {
     reason = 'plan_changed'
   } else if (!input.inFlightOffered) {
     reason = 'no_longer_offered'

@@ -58,6 +58,25 @@ import {
 import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
 import { armorEquipOffers, armorEquipRefusals } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
+import {
+  activeThreats,
+  bodySurvivalFacts,
+  isResponseWorthyThreat,
+  MELEE_THREAT_REACH,
+  selectKeepDistanceSpots,
+  THREAT_DANGER_RADIUS,
+  THREAT_MEMORY_MS,
+  THREAT_RESPONSE_RANGE,
+  threatStandoffRange,
+  weaponFacts,
+} from './threat.ts'
+import type { KeepDistanceSpot, ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
+
+// The threat envelope numbers and the response predicate are owned by
+// `threat.ts` (it also keeps the bounded danger state and scans the escape
+// cells). They stay re-exported here because the candidate layer and its
+// fixtures name them at this boundary.
+export { isResponseWorthyThreat, THREAT_MEMORY_MS, THREAT_RESPONSE_RANGE }
 
 export type CandidateKind =
   | 'MINE'
@@ -115,8 +134,11 @@ export interface Candidate {
  * envelope only removes MINE/MOVE/CRAFT/etc. while the threat is physically
  * immediate, so a slow policy call cannot leave the executor digging through
  * a hit window.
+ *
+ * The number itself is owned by `threat.ts` (`MELEE_THREAT_REACH`) so the
+ * contact envelope, the danger state and the escape scan cannot drift apart.
  */
-export const IMMEDIATE_HOSTILE_RANGE = 3.2
+export const IMMEDIATE_HOSTILE_RANGE = MELEE_THREAT_REACH
 
 /**
  * Farther hostiles remain world observations, but are not combat reactions.
@@ -124,8 +146,12 @@ export const IMMEDIATE_HOSTILE_RANGE = 3.2
  * when the active goal is temporarily blocked turns Jev's pi choice into an
  * unproductive travel plan.  Within this envelope Jev still owns ATTACK versus
  * RETREAT; beyond it the next grounded goal/recovery candidate stays visible.
+ *
+ * This is the bounded danger radius (`THREAT_DANGER_RADIUS`): a walking hostile
+ * inside it closes to melee within one policy decision, so the survival offer
+ * must be grounded here rather than only at contact range.
  */
-export const COMBAT_CANDIDATE_RANGE = 8
+export const COMBAT_CANDIDATE_RANGE = THREAT_DANGER_RADIUS
 
 /**
  * At this health the bot cannot safely trade another melee hit for one more
@@ -149,20 +175,6 @@ export const SURVIVAL_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>
 ])
 
 /**
- * P1 durability: a hostile that has actually engaged the bot is a
- * response-worthy threat far beyond melee range. A skeleton opens fire at
- * roughly 10-16m, which is inside neither `IMMEDIATE_HOSTILE_RANGE` (3.2m) nor
- * `COMBAT_CANDIDATE_RANGE` (8m); without this band Jev sees the attacker in
- * `entities` but has no grounded response at all, which is the observed
- * "does not react while being shot" failure. This only guarantees the option
- * set exists - ATTACK versus RETREAT remains Jev's choice.
- */
-export const THREAT_RESPONSE_RANGE = 24
-
-/** How long a damage observation keeps a hostile response-worthy. */
-export const THREAT_MEMORY_MS = 8000
-
-/**
  * Bound on distinct retreat destinations offered, so Jev can pick a direction
  * instead of being handed a single spot. Small and fixed so the candidate list
  * cannot be crowded by escape routes.
@@ -170,31 +182,53 @@ export const THREAT_MEMORY_MS = 8000
 export const MAX_RETREAT_CANDIDATES = 3
 
 /**
- * Is this hostile a threat Jev must be able to answer? Code owns only the
- * grounded predicate; the choice of ATTACK/RETREAT stays with Jev.
- *
- *   immediate   - already inside melee range (unchanged behaviour)
- *   attributed  - the recorded damage source is this exact entity
- *   engaged     - the bot was damaged inside `THREAT_MEMORY_MS` and this
- *                 hostile has line of sight (used when Mineflayer did not
- *                 attribute the attacker; `lineOfSight === undefined` is
- *                 UNKNOWN and does not invent a threat)
- *
- * `nowMs` is injectable so the fixture does not depend on wall clock.
+ * The kinds that answer a hostile at contact range. Identical to the historical
+ * immediate-threat set: an attack with whatever the body holds, a grounded
+ * keep-distance route, or a bounded escalation. `WAIT`/work actions mechanically
+ * leave the body inside a hit window, which is the measured death shape.
  */
-export function isResponseWorthyThreat(
-  state: Pick<WorldState, 'entities' | 'signals'>,
-  entity: Pick<EntityState, 'id' | 'hostile' | 'distance' | 'attackedSelf' | 'lineOfSight'>,
-  nowMs = Date.now(),
-): boolean {
-  if (!entity.hostile) return false
-  if (!Number.isFinite(entity.distance) || entity.distance > THREAT_RESPONSE_RANGE) return false
-  if (entity.distance <= IMMEDIATE_HOSTILE_RANGE) return true
-  if (entity.attackedSelf === true) return true
-  const last = state.signals.lastDamage ?? null
-  if (last === null || !Number.isFinite(last.atMs) || nowMs - last.atMs > THREAT_MEMORY_MS) return false
-  // Attribution unknown -> require positive sight evidence; never invent one.
-  return entity.lineOfSight === true
+export const CONTACT_THREAT_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'ATTACK',
+  'RETREAT',
+  'ESCALATE',
+])
+
+/**
+ * The kinds that keep answering a hostile while the bounded danger state is
+ * active. Adds the local self-care actions: eating (saturation healing) and
+ * putting on armor are survival, not work, and must not be erased by the
+ * restriction. WHICH of these is taken stays Jev's choice.
+ */
+export const THREAT_SURVIVAL_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'ATTACK',
+  'RETREAT',
+  'ESCALATE',
+  'EAT',
+  'EQUIP',
+])
+
+/**
+ * The bounded escalation offered when the body is under threat and the code
+ * cannot ground a single attack or keep-distance route. Returning the work set
+ * here (the pre-existing fallback) is exactly the measured "keeps mining next to
+ * the zombie" behaviour, so the fallback is now an explicit capability gap the
+ * semantic layer can act on - never a silent return to work.
+ */
+export function threatEscalateCandidate(reason: string, tick = 0): Candidate {
+  return {
+    id: 'ESCALATE',
+    kind: 'ESCALATE',
+    label: `hand control to System 2 (${reason})`,
+    targetName: null,
+    target: null,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick, reason, threatResponse: true },
+  }
 }
 
 export function restrictCandidatesDuringImmediateThreat(
@@ -203,13 +237,12 @@ export function restrictCandidatesDuringImmediateThreat(
 ): Candidate[] {
   const immediateHostile = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
   if (!immediateHostile) return [...candidates]
-  const combat = candidates.filter(
-    (candidate) => candidate.kind === 'ATTACK' || candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE',
-  )
-  // If perception has no grounded combat response, preserve the original set
-  // and let the normal guard report the capability gap; never silently erase
-  // all candidates or invent an attack target.
-  return combat.length > 0 ? combat : [...candidates]
+  const combat = candidates.filter((candidate) => CONTACT_THREAT_KINDS.has(candidate.kind))
+  // A body in melee contact with no grounded attack and no grounded escape must
+  // NOT be handed its work set back: that is the measured "digs while the zombie
+  // kills it" loop. Offer the bounded escalation instead and let the controller
+  // name the missing affordance (`THREAT_NO_ESCAPE`).
+  return combat.length > 0 ? combat : [threatEscalateCandidate('no_grounded_threat_response')]
 }
 
 /**
@@ -229,6 +262,75 @@ export function restrictCandidatesAtCriticalHealth(
   if (!immediateHostile || state.self.health > CRITICAL_COMBAT_HEALTH) return [...candidates]
   const escape = candidates.filter((candidate) => candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE')
   return escape.length > 0 ? escape : [...candidates]
+}
+
+/**
+ * SAFE: while the bounded danger state is ACTIVE, work actions do not stay
+ * selectable. This is the state half of the measured death loop: the body
+ * retreated once while a zombie was inside `IMMEDIATE_HOSTILE_RANGE`, then went
+ * straight back to digging/retrieving/crafting the moment the mob left that
+ * single snapshot. The zombie followed, landed the next hit, and health eroded
+ * 20 -> 18 -> 16 -> 2 -> death over a minute with no state that remembered the
+ * fight was still on.
+ *
+ * The state itself (`ThreatTracker`) enters on the threat predicate and leaves
+ * only when the whole envelope has been continuously clear for a bounded
+ * interval, so this restriction cannot flap per tick. It keeps every grounded
+ * survival/self-care action (`ATTACK`, `RETREAT`, `ESCALATE`, `EAT`, `EQUIP`)
+ * and leaves WHICH one to Jev; when the code can ground none of them it returns
+ * a bounded ESCALATE and the caller mirrors the capability gap
+ * (`THREAT_NO_ESCAPE`) instead of silently handing the work set back.
+ */
+export function restrictCandidatesDuringDangerousThreat(
+  state: Pick<WorldState, 'entities' | 'signals'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const threat = state.signals?.threat ?? null
+  if (threat === null || threat.active !== true) return [...candidates]
+  const survival = candidates.filter((candidate) => THREAT_SURVIVAL_KINDS.has(candidate.kind))
+  if (survival.length > 0) return survival
+  return [
+    threatEscalateCandidate(
+      threat.threatName === null ? 'no_grounded_threat_response' : `no_grounded_threat_response:${threat.threatName}`,
+    ),
+  ]
+}
+
+/**
+ * The exact threat offer the controller applies: contact-range restriction,
+ * then the persistent danger-state restriction. Returns the code-owned gap so
+ * the caller can mirror `THREAT_NO_ESCAPE` when the body was left with nothing
+ * but an escalation while a hostile is on it.
+ */
+export interface ThreatOffer {
+  candidates: Candidate[]
+  /** the danger state this offer was computed against (null when none) */
+  threat: ThreatStateEvidence | null
+  /** true when work actions were removed because of the threat */
+  restricted: boolean
+  /** the body is at contact range right now */
+  inContact: boolean
+  /** code grounded no attack and no keep-distance route under threat */
+  gap: { reason: string } | null
+}
+
+export function applyThreatRestriction(
+  state: Pick<WorldState, 'entities' | 'signals'>,
+  candidates: readonly Candidate[],
+): ThreatOffer {
+  const threat = state.signals?.threat ?? null
+  const inContact = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
+  const contact = restrictCandidatesDuringImmediateThreat(state, candidates)
+  const restricted = restrictCandidatesDuringDangerousThreat(state, contact)
+  const onlyEscalate = restricted.length === 1 && restricted[0]?.kind === 'ESCALATE'
+  const gap = onlyEscalate && (threat?.active === true || inContact) ? { reason: 'no_grounded_threat_response' } : null
+  return {
+    candidates: restricted,
+    threat,
+    restricted: restricted.length !== candidates.length,
+    inContact,
+    gap,
+  }
 }
 
 /**
@@ -1811,16 +1913,26 @@ function generateRawCandidates(
     seenAttackIds.add(producer.id)
     attackTargets.push(producer)
   }
+  // The body's own capability facts for a fight. Code owns CAN: which item the
+  // body is holding (fists are a weapon too), its vanilla damage when this
+  // module can pin it, and whether the body can heal between hits at all
+  // (natural regeneration needs food >= 18; the measured resident held food 0-2
+  // for the whole attrition window and never executed a single EAT). These are
+  // reported on the ATTACK candidate and never used to rank it away: Jev still
+  // chooses ATTACK versus keep-distance versus escalate.
+  const weapon = weaponFacts(state.self.heldItem?.name ?? null)
+  const body = bodySurvivalFacts(state.self)
   for (const entity of attackTargets) {
     const isFoodTarget = huntTargets.includes(entity)
     const goalDrop = goalDropByEntity.has(entity.id) ? focusItem : null
+    const weaponNote = weapon.name === null ? 'with bare fists' : `with ${weapon.label}`
     candidates.push({
       id: `ATTACK:e${entity.id}`,
       kind: 'ATTACK',
       label:
         goalDrop === null
-          ? `attack ${entity.name} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z})`
-          : `hunt ${entity.name} ${entity.distance}m away for ${goalDrop} at (${entity.position.x},${entity.position.y},${entity.position.z})`,
+          ? `attack ${entity.name} ${entity.distance}m away at (${entity.position.x},${entity.position.y},${entity.position.z}) ${weaponNote}`
+          : `hunt ${entity.name} ${entity.distance}m away for ${goalDrop} at (${entity.position.x},${entity.position.y},${entity.position.z}) ${weaponNote}`,
       targetName: entity.name,
       target: entity.position,
       targetEntityId: entity.id,
@@ -1833,6 +1945,15 @@ function generateRawCandidates(
         tick: state.tick,
         entityId: entity.id,
         distance: entity.distance,
+        // Typed CAN facts: what the body swings with, and whether it can heal
+        // the damage it is about to trade. Never a preference.
+        weapon: weapon.label,
+        weaponKind: weapon.kind,
+        ...(weapon.name === null ? {} : { weaponItem: weapon.name }),
+        ...(weapon.damage === null ? {} : { weaponDamage: weapon.damage }),
+        bodyHealth: body.health,
+        bodyFood: body.food,
+        bodyRegenerates: body.regenerating,
         ...(goalDrop === null ? {} : { goalDrop, requiresKill: true }),
         // Typed CAN fact: this ATTACK is the grounded route to food, and which
         // animal it targets. The marker reader/log must not infer it from the
@@ -1879,13 +2000,13 @@ function generateRawCandidates(
   candidates.push(...armorEquipCandidates(state))
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
-  // Response-worthy threats include ranged attackers that have already engaged
-  // the bot, not just the melee-immediate ones. This is the P1 durability fix:
-  // a skeleton shooting from 10m previously produced neither ATTACK (8m cap) nor
-  // RETREAT (3.2m cap), so Jev could only WAIT/MOVE while being hit.
-  const responseThreats = state.entities
-    .filter((entity) => isResponseWorthyThreat(state, entity, state.timestampMs))
-    .sort((a, b) => a.distance - b.distance)
+  // Every threat the body must answer right now, nearest first: hostiles inside
+  // the bounded danger radius (engaged or not) plus response-worthy hostiles
+  // inside the response envelope. This is the P1 durability fix (a skeleton
+  // shooting from 10m previously produced neither ATTACK nor RETREAT) extended
+  // to "a zombie 6m away and closing": the survival offer must be grounded
+  // before the first hit, not only after it.
+  const responseThreats = activeThreats(state.entities, state.signals.lastDamage ?? null, state.timestampMs)
   const primaryThreat = responseThreats[0] ?? null
   const retreats = pickRetreats(
     state,
@@ -1895,30 +2016,43 @@ function generateRawCandidates(
     options.blacklistedMoveTargets,
   )
   for (const retreat of retreats) {
+    const spot = retreat.spot
     candidates.push({
-      id: `RETREAT:${blockId('p', retreat)}`,
+      id: `RETREAT:${blockId('p', spot)}`,
       kind: 'RETREAT',
-      label: moveLabel(retreat, 'retreat to safety', state.self.position),
+      // The label states the separation the destination ACTUALLY buys. The old
+      // "retreat to safety" conflated a 1.4m shuffle with an escape, and the
+      // measured body died standing on a spot labelled exactly that way.
+      label:
+        primaryThreat === null
+          ? moveLabel(spot, 'retreat to safety', state.self.position)
+          : `${moveLabel(spot, `keep distance from ${primaryThreat.name}`, state.self.position)} ` +
+            `(+${Math.round(retreat.gain * 100) / 100}m separation, ${Math.round(retreat.separation * 100) / 100}m away` +
+            `${retreat.outsideReach ? ', outside its reach' : ''}${retreat.escape ? ', escape scan' : ''})`,
       targetName: null,
-      target: retreat,
+      target: spot,
       targetEntityId: null,
       itemName: null,
       requiresTool: false,
       toolName: null,
-      inReach: distance(retreat, state.self.position) <= options.reach,
+      inReach: distance(spot, state.self.position) <= options.reach,
       hasStandableAdjacent: true,
       meta: {
         tick: state.tick,
-        x: retreat.x,
-        y: retreat.y,
-        z: retreat.z,
+        x: spot.x,
+        y: spot.y,
+        z: spot.z,
+        separation: Math.round(retreat.separation * 100) / 100,
+        separationGain: Math.round(retreat.gain * 100) / 100,
+        outsideReach: retreat.outsideReach,
+        ...(retreat.escape ? { escapeScan: true } : {}),
         ...(primaryThreat === null
           ? {}
           : {
               threatEntityId: primaryThreat.id,
               threatName: primaryThreat.name,
               threatDistance: primaryThreat.distance,
-              separation: Math.round(distance(retreat, primaryThreat.position) * 100) / 100,
+              threatStandoff: threatStandoffRange(primaryThreat.name),
               ...(primaryThreat.attackedSelf === true ? { threatAttackedSelf: true } : {}),
               ...(primaryThreat.heldItem != null ? { threatHeldItem: primaryThreat.heldItem } : {}),
             }),
@@ -5990,38 +6124,54 @@ function nearestDanger(state: WorldState, radius: number): BlockState | null {
 }
 
 /**
- * Ranked retreat destinations. The first entry is the spot with the greatest
- * separation from the nearest response-worthy threat; up to
+ * Grounded keep-distance destinations, best separation first. Up to
  * `MAX_RETREAT_CANDIDATES` are returned so Jev can choose a direction instead of
- * receiving one pre-picked spot. Every returned spot must *increase* separation
- * from an immediate/attributed threat, so a retreat can never be a re-labeled
- * MOVE. With no sensed threat the original hazard/self escape semantics are
- * preserved.
+ * receiving one pre-picked spot.
+ *
+ * A destination qualifies only when it ACTUALLY keeps distance from the threat:
+ * it reaches that threat's standoff range without moving closer, or it gains at
+ * least `MIN_KEEP_DISTANCE_GAIN` of separation. The previous rule (`> current +
+ * 0.25`) admitted a 1.4 m shuffle inside melee reach and labelled it "retreat to
+ * safety"; the measured body selected exactly such a spot, executed `moved=0m`,
+ * and died on it. Destinations come from the local `standable` window AND from
+ * the threat escape scan (`terrain.escapeCells`), because the local window is
+ * only 5x5x3 and can never contain a real escape.
+ *
+ * With no sensed threat the original hazard/self escape semantics are preserved.
  */
 function pickRetreats(
   state: WorldState,
   standable: Vec3Json[],
   danger: BlockState | null,
-  threats: readonly EntityState[],
+  threats: readonly ThreatEntityLike[],
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
-): Vec3Json[] {
+): KeepDistanceSpot[] {
   const hurt = state.self.health <= CRITICAL_COMBAT_HEALTH
   if (danger === null && threats.length === 0 && !hurt) return []
   const hostile = threats.length > 0 ? threats[0] ?? null : null
   const threat = danger?.position ?? hostile?.position ?? state.self.position
-  const currentThreatDistance = hostile === null ? null : distance(state.self.position, hostile.position)
-  const scored: Array<{ spot: Vec3Json; separation: number }> = []
-  for (const spot of standable) {
-    if (isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)) continue
-    scored.push({ spot, separation: distance(spot, threat) })
+  const usable = (spot: Vec3Json): boolean => !isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)
+  const standableUsable = standable.filter(usable)
+  if (hostile !== null) {
+    return selectKeepDistanceSpots({
+      self: state.self.position,
+      threat: hostile.position,
+      standable: standableUsable,
+      escapeCells: (state.terrain.escapeCells ?? []).filter(usable),
+      standoff: threatStandoffRange(hostile.name),
+      max: MAX_RETREAT_CANDIDATES,
+    })
   }
-  if (scored.length === 0) return []
+  // Hazard-only (or critical-health-with-no-sensed-hostile): unchanged semantics
+  // - the destination must clear the hazard radius.
+  const scored: KeepDistanceSpot[] = []
+  for (const spot of standableUsable) {
+    const separation = distance(spot, threat)
+    if (separation < HAZARD_DANGER_RADIUS) continue
+    scored.push({ spot, separation, gain: separation - distance(state.self.position, threat), outsideReach: true, escape: false })
+  }
   scored.sort((a, b) => b.separation - a.separation)
-  const qualifying =
-    hostile !== null
-      ? scored.filter((entry) => currentThreatDistance !== null && entry.separation > currentThreatDistance + 0.25)
-      : scored.filter((entry) => entry.separation >= HAZARD_DANGER_RADIUS)
-  return qualifying.slice(0, MAX_RETREAT_CANDIDATES).map((entry) => entry.spot)
+  return scored.slice(0, MAX_RETREAT_CANDIDATES)
 }
 
 /**

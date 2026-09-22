@@ -285,7 +285,14 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
   // (column-unless-unsafe, placeable held, step cap).
   const verticalPlan = hasVerticalPlan(candidate)
   if (!verticalPlan) {
-    const standable = state.terrain.standable.some((spot) => samePosition(spot, target))
+    // SAFE/CAN: a keep-distance destination may come from the threat escape
+    // scan, which applies the same `isStandable` predicate over a wider window
+    // (`state.terrain.escapeCells`). The ordinary 5x5x3 window can never contain
+    // a destination outside melee reach, so validating only against it would
+    // reject every real retreat the candidate layer can ground.
+    const standable =
+      state.terrain.standable.some((spot) => samePosition(spot, target)) ||
+      (state.terrain.escapeCells ?? []).some((spot) => samePosition(spot, target))
     if (!standable) {
       return deny(
         candidate.id,

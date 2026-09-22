@@ -271,6 +271,13 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
       // like a healthy agent (max beta 0.36 < 0.5 over 2148 votes).
       strategicNonProgress: state.signals.strategicNonProgress ?? null,
       oscillationsDetected: state.signals.oscillationsDetected ?? 0,
+      // SAFE: the bounded danger state (see `threat.ts`): whether the body is in
+      // a fight, how long it has been answering it, and how far the nearest
+      // hostile is. Candidate labels already carry the weapon and the separation
+      // each destination buys; this is the STATE those options belong to, so Jev
+      // can choose to keep answering the mob instead of resuming work between two
+      // hits (the measured per-tick failure).
+      threat: state.signals.threat ?? null,
     },
     recentEvents: state.recentEvents.slice(-16),
   }

@@ -24,8 +24,9 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, blockId, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringImmediateThreat, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { bodySurvivalFacts, formatThreatClear, formatThreatNearby, formatThreatNoEscape, MELEE_THREAT_REACH, ThreatTracker, weaponFacts } from './threat.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -1746,6 +1747,21 @@ export class JevController {
   private readonly criticalDamage = new CriticalDamageTracker(resolveCriticalDamageLimit())
   /** Signature of the last `BODY_STARVING`/`CRITICAL_DAMAGE` line, so it logs on a change, not per tick. */
   private lastCriticalDamageLine: string | null = null
+  /**
+   * SAFE: the bounded danger STATE (see `threat.ts`). Enter on the threat
+   * predicate, leave only after the whole envelope has been continuously clear
+   * for `THREAT_CLEAR_MS`. The measured death loop was per-tick: a body that
+   * retreated once and went straight back to work when the mob's snapshot moved
+   * outside `IMMEDIATE_HOSTILE_RANGE`, then died with health 2.17 after a minute
+   * of the same. The candidate layer reads this through `signals.threat`.
+   */
+  private readonly threat = new ThreatTracker()
+  /** Signature of the last `THREAT_NEARBY` line, so proximity logs on a change. */
+  private lastThreatLine: string | null = null
+  /** Signature of the last `THREAT_NO_ESCAPE` line, so the gap logs on a change. */
+  private lastThreatGapLine: string | null = null
+  /** Whether the danger state was active last tick, so the exit logs once. */
+  private threatWasActive = false
   /** Signature of the last `FOOD_HABITAT_REFUSED` line, so it logs on a change. */
   private lastFoodHabitatRefusalKey: string | null = null
   /**
@@ -2372,9 +2388,20 @@ export class JevController {
       this.lastWorldStateTick = this.tickCounter
 
       if (state.self.health <= 0) {
+        // A dead body has no fight to continue: the danger state must not leak
+        // into the post-respawn generation.
+        this.threat.reset()
+        this.threatWasActive = false
+        this.lastThreatLine = null
         this.escalate('unexpected_world_state', 'health <= 0')
         return
       }
+
+      // SAFE: advance the bounded danger state from THIS tick's sensed entities
+      // and publish it on the signals the candidate layer, the guard and the Jev
+      // payload read. Runs before candidate generation so the escape-cell scan,
+      // the retreat grounding and the restriction all see the same state.
+      this.observeThreatState(state)
 
       const unreachableStations = this.unreachableStationKeys(state)
       const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
@@ -2424,7 +2451,16 @@ export class JevController {
       // candidate. Backfill the deterministic craft step for the current craft
       // goal here so an inputs-held craft is never reported as starved.
       candidates = ensureCraftStepActionable(state, candidates, groundingOptions)
-      candidates = restrictCandidatesDuringImmediateThreat(state, candidates)
+      // SAFE: the threat offer. Contact range removes work actions (pre-existing
+      // envelope); the bounded danger STATE keeps them removed until the whole
+      // envelope has been clear for a sustained interval, so the body does not
+      // go back to digging between two hits of the same fight. The result also
+      // names the capability gap when code grounds no attack and no
+      // keep-distance route, which is mirrored as `THREAT_NO_ESCAPE` - the work
+      // set is never silently handed back while a hostile is on the body.
+      const threatOffer = applyThreatRestriction(state, candidates)
+      candidates = threatOffer.candidates
+      this.logThreatGap(state, threatOffer)
       candidates = restrictCandidatesAtCriticalHealth(state, candidates)
       // SAFE: while the body is out of breath the offer collapses to the routes
       // that can end the submersion. This is the candidate-side half of the
@@ -2720,13 +2756,17 @@ export class JevController {
         sensorOptions(this.options, this.scheduler.worldRevision),
       )
       freshState = this.mergeRememberedPortalFrame(freshState)
+      // The revalidation offer applies the SAME threat envelopes as the
+      // decision-time offer (contact range + the published bounded danger
+      // state), so a work action cannot slip back in between the Jev answer and
+      // execution while a hostile is on the body.
       const freshCandidates = restrictCandidatesDuringCriticalDamage(
         freshState,
         restrictCandidatesDuringSubmersion(
           freshState,
           restrictCandidatesAtCriticalHealth(
             freshState,
-            restrictCandidatesDuringImmediateThreat(
+            applyThreatRestriction(
               freshState,
               this.filterMoveCandidates(
                 generateGroundedCandidates(
@@ -2746,9 +2786,9 @@ export class JevController {
               freshState,
               false,
             ),
+            ).candidates,
           ),
         ),
-      ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
@@ -3536,6 +3576,15 @@ export class JevController {
   ): string {
     const running = this.executor.current
     const invalid = running === null ? null : this.deterministicInvalid(candidates, state)
+    // SAFE: in melee contact a threat response must execute now. Code owns only
+    // the contact fact and the kind test; the choice is still Jev's (the newer
+    // one). Without this, the measured fight held the in-flight RETREAT while
+    // Jev selected ATTACK three decisions in a row and the body never swung.
+    const chosen = candidates.find((candidate) => candidate.id === chosenId) ?? null
+    const contactThreatResponse =
+      chosen !== null &&
+      CONTACT_THREAT_KINDS.has(chosen.kind) &&
+      state.entities.some((entity) => entity.hostile && entity.distance <= MELEE_THREAT_REACH)
     const decision = evaluateActionCommitment({
       previous: this.actionCommitmentState,
       inFlight:
@@ -3547,6 +3596,7 @@ export class JevController {
       nowMs: Date.now(),
       inFlightInvalid: running !== null && invalid !== null && invalid.has(running.id),
       inFlightOffered: running !== null && candidates.some((candidate) => candidate.id === running.id),
+      contactThreatResponse,
     })
     this.actionCommitmentState = decision.state
     if (decision.line !== null) {
@@ -5895,6 +5945,117 @@ export class JevController {
       sourceId: sameBurst ? previous.sourceId : null,
       sourceName: sameBurst ? previous.sourceName : null,
     }
+  }
+
+  /**
+   * SAFE: the bounded danger STATE no other counter owns.
+   *
+   * `restrictCandidatesDuringImmediateThreat` is a per-tick predicate: it arms
+   * while a hostile is inside `IMMEDIATE_HOSTILE_RANGE` in the CURRENT snapshot.
+   * Measured live, that let the body retreat once and go straight back to
+   * digging the moment the mob's snapshot moved outside it; the zombie followed,
+   * landed the next hit, and health eroded 20 -> 18 -> 16 -> 2 -> death over a
+   * minute (eight deaths in seven minutes, `run-mubobiq6-12onv`). This tracker
+   * owns the missing state: enter on the threat predicate, stay while any
+   * hostile is inside the bounded danger radius or has engaged the body, and
+   * leave only after the whole envelope has been continuously clear for
+   * `THREAT_CLEAR_MS`.
+   *
+   * The typed `THREAT_NEARBY` line is emitted on a change with the mob name,
+   * distance, contact/danger flags, the code-owned weapon the body holds and
+   * whether the body can regenerate at all - so a post-mortem never has to guess
+   * what killed the body or what it was holding. `THREAT_CLEAR` records the
+   * bounded exit.
+   */
+  private observeThreatState(state: WorldState): void {
+    const evidence = this.threat.note({
+      atMs: state.timestampMs,
+      entities: state.entities,
+      lastDamage: state.signals.lastDamage ?? null,
+    })
+    this.signals.threat = evidence
+    state.signals = { ...state.signals, threat: evidence }
+    const goalKey = this.currentGoalKey()
+    if (!evidence.active) {
+      this.lastThreatLine = null
+      if (this.threatWasActive) {
+        this.threatWasActive = false
+        this.logger.info(
+          'agent',
+          formatThreatClear(goalKey, evidence),
+          { clearMs: evidence.clearMs, clearForMs: evidence.clearForMs },
+          this.tickCounter,
+        )
+      }
+      return
+    }
+    this.threatWasActive = true
+    const weapon = weaponFacts(state.self.heldItem?.name ?? null)
+    const line = formatThreatNearby(goalKey, evidence, weapon, bodySurvivalFacts(state.self))
+    // Bounded dedup: the line carries `activeMs`, which changes every decision,
+    // so the signature drops it and keeps the facts a post-mortem needs
+    // (identity, whole-metre distance, contact/danger, envelope size, weapon). A
+    // mob hovering at the same distance does not re-log every tick.
+    const signature = [
+      evidence.threatId,
+      evidence.threatName,
+      evidence.inContact ? 'contact' : evidence.inDanger ? 'danger' : 'engaged',
+      evidence.threatDistance === null ? 'na' : Math.round(evidence.threatDistance),
+      evidence.hostileCount,
+      weapon.name ?? 'fists',
+    ].join('|')
+    if (signature === this.lastThreatLine) return
+    this.lastThreatLine = signature
+    this.logger.warn(
+      'agent',
+      line,
+      {
+        threat: evidence.threatName,
+        threatId: evidence.threatId,
+        distance: evidence.threatDistance,
+        contact: evidence.inContact,
+        danger: evidence.inDanger,
+        entryReason: evidence.entryReason,
+        activeMs: evidence.activeMs,
+        weapon: state.self.heldItem?.name ?? 'fists',
+        food: state.self.food,
+        health: state.self.health,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Mirror the code-owned threat capability gap: the body is under threat and
+   * the deterministic layer could ground neither an attack nor a keep-distance
+   * route, so only a bounded ESCALATE is offered. This is the honest replacement
+   * for the old fallback that returned the work set while a zombie was inside
+   * melee reach.
+   */
+  private logThreatGap(state: WorldState, offer: ThreatOffer): void {
+    if (offer.gap === null || offer.threat === null) {
+      this.lastThreatGapLine = null
+      return
+    }
+    const line = formatThreatNoEscape(
+      this.currentGoalKey(),
+      offer.threat,
+      weaponFacts(state.self.heldItem?.name ?? null),
+      `${offer.gap.reason}${offer.inContact ? '@contact' : '@danger'}`,
+    )
+    if (line === this.lastThreatGapLine) return
+    this.lastThreatGapLine = line
+    this.logger.warn(
+      'agent',
+      line,
+      {
+        threat: offer.threat.threatName,
+        distance: offer.threat.threatDistance,
+        inContact: offer.inContact,
+        reason: offer.gap.reason,
+      },
+      this.tickCounter,
+    )
   }
 
   /**

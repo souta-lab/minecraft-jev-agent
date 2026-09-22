@@ -316,6 +316,20 @@ export interface Rung {
    * `food` must not imply "finish the whole remaining ladder first".
    */
   selfContained?: boolean
+  /**
+   * The rung's OUTCOME is a world object (a placed station, a built/lit portal,
+   * standing in the Nether), not an inventory item. Its `satisfied` therefore has
+   * a durable world half that live world truth can REVOKE (`syncKnownPortalSites`,
+   * remembered-station validation).
+   *
+   * A durable RESUME record (the archived ledger) may carry this rung as already
+   * reached, but that claim is only usable while the world half still holds: an
+   * inventory achievement is a historical fact of the run, a world outcome can be
+   * disproven by a later live read. Marking the boundary here (rather than
+   * re-deriving it per caller) keeps revocation owned by the rung's own predicate
+   * and usable by every consumer of the durable floor.
+   */
+  worldOutcome?: boolean
   satisfied: (c: Counts, w: ResidentWorldMemory) => boolean
   goals: (c: Counts, w: ResidentWorldMemory) => PlannedGoal[]
   /**
@@ -460,6 +474,7 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'crafting_table',
+    worldOutcome: true,
     satisfied: (c, w) => has(c, 'crafting_table') || w.craftingTables.length > 0,
     goals: () => [{ kind: 'craft', description: 'craft 1 x crafting_table', targetItem: 'crafting_table', requiredCount: 1 }],
   },
@@ -479,6 +494,7 @@ export const RUNGS: readonly Rung[] = [
   },
   {
     id: 'furnace',
+    worldOutcome: true,
     satisfied: (c, w) => has(c, 'furnace') || w.furnaces.length > 0,
     goals: () => [
       { kind: 'craft', description: 'craft 1 x furnace', targetItem: 'furnace', requiredCount: 1 },
@@ -612,6 +628,7 @@ export const RUNGS: readonly Rung[] = [
   // --- M2 portal transition ---
   {
     id: 'nether_portal',
+    worldOutcome: true,
     // M2 transition: done only once the lit nether_portal block actually exists.
     // The previous flint_and_steel predicate declared the rung satisfied before a
     // frame was ever built, so the ladder skipped build/light/verify entirely.
@@ -650,6 +667,7 @@ export const RUNGS: readonly Rung[] = [
   // (`blaze_rods`) while the bot was still in the overworld.
   {
     id: 'enter_nether',
+    worldOutcome: true,
     satisfied: (_c, w) => inNether(w),
     goals: () => [netherPortalEntryGoal()],
   },
@@ -1269,27 +1287,159 @@ export interface ResumeRung {
   /** the rung whose missing precondition forced a fallback, else null. */
   fallbackFrom: string | null
   fallbackNeed: string | null
+  /** `durable` when a durable achievement raised the scan floor, else `inventory`. */
+  resumeBasis: ResumeBasis
+  /** the highest rung the durable run record + world truth proves reached (-1 = none). */
+  achievedRungIndex: number
+  /** `RUNGS[achievedRungIndex]?.id`, or null when the durable record proves nothing. */
+  achievedRungId: string | null
+  /** typed durable records that contributed to `achievedRungIndex`. */
+  achievedSources: DurableLadderSource[]
+}
+
+/**
+ * Why the resume rung was chosen. `inventory` = the live kit alone decided it
+ * (the pre-fix behaviour); `durable` = the run's own durable record (archived
+ * ledger and/or a durable world outcome) raised the floor above what the leftover
+ * kit implies.
+ */
+export type ResumeBasis = 'inventory' | 'durable'
+
+/** Which durable record proves a rung was already reached in this run. */
+export type DurableLadderSource = 'ledger-basis' | 'ledger-goal' | 'world-outcome'
+
+/**
+ * The run-scoped durable ladder record, derived from the HOST-committed class-A
+ * ledger (`ctx.ledgerSnapshot`) by `durableLadderProgressFromLedger`
+ * (generation-entry.ts, which owns the ledger contract). It is evidence ONLY:
+ * `deriveResumeRung` decides how far it may raise the resume floor.
+ */
+export interface DurableLadderProgress {
+  /** highest mandatory rung index the durable record proves already reached (-1 = none). */
+  rungIndex: number
+  /** `RUNGS[rungIndex]?.id`, or null when the record proves nothing. */
+  rungId: string | null
+  /** typed record kinds that contributed. */
+  sources: DurableLadderSource[]
+  /** bounded audit evidence (ledger row ids / basis fields) for the typed marker. */
+  evidence: string[]
+}
+
+/**
+ * The highest mandatory rung that DURABLE WORLD TRUTH alone proves reached: a
+ * remembered station, a lit+verified portal site, standing in the Nether.
+ *
+ * Evaluated with an EMPTY inventory on purpose. A rung predicate keeps its world
+ * half and its inventory half in one `satisfied`, so probing with no kit extracts
+ * exactly the world half - no parallel predicate list to keep in sync, and a rung
+ * whose world outcome is revocable stays revocable.
+ *
+ * This is the world half of the durable resume floor. `durableLadderProgressFromLedger`
+ * (generation-entry.ts, which owns the class-A ledger) merges it with the run's
+ * archived frontier record before the ladder may use it, so the ladder functions
+ * stay pure and a caller with no durable record keeps the old behaviour exactly.
+ */
+export function worldOutcomeRungFloor(world: ResidentWorldMemory): number {
+  let floor = -1
+  for (let i = 0; i < RUNGS.length; i += 1) {
+    const rung = RUNGS[i]
+    if (rung === undefined || !isMandatoryRung(rung)) continue
+    if (!rung.satisfied({}, world)) continue
+    floor = i
+  }
+  return floor
+}
+
+/**
+ * How far the supplied durable record may raise the resume scan, capped by live
+ * world truth.
+ *
+ * The record is the run's own commit (archived ledger: its frontier basis and its
+ * `done` rows). The ladder is a prerequisite chain, so a rung it records as
+ * reached entails every mandatory rung before it - the same capability closure
+ * `rungBehindInventory` already applies to a diamond pickaxe, extended to the
+ * run's durable history.
+ *
+ * The cap is what keeps "lost world state still resets" honest: a `worldOutcome`
+ * rung can be REVOKED (a broken portal, a removed station), and a revoked rung
+ * must be re-planned rather than skipped, so the floor stops just below the first
+ * revoked one. Inventory achievements are historical facts and are not revocable.
+ *
+ * No record, or a record that proves nothing, returns -1: live-inventory
+ * behaviour exactly as before.
+ */
+export function achievedRungFloor(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  durable?: DurableLadderProgress | null,
+): { rungIndex: number; sources: DurableLadderSource[] } {
+  const through = durable === null || durable === undefined ? -1 : durable.rungIndex
+  if (through < 0) return { rungIndex: -1, sources: [] }
+  let floor = -1
+  for (let i = 0; i <= through && i < RUNGS.length; i += 1) {
+    const rung = RUNGS[i]
+    if (rung === undefined || !isMandatoryRung(rung)) continue
+    // A revoked world outcome invalidates the durable claim from here up: the
+    // structure must be re-planned, and everything the record asserted above it
+    // depended on it.
+    if (rung.worldOutcome === true && !rung.satisfied(counts, world)) break
+    floor = i
+  }
+  if (floor < 0) return { rungIndex: -1, sources: [] }
+  return { rungIndex: floor, sources: [...(durable?.sources ?? [])] }
+}
+
+/** How a durable-record rung index maps back to a rung id (null when `complete`). */
+export function rungIdForResumeIndex(rungIndex: number): string | null {
+  return RUNGS[rungIndex]?.id ?? null
 }
 
 /**
  * Inventory-aware resume rung for a ladder reset (death, disconnect, restart or a
  * stale ledger). Requirements: start at wood only when the live inventory is
- * genuinely empty of usable items; otherwise resume at the first rung that still
- * has work and whose preconditions hold, falling back one step (and logging) when
- * a precondition is missing so no ungrounded rung is ever resumed.
+ * genuinely empty of usable items; otherwise resume at the first rung above the
+ * DURABLE floor (`achievedRungFloor`) that still has work and whose preconditions
+ * hold, falling back one step (and logging) when a precondition is missing so no
+ * ungrounded rung is ever resumed.
+ *
+ * The durable floor is what makes a NON-LOSSY death non-lossy: when the run has
+ * already reached a rung (archived ledger + durable world outcome), a death that
+ * kept the inventory must resume that position instead of re-entering at the
+ * earliest rung the leftover kit happens to imply. A genuine total loss (empty
+ * usable inventory) still resets to wood, and the durable record is not consulted
+ * at all in that case.
  */
 export function deriveResumeRung(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
+  durable?: DurableLadderProgress | null,
 ): ResumeRung {
   const first = executableRungs()[0]
   const woodId = first?.id ?? 'wood'
   if (inventoryUsableEmpty(counts)) {
-    return { rungIndex: 0, rungId: woodId, invEmpty: true, fallbackFrom: null, fallbackNeed: null }
+    return {
+      rungIndex: 0,
+      rungId: woodId,
+      invEmpty: true,
+      fallbackFrom: null,
+      fallbackNeed: null,
+      resumeBasis: 'inventory',
+      achievedRungIndex: -1,
+      achievedRungId: null,
+      achievedSources: [],
+    }
+  }
+  const achieved = achievedRungFloor(counts, world, durable)
+  const basis: ResumeBasis = achieved.sources.length > 0 ? 'durable' : 'inventory'
+  const resumeExtras = {
+    resumeBasis: basis,
+    achievedRungIndex: achieved.rungIndex,
+    achievedRungId: rungIdForResumeIndex(achieved.rungIndex),
+    achievedSources: achieved.sources,
   }
   let candidate = -1
-  for (let i = 0; i < RUNGS.length; i += 1) {
+  for (let i = Math.max(0, achieved.rungIndex + 1); i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || !isMandatoryRung(rung)) continue
     if (rungBehindInventory(rung, counts, world)) continue
@@ -1297,15 +1447,15 @@ export function deriveResumeRung(
     break
   }
   if (candidate < 0) {
-    return { rungIndex: RUNGS.length, rungId: 'complete', invEmpty: false, fallbackFrom: null, fallbackNeed: null }
+    return { rungIndex: RUNGS.length, rungId: 'complete', invEmpty: false, fallbackFrom: null, fallbackNeed: null, ...resumeExtras }
   }
   const candidateRung = RUNGS[candidate]
   if (candidateRung === undefined) {
-    return { rungIndex: 0, rungId: woodId, invEmpty: false, fallbackFrom: null, fallbackNeed: null }
+    return { rungIndex: 0, rungId: woodId, invEmpty: false, fallbackFrom: null, fallbackNeed: null, ...resumeExtras }
   }
   const precondition = rungPrecondition(candidateRung, counts, world)
   if (precondition.ok) {
-    return { rungIndex: candidate, rungId: candidateRung.id, invEmpty: false, fallbackFrom: null, fallbackNeed: null }
+    return { rungIndex: candidate, rungId: candidateRung.id, invEmpty: false, fallbackFrom: null, fallbackNeed: null, ...resumeExtras }
   }
   for (let j = candidate - 1; j >= 0; j -= 1) {
     const earlier = RUNGS[j]
@@ -1318,10 +1468,17 @@ export function deriveResumeRung(
       to: earlier.id,
       rungIndex: j,
     })
-    return { rungIndex: j, rungId: earlier.id, invEmpty: false, fallbackFrom: candidateRung.id, fallbackNeed: precondition.need }
+    return {
+      rungIndex: j,
+      rungId: earlier.id,
+      invEmpty: false,
+      fallbackFrom: candidateRung.id,
+      fallbackNeed: precondition.need,
+      ...resumeExtras,
+    }
   }
   log?.('LADDER_RESUME_FALLBACK', { from: candidateRung.id, need: precondition.need, to: woodId, rungIndex: 0 })
-  return { rungIndex: 0, rungId: woodId, invEmpty: false, fallbackFrom: candidateRung.id, fallbackNeed: precondition.need }
+  return { rungIndex: 0, rungId: woodId, invEmpty: false, fallbackFrom: candidateRung.id, fallbackNeed: precondition.need, ...resumeExtras }
 }
 
 /** The executable ladder as a goal list, gated by per-rung preconditions. */
@@ -1432,8 +1589,16 @@ export function buildLadder(
 }
 
 /** Index/id of the first unsatisfied EXECUTABLE rung (the real progress frontier). */
-export function computeFrontier(counts: Counts, world: ResidentWorldMemory): { rungIndex: number; rungId: string } {
-  for (let i = 0; i < RUNGS.length; i += 1) {
+export function computeFrontier(
+  counts: Counts,
+  world: ResidentWorldMemory,
+  durable?: DurableLadderProgress | null,
+): { rungIndex: number; rungId: string } {
+  // Frontier and resume must share the durable floor too: a rung this run already
+  // reached (archived ledger + durable world outcome) is not the frontier just
+  // because the leftover inventory no longer implies it.
+  const floor = achievedRungFloor(counts, world, durable)
+  for (let i = Math.max(0, floor.rungIndex + 1); i < RUNGS.length; i += 1) {
     const rung = RUNGS[i]
     if (rung === undefined || !isMandatoryRung(rung)) continue
     // Frontier and resume must use the same capability-closure predicate. A
@@ -1559,8 +1724,9 @@ export function advanceMilestones(
   state: MilestoneStreamState,
   counts: Counts,
   world: ResidentWorldMemory,
+  durable?: DurableLadderProgress | null,
 ): { records: MilestoneRecord[]; state: MilestoneStreamState } {
-  const frontier = computeFrontier(counts, world)
+  const frontier = computeFrontier(counts, world, durable)
   const records: MilestoneRecord[] = []
   const recorded: Record<string, 'done' | 'unproven'> = { ...state.recorded }
 
@@ -1620,9 +1786,10 @@ export function resolveRungSourceOfTruth(
   counts: Counts,
   world: ResidentWorldMemory,
   log?: (event: string, detail?: Record<string, unknown>) => void,
+  durable?: DurableLadderProgress | null,
 ): RungSourceOfTruth {
-  const planner = computeFrontier(counts, world)
-  const ledger = deriveResumeRung(counts, world, log)
+  const planner = computeFrontier(counts, world, durable)
+  const ledger = deriveResumeRung(counts, world, log, durable)
   const mismatch = planner.rungId !== ledger.rungId
   const adoptLedger = mismatch && ledger.rungId !== 'complete'
   const source: 'ledger' | 'planner' = adoptLedger ? 'ledger' : 'planner'
@@ -1667,11 +1834,13 @@ export function ladderFloorGoals(
     knownFurnaces?: number
     portalFrameBlocks?: number
     log?: (event: string, detail?: Record<string, unknown>) => void
+    /** the run's durable ladder record (archived ledger), when the caller has it. */
+    durableLadderProgress?: DurableLadderProgress | null
   },
 ): LadderFloor {
   const resume =
     opts?.resumeRungIndex === undefined
-      ? deriveResumeRung(counts, world, opts?.log)
+      ? deriveResumeRung(counts, world, opts?.log, opts?.durableLadderProgress)
       : {
           rungIndex: opts.resumeRungIndex,
           rungId: RUNGS[opts.resumeRungIndex]?.id ?? 'complete',
@@ -2396,6 +2565,7 @@ export function plannerStateHash(
   objective: { targetItem: string; haveCount: number },
   identity: PlannerCacheIdentity,
   portalFrameBlocks: number = 0,
+  durable?: DurableLadderProgress | null,
 ): string {
   const stable: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) stable[name] = n
@@ -2405,7 +2575,7 @@ export function plannerStateHash(
     schemaVersion: identity.schemaVersion,
     capabilityHash: identity.capabilityHash,
     inventory: stable,
-    frontier: computeFrontier(counts, world).rungId,
+    frontier: computeFrontier(counts, world, durable).rungId,
     stations: { tables: world.craftingTables.length, furnaces: world.furnaces.length },
     portalFrameBlocks,
     ores: [...world.discoveredOres].sort(),
@@ -2450,6 +2620,15 @@ export interface PlannerOptions {
   refreshLiveFacts?: () => void
   /** key resolver seam for tests; defaults to `resolveJevApiKey` */
   resolveKey?: () => KeyResolution | null
+  /**
+   * The run's durable ladder record (HOST-committed class-A ledger), when the
+   * caller owns it. Every rung decision the planner makes (option horizon,
+   * deterministic ladder floor, milestone stream, cache identity) uses it, so a
+   * non-lossy death cannot make the planner re-plan rungs the run already
+   * reached. Absent (offline fixtures, tests) = live-inventory evidence only,
+   * exactly as before.
+   */
+  durableLadderProgress?: DurableLadderProgress | null
 }
 
 type PlannerReason = 'start' | 'queue_empty' | 'impossible' | 'stuck'
@@ -2536,6 +2715,8 @@ export class PlannerBrain implements System2Brain {
   private currentCounts: Counts = {}
   private currentPortalFrameBlocks = 0
   private adoptedRungId = 'wood'
+  /** the run's durable ladder record (archived ledger), when the caller supplied one. */
+  private readonly durableLadderProgress: DurableLadderProgress | null = null
 
   constructor(options: PlannerOptions) {
     this.bot = options.bot
@@ -2565,6 +2746,7 @@ export class PlannerBrain implements System2Brain {
     this.maxAttempts = options.maxAttempts ?? Number(process.env.BUDDY_PLANNER_MAX_ATTEMPTS ?? 3)
     this.terminate = options.terminate
     this.resolveKey = options.resolveKey ?? resolveJevApiKey
+    this.durableLadderProgress = options.durableLadderProgress ?? null
     this.cache = this.loadCache()
   }
 
@@ -2584,7 +2766,7 @@ export class PlannerBrain implements System2Brain {
     this.currentCounts = counts
     this.currentPortalFrameBlocks = this.bot.entity === undefined ? 0 : countSensedPortalFrameBlocks(this.bot)
     this.log('PORTAL_FRAME_PROGRESS', { blocks: this.currentPortalFrameBlocks })
-    const rung = resolveRungSourceOfTruth(counts, this.world, this.log)
+    const rung = resolveRungSourceOfTruth(counts, this.world, this.log, this.durableLadderProgress)
     this.adoptedRungId = rung.adoptedRungId
     const options = buildPlanOptions(counts, this.world, {
       placedFurnacesNear: this.placedFurnacesNear(),
@@ -3070,7 +3252,7 @@ export class PlannerBrain implements System2Brain {
    * (`reason=frontier`, `done=false`) and can never be read as a completion.
    */
   private emitMilestones(counts: Counts): void {
-    const advanced = advanceMilestones(this.milestones, counts, this.world)
+    const advanced = advanceMilestones(this.milestones, counts, this.world, this.durableLadderProgress)
     this.milestones = advanced.state
     for (const record of advanced.records) this.log('MILESTONE', { ...record })
   }
@@ -3090,7 +3272,7 @@ export class PlannerBrain implements System2Brain {
   }
 
   private hashState(counts: Counts, request: System2PlanRequest): string {
-    return plannerStateHash(counts, this.world, request.objective, this.cacheIdentity, this.currentPortalFrameBlocks)
+    return plannerStateHash(counts, this.world, request.objective, this.cacheIdentity, this.currentPortalFrameBlocks, this.durableLadderProgress)
   }
 
   private worldShort(): string {
@@ -3099,7 +3281,7 @@ export class PlannerBrain implements System2Brain {
 
   private advisorState(counts: Counts, request: System2PlanRequest, waitStreak: number): AdvisorState {
     const entity = this.bot.entity
-    const frontier = computeFrontier(counts, this.world)
+    const frontier = computeFrontier(counts, this.world, this.durableLadderProgress)
     const relevant: Record<string, number> = {}
     for (const [name, n] of Object.entries(counts)) if (n > 0) relevant[name] = n
     const failedCandidates: Record<string, number> = {}
@@ -3132,7 +3314,7 @@ export class PlannerBrain implements System2Brain {
   private compactState(request: System2PlanRequest): EvaluationState {
     const counts = inventoryCounts(this.bot)
     const entity = this.bot.entity
-    const frontier = computeFrontier(counts, this.world)
+    const frontier = computeFrontier(counts, this.world, this.durableLadderProgress)
     const relevant: Record<string, number> = {}
     for (const [name, n] of Object.entries(counts)) {
       if (n > 0) relevant[name] = n
