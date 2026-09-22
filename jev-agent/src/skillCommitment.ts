@@ -656,6 +656,10 @@ export function skillOutcomeForFailure(failureCode: string | null, status: strin
       return 'WORLD_CHANGED'
     case 'submerged':
     case 'combat_unsafe':
+    // The per-step landing guard stopped the leg BEFORE a lethal step
+    // (`stepLanding.ts`): a hard safety refusal, not a generic mechanical block.
+    case 'hazard_between':
+    case 'unsafe_landing':
       return 'SAFETY_INTERRUPT'
     case 'item_unavailable':
     case 'dig_no_tool':
