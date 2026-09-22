@@ -12,6 +12,10 @@ import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { Candidate } from './candidates.ts'
 import { FatalModelError } from './modelFailure.ts'
+// §437 §1/§10: the model-visible half of the semantic projection (no raw telemetry,
+// and the exact top-level keys the projection hash covers).
+import { projectionModelView } from './jevSemanticProjection.ts'
+import type { JevSemanticProjection } from './jevSemanticProjection.ts'
 import type {
   JevAnswer,
   JevPolicy,
@@ -296,10 +300,17 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
   // position is mechanical detail (candidate distance/reach facts carry what the
   // decision needs), and the per-tick event trace is replaced by the projection's
   // bounded meaningful event kinds plus its previous-decision/outcome block.
+  //
+  // §1/§10: `projectionModelView` is the projection minus its evidence-only
+  // `counts` block, so the payload's top-level keys are exactly the keys the
+  // projection hash covers. Shipping the raw object instead would put the
+  // compressed `rawSkillSteps`/`rawEvents` telemetry into policy input and let the
+  // payload drift from its own cache key.
+  const modelView = projectionModelView(projection as JevSemanticProjection)
   return {
-    projectionVersion: (projection as { version?: unknown }).version ?? null,
+    projectionVersion: modelView.version,
     projectionHash: request.projectionHash ?? null,
-    semantic: projection,
+    semantic: modelView,
     self: {
       ...self,
       position: {

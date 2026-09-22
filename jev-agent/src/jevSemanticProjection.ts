@@ -67,14 +67,25 @@ export const JEV_CANDIDATE_SET = 'JEV_CANDIDATE_SET'
 export const JEV_DECISION_EPOCH_END = 'JEV_DECISION_EPOCH_END'
 export const SKILL_OUTCOME_PACKET = 'SKILL_OUTCOME_PACKET'
 export const STALE_JEV_RESULT_DROPPED = 'STALE_JEV_RESULT_DROPPED'
+/**
+ * §3/§12: the moment the ACTIVE decision epoch authorizes a commitment, i.e. the
+ * selected Skill becomes allowed to produce mechanical effects. Emitted by this
+ * lane because §3 ("only the currently active epoch may authorize a new
+ * SkillCommitment") is this lane's contract; the #436 `skillCommitment.ts` lane
+ * owns the envelope/budget the commitment carries. The name is deliberately the
+ * one #436's closure metrics already count (`tools/skill-closure-metrics.mjs`
+ * reads `SKILL_COMMIT`), so the two lanes agree on one marker rather than two.
+ */
+export const SKILL_COMMIT = 'SKILL_COMMIT'
 
 /** Every marker this module emits, for the controller's mirrored-marker list. */
 export const JEV_BOUNDARY_MARKERS: readonly string[] = [
   JEV_DECISION_EPOCH_START,
   JEV_STATE_PROJECTION,
   JEV_CANDIDATE_SET,
-  JEV_DECISION_EPOCH_END,
+  SKILL_COMMIT,
   SKILL_OUTCOME_PACKET,
+  JEV_DECISION_EPOCH_END,
   STALE_JEV_RESULT_DROPPED,
 ]
 
@@ -1045,6 +1056,53 @@ export function projectionBytes(projection: JevSemanticProjection): number {
   return Buffer.byteLength(JSON.stringify(projection))
 }
 
+/**
+ * §1/§9/§10: the MODEL-VISIBLE projection. `counts` is evidence for the
+ * `JEV_STATE_PROJECTION` log line - how much mechanical churn was compressed -
+ * and is deliberately NOT policy input: a raw `SKILL_STEP`/event count is exactly
+ * the telemetry §1 keeps out of the prompt. Stripping it here also makes the
+ * model payload's top-level keys exactly the keys `projectionCore` hashes, so the
+ * cache key and the payload provably cannot drift (§10). The remaining
+ * sub-object reductions inside `projectionCore` (raw `failureCount`, mechanical
+ * `id`/`label`, and the collapsed `realizations`) are the documented §4/§5
+ * churn-only fields, which cannot change WHICH semantic option is correct.
+ */
+export function projectionModelView(projection: JevSemanticProjection): Omit<JevSemanticProjection, 'counts'> {
+  const { counts: _evidenceOnly, ...view } = projection
+  return view
+}
+
+/**
+ * §4/§10: translate a REPLAYED decision onto the current offer.
+ *
+ * A semantic identity is stable across mechanical churn, but the *representative
+ * realization id* it maps to is not (§4: identity is "not transient
+ * implementation coordinates"). A cache hit therefore returns the same semantic
+ * CHOICE, which must be re-pointed at the current representative - otherwise the
+ * replay names a cell that is no longer grounded and no commitment can be claimed
+ * for it. This changes no preference: dedup already proved the realizations
+ * equivalent, so the identity the model chose is the identity replayed.
+ *
+ * Verdict:
+ *  - `repointed`  the same identity is still offered under a different real id;
+ *  - neither flag  the id was not a semantic candidate choice (WAIT, reflex, ...);
+ *  - `lost`       the chosen identity is GONE, which is a genuine semantic change
+ *                 and must be re-queried instead of replayed.
+ */
+export function repointReplayedChoice(
+  chosenId: string | null,
+  previousViews: readonly SemanticCandidateView[],
+  currentViews: readonly SemanticCandidateView[],
+): { chosenId: string | null; repointed: boolean; lost: boolean } {
+  if (chosenId === null) return { chosenId: null, repointed: false, lost: false }
+  const previous = previousViews.find((view) => view.id === chosenId)
+  // Not a semantic candidate selection: nothing to translate, keep it verbatim.
+  if (previous === undefined) return { chosenId, repointed: false, lost: false }
+  const current = currentViews.find((view) => view.identity === previous.identity)
+  if (current === undefined) return { chosenId, repointed: false, lost: true }
+  return { chosenId: current.id, repointed: current.id !== chosenId, lost: false }
+}
+
 /** Deterministic diff of two projections: the meaningful world delta (§5/§7). */
 export function diffSemanticProjections(
   previous: JevSemanticProjection | null,
@@ -1330,6 +1388,30 @@ export function formatEpochEnd(epoch: DecisionEpoch): string {
 
 export function formatStaleResultDropped(epoch: number, activeEpoch: number | null, reason: string): string {
   return `${STALE_JEV_RESULT_DROPPED} epoch=${epoch} activeEpoch=${activeEpoch ?? 'none'} reason=${reason}`
+}
+
+/**
+ * §3/§12: one line per authorized commitment, so a reviewer can join "which
+ * decision epoch allowed this Skill" to "what that Skill returned"
+ * (`SKILL_OUTCOME_PACKET ... commitmentId=...`) without inferring it from timing.
+ * `leaseEpoch` is the executor action lease the commitment was claimed under;
+ * `selectedIdentity` is the stable §4 semantic identity, NOT the transient
+ * candidate id, so the commit/outcome pair still joins after mechanical churn.
+ */
+export function formatSkillCommit(input: {
+  epoch: number
+  commitmentId: string
+  leaseEpoch: number
+  candidateId: string
+  selectedIdentity: string
+  skillKind: string | null
+  projectionHash: string
+}): string {
+  return (
+    `${SKILL_COMMIT} epoch=${input.epoch} commitmentId=${input.commitmentId} lease=${input.leaseEpoch} ` +
+    `skill=${input.skillKind ?? 'unknown'} candidate=${input.candidateId} identity=${input.selectedIdentity} ` +
+    `projectionHash=${input.projectionHash}`
+  )
 }
 
 // ---------------------------------------------------------------------------

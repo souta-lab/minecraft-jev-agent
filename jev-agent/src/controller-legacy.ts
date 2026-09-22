@@ -81,10 +81,12 @@ import {
   formatEpochStart,
   formatJevCandidateSet,
   formatJevStateProjection,
+  formatSkillCommit,
   formatSkillOutcomePacket,
   formatStaleResultDropped,
   JevDecisionEpochs,
   mandatoryPolicyBoundary,
+  repointReplayedChoice,
   semanticTargetRef,
   foodBand,
   threatBand,
@@ -1163,14 +1165,15 @@ interface AbandonVerdict {
 export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // Issue #437: the two evidence planes must both be live-visible. Without these
   // in the mirrored list the live sink DROPS them, and a reviewer cannot
-  // reconstruct what Jev knew (`JEV_STATE_PROJECTION`/`JEV_CANDIDATE_SET`), why
-  // it was asked again (`JEV_DECISION_EPOCH_*`), what semantics came back
-  // (`SKILL_OUTCOME_PACKET`), or that a late model result was rejected
-  // (`STALE_JEV_RESULT_DROPPED`).
+  // reconstruct what Jev knew (`JEV_STATE_PROJECTION`/`JEV_CANDIDATE_SET`), which
+  // epoch allowed the Skill to act (`SKILL_COMMIT`), why Jev was asked again
+  // (`JEV_DECISION_EPOCH_*`), what semantics came back (`SKILL_OUTCOME_PACKET`),
+  // or that a late model result was rejected (`STALE_JEV_RESULT_DROPPED`).
   'JEV_DECISION_EPOCH_START',
   'JEV_STATE_PROJECTION',
   'JEV_CANDIDATE_SET',
   'JEV_DECISION_EPOCH_END',
+  'SKILL_COMMIT',
   'SKILL_OUTCOME_PACKET',
   'STALE_JEV_RESULT_DROPPED',
   'JEV_HEADS',
@@ -1846,7 +1849,6 @@ export class JevController {
 
   private lastDecision: JevResult | null = null
   private lastJevAt = 0
-  private lastDecisionStateHash = ''
   private lastDecisionId: string | null = null
   /** whether the last beta abandon vote actually led to a replan (#46 guard). */
   private lastAbandonAdopted = false
@@ -3516,8 +3518,40 @@ export class JevController {
           this.lastSemanticProjection?.candidates.find((view) => view.id === guarded.candidate.id)?.identity ??
           guarded.candidate.id
         const commitmentId = commitmentRefFor({ candidateId: guarded.candidate.id, epoch: claim.epoch })
-        this.decisionEpochs.authorize({ epoch: authorizing.epoch, commitmentId, selectedIdentity: identity })
+        // §3: `authorize` re-checks that this epoch is still ACTIVE. A lease that
+        // arrives after the epoch was superseded/invalidated is NOT committed and
+        // is logged as a dropped stale result instead of silently acting.
+        const verdict = this.decisionEpochs.authorize({
+          epoch: authorizing.epoch,
+          commitmentId,
+          selectedIdentity: identity,
+        })
+        if (!verdict.accepted) {
+          this.logger.warn(
+            'policy',
+            formatStaleResultDropped(authorizing.epoch, this.decisionEpochs.active?.epoch ?? null, verdict.reason),
+            { candidateId: guarded.candidate.id, leaseEpoch: claim.epoch },
+            this.tickCounter,
+          )
+          return
+        }
         this.actionEpochByLease.set(claim.epoch, { epoch: authorizing.epoch, commitmentId, identity })
+        // §12: the commitment is what makes the Skill allowed to act. One line
+        // joins it to the decision epoch and to the packet that later closes it.
+        this.logger.info(
+          'policy',
+          formatSkillCommit({
+            epoch: authorizing.epoch,
+            commitmentId,
+            leaseEpoch: claim.epoch,
+            candidateId: guarded.candidate.id,
+            selectedIdentity: identity,
+            skillKind: guarded.candidate.kind,
+            projectionHash: authorizing.projectionHash,
+          }),
+          { trigger, leaseEpoch: claim.epoch },
+          this.tickCounter,
+        )
       }
       void claim.completion
         .then((result) => {
@@ -4405,6 +4439,13 @@ export class JevController {
     this.lastAbandonAdopted = false
     const now = Date.now()
     const stateHash = stableStateHash(state)
+    // §6 rate evidence. The raw-state reuse key (`stateHash ===
+    // this.lastDecisionStateHash`) is GONE: `stableStateHash` covers `tick`, the
+    // float body position and the per-tick `recentEvents`, so it changed every
+    // tick and the old gate effectively never fired. The semantic projection hash
+    // below is the reuse key now; `sinceLastCallMs` only reports how fast the
+    // semantic plane is moving.
+    const sinceLastCallMs = this.lastJevAt === 0 ? null : now - this.lastJevAt
     const identityContext = {
       optionInstanceId: optionIdForGoal(state.goalQueue.current) ?? state.currentOption?.instanceId ?? null,
       dimension: state.self.dimension,
@@ -4453,7 +4494,13 @@ export class JevController {
       goalKey: projection.goal.key,
       lastOutcomeRequiredDecision: this.skillOutcomeBoundary,
     })
-    if (!boundary.requery && this.lastDecision !== null) {
+    // §4/§10: the cached decision names the realization that was representative
+    // when the model chose. Identity is stable, the realization id is mechanical,
+    // so the SAME semantic choice is re-pointed at the current representative. If
+    // the chosen identity is gone the state genuinely changed -> re-query below
+    // instead of replaying an unusable decision.
+    const replayed = this.lastDecision === null ? null : this.repointReplay(this.lastDecision, views)
+    if (!boundary.requery && replayed !== null) {
       const previousActive = this.decisionEpochs.active
       const reusedFrom = previousActive?.epoch ?? null
       const epoch = this.decisionEpochs.begin({
@@ -4466,11 +4513,12 @@ export class JevController {
         reusedFrom,
       })
       this.logEpochSuperseded(previousActive)
-      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger)
+      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger, sinceLastCallMs)
       this.lastSemanticProjection = projection
       this.lastProjectionHash = hash
       this.skillOutcomeBoundary = false
-      return this.lastDecision
+      this.lastDecision = replayed
+      return replayed
     }
 
     try {
@@ -4486,7 +4534,7 @@ export class JevController {
         nowMs: now,
       })
       this.logEpochSuperseded(previousActive)
-      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger)
+      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger, sinceLastCallMs)
       this.lastSemanticProjection = projection
       this.lastProjectionHash = hash
       this.skillOutcomeBoundary = false
@@ -4504,7 +4552,6 @@ export class JevController {
       this.jevCalls += 1
       this.lastJevAt = Date.now()
       this.lastDecision = result
-      this.lastDecisionStateHash = stateHash
       this.lastDecisionId = decisionIdFrom(result)
       this.signals.lastPolicyConfidence = result.answers.action?.confidence ?? null
 
@@ -4580,15 +4627,29 @@ export class JevController {
     hash: string,
     views: readonly SemanticCandidateView[],
     trigger: DecisionTrigger,
+    sinceLastCallMs: number | null,
   ): void {
     const change =
       reason === 'semantic_state_changed' && this.lastSemanticProjection !== null
         ? classifyProjectionChange(this.lastSemanticProjection, projection)
         : null
+    // §6: `flap=true` means the semantic plane changed faster than
+    // `minJevIntervalMs` - the gate is working as designed (a real semantic change
+    // always re-queries) but the projection is quantized too finely for this
+    // situation if it stays true. Evidence only; it never suppresses a query,
+    // because replaying a genuinely changed semantic state would be exactly the
+    // hidden-staleness §6 forbids. This is what keeps `minJevIntervalMs` a live
+    // diagnostic instead of the dead rate-limit key it was before #437.
+    const flap = sinceLastCallMs !== null && sinceLastCallMs < this.options.minJevIntervalMs
     this.logger.info(
       'policy',
       formatEpochStart(epoch, reason),
-      { trigger, projectionHash: hash, ...(change ?? {}) },
+      {
+        trigger,
+        projectionHash: hash,
+        ...(sinceLastCallMs === null ? {} : { sinceLastCallMs, flap }),
+        ...(change ?? {}),
+      },
       this.tickCounter,
     )
     this.logger.info('policy', formatJevStateProjection(projection, hash), { trigger }, this.tickCounter)
@@ -4603,6 +4664,32 @@ export class JevController {
   private logEpochSuperseded(previous: DecisionEpoch | null): void {
     if (previous === null || !previous.closed) return
     this.logger.info('policy', formatEpochEnd(previous), {}, this.tickCounter)
+  }
+
+  /**
+   * §4/§10: re-point a replayed decision at the current representative of the
+   * SAME semantic identity (see `repointReplayedChoice`). Returns null when the
+   * chosen identity is no longer offered, which means the semantic state really
+   * did change and the caller must re-query rather than replay. Never changes the
+   * choice: only its mechanical realization id.
+   */
+  private repointReplay(result: JevResult, views: readonly SemanticCandidateView[]): JevResult | null {
+    const choice = repointReplayedChoice(
+      decisionIdFrom(result),
+      this.lastSemanticProjection?.candidates ?? [],
+      views,
+    )
+    if (choice.lost) return null
+    if (!choice.repointed || choice.chosenId === null) return result
+    const answer = result.answers.action
+    if (answer === undefined) return result
+    this.logger.info(
+      'policy',
+      `JEV_REPLAY_REPOINTED identity=${this.lastSemanticProjection?.candidates.find((view) => view.id === decisionIdFrom(result))?.identity ?? 'unknown'} from=${decisionIdFrom(result) ?? 'none'} to=${choice.chosenId}`,
+      { trigger: 'semantic_boundary' },
+      this.tickCounter,
+    )
+    return { ...result, answers: { ...result.answers, action: { ...answer, value: choice.chosenId } } }
   }
 
   /**

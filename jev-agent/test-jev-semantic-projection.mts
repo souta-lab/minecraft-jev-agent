@@ -55,6 +55,8 @@ import {
   policyBoundary,
   projectionBytes,
   projectionHash,
+  projectionModelView,
+  repointReplayedChoice,
   semanticCandidateKey,
   semanticTargetRef,
   SKILL_OUTCOME_PACKET,
@@ -635,6 +637,64 @@ addCase('(14) live trace: fewer pi calls per verified progress, no hidden determ
       : `run=${live.runId} decisions=${live.decisions} actions=${live.actions} sources=${JSON.stringify(live.sources)} epochStarts=${live.piCalls}`
   const pass = mirrored && usesProjectionGate && rawGateRemoved && noFallback
   return { pass, detail: `mirrored=${mirrored} projectionGate=${usesProjectionGate} rawGateRemoved=${rawGateRemoved} noFallback=${noFallback} ${liveDetail}` }
+})
+
+addCase('(15) model payload == hashed projection, and a replay is re-pointed at the current realization', () => {
+  // (a) §1/§10: the model must not receive the evidence-only `counts` block (raw
+  // SkillStep/event telemetry), and the payload's top-level keys must be exactly
+  // the keys the projection hash covers - otherwise key and payload drift.
+  const base = buildJevSemanticProjection(
+    projectionInput({
+      sense: { blockNames: ['stone', 'dirt'], threats: [] },
+      events: ['SKILL_STEP', 'ACTION'],
+      rawTelemetry: { skillSteps: 412, events: 812 },
+    }),
+  )
+  const modelView = projectionModelView(base)
+  const hasCounts = Object.prototype.hasOwnProperty.call(modelView, 'counts')
+  const modelKeys = Object.keys(modelView).sort().join(',')
+  const hashKeys = Object.keys(
+    // projectionCore is private; the hash's coverage is observable through the
+    // public contract: `counts` is the ONLY top-level field outside it.
+    base,
+  )
+    .filter((key) => key !== 'counts')
+    .sort()
+    .join(',')
+  const keysAgree = modelKeys === hashKeys
+  // (b) §4: identity is stable but the representative realization id is mechanical.
+  // A cache hit must re-point the SAME choice at the CURRENT representative; and a
+  // vanished identity must be reported as lost (re-query) rather than replayed.
+  const before = buildJevSemanticProjection(
+    projectionInput({ candidates: [walkToPortalLeg('26,67,10'), walkToPortalLeg('25,67,10')] }),
+  )
+  // Same identity + same hash: only the concrete cell (and so the representative)
+  // moved. The first realization is now a different mechanical cell.
+  const after = buildJevSemanticProjection(
+    projectionInput({ candidates: [walkToPortalLeg('26,67,11'), walkToPortalLeg('25,67,11')] }),
+  )
+  const repointed = repointReplayedChoice('MOVE:p26_67_10', before.candidates, after.candidates)
+  const keptUnchanged = repointReplayedChoice('MOVE:p25_67_10', before.candidates, after.candidates)
+  const gone = repointReplayedChoice('MOVE:p26_67_10', before.candidates, [])
+  const wait = repointReplayedChoice('WAIT', before.candidates, after.candidates)
+  const pass =
+    !hasCounts &&
+    keysAgree &&
+    repointed.repointed &&
+    repointed.chosenId === after.candidates[0]?.id &&
+    !repointed.lost &&
+    // same identity still present under the same representative id -> verbatim
+    !keptUnchanged.repointed &&
+    keptUnchanged.chosenId === 'MOVE:p25_67_10' &&
+    gone.lost &&
+    !gone.repointed &&
+    // a non-candidate choice (WAIT) is never dropped by the translation
+    !wait.lost &&
+    wait.chosenId === 'WAIT'
+  return {
+    pass,
+    detail: `countsInPayload=${hasCounts} keysAgree=${keysAgree} repointedTo=${repointed.chosenId} lost=${gone.lost} waitKept=${wait.chosenId}`,
+  }
 })
 
 // ---------------------------------------------------------------------------
