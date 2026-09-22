@@ -25,13 +25,14 @@ import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer } from './candidates.ts'
-import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
+import { formatContactUnreachable } from './combatClosure.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
@@ -1430,6 +1431,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'HUNT_RETARGET',
   'HUNT_TARGET_LOST',
   'HUNT_REACQUIRE_EXHAUSTED',
+  // The HOVER half of the same vocabulary. Every measured blaze hunt ended
+  // `HUNT_END ... reason=out_of_range swings=0 hits=0`, which reads as a failed
+  // attempt; the mechanical cause was that a producer hovering above the walkway
+  // has a vertical contact component no walk can express. A target the body's melee
+  // envelope provably cannot be brought onto is now a NAMED fact (the contact
+  // geometry, the vertical planner's own refusal, and the carried block a pillar
+  // would consume), so unreachable and merely-missed are distinct run evidence.
+  'HUNT_CONTACT_UNREACHABLE',
   // Starvation is a run-scoped survival fact, not a private diagnostic. The
   // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
   // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and
@@ -2089,6 +2098,8 @@ export class JevController {
   private exploreRouteBlockedThisTick: ExploreRouteBlocked | null = null
   /** last logged COLUMN_DESCENT_REFUSED signature, so one stalled column is one line. */
   private lastColumnDescentRefusalKey: string | null = null
+  /** dedupe key for the mirrored `HUNT_CONTACT_UNREACHABLE` lines */
+  private lastContactRefusalKey: string | null = null
   /** last logged DIG_ROUTE_REFUSED signature, so one blocked terrain route is one line. */
   private lastDigRouteRefusalKey: string | null = null
   /** last logged REFLEX signature, so one unique binding continuation is one line. */
@@ -2982,6 +2993,7 @@ export class JevController {
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
+      this.logContactRefusals(grounded.contactRefusals)
       this.logDigRouteRefusals(grounded.digRefusals)
       this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logBridgeRefusals(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
@@ -10424,6 +10436,49 @@ export class JevController {
       { ...refusal, goal: this.currentGoalKey() },
       this.tickCounter,
     )
+  }
+
+  /**
+   * Typed `HUNT_CONTACT_UNREACHABLE` evidence: a sensed fight target that sits
+   * above the body's walk envelope and for which the ONE vertical planner grounds
+   * no route to its level. Code withholds the ATTACK for it BY CAN (the candidate
+   * gate reports `needs_ascend` + `ascend_plan`), so the target is never leased as
+   * a 0-swing `out_of_range` attempt; this line names the geometry and the
+   * planner's own refusal. Deduplicated on the exact line so a stationary hover
+   * does not repeat every tick.
+   */
+  private logContactRefusals(refusals: readonly ContactRefusal[]): void {
+    const lines = refusals.map((refusal) =>
+      formatContactUnreachable({
+        actionId: `ATTACK:e${refusal.entityId}`,
+        entityId: refusal.entityId,
+        targetName: refusal.targetName,
+        // A candidate-side refusal is always the GATE's proof: the contact geometry
+        // alone ruled the melee envelope out before any lease existed.
+        evidence: 'vertical_gap' as const,
+        approach: refusal.approach,
+        distance: refusal.distance,
+        gapY: refusal.gapY,
+        meleeReach: MELEE_THREAT_REACH,
+        walkGap: MELEE_THREAT_REACH,
+        ascentRefusal: refusal.reason,
+        placeable: refusal.placeable,
+      }),
+    )
+    const key = lines.join('|')
+    if (key === this.lastContactRefusalKey) return
+    this.lastContactRefusalKey = key
+    for (let index = 0; index < refusals.length; index += 1) {
+      const refusal = refusals[index]
+      const line = lines[index]
+      if (line === undefined) continue
+      this.logger.warn(
+        'agent',
+        line,
+        { ...refusal, goal: this.currentGoalKey() },
+        this.tickCounter,
+      )
+    }
   }
 
   /**
