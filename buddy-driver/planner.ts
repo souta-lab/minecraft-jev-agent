@@ -459,7 +459,12 @@ export class PlannerBrain implements System2Brain {
           trigger: mercuryTrigger,
           reason: request.reason,
         })
-        return { op: 'continue', goals: [], note: `stale Mercury result discarded (${mercuryTrigger})` }
+        return {
+          op: 'continue',
+          goals: [],
+          note: `stale Mercury result discarded (${mercuryTrigger})`,
+          provenance: { intentSource: 'none', noGoalsReason: 'stale_generation_discarded' },
+        }
       }
       return this.fatal('mercury-unavailable', `no repair for trigger=${mercuryTrigger}`)
     }

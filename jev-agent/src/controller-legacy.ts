@@ -254,7 +254,13 @@ import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './brid
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
-import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
+import {
+  evaluateSystem2Apply,
+  formatCompiledGoalRows,
+  formatSystem2Discard,
+  formatSystem2PlanApplied,
+  system2BodyOwned,
+} from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
 import {
   evaluateBetaTerminationBoundary,
@@ -1289,6 +1295,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // that no fluid could reach the pocket - and "the body mined the wall because the
   // pocket is provably dry" cannot be told apart from an ordinary tunnel step.
   'DIG_ROUTE_ENTRY',
+  // #system2-compile: the queue-side half of the System2 hand-off must be visible
+  // in BOTH evidence planes. `LLM plan applied` (and therefore the compiled rows it
+  // names) exists only in the run log, so without this marker the one line that
+  // says WHY a model answer became no row - its typed reason - is dropped from the
+  // host log, and "the answer carried no goals" cannot be told apart from "the
+  // answer was never applied".
+  'SYSTEM2_PLAN_NO_GOALS',
+  // The applied half of the same record: what the answer BECAME.
+  'SYSTEM2_PLAN_APPLIED',
   // The BOUNDED LEVEL SCAN (`levelScan.ts`): the descent a body takes when NOTHING at its
   // own level can ground a route and the rock below can. Without these in the mirrored
   // list the live sink DROPS the two lines that say which level the body descended to, which
@@ -8021,9 +8036,82 @@ export class JevController {
         }
         this.llmNotes.push(plan.note)
         if (this.llmNotes.length > 12) this.llmNotes.shift()
+        // #system2-compile: the hand-off is typed and mirrored. The applied line
+        // names the INTENT (which words the model wrote), the COMPILED rows (the
+        // executable meaning: kind, target, dimension) and the apply outcome; an
+        // answer that produced no row is a typed rejection naming why, never a
+        // silent no-op. Code reports the model's WHAT here; it never picks one.
+        const provenance = plan.provenance ?? null
+        const compiledRows = added.map((goal) => ({
+          id: goal.id,
+          kind: goal.kind,
+          targetItem: goal.targetItem ?? null,
+          targetY: goal.targetY ?? null,
+          dimension: goal.dimension ?? null,
+          description: goal.description,
+        }))
+        const compiledSummary = formatCompiledGoalRows(compiledRows)
+        const intentSource = provenance?.intentSource ?? 'unrecorded'
+        // `abort`/`complete`/`continue` are lifecycle ops whose meaning IS the op,
+        // so an empty goal list is their correct shape; only a goal-carrying op can
+        // "carry no goals".
+        const planOp = plan.op ?? 'replace'
+        const goalsExpected = planOp === 'patch' || planOp === 'replace'
+        // The MIRRORED half of the hand-off: one marker line naming the model's own
+        // words, the executable meaning of every accepted row, and the outcome. It
+        // is emitted in BOTH evidence planes (MIRRORED_MARKERS), or the host log
+        // cannot tell "the answer produced no row" from "the answer never applied".
+        this.logger.warn(
+          'system2',
+          formatSystem2PlanApplied({
+            requestId: requestContext.requestId,
+            op: planOp,
+            applied: added.length,
+            depth: this.queue.state.depth,
+            intentSource,
+            uncompiled: provenance?.uncompiled?.length ?? 0,
+            intent: provenance?.intent ?? plan.note,
+            rows: compiledRows,
+          }),
+          {
+            requestId: requestContext.requestId,
+            reason,
+            op: planOp,
+            applied: added.length,
+            compiled: compiledRows,
+            uncompiled: provenance?.uncompiled ?? [],
+            intentSource,
+            intent: provenance?.intent ?? null,
+            noGoalsReason: plan.goals.length === 0 && goalsExpected ? (provenance?.noGoalsReason ?? 'answer_carried_no_goals') : null,
+            note: plan.note,
+          },
+          this.tickCounter,
+        )
+        if (plan.goals.length === 0 && goalsExpected) {
+          const noGoalsReason = provenance?.noGoalsReason ?? 'answer_carried_no_goals'
+          const intentText = (provenance?.intent ?? plan.note).slice(0, 200)
+          this.logger.warn(
+            'system2',
+            `SYSTEM2_PLAN_NO_GOALS op=${planOp} reason=${noGoalsReason} intentSource=${intentSource} requestId=${requestContext.requestId} intent="${intentText}"`,
+            {
+              requestId: requestContext.requestId,
+              reason,
+              op: planOp,
+              noGoalsReason,
+              intentSource,
+              intent: intentText,
+              uncompiled: provenance?.uncompiled ?? [],
+              note: plan.note,
+            },
+            this.tickCounter,
+          )
+          this.recentEvents.push(
+            `System2 answered with no compilable goal (${noGoalsReason}); ${this.currentGoalKey()} held`,
+          )
+        }
         this.logger.info(
           'system2',
-          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} :: ${plan.note}`,
+          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} intentSource=${intentSource} uncompiled=${provenance?.uncompiled?.length ?? 0} compiled=[${compiledSummary}] :: ${plan.note}`,
           {
             provider: this.system2Provider,
             model: this.system2Model,
@@ -8031,6 +8119,10 @@ export class JevController {
             requestContext,
             queueDepth: this.queue.state.depth,
             goals: added.map((goal) => goal.description),
+            compiled: compiledRows,
+            uncompiled: provenance?.uncompiled ?? [],
+            intentSource,
+            intent: provenance?.intent ?? null,
             note: plan.note,
           },
           this.tickCounter,

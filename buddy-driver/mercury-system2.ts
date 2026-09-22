@@ -94,6 +94,7 @@ import {
   extractMercuryIntent,
   groundMercuryIntent,
   parseMercuryJsonTextDetailed,
+  proseWithoutJsonObjects,
   stripUnknownPlanKeys,
 } from './mercury-intent.ts'
 import type { MercuryIntentExtraction, MercuryJsonTextShape } from './mercury-intent.ts'
@@ -102,6 +103,7 @@ export { MERCURY_ALLOWED_GOALS, MERCURY_MODEL_DEFAULT, MERCURY_TYPED_GOAL_KINDS,
 export {
   parseMercuryJsonText,
   parseMercuryJsonTextDetailed,
+  proseWithoutJsonObjects,
   stripUnknownPlanKeys,
   groundMercuryIntent,
   extractMercuryIntent,
@@ -552,6 +554,18 @@ export function buildCorrectivePrompt(basePrompt: string, validationError: strin
 }
 
 /**
+ * #system2-compile: the dimension a lowered goal is executable in when the model
+ * named none - the LIVE one, prefixed like the rest of the plan vocabulary. Code
+ * grounding to where the body is cannot fabricate a target; inventing the
+ * overworld can (and did) declare a Nether row undeployable.
+ */
+function compileLiveDimension(state?: Pick<MercuryStateSummary, 'dimension'>): string {
+  const live = state?.dimension
+  if (typeof live !== 'string' || live.length === 0) return 'minecraft:overworld'
+  return live.startsWith('minecraft:') ? live : `minecraft:${live}`
+}
+
+/**
  * Compile ONE validated goal onto the existing executable machinery:
  *   place/craft/collect/smelt -> matching PlannedGoal kind (PLACE / CRAFT / ...)
  *   goto / goto_resource      -> `collect` of the resource (known-resource RETRIEVE)
@@ -623,7 +637,13 @@ function compileMercuryGoalRaw(
         targetItem: null,
         requiredCount: 1,
         targetY: goal.y,
-        dimension: goal.dimension ?? 'minecraft:overworld',
+        // #system2-compile: a `descend_to` that names no dimension can only be
+        // grounded against the dimension the body is actually in. Defaulting to
+        // the overworld FABRICATED a declared dimension, so the row was
+        // structurally undeployable anywhere else (the measured Nether loop:
+        // `declared=overworld live=the_nether` -> escalate). With no live state
+        // (offline fixtures) the documented overworld default is kept.
+        dimension: goal.dimension ?? compileLiveDimension(state),
         detail: 'mercury descend_to',
       }
     case 'explore':
@@ -681,7 +701,13 @@ function semanticizeMercuryGoal(source: MercuryPlanGoalJson, compiled: PlannedGo
       : source.kind === 'goto' || source.kind === 'goto_resource'
         ? `goto:${item ?? 'unknown'}`
         : source.kind === 'recover_death_site'
-          ? 'recover_death_site'
+          ? // #system2-compile: the Option id contract is `<kind>:<target>` (see
+            // `validateOptionSpec`), so the bare word `recover_death_site` made
+            // every valid death-site recovery unreachable - the compiled row was
+            // dropped by the Option compiler (`OPTION_COMPILE_REJECTED`, measured
+            // 8x live after the predicate validator fix). The verb is preserved,
+            // the host still owns the coordinate.
+            'goto:death_site'
         : source.kind === 'explore'
           ? `explore:${source.mode ?? 'unknown'}`
           : source.kind === 'descend_to'
@@ -727,6 +753,35 @@ export function plannedGoalsFromMercury(
     if (compiled !== null) goals.push(compiled)
   }
   return goals
+}
+
+/**
+ * #system2-compile: the model goals the executable lowering could NOT compile.
+ *
+ * `plannedGoalsFromMercury` skips an uncompilable goal, which is right - code
+ * must not invent the missing WHAT - but a skip that leaves no trace makes a
+ * partial compile look like an answer that named fewer goals. This names every
+ * dropped goal by index and identifying field, so the hand-off is auditable and
+ * a plan that compiles to nothing carries a typed reason all the way to the
+ * queue instead of applying zero rows silently.
+ */
+export function uncompiledMercuryGoals(
+  plan: MercuryPlanJson,
+  state?: Pick<MercuryStateSummary, 'dimension' | 'postDeath'>,
+): { index: number; kind: string; detail: string }[] {
+  if (plan.op === 'abort' || plan.op === 'complete') return []
+  const uncompiled: { index: number; kind: string; detail: string }[] = []
+  plan.goals.forEach((goal, index) => {
+    if (compileMercuryGoal(goal, state) !== null) return
+    const detail =
+      goal.kind === 'recover_death_site'
+        ? 'no live death point in the live dimension'
+        : goal.kind === undefined
+          ? `legacy item goal ${goal.item ?? 'unknown'} is not an executable capability`
+          : `kind ${goal.kind} is not an executable capability`
+    uncompiled.push({ index, kind: goal.kind ?? goal.item ?? 'item', detail })
+  })
+  return uncompiled
 }
 
 const MERCURY_SMELT_INPUTS: Readonly<Record<string, string>> = {
@@ -1164,6 +1219,13 @@ interface MercuryAttemptSuccess {
   droppedKeys: readonly string[]
   renamedKeys: readonly string[]
   matched: readonly string[]
+  /**
+   * #system2-compile: the typed reason a STRUCTURED block inside this answer was
+   * unusable (`null` when the answer carried no block, or when its block was
+   * used). Present so the queue-side hand-off can name the rejection instead of
+   * reporting a generic "no goals".
+   */
+  rejectedBlock?: { stage: string; path: string; expected: string } | null
 }
 
 export interface MercurySystem2Options {
@@ -1943,6 +2005,18 @@ export class MercurySystem2 implements System2Brain {
         this.saveCache()
         const plan = restored.plan
         const goals = plannedGoalsFromMercury(plan, state)
+        // A replayed plan compiles through the SAME lowering, so it can also drop
+        // goals; the replay carries the same typed provenance as a fresh answer.
+        const uncompiledCached = uncompiledMercuryGoals(plan, state)
+        if (uncompiledCached.length > 0) {
+          this.log('MERCURY_GOAL_UNCOMPILED', {
+            trigger,
+            intentSource: 'cached',
+            count: uncompiledCached.length,
+            goals: uncompiledCached,
+            compiled: goals.map((goal) => goal.description),
+          })
+        }
         const ms = Date.now() - started
         this.log('ADVISOR', {
           source: this.provider,
@@ -1954,7 +2028,26 @@ export class MercurySystem2 implements System2Brain {
           note: `cached mercury plan replayed (${cached.strategy})`,
         })
         return {
-          plan: { op: plan.op, goals, note: `cached mercury ${cached.strategy}` },
+          plan: {
+            op: plan.op,
+            goals,
+            note: `cached mercury ${cached.strategy}`,
+            provenance: {
+              intentSource: 'cached',
+              intent: cached.reason.slice(0, 400),
+              ...(goals.length === 0
+                ? {
+                    noGoalsReason:
+                      plan.op === 'abort' || plan.op === 'complete' || plan.op === 'continue'
+                        ? 'lifecycle_op'
+                        : uncompiledCached.length > 0
+                          ? 'goals_not_compilable'
+                          : 'plan_carried_no_goals',
+                  }
+                : {}),
+              ...(uncompiledCached.length > 0 ? { uncompiled: uncompiledCached } : {}),
+            },
+          },
           strategy: cached.strategy,
           op: plan.op,
           goals,
@@ -2110,6 +2203,27 @@ export class MercurySystem2 implements System2Brain {
           expected: enrichmentStateError,
         })
       }
+      // #system2-compile: the typed reason a STRUCTURED block was unusable. It is
+      // carried on the attempt's result so the queue-side line can name it; a
+      // rejected block must never look like an answer that simply said less.
+      const enrichmentNotAPlan = extraction.enrichment !== null && stripped === null
+      if (enrichmentNotAPlan) {
+        this.log('MERCURY_ENRICHMENT_NOT_A_PLAN', {
+          callId,
+          attempt: context.attempt,
+          trigger,
+          keys: Object.keys(extraction.enrichment ?? {}).slice(0, 12),
+          expected: 'a plan object carries op/goals/reason',
+        })
+      }
+      const enrichmentReject =
+        enrichmentStateError !== null
+          ? { stage: 'state', path: 'goals', expected: enrichmentStateError }
+          : validated !== null && !validated.ok
+            ? { stage: validated.reject.stage, path: validated.reject.path, expected: validated.reject.expected }
+            : enrichmentNotAPlan
+              ? { stage: 'envelope', path: '<root>', expected: 'a plan object carries op/goals/reason' }
+              : null
       if (validated !== null && validated.ok && enrichmentStateError === null) {
         for (const repair of validated.repairs) {
           this.log('MERCURY_FIELD_DEFAULT', {
@@ -2149,7 +2263,15 @@ export class MercurySystem2 implements System2Brain {
       // 2) Ground the natural-language intent onto the code-owned capability
       //    matrix. This is grounding, not selection: every goal names a capability
       //    the matrix already exposes, in the model's own mention order.
-      const grounding = groundMercuryIntent(extraction.intent, this.allowedGoalsFor(state))
+      //    #system2-compile: when the answer carried a structured block, only its
+      //    PROSE half is groundable. Feeding the block's own JSON back in let a
+      //    REJECTED plan's surviving goals be applied one by one (the measured
+      //    `count: 0` sibling case), which is a partial application of a rejected
+      //    plan; the rejection must be total.
+      const groundableText =
+        extraction.enrichment === null ? extraction.intent : proseWithoutJsonObjects(extraction.intent)
+      const groundedTextKind = extraction.enrichment === null ? 'answer' : 'prose_only'
+      const grounding = groundMercuryIntent(groundableText, this.allowedGoalsFor(state))
       if (grounding.ok) {
         const constructed: MercuryPlanJson = {
           op: grounding.op,
@@ -2167,6 +2289,8 @@ export class MercurySystem2 implements System2Brain {
               attempt: context.attempt,
               trigger,
               source: 'intent',
+              text: groundedTextKind,
+              rejectedBlock: enrichmentReject,
               matched: grounding.matched.slice(0, 8),
               goals: safe.plan.goals.map((goal) => goal.kind ?? 'item'),
             })
@@ -2180,12 +2304,14 @@ export class MercurySystem2 implements System2Brain {
               droppedKeys: [],
               renamedKeys: [],
               matched: grounding.matched,
+              rejectedBlock: enrichmentReject,
             }
           }
           this.log('MERCURY_INTENT_UNGROUNDED', {
             callId,
             attempt: context.attempt,
             trigger,
+            text: groundedTextKind,
             reason: stateError,
           })
         } else {
@@ -2193,6 +2319,7 @@ export class MercurySystem2 implements System2Brain {
             callId,
             attempt: context.attempt,
             trigger,
+            text: groundedTextKind,
             reason: `grounded goal rejected by capability validation: ${safe.error}`,
           })
         }
@@ -2201,6 +2328,8 @@ export class MercurySystem2 implements System2Brain {
           callId,
           attempt: context.attempt,
           trigger,
+          text: groundedTextKind,
+          rejectedBlock: enrichmentReject,
           reason: grounding.reason,
           matched: grounding.matched.slice(0, 8),
         })
@@ -2224,6 +2353,7 @@ export class MercurySystem2 implements System2Brain {
         droppedKeys: stripped?.notes.droppedKeys ?? [],
         renamedKeys: stripped?.notes.renamedKeys ?? [],
         matched: [],
+        rejectedBlock: enrichmentReject,
       }
     }
 
@@ -2383,7 +2513,21 @@ export class MercurySystem2 implements System2Brain {
           intentSource: 'ungrounded',
         })
         return {
-          plan: { op: 'patch', goals: [], note: `mercury ungrounded: ${success.plan.reason}` },
+          plan: {
+            op: 'patch',
+            goals: [],
+            note: `mercury ungrounded: ${success.plan.reason}`,
+            // A typed, mirrored reason for the empty hand-off: the answer named no
+            // goal the capability matrix exposes. The queue must be able to say
+            // WHY it applied nothing instead of silently no-opping.
+            provenance: {
+              intentSource: 'ungrounded',
+              intent: success.intent.slice(0, 400),
+              noGoalsReason:
+                success.rejectedBlock == null ? 'answer_ungrounded' : 'rejected_block_no_grounded_prose',
+              ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
+            },
+          },
           strategy: 'mercury_ungrounded',
           op: 'patch',
           goals: [],
@@ -2407,6 +2551,21 @@ export class MercurySystem2 implements System2Brain {
       }
       const strategy = mercuryStrategyLabel(plan)
       const goals = plannedGoalsFromMercury(plan, state)
+      // #system2-compile: a model goal whose lowering fails is typed here rather
+      // than disappearing inside `plannedGoalsFromMercury`. Both the host log and
+      // the plan provenance carry it, so "the model asked for X but no X row
+      // exists" is answerable from the records alone.
+      const uncompiled = uncompiledMercuryGoals(plan, state)
+      if (uncompiled.length > 0) {
+        this.log('MERCURY_GOAL_UNCOMPILED', {
+          callId,
+          trigger,
+          intentSource: success.intentSource,
+          count: uncompiled.length,
+          goals: uncompiled,
+          compiled: goals.map((goal) => goal.description),
+        })
+      }
       this.cache.entries[stateHash] = {
         op: plan.op,
         goals: plan.goals.map((goal) => ({ ...goal })),
@@ -2457,7 +2616,29 @@ export class MercurySystem2 implements System2Brain {
       })
 
       return {
-        plan: { op: plan.op, goals, note: `mercury ${plan.op}: ${plan.reason}` },
+        plan: {
+          op: plan.op,
+          goals,
+          note: `mercury ${plan.op}: ${plan.reason}`,
+          provenance: {
+            intentSource: success.intentSource,
+            intent: success.intent.slice(0, 400),
+            ...(goals.length === 0
+              ? {
+                  noGoalsReason:
+                    plan.op === 'abort' || plan.op === 'complete' || plan.op === 'continue'
+                      ? 'lifecycle_op'
+                      : uncompiled.length > 0
+                        ? 'goals_not_compilable'
+                        : 'plan_carried_no_goals',
+                }
+              : {}),
+            ...(uncompiled.length > 0 ? { uncompiled } : {}),
+            // A rejected structured block is evidence even when the prose grounded a
+            // plan: it names WHICH half of the answer the applied rows came from.
+            ...(success.rejectedBlock == null ? {} : { rejectedBlock: success.rejectedBlock }),
+          },
+        },
         strategy,
         op: plan.op,
         goals,
