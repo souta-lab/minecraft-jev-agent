@@ -23,8 +23,8 @@
       "evaluator": { "type": "command", "script": "tools/m2-gate.mjs", "scopeArg": "--run" }
     },
     "M3": {
-      "title": "12 Eyes of Ender",
-      "requires": ["ender_eye>=12"],
+      "title": "Nether reached + 12 Eyes of Ender",
+      "requires": ["nether_reached", "ender_eye>=12"],
       "evaluator": { "type": "command", "script": "tools/m3-gate.mjs", "scopeArg": "--run" }
     },
     "M4": {
