@@ -48,7 +48,7 @@ import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from
 import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
 import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
 import { digRouteBearing, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
-import type { DigRouteRefusal } from './digRoute.ts'
+import type { DigRouteRefusal, DigRouteRefusalReason } from './digRoute.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
@@ -62,9 +62,12 @@ import {
   OBSIDIAN,
   PORTAL_ENTERED_PREDICATE,
   PORTAL_LIT_PREDICATE,
+  PORTAL_ENTER_SKILL,
   PORTAL_OPEN_FACE_MAX_DISTANCE,
   formatReflex,
+  formatSkillPolicyBoundary,
   formatSkillStep,
+  formatSkillStepAuthority,
   groundPortalFrame,
   planPortalIgnition,
   portalOpenFaceCells,
@@ -1516,7 +1519,7 @@ function portalOpenFaceLegs(state: WorldState, options: CandidateOptions, entry:
             target,
             targetName: NETHER_PORTAL,
             reason: 'portal_open_face',
-            skill: 'enter_portal',
+            skill: PORTAL_ENTER_SKILL,
             extraMeta: {
               entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
               faceCell: `${target.x},${target.y},${target.z}`,
@@ -1627,7 +1630,7 @@ export function entryCandidates(
         target: entry.enterCell,
         targetName: NETHER_PORTAL,
         reason: 'route_spent',
-        skill: 'enter_portal',
+        skill: PORTAL_ENTER_SKILL,
         label: (best) =>
           `walk an approach leg toward the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}): the last route there failed, so stand at (${best.x},${best.y},${best.z}) first`,
         extraMeta: { entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}` },
@@ -7174,6 +7177,33 @@ function digRouteCandidate(
     // step is the gate's own obsidian column, needing pickaxe tier 4).
     stepRefusal: (step) => {
       const profile = strictStepDigProfile(state, step)
+      // #436 U5 (SAFE / protected resources): a step whose profile would break a
+      // protected station block or a member of a LIVE structure is never a route,
+      // whatever the tool gate says. The measured case is the portal frame's own
+      // obsidian: the bearing route into the interior runs THROUGH frame cells, and
+      // no route may dismantle the asset the trip is for.
+      const liveStructures = liveStructureIndexOf(state)
+      for (const cell of profile.digPlan) {
+        const name = cell.name ?? ''
+        if (name.length > 0 && isProtectedStationBlock(name)) {
+          return {
+            dir: step.dir,
+            mode: step.mode,
+            reason: 'protected' as DigRouteRefusalReason,
+            block: name,
+            detail: `${name} at (${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a protected station`,
+          }
+        }
+        if (isLiveStructureMember(liveStructures, cell.cell)) {
+          return {
+            dir: step.dir,
+            mode: step.mode,
+            reason: 'protected' as DigRouteRefusalReason,
+            block: name.length > 0 ? name : (step.digName ?? null),
+            detail: `(${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a member of a live structure`,
+          }
+        }
+      }
       if (profile.choice.ok) return null
       const requirement = profile.requirement
       return {
@@ -7451,6 +7481,7 @@ function continuationCandidate(
   spec: { target: Vec3Json; targetName: string | null; reason: string; extraMeta: Record<string, string | number | boolean>; skill: string },
   cont: PocketContinuation,
   reflex: string | null,
+  boundary: string | null = null,
 ): Candidate {
   const feet = {
     x: Math.floor(state.self.position.x),
@@ -7479,10 +7510,20 @@ function continuationCandidate(
         // the contract before the walk), but the fact is stated explicitly so the
         // meta is never silently empty.
         { vertical: 'none' }
-  const line =
-    `SKILL_STEP action=${cont.action} cell=${cellText(target)} via=${via} ` +
-    `landing=${cellText(cont.landing)} ledge=${cellText(cont.ledge)} ` +
-    `vertical=${cont.action === 'step_up' ? 'staircase-up' : 'none'}`
+  // #436 section 17: the step states which deterministic layer justified it. A
+  // candidate-layer continuation is realized only AFTER Jev selects it, so its
+  // authority is MECHANICAL_CONTINUATION; the executor's in-skill step-over (the
+  // unique prerequisite of an already-selected entry) is MANDATORY_PREREQUISITE.
+  const line = formatSkillStep(
+    spec.skill,
+    cont.action,
+    formatSkillStepAuthority(
+      'MECHANICAL_CONTINUATION',
+      `cell=${cellText(target)} via=${via} landing=${cellText(cont.landing)} ledge=${cellText(cont.ledge)} ` +
+        `vertical=${cont.action === 'step_up' ? 'staircase-up' : 'none'} ` +
+        `envelope=movement-only(no_dig,no_place)`,
+    ),
+  )
   const label =
     cont.action === 'step_over'
       ? `step over the hole into (${cellText(target)}) first: from there the ledge at (${cellText(cont.ledge)}) is one step up to (${cellText(cont.landing)}), toward (${cellText(spec.target)})`
@@ -7518,6 +7559,7 @@ function continuationCandidate(
       legContinuationToD: round2Number(cont.toTarget),
       legContinuationLine: line,
       ...(reflex === null ? {} : { legReflex: reflex }),
+      ...(boundary === null ? {} : { legPolicyBoundary: boundary }),
       ...spec.extraMeta,
     },
   }
@@ -7642,9 +7684,28 @@ function travelApproachLegs(
   // LEVEL WALKS over the sensed stands (measured live: `MOVE:p26_67_10` was a
   // sensed stand across a 1-block hole, so the stock MOVE contract failed `stuck`
   // with an empty contract). A genuinely walkable leg is therefore untouched.
-  const continuations =
-    best === null || !levelWalkReachable(state, best) ? pocketContinuations(state, spec.target) : []
-  const uniqueContinuation = continuations.length === 1 && dig === null && (best === null || !levelWalkReachable(state, best))
+  const walkable = best !== null && levelWalkReachable(state, best)
+  const continuations = walkable ? [] : pocketContinuations(state, spec.target)
+  // #436 section 7 (U3) / section 19 (8, 28) / section 22: the grounded remedies
+  // are ENUMERATED by semantic class, never ranked. `movement` is the hole
+  // step-over/step-up; `dig` is the bounded dig route, a separate DESCEND
+  // candidate (never a contract on a MOVE, so a walk never silently gains dig
+  // authority); `place` (a bridge) is a third class. When more than one class is
+  // on offer the next move is Jev's, and the boundary is stated.
+  const remedyClasses = [
+    ...(best !== null ? ['movement:walk'] : []),
+    ...continuations.map((cont) => `movement:${cont.action}`),
+    ...(dig !== null ? ['dig:route'] : []),
+  ]
+  const boundary =
+    remedyClasses.length > 1
+      ? formatSkillPolicyBoundary({
+          skill: spec.skill,
+          reason: 'multiple_non_equivalent_recoveries',
+          alternatives: remedyClasses,
+        })
+      : null
+  const uniqueContinuation = continuations.length === 1 && dig === null && !walkable
   for (const cont of continuations) {
     const reflex = uniqueContinuation
       ? formatLegReflex({
@@ -7661,7 +7722,13 @@ function travelApproachLegs(
             `;d=${round2Number(currentDistance)}->${round2Number(cont.toTarget)}`,
         })
       : null
-    legs.push(continuationCandidate(state, options, spec, cont, reflex))
+    legs.push(continuationCandidate(state, options, spec, cont, reflex, boundary))
+  }
+  // A boundary with no continuation candidate still has to be visible: attach it to
+  // the walk leg / dig route so the operator sees that BOTH classes were grounded
+  // and that code stopped.
+  if (boundary !== null && legs.length > 0) {
+    for (const leg of legs) leg.meta.legPolicyBoundary = boundary
   }
   return legs
 }
@@ -7689,7 +7756,7 @@ function knownResourceApproachLegs(
       target: known.position,
       targetName: known.name,
       reason: 'target_not_observable',
-      skill: 'retrieve_known',
+      skill: KNOWN_RETRIEVE_SKILL,
       label: (best) =>
         `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
       extraMeta: { approachResource: want.item, knownName: known.name },

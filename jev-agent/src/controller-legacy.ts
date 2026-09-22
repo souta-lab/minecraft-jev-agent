@@ -75,7 +75,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, formatSkillStep, formatSkillStepAuthority, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -1280,6 +1280,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // reason=unique_binding_prerequisite`) and the mechanical step when it runs.
   'REFLEX',
   'SKILL_STEP',
+  'SKILL_POLICY_BOUNDARY',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -1921,6 +1922,8 @@ export class JevController {
   private lastDigRouteRefusalKey: string | null = null
   /** last logged REFLEX signature, so one unique binding continuation is one line. */
   private lastLegReflexKey: string | null = null
+  /** last logged SKILL_POLICY_BOUNDARY signature, so one semantic boundary is one line. */
+  private lastSkillBoundaryKey: string | null = null
   /** the current tick's typed dig-route refusals, fed into the starvation `missing` evidence. */
   private digRouteRefusalsThisTick: DigRouteRefusal[] = []
   /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
@@ -2760,6 +2763,7 @@ export class JevController {
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logDigRouteRefusals(grounded.digRefusals)
       this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
+      this.logSkillPolicyBoundaries(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
@@ -3254,7 +3258,26 @@ export class JevController {
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
-      if (guarded.candidate.meta.digRoute === true) this.logDigRoute(guarded.candidate)
+      if (guarded.candidate.meta.digRoute === true) {
+        this.logDigRoute(guarded.candidate)
+        // #436 section 17 layering: the dig route is a SEPARATE candidate of kind
+        // DESCEND (never a contract attached to a MOVE), so it is realized only
+        // after Jev selects it - a MECHANICAL_CONTINUATION of the chosen route,
+        // never the walk silently gaining dig authority.
+        this.logger.info(
+          'agent',
+          formatSkillStep(
+            typeof guarded.candidate.meta.digRouteSkill === 'string' ? guarded.candidate.meta.digRouteSkill : 'DIG_ROUTE(approach)',
+            'dig_route',
+            formatSkillStepAuthority(
+              'MECHANICAL_CONTINUATION',
+              `target=${String(guarded.candidate.meta.digRouteTarget ?? 'unknown')} cell=${String(guarded.candidate.meta.digRouteCell ?? 'unknown')} kind=${String(guarded.candidate.meta.digRouteKind ?? 'unknown')}`,
+            ),
+          ),
+          { actionId: guarded.candidate.id },
+          this.tickCounter,
+        )
+      }
       if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
@@ -4898,6 +4921,26 @@ export class JevController {
       },
       this.tickCounter,
     )
+  }
+
+  /**
+   * The #436 `SKILL_POLICY_BOUNDARY skill=<id> reason=<reason> alternatives=[...]`
+   * facts: where the offer grounded several NON-EQUIVALENT remedies and code
+   * therefore stopped instead of ranking them (section 7 U3 / section 19 (8, 28) /
+   * section 22). Deduped like the other typed facts, and logged for WITHHELD
+   * candidates too, so the boundary is visible on the tick it exists.
+   */
+  private logSkillPolicyBoundaries(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta.legPolicyBoundary
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastSkillBoundaryKey) return
+    this.lastSkillBoundaryKey = key
+    if (key === null) return
+    for (const line of lines) this.logger.warn('agent', line, { line }, this.tickCounter)
   }
 
   /**

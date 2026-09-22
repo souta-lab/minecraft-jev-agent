@@ -267,6 +267,8 @@ interface WorldSpec {
   knownResources?: AgentSignals['knownResources']
   /** the controller's move-failure memory seed (live `MOVE_FAILMEM key=... attempts=n`) */
   failedCandidates?: Record<string, number>
+  /** live-structure member cells (the #436 U5 protected-resource fact) */
+  liveStructureMembers?: NonNullable<WorldState['liveStructureMembers']>
 }
 
 function worldState(spec: WorldSpec): WorldState {
@@ -285,6 +287,7 @@ function worldState(spec: WorldSpec): WorldState {
     furnaces: [],
     placementSpots: [],
     portalFrameSites: [],
+    ...(spec.liveStructureMembers === undefined ? {} : { liveStructureMembers: spec.liveStructureMembers }),
     descent: spec.descent ?? [],
     stepCuts: [],
     headroomCuts: [],
@@ -828,7 +831,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     cont !== undefined &&
       typeof cont.meta.legReflex === 'string' &&
       (cont.meta.legReflex as string).startsWith(
-        'REFLEX ownerSkill=enter_portal reason=unique_binding_prerequisite action=step_over evidence=cell=24,66,10 via=24,66,10 ledge=25,66,10 hole_floor@24,66,10:standable+support_solid;ledge@25,66,10:solid;d=2->1.41',
+        'REFLEX ownerSkill=ENTER_PORTAL(portalSite) reason=unique_binding_prerequisite action=step_over evidence=cell=24,66,10 via=24,66,10 ledge=25,66,10 hole_floor@24,66,10:standable+support_solid;ledge@25,66,10:solid;d=2->1.41',
       ),
     String(cont?.meta.legReflex ?? 'none'),
   )
@@ -836,7 +839,9 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     '(i1) the mechanical step marker names the cell, the via, the landing and the ledge',
     cont !== undefined &&
       String(cont.meta.legContinuationLine) ===
-        'SKILL_STEP action=step_over cell=24,66,10 via=24,66,10 landing=25,67,10 ledge=25,66,10 vertical=none',
+        'SKILL_STEP skill=ENTER_PORTAL(portalSite) step=step_over authority=MECHANICAL_CONTINUATION ' +
+          'evidence=cell=24,66,10 via=24,66,10 landing=25,67,10 ledge=25,66,10 vertical=none ' +
+          'envelope=movement-only(no_dig,no_place) worldDelta=none',
     String(cont?.meta.legContinuationLine ?? 'none'),
   )
   // The continuation strictly closes the distance to the WAYPOINT and, through it,
@@ -951,6 +956,82 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
       spentCont !== undefined,
     `offer=[${normal.candidates.map((candidate) => candidate.id).join(',')}] faceLeg=${faceLeg === undefined ? 'none' : `${faceLeg.id}->${faceLeg.target === null ? 'none' : key(faceLeg.target)}`} cont=${faceCont === undefined ? 'none' : String(faceCont.id)} reflex=${String(faceCont?.meta.legReflex ?? 'none')}`,
   )
+
+  // (i6) #436 section 19 (8)+(28): THE WALL PRESENTS TWO NON-EQUIVALENT RECOVERIES.
+  // The terrain offers a DIG route (a stone tunnel toward the target) AND a
+  // MOVEMENT continuation (a verified hole with a step-up landing). Code must not
+  // rank them: both are on offer, the boundary is stated with the alternatives, and
+  // no REFLEX is emitted (nothing is unique).
+  {
+    const digTarget: Vec3Json = { x: 26, y: 67, z: 10 }
+    const bothCounts = { diamond_pickaxe: 1 }
+    const bothBase = worldState({
+      feet: FEET,
+      descent,
+      counts: bothCounts,
+      current: queuedPlace(digTarget),
+      enterCell: digTarget,
+      standable,
+    })
+    const bothOptions = optionsFor({ feet: FEET, enterCell: digTarget } as WorldSpec)
+    const bothSpent = spendEntryRoute(bothBase, bothOptions, digTarget)
+    const both = worldState({
+      feet: FEET,
+      descent,
+      counts: bothCounts,
+      current: queuedPlace(digTarget),
+      enterCell: digTarget,
+      standable,
+      routes: bothSpent,
+      failedCandidates: exhausted,
+    })
+    const bothOffer = entryCandidates(both, bothOptions)
+    const bothDig = bothOffer.candidates.find((candidate) => candidate.meta.digRoute === true)
+    const bothCont = bothOffer.candidates.find((candidate) => candidate.meta.legContinuation === true)
+    const boundary = bothCont?.meta.legPolicyBoundary ?? bothDig?.meta.legPolicyBoundary
+    check(
+      '(i6) a wall presenting dig vs step-over offers BOTH and states the policy boundary, never a pick',
+      bothDig !== undefined &&
+        bothCont !== undefined &&
+        typeof boundary === 'string' &&
+        (boundary as string).startsWith('SKILL_POLICY_BOUNDARY skill=ENTER_PORTAL(portalSite) reason=multiple_non_equivalent_recoveries alternatives=[') &&
+        (boundary as string).includes('dig:route') &&
+        (boundary as string).includes('movement:step_over') &&
+        bothDig.meta.legReflex === undefined &&
+        bothCont.meta.legReflex === undefined,
+      `offer=[${bothOffer.candidates.map((candidate) => candidate.id).join(',')}] boundary=${String(boundary ?? 'none')}`,
+    )
+  }
+
+  // (i7) #436 U5: THE FRAME'S OWN OBSIDIAN IS NEVER MINED. The east dig step runs
+  // through a cell the world model holds as a LIVE structure member (the portal
+  // frame), so it is refused `protected` even with a pickaxe that could break it.
+  {
+    const frameColumn = worldState({
+      feet: FEET,
+      descent,
+      counts: { diamond_pickaxe: 1 },
+      current,
+      enterCell: TARGET,
+      standable: [FEET],
+      routes: spent,
+      failedCandidates: exhausted,
+      liveStructureMembers: [
+        { kind: 'nether_portal', position: { x: 25, y: 67, z: 9 } },
+        { kind: 'nether_portal', position: { x: 25, y: 68, z: 9 } },
+      ],
+    })
+    const frameOffer = entryCandidates(frameColumn, options)
+    const frameGrounded = generateGroundedCandidates(frameColumn, options)
+    const protectedRefusal = frameGrounded.digRefusals.find((entry) => entry.reason === 'protected')
+    check(
+      '(i7) a dig step through a live-structure frame cell is refused protected, whatever the tool gate says',
+      protectedRefusal !== undefined &&
+        frameOffer.candidates.every((candidate) => candidate.meta.digRoute !== true) &&
+        protectedRefusal.block === 'obsidian',
+      `refusals=[${frameGrounded.digRefusals.map((entry) => `${entry.reason}:${entry.block ?? 'none'}`).join(',')}] offer=[${frameOffer.candidates.map((candidate) => candidate.id).join(',')}]`,
+    )
+  }
 
   // (i4) A WALK-REACHABLE WAYPOINT IS UNTOUCHED: the ordinary leg keeps exactly
   // the meta it had (no `vertical`, no continuation, no reflex).
@@ -1190,7 +1271,9 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
   const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
-    ['DIG_ROUTE logged when selected', /if \(guarded\.candidate\.meta\.digRoute === true\) this\.logDigRoute\(guarded\.candidate\)/.test(source)],
+    ['DIG_ROUTE logged when selected', /if \(guarded\.candidate\.meta\.digRoute === true\) \{\s*\n\s*this\.logDigRoute\(guarded\.candidate\)/.test(source)],
+    ['dig route selection is a canonical SKILL_STEP', /'dig_route',\s*\n\s*formatSkillStepAuthority\(\s*\n\s*'MECHANICAL_CONTINUATION'/.test(source)],
+    ['policy boundary logged', /private logSkillPolicyBoundaries/.test(source) && /SKILL_POLICY_BOUNDARY/.test(source)],
     ['DIG_ROUTE_PROGRESS on a settled step', /if \(candidate\.meta\.digRoute === true\) this\.logDigRouteProgress\(result, candidate\)/.test(source)],
     ['DIG_ROUTE_REFUSED from the offer', /this\.logDigRouteRefusals\(grounded\.digRefusals\)/.test(source)],
     ['DIG_ROUTE mirrored', /const MIRRORED_MARKERS[\s\S]*?'DIG_ROUTE'/.test(source)],
@@ -1209,9 +1292,11 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     // The pocket continuation: grounded at the open-face site, and executed by the
     // entry skill inside the same lease when it is the unique binding prerequisite.
     ['continuation attached at the open-face site', /const continuations = pocketContinuations\(state, target\)/.test(candidatesSource)],
-    ['level-walk reachability gates the continuation', /best === null \|\| !levelWalkReachable\(state, best\)/.test(candidatesSource)],
+    ['level-walk reachability gates the continuation', /const walkable = best !== null && levelWalkReachable\(state, best\)/.test(candidatesSource)],
+    ['remedy classes enumerated, never ranked', /reason: 'multiple_non_equivalent_recoveries'/.test(candidatesSource)],
     ['executor step-over probe', /private portalFaceStepOverVia\(face: Vec3Json\)/.test(executorSource)],
-    ['executor runs the step-over in-skill', /'step_over',\n\s+`cell=\$\{via\.x\}/.test(executorSource)],
+    ['executor runs the step-over in-skill', /'step_over',\n\s+formatSkillStepAuthority\(\s*\n\s*'MANDATORY_PREREQUISITE'/.test(executorSource)],
+    ['executor states the boundary with several floors', /formatSkillPolicyBoundary\(\{/.test(executorSource)],
   ]
   const failed = checks.filter(([, ok]) => !ok).map(([name]) => name)
   check(

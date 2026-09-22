@@ -44,7 +44,7 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillStart, formatSkillStep, normalizePortalDimension, parsePortalCells, PORTAL_OPEN_FACE_MAX_DISTANCE, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, PORTAL_OPEN_FACE_MAX_DISTANCE, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
 import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
@@ -6228,6 +6228,22 @@ export class Executor {
       if (Math.hypot(via.x + 0.5 - (face.x + 0.5), via.z + 0.5 - (face.z + 0.5)) > PORTAL_OPEN_FACE_MAX_DISTANCE) continue
       vias.push(via)
     }
+    if (vias.length > 1) {
+      // #436 section 7 U3 / section 19 (28): several verified floors are several
+      // non-equivalent ways in, so the skill must NOT pick one - state the
+      // boundary with the grounded alternatives and let the candidate layer's
+      // legs carry the choice back to Jev.
+      this.logger.warn(
+        'agent',
+        formatSkillPolicyBoundary({
+          skill: PORTAL_ENTER_SKILL,
+          reason: 'multiple_non_equivalent_recoveries',
+          alternatives: vias.map((cell) => `step_over:${cell.x},${cell.y},${cell.z}`),
+        }),
+        { alternatives: vias.length },
+      )
+      return null
+    }
     const only = vias[0]
     return vias.length === 1 && only !== undefined ? only : null
   }
@@ -6408,7 +6424,12 @@ export class Executor {
             formatSkillStep(
               PORTAL_ENTER_SKILL,
               'step_over',
-              `cell=${via.x},${via.y},${via.z} face=${face.x},${face.y},${face.z}`,
+              formatSkillStepAuthority(
+                'MANDATORY_PREREQUISITE',
+                `cell=${via.x},${via.y},${via.z} face=${face.x},${face.y},${face.z} ` +
+                  `envelope=movement-only(no_dig,no_place)`,
+                `feet=(${feetCell.x},${feetCell.y},${feetCell.z})->(${via.x},${via.y},${via.z})`,
+              ),
             ),
             { actionId: candidate.id, cell: via, face },
           )
