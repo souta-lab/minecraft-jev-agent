@@ -31,6 +31,11 @@ import {
 } from './protectedGoals.ts'
 import { PROTECTED_SMELT_ITEM } from './placementGuard.ts'
 import {
+  formatGoalSuccessProbeError,
+  formatGoalSuccessRetirement,
+} from './goalSuccess.ts'
+import type { GoalSuccessEvidence } from './goalSuccess.ts'
+import {
   compilePlannedGoal,
   orderPrerequisitesBeforeConsumers,
   orphanedPrerequisiteDecision,
@@ -562,6 +567,16 @@ export class GoalQueue {
     | undefined
 
   /**
+   * #predicate-retire: code-owned proof that the row's OWN success predicate
+   * already holds (installed by the controller, reads live world truth at
+   * evaluation time). Absent (unit tests, deterministic baseline) means no
+   * predicate retirement at all - the previous behaviour, byte for byte.
+   */
+  private goalSuccessProbe: ((goal: QueuedGoal) => GoalSuccessEvidence | null) | undefined
+  /** Evidence sink for `GOAL_RETIRED_PREDICATE`; defaults to the lifecycle sink. */
+  private goalSuccessSink: ((line: string, detail: Record<string, unknown>) => void) | undefined
+
+  /**
    * Install the #prereq-dominated proof. Kept as an explicit method (not a plan
    * option) because the reconciliation runs on every lifecycle transition, not
    * only when a plan is applied.
@@ -570,6 +585,22 @@ export class GoalQueue {
     reason: ((goal: QueuedGoal) => DominatedPrerequisiteDecision | null) | null,
   ): void {
     this.dominatedPrerequisiteReason = reason ?? undefined
+  }
+
+  /**
+   * #predicate-retire: the code-owned "does this row's success ALREADY hold in
+   * the world?" probe (see `goalSuccess.ts`), plus its evidence sink. The probe
+   * is installed by the controller because only the controller owns live world
+   * truth; the queue itself stays plain data. Kept as an explicit method (not a
+   * plan option) for the same reason as the domination proof above: the
+   * retirement runs on every lifecycle transition, not only when a plan arrives.
+   */
+  setGoalSuccessProbe(
+    probe: ((goal: QueuedGoal) => GoalSuccessEvidence | null) | null,
+    sink?: ((line: string, detail: Record<string, unknown>) => void) | null,
+  ): void {
+    this.goalSuccessProbe = probe ?? undefined
+    if (sink !== undefined) this.goalSuccessSink = sink ?? undefined
   }
 
   get revision(): number {
@@ -1143,8 +1174,93 @@ export class GoalQueue {
   }
 
   private activate(): void {
+    // #predicate-retire: a row whose own success predicate ALREADY holds is
+    // finished work (`Code = DONE`), so it retires without executing its action
+    // sequence. This runs BEFORE the prerequisite reconciliation so a row that
+    // describes an existing world outcome is retired as `done` instead of being
+    // mislabelled impossible as an orphan. It cannot add or reorder a goal, and
+    // it never replaces one: it only resolves rows whose own postcondition the
+    // world already holds.
+    this.retireSatisfiedGoals()
     this.reconcilePrerequisites()
     const goal = this.nextRef()
     if (goal !== undefined) goal.status = 'active'
+  }
+
+  /**
+   * #predicate-retire: the ADDITIONAL, code-owned retirement path. On every
+   * lifecycle transition (restore, plan apply, progress/completion, yield) an
+   * unfinished row is asked one question - "does the postcondition you exist to
+   * produce already hold in the world?" - and is marked `done` when the answer is
+   * provably yes. Every world-outcome row drains in the same transition (the
+   * measured shape: `place obsidian` + `place nether_portal` restored in front of
+   * an already built, lit and verified gate), and the prerequisite reconciliation
+   * below then retires whatever consumers no longer need.
+   *
+   * A stale INVENTORY prerequisite (a `collect obsidian` row whose count
+   * genuinely does not hold) is deliberately NOT touched here: "is this
+   * prerequisite still wanted?" is the prerequisite-orphan question
+   * (`retireOrphanedPrerequisites`), not a success predicate.
+   *
+   * Cost/rhythm: this is transition-driven, never per-tick, and each row is
+   * probed at most once per transition (one block read per cell at most).
+   *
+   * Truth rules: only the probe's explicit `satisfied` verdict retires a row.
+   * `unsatisfied` and `unknown` leave the row exactly as it was, so every
+   * existing completion path (the `markDone()` sites and the per-tick spatial
+   * predicate) keeps working unchanged. A probe that throws is a bug, not a
+   * verdict: it is reported and the row is left alone.
+   *
+   * Returns the rows retired by this transition (diagnostics/tests).
+   */
+  private retireSatisfiedGoals(now: number = Date.now()): QueuedGoal[] {
+    const probe = this.goalSuccessProbe
+    if (probe === undefined) return []
+    // The retirement is evidence-bearing work: it always reaches a sink. The
+    // controller's mirrored sink wins; otherwise the plan audit sink; otherwise
+    // the module default (stderr), exactly like `PREREQ_RETIRED`.
+    const emit = (line: string, detail: Record<string, unknown>): void => {
+      if (this.goalSuccessSink !== undefined) {
+        this.goalSuccessSink(line, detail)
+        return
+      }
+      const fallback = this.lifecycleSink ?? prereqAuditSink
+      fallback(line)
+    }
+    const retired: QueuedGoal[] = []
+    // Every UNFINISHED row is asked once per lifecycle transition, not only the
+    // head: the measured restore put a non-predicate row first
+    // (`g4:collect:obsidian` active, then `g5:place:obsidian`,
+    // `g6:place:nether_portal`), and a head-only check would never reach the
+    // rows whose outcome already exists. Rows whose predicate cannot be
+    // evaluated are simply skipped; the prerequisite reconciliation below then
+    // retires whatever their consumers no longer need.
+    const unfinished = this.goals.filter((goal) => goal.status === 'pending' || goal.status === 'active')
+    for (const goal of unfinished) {
+      let evidence: GoalSuccessEvidence | null
+      try {
+        evidence = probe(goal)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        emit(formatGoalSuccessProbeError(goal.id, message), { id: goal.id, error: message })
+        continue
+      }
+      if (evidence === null || evidence.status !== 'satisfied') continue
+      goal.status = 'done'
+      goal.haveCount = Math.max(goal.haveCount, goal.requiredCount)
+      goal.detail = `retired: success predicate '${evidence.predicate}' already holds (${evidence.detail})`
+      goal.updatedAt = now
+      retired.push(goal)
+      emit(formatGoalSuccessRetirement(goal, evidence), {
+        id: goal.id,
+        kind: goal.kind,
+        targetItem: goal.targetItem,
+        predicate: evidence.predicate,
+        source: evidence.source,
+        detail: evidence.detail,
+      })
+    }
+    if (retired.length > 0) this.queueRevision += 1
+    return retired
   }
 }

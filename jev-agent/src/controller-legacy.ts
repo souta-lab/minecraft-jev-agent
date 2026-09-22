@@ -129,6 +129,8 @@ import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
 import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
+import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, recordedPortalSitesFromKnownResources, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
+import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -1350,6 +1352,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'RETRIEVE_RETIRED',
   'RETRIEVE_ROUTE_BLOCKED',
   'APPROACH_LEG',
+  // #predicate-retire: a row retired because its OWN success predicate already
+  // held in world truth is a DONE decision, and the queue transition it causes
+  // (the head moving to the next row) is exactly what the measured M3 blocker
+  // turned on. Unmirrored it would be invisible in `buddy.log`: the run would
+  // show a queue that silently advanced from an M2 row to the `blaze_rods` work
+  // with no named reason.
+  GOAL_RETIRED_PREDICATE,
+  GOAL_SUCCESS_PROBE_ERROR,
   // The dig-route family: the target a travel/enter/retrieve goal could not walk
   // to, the bounded terrain route the offer grounded toward it, the typed cause
   // when even that could not be grounded, and the measured distance gain of a
@@ -2249,6 +2259,7 @@ export class JevController {
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.installDominatedPrerequisiteReason()
+    this.installGoalSuccessProbe()
     this.recipeIndex = createRecipeIndex(bot.registry)
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
@@ -2385,6 +2396,7 @@ export class JevController {
     this.lastStateFingerprint = ''
     this.queue = new GoalQueue()
     this.installDominatedPrerequisiteReason()
+    this.installGoalSuccessProbe()
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
     this.decisionWriter = new JsonlWriter(join(this.options.logDir, 'decisions.jsonl'))
@@ -6927,6 +6939,55 @@ export class JevController {
       return
     }
     this.queue.setDominatedPrerequisiteReason((goal) => reason(goal, this.inventorySnapshot()))
+  }
+
+  /**
+   * #predicate-retire: wire the code-owned "does this row's success already hold
+   * in the world?" probe into the queue. The closure reads LIVE world truth at
+   * evaluation time (the queue runs it on every lifecycle transition, including
+   * restore), so a row whose postcondition is already true - the measured
+   * built/lit/verified Nether gate in front of a restored `place nether_portal`
+   * row - retires as DONE instead of holding the queue head forever and starving
+   * the ladder's M3 work.
+   *
+   * It answers CAN/TRUE/DONE only: it never adds, reorders or replaces a goal,
+   * and a predicate it cannot evaluate is UNKNOWN, which is never satisfaction.
+   */
+  private installGoalSuccessProbe(): void {
+    this.queue.setGoalSuccessProbe(
+      (goal) => evaluateGoalSuccess(goal, this.goalWorldProbe()),
+      (line, detail) => this.logger?.warn('queue', line, detail, this.tickCounter),
+    )
+  }
+
+  /** The live world facts the success-predicate probe may read. Plain reads only. */
+  private goalWorldProbe(): GoalSuccessWorldProbe {
+    const scratch = this.bot.entity?.position?.clone()
+    return {
+      dimension: this.bot.game?.dimension ?? null,
+      blockAt: (cell) => {
+        if (scratch === undefined) return null
+        try {
+          return this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
+        } catch {
+          // An unreadable cell is unobservable world truth, never absence.
+          return null
+        }
+      },
+      recordedPortalSites: this.recordedPortalSites(),
+      verifiedBlockRecords: verifiedBlockRecordsFromKnownResources(this.options.knownResources),
+    }
+  }
+
+  /**
+   * The run's durable verified-portal records, in the geometry envelope the
+   * world memory already carries (`KnownResource` kind `portal`: origin +
+   * widthAxis + recorded frame cells). The records are minted and revoked by the
+   * world-memory sync from LIVE block truth (`syncKnownPortalSites` /
+   * `PORTAL_VERIFIED`); this reader neither adds nor revokes one.
+   */
+  private recordedPortalSites(): RecordedPortalSite[] {
+    return recordedPortalSitesFromKnownResources(this.options.knownResources)
   }
 
   /**
