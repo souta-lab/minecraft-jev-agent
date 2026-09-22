@@ -303,6 +303,11 @@ export function restrictCandidatesDuringDangerousThreat(
  * the caller can mirror `THREAT_NO_ESCAPE` when the body was left with nothing
  * but an escalation while a hostile is on it.
  */
+export interface ThreatRestrictionFacts {
+  /** Ordinary hostile ids whose current melee approach was proven no_path. */
+  unreachableThreatEntityIds?: ReadonlySet<number>
+}
+
 export interface ThreatOffer {
   candidates: Candidate[]
   /** the danger state this offer was computed against (null when none) */
@@ -313,14 +318,52 @@ export interface ThreatOffer {
   inContact: boolean
   /** code grounded no attack and no keep-distance route under threat */
   gap: { reason: string } | null
+  /**
+   * Current danger-radius hostiles are all occluded and have no melee path. The
+   * conservative tracker remains active, but this snapshot does not suppress
+   * goal work solely because Euclidean distance is small through sealed terrain.
+   */
+  occluded: { reason: 'no_los_no_path'; entityIds: number[] } | null
+}
+
+function occludedThreatBypass(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
+  facts: ThreatRestrictionFacts,
+): { reason: 'no_los_no_path'; entityIds: number[] } | null {
+  const threat = state.signals?.threat ?? null
+  const unreachable = facts.unreachableThreatEntityIds ?? new Set<number>()
+  if (threat === null || threat.active !== true || unreachable.size === 0) return null
+  // A recent hit keeps the survival envelope conservative even if the attacker
+  // has just moved behind cover. This preserves the original hysteresis safety.
+  const damage = state.signals.lastDamage ?? null
+  if (damage !== null && Number.isFinite(damage.atMs) && state.timestampMs - damage.atMs <= THREAT_MEMORY_MS) return null
+
+  const nearby = state.entities.filter(
+    (entity) => entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
+  )
+  if (nearby.length === 0) return null // lingering clear-state hysteresis stays unchanged
+  const allOccludedAndUnreachable = nearby.every(
+    (entity) =>
+      entity.distance > IMMEDIATE_HOSTILE_RANGE &&
+      entity.attackedSelf !== true &&
+      entity.lineOfSight === false &&
+      unreachable.has(entity.id),
+  )
+  if (!allOccludedAndUnreachable) return null
+  return { reason: 'no_los_no_path', entityIds: nearby.map((entity) => entity.id).sort((a, b) => a - b) }
 }
 
 export function applyThreatRestriction(
-  state: Pick<WorldState, 'entities' | 'signals'>,
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
   candidates: readonly Candidate[],
+  facts: ThreatRestrictionFacts = {},
 ): ThreatOffer {
   const threat = state.signals?.threat ?? null
   const inContact = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
+  const occluded = occludedThreatBypass(state, facts)
+  if (occluded !== null) {
+    return { candidates: [...candidates], threat, restricted: false, inContact: false, gap: null, occluded }
+  }
   const contact = restrictCandidatesDuringImmediateThreat(state, candidates)
   const restricted = restrictCandidatesDuringDangerousThreat(state, contact)
   const onlyEscalate = restricted.length === 1 && restricted[0]?.kind === 'ESCALATE'
@@ -331,6 +374,7 @@ export function applyThreatRestriction(
     restricted: restricted.length !== candidates.length,
     inContact,
     gap,
+    occluded: null,
   }
 }
 

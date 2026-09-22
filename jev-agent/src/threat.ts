@@ -119,6 +119,7 @@ export const THREAT_NEARBY = 'THREAT_NEARBY'
  */
 export const THREAT_RANGED_UNANSWERED = 'THREAT_RANGED_UNANSWERED'
 export const THREAT_NO_ESCAPE = 'THREAT_NO_ESCAPE'
+export const THREAT_OCCLUDED = 'THREAT_OCCLUDED'
 export const THREAT_CLEAR = 'THREAT_CLEAR'
 
 /** Vanilla 1.21 unarmed player attack damage. */
@@ -464,7 +465,27 @@ export function formatThreatNearby(
     `engaged=${evidence.threatEngaged} los=${evidence.threatLineOfSight === null ? 'unknown' : evidence.threatLineOfSight} ` +
     `threatHeld=${held} weapon=${weapon.label} weaponKind=${weapon.kind} weaponDamage=${damage} ` +
     `health=${round2(body.health)} food=${body.food} regenerating=${body.regenerating} ` +
-    `activeMs=${evidence.activeMs} -> attack/keep-distance stay offered until the envelope is clear for ${evidence.clearMs}ms`
+    `activeMs=${evidence.activeMs} -> danger memory stays active until the envelope is clear for ${evidence.clearMs}ms; current CAN is grounded separately`
+  )
+}
+
+/**
+ * The conservative distance tracker sees a hostile, but current CAN proves every
+ * danger-radius hostile is behind occlusion with no melee route and there was no
+ * recent hit. Work may continue for THIS snapshot; the tracker is intentionally
+ * left active so LOS/path/contact becoming true re-arms survival immediately.
+ */
+export function formatThreatOccluded(
+  goalKey: string,
+  evidence: ThreatStateEvidence,
+  entityIds: readonly number[],
+): string {
+  const name = evidence.threatName ?? 'unknown'
+  const distance = evidence.threatDistance === null ? 'unknown' : `${round2(evidence.threatDistance)}m`
+  return (
+    `${THREAT_OCCLUDED} goal=${goalKey} threat=${name} ids=[${entityIds.join(',')}] distance=${distance} ` +
+    `los=${evidence.threatLineOfSight === null ? 'unknown' : evidence.threatLineOfSight} engaged=${evidence.threatEngaged} ` +
+    `reason=no_los_no_path -> threat memory stays active, but this snapshot does not suppress grounded goal work`
   )
 }
 

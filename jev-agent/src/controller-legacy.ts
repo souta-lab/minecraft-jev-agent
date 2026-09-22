@@ -27,7 +27,7 @@ import pathfinderModule from 'mineflayer-pathfinder'
 import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -1848,6 +1848,7 @@ export class JevController {
   private lastThreatLine: string | null = null
   /** Signature of the last `THREAT_NO_ESCAPE` line, so the gap logs on a change. */
   private lastThreatGapLine: string | null = null
+  private lastThreatOccludedLine: string | null = null
   /** Whether the danger state was active last tick, so the exit logs once. */
   private threatWasActive = false
   /** Signature of the last `FOOD_HABITAT_REFUSED` line, so it logs on a change. */
@@ -2604,8 +2605,19 @@ export class JevController {
       // names the capability gap when code grounds no attack and no
       // keep-distance route, which is mirrored as `THREAT_NO_ESCAPE` - the work
       // set is never silently handed back while a hostile is on the body.
-      const threatOffer = applyThreatRestriction(state, candidates)
+      const unreachableThreatEntityIds = new Set<number>(
+        grounded.withheld
+          .filter(
+            (entry) =>
+              entry.candidate.kind === 'ATTACK' &&
+              entry.result.reason === 'no_path' &&
+              entry.candidate.targetEntityId !== null,
+          )
+          .map((entry) => entry.candidate.targetEntityId as number),
+      )
+      const threatOffer = applyThreatRestriction(state, candidates, { unreachableThreatEntityIds })
       candidates = threatOffer.candidates
+      this.logThreatOccluded(threatOffer)
       this.logThreatGap(state, threatOffer)
       candidates = restrictCandidatesAtCriticalHealth(state, candidates)
       // SAFE: while the body is out of breath the offer collapses to the routes
@@ -6390,6 +6402,29 @@ export class JevController {
         health: state.self.health,
         weapon: state.self.heldItem?.name ?? 'fists',
         source: sourceName,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /** Current CAN says the conservative proximity threat is occluded/unreachable. */
+  private logThreatOccluded(offer: ThreatOffer): void {
+    if (offer.occluded === null || offer.threat === null) {
+      this.lastThreatOccludedLine = null
+      return
+    }
+    const line = formatThreatOccluded(this.currentGoalKey(), offer.threat, offer.occluded.entityIds)
+    if (line === this.lastThreatOccludedLine) return
+    this.lastThreatOccludedLine = line
+    this.logger.info(
+      'agent',
+      line,
+      {
+        marker: THREAT_OCCLUDED,
+        threat: offer.threat.threatName,
+        ids: offer.occluded.entityIds,
+        distance: offer.threat.threatDistance,
+        reason: offer.occluded.reason,
       },
       this.tickCounter,
     )
