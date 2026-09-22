@@ -1375,6 +1375,20 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // climb that was (or was not) available.
   'PORTAL_ENTRY_CLIMB',
   'PORTAL_ENTRY_CLIMB_REFUSED',
+  // The COMPOSED entry route's HORIZONTAL half (the same trial, second half): the
+  // crossing leg places the floor of the void between the body's ledge and the
+  // floated gate. It is grounded in the candidate layer
+  // (`candidates.ts#entryCandidates`) and executed as ONE bounded `runBridgeLeg`
+  // chunk, so this line is the entry route's own summary of WHICH span it declared
+  // (direction, span, first placement cell, first landing) and WHAT the leg did.
+  // `outcome=advanced` (the body moved onto the floor it placed) is deliberately
+  // distinct from `outcome=placed` (a block exists but the body did NOT advance):
+  // the previous lane's fixture proved a placement without a proven advance, and
+  // that distinction is the whole point of this half. The per-step placements stay
+  // on the existing mirrored `BRIDGE_*` markers; without this line the live sink
+  // DROPS the entry-route summary and a reviewer cannot tell a crossing that ran
+  // from one that was never grounded.
+  'PORTAL_ENTRY_CROSS',
   // Issue #436: the Skill boundary and the reflex proof must both be live-visible,
   // or a reviewer cannot tell "Jev chose the target" from "code finished it".
   'SKILL_START',

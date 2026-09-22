@@ -801,6 +801,62 @@ export function planBridgeRoute(input: BridgeRouteInput): BridgeRouteDecision {
   }
 }
 
+/**
+ * The candidate-meta CONTRACT of a grounded bridge leg: every fact `runBridge`
+ * reads before it places, written in ONE place.
+ *
+ * WHY THIS IS SHARED (measured drift risk, 2026-09-23): the bridge was first
+ * offered only as a MOVE remedy (`candidates.ts#bridgeLegCandidate`), and its
+ * meta was written inline there. The portal ENTRY's crossing leg is the same
+ * grounded span reached through a different Skill (`ENTER_PORTAL`, one of the
+ * arms Jev may select), and an offer that wrote a SUBSET of these keys would be
+ * executable on paper and inert in practice - exactly the defect the
+ * `placeBlockName` re-probe fix (main b5325b3) closed for the self-landing
+ * scaffold: `runBridge` refuses with `target_gone` when `bridgeDir`/`bridgeBlock`
+ * are missing, cannot bound itself without `bridgeSpan`, cannot declare its
+ * `EffectEnvelope` without `mayPlaceBlocks` + `bridgePlace`, and cannot show the
+ * `BRIDGE_START` line the offer grounded without `bridgeLine`.
+ *
+ * Pure: no bot, no world, no clock. `bridgeFrom`/`bridgeTo`/`bridgeRemaining` are
+ * the offer-time distance claims, in `round2Number` precision, and the
+ * self-landing scaffold's own two keys are present only for that case - so a
+ * verified span's contract is byte-identical to before.
+ */
+export function bridgeContractMeta(plan: BridgePlan): Record<string, string | number | boolean> {
+  const selfLanding = plan.selfLanding === true
+  return {
+    [BRIDGE_META]: true,
+    [BRIDGE_DIR_META]: plan.dir,
+    [BRIDGE_BLOCK_META]: plan.block,
+    [BRIDGE_SPAN_META]: plan.span,
+    [BRIDGE_TARGET_META]: cellText(plan.far),
+    // #436 section 5 EffectEnvelope: this leg WILL place blocks and consume
+    // `bridgeBlock`. Declared, never implicit.
+    [BRIDGE_MAY_PLACE_META]: true,
+    [BRIDGE_LINE_META]: plan.line,
+    [BRIDGE_LANDING_META]: cellText(plan.landing),
+    [BRIDGE_PLACE_META]: cellText(plan.place),
+    bridgeFrom: round2Number(plan.from),
+    bridgeTo: round2Number(plan.to),
+    bridgeRemaining: plan.remaining,
+    // The SELF-LANDING SCAFFOLD says so in machine-readable form: this leg's far
+    // side is the cell it floors, so `span` is 1 by construction and the bounded
+    // continuation is the next offer from the new stand cell. `pocket` carries the
+    // shared per-cell verdict the step was grounded on (the SAME
+    // `wallEntry.ts#wallPocketRefusal` family the wall entry and level scan read).
+    ...(selfLanding
+      ? {
+          [BRIDGE_SELF_LANDING_META]: true,
+          [BRIDGE_POCKET_EVIDENCE_META]: plan.pocketEvidence ?? 'none',
+        }
+      : {}),
+  }
+}
+
+function round2Number(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
 /** The cardinal direction from `from` to `to` (the axis with the larger delta). */
 export function bridgeBearingDir(from: Vec3Json, to: Vec3Json): BridgeDir {
   const dx = to.x - from.x

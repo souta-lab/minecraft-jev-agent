@@ -56,6 +56,7 @@ import {
   PORTAL_WALK_IN_LEVEL_TOLERANCE,
   PORTAL_ENTRY_CLIMB,
   PORTAL_ENTRY_CLIMB_REFUSED,
+  PORTAL_ENTRY_CROSS,
   formatPortalEntryNoKnownSite,
   planPortalEntry,
   portalFrameLayout,
@@ -65,6 +66,9 @@ import type { PortalEntryPlan, PortalFrameSite } from './src/netherPortalPlan.ts
 import { defaultCandidateOptions, entryCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { cellKey, observeZeroProgressRoute, routeSignature } from './src/zeroProgressRoute.ts'
+import { BRIDGE_DIRS, BRIDGE_META, BRIDGE_PLACE_META } from './src/bridgeRoute.ts'
+import { probeBridgeDirection } from './src/state.ts'
+import type { BridgeProbe } from './src/bridgeRoute.ts'
 import { guardCandidate } from './src/policy.ts'
 import { Executor, ExecutorError, defaultExecutorOptions } from './src/executor.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
@@ -130,12 +134,25 @@ interface FixtureBot {
   movedToFace: boolean
 }
 
-function makeBot(feet: Vec3Json, grid: Map<string, Cell>, hasPickaxe: boolean): FixtureBot {
+function makeBot(
+  feet: Vec3Json,
+  grid: Map<string, Cell>,
+  hasPickaxe: boolean,
+  carried: Record<string, number> = {},
+): FixtureBot {
   const position = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5)
   const digs: string[] = []
   const pathCalls: Vec3Json[] = []
   const legs: string[] = []
   const inventoryItems = hasPickaxe ? [{ name: 'diamond_pickaxe', type: registry.itemsByName.diamond_pickaxe.id as number, count: 1 }] : []
+  // The blocks the route DECLARED (the crossing's `bridgeBlock`): the body really
+  // carries them, so `equipPlacementItem` + `placeBlock` can consume them exactly
+  // as the live actuator does.
+  for (const [name, count] of Object.entries(carried)) {
+    const type = registry.itemsByName[name]?.id
+    if (typeof type !== 'number') throw new Error(`fixture: unknown item ${name}`)
+    inventoryItems.push({ name, type, count })
+  }
   const blockAt = (v: { x: number; y: number; z: number }) => {
     const found = grid.get(`${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)}`)
     if (found === undefined) return null
@@ -190,7 +207,23 @@ function makeBot(feet: Vec3Json, grid: Map<string, Cell>, hasPickaxe: boolean): 
       grid.set(k, cell('air'))
     },
     stopDigging: () => undefined,
-    equip: async () => undefined,
+    // mineflayer's equip makes the item the HELD one, and the executor's
+    // `equipPlacementItem` requires exactly that reflection before it places.
+    equip: async (item: { name: string; type: number; count: number }) => {
+      bot.heldItem = item
+    },
+    // The server's own placement rule, modelled: the block lands in the cell the
+    // clicked face points at, and it is the HELD item that goes in (mineflayer's
+    // generic_place sends the held stack).
+    placeBlock: async (reference: { position: Vec3 }, face: { x: number; y: number; z: number }) => {
+      const target = {
+        x: Math.floor(reference.position.x) + face.x,
+        y: Math.floor(reference.position.y) + face.y,
+        z: Math.floor(reference.position.z) + face.z,
+      }
+      const held = (bot.heldItem as { name: string } | null)?.name ?? 'cobblestone'
+      grid.set(`${target.x},${target.y},${target.z}`, cell(held))
+    },
     pathfinder: {
       movements: null as unknown,
       setMovements: (movements: unknown) => {
@@ -438,13 +471,18 @@ function installWalkModel(
     if (!state) return
     if (control === 'jump') {
       jumped = true
-      // the measured hop lands ON the threshold top (one block up); a wall stops it
-      if (
-        options.blocked !== true &&
-        fixture.position.y < ENTER_CELL.y - 0.05 &&
-        ENTER_CELL.y - fixture.position.y <= 1.5
-      ) {
-        fixture.position.y = ENTER_CELL.y
+      // ONE vanilla jump clears one block: the body rises a level when the space it
+      // would occupy is free. This is the SAME single mechanic the direct walk's hop
+      // onto the frame threshold and a PILLAR step's place-then-land cycle both use,
+      // so the fixture models one physics rule instead of one special case per
+      // caller. A wall stops it (`blocked`).
+      if (options.blocked !== true) {
+        const cellName = (x: number, y: number, z: number): string | undefined =>
+          fixture.grid.get(`${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`)?.boundingBox
+        if (cellName(fixture.position.x, fixture.position.y + 1, fixture.position.z) !== 'block' &&
+            cellName(fixture.position.x, fixture.position.y + 2, fixture.position.z) !== 'block') {
+          fixture.position.y += 1
+        }
       }
       return
     }
@@ -584,6 +622,15 @@ function worldState(
   counts: Record<string, number>,
   descent: DescentOption[] = [],
   standable: Vec3Json[] = [bodyFeet],
+  /**
+   * The sensor's own bounded forward probes (`state.ts#buildBridgeProbes`). A
+   * fixture that grounds a crossing must feed the REAL `probeBridgeDirection`
+   * output, because the self-landing rule is grounded on the pocket's own
+   * face-adjacency flood read, which only the sensor fills.
+   */
+  bridgeProbes?: BridgeProbe[],
+  /** the LIVE structures of the world model (the portal frame + interior) */
+  liveStructures: Vec3Json[] = [],
 ): WorldState {
   const current = queuedPlace()
   return {
@@ -616,14 +663,21 @@ function worldState(
     goalQueue: queueWith(current),
     recentEvents: [],
     signals: signals(),
+    ...(bridgeProbes === undefined ? {} : { bridgeProbes }),
+    ...(liveStructures.length === 0
+      ? {}
+      : { liveStructureMembers: liveStructures.map((position) => ({ kind: 'nether_portal', position })) }),
   }
 }
 
 /** The gate's entry plan (lit interior + standable enter cell), from live world truth. */
-function entryPlan(fixture: FixtureBot): PortalEntryPlan {
+function entryPlan(
+  fixture: FixtureBot,
+  self: Vec3Json = { x: ENTER_CELL.x, y: ENTER_CELL.y - 1, z: ENTER_CELL.z - 1 },
+): PortalEntryPlan {
   const plan = planPortalEntry({
     site: SITE,
-    self: { x: ENTER_CELL.x, y: ENTER_CELL.y - 1, z: ENTER_CELL.z - 1 },
+    self,
     blockAt: (c) => fixture.bot.blockAt(new Vec3(c.x, c.y, c.z))?.name ?? null,
     isStandable: (c) => isStandable(fixture.bot, c),
     fromDimension: OVERWORLD,
@@ -984,14 +1038,16 @@ function trialPathFacts(fixture: FixtureBot, executor: Executor, alsoBlockEntry:
   const candidate = enterCandidate(fixture, state)
   const result = await runEntry(fixture, candidate, true)
   check(
-    '(o) a LEVEL gate is untouched: vertical=none, no fallback key, no climb marker, the walk-in transfers',
+    '(o) a LEVEL gate is untouched: vertical=none, no fallback key, no crossing key, no climb marker, the walk-in transfers',
     candidate.meta.vertical === 'none' &&
       candidate.meta.fallbackVertical === undefined &&
+      candidate.meta[BRIDGE_META] === undefined &&
+      candidate.meta[BRIDGE_PLACE_META] === undefined &&
       result.status === 'done' &&
       result.verified === true &&
       !result.messages.some((line) => line.startsWith(PORTAL_ENTRY_CLIMB)) &&
       !result.messages.some((line) => line.includes('climb=')),
-    `vertical=${String(candidate.meta.vertical)} fallback=${String(candidate.meta.fallbackVertical)} status=${result.status} verified=${result.verified}`,
+    `vertical=${String(candidate.meta.vertical)} fallback=${String(candidate.meta.fallbackVertical)} bridge=${String(candidate.meta[BRIDGE_META])} status=${result.status} verified=${result.verified}`,
   )
 }
 
@@ -1005,16 +1061,17 @@ function trialPathFacts(fixture: FixtureBot, executor: Executor, alsoBlockEntry:
   const candidate = enterCandidate(fixture, state)
   const result = await runEntry(fixture, candidate, true)
   check(
-    '(o) a ONE-BLOCK step-up is untouched: vertical=pillar steps=1 with NO fallback key, no climb marker, transfer',
+    '(o) a ONE-BLOCK step-up is untouched: vertical=pillar steps=1 with NO fallback/crossing key, no climb marker, transfer',
     candidate.meta.vertical === 'pillar' &&
       candidate.meta.pillarSteps === 1 &&
       candidate.meta.pillarToY === ENTER_CELL.y &&
       candidate.meta.fallbackVertical === undefined &&
+      candidate.meta[BRIDGE_META] === undefined &&
       result.status === 'done' &&
       result.verified === true &&
       !result.messages.some((line) => line.startsWith(PORTAL_ENTRY_CLIMB)) &&
       !result.messages.some((line) => line.includes('climb=')),
-    `vertical=${String(candidate.meta.vertical)} steps=${String(candidate.meta.pillarSteps)} fallback=${String(candidate.meta.fallbackVertical)} status=${result.status} verified=${result.verified}`,
+    `vertical=${String(candidate.meta.vertical)} steps=${String(candidate.meta.pillarSteps)} fallback=${String(candidate.meta.fallbackVertical)} bridge=${String(candidate.meta[BRIDGE_META])} status=${result.status} verified=${result.verified}`,
   )
 }
 
@@ -1986,6 +2043,10 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
     // and the operator's trial is indistinguishable from "no leg was ever grounded".
     PORTAL_ENTRY_CLIMB,
     PORTAL_ENTRY_CLIMB_REFUSED,
+    // ...and the crossing half's own line: the entry route's summary of the span it
+    // declared and whether the body advanced onto the floor it placed. The
+    // per-step placements are the already-mirrored `BRIDGE_*` markers.
+    PORTAL_ENTRY_CROSS,
     SKILL_START,
     SKILL_STEP,
     SKILL_INTERRUPT,
@@ -2390,6 +2451,538 @@ const STEP_OVER_FACE: Vec3Json = { x: 26, y: 67, z: 10 }
       model.controls.length === 0 &&
       fixture.digs.length === 0,
     `status=${result.status} controls=[${model.controls.join(',')}] digs=${fixture.digs.length} boundary=[${boundary}]`,
+  )
+}
+
+
+// ===========================================================================
+// (s) THE OPERATOR'S TRIAL, DECODED FROM THE SAVE: the CROSSING half.
+//
+// MEASURED (read-only decode of `r.0.0.mca`, chunk (1,0), DataVersion 4671,
+// Status=full; the portal/obsidian round-trip is the decoder's own sanity anchor):
+//
+//   * the portal is a 2x3 interior at z=9: nether_portal at (26..27, 67..69, 9),
+//     ringed by obsidian (25,67..69,9) (28,67..69,9) (26..27,66,9) (26..27,70,9);
+//   * the body's own stand cell is (26,64,6): feet and head AIR, support
+//     (26,63,6)=grass_block - the reported live position (26.3,64.0,6.3);
+//   * SOUTH of it, at the portal's own level, everything is AIR: (26,67,7),
+//     (26,67,8) and their floors (26,66,7), (26,66,8) - the void between the ledge
+//     and the gate. The frame's bottom row (26,66,9) is OBSIDIAN, so the interior's
+//     floor exists but the body cannot walk to it: the pinned `canDig=false`
+//     pathfinder cannot express "place a block into the void and step onto it",
+//     which is why every ENTER realization ended `PATH_CALLBACK phase=failed
+//     outcome=stuck`.
+//
+// The composition under test (one bounded commitment, each leg typed + mirrored):
+//   climb legs (`PORTAL_ENTRY_CLIMB*`)  ->  crossing leg (`PORTAL_ENTRY_CROSS`,
+//   one `runBridgeLeg` chunk, per-step evidence on the existing `BRIDGE_*`
+//   markers)  ->  the verified walk-in (`PORTAL_WALK_IN`).
+//
+// (s-1) the climb half on the measured geometry is UNCHANGED: a body at the
+//       ledge (26,64,6) carries the own-column PILLAR to the interior's level and
+//       NO crossing (the crossing belongs to the level it happens at).
+// (s-2) the crossing half: a body AT the interior's level (the post-climb state)
+//       carries a real verified span south - place (26,66,7), land (26,67,7),
+//       far = the interior cell itself - and BOTH the reachability gate and the
+//       guard accept that crossing-only entry, so the selected leg really runs.
+// (s-3) THE WHOLE TRIAL through the live gate, one bounded chunk per decision
+//       (each decision re-sensed at the body's current cell): the climb lifts the
+//       body, the crossing really PLACES and the body really ADVANCES onto the
+//       floor it made, and the verified walk-in enters - the exact "advance, not
+//       just a placement" distinction the previous lane's fixture left unproven.
+// (s-4) ONE crossing decision is a bounded chunk: durable body progress,
+//       `verified=false`, never a claimed entry.
+// (s-5) the one-below shape (the interior one block above the far side): the offer
+//       is a SELF-LANDING scaffold, its execution floors (26,65,7) with the body
+//       standing on it, and the rest of the route still enters.
+// (s-6) a declared crossing that cannot execute is a TERMINAL typed refusal that
+//       names the failed leg, and the body is never pushed into the gap.
+// (s-7) the control shapes stay byte-identical: a level gate, a one-block step-up
+//       and an ordinary walkable gate carry no crossing at all - including one
+//       whose probes ARE sensed.
+// ===========================================================================
+
+/**
+ * The measured geometry's structural cells, written as the save's own coordinates
+ * (the fixtures above use the historical ORIGIN/LAYOUT gate; this one is the
+ * operator's trial). Every cell named here was read from the region bytes; the
+ * cells deliberately NOT named are left unknown (`blockAt` -> null), which the
+ * sensor and every rule treat as fail-closed.
+ */
+function measuredPortalGrid(): Map<string, Cell> {
+  const grid = new Map<string, Cell>()
+  const air = (x: number, y: number, z: number): void => {
+    grid.set(`${x},${y},${z}`, cell('air'))
+  }
+  // the body's ledge: support + the body rows, and the CLEAR AIR COLUMN above it
+  // the pillar climb needs (the save has air all the way to the gate's level here:
+  // that is why the climb is the leg that closes the height)
+  grid.set('26,63,6', cell('grass_block'))
+  for (const y of [64, 65, 66, 67, 68, 69]) air(26, y, 6)
+  // the existing cobblestone step south of the body (the save's own block)
+  grid.set('26,64,7', cell('cobblestone'))
+  // the void the crossing has to floor, at the portal's level and below it:
+  // (26,67,7)/(26,66,7) and (26,67,8)/(26,66,8) are the span's own cells
+  for (const x of [26]) {
+    for (const z of [7, 8]) {
+      air(x, 65, z)
+      air(x, 66, z)
+      air(x, 67, z)
+      air(x, 68, z)
+    }
+  }
+  // the gate itself: 2x3 interior + the 10-cell obsidian ring
+  for (const y of [67, 68, 69]) {
+    grid.set(`25,${y},9`, cell('obsidian'))
+    grid.set(`26,${y},9`, cell(NETHER_PORTAL))
+    grid.set(`27,${y},9`, cell(NETHER_PORTAL))
+    grid.set(`28,${y},9`, cell('obsidian'))
+  }
+  grid.set('26,66,9', cell('obsidian'))
+  grid.set('27,66,9', cell('obsidian'))
+  grid.set('26,70,9', cell('obsidian'))
+  grid.set('27,70,9', cell('obsidian'))
+  // the first cell of the OTHER three cardinal probes, exactly as the save has
+  // them (air on air): so the crossing is chosen as the shortest REAL span, never
+  // because the other directions were merely unsensed.
+  for (const [x, z] of [
+    [25, 6],
+    [27, 6],
+    [26, 5],
+  ] as const) {
+    air(x, 66, z)
+    air(x, 67, z)
+    air(x, 68, z)
+  }
+  // the wider surroundings the save also has (the body's ledge and the grass
+  // shelf west of the corridor), so a probe that looks further sees real ground
+  grid.set('26,63,5', cell('grass_block'))
+  grid.set('26,63,4', cell('grass_block'))
+  grid.set('27,63,4', cell('grass_block'))
+  return grid
+}
+
+/** The gate's live-structure member cells (frame + interior): the protected set. */
+const MEASURED_STRUCTURE: Vec3Json[] = [
+  ...LAYOUT.frame.map((c) => ({ ...c })),
+  ...LAYOUT.interior.map((c) => ({ ...c })),
+]
+
+/** The real sensor's four bounded probes for a body on the measured geometry. */
+function measuredProbes(fixture: FixtureBot, feet: Vec3Json): BridgeProbe[] {
+  return BRIDGE_DIRS.map((dir) => probeBridgeDirection(fixture.bot, feet, dir))
+}
+
+/**
+ * The measured LOCOMOTION facts of the trial: the portal interior is not a walk
+ * target for the stock actuator (`PATH_CALLBACK phase=failed outcome=stuck`), and
+ * a landing cell is only walked onto when its support really exists in the world
+ * (the crossing places it first).
+ */
+function measuredEntryPath(fixture: FixtureBot, executor: Executor, interiorWalkable: boolean): void {
+  const base = (executor as unknown as { pathTo: (target: Vec3Json) => Promise<void> }).pathTo
+  ;(executor as unknown as { pathTo: (target: Vec3Json) => Promise<void> }).pathTo = async (
+    target: Vec3Json,
+  ): Promise<void> => {
+    fixture.pathCalls.push({ ...target })
+    if (key(target) === key(ENTER_CELL) && !interiorWalkable) {
+      throw new ExecutorError('path_stuck', 'pathfinder GoalBlock -> stuck')
+    }
+    if (key(target) !== key(ENTER_CELL)) {
+      const support = fixture.grid.get(`${target.x},${target.y - 1},${target.z}`)
+      if (support === undefined || support.boundingBox !== 'block') {
+        throw new ExecutorError('path_stuck', `no support under (${key(target)})`)
+      }
+    }
+    await base(target)
+  }
+}
+
+/**
+ * The ENTER candidate the LIVE decision loop would present for the measured
+ * geometry: `generateGroundedCandidates` (the reachability gate included) with the
+ * measured pathfinder fact - the interior is not a walk target for the stock
+ * actuator, so a `no_path` probe is what the gate sees. `null` means the gate
+ * WITHHELD the entry (which would mean the crossing route can never be chosen).
+ */
+function liveEntryCandidate(fixture: FixtureBot, state: WorldState, self: Vec3Json): Candidate | null {
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    portalEntry: entryPlan(fixture, self),
+    reachability: { pathProbe: () => 'no_path' },
+  }
+  return generateGroundedCandidates(state, options).candidates.find((c) => c.kind === 'ENTER_PORTAL') ?? null
+}
+
+/**
+ * The offering state re-SENSED at the body's CURRENT cell, exactly as the live
+ * decision loop does every tick. The bridge probes are feet-level facts, so a
+ * state captured at an older cell would offer a span from a cell the body has
+ * already left.
+ */
+function measuredStateAt(
+  fixture: FixtureBot,
+  counts: Record<string, number> = { diamond_pickaxe: 1, cobblestone: 32 },
+): WorldState {
+  const feet = {
+    x: Math.floor(fixture.position.x),
+    y: Math.floor(fixture.position.y),
+    z: Math.floor(fixture.position.z),
+  }
+  return worldState(
+    { x: fixture.position.x, y: fixture.position.y, z: fixture.position.z },
+    [],
+    counts,
+    [],
+    [feet],
+    measuredProbes(fixture, feet),
+    MEASURED_STRUCTURE,
+  )
+}
+
+/**
+ * Run the ENTER commitment the way the live loop does: each decision RE-SENSES the
+ * body's current cell and runs ONE bounded chunk (the climb chunk, a crossing
+ * chunk, then the verified walk-in). Bounded by `maxActions`, so a route that
+ * cannot finish reports what it really did instead of looping.
+ */
+async function runMeasuredEntryRoute(
+  fixture: FixtureBot,
+  maxActions = 6,
+): Promise<{ status: string; failure: string | null; verified: boolean; actions: number; messages: string[] }> {
+  let messages: string[] = []
+  let status = 'failed'
+  let failure: string | null = null
+  let verified = false
+  let actions = 0
+  for (let index = 0; index < maxActions; index += 1) {
+    const state = measuredStateAt(fixture)
+    const feet = {
+      x: Math.floor(fixture.position.x),
+      y: Math.floor(fixture.position.y),
+      z: Math.floor(fixture.position.z),
+    }
+    // The LIVE loop's own composition: the reachability gate presents the entry the
+    // body's CURRENT cell grounds (a withheld entry is reported as such, never as a
+    // silent no-route).
+    const candidate = liveEntryCandidate(fixture, state, feet) ?? enterCandidate(fixture, state)
+    const result = await runEntry(fixture, candidate, true, false, (executor) => {
+      installWalkModel(fixture, { transfer: true })
+      measuredEntryPath(fixture, executor, false)
+    })
+    actions += 1
+    messages = [...messages, ...result.messages]
+    status = result.status
+    failure = result.failure
+    verified = result.verified
+    if (result.status === 'done' && result.verified) break
+  }
+  return { status, failure, verified, actions, messages }
+}
+
+{
+  // (s-1) The CLIMB half on the measured geometry, BEFORE it runs: the body stands
+  // on the ledge at feet y=64, three below the interior. The offer is exactly the
+  // one today's code grounds (the own-column pillar to the interior's level) and
+  // carries NO crossing: a crossing at the ledge's own level would spend blocks on
+  // a span that still does not reach the gate.
+  const grid = measuredPortalGrid()
+  const fixture = makeBot({ x: 26, y: 64, z: 6 }, grid, true, { cobblestone: 32 })
+  const state = worldState(
+    { x: 26.5, y: 64, z: 6.5 },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+    [],
+    [{ x: 26, y: 64, z: 6 }],
+    measuredProbes(fixture, { x: 26, y: 64, z: 6 }),
+    MEASURED_STRUCTURE,
+  )
+  const candidate = enterCandidate(fixture, state)
+  const sig = routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta })
+  check(
+    '(s-1) the measured ledge grounds the CLIMB (own-column pillar to the interior level) and no crossing at the ledge level',
+    candidate.meta.vertical === 'pillar' &&
+      candidate.meta.pillarToY === ENTER_CELL.y &&
+      candidate.meta.pillarSteps === 3 &&
+      candidate.meta.pillarPlaceName === 'cobblestone' &&
+      candidate.meta[BRIDGE_META] === undefined &&
+      candidate.meta[BRIDGE_PLACE_META] === undefined &&
+      sig === 'ENTER_PORTAL:pillar:unknown:64->67:dig=none:step=none:pillar=3:fallback=none',
+    `vertical=${String(candidate.meta.vertical)} toY=${String(candidate.meta.pillarToY)} steps=${String(candidate.meta.pillarSteps)} bridge=${String(candidate.meta[BRIDGE_META])} routeSig=${sig}`,
+  )
+}
+
+{
+  // (s-2) The CROSSING half: the post-climb state (the pillar the climb places
+  // occupies the body's own column below its feet), at the interior's own level.
+  // The offer grounds a REAL verified span south - the first placement cell, the
+  // first landing, and the far side, which IS the interior cell.
+  const grid = measuredPortalGrid()
+  for (const y of [64, 65, 66]) grid.set(`26,${y},6`, cell('cobblestone'))
+  const fixture = makeBot({ x: 26, y: 67, z: 6 }, grid, true, { cobblestone: 32 })
+  const state = worldState(
+    { x: 26.5, y: 67, z: 6.5 },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+    [],
+    [{ x: 26, y: 67, z: 6 }],
+    measuredProbes(fixture, { x: 26, y: 67, z: 6 }),
+    MEASURED_STRUCTURE,
+  )
+  const candidate = enterCandidate(fixture, state)
+  check(
+    '(s-2) at the interior level the entry grounds the CROSSING: a verified span south, place (26,66,7) land (26,67,7) far = the interior',
+    candidate.meta[BRIDGE_META] === true &&
+      candidate.meta.bridgeDir === 'S' &&
+      candidate.meta.bridgeBlock === 'cobblestone' &&
+      candidate.meta.bridgeSpan === 2 &&
+      candidate.meta[BRIDGE_PLACE_META] === '26,66,7' &&
+      candidate.meta.bridgeLanding === '26,67,7' &&
+      candidate.meta.bridgeTarget === '26,67,9' &&
+      candidate.meta.mayPlaceBlocks === true &&
+      candidate.meta.legContinuationSkill === PORTAL_ENTER_SKILL &&
+      String(candidate.meta.bridgeLine).startsWith('BRIDGE_START cell=26,67,7 block=cobblestone span=2') &&
+      String(candidate.meta.bridgeAuthorityLine).startsWith(
+        `SKILL_STEP skill=${PORTAL_ENTER_SKILL} step=bridge authority=MECHANICAL_CONTINUATION`,
+      ),
+    `dir=${String(candidate.meta.bridgeDir)} span=${String(candidate.meta.bridgeSpan)} place=${String(candidate.meta[BRIDGE_PLACE_META])} landing=${String(candidate.meta.bridgeLanding)} target=${String(candidate.meta.bridgeTarget)} line="${String(candidate.meta.bridgeLine)}" authority="${String(candidate.meta.bridgeAuthorityLine)}"`,
+  )
+
+  // The REACHABILITY GATE must present this entry: the crossing contract is its own
+  // path fact (a bridge leg is evaluated like a vertical plan, `candidates.ts#evaluateCandidate`),
+  // so an entry whose only route is to lay its own floor is not withheld `no_path`.
+  // Without this the live loop would never offer the crossing after the climb.
+  const live = liveEntryCandidate(fixture, state, { x: 26, y: 67, z: 6 })
+  check(
+    '(s-2) the reachability gate PRESENTS the crossing-only entry (a bridge leg is its own path fact), never withholds it no_path',
+    live !== null && live.meta[BRIDGE_META] === true && live.meta.bridgeSpan === 2,
+    `presented=${live !== null} bridge=${String(live?.meta[BRIDGE_META])} span=${String(live?.meta.bridgeSpan)}`,
+  )
+  // ...and the GUARD accepts it: the crossing is the entry's own route, so the
+  // horizontal path probe is skipped for exactly the reason a MOVE bridge skips it
+  // (`policy.ts#carriesOwnRoute`), while every hazard/void/in-flight check still runs.
+  const verdict =
+    live === null
+      ? null
+      : guardCandidate(live, state, {
+          phase: 'decision',
+          candidateIds: new Set([live.id]),
+          inFlight: null,
+          reach: 4.5,
+          maxCandidateAgeTicks: 200,
+          canComputePath: () => true,
+        })
+  check(
+    '(s-2) the guard accepts the crossing-only entry (its own route), so the selected leg really leases',
+    verdict !== null && verdict.ok === true,
+    `ok=${String(verdict?.ok)} reason=${verdict === null || verdict.ok ? 'none' : verdict.reason}`,
+  )
+
+  // (s-3) EXECUTION OF THE WHOLE MEASURED TRIAL, one bounded chunk per decision,
+  // each decision re-sensed at the body's current cell (the live loop's own shape):
+  // the CLIMB lifts the body to the interior's level, the CROSSING lays the floor
+  // of the void and the body ADVANCES onto it, and the verified WALK-IN closes the
+  // last cell. The assertion separates the two facts the previous lane's fixture
+  // could not: the blocks really appear in the world AND the body really advances.
+  {
+    const runFixture = makeBot({ x: 26, y: 64, z: 6 }, measuredPortalGrid(), true, { cobblestone: 32 })
+    const route = await runMeasuredEntryRoute(runFixture)
+    const climb = route.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CLIMB))
+    const steps = route.messages.filter((line) => line.startsWith('BRIDGE_STEP'))
+    const cross = route.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CROSS))
+    const entered = route.messages.find((line) => line.startsWith('PORTAL_ENTERED')) ?? ''
+    const walkIn = route.messages.find((line) => line.startsWith('PORTAL_WALK_IN ')) ?? ''
+    check(
+      '(s-3) the measured trial crosses: the climb lifts the body, the crossing ADVANCES it onto the floor it places, the walk-in enters',
+      climb.some((line) => line.includes('climb=pillar') && line.includes('outcome=climbed')) &&
+        // the crossing's own STRICT REDUCTION (the bound every verified span takes):
+        // the leg started 2.55m from the interior and ended 0.71m from it.
+        cross.some((line) => line.includes('outcome=advanced') && line.includes('d=2.55->0.71')) &&
+        steps.length === 2 &&
+        steps[0] === 'BRIDGE_STEP from=26,67,6 to=26,67,7 block=cobblestone' &&
+        steps[1] === 'BRIDGE_STEP from=26,67,7 to=26,67,8 block=cobblestone' &&
+        runFixture.grid.get('26,66,7')?.name === 'cobblestone' &&
+        runFixture.grid.get('26,66,8')?.name === 'cobblestone' &&
+        walkIn.includes('transferred=true') &&
+        entered.includes('pos=26,67,9') &&
+        entered.includes('dimension=minecraft:the_nether') &&
+        route.status === 'done' &&
+        route.verified === true &&
+        route.failure === null,
+      `actions=${route.actions} status=${route.status} failure=${route.failure ?? 'none'} verified=${route.verified} climb=${climb.length} climbLines=[${climb.slice(0, 4).join(' || ')}] steps=[${steps.join(' | ')}] floors=${String(runFixture.grid.get('26,66,7')?.name)}/${String(runFixture.grid.get('26,66,8')?.name)} cross=[${cross.join(' | ')}] walkIn=[${walkIn}] entered=[${entered}]`,
+    )
+
+    // (s-4) The crossing is a BOUNDED chunk, never a claimed entry: the FIRST
+    // decision that runs it returns durable body progress with `verified=false`, and
+    // the entry is only claimed by the later dimension postcondition.
+    const chunk = await (async (): Promise<{ status: string; verified: boolean; cross: string }> => {
+      const fixture = makeBot({ x: 26, y: 67, z: 6 }, measuredPortalGrid(), true, { cobblestone: 32 })
+      for (const y of [64, 65, 66]) fixture.grid.set(`26,${y},6`, cell('cobblestone'))
+      const candidate = enterCandidate(fixture, measuredStateAt(fixture))
+      const result = await runEntry(fixture, candidate, true, false, (executor) => {
+        installWalkModel(fixture, { transfer: true })
+        measuredEntryPath(fixture, executor, false)
+      })
+      return {
+        status: result.status,
+        verified: result.verified,
+        cross: result.messages.find((line) => line.startsWith(PORTAL_ENTRY_CROSS)) ?? '',
+      }
+    })()
+    check(
+      '(s-4) one crossing decision is a bounded chunk: durable body progress, verified=false, no claimed entry',
+      chunk.status === 'done' &&
+        chunk.verified === false &&
+        chunk.cross.includes('outcome=advanced') &&
+        chunk.cross.includes('d=2.55->0.71'),
+      `status=${chunk.status} verified=${chunk.verified} cross=[${chunk.cross}]`,
+    )
+  }
+}
+
+{
+  // (s-5) THE INTERIOR ONE BLOCK ABOVE THE FAR SIDE: the body is at feet y=66 (one
+  // below the interior), so no already-standable far bank exists inside the probe
+  // and the crossing grounds as a SELF-LANDING SCAFFOLD - this step creates the
+  // floor of the cell it occupies. Its execution + the walk-in's own audited hop
+  // then reach the dimension postcondition in ONE commitment.
+  const grid = measuredPortalGrid()
+  for (const y of [64, 65]) grid.set(`26,${y},6`, cell('cobblestone'))
+  const fixture = makeBot({ x: 26, y: 66, z: 6 }, grid, true, { cobblestone: 32 })
+  const state = worldState(
+    { x: 26.5, y: 66, z: 6.5 },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+    [],
+    [{ x: 26, y: 66, z: 6 }],
+    measuredProbes(fixture, { x: 26, y: 66, z: 6 }),
+    MEASURED_STRUCTURE,
+  )
+  const candidate = enterCandidate(fixture, state)
+  const offered =
+    candidate.meta[BRIDGE_META] === true &&
+    candidate.meta.bridgeSelfLanding === true &&
+    candidate.meta.bridgeSpan === 1 &&
+    candidate.meta[BRIDGE_PLACE_META] === '26,65,7' &&
+    candidate.meta.bridgeLanding === '26,66,7' &&
+    String(candidate.meta.bridgePocketEvidence).includes('floor=26,65,7:cobblestone:placed')
+  // The CLIMB half is the one the measured ledge offer already grounds (and (s-3)
+  // proves it runs); this section isolates the crossing EXECUTION in the
+  // one-block-above shape, with the climb half already realized - the same fixture
+  // idiom the (m-e2) case uses. The crossing must then CREATE the floor of the cell
+  // it occupies and the body must really stand on it.
+  const crossingCandidate: Candidate = { ...candidate, meta: { ...candidate.meta, vertical: 'none' } }
+  const crossingAction = await runEntry(fixture, crossingCandidate, true, false, (executor) => {
+    installWalkModel(fixture, { transfer: true })
+    measuredEntryPath(fixture, executor, false)
+  })
+  const cross = crossingAction.messages.find((line) => line.startsWith(PORTAL_ENTRY_CROSS)) ?? ''
+  const step = crossingAction.messages.find((line) => line.startsWith('BRIDGE_STEP')) ?? ''
+  const crossingBody = {
+    x: Math.floor(fixture.position.x),
+    y: Math.floor(fixture.position.y),
+    z: Math.floor(fixture.position.z),
+  }
+  // The rest of the route, one bounded chunk per decision, reaches the transfer.
+  const walkAction = await runMeasuredEntryRoute(fixture)
+  const entered = walkAction.messages.find((line) => line.startsWith('PORTAL_ENTERED')) ?? ''
+  const walkIn = walkAction.messages.find((line) => line.startsWith('PORTAL_WALK_IN ')) ?? ''
+  check(
+    '(s-5) one block below the interior the crossing is a SELF-LANDING scaffold: it floors the cell and the body stands on it',
+    offered &&
+      step === 'BRIDGE_STEP from=26,66,6 to=26,66,7 block=cobblestone' &&
+      fixture.grid.get('26,65,7')?.name === 'cobblestone' &&
+      key(crossingBody) === '26,66,7' &&
+      cross.includes('outcome=advanced') &&
+      cross.includes('placed=1') &&
+      crossingAction.status === 'done' &&
+      crossingAction.verified === false &&
+      walkIn.includes('transferred=true') &&
+      entered.includes('pos=26,67,9') &&
+      walkAction.status === 'done' &&
+      walkAction.verified === true,
+    `self=${String(candidate.meta.bridgeSelfLanding)} place=${String(candidate.meta[BRIDGE_PLACE_META])} floor=${String(fixture.grid.get('26,65,7')?.name)} body=${key(crossingBody)} step=[${step}] cross=[${cross}] crossingVerified=${crossingAction.verified} actions=${walkAction.actions} walkIn=[${walkIn}] entered=[${entered}] status=${walkAction.status} verified=${walkAction.verified}`,
+  )
+}
+
+{
+  // (s-6) A DECLARED crossing that cannot execute live (the block left the
+  // inventory between the decision and the lease) is a TERMINAL typed refusal that
+  // NAMES the leg: `cross=` carries the offer's own span/place/landing and the
+  // refusal. The body is never pushed into the gap the crossing was grounded to
+  // fill - the walk-in cannot see a missing floor, only solid blockers.
+  const grid = measuredPortalGrid()
+  for (const y of [64, 65, 66]) grid.set(`26,${y},6`, cell('cobblestone'))
+  const fixture = makeBot({ x: 26, y: 67, z: 6 }, grid, true, { cobblestone: 32 })
+  const state = worldState(
+    { x: 26.5, y: 67, z: 6.5 },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+    [],
+    [{ x: 26, y: 67, z: 6 }],
+    measuredProbes(fixture, { x: 26, y: 67, z: 6 }),
+    MEASURED_STRUCTURE,
+  )
+  const candidate = enterCandidate(fixture, state)
+  // the crossing was planned WITH the block; execution time has none
+  fixture.inventoryItems.length = 0
+  const result = await runEntry(fixture, candidate, true, false, (executor) => {
+    installWalkModel(fixture, { transfer: true })
+    measuredEntryPath(fixture, executor, false)
+  })
+  const cross = result.messages.find((line) => line.startsWith(PORTAL_ENTRY_CROSS)) ?? ''
+  const blocked = result.messages.find((line) => line.startsWith('PORTAL_ENTRY_ROUTE_BLOCKED')) ?? ''
+  check(
+    '(s-6) a declared crossing that cannot execute is terminal and typed: cross= names the span, the place cell, the landing and the refusal',
+    cross.includes('outcome=refused') &&
+      // a refusal claims NO movement: the leg's own distance is unchanged
+      cross.includes('d=2.55->2.55') &&
+      cross.includes('detail=no_block verified=false') &&
+      blocked.includes('reason=route_blocked') &&
+      blocked.includes('cross=dir=S,span=2,place=26,66,7,landing=26,67,7,outcome=refused,placed=0,d=2.55->2.55') &&
+      blocked.includes('detail=no_block') &&
+      result.status === 'failed' &&
+      fixture.grid.get('26,66,7')?.name === 'air' &&
+      !result.messages.some((line) => line.startsWith('PORTAL_WALK_IN ')),
+    `status=${result.status} cross=[${cross}] blocked=[${blocked}] placed=${String(fixture.grid.get('26,66,7')?.name)} walkIns=${result.messages.filter((line) => line.startsWith('PORTAL_WALK_IN ')).length}`,
+  )
+}
+
+{
+  // (s-7) THE CONTROL SHAPES, with the crossing rule fully active AND the probes
+  // really sensed: a level gate where the body stands on ordinary ground beside the
+  // interior grounds NO crossing (the first cell in every direction is either a
+  // stand or has a floor), so the offer keeps exactly the meta it had and no
+  // crossing marker is ever emitted.
+  const grid = gateGrid()
+  grid.set('25,66,10', cell('stone'))
+  grid.set('26,66,10', cell('stone'))
+  grid.set('27,66,10', cell('stone'))
+  grid.set('25,66,9', cell('stone'))
+  const fixture = makeBot({ x: 25, y: 67, z: 10 }, grid, true, { cobblestone: 32 })
+  const state = worldState(
+    { x: 25.5, y: 67, z: 10.5 },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+    [],
+    [
+      { x: 25, y: 67, z: 10 },
+      { x: 26, y: 67, z: 10 },
+    ],
+    measuredProbes(fixture, { x: 25, y: 67, z: 10 }),
+  )
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true)
+  check(
+    '(s-7) a LEVEL gate with sensed probes grounds no crossing: vertical=none, no bridge key, no crossing marker, the walk-in transfers',
+    candidate.meta.vertical === 'none' &&
+      candidate.meta[BRIDGE_META] === undefined &&
+      candidate.meta.fallbackVertical === undefined &&
+      result.status === 'done' &&
+      result.verified === true &&
+      !result.messages.some((line) => line.startsWith(PORTAL_ENTRY_CROSS)) &&
+      fixture.grid.get('26,66,10')?.name === 'stone',
+    `vertical=${String(candidate.meta.vertical)} bridge=${String(candidate.meta[BRIDGE_META])} status=${result.status} verified=${result.verified} crossingLines=${result.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CROSS)).length}`,
   )
 }
 

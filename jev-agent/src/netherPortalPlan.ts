@@ -1179,15 +1179,23 @@ export interface PortalEntryRouteBlockedInput {
    * tolerance, so a level entry's line stays byte-identical.
    */
   readonly climb?: string
+  /**
+   * The CROSSING half (optional, additive): the declared crossing leg's own plan
+   * facts and why it did not close the horizontal gap. Omitted entirely when the
+   * entry carried no grounded crossing, so every pre-existing line (including a
+   * level gate, a one-block step-up and a plain walk-in) stays byte-identical.
+   */
+  readonly cross?: string
 }
 
 /** The exact `PORTAL_ENTRY_ROUTE_BLOCKED` line: the obstruction, named. */
 export function formatPortalEntryRouteBlocked(input: PortalEntryRouteBlockedInput): string {
   const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
   const climb = input.climb === undefined || input.climb.length === 0 ? '' : ` climb=${input.climb}`
+  const cross = input.cross === undefined || input.cross.length === 0 ? '' : ` cross=${input.cross}`
   return (
     `PORTAL_ENTRY_ROUTE_BLOCKED reason=${input.reason}` +
-    ` entry=${formatPos(input.entryCell)} from_y=${input.fromY} to_y=${input.toY}${detail}${climb}`
+    ` entry=${formatPos(input.entryCell)} from_y=${input.fromY} to_y=${input.toY}${detail}${climb}${cross}`
   )
 }
 
@@ -1293,11 +1301,91 @@ export function formatPortalEntryClimbRefused(input: PortalEntryClimbRefusedInpu
   )
 }
 
+// ---------------------------------------------------------------------------
+// The COMPOSED entry approach's horizontal half: the CROSSING.
+//
+// Measured, live (the operator's trial, body (26.3,64.0,6.3) on a ledge, floated
+// gate interior (26,67,9)): the previous lane landed the CLIMB half - the body
+// can now reach the interior's own level - and the remaining gap is open AIR. The
+// frame's bottom row is obsidian at y=66, so the interior's floor is a cell the
+// body can only reach by PLACING it: the pinned `canDig=false` pathfinder cannot
+// express "put a block into the void and step onto it", which is why every ENTER
+// realization ended `PATH_CALLBACK phase=failed outcome=stuck`.
+//
+// This is that half's own evidence, in the SAME shape as `PORTAL_ENTRY_CLIMB`:
+// one line per crossing leg the entry runs, naming the offer's own plan facts
+// (direction, span, first placement cell, first landing) and the leg's outcome.
+// The step-by-step placements stay on the existing `BRIDGE_*` vocabulary
+// (`BRIDGE_START` / `BRIDGE_STEP` / `BRIDGE_END` / `BRIDGE_REFUSED`), which the
+// controller already mirrors - this line is the ENTRY ROUTE's own summary, so a
+// reviewer can read "the climb ended here, the crossing was declared THIS span,
+// and it placed THIS many blocks and advanced / did not advance" without joining
+// a bridge line to an entry line by timestamp.
+// ---------------------------------------------------------------------------
+
+/** The composed entry crossing: one line per crossing leg the entry runs. */
+export const PORTAL_ENTRY_CROSS = 'PORTAL_ENTRY_CROSS'
+
+/**
+ * How a composed crossing leg ended:
+ *   `advanced`    the leg placed at least one block AND the body durably closed
+ *                 distance / reached the verified far side;
+ *   `placed`      a block was placed but the body did NOT advance onto its landing
+ *                 (a typed partial leg: the floor exists, the body did not move);
+ *   `gap_closed`  the live re-probe found no gap to cross (nothing was placed, so
+ *                 the ordinary walk owns the rest);
+ *   `refused`     the live re-probe answered its own typed refusal (no_block /
+ *                 hazard / protected / portal_plane / budget / no_verified_landing)
+ *                 and NOTHING was placed;
+ *   `failed`      the leg ran and neither placed nor advanced (a thrown leg).
+ */
+export type PortalEntryCrossOutcome = 'advanced' | 'placed' | 'gap_closed' | 'refused' | 'failed'
+
+export interface PortalEntryCrossInput {
+  readonly cell: PortalBlockPosition
+  readonly fromY: number
+  readonly toY: number
+  /** the cardinal direction the offer grounded (`E`/`W`/`N`/`S`) */
+  readonly dir: string
+  /** the item the crossing consumes (`meta.bridgeBlock`) */
+  readonly block: string
+  /** the offer's OWN bound: how many placements its verified span needed */
+  readonly span: number
+  /** the offer's first verified placement cell (`meta.bridgePlace`) */
+  readonly place: string
+  /** the offer's first landing cell (`meta.bridgeLanding`) */
+  readonly landing: string
+  readonly outcome: PortalEntryCrossOutcome
+  /** placements the leg actually completed (never the offer's claim) */
+  readonly placed: number
+  /**
+   * The leg's own distance claim to the interior, in `round2` precision:
+   * `from` when the leg started and `to` when it ended. The crossing's bound is
+   * the SAME strict reduction every verified span takes (`BRIDGE_MIN_ADVANCE`), so
+   * the entry route states it rather than asking a reviewer to infer it.
+   */
+  readonly from?: number
+  readonly to?: number
+  readonly detail?: string
+}
+
+/** The exact `PORTAL_ENTRY_CROSS` line: one composed crossing leg, named. */
+export function formatPortalEntryCross(input: PortalEntryCrossInput): string {
+  const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
+  const distance =
+    input.from === undefined || input.to === undefined ? '' : ` d=${round2(input.from)}->${round2(input.to)}`
+  return (
+    `${PORTAL_ENTRY_CROSS} cell=${formatPos(input.cell)}` +
+    ` from_y=${input.fromY} to_y=${input.toY} dy=${input.toY - input.fromY}` +
+    ` dir=${input.dir} block=${input.block} span=${input.span} place=${input.place} landing=${input.landing}` +
+    ` outcome=${input.outcome} placed=${input.placed}${distance}${detail}`
+  )
+}
+
 /** The exact `PORTAL_ENTERED` line. */
 export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: string = NETHER): string {
   return `${PORTAL_ENTERED} pos=${formatPos(enterCell)} dimension=${dimension}`
 }
-
 /**
  * Why the bounded direct walk did not run. Every reason is a live-world fact
  * read BEFORE any movement:

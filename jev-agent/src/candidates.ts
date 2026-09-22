@@ -71,6 +71,7 @@ import {
   BRIDGE_SELF_LANDING_META,
   BRIDGE_SPAN_META,
   BRIDGE_TARGET_META,
+  bridgeContractMeta,
   formatBridgeRefused,
   isBridgeMove,
   planBridgeRoute,
@@ -2780,6 +2781,15 @@ export function entryCandidates(
   // meta, including the `fallbackVertical: 'none'` a tunnel-less descent emits),
   // plus the own-column ascent only where it is a genuinely different second leg.
   const declaresFallback = route.plan?.kind === 'reuse' || ownColumnFallback !== null
+  // THE CROSSING LEG (the operator's trial, second half - see
+  // `groundEntryBridgeLeg`): when the body already stands at the interior's own
+  // level and the way across is open air, the missing mechanical fact is a
+  // scaffolded span, grounded by the SAME bridge rule every other leg uses. It is
+  // attached with the ONE shared contract (`bridgeRoute.ts#bridgeContractMeta`),
+  // so the executor reads exactly the keys this offer wrote. Grounded ONLY when a
+  // span really exists: a level gate, a one-block step-up and an ordinary walkable
+  // gate keep byte-identical meta (no `bridge*` key, no crossing marker).
+  const bridgePlan = groundEntryBridgeLeg(state, options, entry)
   const meta: Record<string, string | number | boolean> = {
     tick: state.tick,
     enterX: entry.enterCell.x,
@@ -2793,6 +2803,15 @@ export function entryCandidates(
     ...(entry.unverified === true ? { entryUnverified: true } : {}),
     ...verticalMeta,
     ...(declaresFallback ? fallbackVerticalMeta(fallbackPlan) : {}),
+    // The crossing contract, exactly like a MOVE bridge carries it (plus the
+    // §17 authority line and the owning skill, which is THIS Skill).
+    ...(bridgePlan === null
+      ? {}
+      : {
+          ...bridgeContractMeta(bridgePlan),
+          bridgeAuthorityLine: entryBridgeAuthorityLine(bridgePlan),
+          legContinuationSkill: PORTAL_ENTER_SKILL,
+        }),
     ...(route.plan === null && route.ascentRefusal !== null
       ? { entryRouteRefusal: route.ascentRefusal.reason }
       : {}),
@@ -10495,6 +10514,91 @@ function groundBridgeLeg(
 }
 
 /**
+ * THE CROSSING LEG of the portal entry (the operator's trial, second half).
+ *
+ * Measured, live (`runs/` operator trial 2026-09-23, body `(26.3,64.0,6.3)` on a
+ * ledge, floated gate interior `(26,67,9)`): the body's ledge ends and there is
+ * open air - not a step, not a dig - between it and the gate. The frame's bottom
+ * row is obsidian at `y=66`, so standing in the interior means standing ON that
+ * row, and the interior's own floor is not a cell the body can walk to: the
+ * `canDig=false` pathfinder cannot express "place a block into the void and step
+ * onto it", and the dig/vertical route has nothing to dig because the gap is AIR.
+ * Every ENTER realization therefore ended `PATH_CALLBACK phase=failed
+ * outcome=stuck`, and the previous lane closed only the CLIMB half.
+ *
+ * This grounds the missing half with the SAME rule every other bridge uses
+ * (`bridgeRoute.ts#planBridgeRoute` over the sensor's own bounded forward probes
+ * `state.bridgeProbes`), gated on the ONE geometry where the crossing is the
+ * missing mechanical fact:
+ *
+ *   the body is already at the interior's own level, within the walk-in's
+ *   tolerance (`PORTAL_WALK_IN_LEVEL_TOLERANCE`).
+ *
+ * When the interior is higher than that, the CLIMB is the missing fact and this
+ * returns no plan: the two legs are not alternatives, they are consecutive halves
+ * of one route (climb, then cross, then the verified walk-in), and grounding a
+ * crossing at the ledge's own level would spend blocks on a span that still does
+ * not reach the gate. When the interior is lower, the descent half owns it.
+ *
+ * The protected predicate is the ONE shared source rule (`blockSafety.ts`):
+ * a protected station by name, or a cell of a LIVE structure - which is what the
+ * portal frame and interior cells are. So the crossing can never place into the
+ * gate, and it can never bridge ONTO a gate cell.
+ *
+ * The refusal is deliberately NOT attached to the entry offer: an entry whose
+ * ordinary walk can close the last block needs no crossing, and a refusal key on
+ * it would put a "the bridge was refused" fact on a route that needed no bridge -
+ * as well as changing the offer of a level gate. The crossing's typed refusals are
+ * reported where they are real: live, by `runBridge`'s own `BRIDGE_REFUSED`, and on
+ * the terminal `PORTAL_ENTRY_ROUTE_BLOCKED ... cross=` when a declared crossing
+ * leg could not execute.
+ */
+function groundEntryBridgeLeg(
+  state: WorldState,
+  options: CandidateOptions,
+  entry: PortalEntryCandidate,
+): BridgePlan | null {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  if (Math.abs(entry.enterCell.y - feet.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE) return null
+  const liveStructures = liveStructureIndexOf(state)
+  const decision = planBridgeRoute({
+    selfFeet: feet,
+    target: entry.enterCell,
+    probes: state.bridgeProbes,
+    placeable: selectPlaceableBlock(state.inventory.counts),
+    isProtected: (cell, name) =>
+      (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell),
+    maxSpan: options.bridgeMaxSpan ?? BRIDGE_MAX_SPAN,
+  })
+  return decision.plan
+}
+
+/**
+ * The crossing leg's #436 section 17 layer, in the SAME `SKILL_STEP ... step=bridge`
+ * vocabulary the MOVE bridge offer writes (`bridgeLegCandidate`): the ENTER action
+ * is the one Jev selected, so its crossing realizes that selection mechanically.
+ * `legContinuationSkill` names the owning Skill for the controller's mirror, exactly
+ * as the MOVE leg does for a route-opening offer.
+ */
+function entryBridgeAuthorityLine(plan: BridgePlan): string {
+  return formatSkillStep(
+    PORTAL_ENTER_SKILL,
+    'bridge',
+    formatSkillStepAuthority(
+      'MECHANICAL_CONTINUATION',
+      `cell=${cellText(plan.landing)} place=${cellText(plan.place)} far=${cellText(plan.far)} ` +
+        `dir=${plan.dir} block=${plan.block} span=${plan.span} probe=bounded(${plan.span})`,
+      'place_blocks=1',
+      { budget: plan.span },
+    ),
+  )
+}
+
+/**
  * #436 section 7 uniqueness proof for a bridge that is the ONLY grounded remedy:
  * the exact geometry (landing / placement cell / verified far side) plus the
  * distance claim, in the ONE `REFLEX` vocabulary `netherPortalPlan.ts` owns.
@@ -10566,31 +10670,10 @@ function bridgeLegCandidate(
       x: plan.far.x,
       y: plan.far.y,
       z: plan.far.z,
-      [BRIDGE_META]: true,
-      [BRIDGE_DIR_META]: plan.dir,
-      [BRIDGE_BLOCK_META]: plan.block,
-      [BRIDGE_SPAN_META]: plan.span,
-      [BRIDGE_TARGET_META]: cellText(plan.far),
-      // #436 section 5 EffectEnvelope: this MOVE WILL place blocks and consume
-      // `bridgeBlock`. Declared, never implicit.
-      [BRIDGE_MAY_PLACE_META]: true,
-      [BRIDGE_LINE_META]: plan.line,
-      [BRIDGE_LANDING_META]: cellText(plan.landing),
-      [BRIDGE_PLACE_META]: cellText(plan.place),
-      bridgeFrom: round2Number(plan.from),
-      bridgeTo: round2Number(plan.to),
-      bridgeRemaining: plan.remaining,
-      // The SELF-LANDING SCAFFOLD says so in machine-readable form: this leg's far
-      // side is the cell it floors, so `span` is 1 by construction and the bounded
-      // continuation is the next offer from the new stand cell. `pocket` carries the
-      // shared per-cell verdict the step was grounded on (the SAME
-      // `wallEntry.ts#wallPocketRefusal` family the wall entry and level scan read).
-      ...(selfLanding
-        ? {
-            [BRIDGE_SELF_LANDING_META]: true,
-            [BRIDGE_POCKET_EVIDENCE_META]: plan.pocketEvidence ?? 'none',
-          }
-        : {}),
+      // The ONE bridge contract (`bridgeRoute.ts#bridgeContractMeta`), shared with
+      // the portal entry's crossing leg so an offer can never declare a subset of
+      // what `runBridge` reads.
+      ...bridgeContractMeta(plan),
       [BRIDGE_AUTHORITY_META]: authority,
       // The skill that owns this leg, in the SAME meta key the hole
       // step-over/step-up continuation uses, so the controller's `SKILL_STEP`
