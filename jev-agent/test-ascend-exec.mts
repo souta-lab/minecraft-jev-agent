@@ -334,8 +334,11 @@ addCase('a Jev-selected ASCEND pillar passes the decision guard and the executor
   const executor = new Executor(bot, makeCapturingLogger(logs), {
     ...defaultExecutorOptions,
     actuation: 'pathfinder',
-    pathTimeoutMs: 1,
-    pickupPathTimeoutMs: 1,
+    // issue #436 section 15: the declared path budget is the COMMITMENT's own
+    // wall-clock bound now that the harness layer owns the walk loop, so it must
+    // be a real bound - a 1 ms commitment could not run even one pillar step.
+    pathTimeoutMs: 3000,
+    pickupPathTimeoutMs: 3000,
     packetStepMs: 0,
     maxStepsPerWaypoint: 1,
   })
@@ -528,8 +531,11 @@ addCase('the executor refusal for an unplaceable pillar leaves a typed PILLAR ma
   const executor = new Executor(bot, makeCapturingLogger(logs), {
     ...defaultExecutorOptions,
     actuation: 'pathfinder',
-    pathTimeoutMs: 1,
-    pickupPathTimeoutMs: 1,
+    // issue #436 section 15: the declared path budget is the COMMITMENT's own
+    // wall-clock bound now that the harness layer owns the walk loop, so it must
+    // be a real bound - a 1 ms commitment could not run even one pillar step.
+    pathTimeoutMs: 3000,
+    pickupPathTimeoutMs: 3000,
     packetStepMs: 0,
     maxStepsPerWaypoint: 1,
   })

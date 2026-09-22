@@ -20,8 +20,23 @@
 //
 // This fixture drives the REAL executor for a ~167m MOVE whose direct GoalBlock
 // path is refused. Before the leg mechanism the MOVE failed outright and the
-// body never moved; after it, one committed leg closes >100m and the result is
-// `done/verified=false/progressed=true` (goal stays open).
+// body never moved; after it, one committed leg closes >100m.
+//
+// UPDATED 2026-09-23 (issue #436 / OPERATOR DIRECTIVE, `walkSkill.ts`): the leg is
+// now the FIRST mechanical leg of ONE committed walk owned by the harness layer,
+// so the settled result is the COMMITMENT's, not the leg's:
+//
+//   * the leg mechanism itself is unchanged (same GoalNear leg, same LEG_TRAVEL /
+//     LEG_PROGRESS evidence, same physical path);
+//   * a commitment whose declared budget is spent after that leg settles with the
+//     TYPED `path_timeout`/BUDGET_EXHAUSTED end and still reports the durable body
+//     progress it made (`progressed`/`distanceClosed`), instead of the old
+//     `done/phase=leg` shape that could not be told apart from an arrival;
+//   * `verified` stays FALSE: only `classifyMoveArrival` verifies the committed
+//     target, so a leg is never reported as arrival.
+//
+// The budget is the commitment's own `pathTimeoutMs` (#436 section 15), which is
+// why the fixture's tiny 1 ms value is raised to a realistic bounded value.
 //
 // Run: bun test-leg-travel.mts
 import { readFileSync } from 'node:fs'
@@ -176,10 +191,10 @@ function makeLegBot(mode: LegMode): LegFixture {
               position.y,
               position.z + (TARGET.z - position.z) * 0.6,
             )
-            emit('goal_reached')
-          } else {
-            emit('path_update', { status: 'noPath' })
           }
+          // `leg-no-progress`: the stock GoalNear leg REPORTS success without the
+          // body moving, so the leg must never be charged as progress.
+          emit('goal_reached')
           return
         }
         // The direct GoalBlock/GoalGetToBlock path to the exact far cell is refused.
@@ -224,9 +239,12 @@ async function runMove(mode: LegMode) {
   const executor = new Executor(fixture.bot, makeLogger(fixture.logs), {
     ...defaultExecutorOptions,
     actuation: 'pathfinder',
-    // The stock path reads the synchronous fake events; the control/packet
-    // fallbacks must not burn wall-clock before/after the leg.
-    pathTimeoutMs: 1,
+    // The stock path reads the synchronous fake events; the control-walk fallback
+    // spends a bounded stage of this window, and it is also the COMMITMENT's
+    // declared budget (the first stage is capped at half when a travel leg is the
+    // designed next stage, so the travel leg still runs inside the same budget).
+    // Kept small so this fixture costs ~0.4 s per case instead of seconds.
+    pathTimeoutMs: 400,
     pickupPathTimeoutMs: 1,
     packetStepMs: 0,
     maxStepsPerWaypoint: 1,
@@ -271,33 +289,44 @@ addCase('a target within LEG_TRAVEL_MIN_DISTANCE warrants no leg at all', () => 
 addCase('a ~167m MOVE whose direct GoalBlock path is refused walks one committed GoalNear leg and closes distance', async () => {
   const { result, fixture, distanceBefore, distanceAfter } = await runMove('leg-closes')
   const pass =
-    result.status === 'done' &&
+    result.status === 'failed' &&
+    result.failure === 'path_timeout' &&
     result.verified === false &&
     result.progressed === true &&
+    result.distanceClosed === true &&
     distanceAfter < distanceBefore - LEG_MIN_PROGRESS &&
     fixture.goalsSet.some((name) => name === 'GoalNear') &&
     has(fixture.logs, 'LEG_TRAVEL') &&
-    has(fixture.logs, 'LEG_PROGRESS')
+    has(fixture.logs, 'LEG_PROGRESS') &&
+    fixture.logs.filter((line) => line.startsWith('SKILL_START')).length === 1 &&
+    fixture.logs.some((line) => line.startsWith('SKILL_END') && line.includes('outcome=BUDGET_EXHAUSTED'))
   return {
     pass,
     detail:
-      `status=${result.status} verified=${result.verified} progressed=${result.progressed} ` +
+      `status=${result.status} failure=${result.failure} verified=${result.verified} progressed=${result.progressed} ` +
       `dist=${distanceBefore.toFixed(1)}->${distanceAfter.toFixed(1)} goals=${fixture.goalsSet.join(',')} detail=${result.detail}`,
   }
 })
 
-addCase('a successful leg is reported as progress, NOT as arrival at the final target', async () => {
+addCase('a walked leg is reported as progress, NEVER as arrival at the final target', async () => {
   const { result, fixture } = await runMove('leg-closes')
   // The controller's own MOVE-arrival predicate requires the executor `verified`
-  // flag; a leg must leave it false so the goal stays open for the next leg.
-  const pass = result.status === 'done' && result.verified === false && result.phase === 'leg'
-  return { pass, detail: `status=${result.status} verified=${result.verified} phase=${result.phase} detail=${result.detail}` }
+  // flag; a leg must leave it false so the committed target stays open for the
+  // next decision. `phase` names the typed stop, so a spent budget can never be
+  // read as an arrival.
+  const pass =
+    result.verified === false &&
+    result.progressed === true &&
+    result.phase === 'walk_budget_exhausted' &&
+    result.failure === 'path_timeout'
+  return { pass, detail: `status=${result.status} verified=${result.verified} phase=${result.phase} failure=${result.failure} detail=${result.detail}` }
 })
 
 addCase('a leg that makes no positional progress fails typed and is never reported as progress', async () => {
   const { result, fixture, distanceBefore, distanceAfter } = await runMove('leg-no-progress')
   const pass =
     result.status === 'failed' &&
+    (result.failure === 'path_stuck' || result.failure === 'path_timeout') &&
     result.progressed === false &&
     result.verified === false &&
     distanceAfter > distanceBefore - LEG_MIN_PROGRESS &&
@@ -318,7 +347,7 @@ addCase('runRetrieve drives the same committed leg and keeps "target reached" se
   const retrieveLeg = /if \(approachError !== null\) \{\s*const leg = await this\.runTravelLeg\(/.test(source)
   const moveLeg = /if \(pathError !== null\) \{\s*const leg = await this\.runTravelLeg\(/.test(source)
   const helper = source.includes('private async runTravelLeg(')
-  const goalNearLeg = source.includes('await this.pathToNear(target, LEG_TRAVEL_RADIUS, epoch, signal)')
+  const goalNearLeg = /await this\.pathToNear\(target, LEG_TRAVEL_RADIUS, epoch, signal/.test(source)
   // The RETRIEVE arrival post-condition is still owned by classifyRetrieveApproach
   // (distance <= RETRIEVE_ARRIVAL_RADIUS), not by the leg.
   const arrivalStillOwned = source.includes('const approach = classifyRetrieveApproach({')

@@ -84,6 +84,26 @@ import {
   targetIdentityOf,
 } from './skillCommitment.ts'
 import type { SkillTerminalReason } from './jevSemanticProjection.ts'
+// issue #436 / OPERATOR DIRECTIVE 2026-09-23: the WALK_TO family is ONE harness-layer
+// Skill with a bounded closed loop (see `walkSkill.ts` for the measured symptom and
+// the contract). The loop decision is pure and lives there; this file only drives it.
+import {
+  WALK_LEG_CONTINUABLE,
+  WALK_SKILL_MIN_PROGRESS,
+  WALK_STRICT_ARRIVAL_RANGE,
+  WALK_STRICT_ARRIVAL_TOLERANCE,
+  walkStageBudgetMs,
+  formatWalkBoundary,
+  formatWalkLeg,
+  formatWalkSkillStart,
+  isWalkSkillKind,
+  walkBoundaryAfterLeg,
+  walkLegEvidence,
+  walkSkillBudget,
+  walkSkillIdFor,
+  walkTargetOf,
+} from './walkSkill.ts'
+import type { WalkLegFailure, WalkSkillBudget, WalkSkillId, WalkStop } from './walkSkill.ts'
 import type {
   Effect,
   EffectEnvelope,
@@ -335,6 +355,19 @@ export interface ClaimResult {
   kept: boolean
   epoch: number
   completion: Promise<ExecutionResult>
+}
+
+/**
+ * ONE bounded mechanical leg of a committed locomotion Skill (issue #436 section
+ * 3): the result the leg would have settled the action with before the harness
+ * layer owned the loop, plus whether THIS leg verified the committed arrival.
+ * `Executor#runWalkSkill` - not the controller - decides whether it continues.
+ */
+export interface WalkLegExecution {
+  /** the committed postcondition (arrival predicate) was verified by this leg */
+  arrived: boolean
+  /** the settled result of this leg (used verbatim when `arrived`) */
+  result: ExecutionResult
 }
 
 export class ActionCancelled extends Error {
@@ -2535,19 +2568,340 @@ export class Executor {
     return result
   }
 
+  /**
+   * issue #436 section 3 / OPERATOR DIRECTIVE 2026-09-23:
+   *
+   *   "A Jev selection is a commitment to one grounded semantic action, not
+   *    permission for one primitive Mineflayer call."
+   *
+   * The committed MOVE/RETREAT walks to its selected destination inside ONE
+   * bounded, closed-loop harness-layer Skill: ordinary replanning of the SAME
+   * target, the existing bump-and-jump, and continuation after a leg that merely
+   * failed mechanically are all MECHANICAL_CONTINUATION of the one decision.
+   * Policy is re-entered only at a semantic boundary (`walkSkill.ts`).
+   *
+   * A BRIDGE leg is its own route, exactly like a generated vertical plan: the
+   * stock `canDig=false` pathfinder cannot express "place a block and step onto
+   * it". It owns its own bounded place-then-advance loop, so it is dispatched
+   * BEFORE the walk loop and never wrapped by it.
+   */
   private async runMove(
     candidate: Candidate,
     epoch: number,
     signal: AbortSignal,
     startedAt: number,
   ): Promise<ExecutionResult> {
+    if (isBridgeMove(candidate)) return await this.runBridge(candidate, epoch, signal, startedAt)
+    return await this.runWalkSkill(candidate, epoch, signal, startedAt, (legSignal, strict, remainingMs) =>
+      this.runMoveLeg(candidate, epoch, legSignal, startedAt, strict, remainingMs),
+    )
+  }
+
+  /**
+   * THE WALK-TO SKILL LOOP (issue #436 section 3; OPERATOR DIRECTIVE 2026-09-23).
+   *
+   * ONE Jev selection owns the whole traversal. While the commitment is inside its
+   * declared `EffectEnvelope` and budget, this loop keeps making bounded mechanical
+   * progress toward the SAME committed target - replanning that target with the
+   * ordinary mechanics, bumping and jumping the ordinary way, and continuing after
+   * a leg that merely failed mechanically. It does NOT re-decide anything:
+   *
+   *   * the target is the committed target (never a retarget, never a substitute);
+   *   * every step still goes through `assertEffect` (the envelope can never widen);
+   *   * `assertCommitmentValid` revalidates world/epoch/dimension between legs, and
+   *     the per-step landing guard + env-hazard abort stay live per step, so a
+   *     lethal step or a revoked lease stops the loop mid-leg, not at the end;
+   *   * the boundary decision is the pure `walkBoundaryAfterLeg` - arrival, typed
+   *     safety/invalidation, budget, or "no authorised mechanical continuation"
+   *     (which is the section 7 U3 / section 22 policy boundary, with NO choice
+   *     made between remedy classes).
+   *
+   * Evidence: ONE `SKILL_START` (the commitment), one `SKILL_STEP
+   * authority=MECHANICAL_CONTINUATION step=walk_leg count=<leg>` per mechanical
+   * leg, one `SKILL_END` with the verified outcome (emitted by `runAction`), and
+   * `SKILL_POLICY_BOUNDARY` at a semantic stop. `actionsPerDecision` is therefore
+   * > 1 by construction for any traversal that needs more than one leg.
+   */
+  private async runWalkSkill(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+    runLeg: (signal: AbortSignal, strictArrival: boolean, remainingMs: number) => Promise<WalkLegExecution>,
+  ): Promise<ExecutionResult> {
+    const target = walkTargetOf(candidate)
+    const skill = walkSkillIdFor(candidate.kind)
+    const commitment = this.activeCommitment
+    // No commitment / no destination / not a locomotion kind: keep exactly the
+    // pre-loop behaviour (ONE bounded leg) instead of inventing a loop owner.
+    const declaredBudget = walkSkillBudget(commitment?.budget.ms ?? null)
+    if (target === null || skill === null || commitment === null || !isWalkSkillKind(candidate.kind)) {
+      return (await runLeg(signal, false, declaredBudget.ms)).result
+    }
+    const budget = declaredBudget
+    const deadlineAt = startedAt + budget.ms
+    let legs = 0
+    let stalledLegs = 0
+    let remaining = this.distanceToFeet(target)
+    const startDistance = remaining
+    this.logger.info(
+      'executor',
+      formatWalkSkillStart({ skill, commitment, budget, target, envelope: commitment.allowedEffects }),
+      {
+        actionId: candidate.id,
+        commitmentId: commitment.commitmentId,
+        decisionEpoch: commitment.decisionEpoch,
+        stepCap: budget.steps,
+        msBudget: budget.ms,
+      },
+    )
+    for (;;) {
+      // Budget is checked BEFORE another leg starts, so a spent commitment can
+      // never begin mechanical work it cannot bound.
+      const pre = walkBoundaryAfterLeg({
+        legs,
+        stalledLegs,
+        elapsedMs: Date.now() - startedAt,
+        budget,
+        arrived: false,
+        failure: null,
+        invalidated: null,
+      })
+      if (pre.stop) {
+        return this.settleWalkSkill(
+          candidate,
+          epoch,
+          skill,
+          commitment,
+          pre,
+          legs,
+          stalledLegs,
+          remaining,
+          target,
+          null,
+          startedAt,
+          startDistance - remaining,
+        )
+      }
+      // §14/23 per-LEG revalidation: the world/epoch/dimension this commitment was
+      // grounded in can change between legs (a portalled body, an epoch bump). It
+      // fails closed with the typed SKILL_INVALIDATED event and never re-plans into
+      // the new world - the replacement target belongs to policy.
+      this.assertCommitmentValid()
+      const bound = this.boundWalkLeg(signal, deadlineAt)
+      const before = remaining
+      let arrived = false
+      let settled: ExecutionResult | null = null
+      let thrown: unknown = null
+      let legFailure: WalkLegFailure | null = null
+      let phase = 'pathing'
+      legs += 1
+      try {
+        // The FIRST leg keeps the exact pre-loop physical path; every retry of the
+        // SAME committed target tightens arrival to the committed cell.
+        const leg = await runLeg(bound.signal, legs > 0, Math.max(1, deadlineAt - Date.now()))
+        arrived = leg.arrived
+        settled = leg.result
+        phase = leg.result.phase
+      } catch (error) {
+        thrown = error
+        legFailure = this.walkLegFailureOf(error, bound.timedOut())
+      } finally {
+        bound.cleanup()
+      }
+      const after = this.distanceToFeet(target)
+      remaining = after
+      // Durable mechanical progress: distance actually closed toward the committed
+      // target. A leg that failed mechanically but still closed distance is
+      // progress (section 5: body motion is progress, never completion).
+      stalledLegs = before - after >= WALK_SKILL_MIN_PROGRESS ? 0 : stalledLegs + 1
+      this.logger.info(
+        'executor',
+        formatWalkLeg({
+          skill,
+          commitment,
+          leg: legs,
+          evidence: walkLegEvidence({ leg: legs, from: before, to: after, failureCode: legFailure?.code ?? null, phase }),
+          worldDelta: this.bodyDelta(),
+          failure: legFailure?.code ?? null,
+        }),
+        {
+          actionId: candidate.id,
+          commitmentId: commitment.commitmentId,
+          leg: legs,
+          failure: legFailure?.code ?? null,
+          remaining: round2(after),
+        },
+      )
+      const decision = walkBoundaryAfterLeg({
+        legs,
+        stalledLegs,
+        elapsedMs: Date.now() - startedAt,
+        budget,
+        arrived,
+        failure: legFailure,
+        invalidated: null,
+      })
+      if (!decision.stop) continue
+      if (decision.reason === 'arrived' && settled !== null) return settled
+      return this.settleWalkSkill(
+        candidate,
+        epoch,
+        skill,
+        commitment,
+        decision,
+        legs,
+        stalledLegs,
+        remaining,
+        target,
+        thrown,
+        startedAt,
+        startDistance - remaining,
+      )
+    }
+  }
+
+  /**
+   * Stop the committed walk at a SEMANTIC boundary and hand control back to
+   * policy with the typed reason.
+   *
+   * A stop the loop itself decided (its own budget/stall bound) settles with a
+   * `failed` result carrying the TYPED code and the durable body progress it did
+   * make, so the controller still sees `progressed`/`distanceClosed` for a walk
+   * that closed real distance without reaching the target (the #352 signal) -
+   * a "typed end" is never a silent stop and never a fake arrival. A stop caused
+   * by a leg failure rethrows that failure unchanged, so safety, invalidation and
+   * ordinary mechanical failures keep their own code, message and semantics.
+   */
+  private settleWalkSkill(
+    candidate: Candidate,
+    epoch: number,
+    skill: WalkSkillId,
+    commitment: SkillCommitment,
+    stop: WalkStop,
+    legs: number,
+    stalledLegs: number,
+    remaining: number,
+    target: Vec3Json,
+    thrown: unknown,
+    startedAt: number,
+    closed: number,
+  ): ExecutionResult {
+    const boundary = formatWalkBoundary({ skill, commitment, stop, legs, remaining, target, stalledLegs })
+    const detail = {
+      actionId: candidate.id,
+      commitmentId: commitment.commitmentId,
+      reason: stop.reason,
+      outcome: stop.outcome,
+      legs,
+      stalledLegs,
+      remaining: round2(remaining),
+      closed: round2(closed),
+    }
+    // §17 single owner per marker: only a stop where code reached a decision it
+    // must NOT make states the policy boundary (the grounded remedy list stays
+    // policy's, so `alternatives=[]` here); a safety/lease/capability end is an
+    // INTERRUPT with its own typed end, so the boundary counter keeps meaning.
+    if (stop.policyBoundary) this.logger.warn('agent', boundary, detail)
+    else this.logger.warn('agent', formatSkillInterrupt(skill, stop.reason), detail)
+    if (thrown !== null && !(thrown instanceof ActionCancelled && stop.failureCode === 'path_timeout')) throw thrown
+    const code = (stop.failureCode ?? 'path_stuck') as FailureCode
+    return this.buildResult(
+      candidate,
+      epoch,
+      startedAt,
+      'failed',
+      stop.reason === 'budget_exhausted' ? 'walk_budget_exhausted' : 'walk_blocked',
+      `${skill} ${candidate.id} stopped at a policy boundary reason=${stop.reason} after ${legs} mechanical leg(s) ` +
+        `(${round2(remaining)}m from (${target.x},${target.y},${target.z})), closed=${round2(closed)}m, ` +
+        `elapsed=${Date.now() - startedAt}ms`,
+      code,
+      {
+        verified: false,
+        blockRemoved: false,
+        dropObserved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+        // Durable mechanical progress is NOT completion (#436 section 5) and is
+        // NOT thrown away either: the same bounded-progress signal the travel leg
+        // already reports (#352) travels on the typed stop.
+        progressed: closed >= WALK_SKILL_MIN_PROGRESS,
+        distanceClosed: closed >= WALK_SKILL_MIN_PROGRESS,
+      },
+    )
+  }
+
+  /** The leg's typed failure, in the loop's vocabulary (never a silent retry). */
+  private walkLegFailureOf(error: unknown, timedOut: boolean): WalkLegFailure {
+    if (error instanceof ActionCancelled) {
+      // Our own wall-clock bound reads as a spent budget; any other abort is the
+      // caller/lease and keeps its own lifecycle outcome.
+      return timedOut
+        ? { code: 'path_timeout', outcome: 'BUDGET_EXHAUSTED' }
+        : { code: 'cancelled', outcome: 'LEASE_REVOKED' }
+    }
+    const code = error instanceof ExecutorError ? error.code : 'unknown_event'
+    return { code, outcome: skillOutcomeForFailure(code, 'failed') }
+  }
+
+  /**
+   * Bound ONE leg by the commitment's wall-clock deadline: the child signal is
+   * aborted either by the caller (lease/reflex) or by the deadline, and the loop
+   * distinguishes the two (`timedOut`) so a spent budget is `BUDGET_EXHAUSTED`
+   * while a revoked lease stays `LEASE_REVOKED`.
+   */
+  private boundWalkLeg(
+    signal: AbortSignal,
+    deadlineAt: number,
+  ): { signal: AbortSignal; timedOut: () => boolean; cleanup: () => void } {
+    const controller = new AbortController()
+    let timedOut = false
+    const onParentAbort = (): void => controller.abort(signal.reason)
+    if (signal.aborted) controller.abort(signal.reason)
+    else signal.addEventListener('abort', onParentAbort, { once: true })
+    const timer = setTimeout(
+      () => {
+        timedOut = true
+        controller.abort(new Error('walk skill commitment budget exhausted'))
+      },
+      Math.max(0, deadlineAt - Date.now()),
+    )
+    return {
+      signal: controller.signal,
+      timedOut: () => timedOut,
+      cleanup: () => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', onParentAbort)
+      },
+    }
+  }
+
+  /**
+   * ONE bounded mechanical leg of a committed walk: exactly the behaviour
+   * `runMove` had before the loop existed (vertical contract chunk -> stock
+   * pathfinder -> travel leg -> control-walk/packet fallback -> arrival
+   * classification). It reports whether THIS leg verified the committed arrival
+   * and otherwise throws its own typed failure, which the loop classifies.
+   */
+  private async runMoveLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+    strictArrival = false,
+    remainingMs?: number,
+  ): Promise<WalkLegExecution> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', `${candidate.kind} candidate has no coordinates`)
-    // A BRIDGE leg is its own route, exactly like a generated vertical plan: the
-    // stock `canDig=false` pathfinder cannot express "place a block and step onto
-    // it". It is dispatched before the vertical contract / walk because its whole
-    // mechanic is the bounded place-then-advance loop below.
-    if (isBridgeMove(candidate)) return await this.runBridge(candidate, epoch, signal, startedAt)
+    // The committed budget is the WHOLE commitment's bound, so the first stage of
+    // this leg gets at most what is left - and, when a committed travel leg is the
+    // designed next stage for a far target (#352), at most half of it, so the
+    // travel leg can still run inside the same declared budget.
+    const stageMs = walkStageBudgetMs(
+      remainingMs ?? this.options.pathTimeoutMs,
+      classifyTravelLeg({ remainingBefore: this.distanceToFeet(target), remainingAfter: this.distanceToFeet(target) })
+        .warranted,
+    )
     const anchor = this.anchorBlock(candidate)
     this.setPhase(candidate, epoch, 'pathing')
     const before = this.distanceToFeet(target)
@@ -2586,9 +2940,10 @@ export class Executor {
           vertical: activeVertical,
         })
       }
-      // Preserve bounded ascent as durable MOVE progress.  The next sensor
-      // tick re-plans from the new Y instead of sending a canDig=false
-      // horizontal path back down to the original standable spot.
+      // Preserve bounded ascent as durable MOVE progress. The committed walk's
+      // OWN loop now re-plans the next vertical chunk from the new Y (the same
+      // target, no new decision); if the loop's budget ends here the chunk is
+      // still durable progress evidence on the settled result.
       if (
         shouldReplanAfterVerticalChunk({
           verticalStep,
@@ -2598,23 +2953,30 @@ export class Executor {
         })
       ) {
         const direction = climbedTo > startFloorY ? 'climbed' : 'descended'
-        return this.buildResult(
-          candidate,
-          epoch,
-          startedAt,
-          'done',
-          'arrived',
-          `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
-          null,
-          {
-            verified: true,
-            blockRemoved: dugVertical && verticalStep,
-            dropObserved: false,
-            itemsGained: 0,
-            goalItemCount: this.countGoalItem(),
-            progressed: true,
-          },
-        )
+        return {
+          // A bounded vertical chunk is NOT the committed arrival: the MOVE's own
+          // contract is the destination cell, so the loop keeps the commitment and
+          // re-plans the SAME target. `verified: true` stays as the existing
+          // durable-progress evidence on the result.
+          arrived: false,
+          result: this.buildResult(
+            candidate,
+            epoch,
+            startedAt,
+            'done',
+            'arrived',
+            `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded vertical chunk of the committed walk)`,
+            null,
+            {
+              verified: true,
+              blockRemoved: dugVertical && verticalStep,
+              dropObserved: false,
+              itemsGained: 0,
+              goalItemCount: this.countGoalItem(),
+              progressed: true,
+            },
+          ),
+        }
       }
     }
     let pathError: unknown = null
@@ -2625,7 +2987,16 @@ export class Executor {
       // block is NOT the arrival goal here: a MOVE exists to walk to the
       // standable spot, and `anchorIsGoal` is deliberately omitted so the
       // fallback tests the FEET distance to the spot.
-      await this.pathTo(target, epoch, signal, 'GoalBlock', { anchor, requireLevel: true })
+      await this.pathTo(target, epoch, signal, 'GoalBlock', {
+        anchor,
+        requireLevel: true,
+        budgetMs: stageMs,
+        // A RETRY of the SAME committed target (the first leg is byte-identical
+        // to the pre-loop behaviour) tightens arrival to the committed cell.
+        ...(strictArrival
+          ? { range: WALK_STRICT_ARRIVAL_RANGE, tolerance: WALK_STRICT_ARRIVAL_TOLERANCE }
+          : {}),
+      })
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       this.ensureOwned(epoch, signal)
@@ -2642,7 +3013,13 @@ export class Executor {
     // failure (no false progress, bounded by the move-failure memory).
     let legProgressed = false
     if (pathError !== null) {
-      const leg = await this.runTravelLeg(candidate, target, epoch, signal)
+      const leg = await this.runTravelLeg(
+        candidate,
+        target,
+        epoch,
+        signal,
+        Math.max(1, (remainingMs ?? this.options.pathTimeoutMs) - stageMs),
+      )
       if (leg.decision.progressed) {
         legProgressed = true
         pathError = null
@@ -2689,25 +3066,28 @@ export class Executor {
       )
       this.notifyPathCompleted(target)
     }
-    return this.buildResult(
-      candidate,
-      epoch,
-      startedAt,
-      'done',
-      legProgressed && !verified ? 'leg' : 'arrived',
-      legProgressed && !verified
-        ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
-        : `moved from ${round2(before)}m to ${round2(after)}m`,
-      null,
-      {
-        verified,
-        blockRemoved: false,
-        dropObserved: false,
-        itemsGained: 0,
-        goalItemCount: this.countGoalItem(),
-        progressed: legProgressed,
-      },
-    )
+    return {
+      arrived: verified,
+      result: this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'done',
+        legProgressed && !verified ? 'leg' : 'arrived',
+        legProgressed && !verified
+          ? `travel leg toward (${target.x},${target.y},${target.z}); target not reached (goal stays open)`
+          : `moved from ${round2(before)}m to ${round2(after)}m`,
+        null,
+        {
+          verified,
+          blockRemoved: false,
+          dropObserved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+          progressed: legProgressed,
+        },
+      ),
+    }
   }
 
   /**
@@ -3056,12 +3436,34 @@ export class Executor {
     })
   }
 
+  /**
+   * The committed RETRIEVE walks to its remembered resource inside ONE bounded,
+   * closed-loop harness-layer Skill (issue #436 section 3 / OPERATOR DIRECTIVE
+   * 2026-09-23): the vertical contract chunk, the horizontal approach, the travel
+   * leg, a mechanically blocked step and the retry from the new position are all
+   * MECHANICAL_CONTINUATION of the one selection - never a new Jev decision per
+   * leg. Policy is re-entered only at a semantic boundary (`walkSkill.ts`).
+   */
   private async runRetrieve(
     candidate: Candidate,
     epoch: number,
     signal: AbortSignal,
     startedAt: number,
   ): Promise<ExecutionResult> {
+    return await this.runWalkSkill(candidate, epoch, signal, startedAt, (legSignal, strict, remainingMs) =>
+      this.runRetrieveLeg(candidate, epoch, legSignal, startedAt, strict, remainingMs),
+    )
+  }
+
+  /** ONE bounded mechanical leg of a committed RETRIEVE (the pre-loop behaviour). */
+  private async runRetrieveLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+    strictArrival = false,
+    remainingMs?: number,
+  ): Promise<WalkLegExecution> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'RETRIEVE candidate has no coordinates')
     const before = this.distanceToFeet(target)
@@ -3149,29 +3551,38 @@ export class Executor {
           { target, actionId: candidate.id, vertical: activeVertical, before: round2(before) },
         )
       }
-      return this.buildResult(
-        candidate,
-        epoch,
-        startedAt,
-        'done',
-        'retrieved',
-        `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded chunk; next decision re-plans)`,
-        null,
-        {
-          verified: outcome.verified,
-          blockRemoved: dugVertical && verticalStep,
-          dropObserved: false,
-          itemsGained: 0,
-          goalItemCount: this.countGoalItem(),
-          progressed: outcome.progressed,
-          distanceClosed: outcome.closed,
-        },
-      )
+      return {
+        arrived: false,
+        result: this.buildResult(
+          candidate,
+          epoch,
+          startedAt,
+          'done',
+          'retrieved',
+          `${direction} from y=${startFloorY} to y=${climbedTo} toward y=${target.y} (bounded vertical chunk of the committed retrieval)`,
+          null,
+          {
+            verified: outcome.verified,
+            blockRemoved: dugVertical && verticalStep,
+            dropObserved: false,
+            itemsGained: 0,
+            goalItemCount: this.countGoalItem(),
+            progressed: outcome.progressed,
+            distanceClosed: outcome.closed,
+          },
+        ),
+      }
     }
     this.setPhase(candidate, epoch, 'approaching')
     let approachError: ExecutorError | null = null
     try {
-      await this.pathToNear(target, RETRIEVE_ARRIVAL_RADIUS, epoch, signal)
+      await this.pathToNear(target, strictArrival ? WALK_STRICT_ARRIVAL_RANGE : RETRIEVE_ARRIVAL_RADIUS, epoch, signal, {
+        budgetMs: walkStageBudgetMs(
+          remainingMs ?? this.options.pickupPathTimeoutMs,
+          classifyTravelLeg({ remainingBefore: this.distanceToFeet(target), remainingAfter: this.distanceToFeet(target) })
+            .warranted,
+        ),
+      })
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
       approachError =
@@ -3269,15 +3680,18 @@ export class Executor {
       `RETRIEVE ${candidate.id} arrival targetDistance=${round2(before)}m->${round2(after)}m y=${round2(startY)}->${round2(endY)} vertical=${activeVertical} outcome=${approach.outcome}`,
       { target, actionId: candidate.id },
     )
-    return this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m (${approach.outcome})`, null, {
-      verified,
-      blockRemoved: dugVertical && verticalStep,
-      dropObserved: false,
-      itemsGained: 0,
-      goalItemCount: this.countGoalItem(),
-      progressed: outcome.progressed,
-      distanceClosed: approach.closed,
-    })
+    return {
+      arrived: verified,
+      result: this.buildResult(candidate, epoch, startedAt, 'done', 'retrieved', `approached remembered resource from ${round2(before)}m to ${round2(after)}m (${approach.outcome})`, null, {
+        verified,
+        blockRemoved: dugVertical && verticalStep,
+        dropObserved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+        progressed: outcome.progressed,
+        distanceClosed: approach.closed,
+      }),
+    }
   }
 
   private async digRetrievalStaircase(
@@ -8019,11 +8433,19 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
     goalKind: 'GoalGetToBlock' | 'GoalBlock',
-    fallback?: { anchor?: Vec3Json | null; requireLevel?: boolean },
+    fallback?: {
+      anchor?: Vec3Json | null
+      requireLevel?: boolean
+      range?: number
+      tolerance?: number
+      /** wall clock this stage may spend (defaults to the runner's own path timeout) */
+      budgetMs?: number
+    },
   ): Promise<void> {
+    const budgetMs = fallback?.budgetMs ?? this.options.pathTimeoutMs
     if (this.options.actuation === 'pathfinder') {
       try {
-        await this.stockPathTo(target, epoch, signal, goalKind)
+        await this.stockPathTo(target, epoch, signal, goalKind, budgetMs)
         return
       } catch (error) {
         if (error instanceof ActionCancelled) throw error
@@ -8038,9 +8460,10 @@ export class Executor {
         anchor: fallback?.anchor ?? (goalKind === 'GoalGetToBlock' ? target : null),
         anchorIsGoal: goalKind === 'GoalGetToBlock',
         requireLevel: fallback?.requireLevel,
-        budgetMs: this.options.pathTimeoutMs,
+        tolerance: fallback?.tolerance,
+        budgetMs,
       })
-      if (!controlsWorked) await this.walkByPackets(target, 1, epoch, signal)
+      if (!controlsWorked) await this.walkByPackets(target, fallback?.range ?? 1, epoch, signal)
       this.notifyPathCompleted(target)
       return
     }
@@ -8049,9 +8472,9 @@ export class Executor {
       (await this.walkByControls(target, epoch, signal, {
         anchor: target,
         anchorIsGoal: true,
-        budgetMs: this.options.pathTimeoutMs,
+        budgetMs,
       }))
-    if (!controlsWorked) await this.walkByPackets(target, 1, epoch, signal)
+    if (!controlsWorked) await this.walkByPackets(target, fallback?.range ?? 1, epoch, signal)
     this.notifyPathCompleted(target)
   }
 
@@ -8075,6 +8498,7 @@ export class Executor {
     target: Vec3Json,
     epoch: number,
     signal: AbortSignal,
+    budgetMs?: number,
   ): Promise<{ decision: TravelLegDecision; error: ExecutorError | null }> {
     const remainingBefore = this.distanceToFeet(target)
     const warranted = classifyTravelLeg({ remainingBefore, remainingAfter: remainingBefore })
@@ -8086,7 +8510,9 @@ export class Executor {
     )
     let error: ExecutorError | null = null
     try {
-      await this.pathToNear(target, LEG_TRAVEL_RADIUS, epoch, signal)
+      await this.pathToNear(target, LEG_TRAVEL_RADIUS, epoch, signal, {
+        ...(budgetMs === undefined ? {} : { budgetMs }),
+      })
     } catch (thrown) {
       if (thrown instanceof ActionCancelled) throw thrown
       error =
@@ -8127,13 +8553,14 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
     goalKind: 'GoalGetToBlock' | 'GoalBlock',
+    timeoutMs: number = this.options.pathTimeoutMs,
   ): Promise<void> {
     this.assertEffect({ type: 'move' })
     const goal =
       goalKind === 'GoalGetToBlock'
         ? new goals.GoalGetToBlock(target.x, target.y, target.z)
         : new goals.GoalBlock(target.x, target.y, target.z)
-    const outcome = this.waitForGoal(epoch, signal, this.options.pathTimeoutMs)
+    const outcome = this.waitForGoal(epoch, signal, timeoutMs)
     this.bot.pathfinder.setGoal(goal)
     const result = await outcome
     this.pathStatus = toPathStatus(result)
@@ -8149,15 +8576,16 @@ export class Executor {
     range: number,
     epoch: number,
     signal: AbortSignal,
-    options: { requireLevel?: boolean } = {},
+    options: { requireLevel?: boolean; budgetMs?: number } = {},
   ): Promise<void> {
     this.assertEffect({ type: 'move' })
+    const budgetMs = options.budgetMs ?? this.options.pickupPathTimeoutMs
     if (this.options.actuation === 'pathfinder') {
       try {
         const goal = options.requireLevel === true
           ? new goals.GoalBlock(position.x, position.y, position.z)
           : new goals.GoalNear(position.x, position.y, position.z, range)
-        const outcome = this.waitForGoal(epoch, signal, this.options.pickupPathTimeoutMs)
+        const outcome = this.waitForGoal(epoch, signal, budgetMs)
         this.bot.pathfinder.setGoal(goal)
         const result = await outcome
         this.pathStatus = toPathStatus(result)
@@ -8180,7 +8608,7 @@ export class Executor {
       const controlsWorked = await this.walkByControls(position, epoch, signal, {
         range,
         requireLevel: options.requireLevel,
-        budgetMs: this.options.pickupPathTimeoutMs,
+        budgetMs,
       })
       if (!controlsWorked) await this.walkByPackets(position, range, epoch, signal)
       this.notifyPathCompleted(position)
@@ -8189,7 +8617,7 @@ export class Executor {
     const controlsWorked = await this.walkByControls(position, epoch, signal, {
       range,
       requireLevel: options.requireLevel,
-      budgetMs: this.options.pickupPathTimeoutMs,
+      budgetMs,
     })
     if (!controlsWorked) await this.walkByPackets(position, range, epoch, signal)
     this.notifyPathCompleted(position)
