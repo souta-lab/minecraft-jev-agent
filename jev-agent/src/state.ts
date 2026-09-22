@@ -870,6 +870,48 @@ function isSolidSupport(block: { boundingBox: string } | null): boolean {
   return block !== null && block.boundingBox === 'block'
 }
 
+/**
+ * Foliage/canopy block names (`oak_leaves`, `birch_leaves`, `azalea_leaves`,
+ * ...). A leaf block is COLLIDABLE - `boundingBox === 'block'` - so a 1.8-tall
+ * body can physically stand on a treetop and `isStandable` must keep saying so;
+ * that is locomotion truth and walking across a canopy stays legal.
+ *
+ * What a leaf is NOT is LOAD-BEARING GROUND. It is not a habitat surface, not a
+ * foundation a block may be placed onto, and not the landing of a step-up route.
+ * Every layer that picks a DESTINATION (terrain / explore / retreat cells), a
+ * PLACEMENT site (station, pillar, scaffold) or a step-up LANDING therefore asks
+ * for {@link isUsableGroundSupport} instead of bare solidity, so a hungry body is
+ * never walked up a treetop and no block is placed on leaves.
+ */
+const CANOPY_BLOCK_NAME = /(^|_)leaves$/
+
+/** True when a block name is a leaf canopy block (see {@link CANOPY_BLOCK_NAME}). */
+export function isCanopyBlockName(name: string): boolean {
+  return CANOPY_BLOCK_NAME.test(name)
+}
+
+/** The block slice the load-bearing-ground rule needs. */
+export interface SupportBlockLike {
+  name: string
+  boundingBox: string
+}
+
+/**
+ * The ONE load-bearing-ground rule: a full solid block that is not a leaf
+ * canopy. Shared by the destination (`buildTerrain`), placement-site
+ * (`buildPlacementSpots`) and step-up-landing (`buildStepCuts`) layers. It is
+ * deliberately stricter than `isStandable`, which stays the locomotion and
+ * passability truth.
+ */
+export function isUsableGroundSupport(block: SupportBlockLike | null): boolean {
+  return block !== null && isSolidSupport(block) && !isCanopyBlockName(block.name)
+}
+
+/** True when the block under `feet` is genuinely usable ground (not a canopy). */
+export function hasUsableGroundSupport(bot: Bot, feet: Vec3Json): boolean {
+  return isUsableGroundSupport(bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })))
+}
+
 const REPLACEABLE_AIR = new Set(['air', 'cave_air', 'void_air'])
 
 function isReplaceableAir(block: { name: string } | null): boolean {
@@ -890,6 +932,17 @@ export function isStandable(bot: Bot, feet: Vec3Json): boolean {
   const headBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z }))
   const belowBlock = bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z }))
   return isPassable(feetBlock) && isPassable(headBlock) && isSolidSupport(belowBlock)
+}
+
+/**
+ * The DESTINATION rule: the cell is standable AND its support is genuinely
+ * usable ground (not a leaf canopy). Terrain sensing, explore/retreat cells and
+ * every placement cell use this one, so `isStandable` keeps owning pure
+ * locomotion truth while a treetop stops being a goal, a build site or a
+ * landing.
+ */
+export function isUsableStand(bot: Bot, feet: Vec3Json): boolean {
+  return isStandable(bot, feet) && hasUsableGroundSupport(bot, feet)
 }
 
 /** The 8 neighbours the executor could stand on to reach a block, best first. */
@@ -1821,6 +1874,7 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
     const block = at(x, y, z)
     return block !== null && block.boundingBox === 'block'
   }
+  const usableGround = (x: number, y: number, z: number): boolean => isUsableGroundSupport(at(x, y, z))
   const clear = (x: number, y: number, z: number): boolean => {
     const block = at(x, y, z)
     return block === null || block.boundingBox === 'empty'
@@ -1861,7 +1915,11 @@ function buildStepCuts(bot: Bot, options: SensorOptions, self: SelfState): StepC
       let reason = 'safe'
       if (isProtectedStationBlock(name)) reason = `${name} is a protected station`
       else if (!diggableSolid(x, top, z)) reason = `${name} is not breakable`
-      else if (!solid(x, top - 1, z)) reason = 'no solid landing under the cut'
+      // The landing must be usable GROUND, not merely solid: a cut whose step
+      // rests on a leaf block turns a treetop into an up-staircase destination
+      // (measured live: `STEP:N:b75_78_8 phase=digging` while the body clambered
+      // through a canopy at y=74-78).
+      else if (!usableGround(x, top - 1, z)) reason = 'no usable ground under the cut'
       else if (!clear(x, top + 1, z) || !clear(x, top + 2, z)) reason = 'no headroom above the new step'
       else if (hazardsAround(hazardous, cut, step, { x, y: top - 1, z })) reason = 'lava/water in the step column'
       out.push({ dir, dx, dz, cut, step, name, safe: reason === 'safe', reason })
@@ -1978,7 +2036,12 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
         // the server refuses to overwrite them, so placing there silently fails.
         if (!isReplaceableAir(atFeet)) continue
         if (above === null || above.boundingBox !== 'empty') continue
-        if (below === null || below.boundingBox !== 'block') continue
+        // Usable ground only: a leaf canopy is solid enough for the server to
+        // accept a placement, but a block on leaves is not a station, scaffold
+        // or pillar step. Measured live (run-mubobiq6-12onv): a hungry body
+        // pillared itself up a treetop and the operator photographed a
+        // cobblestone block sitting on the canopy.
+        if (!isUsableGroundSupport(below)) continue
         const pos = vecJson(candidate)
         if (distance(pos, self.eyePosition) > options.reach + 0.5) continue
         spots.push(pos)
@@ -2430,7 +2493,10 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
     for (let dz = -2; dz <= 2; dz += 1) {
       for (let dy = -1; dy <= 1; dy += 1) {
         const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
-        if (!isStandable(bot, feet)) continue
+        // A canopy top is collidable but is not a destination: terrain cells are
+        // the standable set every MOVE/explore/retreat/placement solve picks
+        // from, so a leaf-supported cell here became "walk onto the treetop".
+        if (!isUsableStand(bot, feet)) continue
         found.push(feet)
       }
     }

@@ -352,12 +352,13 @@ export interface CandidateOptions {
    */
   foodHuntRange?: number
   /**
-   * Grounded animal-habitat target Y supplied by the controller from remembered
-   * surface structures (a portal frame / station the resident verified above
-   * ground). The hungry-hunt ascent aims here instead of the bare sea-level
-   * floor, so the route lands on real surface rather than inside a dirt column.
-   * Absent means "no surface memory", which falls back to
-   * `ANIMAL_HABITAT_SEA_LEVEL`.
+   * Grounded animal-habitat target Y supplied by the controller from a LOCAL
+   * surface structure (a station the resident can sense from here). The
+   * hungry-hunt ascent aims here instead of the bare sea-level floor, so the
+   * route lands on real surface rather than inside a dirt column. Absent means
+   * "no sensed local surface", which falls back to `sensedSurfaceY` and then to
+   * `ANIMAL_HABITAT_SEA_LEVEL`; a REMEMBERED station is not accepted as a hint
+   * because the route climbs the body's own column (see `sensedSurfaceY`).
    */
   foodHabitatY?: number | null
   /** nearest distance (m) at which an out-of-reach block earns a MOVE candidate */
@@ -2496,10 +2497,12 @@ export function formatFoodHabitatRefused(refusal: SurfaceAscentRefusal): string 
  * The hungry body's vertical route to animal habitat.
  *
  * Fires only when the resident is hungry, holds no food, has NO sensed food
- * animal in range, and is below the habitat band - i.e. exactly the state where
+ * animal in range, and is BELOW the habitat band - i.e. exactly the state where
  * the hunt has no grounded route at all and would otherwise degenerate to
- * WAIT/DESCEND. It reuses the SAME `planVerticalApproachDetailed` machinery (and
- * therefore reuse/staircase-up/pillar) as the `surface` goal and the MOVE/RETRIEVE
+ * WAIT/DESCEND. At or above the band the body is already where animals can spawn,
+ * so no upward route is offered (see the band check below). It reuses the SAME
+ * `planVerticalApproachDetailed` machinery (and therefore
+ * reuse/staircase-up/pillar) as the `surface` goal and the MOVE/RETRIEVE
  * ascents, and returns the same typed refusal when no plan exists. CAN
  * enumeration only: the route is appended alongside every other candidate and
  * never overrides or ranks one.
@@ -2512,10 +2515,20 @@ export function foodHabitatAscent(state: WorldState, options: CandidateOptions):
     (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
   )
   if (animalSensed) return { candidates: [], refusal: null }
+  // The arm's ONLY grounded premise is Minecraft spawn truth: passive animals
+  // need grass with sky access, and in the 1.18+ overworld that surface does not
+  // exist below sea level. A body already AT or ABOVE the band is standing in the
+  // band, so climbing higher has no grounded reason - and inside a leaf canopy
+  // "higher" is the treetop. Measured live (run-mubobiq6-12onv): `food = 0` held
+  // for hours, the body sat in an oak canopy at y=74-78, and this arm kept
+  // offering `ASCEND:habitat:p76_78_12` (own-column pillar) up a tree it had no
+  // reason to be in. A body genuinely below the band still gets the route, and a
+  // plan-less band ascent still returns its typed `FOOD_HABITAT_REFUSED`.
+  if (Math.floor(state.self.position.y) >= ANIMAL_HABITAT_SEA_LEVEL) return { candidates: [], refusal: null }
   const hinted =
     typeof options.foodHabitatY === 'number' && Number.isFinite(options.foodHabitatY)
       ? options.foodHabitatY
-      : highestKnownSurfaceY(state)
+      : sensedSurfaceY(state)
   const targetY = Math.max(ANIMAL_HABITAT_SEA_LEVEL, hinted ?? ANIMAL_HABITAT_SEA_LEVEL)
   const current = state.goalQueue?.current ?? null
   const goalId = current?.id ?? 'food-habitat'
@@ -2529,22 +2542,28 @@ export function foodHabitatAscent(state: WorldState, options: CandidateOptions):
 }
 
 /**
- * The highest Y among the surface structures the resident has itself verified
- * (a Nether portal frame it built, a station it placed), or null when it has
- * none. This is the grounded "I have stood above ground there" hint that turns
- * the sea-level floor into the real surface, so a hungry ascent lands next to
- * grass instead of inside a dirt column. Pure: it reads only sensed/remembered
- * world state, never a global.
+ * The highest Y among the surface structures the body can SEE right now (a
+ * NEAR-FIELD sensed station - `isSensedStation`), or null when it sees none.
+ *
+ * This is the grounded "I can see the real surface from here" hint that turns
+ * the sea-level floor into the local surface, so a hungry ascent lands next to
+ * grass instead of inside a dirt column. Only SENSED cells qualify: the route
+ * this hint feeds climbs the BODY'S OWN column, and a durable remembered station
+ * can be hundreds of blocks away at a different altitude (measured live
+ * run-mubobiq6-12onv: a remembered `crafting_table` at (-50,79,-7) raised the
+ * own-column habitat target to y=79, so a hungry body at y=73 pillared straight
+ * up through an oak canopy toward an altitude that had nothing to do with where
+ * it stood). A remembered cell is real, but it is not evidence about the terrain
+ * above the body. Pure: it reads only the sensed world state, never a global.
  */
-function highestKnownSurfaceY(state: WorldState): number | null {
+function sensedSurfaceY(state: WorldState): number | null {
   let best: number | null = null
   const consider = (y: unknown): void => {
     if (typeof y !== 'number' || !Number.isFinite(y)) return
     best = best === null ? y : Math.max(best, y)
   }
-  for (const site of state.portalFrameSites ?? []) consider(site.origin?.y)
-  for (const station of state.craftingTables ?? []) consider(station.y)
-  for (const station of state.furnaces ?? []) consider(station.y)
+  for (const station of state.craftingTables ?? []) if (isSensedStation(station)) consider(station.y)
+  for (const station of state.furnaces ?? []) if (isSensedStation(station)) consider(station.y)
   return best
 }
 

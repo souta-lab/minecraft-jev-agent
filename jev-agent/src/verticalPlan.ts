@@ -94,7 +94,13 @@ export function shouldReplanAfterVerticalChunk(input: {
 }
 
 /** Why a PILLAR_UP step is refused; `reached` is the normal loop end. */
-export type PillarStepRefusal = 'reached' | 'no_placeable' | 'unsafe_column' | 'no_footing' | 'no_headroom'
+export type PillarStepRefusal =
+  | 'reached'
+  | 'no_placeable'
+  | 'unsafe_column'
+  | 'no_footing'
+  | 'canopy_footing'
+  | 'no_headroom'
 
 /**
  * The deterministic gate for one PILLAR_UP step. The executor resolves the live
@@ -102,18 +108,25 @@ export type PillarStepRefusal = 'reached' | 'no_placeable' | 'unsafe_column' | '
  * safety rules (no placeable, hazard column, no solid footing, blocked
  * headroom) are unit-testable without a bot. `remaining` is the plan's bounded
  * step budget, so `reached` also ends the loop the moment the chunk is done.
+ *
+ * `footingUsable` is the load-bearing half of the footing fact (`state.ts`
+ * `isUsableGroundSupport`): the cell the new block rests on must be real ground,
+ * not a leaf canopy. It is optional and defaults to true so pure callers that
+ * have no live block read keep the old geometry-only behaviour.
  */
 export function evaluatePillarStep(input: {
   placeableCount: number
   columnSafe: boolean
   remaining: number
   footingSolid: boolean
+  footingUsable?: boolean
   headroomClear: boolean
 }): { ok: true } | { ok: false; reason: PillarStepRefusal } {
   if (input.remaining < 1) return { ok: false, reason: 'reached' }
   if (input.placeableCount < 1) return { ok: false, reason: 'no_placeable' }
   if (!input.columnSafe) return { ok: false, reason: 'unsafe_column' }
   if (!input.footingSolid) return { ok: false, reason: 'no_footing' }
+  if (input.footingUsable === false) return { ok: false, reason: 'canopy_footing' }
   if (!input.headroomClear) return { ok: false, reason: 'no_headroom' }
   return { ok: true }
 }
