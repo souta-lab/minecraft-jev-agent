@@ -384,6 +384,32 @@ export function evictStaleKnownResources(
 }
 
 /**
+ * The durable known-resource entries a `KNOWN_RESOURCE_FALSIFIED` event removes.
+ *
+ * ONLY `block_mined` deletes: the loaded world proved the remembered BLOCK is
+ * gone, so the memory is wrong and would otherwise be re-offered the moment the
+ * body walks out of the loaded radius that produced the verdict (the sensor's
+ * own filter is distance-scoped: an unloaded cell is `unknown` again, and the
+ * stale `RETRIEVE:known` route comes straight back). A `mob_gone`/`drop_absent`
+ * verdict is NOT a disproof of the landmark - a fortress stands, a mob can walk
+ * back in, and the fabric scan would re-mint the cell anyway - so those verdicts
+ * withhold the route for the tick that observed them and are re-derived from live
+ * truth every tick. Pure.
+ */
+export function knownResourceFalsifiedRemovals(
+  known: readonly KnownResourceJson[],
+  detail: Record<string, unknown> | undefined,
+): KnownResourceJson[] {
+  if (detail?.reason !== 'block_mined') return []
+  const cell = asVec3Json(detail?.cell)
+  if (cell === null) return []
+  const rounded = `${Math.round(cell.x)},${Math.round(cell.y)},${Math.round(cell.z)}`
+  return known.filter(
+    (resource) => `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}` === rounded,
+  )
+}
+
+/**
  * #80: the near-field radius the ORIGINAL lifecycle used to treat a failed search
  * as proof of absence. That inference is retired (see `syncKnownPortalSites`): a
  * failed search is not an observation at ANY distance. Measured live
@@ -1977,6 +2003,36 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     }
   }
 
+  /**
+   * `KNOWN_RESOURCE_FALSIFIED reason=block_mined` (the sensor proved the block is
+   * gone) evicts the durable cell, in the same order the host replica applies
+   * removals and merges. A `mob_gone`/`drop_absent` verdict deliberately does
+   * NOT delete: the landmark is not disproved, and the fabric scan would re-mint
+   * the cell on the next tick, so the sensor re-derives the withhold instead
+   * (see `knownResourceFalsifiedRemovals`).
+   */
+  function handleKnownResourceFalsified(detail: Record<string, unknown> | undefined): void {
+    const removed = knownResourceFalsifiedRemovals(world.knownResources, detail)
+    if (removed.length === 0) return
+    const keys = new Set(
+      removed.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`),
+    )
+    for (let index = world.knownResources.length - 1; index >= 0; index -= 1) {
+      const resource = world.knownResources[index]
+      if (resource === undefined) continue
+      const key = `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`
+      if (keys.has(key)) world.knownResources.splice(index, 1)
+    }
+    ctx.proposeWorldMemory({ removeKnownResources: removed.map((resource) => ({ ...resource })) })
+    for (const resource of removed) {
+      ctx.log('KNOWN_RESOURCE_STALE', {
+        item: resource.name,
+        at: `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`,
+        reason: 'block_mined',
+      })
+    }
+  }
+
   const unusableStationKeys = new Set<string>()
   for (const station of [...durableFurnaces, ...durableTables]) {
     if (isStationSelectable(station, now)) continue
@@ -2398,6 +2454,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       const status = typeof detail.status === 'string' ? detail.status : null
       if (actionId !== null && status !== null) m2Snapshot?.recordTerminal(actionId, { verified, status })
       handleStationEvent(event, detail)
+      handleKnownResourceFalsified(detail)
       // #354: the ONE traversal producer. The executor/controller outcome stream
       // is already mirrored here; no extra listener or sensor is added.
       recordTraversalOutcome(event, detail)

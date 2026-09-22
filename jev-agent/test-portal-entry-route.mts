@@ -1442,7 +1442,7 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
       first.messages.some(
         (line) =>
           line.startsWith(SKILL_STEP) &&
-          line.includes('stepKind=approach_leg') &&
+          line.includes('step=approach_leg') &&
           line.includes('authority=MANDATORY_PREREQUISITE'),
       ) &&
       first.messages.some(
@@ -1498,7 +1498,7 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
   const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
   const model = installWalkModel(fixture, { transfer: true })
   const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
-  const step = result.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('stepKind=approach_leg')) ?? ''
+  const step = result.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('step=approach_leg')) ?? ''
   const legLine = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_LEG)) ?? ''
   const state = worldState(OCCLUDED_STAND, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
     OCCLUDED_STAND,
@@ -1572,7 +1572,7 @@ const LOWER_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
       first.messages.some(
         (line) =>
           line.startsWith(SKILL_STEP) &&
-          line.includes('stepKind=approach_leg') &&
+          line.includes('step=approach_leg') &&
           line.includes('authority=MANDATORY_PREREQUISITE'),
       ) &&
       blocked.includes('obsidian@25,67,9') &&
@@ -1589,7 +1589,7 @@ const LOWER_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
   const reoffered = entryCandidates(state, { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) })
   const second = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
   const walkLine = second.messages.find((line) => line.startsWith(`${PORTAL_WALK_IN} `)) ?? ''
-  const hop = second.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('stepKind=hop')) ?? ''
+  const hop = second.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('step=hop')) ?? ''
   check(
     '(m-a) from the lower face the bounded walk steps UP into the interior and the transfer is observed',
     reoffered.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL') &&

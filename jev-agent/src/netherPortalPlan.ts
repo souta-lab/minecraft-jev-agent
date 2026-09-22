@@ -1271,6 +1271,48 @@ export const SKILL_STEP = 'SKILL_STEP'
 export const SKILL_INTERRUPT = 'SKILL_INTERRUPT'
 export const SKILL_END = 'SKILL_END'
 export const REFLEX = 'REFLEX'
+/**
+ * The Skill stopped because continuing would require a SEMANTIC decision code
+ * does not own (#436 section 6 material policy re-entry, section 7 result clause,
+ * section 22 "no recovery trees"). The alternatives that were grounded are named
+ * so a reviewer can see code did not rank them.
+ */
+export const SKILL_POLICY_BOUNDARY = 'SKILL_POLICY_BOUNDARY'
+
+/**
+ * Which of the three deterministic layers (#436 section 17) justified a
+ * mechanical step:
+ *
+ *   MECHANICAL_CONTINUATION the selected Skill is still being realized;
+ *   MANDATORY_PREREQUISITE  the U1..U6 uniqueness contract justified exactly this
+ *                           prerequisite, so code may finish it on Jev's behalf;
+ *   HARD_SAFETY_REFLEX      immediate safety stabilization preempted execution.
+ */
+export type SkillStepAuthority = 'MECHANICAL_CONTINUATION' | 'MANDATORY_PREREQUISITE' | 'HARD_SAFETY_REFLEX'
+
+/** The `SKILL_STEP` detail half: `authority=<layer> evidence=<fact> worldDelta=<fact>`. */
+export function formatSkillStepAuthority(
+  authority: SkillStepAuthority,
+  evidence: string,
+  worldDelta: string = 'none',
+): string {
+  return `authority=${authority} evidence=${evidence} worldDelta=${worldDelta}`
+}
+
+/**
+ * `SKILL_POLICY_BOUNDARY skill=<id> reason=<reason> alternatives=[<a>,<b>]`
+ *
+ * Emitted exactly where code reached a decision it must NOT make: several
+ * non-equivalent remedies (or several semantic targets) were grounded and the
+ * next move belongs to Jev. `alternatives` is ordered by discovery, never ranked.
+ */
+export function formatSkillPolicyBoundary(input: {
+  skill: string
+  reason: string
+  alternatives: readonly string[]
+}): string {
+  return `${SKILL_POLICY_BOUNDARY} skill=${input.skill} reason=${input.reason} alternatives=[${input.alternatives.join(',')}]`
+}
 
 /** The entry Skill's stable id (the `skill` / `ownerSkill` field). */
 export const PORTAL_ENTER_SKILL = 'ENTER_PORTAL(portalSite)'
@@ -1299,18 +1341,21 @@ export function formatSkillEnd(
   execution: string,
   verification: string,
   postcondition: string,
+  failure: string | null = null,
 ): string {
-  return `${SKILL_END} skill=${skill} execution=${execution} verification=${verification} postcondition=${postcondition}`
+  return (
+    `${SKILL_END} skill=${skill} execution=${execution} verification=${verification} postcondition=${postcondition}` +
+    (failure === null || failure.length === 0 ? '' : ` failure=${failure}`)
+  )
 }
 
 /**
- * Issue #436 §17: three deterministic layers must be distinguishable in the
- * evidence, and every multi-step Skill must state the commitment it realizes.
+ * Issue #436 §17: every multi-step Skill states the commitment it realizes. The
+ * Phase-1 vocabulary (`formatSkillStep` + `formatSkillStepAuthority`,
+ * `formatSkillPolicyBoundary`, `formatSkillEnd`) owns the evidence layers; these
+ * additive fields name WHICH commitment a step belongs to.
  */
 export const SKILL_COMMIT = 'SKILL_COMMIT'
-export const SKILL_POLICY_BOUNDARY = 'SKILL_POLICY_BOUNDARY'
-
-export type SkillAuthority = 'MECHANICAL_CONTINUATION' | 'MANDATORY_PREREQUISITE' | 'HARD_SAFETY_REFLEX'
 
 export interface SkillCommitInput {
   readonly skill: string
@@ -1332,55 +1377,6 @@ export function formatSkillCommit(input: SkillCommitInput): string {
     ` candidateId=${input.candidateId} skillKind=${input.skillKind}` +
     ` targetIdentity=${input.targetIdentity} postconditionHash=${input.postconditionHash}` +
     ` effectEnvelopeHash=${input.effectEnvelopeHash}`
-  )
-}
-
-export interface SkillStepInput {
-  readonly skill: string
-  readonly commitmentId: string
-  readonly stepKind: string
-  readonly authority: SkillAuthority
-  readonly evidence: string
-  readonly worldDelta: string
-}
-
-/** The exact `SKILL_STEP` line: one mechanical step under one commitment. */
-export function formatSkillStepV2(input: SkillStepInput): string {
-  return (
-    `${SKILL_STEP} skill=${input.skill} commitmentId=${input.commitmentId} stepKind=${input.stepKind}` +
-    ` authority=${input.authority} evidence=${input.evidence} worldDelta=${input.worldDelta}`
-  )
-}
-
-/** The exact `SKILL_POLICY_BOUNDARY` line: code stopped, Jev owns the choice. */
-export function formatSkillPolicyBoundary(
-  skill: string,
-  commitmentId: string,
-  reason: string,
-  alternatives: readonly string[],
-): string {
-  return (
-    `${SKILL_POLICY_BOUNDARY} skill=${skill} commitmentId=${commitmentId}` +
-    ` reason=${reason} alternatives=[${alternatives.join(',')}]`
-  )
-}
-
-export interface SkillEndInput {
-  readonly skill: string
-  readonly commitmentId: string
-  readonly execution: string
-  readonly verification: string
-  readonly progress: string
-  readonly failureCode: string
-  readonly targetIdentity: string
-}
-
-/** The exact `SKILL_END` line (issue #436 §17 field set). */
-export function formatSkillEndV2(input: SkillEndInput): string {
-  return (
-    `${SKILL_END} skill=${input.skill} commitmentId=${input.commitmentId} execution=${input.execution}` +
-    ` verification=${input.verification} progress=${input.progress} failureCode=${input.failureCode}` +
-    ` targetIdentity=${input.targetIdentity}`
   )
 }
 

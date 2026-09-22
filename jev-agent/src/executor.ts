@@ -44,8 +44,8 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillCommit, formatSkillEndV2, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStepV2, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, skillHash, verifyPortal } from './netherPortalPlan.ts'
-import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillAuthority, SkillSelectionSource } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillCommit, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, skillHash, verifyPortal } from './netherPortalPlan.ts'
+import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource, SkillStepAuthority } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -1798,18 +1798,7 @@ export class Executor {
             })
             this.logger.warn(
               'agent',
-              formatSkillEndV2({
-                skill: PORTAL_ENTER_SKILL,
-                commitmentId: `${candidate.id}#${epoch}`,
-                execution: 'failed',
-                verification: 'unverified',
-                progress: 'none',
-                failureCode: code,
-                targetIdentity: this.portalTargetIdentity(
-                  this.portalEntryCellOf(candidate),
-                  this.portalEntryDimensionOf(candidate),
-                ),
-              }),
+              `${formatSkillEnd(PORTAL_ENTER_SKILL, 'failed', 'unverified', code, code)} progress=none failureCode=${code} commitmentId=${candidate.id}#${epoch} targetIdentity=${this.portalTargetIdentity(this.portalEntryCellOf(candidate), this.portalEntryDimensionOf(candidate))}`,
               { actionId: candidate.id, failure: code },
             )
             throw error
@@ -6268,20 +6257,17 @@ export class Executor {
     candidate: Candidate,
     epoch: number,
     stepKind: string,
-    authority: SkillAuthority,
+    authority: SkillStepAuthority,
     evidence: string,
     worldDelta: string,
   ): void {
     this.logger.info(
       'agent',
-      formatSkillStepV2({
-        skill: PORTAL_ENTER_SKILL,
-        commitmentId: this.portalCommitmentId(candidate, epoch),
+      formatSkillStep(
+        PORTAL_ENTER_SKILL,
         stepKind,
-        authority,
-        evidence,
-        worldDelta,
-      }),
+        `${formatSkillStepAuthority(authority, evidence, worldDelta)} commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
+      ),
       { actionId: candidate.id, stepKind, authority },
     )
   }
@@ -6394,6 +6380,69 @@ export class Executor {
       this.portalCellDistance(cell) <= PORTAL_WALK_IN_INSIDE_RADIUS &&
       Math.abs(this.bot.entity.position.y - cell.y) <= PORTAL_OPEN_FACE_LEVEL_TOLERANCE
     )
+  }
+
+  /**
+   * The bounded STEP-OVER floor for an open face the body cannot walk to.
+   *
+   * Measured live (run-mucbyro1-1hqhm, the M3 pocket): the unique standable open
+   * face (26,67,10) sat behind the 1-block hole at (24,67,10) over (24,66,10), so
+   * the direct control walk to the face failed and the skill reported
+   * `PORTAL_APPROACH_REFUSED reason=unreachable`. The mechanical route is: drop
+   * into the verified hole floor, then climb the ledge onto the face. The floor is
+   * derived from BLOCK TRUTH here (the front cell is open with no floor at feet
+   * level while the cell below it IS standable), never from the plan's wording.
+   *
+   * Returns the floor only when exactly ONE exists: a unique mechanical
+   * prerequisite is a #436 reflex the skill may execute, while several floors are
+   * several ways in - those stay policy-visible candidates the candidate layer
+   * already offers, so this returns null and the skill refuses typed instead of
+   * picking one.
+   */
+  private portalFaceStepOverVia(face: Vec3Json): Vec3Json | null {
+    const position = this.bot.entity.position
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+    const vias: Vec3Json[] = []
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const front = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+      const via = { x: front.x, y: feet.y - 1, z: front.z }
+      // The body must be able to walk INTO the front column (2-high clearance)...
+      if (!this.passableAt(front.x, front.y, front.z)) continue
+      if (!this.passableAt(front.x, front.y + 1, front.z)) continue
+      // ...it must be a HOLE at feet level (no floor), so the ordinary walk cannot
+      // already own this step...
+      if (this.solidSupportAt(front.x, front.y - 1, front.z)) continue
+      // ...and the cell one below must be a verified stand the body drops onto.
+      if (!isStandable(this.bot, via)) continue
+      // The face must be one level up at most and within the bounded face range.
+      if (face.y - via.y > 1) continue
+      if (Math.hypot(via.x + 0.5 - (face.x + 0.5), via.z + 0.5 - (face.z + 0.5)) > PORTAL_OPEN_FACE_MAX_DISTANCE) continue
+      vias.push(via)
+    }
+    if (vias.length > 1) {
+      // #436 section 7 U3 / section 19 (28): several verified floors are several
+      // non-equivalent ways in, so the skill must NOT pick one - state the
+      // boundary with the grounded alternatives and let the candidate layer's
+      // legs carry the choice back to Jev.
+      this.logger.warn(
+        'agent',
+        formatSkillPolicyBoundary({
+          skill: PORTAL_ENTER_SKILL,
+          reason: 'multiple_non_equivalent_recoveries',
+          alternatives: vias.map((cell) => `step_over:${cell.x},${cell.y},${cell.z}`),
+        }),
+        { alternatives: vias.length },
+      )
+      return null
+    }
+    const only = vias[0]
+    return vias.length === 1 && only !== undefined ? only : null
+
   }
 
   /** Is the body's own cell space the portal interior (its footprint + level)? */
@@ -6624,7 +6673,7 @@ export class Executor {
     const boundary = (reason: string, alternatives: readonly string[]): void => {
       this.logger.warn(
         'agent',
-        formatSkillPolicyBoundary(PORTAL_ENTER_SKILL, this.portalCommitmentId(candidate, epoch), reason, alternatives),
+        `${formatSkillPolicyBoundary({ skill: PORTAL_ENTER_SKILL, reason, alternatives })} commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
         { actionId: candidate.id, reason, target: enterCell },
       )
     }
@@ -6662,19 +6711,14 @@ export class Executor {
     // one class, several equivalent instances: refine by nearest reachable face,
     // bounded to two attempts, and say so in the evidence
     const attempts = faces.slice(0, PORTAL_FACE_LEG_MAX_ATTEMPTS)
-    this.logger.info(
-      'agent',
-      formatSkillStepV2({
-        skill: PORTAL_ENTER_SKILL,
-        commitmentId: this.portalCommitmentId(candidate, epoch),
-        stepKind: 'approach_leg',
-        authority: 'MANDATORY_PREREQUISITE',
-        evidence:
-          `blocker=${blockerEvidence} class=DETOUR faces=[${faceNames.join(';')}] ` +
-          `refined_by=nearest_reachable chosen=${attempts.map((face) => `${face.x},${face.y},${face.z}`).join(';')}`,
-        worldDelta: 'none',
-      }),
-      { actionId: candidate.id, target: enterCell, faces: faces.length },
+    this.logPortalStep(
+      candidate,
+      epoch,
+      'approach_leg',
+      'MANDATORY_PREREQUISITE',
+      `blocker=${blockerEvidence} class=DETOUR faces=[${faceNames.join(';')}] ` +
+        `refined_by=nearest_reachable chosen=${attempts.map((face) => `${face.x},${face.y},${face.z}`).join(';')}`,
+      'none',
     )
     for (const face of attempts) {
       if (this.dimensionMatches(dimension)) break
@@ -6692,7 +6736,19 @@ export class Executor {
         }),
         { actionId: candidate.id, cell: face, target: enterCell },
       )
-      const reached = await this.walkToPortalFace(candidate, epoch, signal, face)
+      let reached = await this.walkToPortalFace(candidate, epoch, signal, face)
+      if (!reached) {
+        // Same remedy class, one refinement deeper: the face may sit behind a
+        // 1-block hole, and the mechanical route is drop-then-step-up. The via is
+        // used only when exactly ONE verified floor exists (several are several
+        // ways in, and that boundary is already emitted).
+        const via = this.portalFaceStepOverVia(face)
+        if (via !== null) {
+          const dropped = await this.walkToPortalFace(candidate, epoch, signal, via)
+          if (dropped) reached = await this.walkToPortalFace(candidate, epoch, signal, face)
+        }
+      }
+
       if (!reached) continue
       // U6: re-observe the postcondition. The leg claims progress only if the
       // body is standing on a face that is STILL standable right now; a face that
@@ -6700,12 +6756,7 @@ export class Executor {
       if (!isStandable(this.bot, face) || !this.portalInsideFace(face)) {
         this.logger.warn(
           'agent',
-          formatSkillPolicyBoundary(
-            PORTAL_ENTER_SKILL,
-            this.portalCommitmentId(candidate, epoch),
-            'face_unverified',
-            faceNames,
-          ),
+          `${formatSkillPolicyBoundary({ skill: PORTAL_ENTER_SKILL, reason: 'face_unverified', alternatives: faceNames })} commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
           { actionId: candidate.id, cell: face, target: enterCell },
         )
         this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'unreachable'), {
@@ -6749,15 +6800,7 @@ export class Executor {
     // stays open for the next decision (never a silent completion).
     this.logger.info(
       'agent',
-      formatSkillEndV2({
-        skill: PORTAL_ENTER_SKILL,
-        commitmentId: this.portalCommitmentId(candidate, epoch),
-        execution: 'progress',
-        verification: 'unverified',
-        progress: 'body_chunk',
-        failureCode: 'none',
-        targetIdentity: this.portalTargetIdentity(this.portalEntryCellOf(candidate), this.portalEntryDimensionOf(candidate)),
-      }),
+      `${formatSkillEnd(PORTAL_ENTER_SKILL, 'progress', 'unverified', 'portal_not_entered')} progress=body_chunk failureCode=none commitmentId=${this.portalCommitmentId(candidate, epoch)} targetIdentity=${this.portalTargetIdentity(this.portalEntryCellOf(candidate), this.portalEntryDimensionOf(candidate))}`,
       { actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'approaching', detail, null, {
@@ -6873,15 +6916,7 @@ export class Executor {
     })
     this.logger.info(
       'agent',
-      formatSkillEndV2({
-        skill: PORTAL_ENTER_SKILL,
-        commitmentId: this.portalCommitmentId(candidate, epoch),
-        execution: 'entered',
-        verification: 'dimension',
-        progress: 'portal_entered',
-        failureCode: 'none',
-        targetIdentity: this.portalTargetIdentity(enterCell, dimension),
-      }),
+      `${formatSkillEnd(PORTAL_ENTER_SKILL, 'entered', 'dimension', `portal_entered dimension=${dimension}`)} progress=portal_entered failureCode=none commitmentId=${this.portalCommitmentId(candidate, epoch)} targetIdentity=${this.portalTargetIdentity(enterCell, dimension)}`,
       { actionId: candidate.id, target: enterCell, dimension },
     )
     return this.buildResult(
