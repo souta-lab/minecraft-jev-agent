@@ -94,6 +94,24 @@ export const THREAT_ESCAPE_DY = 1
 export const THREAT_ESCAPE_MAX_CELLS = 12
 
 /**
+ * How far an UNSEEN attacker's stated damage origin may sit and still anchor the
+ * sensor's local escape scan. A ghast fires from 64 m (`threatAttackRange`), so
+ * this must clear that: the destinations stay local to the body (the scan is
+ * `THREAT_ESCAPE_RADIUS` around it), only the sight-line origin is far away.
+ */
+export const UNSENSED_THREAT_ANCHOR_RANGE = 96
+
+/**
+ * Separation an unseen attacker's damage origin must buy for a destination to
+ * count as keep-distance. Smaller than the sensed-threat `MIN_KEEP_DISTANCE_GAIN`
+ * because a distant origin cannot be outrun at all: the local scan can only
+ * offer a lateral step, and a lateral step still moves the body off the firing
+ * line the attack just travelled along. Cover (real block truth) remains the
+ * load-bearing qualification for these origins.
+ */
+export const UNSENSED_MIN_KEEP_DISTANCE_GAIN = 0.5
+
+/**
  * Bounded "the goal is stalled" window used by the danger-state restriction.
  * Identical to the controller's default `stallMs` (`LOCAL_PROGRESS_STALL`);
  * injected as an option so the two can never drift.
@@ -1196,9 +1214,115 @@ export function unansweredRangedThreats(
 }
 
 /**
+ * The typed facts the body has about an attacker that damaged it while being
+ * absent from its own sensor snapshot.
+ *
+ * This is NOT an invented entity. Every field comes from the recorded damage
+ * attribution (`signals.lastDamage`) plus the body's own inventory truth, and
+ * the entity list is consulted only to CONFIRM the attacker is not in it. The
+ * measured shape (`THREAT_RANGED_UNANSWERED threat=ender_dragon distance=null
+ * sensed=false` then `DEATH_CAUSE killer=ender_dragon killerEvidence=mineflayer
+ * killerId=39414`) is exactly this: an attacker the sensor never placed,
+ * hitting the body.
+ */
+export interface UnsensedAttacker {
+  /** the attacker's entity id from the damage attribution, or null when absent */
+  id: number | null
+  name: string
+  /** wall-clock ms of the damage observation this came from */
+  atMs: number
+  /** how old that observation is, ms (null when the timestamp is unusable) */
+  ageMs: number | null
+  /**
+   * WHERE the damage came from, when the server stated it (`damage_event`
+   * `sourcePosition`, or the resolved source entity's position). `null` is
+   * UNKNOWN, never "no threat": without it no direction can be grounded, and
+   * the evidence must say so instead of guessing one.
+   */
+  position: Vec3Json | null
+  /** the code-owned reason a position is unknown, or null when one is known */
+  positionMissingReason: string | null
+  /** the separation the body would need to answer this family from */
+  standoff: number
+  /** the distance this family can attack from (a ghast fires from 64 m) */
+  attackRange: number
+}
+
+/** The facts `unsensedAttackerFacts` reads; a structural subset of WorldState. */
+export interface UnsensedAttackerObservation {
+  entities: readonly ThreatEntityLike[]
+  signals: {
+    lastDamage?: LastDamageEvidence | null
+    threat?: ThreatStateEvidence | null
+  }
+  timestampMs: number
+}
+
+/**
+ * SAFE: the attacker that damaged the body and is NOT in its sensor snapshot.
+ *
+ * Returns `null` unless ALL of these hold, so nothing here can fabricate a
+ * threat or resurrect a stale one:
+ *
+ *   * a damage attribution exists with a name or an id (an unattributed hit -
+ *     fire, lava, a fall - is the environmental owner's fact, not this one);
+ *   * it is inside `THREAT_MEMORY_MS` of the current tick;
+ *   * NO sensed entity carries that id, and no sensed hostile carries that name.
+ *
+ * The entity check is deliberately one-sided: a sensor that witnessed the
+ * attacker is the stronger evidence and owns the response, so this fact falls
+ * silent the moment the attacker becomes visible - which is what keeps the
+ * sensed engage/cover paths unchanged.
+ *
+ * `position` is copied from the damage attribution and is never derived from
+ * proximity, the attacker's attack range, or the body's facing. When it is
+ * absent, `positionMissingReason` names the missing fact instead of
+ * substituting one.
+ */
+export function unsensedAttackerFacts(observation: UnsensedAttackerObservation): UnsensedAttacker | null {
+  const damage = observation.signals.lastDamage ?? null
+  if (damage === null || damage === undefined) return null
+  const name = typeof damage.sourceName === 'string' && damage.sourceName.length > 0 ? damage.sourceName : null
+  const id = typeof damage.sourceId === 'number' && Number.isFinite(damage.sourceId) ? damage.sourceId : null
+  if (name === null && id === null) return null
+  const atMs = Number.isFinite(damage.atMs) ? damage.atMs : null
+  if (atMs === null) return null
+  const ageMs = observation.timestampMs - atMs
+  if (ageMs > THREAT_MEMORY_MS) return null
+  if (id !== null && observation.entities.some((entity) => entity.id === id)) return null
+  if (name !== null && observation.entities.some((entity) => entity.hostile && entity.name === name)) return null
+  const position = normalPosition(damage.sourcePosition)
+  return {
+    id,
+    name: name ?? `entity:${id ?? 'unknown'}`,
+    atMs,
+    ageMs: Math.max(0, ageMs),
+    position,
+    positionMissingReason:
+      position === null ? 'damage_event.sourcePosition absent and source entity position unavailable' : null,
+    standoff: threatStandoffRange(name ?? 'unknown'),
+    attackRange: threatAttackRange(name ?? 'unknown'),
+  }
+}
+
+function normalPosition(value: Vec3Json | null | undefined): Vec3Json | null {
+  if (value === null || value === undefined) return null
+  if (!Number.isFinite(value.x) || !Number.isFinite(value.y) || !Number.isFinite(value.z)) return null
+  return { x: value.x, y: value.y, z: value.z }
+}
+
+/**
  * `THREAT_RANGED_UNANSWERED ...` - a named attacker the body cannot answer.
  * `sensed=false` means even the entity is outside perception, so only the
  * damage attribution names it.
+ *
+ * The added fields state what the body can still DO about it, because "the
+ * attacker is invisible" and "the body has no answer" are different facts and
+ * the run log must not conflate them:
+ *
+ *   sourcePos=known|unknown    is the damage origin a grounded coordinate?
+ *   response=<grounded route>|break_contact|no_destination|none
+ *   missing=<the absent fact>  only when no destination could be grounded
  */
 export function formatThreatRangedUnanswered(input: {
   goalKey: string
@@ -1207,6 +1331,10 @@ export function formatThreatRangedUnanswered(input: {
   sourceName: string | null
   body: BodySurvivalFacts
   weapon: WeaponFacts
+  /** the unsensed-attacker facts, when this line is about one */
+  attacker?: UnsensedAttacker | null
+  /** what the body can still do about it (see `unsensedThreatResponse`) */
+  response?: UnansweredThreatResponse
 }): string {
   const name = input.threat?.name ?? input.sourceName ?? 'unknown'
   // Whole metres: the marker is deduped on its whole line, so a sub-metre
@@ -1215,12 +1343,158 @@ export function formatThreatRangedUnanswered(input: {
   const standoff = input.threat === null ? String(threatStandoffRange(name)) : String(input.threat.standoff)
   const range = String(threatAttackRange(name))
   const damage = input.weapon.damage === null ? 'unknown' : String(input.weapon.damage)
+  const attacker = input.attacker ?? null
+  const positionFact =
+    attacker === null ? '' : ` sourcePos=${attacker.position === null ? 'unknown' : positionLabel(attacker.position)}`
+  const responseFact = input.response === undefined ? '' : ` response=${input.response.kind}`
+  const missingFact =
+    input.response === undefined || input.response.missing.length === 0
+      ? ''
+      : ` missing=${input.response.missing.join('+')}`
   return (
     `${THREAT_RANGED_UNANSWERED} goal=${input.goalKey} threat=${name} distance=${distance} ` +
-    `sensed=${input.threat !== null} standoff=${standoff} attackRange=${range} ` +
+    `sensed=${input.threat !== null} standoff=${standoff} attackRange=${range}${positionFact} ` +
     `weapon=${input.weapon.label} weaponKind=${input.weapon.kind} weaponDamage=${damage} ` +
-    `health=${round2(input.body.health)} food=${input.body.food} regenerating=${input.body.regenerating} ` +
-    `-> no grounded attack/keep-distance route outside the response envelope; typed gap, no action invented`
+    `health=${round2(input.body.health)} food=${input.body.food} regenerating=${input.body.regenerating}` +
+    `${responseFact}${missingFact} -> no grounded attack/keep-distance route outside the response envelope; typed gap, no action invented`
+  )
+}
+
+function positionLabel(position: Vec3Json): string {
+  return `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`
+}
+
+// ---------------------------------------------------------------------------
+// SAFE: what an UNSEEN attacker can still be answered with.
+// ---------------------------------------------------------------------------
+//
+// Measured (main `cd7b38b`, operator-summoned ender dragon + ghasts in the
+// Nether):
+//
+//   THREAT_RANGED_UNANSWERED threat=ender_dragon distance=null sensed=false
+//   CRITICAL_DAMAGE health=1.67 food=20 source=ender_dragon damage=2
+//   CANDIDATE_WITHHELD candidate=ATTACK:e44077 reason=no_path
+//   DEATH_CAUSE killer=ender_dragon killerEvidence=mineflayer killerId=39414 threat=null
+//
+// Three separate truths had to be separated:
+//
+//   1. `unansweredRangedThreats` reads `entity.attackedSelf`, and that fact is
+//      projected onto SENSED entities only (`buildEntities`). An attacker that
+//      never enters the snapshot therefore produces `[]` however hard it hits,
+//      so the marker could only ever name it through the `sourceName` fallback.
+//   2. Nothing owned "the body is being hit by an unseen attacker, so its
+//      destination must break contact or line of sight". The route generator
+//      reads a threat POSITION (`activeThreats` -> `pickRetreats` ->
+//      `selectKeepDistanceSpots`), so an attacker with no sensed position
+//      grounded no keep-distance route at all.
+//   3. The offer then collapsed to the bounded `ESCALATE`, i.e. the body stood
+//      still in the open and absorbed the next hit.
+//
+// This section owns the deterministic answer to (2). It never picks WHAT the
+// body does and never invents a coordinate:
+//
+//   * a KNOWN damage origin grounds a real directional response - the existing
+//     cover/keep-distance solver, fed with that position as the thing to move
+//     away from and to ray cover against;
+//   * an UNKNOWN damage origin grounds no direction, so the body gets a bounded
+//     break-contact restriction (no work action, no standing-still WAIT) and the
+//     typed evidence names the exact missing fact.
+
+/** The kind of grounded response an unsensed attacker has. */
+export type UnsensedThreatResponseKind =
+  /** a cell exists that breaks the attacker's line of sight (real block truth) */
+  | 'cover'
+  /** a cell exists that genuinely gains separation from a known damage origin */
+  | 'keep_distance'
+  /** a KNOWN origin exists, but no qualifying destination could be grounded */
+  | 'no_destination'
+  /** the origin is UNKNOWN, so no direction can be grounded: break contact only */
+  | 'break_contact'
+  /** no visible attacker and no recorded attacker: nothing to answer */
+  | 'none'
+
+/**
+ * The code-owned answer facts for an unsensed attacker. `missing` names the
+ * ABSENT facts (never a guess), so the run log distinguishes "the body has no
+ * answer" from "the body was never told where the attack came from".
+ */
+export interface UnansweredThreatResponse {
+  kind: UnsensedThreatResponseKind
+  /** the absent facts, most load-bearing first */
+  missing: string[]
+  /** true when a destination is grounded by this fact */
+  grounded: boolean
+}
+
+/**
+ * SAFE: can the body ground ANY physical response to an attacker it cannot see?
+ *
+ * `groundedDestinations` is how many destinations the existing keep-distance
+ * solver produced from the damage origin - real cells that gain separation or
+ * break its sight line - and `coverCells` how many of those are cover. Code owns
+ * only these facts; WHICH destination (or none) stays Jev's choice.
+ */
+export function unsensedThreatResponse(input: {
+  attacker: UnsensedAttacker | null
+  /** destinations `selectKeepDistanceSpots` grounded from the damage origin */
+  groundedDestinations: number
+  /** the sensor's own cover cells for this origin (real block truth) */
+  coverCells: number
+  /** the body's grounded locomotion actions currently on offer */
+  availableMoves: number
+}): UnansweredThreatResponse {
+  if (input.attacker === null) return { kind: 'none', missing: [], grounded: false }
+  if (input.attacker.position === null) {
+    return {
+      kind: 'break_contact',
+      // Named in the order the layers would consume them: without a position
+      // there is no direction, and without a direction there is no cover ray,
+      // no separation gain and no standoff to reach.
+      missing: ['damage_source_position', 'attack_direction', 'keep_distance_destination'],
+      grounded: false,
+    }
+  }
+  if (input.groundedDestinations > 0) {
+    return { kind: input.coverCells > 0 ? 'cover' : 'keep_distance', missing: [], grounded: true }
+  }
+  return {
+    kind: 'no_destination',
+    missing:
+      input.availableMoves > 0 ? ['keep_distance_destination'] : ['keep_distance_destination', 'locomotion_route'],
+    grounded: false,
+  }
+}
+
+/**
+ * `THREAT_BREAK_CONTACT ...` - the body is being hit by an attacker it cannot
+ * place, no direction could be grounded, and the bounded break-contact
+ * restriction is arming so the body cannot stand still in the open.
+ *
+ * The marker exists because the alternative is silence: the measured death had a
+ * named killer in `DEATH_CAUSE` and nothing anywhere saying the body had no
+ * physical answer while it was being hit.
+ */
+export const THREAT_BREAK_CONTACT = 'THREAT_BREAK_CONTACT'
+
+export function formatThreatBreakContact(input: {
+  goalKey: string
+  attacker: UnsensedAttacker
+  response: UnansweredThreatResponse
+  body: BodySurvivalFacts
+  weapon: WeaponFacts
+  /** the grounded locomotion actions the restricted offer still carries */
+  availableMoves: readonly string[]
+}): string {
+  const id = input.attacker.id === null ? 'none' : String(input.attacker.id)
+  const age = input.attacker.ageMs === null ? 'unknown' : String(Math.round(input.attacker.ageMs))
+  const damage = input.weapon.damage === null ? 'unknown' : String(input.weapon.damage)
+  const moves = input.availableMoves.length === 0 ? 'none' : input.availableMoves.join(',')
+  return (
+    `${THREAT_BREAK_CONTACT} goal=${input.goalKey} threat=${input.attacker.name} attackerId=${id} ` +
+    `sourcePos=${input.attacker.position === null ? 'unknown' : positionLabel(input.attacker.position)} ` +
+    `missing=[${input.response.missing.join(',')}] moves=[${moves}] ` +
+    `weapon=${input.weapon.label} weaponDamage=${damage} health=${round2(input.body.health)} food=${input.body.food} ` +
+    `ageMs=${age} -> no direction could be grounded from the damage attribution; the body must keep moving, not stand still`
   )
 }
 
@@ -1397,7 +1671,14 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
     const gain = separation - current
     const outsideReach = separation >= standoff
     const inCover = occluded.has(key)
-    const qualifies = gain >= minGain || (outsideReach && gain > 0) || (inCover && gain > 0)
+    // Cover qualifies on its own. It is a real block-truth fact ("this cell is
+    // not in the attacker's sight line", never a guess - an un-rayable cell is
+    // simply absent), and it is the ONE fact that answers a ranged attacker the
+    // body cannot outrun. The earlier `gain > 0` conjunct made cover unusable
+    // against precisely the attacker this rule exists for: an origin far enough
+    // away that no local cell gains radial separation. A lateral step that stops
+    // the attack is not "moving closer" in any sense that matters.
+    const qualifies = gain >= minGain || (outsideReach && gain > 0) || inCover
     if (!qualifies) return
     scored.push({ spot, separation, gain, outsideReach, escape, occluded: inCover })
   }
@@ -1405,8 +1686,21 @@ export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceS
   for (const spot of input.standable) consider(spot, false)
   // Farthest from the threat first: this is a CAN narrowing (at most `max`
   // destinations are handed to Jev), not a preference among action kinds.
-  scored.sort((a, b) => b.separation - a.separation)
-  return scored.slice(0, max)
+  const bySeparation = (a: KeepDistanceSpot, b: KeepDistanceSpot): number => b.separation - a.separation
+  const plain = scored.filter((entry) => !entry.occluded).sort(bySeparation)
+  const covered = scored.filter((entry) => entry.occluded).sort(bySeparation)
+  // COVER RESERVES THE FIRST SLOT. Cover and separation are different facts with
+  // the same effect (the attack stops), but only one of them is measured ALONG
+  // the axis the attack travels: a cell out of the sight line stops a ranged
+  // attacker the body cannot outrun at ANY separation, while a "farther" cell
+  // still in the firing line does not. Sorting purely by separation put the
+  // scan's boundary cells - the farthest by construction - ahead of every cover
+  // cell, so with an unsensed attacker (whose local cells barely move the radial
+  // number) cover was grounded and then never offered. One reserved slot is the
+  // smallest change that makes the fact representable; the rest of the offer
+  // keeps the measured separation ordering exactly.
+  if (covered.length === 0) return plain.slice(0, max)
+  return max === 0 ? [] : [covered[0] as KeepDistanceSpot, ...covered.slice(1), ...plain].slice(0, max)
 }
 
 function cellKey(spot: Vec3Json): string {

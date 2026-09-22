@@ -110,8 +110,12 @@ import {
   THREAT_MEMORY_MS,
   THREAT_RESPONSE_RANGE,
   threatStandoffRange,
+  UNSENSED_MIN_KEEP_DISTANCE_GAIN,
+  unsensedAttackerFacts,
+  unsensedThreatResponse,
   weaponFacts,
 } from './threat.ts'
+import type { UnsensedAttacker, UnansweredThreatResponse } from './threat.ts'
 import type { KeepDistanceSpot, ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
 import { HUNT_APPROACH_BUDGET } from './combatClosure.ts'
 import {
@@ -640,6 +644,170 @@ export function restrictCandidatesDuringCriticalDamage(
   if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
   const rescue = damageEndingCandidates(candidates)
   return rescue.length > 0 ? rescue : [...candidates]
+}
+
+// ---------------------------------------------------------------------------
+// SAFE: the bounded answer to an attacker the sensor never placed.
+//
+// Measured live (main `cd7b38b`, operator-summoned ender dragon at the fortress
+// approach; server log `/summon minecraft:ender_dragon`, then `AI_Buddy was
+// killed by Ender Dragon using magic`):
+//
+//   THREAT_RANGED_UNANSWERED threat=ender_dragon distance=null sensed=false
+//   CRITICAL_DAMAGE health=5 food=20 source=ender_dragon damage=1 limit=3
+//   DEATH_CAUSE killer=ender_dragon killerEvidence=mineflayer killerId=39414 threat=null
+//
+// The damage was attributed to a NAMED entity that never entered the sensor, so
+// `activeThreats` and `signals.threat` both stayed empty and the danger-state
+// restriction never armed. Nothing else owned "the body is being hit by an
+// attacker it cannot see", so the tick could end on a no-op while health fell.
+//
+// This restriction is the general form: it depends on NO mob name and NO
+// summonability. It fixes the ordering the other restrictions have - the
+// all-or-nothing `threatNotInContact -> return` that leaves the body idle - by
+// sorting the offer into routes that MOVE the body and routes that do not:
+//
+//   * a grounded move/escape exists  -> the non-physical kinds (WAIT, ESCALATE,
+//     and the work actions that hold the body still) are removed, so the body
+//     keeps moving. WHICH route stays Jev's choice.
+//   * no grounded route exists       -> the offer is left whole, because
+//     deleting the only remaining action would return an empty tick; the
+//     controller's own survival control bounds it, and the typed
+//     `THREAT_BREAK_CONTACT` evidence names the missing facts.
+// ---------------------------------------------------------------------------
+
+/** What the body can still do about an unsensed attacker (evidence + answer). */
+export interface UnseenAttackerOffer {
+  /** the attacker the damage attribution named and the sensor did not place */
+  attacker: UnsensedAttacker | null
+  /** the code-owned answer facts (see `unsensedThreatResponse`) */
+  response: UnansweredThreatResponse
+  /** the whole input offer, so a caller can see what was removed */
+  offered: Candidate[]
+  /** how many grounded destinations the escape scan produced for the origin */
+  groundedDestinations: number
+  /** ids of the grounded locomotion actions the offer still carries */
+  moveIds: string[]
+  /** ids of the locomotion actions whose destination came from the threat scan */
+  escapeIds: string[]
+}
+
+/**
+ * The candidate kinds that MOVE the body: only these can break contact. Each
+ * one changes the body's block cell when it executes, so choosing it is a real
+ * body displacement rather than a stance.
+ *
+ * Deliberately NOT the same set as `MECHANICAL_LOCOMOTION_KINDS` below, which
+ * answers a different question ("may this leg be realized as a dimension
+ * transfer?") and therefore includes `RETRIEVE`. A retrieve physically walks the
+ * body, but toward the goal's own target - it is the work that was happening
+ * while the measured body died, not an answer to the attacker. `DESCEND` and
+ * `STEP` are here for the same reason `MOVE` is: their realization ends with the
+ * body in a different cell, dug or stepped.
+ *
+ * `MINE`/`CRAFT`/`PLACE`/`SMELT`/`IGNITE` are not here: they change the WORLD
+ * while the body keeps taking hits from the same spot, which is the measured
+ * "digs while it dies" shape. `ENTER_PORTAL` is not either (and a keep-distance
+ * realization may never cross a dimension, `crosses_dimension`); whether to
+ * disengage is Jev's semantic choice, not a mechanical break-contact leg.
+ */
+const BREAK_CONTACT_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'RETREAT',
+  'STEP',
+  'DESCEND',
+])
+
+/**
+ * The kinds that hold the body where it is while the attacker keeps firing: the
+ * explicit no-ops, the work actions, and `RETRIEVE` (body motion toward the
+ * goal's target). Removed while an unsensed attacker is landing hits and a
+ * grounded break-contact route exists.
+ *
+ * The two sets partition `CandidateKind` exactly, so a kind added later is
+ * covered by one of them by construction and can never silently escape this
+ * restriction by being in neither.
+ */
+const STATIONARY_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'WAIT',
+  'ESCALATE',
+  'MINE',
+  'CRAFT',
+  'PLACE',
+  'SMELT',
+  'IGNITE',
+  'ENTER_PORTAL',
+  'RETRIEVE',
+])
+
+function isStationaryKind(kind: CandidateKind): boolean {
+  return STATIONARY_KINDS.has(kind)
+}
+
+/**
+ * The locomotion candidates whose destination is the threat-escape scan: the
+ * cells the sensor grounded FROM the attributed origin, plus the cells its sight
+ * line cannot reach. These are the only destinations that answer an attacker the
+ * body cannot see; a goal-directed MOVE is body motion but not an escape, and
+ * `unsensedThreatResponse` must not count it as one.
+ */
+function groundedEscapeIds(state: Pick<WorldState, 'terrain'>, candidates: readonly Candidate[]): string[] {
+  const cells = new Set<string>()
+  for (const cell of [...(state.terrain.escapeCells ?? []), ...(state.terrain.threatCoverCells ?? [])]) {
+    cells.add(`${cell.x},${cell.y},${cell.z}`)
+  }
+  return candidates
+    .filter(
+      (candidate) =>
+        BREAK_CONTACT_KINDS.has(candidate.kind) &&
+        candidate.target !== null &&
+        cells.has(`${candidate.target.x},${candidate.target.y},${candidate.target.z}`),
+    )
+    .map((candidate) => candidate.id)
+}
+
+/**
+ * SAFE: the exact damage/origin facts for the offer, independent of kind
+ * filtering. Pure; exported so the controller can mirror the typed evidence.
+ */
+export function unseenAttackerOffer(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs' | 'terrain'>,
+  candidates: readonly Candidate[],
+): UnseenAttackerOffer {
+  const attacker = unsensedAttackerFacts(state)
+  // `groundedDestinations` counts ESCAPE destinations (the sensor's own cells for
+  // this origin), not every locomotion action: a goal-directed walk is movement
+  // but it is not a direction away from the attacker, and the marker must not
+  // claim the body can answer when all it can do is keep working.
+  const escapeIds = groundedEscapeIds(state, candidates)
+  const moveIds = candidates
+    .filter((candidate) => BREAK_CONTACT_KINDS.has(candidate.kind))
+    .map((candidate) => candidate.id)
+  const response = unsensedThreatResponse({
+    attacker,
+    groundedDestinations: attacker === null || attacker.position === null ? 0 : escapeIds.length,
+    coverCells: (state.terrain.threatCoverCells ?? []).length,
+    availableMoves: moveIds.length,
+  })
+  return { attacker, response, offered: [...candidates], groundedDestinations: escapeIds.length, moveIds, escapeIds }
+}
+
+/**
+ * SAFE: while an unsensed attacker is hitting the body, no candidate may hold
+ * the body still if ANY grounded way to move exists. Returns the offer
+ * unchanged when the premise does not hold (no unsensed attacker, or nothing
+ * grounded to move with), so ordinary survival and the sensed paths are
+ * byte-identical.
+ */
+export function restrictCandidatesDuringUnseenAttacker(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs' | 'terrain'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const offer = unseenAttackerOffer(state, candidates)
+  if (offer.attacker === null) return [...candidates]
+  if (offer.moveIds.length === 0) return [...candidates]
+  const moved = candidates.filter((candidate) => !isStationaryKind(candidate.kind))
+  return moved.length > 0 ? moved : [...candidates]
 }
 
 // ---------------------------------------------------------------------------
@@ -3223,15 +3391,24 @@ function generateRawCandidates(
   // before the first hit, not only after it.
   const responseThreats = activeThreats(state.entities, state.signals.lastDamage ?? null, state.timestampMs)
   const primaryThreat = responseThreats[0] ?? null
+  // The attacker the sensor never witnessed, when the damage attribution named
+  // one. Its POSITION is the only thing that can ground a directional answer for
+  // it; when the attribution carries no position this is null and no destination
+  // is invented (the break-contact restriction owns that case).
+  const attacker = unsensedAttackerFacts(state)
+  const attributedThreat =
+    attacker !== null && attacker.position !== null ? { name: attacker.name, position: attacker.position } : null
   const retreats = pickRetreats(
     state,
     state.terrain.standable,
     danger,
     responseThreats,
     options.blacklistedMoveTargets,
+    attributedThreat,
   )
   for (const retreat of retreats) {
     const spot = retreat.spot
+    const threatName = primaryThreat?.name ?? attributedThreat?.name ?? null
     candidates.push({
       id: `RETREAT:${blockId('p', spot)}`,
       kind: 'RETREAT',
@@ -3239,9 +3416,9 @@ function generateRawCandidates(
       // "retreat to safety" conflated a 1.4m shuffle with an escape, and the
       // measured body died standing on a spot labelled exactly that way.
       label:
-        primaryThreat === null
+        threatName === null
           ? moveLabel(spot, 'retreat to safety', state.self.position)
-          : `${moveLabel(spot, `keep distance from ${primaryThreat.name}`, state.self.position)} ` +
+          : `${moveLabel(spot, `keep distance from ${threatName}`, state.self.position)} ` +
             `(+${Math.round(retreat.gain * 100) / 100}m separation, ${Math.round(retreat.separation * 100) / 100}m away` +
             `${retreat.outsideReach ? ', outside its reach' : ''}${retreat.occluded ? ', out of its sight line' : ''}${retreat.escape ? ', escape scan' : ''})`,
       targetName: null,
@@ -3266,6 +3443,14 @@ function generateRawCandidates(
         // when the room gives the body no separation to buy. Jev still chooses
         // whether to take it.
         ...(retreat.occluded ? { threatOccluded: true } : {}),
+        // The attacker was NOT in the sensor snapshot: the destination was
+        // grounded from the damage attribution's stated origin. Typed so a
+        // post-mortem can tell a witnessed retreat from an answered ambush. The
+        // origin itself stays off `meta` (which carries scalars only) and travels
+        // on `LastDamageEvidence.sourcePosition`.
+        ...(attributedThreat !== null && primaryThreat === null
+          ? { threatUnsensed: true, threatName: attributedThreat.name }
+          : {}),
         ...(primaryThreat === null
           ? {}
           : {
@@ -9489,17 +9674,32 @@ function pickRetreats(
   danger: BlockState | null,
   threats: readonly ThreatEntityLike[],
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
+  /** the damage attribution as a threat origin, for an attacker never sensed */
+  attributed: { name: string; position: Vec3Json } | null = null,
 ): KeepDistanceSpot[] {
   const hurt = state.self.health <= CRITICAL_COMBAT_HEALTH
-  if (danger === null && threats.length === 0 && !hurt) return []
+  if (danger === null && threats.length === 0 && !hurt && attributed === null) return []
   const hostile = threats.length > 0 ? threats[0] ?? null : null
-  const threat = danger?.position ?? hostile?.position ?? state.self.position
+  const threat = danger?.position ?? hostile?.position ?? attributed?.position ?? state.self.position
   const usable = (spot: Vec3Json): boolean => !isBlacklistedMoveTarget(state, blacklistedMoveTargets, spot)
   const standableUsable = standable.filter(usable)
-  if (hostile !== null) {
+  if (hostile !== null || attributed !== null) {
+    // The unseen-attacker arm: the body cannot see the mob, but the server told
+    // it WHERE the damage came from. The destinations are the sensor's own cells
+    // for exactly that origin (`escapeCells` + `threatCoverCells` are built from
+    // it, see `state.ts#buildEscapeCells`), and the qualification threshold is
+    // the unseen one - a distant origin can only be answered laterally, so cover
+    // (real block truth) is the load-bearing fact. With a SENSED hostile the
+    // measured threshold and behaviour are unchanged.
+    //
+    // An ATTACKER takes precedence over the hazard BLOCK here: the hazard escape
+    // has its own owner (`envHazardEscapeCandidates`, offered every tick), and a
+    // destination measured from a hazard block while an attacker is known would
+    // have no relation to that attacker at all.
+    const unseen = hostile === null
     return selectKeepDistanceSpots({
       self: state.self.position,
-      threat: hostile.position,
+      threat: hostile?.position ?? attributed?.position ?? state.self.position,
       standable: standableUsable,
       escapeCells: (state.terrain.escapeCells ?? []).filter(usable),
       // The two CAN facts the sensor owns for this threat (real block truth):
@@ -9508,7 +9708,8 @@ function pickRetreats(
       // realizes a dimension transfer (never a keep-distance destination).
       occludedCells: (state.terrain.threatCoverCells ?? []).filter(usable),
       transferCells: state.terrain.portalWalkInCells ?? [],
-      standoff: threatStandoffRange(hostile.name),
+      standoff: threatStandoffRange(hostile?.name ?? attributed?.name ?? 'unknown'),
+      ...(unseen ? { minGain: UNSENSED_MIN_KEEP_DISTANCE_GAIN } : {}),
       max: MAX_RETREAT_CANDIDATES,
     })
   }

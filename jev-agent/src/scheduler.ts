@@ -212,6 +212,21 @@ export class DecisionScheduler {
    */
   private observesBlocks = false
   private observesChunks = false
+  /**
+   * The `damage_event` origin the server stated for the hit being delivered.
+   *
+   * Mineflayer's `entityHurt` carries only `(entity, source)`, so it DROPS the
+   * packet's own `sourcePosition` field - the one fact that says where the
+   * damage came from when the attacker is not in `bot.entities` at all (a ghast
+   * beyond the entity radius, an ender dragon, any summoned/plugin entity).
+   * Without it the body cannot ground a direction to move away from, and the
+   * measured Nether deaths (`killer=ender_dragon killerEvidence=mineflayer`,
+   * `sensed=false`) had no answer at all.
+   *
+   * Set from the packet listener immediately before `entityHurt` is emitted,
+   * consumed once, and never derived from proximity or a mob's attack range.
+   */
+  private pendingDamageOrigin: { x: number; y: number; z: number } | null = null
 
   constructor(bot: Bot, logger: EventLogger, options: Partial<SchedulerOptions> = {}) {
     this.bot = bot
@@ -269,7 +284,12 @@ export class DecisionScheduler {
     this.observesChunks = true
     if (this.enabled.has('path_completed')) this.bot.on('goal_reached', this.onGoalReached)
     if (this.enabled.has('mob_appeared')) this.bot.on('entitySpawn', this.onEntitySpawn)
-    if (this.enabled.has('damage_taken')) this.bot.on('entityHurt', this.onEntityHurt)
+    if (this.enabled.has('damage_taken')) {
+      this.bot.on('entityHurt', this.onEntityHurt)
+      // The packet's own origin, which mineflayer's `entityHurt` does not carry.
+      // Guarded: `_client` is private API and a fixture double may not have one.
+      this.client()?.on('damage_event', this.onDamageEvent)
+    }
     if (this.enabled.has('hp_changed')) this.bot.on('health', this.onHealth)
     if (this.enabled.has('low_air')) this.bot.on('breath', this.onBreath)
     if (this.enabled.has('inventory_changed')) {
@@ -293,6 +313,7 @@ export class DecisionScheduler {
     this.bot.removeListener('goal_reached', this.onGoalReached)
     this.bot.removeListener('entitySpawn', this.onEntitySpawn)
     this.bot.removeListener('entityHurt', this.onEntityHurt)
+    this.client()?.removeListener('damage_event', this.onDamageEvent)
     this.bot.removeListener('health', this.onHealth)
     this.bot.removeListener('breath', this.onBreath)
     this.bot.removeListener('playerCollect', this.onPlayerCollect)
@@ -343,7 +364,48 @@ export class DecisionScheduler {
     this.request('mob_appeared', detail)
   }
 
+  /**
+   * The private mineflayer client, or null when this bot double has none. Only
+   * used to read the ONE packet field `entityHurt` drops (see
+   * `pendingDamageOrigin`); never to write, and never required for the scheduler
+   * to run.
+   */
+  private client(): { on: (event: string, handler: (packet: unknown) => void) => void; removeListener: (event: string, handler: (packet: unknown) => void) => void } | null {
+    const client = (this.bot as unknown as { _client?: unknown })._client
+    if (client === null || client === undefined) return null
+    const candidate = client as { on?: unknown; removeListener?: unknown }
+    if (typeof candidate.on !== 'function' || typeof candidate.removeListener !== 'function') return null
+    return candidate as {
+      on: (event: string, handler: (packet: unknown) => void) => void
+      removeListener: (event: string, handler: (packet: unknown) => void) => void
+    }
+  }
+
+  /**
+   * SAFE: read the damage origin the server stated for an incoming hit.
+   *
+   * The 1.20+ `damage_event` packet is
+   * `{entityId, sourceTypeId, sourceCauseId, sourceDirectId, sourcePosition}`.
+   * `sourcePosition` is optional on the wire and is exactly what it says: the
+   * position the damage came from when the server provides one. It is recorded
+   * ONLY when all three components are finite; anything else leaves the origin
+   * UNKNOWN, which the decision layer reports as a missing fact rather than
+   * filling in a guess.
+   */
+  private readonly onDamageEvent = (packet: unknown): void => {
+    this.pendingDamageOrigin = null
+    if (typeof packet !== 'object' || packet === null) return
+    const raw = (packet as { sourcePosition?: unknown }).sourcePosition
+    if (typeof raw !== 'object' || raw === null) return
+    const value = raw as { x?: unknown; y?: unknown; z?: unknown }
+    if (typeof value.x !== 'number' || typeof value.y !== 'number' || typeof value.z !== 'number') return
+    if (!Number.isFinite(value.x) || !Number.isFinite(value.y) || !Number.isFinite(value.z)) return
+    this.pendingDamageOrigin = { x: value.x, y: value.y, z: value.z }
+  }
+
   private readonly onEntityHurt = (entity: Entity | undefined, source?: Entity): void => {
+    const origin = this.pendingDamageOrigin
+    this.pendingDamageOrigin = null
     if (this.bot.entity === undefined || entity === undefined || entity.id !== this.bot.entity.id) return
     // Mineflayer's `damage_event` carries the attacking entity when the server
     // attributes the damage; `source` is undefined for environmental damage.
@@ -353,10 +415,25 @@ export class DecisionScheduler {
       source === undefined || source === null
         ? null
         : source.username ?? source.name ?? source.kind ?? 'unknown'
+    // The stated damage origin: the packet's own `sourcePosition` when the
+    // server sent one, else the resolved source entity's position. A source
+    // entity that exists always has a position; a source the client never
+    // received has neither, and then the origin stays UNKNOWN.
+    const entityPosition = source?.position
+    const position =
+      origin ??
+      (entityPosition !== undefined &&
+      entityPosition !== null &&
+      Number.isFinite(entityPosition.x) &&
+      Number.isFinite(entityPosition.y) &&
+      Number.isFinite(entityPosition.z)
+        ? { x: entityPosition.x, y: entityPosition.y, z: entityPosition.z }
+        : null)
     this.request('damage_taken', {
       health: this.bot.health,
       attackerId: source?.id ?? null,
       attackerName,
+      ...(position === null ? {} : { attackerPosition: position }),
     })
   }
 
