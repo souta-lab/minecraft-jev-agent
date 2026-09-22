@@ -63,6 +63,8 @@ import {
   PORTAL_ENTERED_PREDICATE,
   PORTAL_LIT_PREDICATE,
   PORTAL_OPEN_FACE_MAX_DISTANCE,
+  formatReflex,
+  formatSkillStep,
   groundPortalFrame,
   planPortalIgnition,
   portalOpenFaceCells,
@@ -1445,15 +1447,14 @@ function portalOpenFaceLegs(state: WorldState, options: CandidateOptions, entry:
   const standable = new Set(state.terrain.standable.map((spot) => cellKey(spot)))
   const interior: PortalBlockPosition[] = entry.portalCells
   const bodyCell = cellKey(state.self.position)
-  return portalOpenFaceCells(
+  const faces = portalOpenFaceCells(
     interior,
     entry.enterCell.y,
     (spot) => standable.has(cellKey(spot)),
     state.self.position,
     PORTAL_OPEN_FACE_MAX_DISTANCE,
-  )
-    .filter((spot) => cellKey(spot) !== bodyCell)
-    .map((spot) => ({
+  ).filter((spot) => cellKey(spot) !== bodyCell)
+  const faceLegs = faces.map((spot) => ({
       id: `MOVE:${blockId('p', spot)}`,
       kind: 'MOVE' as const,
       label:
@@ -1467,15 +1468,67 @@ function portalOpenFaceLegs(state: WorldState, options: CandidateOptions, entry:
       toolName: null,
       inReach: distance(spot, state.self.position) <= options.reach,
       hasStandableAdjacent: true,
-      meta: {
-        tick: state.tick,
-        x: spot.x,
-        y: spot.y,
-        z: spot.z,
-        approachLeg: 'portal_open_face',
-        approachTarget: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
-      },
-    }))
+    meta: {
+      tick: state.tick,
+      x: spot.x,
+      y: spot.y,
+      z: spot.z,
+      approachLeg: 'portal_open_face',
+      approachTarget: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
+    },
+  }))
+  // THE BOUNDED CONTINUATION at the site where the entry lane grounds the face:
+  // measured live (run-mucbyro1-1hqhm) the one open face was standable but NOT
+  // reachable by its own leg probe - the 1-block hole at (24,67,10)/(24,66,10)
+  // sits between the body and the face - so the offer refused `faces=1` while the
+  // generic MOVE arm never saw the pocket. The same `pocketContinuations` grounder
+  // the travel arm uses is attached here, aimed at the FACE, so the mechanical
+  // route into the pocket is on offer in the decision that owns the entry.
+  const out: Candidate[] = [...faceLegs]
+  const reachableFaces = faceLegs.filter((leg) => leg.target !== null && levelWalkReachable(state, leg.target))
+  const unreachableFaces = faceLegs.filter((leg) => leg.target !== null && !levelWalkReachable(state, leg.target))
+  for (const leg of unreachableFaces) {
+    const target = leg.target
+    if (target === null) continue
+    const continuations = pocketContinuations(state, target)
+    const unique = continuations.length === 1 && reachableFaces.length === 0 && faceLegs.length === 1
+    for (const cont of continuations) {
+      const reflex = unique
+        ? formatLegReflex({
+            skill: 'enter_portal',
+            action: cont.action,
+            cell: cont.via ?? cont.landing,
+            via: cont.via,
+            ledge: cont.ledge,
+            evidence:
+              `exactly one standable open face (${cellText(target)}) is not level-walk reachable from ` +
+              `(${cellText(state.self.position)}); the bounded continuation is ` +
+              `${cont.action === 'step_over' ? `drop into (${cont.via === null ? 'none' : cellText(cont.via)}) then ` : ''}` +
+              `step up onto (${cellText(cont.ledge)}) at (${cellText(cont.landing)}); ` +
+              `d=${round2Number(distance(state.self.position, target))}->${round2Number(cont.toTarget)}`,
+          })
+        : null
+      out.push(
+        continuationCandidate(
+          state,
+          options,
+          {
+            target,
+            targetName: NETHER_PORTAL,
+            reason: 'portal_open_face',
+            skill: 'enter_portal',
+            extraMeta: {
+              entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
+              faceCell: `${target.x},${target.y},${target.z}`,
+            },
+          },
+          cont,
+          reflex,
+        ),
+      )
+    }
+  }
+  return out
 }
 
 export function entryCandidates(
@@ -7398,7 +7451,10 @@ function continuationCandidate(
           feet.y,
           cont.landing.y,
         )
-      : {}
+      : // The hole floor comes FIRST: no vertical contract here (the executor runs
+        // the contract before the walk), but the fact is stated explicitly so the
+        // meta is never silently empty.
+        { vertical: 'none' }
   const line =
     `SKILL_STEP action=${cont.action} cell=${cellText(target)} via=${via} ` +
     `landing=${cellText(cont.landing)} ledge=${cellText(cont.ledge)} ` +
@@ -7443,20 +7499,26 @@ function continuationCandidate(
   }
 }
 
-/** `REFLEX ownerSkill=<skill> reason=unique_binding_prerequisite action=<a> cell=<c> via=<v> ledge=<l> evidence=<e>` */
+/**
+ * The #436 `REFLEX` line for a unique binding continuation: the landed
+ * `netherPortalPlan.formatReflex` shape (ownerSkill / reason / action / evidence),
+ * with the cell, the hole floor and the ledge carried inside `evidence` so the
+ * marker family stays ONE vocabulary across the candidate layer and the skill.
+ */
 function formatLegReflex(input: {
   skill: string
   action: PocketContinuation['action']
+  /** the cell the step starts from (the hole floor) or lands on (a direct step-up) */
   cell: Vec3Json
   via: Vec3Json | null
   ledge: Vec3Json
   evidence: string
 }): string {
-  return (
-    `REFLEX ownerSkill=${input.skill} reason=unique_binding_prerequisite action=${input.action} ` +
-    `cell=${cellText(input.cell)} via=${input.via === null ? 'none' : cellText(input.via)} ` +
-    `ledge=${cellText(input.ledge)} evidence=${input.evidence}`
-  )
+  return formatReflex({
+    ownerSkill: input.skill,
+    action: input.action,
+    evidence: `cell=${cellText(input.cell)} via=${input.via === null ? 'none' : cellText(input.via)} ledge=${cellText(input.ledge)} ${input.evidence}`,
+  })
 }
 
 function travelApproachLegs(
@@ -7551,14 +7613,21 @@ function travelApproachLegs(
   // ordinary MOVE / reachability / failure-memory machinery still owns the
   // execution and the spend budget; a stepping stone that proves zero change is
   // spent like any other leg.
-  const continuations = best === null ? pocketContinuations(state, spec.target) : []
-  const uniqueContinuation = continuations.length === 1 && dig === null
+  // Fire the continuation grounder only when the ordinary walk cannot express the
+  // route: no advancing cell at all, or an advancing cell that is not reachable by
+  // LEVEL WALKS over the sensed stands (measured live: `MOVE:p26_67_10` was a
+  // sensed stand across a 1-block hole, so the stock MOVE contract failed `stuck`
+  // with an empty contract). A genuinely walkable leg is therefore untouched.
+  const continuations =
+    best === null || !levelWalkReachable(state, best) ? pocketContinuations(state, spec.target) : []
+  const uniqueContinuation = continuations.length === 1 && dig === null && (best === null || !levelWalkReachable(state, best))
   for (const cont of continuations) {
     const reflex = uniqueContinuation
       ? formatLegReflex({
           skill: spec.skill,
           action: cont.action,
-          cell: cont.landing,
+          // the cell the continuation MOVES INTO (the hole floor for a step-over)
+          cell: cont.via ?? cont.landing,
           via: cont.via,
           ledge: cont.ledge,
           evidence:

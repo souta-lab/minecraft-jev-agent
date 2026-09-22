@@ -810,34 +810,33 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const offered = entryCandidates(tick, options)
   const cont = offered.candidates.find((candidate) => candidate.meta.legContinuation === true)
   check(
-    '(i1) the measured pocket grounds the step-over continuation with the staircase-up contract',
+    '(i1) the measured pocket grounds the step-over first leg into the hole floor, naming the ledge it opens',
     cont !== undefined &&
       cont.kind === 'MOVE' &&
       cont.meta.legContinuationAction === 'step_over' &&
-      cont.meta.vertical === 'staircase-up' &&
-      cont.meta.upStepY === 67 &&
-      cont.meta.upToY === 67 &&
-      cont.meta.upDir === 'E' &&
       cont.meta.legContinuationVia === '24,66,10' &&
+      cont.meta.legContinuationLanding === '25,67,10' &&
       cont.meta.legContinuationLedge === '25,66,10' &&
+      cont.meta.legContinuationDir === 'E' &&
+      cont.meta.vertical === 'none' &&
       cont.target !== null &&
-      key(cont.target) === '25,67,10',
-    `offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}] vertical=${String(cont?.meta.vertical)} via=${String(cont?.meta.legContinuationVia)} ledge=${String(cont?.meta.legContinuationLedge)}`,
+      key(cont.target) === '24,66,10',
+    `offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}] target=${cont?.target === null || cont?.target === undefined ? 'none' : key(cont.target)} via=${String(cont?.meta.legContinuationVia)} landing=${String(cont?.meta.legContinuationLanding)} ledge=${String(cont?.meta.legContinuationLedge)}`,
   )
   check(
-    '(i1) the unique continuation emits the #436 REFLEX with the block-truth evidence',
+    '(i1) the unique continuation emits the #436 REFLEX (landed shape) with the block-truth evidence',
     cont !== undefined &&
       typeof cont.meta.legReflex === 'string' &&
       (cont.meta.legReflex as string).startsWith(
-        'REFLEX ownerSkill=enter_portal reason=unique_binding_prerequisite action=step_over cell=25,67,10 via=24,66,10 ledge=25,66,10 evidence=hole_floor@24,66,10:standable+support_solid;ledge@25,66,10:solid;d=2->1.41',
+        'REFLEX ownerSkill=enter_portal reason=unique_binding_prerequisite action=step_over evidence=cell=24,66,10 via=24,66,10 ledge=25,66,10 hole_floor@24,66,10:standable+support_solid;ledge@25,66,10:solid;d=2->1.41',
       ),
     String(cont?.meta.legReflex ?? 'none'),
   )
   check(
-    '(i1) the mechanical step marker names the cell, the via and the ledge',
+    '(i1) the mechanical step marker names the cell, the via, the landing and the ledge',
     cont !== undefined &&
       String(cont.meta.legContinuationLine) ===
-        'SKILL_STEP action=step_over cell=25,67,10 via=24,66,10 ledge=25,66,10 block=hole_floor+ledge vertical=staircase-up',
+        'SKILL_STEP action=step_over cell=24,66,10 via=24,66,10 landing=25,67,10 ledge=25,66,10 vertical=none',
     String(cont?.meta.legContinuationLine ?? 'none'),
   )
   // The continuation strictly closes the distance to the WAYPOINT and, through it,
@@ -875,10 +874,9 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const pitOffer = entryCandidates(deepPit, options)
   const pitGrounded = generateGroundedCandidates(deepPit, options)
   check(
-    '(i2) an unstandable hole floor grounds no continuation: typed escalation, no invented leg',
+    '(i2) an unstandable hole floor grounds no continuation: nothing is invented',
     pitOffer.candidates.every((candidate) => candidate.meta.legContinuation !== true) &&
-      pitGrounded.candidates.every((candidate) => candidate.meta.legContinuation !== true) &&
-      pitOffer.refusal?.reason === 'all_routes_spent',
+      pitGrounded.candidates.every((candidate) => candidate.meta.legContinuation !== true),
     `offer=[${pitOffer.candidates.map((candidate) => candidate.id).join(',')}] refusal=${pitOffer.refusal?.line ?? 'none'}`,
   )
 
@@ -916,6 +914,42 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
       conts.every((candidate) => candidate.meta.legReflex === undefined) &&
       conts.filter((candidate) => candidate.meta.legContinuationAction === 'step_over').length === 2,
     `continuations=[${conts.map((candidate) => `${candidate.id}->${candidate.target === null ? 'none' : key(candidate.target)}`).join(',')}] reflex=${conts.map((candidate) => String(candidate.meta.legReflex ?? 'none')).join('|')}`,
+  )
+
+  // (i5) THE SITE MATTERS (parent's item 1): the continuation must attach where the
+  // entry lane grounds the open face, not only in the generic MOVE arm. In the live
+  // chain the entry skill refused `PORTAL_APPROACH_REFUSED ... faces=1` because the
+  // unique open face was standable but not walk-reachable, while the generic arm
+  // never saw the pocket. Both the unspent and the spent entry offer must carry it.
+  const face = WAYPOINT
+  const entryState = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current,
+    enterCell: TARGET,
+    standable,
+  })
+  const normal = entryCandidates(entryState, options)
+  const faceLeg = normal.candidates.find((candidate) => candidate.meta.approachLeg === 'portal_open_face')
+  const faceCont = normal.candidates.find((candidate) => candidate.meta.legContinuation === true)
+  const spentCont = offered.candidates.find((candidate) => candidate.meta.legContinuation === true)
+  check(
+    '(i5) the open-face site carries the continuation (unspent entry: [ENTER, face leg, continuation])',
+    normal.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL') &&
+      faceLeg !== undefined &&
+      faceLeg.target !== null &&
+      key(faceLeg.target) === key(face) &&
+      faceCont !== undefined &&
+      faceCont.meta.approachLeg === 'portal_open_face' &&
+      faceCont.target !== null &&
+      key(faceCont.target) === '24,66,10' &&
+      typeof faceCont.meta.legReflex === 'string' &&
+      (faceCont.meta.legReflex as string).startsWith(
+        'REFLEX ownerSkill=enter_portal reason=unique_binding_prerequisite action=step_over evidence=cell=24,66,10',
+      ) &&
+      spentCont !== undefined,
+    `offer=[${normal.candidates.map((candidate) => candidate.id).join(',')}] faceLeg=${faceLeg === undefined ? 'none' : `${faceLeg.id}->${faceLeg.target === null ? 'none' : key(faceLeg.target)}`} cont=${faceCont === undefined ? 'none' : String(faceCont.id)} reflex=${String(faceCont?.meta.legReflex ?? 'none')}`,
   )
 
   // (i4) A WALK-REACHABLE WAYPOINT IS UNTOUCHED: the ordinary leg keeps exactly
@@ -1154,6 +1188,7 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 {
   const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
+  const executorSource = readFileSync(new URL('./src/executor.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
     ['DIG_ROUTE logged when selected', /if \(guarded\.candidate\.meta\.digRoute === true\) this\.logDigRoute\(guarded\.candidate\)/.test(source)],
     ['DIG_ROUTE_PROGRESS on a settled step', /if \(candidate\.meta\.digRoute === true\) this\.logDigRouteProgress\(result, candidate\)/.test(source)],
@@ -1171,6 +1206,12 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     ['skipped primary on the candidate meta', /digRouteSkipped: `\$\{route\.skipped\.dir\}:\$\{route\.skipped\.reason\}`/.test(candidatesSource)],
     ['detour telemetry', /detour: candidate\.meta\.digRouteDetour === true/.test(source)],
     ['an approach leg is never the destination', /if \(cellKey\(spot\) === targetKey\) continue/.test(candidatesSource)],
+    // The pocket continuation: grounded at the open-face site, and executed by the
+    // entry skill inside the same lease when it is the unique binding prerequisite.
+    ['continuation attached at the open-face site', /const continuations = pocketContinuations\(state, target\)/.test(candidatesSource)],
+    ['level-walk reachability gates the continuation', /best === null \|\| !levelWalkReachable\(state, best\)/.test(candidatesSource)],
+    ['executor step-over probe', /private portalFaceStepOverVia\(face: Vec3Json\)/.test(executorSource)],
+    ['executor runs the step-over in-skill', /'step_over',\n\s+`cell=\$\{via\.x\}/.test(executorSource)],
   ]
   const failed = checks.filter(([, ok]) => !ok).map(([name]) => name)
   check(

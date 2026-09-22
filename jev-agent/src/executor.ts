@@ -6186,6 +6186,52 @@ export class Executor {
     return Math.hypot(position.x - (cell.x + 0.5), position.z - (cell.z + 0.5))
   }
 
+  /**
+   * The bounded STEP-OVER floor for an open face the body cannot walk to.
+   *
+   * Measured live (run-mucbyro1-1hqhm, the M3 pocket): the unique standable open
+   * face (26,67,10) sat behind the 1-block hole at (24,67,10) over (24,66,10), so
+   * the direct control walk to the face failed and the skill reported
+   * `PORTAL_APPROACH_REFUSED reason=unreachable`. The mechanical route is: drop
+   * into the verified hole floor, then climb the ledge onto the face. The floor is
+   * derived from BLOCK TRUTH here (the front cell is open with no floor at feet
+   * level while the cell below it IS standable), never from the plan's wording.
+   *
+   * Returns the floor only when exactly ONE exists: a unique mechanical
+   * prerequisite is a #436 reflex the skill may execute, while several floors are
+   * several ways in - those stay policy-visible candidates the candidate layer
+   * already offers, so this returns null and the skill refuses typed instead of
+   * picking one.
+   */
+  private portalFaceStepOverVia(face: Vec3Json): Vec3Json | null {
+    const position = this.bot.entity.position
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+    const vias: Vec3Json[] = []
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const front = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+      const via = { x: front.x, y: feet.y - 1, z: front.z }
+      // The body must be able to walk INTO the front column (2-high clearance)...
+      if (!this.passableAt(front.x, front.y, front.z)) continue
+      if (!this.passableAt(front.x, front.y + 1, front.z)) continue
+      // ...it must be a HOLE at feet level (no floor), so the ordinary walk cannot
+      // already own this step...
+      if (this.solidSupportAt(front.x, front.y - 1, front.z)) continue
+      // ...and the cell one below must be a verified stand the body drops onto.
+      if (!isStandable(this.bot, via)) continue
+      // The face must be one level up at most and within the bounded face range.
+      if (face.y - via.y > 1) continue
+      if (Math.hypot(via.x + 0.5 - (face.x + 0.5), via.z + 0.5 - (face.z + 0.5)) > PORTAL_OPEN_FACE_MAX_DISTANCE) continue
+      vias.push(via)
+    }
+    const only = vias[0]
+    return vias.length === 1 && only !== undefined ? only : null
+  }
+
   /** Is the body's own cell space the portal interior (its footprint + level)? */
   private portalInsideInterior(cell: Vec3Json): boolean {
     return (
@@ -6326,11 +6372,59 @@ export class Executor {
         formatSkillStep(PORTAL_ENTER_SKILL, 'approach_leg', `cell=${face.x},${face.y},${face.z}`),
         { actionId: candidate.id, cell: face },
       )
-      const reached = await this.walkByControls(face, epoch, signal, {
+      let reached = await this.walkByControls(face, epoch, signal, {
         directBearing: true,
         budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
         arrivedAt: arrived,
       })
+      if (!reached) {
+        // THE BOUNDED STEP-OVER CONTINUATION (#436): the face is standable but the
+        // body cannot walk to it because a verified 1-block hole lies between them.
+        // Dropping into that hole floor and then climbing the ledge is the
+        // mechanically unique prerequisite, so code may execute it - inside the
+        // SAME skill/lease, so the click-through stays one semantic choice (Jev
+        // chose the entry), with the bounded body change reported as a durable
+        // chunk. Several floors would be several ways in and stay policy-visible
+        // candidates: `portalFaceStepOverVia` returns null then and the skill
+        // refuses typed exactly as before.
+        const via = this.portalFaceStepOverVia(face)
+        if (via !== null) {
+          const from = this.bot.entity.position
+          const feetCell = { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) }
+          this.logger.info(
+            'agent',
+            formatReflex({
+              ownerSkill: PORTAL_ENTER_SKILL,
+              action: 'step_over',
+              evidence:
+                `the only standable open face (${face.x},${face.y},${face.z}) is not walk reachable from ` +
+                `(${feetCell.x},${feetCell.y},${feetCell.z}); the bounded continuation is the verified hole floor ` +
+                `(${via.x},${via.y},${via.z}) and then one step up onto the ledge (d=${round2(fromD)})`,
+            }),
+            { actionId: candidate.id, cell: via, target: enterCell },
+          )
+          this.logger.info(
+            'agent',
+            formatSkillStep(
+              PORTAL_ENTER_SKILL,
+              'step_over',
+              `cell=${via.x},${via.y},${via.z} face=${face.x},${face.y},${face.z}`,
+            ),
+            { actionId: candidate.id, cell: via, face },
+          )
+          const reachedVia = await this.walkByControls(via, epoch, signal, {
+            directBearing: true,
+            budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
+          })
+          if (reachedVia) {
+            reached = await this.walkByControls(face, epoch, signal, {
+              directBearing: true,
+              budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
+              arrivedAt: arrived,
+            })
+          }
+        }
+      }
       if (!reached) continue
       const toD = this.portalCellDistance(enterCell)
       this.logger.info(
