@@ -47,6 +47,9 @@ import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
+import { headroomAcrossFootprint } from './bodyGeometry.ts'
+import { buildEnvHazardState, envHazardKindOfBlock } from './envHazard.ts'
+import type { EnvHazardCell, EnvHazardState } from './envHazard.ts'
 
 export type Vec3Json = {
   x: number
@@ -130,28 +133,48 @@ export type KnownResource = {
  * Live-world verdict for ONE remembered resource cell (see
  * `probeKnownResources`). Positive replacement evidence, not absence:
  *
- *  - `present`   the remembered block is still there;
+ *  - `present`   the memory is still true. For a `producer`/`drop` claim that
+ *                means the live producer instance / dropped item was SENSED at
+ *                the cell - the landmark block standing there is not the claim;
  *  - `replaced`  a same-family variant occupies the cell (iron_ore ->
  *                deepslate_iron_ore); the coordinate is still a valid route;
- *  - `falsified` a DIFFERENT, non-proving block occupies the cell. This is the
- *                world disproving the memory (the measured M2 case: remembered
- *                obsidian cells now read as stone);
- *  - `unknown`   no verdict: the chunk is unloaded, the cell is air/fluid (a
- *                mined-out cell is not distinguishable from a not-yet-sent
- *                section here), or the read failed.
+ *  - `falsified` the loaded world DISPROVES the claim, with the typed `reason`:
+ *                `block_mined` (the block is gone/replaced), `mob_gone` (a
+ *                landmark whose producers are absent from the entity envelope)
+ *                or `drop_absent` (a remembered item stack nothing is holding);
+ *  - `unknown`   no verdict: the chunk is unloaded, the cell is outside the
+ *                evidence envelope the sensor actually covers, or the read
+ *                failed. UNKNOWN is never absence.
  *
  * The verdict is world truth (CAN/TRUE), never a preference. It exists so a
  * collect goal cannot keep re-targeting a memory the loaded world contradicts.
  */
 export type KnownResourceEvidenceStatus = 'present' | 'replaced' | 'falsified' | 'unknown'
 
+/** Why the loaded world disproved a remembered cell; only ever set on `falsified`. */
+export type KnownResourceFalsifiedReason =
+  /** the cell no longer holds the remembered block (air/fluid/another block) */
+  | 'block_mined'
+  /** the landmark stands, but no producer instance is inside the entity envelope */
+  | 'mob_gone'
+  /** the cell was remembered as the item itself and nothing holds that item */
+  | 'drop_absent'
+
 export interface KnownResourceEvidence {
-  /** block name the durable memory asserted */
+  /** block (or item) name the durable memory asserted */
   name: string
   position: Vec3Json
   /** live block name at the cell, or null when the chunk is unloaded */
   observed: string | null
   status: KnownResourceEvidenceStatus
+  /** what the cell asserts, and therefore how it was verified */
+  claim: KnownResourceClaim
+  /** the want item this verdict was computed for */
+  item: string
+  /** why `falsified`; absent for every other status */
+  reason?: KnownResourceFalsifiedReason
+  /** the live evidence behind a `present` producer/drop verdict */
+  source?: 'mob' | 'drop'
 }
 
 export type HeldItemState = {
@@ -236,6 +259,16 @@ export type SelfState = {
   air?: number
   feetInWater?: boolean
   eyesInWater?: boolean
+  /**
+   * SAFE: the body's own environmental hazard state (fire/lava/burning/
+   * drowning), sensed from real block truth at the body's own column and the
+   * adjacent cells plus Mineflayer's own on-fire flag (see `envHazard.ts`).
+   * Optional so pure fixtures that predate the hazard facts need not restate
+   * them: `buildSelf` always populates it and consumers treat an absent value
+   * as "the sensor never observed a hazard" - which is exactly the
+   * behaviour-preserving default.
+   */
+  envHazard?: EnvHazardState
   /**
    * Worn armor per destination. Optional so pure fixtures that predate the
    * armor affordance need not restate it; `buildWorldState` always populates it
@@ -493,17 +526,19 @@ export type StepCut = {
 }
 
 /**
- * A solid block directly above the bot's feet that blocks a jump (the
- * "canopy pocket" trap: a 2-tall space under leaves where every step-up jump is
- * vetoed by the ceiling). Mining it opens the headroom the jump needs. `safe` is
- * false when the block must not be removed (unbreakable, or a fluid/hazard).
+ * A cell in the local jump-headroom envelope. Usually this is a solid ceiling
+ * block that can become a clearance MINE. A fail-closed unknown/unloaded cell is
+ * also retained with `safe=false`, so CAN never turns missing world truth into
+ * executable headroom.
  */
 export type HeadroomCut = {
-  /** the ceiling block itself (feet + 1 or feet + 2; never the feet/support) */
+  /** the blocking/clearance cell (feet + 1 or feet + 2; never support) */
   pos: Vec3Json
   name: string
   safe: boolean
   reason: string
+  /** true only when this cell blocks the CURRENT player AABB jump headroom */
+  currentFootprint?: boolean
 }
 
 /** A cardinal stair direction, plus `D` for digging straight down the bot's column. */
@@ -767,6 +802,16 @@ export type WorldState = {
    * behaviourally unchanged.
    */
   submergedPlacementSpots?: Vec3Json[]
+  /**
+   * SAFE: the adjacent cells the environmental hazard scan classified from real
+   * block truth (feet/head/support per cell + the water fact), populated only
+   * while `self.envHazard.active` - an inactive body carries no cells, so the
+   * non-hazard state stays exactly the shape it had. The candidate layer grounds
+   * hazard escapes from these cells; they are deliberately NOT part of `self`
+   * (the Jev snapshot keeps `self` whole, and 24 cells per tick must not grow
+   * the prompt).
+   */
+  envHazardCells?: EnvHazardCell[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
@@ -880,6 +925,15 @@ export interface SensorInput {
   recentOutcomes?: readonly System2Outcome[]
   /** the item the current subgoal targets, used to focus the block scan */
   focusItem?: string | null
+  /**
+   * Every want item the candidate generator can route to this tick: the active
+   * focus plus any queued want the explicit descent proxy exposes
+   * (`candidates.ts#retrievalNeeds`). Remembered cells are verified for ALL of
+   * them, because a queued want's `RETRIEVE:known` route is offered from the same
+   * memory: verifying only the focus left a queued want's stale cell unproven and
+   * therefore permanently re-offered. Defaults to `focusItem`.
+   */
+  retrievalItems?: readonly string[]
   recentEvents: string[]
   signals: AgentSignals
   /**
@@ -1009,6 +1063,74 @@ export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> =
 export function scannedBlockNames(focusItem: string | null): readonly string[] | undefined {
   if (focusItem === null) return undefined
   return ORE_SOURCES[focusItem] ?? DIRECT_BLOCK_SOURCES[focusItem]
+}
+
+/**
+ * Deterministic Minecraft producer truth for the items whose only grounded
+ * source is a mob drop. CAN/TRUE only: every sensed producer instance is exposed
+ * as a grounded alternative and Jev still owns WHICH one to pursue.
+ *
+ * It lives in the sensor (not the candidate layer) because the sensor must
+ * verify a remembered producer landmark against live entity truth (see
+ * `probeKnownResources`); `candidates.ts` imports this one table instead of
+ * keeping a second copy.
+ */
+export const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
+  ender_pearl: new Set(['enderman']),
+  blaze_rod: new Set(['blaze']),
+}
+
+/**
+ * True when every declared source name for a want is structure fabric: the block
+ * is a LANDMARK that hosts the producers, not a deposit that drops the item
+ * (`nether_bricks` does not yield `blaze_rod`; `resourceMatches` stays exact).
+ */
+export function isStructureFabricSource(blockNames: readonly string[]): boolean {
+  return blockNames.length > 0 && blockNames.every((name) => NETHER_STRUCTURE_BLOCK_NAMES.includes(name))
+}
+
+/**
+ * What a remembered cell ASSERTS about how the want item is obtained. Derived
+ * from the name the memory recorded, never from the entry's durability `kind`
+ * (#80/#342 reuse `kind` for portal/fortress envelopes that are not deposits):
+ *
+ *   `block`    the cell holds a block whose own drop is the item (iron_ore ->
+ *              raw_iron, gravel -> flint, obsidian -> obsidian): live block
+ *              truth at the cell is the whole verdict;
+ *   `producer` the cell is a structure LANDMARK that hosts the item's mob
+ *              producers (nether_bricks -> blaze_rod). The block standing there
+ *              does not put the drop there, so the cell is a deposit route only
+ *              while a producer instance (or its dropped item) is SENSED;
+ *   `drop`     the cell is remembered as the item itself (loot, a death drop),
+ *              so it is a route only while a dropped item entity is SENSED.
+ *
+ * Pure. This is the classification the offer/withhold rule is built on: a memory
+ * must be verified against the thing it actually claims.
+ */
+export type KnownResourceClaim = 'block' | 'producer' | 'drop'
+
+export function knownResourceClaimFor(name: string, item: string | null): KnownResourceClaim {
+  if (item !== null) {
+    const sources = scannedBlockNames(item)
+    // A declared block source for this item is a BLOCK claim even when the block
+    // and the item share a name (`obsidian` -> `obsidian` is a mine, not a drop).
+    if (sources !== undefined && sources.includes(name)) {
+      return isStructureFabricSource(sources) ? 'producer' : 'block'
+    }
+    // Remembered as the item itself (loot, a death drop) rather than as a block.
+    if (name === item) return 'drop'
+  }
+  if (NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) return 'producer'
+  return 'block'
+}
+
+/** The mob producers a landmark block can host (`nether_bricks` -> `blaze`). */
+function landmarkProducers(name: string): ReadonlySet<string> {
+  const out = new Set<string>()
+  for (const [item, producers] of Object.entries(MOB_DROP_PRODUCERS)) {
+    if ((scannedBlockNames(item) ?? []).includes(name)) for (const producer of producers) out.add(producer)
+  }
+  return out
 }
 
 /** Resolve a block's primary drop, required tool class and required pickaxe rank. */
@@ -1141,7 +1263,25 @@ export function isStandable(bot: Bot, feet: Vec3Json): boolean {
  * landing.
  */
 export function isUsableStand(bot: Bot, feet: Vec3Json): boolean {
-  return isStandable(bot, feet) && hasUsableGroundSupport(bot, feet)
+  return isUsableStandFromBlocks(
+    bot.blockAt(toVec3(bot, feet)),
+    bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z })),
+    bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })),
+  )
+}
+
+/**
+ * `isUsableStand` over blocks the caller has ALREADY read. The environmental
+ * hazard scan samples a 3x3x3 ring around the body every tick and must not read
+ * every cell twice; both callers are the same destination rule, so a canopy top
+ * cannot be standable for one of them and not the other.
+ */
+export function isUsableStandFromBlocks(
+  feetBlock: { boundingBox: string } | null,
+  headBlock: { boundingBox: string } | null,
+  supportBlock: SupportBlockLike | null,
+): boolean {
+  return isPassable(feetBlock) && isPassable(headBlock) && isUsableGroundSupport(supportBlock)
 }
 
 /** The 8 neighbours the executor could stand on to reach a block, best first. */
@@ -1176,12 +1316,26 @@ function findAdjacentStandable(bot: Bot, target: Vec3Json): Vec3Json | null {
 }
 
 function buildSelf(bot: Bot): SelfState {
+  return buildSelfDetail(bot).self
+}
+
+/**
+ * `buildSelf` plus the hazard cell sample the world state carries separately:
+ * `self.envHazard` must stay lean (the Jev snapshot ships `self` whole), while
+ * the candidate layer needs the 24 classified neighbours. One read pass builds
+ * both.
+ */
+function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazardCell[] } {
   const position = vecJson(bot.entity.position)
   const eye = bot.entity.position.offset(0, EYE_HEIGHT, 0)
   const held = bot.heldItem
   const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
   const eyes = { x: Math.floor(eye.x), y: Math.floor(eye.y), z: Math.floor(eye.z) }
-  return {
+  const air = readAir(bot)
+  const feetInWater = fluidAt(bot, feet)
+  const eyesInWater = fluidAt(bot, eyes)
+  const envHazardCells = buildEnvHazardRing(bot, feet)
+  const self: SelfState = {
     username: bot.username,
     position,
     eyePosition: vecJson(eye),
@@ -1195,10 +1349,141 @@ function buildSelf(bot: Bot): SelfState {
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
     armor: buildArmor(bot),
-    air: readAir(bot),
-    feetInWater: fluidAt(bot, feet),
-    eyesInWater: fluidAt(bot, eyes),
+    air,
+    feetInWater,
+    eyesInWater,
+    envHazard: buildEnvHazard(bot, {
+      feet,
+      air,
+      feetInWater,
+      eyesInWater,
+      onFire: readOnFire(bot),
+      cells: envHazardCells,
+    }),
   }
+  return { self, envHazardCells }
+}
+
+/**
+ * SAFE: Mineflayer's OWN on-fire fact.
+ *
+ * `prismarine-entity` exposes no `onFire`/`fireTicks` property, but the entity
+ * metadata it *does* keep carries the vanilla shared-flags byte at key 0
+ * (`mineflayer/lib/plugins/entities.js` writes every metadata key it receives
+ * onto `entity.metadata`), and bit 0x01 of that byte is the vanilla "entity is
+ * on fire" flag - which is how the client knows to draw a burning body, and is
+ * the only fire fact that survives leaving the fire block.
+ *
+ * `null` when the client never delivered metadata (a fixture bot, an old
+ * version): UNKNOWN is not "not burning", and no other layer may turn it into a
+ * positive fact.
+ */
+function readOnFire(bot: Bot): boolean | null {
+  const metadata = (bot.entity as { metadata?: unknown }).metadata
+  if (!Array.isArray(metadata)) return null
+  const flags = metadata[0]
+  if (typeof flags !== 'number' || !Number.isFinite(flags)) return null
+  return (flags & 0x01) !== 0
+}
+
+/**
+ * SAFE: the adjacent-cell sample the environmental hazard state is built from.
+ *
+ * The 3x3 horizontal ring at feet.y-1..feet.y+1 (24 cells, the body's own cell
+ * excluded), each read as feet + head + support so the destination rule
+ * (`isUsableStandFromBlocks`) and the hazard/water facts come from the SAME real
+ * blocks the body would occupy. An unloaded cell (`blockAt` -> null) is never
+ * standable and never a hazard: no read, no fact.
+ */
+function buildEnvHazardRing(bot: Bot, feet: Vec3Json): EnvHazardCell[] {
+  const cells: EnvHazardCell[] = []
+  const at = (x: number, y: number, z: number) => bot.blockAt(toVec3(bot, { x, y, z }))
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      if (dx === 0 && dz === 0) continue
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const x = feet.x + dx
+        const y = feet.y + dy
+        const z = feet.z + dz
+        const feetBlock = at(x, y, z)
+        const headBlock = at(x, y + 1, z)
+        const supportBlock = at(x, y - 1, z)
+        const hazardBlock =
+          (feetBlock !== null && envHazardKindOfBlock(feetBlock.name) !== null
+            ? feetBlock.name
+            : headBlock !== null && envHazardKindOfBlock(headBlock.name) !== null
+              ? headBlock.name
+              : supportBlock !== null && envHazardKindOfBlock(supportBlock.name) !== null
+                ? supportBlock.name
+                : null)
+        cells.push({
+          position: { x, y, z },
+          standable: isUsableStandFromBlocks(feetBlock, headBlock, supportBlock),
+          hazard: envHazardKindOfBlock(hazardBlock),
+          hazardBlock,
+          water: feetBlock !== null && PROBE_FLUIDS.has(feetBlock.name),
+        })
+      }
+    }
+  }
+  return cells
+}
+
+/**
+ * SAFE: the body's own environmental hazard state (fire/lava/burning/drowning).
+ *
+ * The measured live failure: the body burned to death in the Nether with every
+ * damage tick arriving as `source=null` and no marker in the whole run naming
+ * fire, lava or burning - nothing had ever read the block the body was standing
+ * in. This reads it, plus the adjacent cells, and nothing else: no hazard is
+ * ever inferred from damage, from a block *near* the body, or from a missing
+ * read.
+ */
+function buildEnvHazard(
+  bot: Bot,
+  input: {
+    feet: Vec3Json
+    air: number
+    feetInWater: boolean
+    eyesInWater: boolean
+    onFire: boolean | null
+    cells: EnvHazardCell[]
+  },
+): EnvHazardState {
+  const at = (y: number) => bot.blockAt(toVec3(bot, { x: input.feet.x, y, z: input.feet.z }))
+  const feetBlock = at(input.feet.y)
+  const headBlock = at(input.feet.y + 1)
+  const supportBlock = at(input.feet.y - 1)
+  // The cell a 1.8-tall body's head occupies when it rises one step: the
+  // drowning geometry ("water at the head, air immediately above").
+  const aboveHeadBlock = at(input.feet.y + 2)
+  const inWater = input.feetInWater === true || input.eyesInWater === true
+  return buildEnvHazardState({
+    self: input.feet,
+    feetBlock: feetBlock?.name ?? null,
+    headBlock: headBlock?.name ?? null,
+    supportBlock: supportBlock?.name ?? null,
+    onFire: input.onFire,
+    // The breath/water facts are `bodySubmersion`'s (one owner); the hazard
+    // state only re-expresses drowning so one marker can name it.
+    outOfAir: bodySubmersion({
+      air: input.air,
+      feetInWater: input.feetInWater,
+      eyesInWater: input.eyesInWater,
+    }).state === 'out_of_air',
+    inWater,
+    headInWater: input.eyesInWater === true,
+    // "Verified AIR immediately above" is not merely "passable above": a fluid
+    // cell is passable with an empty bounding box, so water above the head must
+    // NOT read as a breathable cell. Only air (any non-fluid passable cell)
+    // grounds the rise.
+    airAbove:
+      isPassable(aboveHeadBlock) &&
+      aboveHeadBlock !== null &&
+      !PROBE_FLUIDS.has(aboveHeadBlock.name) &&
+      envHazardKindOfBlock(aboveHeadBlock.name) === null,
+    cells: input.cells,
+  })
 }
 
 /**
@@ -1762,6 +2047,9 @@ function sameRememberedFamily(remembered: string, observed: string): boolean {
 /** Does a remembered cell belong to the active focus's scanned source names? */
 function rememberedMatchesFocus(focusItem: string | null, name: string): boolean {
   if (focusItem === null) return false
+  // A cell remembered as the item itself (loot, a death drop) is matched by
+  // identity: no block-source table can name it.
+  if (name === focusItem) return true
   const sources = scannedBlockNames(focusItem)
   if (sources !== undefined) return sources.includes(name)
   if (
@@ -1776,9 +2064,33 @@ function rememberedMatchesFocus(focusItem: string | null, name: string): boolean
   return false
 }
 
+/** A raw entity from `bot.entities`, defensively typed (fixture doubles included). */
+interface LiveEntityLike {
+  name?: string
+  username?: string | null
+  kind?: string
+  position?: { x: number; y: number; z: number }
+  getDroppedItem?: () => { name?: string } | null
+}
+
+/** Live producer/drop evidence a remembered producer/drop claim needs. */
+export interface KnownResourceProbeOptions {
+  /**
+   * Every want item this tick's retrieval machinery could route to: the active
+   * focus PLUS any queued want the explicit descent proxy exposes (see
+   * `candidates.ts#retrievalNeeds`). Defaults to the single `focusItem`, so a
+   * caller that does not know about queued wants keeps its exact scope.
+   */
+  items?: readonly (string | null)[]
+  /** live general-entity radius (`SensorOptions.entityRadius`) */
+  entityRadius?: number
+  /** widened hostile radius (`SensorOptions.hostileRadius`) */
+  hostileRadius?: number
+}
+
 /**
  * #14-world-proof: positive live-world evidence for the remembered resource
- * cells the active focus would otherwise retrieve.
+ * cells the retrieval machinery would otherwise offer as targets.
  *
  * The durable staleness eviction (`generation-entry.ts#evictStaleKnownResources`)
  * only probes cells inside a 24-block "definitely loaded" radius. A memory that
@@ -1787,49 +2099,240 @@ function rememberedMatchesFocus(focusItem: string | null, name: string): boolean
  * stayed a live `RETRIEVE:known:obsidian` route forever and the body kept walking
  * to it. This probe reads the actual block at the cell: `bot.blockAt` returns
  * null for an unloaded chunk, so a far-but-loaded replacement is provable while
- * an unloaded one stays `unknown`. It is world truth only (CAN/TRUE): the sensor
- * removes `falsified` cells from `signals.knownResources` and reports the typed
- * evidence; no goal, action or ranking is decided here.
+ * an unloaded one stays `unknown`.
+ *
+ * The verdict follows the CLAIM the cell makes (`knownResourceClaimFor`), because
+ * "the block is still there" is not the truth a mob-drop memory asserts: a
+ * remembered fortress body whose producers are all absent is a stale route even
+ * though every `nether_bricks` block still stands (the measured M3 shape: the
+ * body walked to remembered fortress cells for `blaze_rod` while the run's own
+ * entity sensor reported `sensed=0`). A `producer`/`drop` claim is therefore
+ * verified against the live ENTITY envelope, and absence is only a verdict inside
+ * the radius that envelope actually covers: an unloaded cell, a read failure, or
+ * a cell beyond the sensor's radius stays `unknown`, never "gone".
+ *
+ * It is world truth only (CAN/TRUE): the sensor removes `falsified` cells from
+ * `signals.knownResources` and reports the typed evidence; no goal, action or
+ * ranking is decided here. Pure aside from the read-only `bot` probes.
  */
 export function probeKnownResources(
   bot: Bot,
   focusItem: string | null,
   remembered: readonly KnownResource[],
+  options: KnownResourceProbeOptions = {},
 ): KnownResourceEvidence[] {
-  if (focusItem === null) return []
-  const focusSources = scannedBlockNames(focusItem)
-  const out: KnownResourceEvidence[] = []
+  const items = (options.items ?? [focusItem]).filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  )
+  if (items.length === 0) return []
+  const entityRadius = options.entityRadius ?? defaultSensorOptions.entityRadius
+  const hostileRadius = options.hostileRadius ?? defaultSensorOptions.hostileRadius
+  const entities = liveEntities(bot)
+  // One cell, one verdict: a cell matching several wants resolves to the
+  // strongest one (falsified wins), because the candidate layer withholds a cell
+  // by coordinate regardless of which want it was serving.
+  const byCell = new Map<string, KnownResourceEvidence>()
   for (const resource of remembered) {
-    if (resource.kind !== 'ore' && resource.kind !== 'log') continue
-    if (!rememberedMatchesFocus(focusItem, resource.name)) continue
-    const position = resource.position
-    let block: { name?: string; boundingBox?: string } | null = null
-    try {
-      block = (bot.blockAt(new Vec3(position.x, position.y, position.z)) ?? null) as {
-        name?: string
-        boundingBox?: string
-      } | null
-    } catch {
-      block = null
+    if (resource.kind !== 'ore' && resource.kind !== 'log' && resource.kind !== 'structure') continue
+    for (const item of items) {
+      if (!rememberedMatchesFocus(item, resource.name)) continue
+      const evidence = probeRememberedCell(bot, entities, resource, item, entityRadius, hostileRadius)
+      if (evidence === null) continue
+      const cell = `${evidence.position.x},${evidence.position.y},${evidence.position.z}`
+      byCell.set(cell, preferredEvidence(byCell.get(cell), evidence))
     }
-    const observed = typeof block?.name === 'string' ? block.name : null
-    let status: KnownResourceEvidenceStatus
-    if (observed === null) status = 'unknown'
-    else if (observed === resource.name) status = 'present'
-    // A same-family variant (ore -> deepslate ore) or another declared source
-    // name for this focus (nether_bricks -> nether_brick_fence) still serves the
-    // want, so the cell stays a valid route and is reported as `replaced`.
-    else if (sameRememberedFamily(resource.name, observed) || focusSources?.includes(observed) === true)
-      status = 'replaced'
-    // Any other LOADED block falsifies the memory: `null` above is the only
-    // no-verdict case (unloaded cell). Air/fluids and empty-shape blocks are a
-    // loaded cell whose resource is gone, so a stale RETRIEVE route must not
-    // survive them (#406).
-    else if (ABSENCE_PROVING_CELL_BLOCKS.has(observed) || block?.boundingBox === 'empty') status = 'falsified'
-    else status = 'falsified'
-    out.push({ name: resource.name, position: { x: position.x, y: position.y, z: position.z }, observed, status })
   }
-  return out
+  return [...byCell.values()]
+}
+
+const EVIDENCE_RANK: Readonly<Record<KnownResourceEvidenceStatus, number>> = {
+  unknown: 0,
+  replaced: 1,
+  present: 2,
+  falsified: 3,
+}
+
+function preferredEvidence(
+  previous: KnownResourceEvidence | undefined,
+  next: KnownResourceEvidence,
+): KnownResourceEvidence {
+  if (previous === undefined) return next
+  return EVIDENCE_RANK[next.status] >= EVIDENCE_RANK[previous.status] ? next : previous
+}
+
+/** `bot.entities`, or null when this bot double cannot report entities at all. */
+function liveEntities(bot: Bot): Record<string, LiveEntityLike> | null {
+  const entities = (bot as { entities?: unknown }).entities
+  if (entities === null || typeof entities !== 'object') return null
+  return entities as Record<string, LiveEntityLike>
+}
+
+/** The bot's own feet cell, or null when the double exposes no entity. */
+function botSelfPosition(bot: Bot): Vec3Json | null {
+  const position = (bot as { entity?: { position?: { x: number; y: number; z: number } } }).entity?.position
+  if (position === undefined) return null
+  return { x: position.x, y: position.y, z: position.z }
+}
+
+/**
+ * The cell's live block. `loaded: false` is Mineflayer's "chunk not loaded" (or a
+ * read failure); a loaded cell always yields a name, `air` included (#406).
+ */
+function readCellBlock(
+  bot: Bot,
+  cell: Vec3Json,
+): { name: string | null; loaded: boolean; boundingBox: string | null } {
+  try {
+    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z)) as {
+      name?: string
+      boundingBox?: string
+    } | null
+    if (block === null || block === undefined) return { name: null, loaded: false, boundingBox: null }
+    return {
+      name: typeof block.name === 'string' ? block.name : null,
+      loaded: true,
+      boundingBox: typeof block.boundingBox === 'string' ? block.boundingBox : null,
+    }
+  } catch {
+    return { name: null, loaded: false, boundingBox: null }
+  }
+}
+
+/** A dropped item's item name, or null when this entity is not a dropped item. */
+function droppedItemOf(entity: LiveEntityLike): string | null {
+  if (entity.name !== 'item' && entity.name !== 'Item' && entity.name !== 'item_stack') return null
+  try {
+    const item = entity.getDroppedItem?.()
+    return item != null && typeof item.name === 'string' && item.name.length > 0 ? item.name : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is a live producer instance (or a dropped instance of the wanted item) sensed
+ * inside the cell's own neighbourhood? `entities === null` means the bot double
+ * cannot report entities, which is NOT "nothing is there".
+ */
+function liveProducerOrDrop(
+  entities: Record<string, LiveEntityLike> | null,
+  cell: Vec3Json,
+  producers: ReadonlySet<string>,
+  item: string,
+  radius: number,
+): 'mob' | 'drop' | null {
+  if (entities === null) return null
+  for (const entity of Object.values(entities)) {
+    const position = entity?.position
+    if (position === undefined) continue
+    if (distance({ x: position.x, y: position.y, z: position.z }, cell) > radius) continue
+    // A PLAYER is never the producer: `buildEntities` reads `username` first, so
+    // an online player named `blaze` must not verify a fortress.
+    if (typeof entity.username !== 'string') {
+      if (typeof entity.name === 'string' && producers.has(entity.name)) return 'mob'
+      if (typeof entity.kind === 'string' && producers.has(entity.kind)) return 'mob'
+    }
+    if (droppedItemOf(entity) === item) return 'drop'
+  }
+  return null
+}
+
+/** The radius the entity sensor covers for these producers (hostiles are widened). */
+function producerProofRadius(
+  producers: ReadonlySet<string>,
+  entityRadius: number,
+  hostileRadius: number,
+): number {
+  let radius = 0
+  for (const producer of producers) {
+    radius = Math.max(radius, isHostile(producer, undefined) ? hostileRadius : entityRadius)
+  }
+  return radius
+}
+
+function probeRememberedCell(
+  bot: Bot,
+  entities: Record<string, LiveEntityLike> | null,
+  resource: KnownResource,
+  item: string,
+  entityRadius: number,
+  hostileRadius: number,
+): KnownResourceEvidence | null {
+  const position = resource.position
+  const cell: Vec3Json = { x: position.x, y: position.y, z: position.z }
+  const block = readCellBlock(bot, cell)
+  const claim = knownResourceClaimFor(resource.name, item)
+  if (claim === 'producer' || claim === 'drop') {
+    const producers = claim === 'producer' ? landmarkProducers(resource.name) : new Set<string>()
+    // A landmark with no declared producers is not a producer route: verify it as
+    // the block it is instead of inventing a mob claim for it.
+    if (claim === 'producer' && producers.size === 0) {
+      return blockEvidence(resource, item, block, 'block', [])
+    }
+    const radius = claim === 'drop' ? entityRadius : producerProofRadius(producers, entityRadius, hostileRadius)
+    const source = liveProducerOrDrop(entities, cell, producers, item, radius)
+    if (source !== null) {
+      return { name: resource.name, position: cell, observed: block.name, status: 'present', claim, item, source }
+    }
+    const self = botSelfPosition(bot)
+    // No producer/drop inside the envelope. That is a contradiction only when the
+    // cell is actually observable (loaded + inside the radius the entity sensor
+    // covers); otherwise it is UNKNOWN - a mob that walked away, a chunk that is
+    // not loaded or a cell out of sensor range is never proof of absence.
+    if (entities === null || self === null || !block.loaded || distance(self, cell) > radius) {
+      return { name: resource.name, position: cell, observed: block.name, status: 'unknown', claim, item }
+    }
+    return {
+      name: resource.name,
+      position: cell,
+      observed: block.name,
+      status: 'falsified',
+      claim,
+      item,
+      reason: claim === 'drop' ? 'drop_absent' : 'mob_gone',
+    }
+  }
+  return blockEvidence(resource, item, block, claim, scannedBlockNames(item) ?? [])
+}
+
+/** The live-block verdict for a cell whose claim is the block itself. */
+function blockEvidence(
+  resource: KnownResource,
+  item: string,
+  block: { name: string | null; loaded: boolean; boundingBox: string | null },
+  claim: KnownResourceClaim,
+  focusSources: readonly string[],
+): KnownResourceEvidence {
+  const cell: Vec3Json = { x: resource.position.x, y: resource.position.y, z: resource.position.z }
+  const observed = block.loaded ? block.name : null
+  let status: KnownResourceEvidenceStatus
+  let reason: KnownResourceFalsifiedReason | undefined
+  if (observed === null) status = 'unknown'
+  else if (observed === resource.name) status = 'present'
+  // A same-family variant (ore -> deepslate ore) or another declared source
+  // name for this focus (nether_bricks -> nether_brick_fence) still serves the
+  // want, so the cell stays a valid route and is reported as `replaced`.
+  else if (sameRememberedFamily(resource.name, observed) || focusSources.includes(observed)) status = 'replaced'
+  // Any other LOADED block falsifies the memory: `null` above is the only
+  // no-verdict case (unloaded cell). Air/fluids and empty-shape blocks are a
+  // loaded cell whose resource is gone, so a stale RETRIEVE route must not
+  // survive them (#406).
+  else if (ABSENCE_PROVING_CELL_BLOCKS.has(observed) || block.boundingBox === 'empty') {
+    status = 'falsified'
+    reason = 'block_mined'
+  } else {
+    status = 'falsified'
+    reason = 'block_mined'
+  }
+  return {
+    name: resource.name,
+    position: cell,
+    observed,
+    status,
+    claim,
+    item,
+    ...(reason === undefined ? {} : { reason }),
+  }
 }
 
 function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
@@ -2256,16 +2759,32 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
   const feetZ = Math.floor(self.position.z)
   const scratch = bot.entity.position.clone()
   const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
-  const clear = (x: number, y: number, z: number): boolean => {
-    const block = at(x, y, z)
-    return block === null || block.boundingBox === 'empty'
-  }
-  if (clear(feetX, feetY + 1, feetZ) && clear(feetX, feetY + 2, feetZ)) return []
+  const halfWidth = bot.entity.width > 0 ? bot.entity.width / 2 : 0.3
+  const current = headroomAcrossFootprint({
+    center: { x: self.position.x, z: self.position.z },
+    feetY: self.position.y,
+    halfWidth,
+    // Match executor.passableAt exactly: unknown/unloaded is NOT proven clear.
+    isPassable: (x, y, z) => isPassable(at(x, y, z)),
+  })
+  if (current.clear) return []
 
-  const out: HeadroomCut[] = []
-  const consider = (x: number, y: number, z: number): void => {
+  const out = new Map<string, HeadroomCut>()
+  const consider = (x: number, y: number, z: number, currentFootprint: boolean): void => {
     const block = at(x, y, z)
-    if (block === null || block.boundingBox !== 'block') return
+    if (block === null) {
+      if (currentFootprint) {
+        out.set(`${x},${y},${z}`, {
+          pos: { x, y, z },
+          name: 'unknown',
+          safe: false,
+          reason: 'cell is unloaded/unknown',
+          currentFootprint: true,
+        })
+      }
+      return
+    }
+    if (block.boundingBox === 'empty') return
     const name = block.name
     let safe = true
     let reason = 'safe'
@@ -2279,18 +2798,20 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
       safe = false
       reason = `${name} would flood or burn the pocket`
     }
-    out.push({ pos: { x, y, z }, name, safe, reason })
+    const key = `${x},${y},${z}`
+    const existing = out.get(key)
+    out.set(key, { pos: { x, y, z }, name, safe, reason, currentFootprint: currentFootprint || existing?.currentFootprint === true })
   }
-  for (const dy of [1, 2]) consider(feetX, feetY + dy, feetZ)
-  // Adjacent columns are included so a clearance candidate survives the 1-block
-  // shuffle of the escape and the next decision can still execute the same dig.
+  if (current.blocker !== null) consider(current.blocker.x, current.blocker.y, current.blocker.z, true)
+  // Adjacent columns remain in the observation pool so a small body shuffle does
+  // not erase local geometry. They are context only: candidate generation exposes
+  // the `currentFootprint` blocker, never these neighbours, as headroom acquisition.
   for (let dx = -1; dx <= 1; dx += 1) {
     for (let dz = -1; dz <= 1; dz += 1) {
-      if (dx === 0 && dz === 0) continue
-      for (const dy of [1, 2]) consider(feetX + dx, feetY + dy, feetZ + dz)
+      for (const dy of [1, 2]) consider(feetX + dx, feetY + dy, feetZ + dz, false)
     }
   }
-  return out
+  return [...out.values()]
 }
 
 /**
@@ -2895,7 +3416,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
 }
 
 function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOptions): WorldState {
-  const self = buildSelf(bot)
+  const { self, envHazardCells } = buildSelfDetail(bot)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   // #14-world-proof: falsify remembered resource cells the loaded world
@@ -2904,6 +3425,11 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     bot,
     input.focusItem ?? null,
     input.signals.knownResources ?? [],
+    {
+      ...(input.retrievalItems === undefined ? {} : { items: input.retrievalItems }),
+      entityRadius: options.entityRadius,
+      hostileRadius: options.hostileRadius,
+    },
   )
   const falsifiedKnownCells = new Set(
     knownResourceEvidence
@@ -2940,6 +3466,10 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     inventory,
     entities,
     blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
+    // The hazard cell sample is carried only while a hazard is actually present:
+    // an inactive body's state keeps exactly the shape it had before this fact
+    // existed, and the candidate layer reads "no cells" as "no hazard".
+    ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
     terrain: {
       standable: buildTerrain(bot, options, self),
       escapeCells: buildEscapeCells(bot, options, self, entities),

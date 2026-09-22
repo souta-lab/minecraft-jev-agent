@@ -18,6 +18,7 @@
 //   build_portal_frame -> multi-cell PLACE (code-owned frame geometry)
 //   light_portal  -> IGNITE selected skill (place nether_portal + portal_lit)
 //   verify_portal -> IGNITE selected skill (same, re-verifies the postcondition)
+//   enter_portal  -> ENTER_PORTAL selected skill (place nether_portal + portal_entered)
 //
 // The M2 Nether gate is exposed as MODEL-VISIBLE WHAT, never as model-supplied
 // geometry. Mercury picks `build_portal_frame` / `light_portal` / `verify_portal`
@@ -52,6 +53,7 @@ export const MERCURY_TYPED_GOAL_KINDS = [
   'light_portal',
   'verify',
   'verify_portal',
+  'enter_portal',
 ] as const
 
 export type MercuryTypedGoalKind = (typeof MERCURY_TYPED_GOAL_KINDS)[number]

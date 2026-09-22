@@ -59,6 +59,25 @@ const deathRecovery: DeathRecoveryContext = {
   recentDeathWindowMs: 120_000,
 }
 
+const portalWorld = emptyWorldMemory()
+portalWorld.portalVerified = true
+portalWorld.knownPortalSites.push({
+  x: 25,
+  y: 66,
+  z: 9,
+  widthAxis: 'x',
+  dimension: 'minecraft:overworld',
+  worldEpoch: 1,
+  lastVerifiedAt: 9_000,
+})
+const portalSummary = buildMercurySummary(bot, portalWorld, request, 'no_candidate')
+assert.deepEqual(portalSummary.portal, { verified: true, knownSites: 1 })
+assert.notEqual(
+  hashMercuryState(portalSummary),
+  hashMercuryState({ ...portalSummary, portal: { verified: false, knownSites: 1 } }),
+  'live portal truth must participate in the System2 cache key',
+)
+
 const postDeath = buildMercurySummary(bot, world, request, 'post_death', deathRecovery)
 assert.deepEqual(postDeath.postDeath, {
   latestDeathPoint: { x: 12, y: 68, z: -2 },

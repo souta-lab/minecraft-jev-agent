@@ -119,6 +119,7 @@ export const THREAT_NEARBY = 'THREAT_NEARBY'
  */
 export const THREAT_RANGED_UNANSWERED = 'THREAT_RANGED_UNANSWERED'
 export const THREAT_NO_ESCAPE = 'THREAT_NO_ESCAPE'
+export const THREAT_OCCLUDED = 'THREAT_OCCLUDED'
 export const THREAT_CLEAR = 'THREAT_CLEAR'
 
 /** Vanilla 1.21 unarmed player attack damage. */
@@ -464,7 +465,27 @@ export function formatThreatNearby(
     `engaged=${evidence.threatEngaged} los=${evidence.threatLineOfSight === null ? 'unknown' : evidence.threatLineOfSight} ` +
     `threatHeld=${held} weapon=${weapon.label} weaponKind=${weapon.kind} weaponDamage=${damage} ` +
     `health=${round2(body.health)} food=${body.food} regenerating=${body.regenerating} ` +
-    `activeMs=${evidence.activeMs} -> attack/keep-distance stay offered until the envelope is clear for ${evidence.clearMs}ms`
+    `activeMs=${evidence.activeMs} -> danger memory stays active until the envelope is clear for ${evidence.clearMs}ms; current CAN is grounded separately`
+  )
+}
+
+/**
+ * The conservative distance tracker sees a hostile, but current CAN proves every
+ * danger-radius hostile is behind occlusion with no melee route and there was no
+ * recent hit. Work may continue for THIS snapshot; the tracker is intentionally
+ * left active so LOS/path/contact becoming true re-arms survival immediately.
+ */
+export function formatThreatOccluded(
+  goalKey: string,
+  evidence: ThreatStateEvidence,
+  entityIds: readonly number[],
+): string {
+  const name = evidence.threatName ?? 'unknown'
+  const distance = evidence.threatDistance === null ? 'unknown' : `${round2(evidence.threatDistance)}m`
+  return (
+    `${THREAT_OCCLUDED} goal=${goalKey} threat=${name} ids=[${entityIds.join(',')}] distance=${distance} ` +
+    `los=${evidence.threatLineOfSight === null ? 'unknown' : evidence.threatLineOfSight} engaged=${evidence.threatEngaged} ` +
+    `reason=no_los_no_path -> threat memory stays active, but this snapshot does not suppress grounded goal work`
   )
 }
 
@@ -807,6 +828,14 @@ export interface DeathCauseInput {
   wornArmorCount: number
   /** age of the damage attribution at death, ms, or null when none */
   damageAgeMs: number | null
+  /**
+   * SAFE: the environmental cause the body was standing in at death (`fire` /
+   * `lava` / `drowning`), or null when it was in none. Used ONLY when
+   * Mineflayer attributed no attacker, so `killer=` names fire/lava/drowning
+   * with the same evidence the body's own hazard state carries - never as a
+   * guess over a real attribution.
+   */
+  envHazard?: string | null
 }
 
 /**
@@ -814,6 +843,13 @@ export interface DeathCauseInput {
  * one line that names the cause with evidence, or states explicitly that the
  * killer is unknown (`killer=unattributed`) instead of leaving a post-mortem to
  * infer it from `cause=damage`.
+ *
+ * Measured live (`run-mucaq28q-1ftq1`): the Nether deaths carried
+ * `killer=null killerId=null` while the body was burning/standing in lava -
+ * fire and lava have no attacking entity, so the entity-keyed attribution was
+ * empty. When the body's own environmental hazard state has a damage-dealing
+ * kind and no attacker was recorded, that hazard is the killer and
+ * `killerEvidence=environment` says so; a real attribution always wins.
  */
 export function formatDeathCause(input: DeathCauseInput): string {
   const hostiles = input.hostiles
@@ -821,11 +857,14 @@ export function formatDeathCause(input: DeathCauseInput): string {
     .slice(0, 4)
     .map((entity) => `${entity.name}:${Math.round(entity.distance)}m`)
     .join(',')
-  const killer = input.lastDamage?.sourceName ?? 'unattributed'
+  const environmental = input.lastDamage === null ? (input.envHazard ?? null) : null
+  const killer = input.lastDamage?.sourceName ?? environmental ?? 'unattributed'
+  const killerEvidence =
+    input.lastDamage?.sourceName != null ? 'mineflayer' : environmental !== null ? 'environment' : 'none'
   return (
     `${DEATH_CAUSE} dimension=${input.dimension} pos=${input.position.x},${input.position.y},${input.position.z} ` +
     `health=${round2(input.health)} food=${input.food} hostCause=${input.hostCause ?? 'unknown'} ` +
-    `killer=${killer} killerId=${input.lastDamage?.sourceId ?? 'none'} damageAgeMs=${input.damageAgeMs ?? 'none'} ` +
+    `killer=${killer} killerEvidence=${killerEvidence} killerId=${input.lastDamage?.sourceId ?? 'none'} damageAgeMs=${input.damageAgeMs ?? 'none'} ` +
     `threat=${input.threat?.threatName ?? 'none'} threatDistance=${input.threat?.threatDistance ?? 'none'} ` +
     `contact=${input.threat?.inContact ?? false} threatActiveMs=${input.threat?.activeMs ?? 0} ` +
     `weapon=${input.weapon.label} weaponDamage=${input.weapon.damage ?? 'unknown'} armor=${input.wornArmorCount}/4 ` +

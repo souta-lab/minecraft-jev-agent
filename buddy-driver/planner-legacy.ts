@@ -2596,6 +2596,68 @@ function emptyCache(identity: PlannerCacheIdentity): PlannerCacheFile {
  * capability/rung-set hash with the live state, so a world reset, a dimension
  * change or a changed option contract can never serve a stale plan.
  */
+/**
+ * The inputs the LLM actually SEES (compactState) that the original hash omitted -
+ * open issues #412/#413/#414. Without them the plan throttle can suppress a re-plan
+ * while the body/queue/failure situation has genuinely changed (`PLAN_THROTTLED
+ * reason=action_impossible ... because=no_new_info` was observed live for minutes
+ * while the run's typed route exhaustion, position and recent failures were all new),
+ * and a cache hit can replay a plan chosen under a different situation.
+ */
+export interface PlannerModelView {
+  position: { x: number; y: number; z: number } | null
+  health: number | null
+  food: number | null
+  toolRank: number
+  queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
+  wakeReason: string
+  wakeDetail: string
+  /** `compactState` sends the last five model-visible events as well; #412 lists them as an omitted input. */
+  recentEvents: string[]
+  recentOutcomes: string[]
+  horizon: string[]
+}
+
+/** The raw facts the view is built from (production passes the live bot/queue; fixtures pass the same constants). */
+export interface PlannerModelViewInput {
+  counts: Counts
+  world: ResidentWorldMemory
+  request: Pick<System2PlanRequest, 'objective' | 'reason' | 'detail' | 'recentEvents' | 'recentOutcomes' | 'goalQueueState'>
+  position: { x: number; y: number; z: number } | null
+  health: number | null
+  food: number | null
+}
+
+/**
+ * Build the view of the world the LLM is SHOWN (see `compactState`). Exported so the
+ * cache/throttle fixtures can key exactly as production does - if they seed with a
+ * different view the repeat-hit contract is untestable and, worse, the throttle could
+ * read `no_new_info` for a situation that actually changed.
+ */
+export function plannerModelView(input: PlannerModelViewInput): PlannerModelView {
+  return {
+    position: input.position,
+    health: input.health,
+    food: input.food,
+    toolRank: bestPickaxeRank(input.counts),
+    queue: {
+      depth: input.request.goalQueueState.depth,
+      done: input.request.goalQueueState.done,
+      current: input.request.goalQueueState.current?.description ?? null,
+      hasImpossible: input.request.goalQueueState.hasImpossible,
+    },
+    wakeReason: input.request.reason,
+    wakeDetail: input.request.detail.slice(0, 200),
+    recentEvents: input.request.recentEvents.slice(-5).map((event: string) => event),
+    recentOutcomes: input.request.recentOutcomes
+      .slice(-5)
+      .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`),
+    horizon: executableRungs()
+      .filter((rung) => !rung.satisfied(input.counts, input.world))
+      .map((rung) => rung.id),
+  }
+}
+
 export function plannerStateHash(
   counts: Counts,
   world: ResidentWorldMemory,
@@ -2603,6 +2665,7 @@ export function plannerStateHash(
   identity: PlannerCacheIdentity,
   portalFrameBlocks: number = 0,
   durable?: DurableLadderProgress | null,
+  modelView?: PlannerModelView | null,
 ): string {
   const stable: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) stable[name] = n
@@ -2618,6 +2681,9 @@ export function plannerStateHash(
     ores: [...world.discoveredOres].sort(),
     objective: objective.targetItem,
     objectiveHave: objective.haveCount,
+    // The body/queue/failure half of what the model sees. `undefined` (a caller that
+    // does not supply a view, e.g. an older fixture) is JSON-stable as an absent key.
+    view: modelView ?? undefined,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -3309,7 +3375,29 @@ export class PlannerBrain implements System2Brain {
   }
 
   private hashState(counts: Counts, request: System2PlanRequest): string {
-    return plannerStateHash(counts, this.world, request.objective, this.cacheIdentity, this.currentPortalFrameBlocks, this.durableLadderProgress)
+    // Mirror `compactState` field-for-field: the throttle and the plan cache must key on
+    // exactly what the model is shown, or a new situation reads as `no_new_info`.
+    const entity = this.bot.entity
+    const view = plannerModelView({
+      counts,
+      world: this.world,
+      request,
+      position:
+        entity === undefined
+          ? null
+          : { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) },
+      health: Number.isFinite(this.bot.health) ? Math.round(this.bot.health) : null,
+      food: Number.isFinite(this.bot.food) ? Math.round(this.bot.food) : null,
+    })
+    return plannerStateHash(
+      counts,
+      this.world,
+      request.objective,
+      this.cacheIdentity,
+      this.currentPortalFrameBlocks,
+      this.durableLadderProgress,
+      view,
+    )
   }
 
   private worldShort(): string {

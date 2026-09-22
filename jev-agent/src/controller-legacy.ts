@@ -24,10 +24,11 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -65,7 +66,7 @@ import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
-import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates } from './executor.ts'
+import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
 import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
@@ -75,8 +76,8 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
-import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -86,8 +87,8 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyStarving, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import type { AgentSignals, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -163,12 +164,18 @@ import {
   formatDescendRetired,
   formatRetrieveRetired,
   formatRetrieveRouteBlocked,
+  formatRouteSpent,
+  formatRouteStageFailed,
   isZeroProgressRouteKind,
   observeZeroProgressRoute,
+  routeFailureStage,
   routeSignature,
+  ROUTE_ALL_SPENT_REASON,
   ZERO_PROGRESS_STAND_ROUTE_LIMIT,
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
+import { formatDigRouteProgress, formatDigRouteRefused } from './digRoute.ts'
+import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
@@ -203,6 +210,14 @@ export type EscalationReason =
   | 'progress_stall'
   | 'unexpected_world_state'
   | 'all_candidates_invalid'
+  /**
+   * Every grounded route for the active goal's target is spent (`ROUTE_ESCALATE
+   * ... reason=all_routes_spent`) and no approach leg changes the stand cell.
+   * This is a STRUCTURAL capability boundary, not a local path/stall signal:
+   * code proved it can ground no route at all, so WHAT comes next belongs to
+   * System2. It is deliberately NOT in the facade's `LOCAL_POLICY_ESCALATIONS`.
+   */
+  | 'route_exhausted'
   | 'goal_complete'
   | 'unknown_event'
   | 'policy_error'
@@ -220,6 +235,7 @@ const ESCALATION_TO_SUMMON: Record<EscalationReason, LlmSummonReason> = {
   progress_stall: 'no_progress',
   unexpected_world_state: 'unknown_situation',
   all_candidates_invalid: 'action_impossible',
+  route_exhausted: 'action_impossible',
   goal_complete: 'queue_empty',
   unknown_event: 'unknown_situation',
   policy_error: 'unknown_situation',
@@ -863,6 +879,108 @@ export function filterKnownResources(
   return resources.filter((resource) => !unreachable.has(resourceKey(resource)))
 }
 
+/**
+ * `KNOWN_RESOURCE_FALSIFIED item=<item> name=<name> cell=<x,y,z> reason=<reason>`.
+ *
+ * A remembered cell the loaded world PROVED wrong: `block_mined` (the block is
+ * gone/replaced), `mob_gone` (the landmark stands but no producer is inside the
+ * entity envelope) or `drop_absent` (the cell was remembered as the item itself
+ * and nothing holds it). Typed truth, never a preference.
+ */
+export function formatKnownResourceFalsified(
+  item: string,
+  name: string,
+  cell: Vec3Json,
+  reason: KnownResourceFalsifiedReason,
+): string {
+  return `KNOWN_RESOURCE_FALSIFIED item=${item} name=${name} cell=${cell.x},${cell.y},${cell.z} reason=${reason}`
+}
+
+/** `KNOWN_RESOURCE_RESIGHTED item=<item> name=<name> cell=<x,y,z> source=mob|drop`. */
+export function formatKnownResourceResighted(
+  item: string,
+  name: string,
+  cell: Vec3Json,
+  source: 'mob' | 'drop',
+): string {
+  return `KNOWN_RESOURCE_RESIGHTED item=${item} name=${name} cell=${cell.x},${cell.y},${cell.z} source=${source}`
+}
+
+/**
+ * `KNOWN_RESOURCE_RETIRED item=<item> cell=<x,y,z> attempts=<n>`.
+ *
+ * The bounded-retire boundary (`decideKnownRetrieve`) dropped a remembered cell
+ * as unreachable after `attempts` zero-progress retrieves. The cell was PRESENT
+ * but this body could not close it: retirement is per-cell and unrelated to the
+ * falsification reasons above (a merely unreachable resource is not disproved).
+ */
+export function formatKnownResourceRetired(item: string, cell: Vec3Json, attempts: number): string {
+  return `KNOWN_RESOURCE_RETIRED item=${item} cell=${cell.x},${cell.y},${cell.z} attempts=${attempts}`
+}
+
+/** Dedupe state for remembered-cell verdict lines (one per generation). */
+export interface KnownResourceVerdictLatch {
+  /** `<item>:<name>@<cell>:<reason>` already reported */
+  falsified: Set<string>
+  /** `<item>:<name>@<cell>` re-sight already reported */
+  resighted: Set<string>
+}
+
+export type KnownResourceVerdict =
+  | { kind: 'none' }
+  | { kind: 'falsified'; reason: KnownResourceFalsifiedReason }
+  | { kind: 'resighted'; source: 'mob' | 'drop' }
+
+/**
+ * The report rule for one remembered-cell verdict, mutating the dedupe latch.
+ *
+ *   - `falsified` is reported once per (item, name, cell, reason);
+ *   - a cell the world verifies again RE-ARMS that report, so a second
+ *     contradiction of the same cell is reported - and durably evicted - again
+ *     instead of being swallowed by the once-per-cell latch;
+ *   - only a producer/drop re-sight that actually followed a withhold gets its
+ *     own line: a block being present is the ordinary case and would spam.
+ *
+ * Pure apart from the latch. No goal, action or ranking is involved.
+ */
+export function nextKnownResourceVerdict(
+  latch: KnownResourceVerdictLatch,
+  evidence: Pick<KnownResourceEvidence, 'item' | 'name' | 'position' | 'status' | 'reason' | 'source'>,
+): KnownResourceVerdict {
+  const base = `${evidence.item}:${evidence.name}@${evidence.position.x},${evidence.position.y},${evidence.position.z}`
+  if (evidence.status === 'falsified') {
+    const reason: KnownResourceFalsifiedReason = evidence.reason ?? 'block_mined'
+    const key = `${base}:${reason}`
+    if (latch.falsified.has(key)) return { kind: 'none' }
+    latch.falsified.add(key)
+    latch.resighted.delete(base)
+    return { kind: 'falsified', reason }
+  }
+  if (evidence.status !== 'present' && evidence.status !== 'replaced') return { kind: 'none' }
+  const withheld = [...latch.falsified].some((key) => key.startsWith(`${base}:`))
+  for (const key of [...latch.falsified]) {
+    if (key.startsWith(`${base}:`)) latch.falsified.delete(key)
+  }
+  if (evidence.source === undefined || !withheld || latch.resighted.has(base)) return { kind: 'none' }
+  latch.resighted.add(base)
+  return { kind: 'resighted', source: evidence.source }
+}
+
+function knownResourceVerdictDetail(
+  evidence: KnownResourceEvidence,
+  reason: KnownResourceFalsifiedReason | null,
+): Record<string, unknown> {
+  return {
+    item: evidence.item,
+    name: evidence.name,
+    cell: evidence.position,
+    observed: evidence.observed,
+    claim: evidence.claim,
+    ...(reason === null ? {} : { reason }),
+    ...(evidence.source === undefined ? {} : { source: evidence.source }),
+  }
+}
+
 /** Item names whose VERIFIED placement registers a usable smelt station. */
 export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
 
@@ -1031,6 +1149,24 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DESCENT_REFUSED',
   'DESCENT_CHUNK',
   'PORTAL_ENTRY_UNVERIFIED',
+  // The bounded direct walk into a non-solid portal cell: the live run needs
+  // both the measured motion (`PORTAL_WALK_IN ... transferred=`) and the typed
+  // pre-movement refusal, or its log cannot tell "walked in" from "never tried".
+  'PORTAL_WALK_IN',
+  'PORTAL_WALK_IN_REFUSED',
+  // The step-aside onto an open face of the portal: the detour must be visible
+  // in the run log, or "the body refused to step one block aside" cannot be
+  // told apart from "no leg was ever grounded".
+  'PORTAL_APPROACH_LEG',
+  'PORTAL_APPROACH_REFUSED',
+  // Issue #436: the Skill boundary and the reflex proof must both be live-visible,
+  // or a reviewer cannot tell "Jev chose the target" from "code finished it".
+  'SKILL_START',
+  'SKILL_STEP',
+  'SKILL_INTERRUPT',
+  'SKILL_END',
+  'REFLEX',
+  SKILL_POLICY_BOUNDARY,
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'PILLAR_FAIL',
@@ -1055,6 +1191,11 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'LOCAL_MOVE_OSCILLATION',
   'LOCAL_WAIT_RECOVERY',
   'KNOWN_RESOURCE_STALE',
+  'KNOWN_RESOURCE_FALSIFIED',
+  'KNOWN_RESOURCE_RESIGHTED',
+  'KNOWN_RESOURCE_RETIRED',
+  SKILL_END,
+  SKILL_INTERRUPT,
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
@@ -1080,6 +1221,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // than only a line in the executor log.
   'BODY_SUBMERGED',
   'LOW_AIR_PREEMPT',
+  // SAFE: the body's own environmental hazard (fire/lava/burning/drowning).
+  // Measured live (`run-mucaq28q-1ftq1`) the body burned to death in the Nether
+  // with ZERO lines naming fire, lava or burning, so these must be on the
+  // mirrored path a post-mortem reads. (`REFLEX` / `SKILL_INTERRUPT` are already
+  // above: one #436 vocabulary, owned by `netherPortalPlan.ts`.)
+  ENV_HAZARD,
+  ENV_HAZARD_NO_EXIT,
+  ENV_HAZARD_CLEAR,
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
@@ -1110,6 +1259,38 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
   ACTION_REJECTED,
+  // The route-family vocabulary is run-scoped evidence: a settled route stage
+  // failure, the exact route it spends, and a goal whose grounded routes are all
+  // spent. Measured live (run-muc620xb-1d312) the recorder DID write
+  // `ACTION_ZERO_PROGRESS ... kind=ENTER_PORTAL retry=1..20`, but the marker was
+  // not mirrored, so the resident log showed zero of them and the frozen route
+  // looked like a route that was never spent. Keep every existing route marker
+  // here too (`ACTION_ZERO_PROGRESS`, the retirements, the approach leg) so the
+  // next measurement reads the same facts the runtime acted on.
+  'ROUTE_STAGE_FAILED',
+  'ROUTE_SPENT',
+  'ROUTE_ESCALATE',
+  'ACTION_ZERO_PROGRESS',
+  'DESCEND_RETIRED',
+  'RETRIEVE_RETIRED',
+  'RETRIEVE_ROUTE_BLOCKED',
+  'APPROACH_LEG',
+  // The dig-route family: the target a travel/enter/retrieve goal could not walk
+  // to, the bounded terrain route the offer grounded toward it, the typed cause
+  // when even that could not be grounded, and the measured distance gain of a
+  // settled dig step. A body sealed in its own shaft produced none of these
+  // before (measured run-muc9k936-1f3vb: `presented=['WAIT','ESCALATE']` for
+  // minutes while the known gate sat 21 blocks away), so the whole route family
+  // must be observable run-scoped.
+  'DIG_ROUTE',
+  'DIG_ROUTE_REFUSED',
+  'DIG_ROUTE_PROGRESS',
+  // #436 reflex/continuation vocabulary: a bounded mechanical continuation that is
+  // the UNIQUE binding prerequisite of the active leg (`REFLEX
+  // reason=unique_binding_prerequisite`) and the mechanical step when it runs.
+  'REFLEX',
+  'SKILL_STEP',
+  'SKILL_POLICY_BOUNDARY',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -1663,6 +1844,11 @@ export class JevController {
   private readonly searchedSurfaceTargets = new Set<string>()
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
+  /** Report latch for `KNOWN_RESOURCE_FALSIFIED`/`KNOWN_RESOURCE_RESIGHTED` lines. */
+  private readonly knownResourceVerdicts: KnownResourceVerdictLatch = {
+    falsified: new Set<string>(),
+    resighted: new Set<string>(),
+  }
   /**
    * Consecutive zero-progress retrieves per remembered resource (`name@x,y,z`).
    * Retires a present-but-unreachable resource after KNOWN_RETRIEVE_RETIRE_LIMIT.
@@ -1742,6 +1928,14 @@ export class JevController {
   private exploreRouteBlockedThisTick: ExploreRouteBlocked | null = null
   /** last logged COLUMN_DESCENT_REFUSED signature, so one stalled column is one line. */
   private lastColumnDescentRefusalKey: string | null = null
+  /** last logged DIG_ROUTE_REFUSED signature, so one blocked terrain route is one line. */
+  private lastDigRouteRefusalKey: string | null = null
+  /** last logged REFLEX signature, so one unique binding continuation is one line. */
+  private lastLegReflexKey: string | null = null
+  /** last logged SKILL_POLICY_BOUNDARY signature, so one semantic boundary is one line. */
+  private lastSkillBoundaryKey: string | null = null
+  /** the current tick's typed dig-route refusals, fed into the starvation `missing` evidence. */
+  private digRouteRefusalsThisTick: DigRouteRefusal[] = []
   /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
   private columnDescentRefusalThisTick: ColumnDescentRefusal | null = null
   /** last logged PROSPECT_REFUSED signature, so one blocked en-route exposure is one line. */
@@ -1836,6 +2030,26 @@ export class JevController {
   /** Signature of the last `BODY_STARVING`/`CRITICAL_DAMAGE` line, so it logs on a change, not per tick. */
   private lastCriticalDamageLine: string | null = null
   /**
+   * SAFE: code-owned environmental-hazard evidence for the body's own cell (fire
+   * / lava / burning / drowning) plus the damage it attributes. Measured live
+   * (`run-mucaq28q-1ftq1`): the body burned to death in the Nether with every
+   * tick arriving as `source=null` and no marker in the whole run naming fire,
+   * lava or burning. The state itself is sensed in `state.ts`
+   * (`SelfState.envHazard`); this tracker only counts the damage that state
+   * explains and marks the moment the hazard ends.
+   */
+  private readonly envHazard = new EnvHazardTracker()
+  /** Signature of the last `ENV_HAZARD` line, so the state logs on a change. */
+  private lastEnvHazardLine: string | null = null
+  /** Signature of the last `ENV_HAZARD_NO_EXIT` line, so the gap logs on a change. */
+  private lastEnvHazardGapLine: string | null = null
+  /** Signature of the last `REFLEX` line, so a repeated reflex decision logs once. */
+  private lastReflexLine: string | null = null
+  /** Signature of the last `SKILL_POLICY_BOUNDARY` line (hazard boundaries). */
+  private lastEnvBoundaryLine: string | null = null
+  /** True when a fresh damage observation landed this tick (fed to `envHazard`). */
+  private damageObservedThisTick = false
+  /**
    * SAFE: the bounded danger STATE (see `threat.ts`). Enter on the threat
    * predicate, leave only after the whole envelope has been continuously clear
    * for `THREAT_CLEAR_MS`. The measured death loop was per-tick: a body that
@@ -1848,6 +2062,7 @@ export class JevController {
   private lastThreatLine: string | null = null
   /** Signature of the last `THREAT_NO_ESCAPE` line, so the gap logs on a change. */
   private lastThreatGapLine: string | null = null
+  private lastThreatOccludedLine: string | null = null
   /** Whether the danger state was active last tick, so the exit logs once. */
   private threatWasActive = false
   /** Signature of the last `FOOD_HABITAT_REFUSED` line, so it logs on a change. */
@@ -2280,6 +2495,11 @@ export class JevController {
       const lastDamage = state.signals.lastDamage ?? null
       const threat = state.signals.threat ?? null
       const at = state.self.position
+      // SAFE: fire/lava/burning have no attacking entity, so an unattributed
+      // death in one is attributed to the hazard the body's own sensed state
+      // names (measured live: `killer=null` while the body burned). A real
+      // Mineflayer attribution always wins inside `formatDeathCause`.
+      const environmentalKiller = this.envHazardAttribution()
       const line = formatDeathCause({
         dimension: state.self.dimension,
         position: at,
@@ -2299,13 +2519,16 @@ export class JevController {
           return piece !== null && piece !== undefined
         }).length,
         damageAgeMs: lastDamage === null ? null : Math.max(0, Math.round(state.timestampMs - lastDamage.atMs)),
+        envHazard: environmentalKiller,
       })
       this.logger.warn(
         'agent',
         line,
         {
           dimension: state.self.dimension,
-          killer: lastDamage?.sourceName ?? null,
+          killer: lastDamage?.sourceName ?? environmentalKiller,
+          killerEvidence:
+            lastDamage?.sourceName != null ? 'mineflayer' : environmentalKiller !== null ? 'environment' : 'none',
           killerId: lastDamage?.sourceId ?? null,
           threat: threat?.threatName ?? null,
           threatDistance: threat?.threatDistance ?? null,
@@ -2439,6 +2662,7 @@ export class JevController {
     this.tickLlmCalls = 0
     try {
       this.tickCounter += 1
+      this.damageObservedThisTick = false
       this.triggerCounts[trigger] = (this.triggerCounts[trigger] ?? 0) + 1
       if (CRITICAL_TRIGGERS.has(trigger)) this.criticalStateVersion += 1
       this.signals.maxConcurrentActions = this.executor.maxConcurrentActions
@@ -2510,6 +2734,7 @@ export class JevController {
           currentOption: this.currentOptionContext(),
           recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
+          retrievalItems: this.retrievalProbeItems(),
           recentEvents: this.recentEvents,
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
@@ -2520,6 +2745,10 @@ export class JevController {
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
+      // Section E: the state just contradicted the running skill's target claim,
+      // so stop it with a typed outcome BEFORE this tick's decision. Jev owns the
+      // replacement; code never substitutes one.
+      this.cancelContradictedSkillTarget(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
       this.lastStateFingerprint = this.stateFingerprint(state)
       // Retain the sensor facts the pure vertical-plan refusal needs (step cuts,
@@ -2544,6 +2773,11 @@ export class JevController {
       // the retreat grounding and the restriction all see the same state.
       this.observeThreatState(state)
       this.observeUnansweredRangedThreat(state)
+      // SAFE: the body's own environmental hazard (fire/lava/burning/drowning)
+      // is a sensor fact on THIS tick's state; mirror it, name the typed CAN gap
+      // when the world grounds no exit, and feed the tracker the damage
+      // observation so `source=null` can be attributed with evidence.
+      this.observeEnvHazard(state)
 
       const unreachableStations = this.unreachableStationKeys(state)
       const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
@@ -2565,11 +2799,15 @@ export class JevController {
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
+      this.noteRouteExhaustion(grounded.entryRefusal)
       this.logEntryUnverified(portalEntry)
       this.logArmorRefusal(grounded.armorRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
+      this.logDigRouteRefusals(grounded.digRefusals)
+      this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
+      this.logSkillPolicyBoundaries(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
@@ -2604,8 +2842,9 @@ export class JevController {
       // names the capability gap when code grounds no attack and no
       // keep-distance route, which is mirrored as `THREAT_NO_ESCAPE` - the work
       // set is never silently handed back while a hostile is on the body.
-      const threatOffer = applyThreatRestriction(state, candidates)
+      const threatOffer = applyGroundedThreatRestriction(state, candidates, grounded.withheld)
       candidates = threatOffer.candidates
+      this.logThreatOccluded(threatOffer)
       this.logThreatGap(state, threatOffer)
       candidates = restrictCandidatesAtCriticalHealth(state, candidates)
       // SAFE: while the body is out of breath the offer collapses to the routes
@@ -2619,6 +2858,12 @@ export class JevController {
       // offer). The controller-side half is `observeCriticalDamage`, which
       // proves exhaustion and wakes System2.
       candidates = restrictCandidatesDuringCriticalDamage(state, candidates)
+      // SAFE: while the body stands in fire/lava/burning, work that keeps it
+      // there is withheld and only the routes that can leave the hazard stay
+      // offered (the grounded escapes, RETREAT/DESCEND, self-care, ESCALATE).
+      // Drowning is excluded: `restrictCandidatesDuringSubmersion` above owns
+      // that question.
+      candidates = restrictCandidatesDuringEnvHazard(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -2725,6 +2970,18 @@ export class JevController {
         if (this.prospectRefusalThisTick !== null) {
           const prospectToken = `prospect:${this.prospectRefusalThisTick.reason}`
           if (!missing.includes(prospectToken)) missing.push(prospectToken)
+        }
+        // A travel/enter/retrieve target with no walkable route whose TERRAIN
+        // route was refused too is the same kind of capability gap: name the
+        // mechanical cause (hazard/unbreakable/no_support/open_floor/protected/
+        // no_tool/no_step/spent) in the starvation evidence, so a body sealed in
+        // its own shaft can never report `no_productive_action` with no terrain
+        // fact (measured run-muc9k936-1f3vb: `presented=2 productive=0
+        // missing=["MOVE:...:open_path", ...]` for minutes while the known gate
+        // sat 21 blocks away behind ordinary stone).
+        for (const refusal of this.digRouteRefusalsThisTick) {
+          const digToken = `dig_route:${refusal.reason}`
+          if (!missing.includes(digToken)) missing.push(digToken)
         }
         // The typed no-source fact rides the same starvation/escalation evidence
         // so a starvation line never says only `no_productive_action` when the
@@ -2848,15 +3105,31 @@ export class JevController {
       }
       this.breakFailureDeadlock(candidates)
 
-      // exception: the plan ran dry -> ask the LLM for the next horizon
-      if (this.queue.isEmpty) {
-        this.summonLlm('queue_empty', 'goal queue is empty; no long-horizon goal to consume')
-      }
-
       const planGoal: CausalGoalRef | null = state.goalQueue.current
       const causalStamp = makeCausalStamp({ chainId: makeChainId(), goal: planGoal })
 
-      const decision = await this.decide(state, candidates, trigger, causalStamp.chainId)
+      // SAFE (issue #436 section B): the hard-safety reflex. When the body is in
+      // an environmental hazard and exactly ONE route out is grounded, the
+      // decision is uniquely determined - deterministic code executes it without
+      // spending a model call, and it may interrupt the in-flight skill
+      // (SKILL_INTERRUPT). With two or more grounded routes the choice is Jev's
+      // WHICH and this returns null, leaving the ordinary offered candidates.
+      const reflex = envHazardReflexAction(state, candidates)
+      // Read unconditionally: the §17 policy boundary needs to know whether a
+      // Skill was in flight even when no reflex fires.
+      const inFlightAtReflex = this.inFlight()
+
+      // exception: the plan ran dry -> ask the LLM for the next horizon. A reflex
+      // tick is a hard-safety interruption, not a new horizon, so it must not
+      // summon the planner on its way out.
+      if (reflex === null && this.queue.isEmpty) {
+        this.summonLlm('queue_empty', 'goal queue is empty; no long-horizon goal to consume')
+      }
+
+      const decision =
+        reflex === null
+          ? await this.decide(state, candidates, trigger, causalStamp.chainId)
+          : this.reflexDecision(reflex.candidate)
       const semantic = this.semanticEscalation(decision)
       const needLlmAdopted = semantic.escalate
       if (needLlmAdopted) {
@@ -2866,10 +3139,18 @@ export class JevController {
       this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
-      const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
-      const heldId = this.applyActionCommitment(committedId, candidates, state)
+      // SAFE: a hard-safety reflex is never held behind a skill lease or a
+      // previous model decision - it exists to interrupt them. Both commitment
+      // layers and the danger gate are model-decision machinery, so a reflex tick
+      // passes them by; the guard below still validates the candidate
+      // mechanically.
+      const committedId = reflex === null ? this.applyCandidateCommitment(rawChosenId, candidates, state) : rawChosenId
+      const heldId = reflex === null ? this.applyActionCommitment(committedId, candidates, state) : committedId
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(heldId, dangerGate, candidates)
+      const gated =
+        reflex === null
+          ? this.applyDangerGate(heldId, dangerGate, candidates)
+          : { chosenId: heldId, overridden: false }
       // Re-groundable: a vanished survival action is replaced below by the SAME
       // action kind from the fresh offer (see the guard at the revalidation).
       let chosenId = gated.chosenId
@@ -2905,6 +3186,7 @@ export class JevController {
           currentOption: this.currentOptionContext(),
           recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
+          retrievalItems: this.retrievalProbeItems(),
           recentEvents: this.recentEvents,
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
@@ -2916,33 +3198,29 @@ export class JevController {
       // decision-time offer (contact range + the published bounded danger
       // state), so a work action cannot slip back in between the Jev answer and
       // execution while a hostile is on the body.
-      const freshCandidates = restrictCandidatesDuringCriticalDamage(
+      const freshGrounded = generateGroundedCandidates(
         freshState,
-        restrictCandidatesDuringSubmersion(
+        candidateOptions(
+          this.options,
+          this.recipeIndex,
+          this.unreachableStationKeys(freshState),
+          this.reachabilityGateOptions(),
+          this.blacklistedMoveTargets(freshState),
+          freshState.portalFrame,
+          this.searchedSurfaceTargets,
+          this.portalEntryPlan(freshState),
+          this.placementRetries.retiredItemSet(),
+        ),
+      )
+      const freshBeforeThreat = this.filterMoveCandidates(freshGrounded.candidates, freshState, false)
+      const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
+      const freshCandidates = restrictCandidatesDuringEnvHazard(
+        freshState,
+        restrictCandidatesDuringCriticalDamage(
           freshState,
-          restrictCandidatesAtCriticalHealth(
+          restrictCandidatesDuringSubmersion(
             freshState,
-            applyThreatRestriction(
-              freshState,
-              this.filterMoveCandidates(
-                generateGroundedCandidates(
-                  freshState,
-                  candidateOptions(
-                    this.options,
-                  this.recipeIndex,
-                  this.unreachableStationKeys(freshState),
-                  this.reachabilityGateOptions(),
-                  this.blacklistedMoveTargets(freshState),
-                  freshState.portalFrame,
-                  this.searchedSurfaceTargets,
-                  this.portalEntryPlan(freshState),
-                  this.placementRetries.retiredItemSet(),
-                ),
-              ).candidates,
-              freshState,
-              false,
-            ),
-            ).candidates,
+            restrictCandidatesAtCriticalHealth(freshState, freshThreatOffer.candidates),
           ),
         ),
       )
@@ -3045,6 +3323,30 @@ export class JevController {
       })
 
       if (!guarded.ok) {
+        // §8/§17: a reflex the mechanical guard REFUSED is a typed failure, never
+        // a silent no-op - the reviewer sees that code tried to stabilise and the
+        // guard stopped it, with the guard's own code as the failure reason.
+        if (reflex !== null) {
+          this.logger.warn(
+            'policy',
+            formatSkillStep(
+              inFlightAtReflex?.id ?? state.currentOption?.templateId ?? this.currentGoalKey(),
+              'env_hazard_stabilize',
+              formatSkillStepAuthority(
+                'HARD_SAFETY_REFLEX',
+                formatEnvHazardReflexEvidence(this.envHazard.evidence()),
+                'none',
+                { budget: 1, failure: `guard_${guarded.code}` },
+              ),
+            ),
+            { authority: 'HARD_SAFETY_REFLEX', action: reflex.candidate.id, failure: `guard_${guarded.code}` },
+            this.tickCounter,
+          )
+          // The decision returns to the semantic controller with the boundary
+          // recorded, so a refused stabilisation cannot silently replace the
+          // Skill either.
+          this.logEnvHazardBoundary(state, candidates, inFlightAtReflex)
+        }
         this.onGuardReject(
           guarded,
           decision,
@@ -3055,8 +3357,46 @@ export class JevController {
       }
 
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
+      // The reflex is logged only once the guard has accepted the candidate, so
+      // the line can never claim an action the mechanical checks refused.
+      if (reflex !== null) {
+        this.logReflex(
+          reflex,
+          state,
+          inFlightAtReflex,
+          envHazardEscapeRoutes(state, candidates)
+            .filter((route) => route.id !== reflex.candidate.id)
+            .map((route) => route.id),
+        )
+        this.lastEnvBoundaryLine = null
+      } else {
+        // §8/§17: code is NOT taking over. If a Skill is in flight inside this
+        // hazard, record the boundary and the grounded alternatives.
+        this.logEnvHazardBoundary(state, candidates, inFlightAtReflex)
+      }
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
+      if (guarded.candidate.meta.digRoute === true) {
+        this.logDigRoute(guarded.candidate)
+        // #436 section 17 layering: the dig route is a SEPARATE candidate of kind
+        // DESCEND (never a contract attached to a MOVE), so it is realized only
+        // after Jev selects it - a MECHANICAL_CONTINUATION of the chosen route,
+        // never the walk silently gaining dig authority.
+        this.logger.info(
+          'agent',
+          formatSkillStep(
+            typeof guarded.candidate.meta.digRouteSkill === 'string' ? guarded.candidate.meta.digRouteSkill : 'DIG_ROUTE(approach)',
+            'dig_route',
+            formatSkillStepAuthority(
+              'MECHANICAL_CONTINUATION',
+              `target=${String(guarded.candidate.meta.digRouteTarget ?? 'unknown')} cell=${String(guarded.candidate.meta.digRouteCell ?? 'unknown')} kind=${String(guarded.candidate.meta.digRouteKind ?? 'unknown')}`,
+            ),
+          ),
+          { actionId: guarded.candidate.id },
+          this.tickCounter,
+        )
+      }
+      if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -4370,6 +4710,10 @@ export class JevController {
         }
       }
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
+      // The dig route's own progress assertion: the step CLAIMED it lands closer
+      // to the goal's target, so a settled step re-measures the distance. Only a
+      // real decrease is reported.
+      if (candidate.meta.digRoute === true) this.logDigRouteProgress(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
         // Only a COMPLETED retrieval - the target actually arrived or the item
@@ -4695,6 +5039,181 @@ export class JevController {
       },
       this.tickCounter,
     )
+  }
+
+  /**
+   * The #436 `SKILL_POLICY_BOUNDARY skill=<id> reason=<reason> alternatives=[...]`
+   * facts: where the offer grounded several NON-EQUIVALENT remedies and code
+   * therefore stopped instead of ranking them (section 7 U3 / section 19 (8, 28) /
+   * section 22). Deduped like the other typed facts, and logged for WITHHELD
+   * candidates too, so the boundary is visible on the tick it exists.
+   */
+  private logSkillPolicyBoundaries(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta.legPolicyBoundary
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastSkillBoundaryKey) return
+    this.lastSkillBoundaryKey = key
+    if (key === null) return
+    for (const line of lines) this.logger.warn('agent', line, { line }, this.tickCounter)
+  }
+
+  /**
+   * The #436 `REFLEX ownerSkill=<skill> reason=unique_binding_prerequisite
+   * action=<step_up|step_over> cell=... via=... ledge=... evidence=...` facts: the
+   * bounded mechanical continuation that is the UNIQUE way the active leg can
+   * reach its waypoint from here (see `candidates.ts#pocketContinuations`).
+   * Deduped like the other typed dead-end facts, and logged for the WITHHELD
+   * candidates too, so "the only way out is this step" is visible in the resident
+   * log even while Jev is still choosing (measured run-mucbyro1-1hqhm: the body
+   * was stuck on a stuck MOVE with an empty contract and no such fact at all).
+   */
+  private logLegReflexes(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta.legReflex
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastLegReflexKey) return
+    this.lastLegReflexKey = key
+    if (key === null) return
+    for (const line of lines) {
+      this.logger.info('agent', line, { line }, this.tickCounter)
+    }
+  }
+
+  /**
+   * The mechanical continuation Jev selected (`SKILL_STEP action=... cell=...
+   * via=... ledge=... vertical=staircase-up`). Logged when the action is taken, so
+   * the marker means "the body is now running this step", not "a step existed";
+   * the ordinary MOVE/PATH/VERIFIED markers then report its outcome unchanged.
+   */
+  private logSkillStep(candidate: Candidate): void {
+    const line = typeof candidate.meta.legContinuationLine === 'string' ? candidate.meta.legContinuationLine : null
+    this.logger.info(
+      'agent',
+      line ??
+        `SKILL_STEP action=${String(candidate.meta.legContinuationAction ?? 'step_up')} cell=${String(candidate.meta.legContinuationCell ?? 'unknown')} vertical=${String(candidate.meta.vertical ?? 'none')}`,
+      {
+        actionId: candidate.id,
+        skill: typeof candidate.meta.legContinuationSkill === 'string' ? candidate.meta.legContinuationSkill : null,
+        action: typeof candidate.meta.legContinuationAction === 'string' ? candidate.meta.legContinuationAction : null,
+        cell: typeof candidate.meta.legContinuationCell === 'string' ? candidate.meta.legContinuationCell : null,
+        via: typeof candidate.meta.legContinuationVia === 'string' ? candidate.meta.legContinuationVia : null,
+        ledge: typeof candidate.meta.legContinuationLedge === 'string' ? candidate.meta.legContinuationLedge : null,
+        vertical: typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : null,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The selected DIG route: the travel/enter/retrieve target had no walkable
+   * route, so the offer grounded a bounded dig step toward it. Logged when Jev
+   * actually selects it, so the marker means "this body is now digging the route",
+   * not "a route was enumerated". The `from_d`/`to_d` pair is the mechanical
+   * claim the route makes (the step lands strictly closer to the target), and the
+   * settled action re-measures it in `DIG_ROUTE_PROGRESS`.
+   */
+  private logDigRoute(candidate: Candidate): void {
+    const line = typeof candidate.meta.digRouteLine === 'string' ? candidate.meta.digRouteLine : null
+    this.logger.info(
+      'agent',
+      line ?? `DIG_ROUTE reason=${String(candidate.meta.digRouteReason ?? 'no_walkable_route')} actionId=${candidate.id}`,
+      {
+        actionId: candidate.id,
+        target: typeof candidate.meta.digRouteTarget === 'string' ? candidate.meta.digRouteTarget : null,
+        bearing: typeof candidate.meta.digRouteBearing === 'string' ? candidate.meta.digRouteBearing : null,
+        cell: typeof candidate.meta.digRouteCell === 'string' ? candidate.meta.digRouteCell : null,
+        block: typeof candidate.meta.digRouteBlock === 'string' ? candidate.meta.digRouteBlock : null,
+        kind: typeof candidate.meta.digRouteKind === 'string' ? candidate.meta.digRouteKind : null,
+        fromD: typeof candidate.meta.digRouteFrom === 'number' ? candidate.meta.digRouteFrom : null,
+        toD: typeof candidate.meta.digRouteTo === 'number' ? candidate.meta.digRouteTo : null,
+        detour: candidate.meta.digRouteDetour === true,
+        skipped: typeof candidate.meta.digRouteSkipped === 'string' ? candidate.meta.digRouteSkipped : null,
+        skippedBlock:
+          typeof candidate.meta.digRouteSkippedBlock === 'string' ? candidate.meta.digRouteSkippedBlock : null,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The settled dig route measured against the world: `from_d` is what the route
+   * claimed when it was offered and `to_d` the live distance now. Emitted only
+   * when the distance actually shrank, so "the distance strictly decreases as the
+   * body advances" is a measured fact per action instead of an assumption.
+   */
+  private logDigRouteProgress(result: ExecutionResult, candidate: Candidate): void {
+    const fromD = typeof candidate.meta.digRouteFrom === 'number' ? candidate.meta.digRouteFrom : null
+    const targetText = typeof candidate.meta.digRouteTarget === 'string' ? candidate.meta.digRouteTarget : null
+    if (fromD === null || targetText === null) return
+    const parts = targetText.split(',').map((value) => Number(value))
+    const [x, y, z] = parts
+    if (x === undefined || y === undefined || z === undefined) return
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return
+    const target = { x, y, z }
+    // Measured on the SAME basis the offer used (the floored feet cell), so a
+    // body that dug and did not change its cell can never be reported as having
+    // advanced: a fractional position 0.5 blocks into the old cell must not read
+    // as a distance gain.
+    const feet = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    }
+    const toD = Math.round(distance(feet, target) * 100) / 100
+    if (!(toD < fromD)) return
+    this.logger.info(
+      'agent',
+      formatDigRouteProgress(fromD, toD, target, feet),
+      {
+        actionId: result.actionId,
+        kind: result.kind,
+        status: result.status,
+        fromD,
+        toD,
+        target,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The typed `DIG_ROUTE_REFUSED` facts for this tick's travel/enter/retrieve
+   * targets that could be neither walked to nor dug toward. Deduped like the
+   * column-descent refusal (one line per distinct cause), so the dead end is
+   * stated (hazard / unbreakable / no support / open floor / protected / no tool /
+   * no step / spent) instead of the offer silently collapsing to WAIT + ESCALATE.
+   */
+  private logDigRouteRefusals(refusals: readonly DigRouteRefusal[]): void {
+    this.digRouteRefusalsThisTick = refusals.map((refusal) => ({ ...refusal }))
+    const lines = refusals.map((refusal) => formatDigRouteRefused(refusal))
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastDigRouteRefusalKey) return
+    this.lastDigRouteRefusalKey = key
+    if (key === null) return
+    for (let index = 0; index < refusals.length; index += 1) {
+      const refusal = refusals[index]
+      if (refusal === undefined) continue
+      this.logger.warn(
+        'agent',
+        lines[index] ?? formatDigRouteRefused(refusal),
+        {
+          reason: refusal.reason,
+          target: refusal.target,
+          bearing: refusal.bearing,
+          cell: refusal.cell,
+          block: refusal.block,
+          detail: refusal.detail,
+        },
+        this.tickCounter,
+      )
+    }
   }
 
   private logDescendPlan(candidate: Candidate): void {
@@ -5314,6 +5833,21 @@ export class JevController {
     this.lastEntryRefusalKey = key
     if (refusal === null) return
     this.logger.warn('agent', refusal.line, { reason: refusal.reason }, this.tickCounter)
+  }
+
+  /**
+   * A route arm that reports `all_routes_spent` has proved a STRUCTURAL
+   * capability boundary: every route it can ground from this body cell to the
+   * goal's target is spent, and no grounded approach leg changes the stand cell.
+   * That is exactly the WHAT-next boundary System2 owns, so it goes through the
+   * ordinary bounded escalation (`escalationCooldownMs` / `escalationWindowMs`
+   * and the `ESCALATION_TO_SUMMON` mapping) instead of re-offering the dead
+   * route. Code still owns the fact (CAN/TRUE); Jev still chooses WHICH among
+   * the remaining grounded offers; System2 owns WHAT comes next.
+   */
+  private noteRouteExhaustion(refusal: PortalEntryRefusal | null): void {
+    if (refusal === null || refusal.reason !== ROUTE_ALL_SPENT_REASON) return
+    this.escalate('route_exhausted', refusal.line)
   }
 
   private effectiveHave(): number {
@@ -6395,6 +6929,29 @@ export class JevController {
     )
   }
 
+  /** Current CAN says the conservative proximity threat is occluded/unreachable. */
+  private logThreatOccluded(offer: ThreatOffer): void {
+    if (offer.occluded === null || offer.threat === null) {
+      this.lastThreatOccludedLine = null
+      return
+    }
+    const line = formatThreatOccluded(this.currentGoalKey(), offer.threat, offer.occluded.entityIds)
+    if (line === this.lastThreatOccludedLine) return
+    this.lastThreatOccludedLine = line
+    this.logger.info(
+      'agent',
+      line,
+      {
+        marker: THREAT_OCCLUDED,
+        threat: offer.threat.threatName,
+        ids: offer.occluded.entityIds,
+        distance: offer.threat.threatDistance,
+        reason: offer.occluded.reason,
+      },
+      this.tickCounter,
+    )
+  }
+
   /**
    * Mirror the code-owned threat capability gap: the body is under threat and
    * the deterministic layer could ground neither an attack nor a keep-distance
@@ -6457,12 +7014,27 @@ export class JevController {
       // non-damage tick that did so would erase the step before it is counted.
       const previousHealth = this.lastObservedHealth
       if (Number.isFinite(health)) this.lastObservedHealth = health
+      // The environmental-hazard tracker counts the SAME observation. A real
+      // negative health step is damage; a `damage_taken` event with no comparable
+      // step (a respawn/hot-reload boundary) is still a hit.
+      if (
+        (typeof previousHealth === 'number' && Number.isFinite(previousHealth) && health < previousHealth) ||
+        (trigger === 'damage_taken' && !(typeof previousHealth === 'number' && Number.isFinite(previousHealth)))
+      ) {
+        this.damageObservedThisTick = true
+      }
       this.criticalDamage.note({
         health,
         previousHealth,
         planKey,
         food,
-        sourceName: this.signals.lastDamage?.sourceName ?? null,
+        // SAFE: Mineflayer's attribution wins; when there is none and the body's
+        // own hazard state names a damage-dealing environmental cause, that cause
+        // is the honest source (`source=fire` instead of the measured
+        // `source=environment` while burning). `envHazardDamageSource` refuses to
+        // attribute damage to a hazard that cannot deal it (`adjacent_lava`
+        // alone).
+        sourceName: this.signals.lastDamage?.sourceName ?? this.envHazardAttribution(),
       })
     }
     // SAFE: the critical STARVING state is a durable sensor fact, not an event.
@@ -6525,6 +7097,269 @@ export class JevController {
       'progress_stall',
       `CRITICAL_DAMAGE_EXHAUSTED goal=${goalKey} health=${evidence.health} food=${evidence.food ?? 'unknown'} damage=${evidence.consecutiveDamage}/${evidence.limit} source=${evidence.sourceName ?? 'environment'}`,
     )
+  }
+
+  /**
+   * SAFE (issue #436 §8/§17): the hard-safety reflex telemetry.
+   *
+   * Three lines, all emitted only after the guard accepted the candidate so a
+   * line can never claim an action the mechanical checks refused:
+   *
+   *   SKILL_STEP ... authority=HARD_SAFETY_REFLEX budget=1
+   *     the §17 layer: this step was an immediate safety stabilisation, not a
+   *     mechanical continuation of the selected Skill;
+   *   REFLEX ownerSkill=<the interrupted skill> reason=hard_safety action=<what>
+   *     evidence=<the block/flag that proved it>
+   *     the §8 proof: code was allowed to finish exactly this action;
+   *   SKILL_INTERRUPT + SKILL_POLICY_BOUNDARY skill=... reason=hard_safety_interrupt
+   *     alternatives=[...]
+   *     the boundary: the in-flight Skill was preempted and the decision returns
+   *     to the semantic controller with the other grounded routes exposed.
+   *
+   * The REFLEX line is de-duplicated by its own facts so a persistent hazard
+   * does not re-log every tick.
+   */
+  private logReflex(
+    reflex: EnvHazardReflex,
+    state: WorldState,
+    inFlight: InFlightAction | null,
+    alternatives: readonly string[],
+  ): void {
+    const interruptReason: SkillPolicyBoundaryReason = 'hard_safety_interrupt'
+    const evidence = formatEnvHazardReflexEvidence(this.envHazard.evidence())
+    const ownerSkill = inFlight?.id ?? state.currentOption?.templateId ?? this.currentGoalKey()
+    const line = formatReflex({
+      ownerSkill,
+      reason: 'hard_safety',
+      action: reflex.candidate.id,
+      evidence,
+    })
+    if (line !== this.lastReflexLine) {
+      this.lastReflexLine = line
+      this.logger.warn(
+        'policy',
+        line,
+        {
+          ownerSkill,
+          reason: 'hard_safety',
+          action: reflex.candidate.id,
+          kind: reflex.kind,
+          escapeKind: reflex.escapeKind,
+          evidence,
+          goal: this.currentGoalKey(),
+        },
+        this.tickCounter,
+      )
+    }
+    this.logger.warn(
+      'policy',
+      formatSkillStep(
+        ownerSkill,
+        'env_hazard_stabilize',
+        formatSkillStepAuthority('HARD_SAFETY_REFLEX', evidence, 'stabilize_one_step', { budget: 1 }),
+      ),
+      {
+        ownerSkill,
+        authority: 'HARD_SAFETY_REFLEX',
+        stepKind: 'env_hazard_stabilize',
+        budget: 1,
+        action: reflex.candidate.id,
+        kind: reflex.kind,
+        target: reflex.candidate.target,
+      },
+      this.tickCounter,
+    )
+    if (inFlight === null) return
+    this.logger.warn(
+      'policy',
+      `${formatSkillInterrupt(inFlight.id, reflex.kind)} -> kind=${inFlight.kind} reflex=${reflex.candidate.id}`,
+      {
+        reason: reflex.kind,
+        interrupted: inFlight.id,
+        interruptedKind: inFlight.kind,
+        reflex: reflex.candidate.id,
+      },
+      this.tickCounter,
+    )
+    // §8: the reflex may preempt, but the decision then returns to the semantic
+    // controller - which the boundary line records with the remaining grounded
+    // routes exposed.
+    this.logger.warn(
+      'policy',
+      formatSkillPolicyBoundary({
+        skill: inFlight.id,
+        reason: interruptReason,
+        alternatives,
+      }),
+      { skill: inFlight.id, reason: 'hard_safety_interrupt', alternatives, authority: 'HARD_SAFETY_REFLEX' },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * SAFE (issue #436 §8/§17): the boundary where code must NOT take over.
+   *
+   * The body is in an environmental hazard with an in-flight Skill, and the exit
+   * is not a unique immediate stabilisation - either several grounded routes
+   * exist (Jev's WHICH) or none does (the typed `ENV_HAZARD_NO_EXIT` gap). This
+   * line names that boundary and exposes the grounded alternatives so a reviewer
+   * can see that code returned the decision instead of picking a destination.
+   */
+  private logEnvHazardBoundary(
+    state: WorldState,
+    candidates: readonly Candidate[],
+    inFlight: InFlightAction | null,
+  ): void {
+    const hazard = state.self.envHazard ?? null
+    if (hazard?.active !== true || hazard.escapeRequired !== true || inFlight === null) return
+    const routes = envHazardEscapeRoutes(state, candidates)
+    const reason: SkillPolicyBoundaryReason =
+      routes.length === 0 ? 'no_grounded_escape' : 'multiple_grounded_escapes'
+    const line = formatSkillPolicyBoundary({
+      skill: inFlight.id,
+      reason,
+      alternatives: routes.map((route) => route.id),
+    })
+    if (line === this.lastEnvBoundaryLine) return
+    this.lastEnvBoundaryLine = line
+    this.logger.warn(
+      'policy',
+      line,
+      {
+        skill: inFlight.id,
+        reason,
+        alternatives: routes.map((route) => route.id),
+        kind: hazard.kinds.join('+'),
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The synthetic decision a hard-safety reflex carries: the SAME downstream
+   * pipeline (decision record, guard, executor claim) with an explicit
+   * provenance that is neither Jev nor the deterministic fallback, and NO model
+   * call. `answers.action` is the one authoritative choice the executor reads.
+   */
+  private reflexDecision(candidate: Candidate): JevResult {
+    return {
+      callId: `reflex:${randomUUID()}`,
+      policy: 'reflex',
+      source: 'reflex',
+      model: 'hard_safety_reflex',
+      latencyMs: 0,
+      usage: null,
+      answers: {
+        action: {
+          name: 'action',
+          type: 'choice',
+          value: candidate.id,
+          probability: 1,
+          confidence: 1,
+          probabilities: null,
+          legend: null,
+          note: 'uniquely-determined hard-safety reflex (issue #436 section B)',
+        },
+      },
+    }
+  }
+
+  /**
+   * SAFE: the environmental cause an UNATTRIBUTED damage event is attributed to,
+   * or null when the body is in no damage-dealing hazard.
+   *
+   * Reads the tracker's last observation, which is one decision old by
+   * construction: `observeCriticalDamage` runs before the sensor build, and the
+   * hazard state is part of that build. A hazard the body is standing in persists
+   * across decisions, so the attribution names the cause that is actually
+   * dealing the damage; `envHazardDamageSource` still refuses to attribute to a
+   * hazard that cannot deal damage (`adjacent_lava` alone).
+   */
+  private envHazardAttribution(): string | null {
+    const evidence = this.envHazard.evidence()
+    if (!evidence.active) return null
+    return envHazardDamageSource(evidence.kinds)
+  }
+
+  /**
+   * SAFE: the body's own environmental-hazard telemetry (fire / lava / burning /
+   * drowning).
+   *
+   * Measured live (`run-mucaq28q-1ftq1`, main 99f0020): the body burned to death
+   * in the Nether, every tick arrived as `source=environment`, and a scan of the
+   * whole run found FIRE 0 | LAVA 0 | HAZARD_FIRE 0 | IN_FIRE 0 | BURN 0 - the
+   * system had NO state for it. This mirrors the sensed fact as `ENV_HAZARD`
+   * (with the exits the world actually grounds), the typed CAN gap
+   * `ENV_HAZARD_NO_EXIT` when it grounds none, and `ENV_HAZARD_CLEAR` when the
+   * body gets out. It never invents a route and never ranks one: the exits are
+   * ordinary candidates and the choice among them stays Jev's
+   * (`envHazardReflexAction` fires only when exactly one is grounded).
+   */
+  private observeEnvHazard(state: WorldState): void {
+    const hazard = state.self.envHazard ?? null
+    const evidence = this.envHazard.note({
+      atMs: state.timestampMs,
+      hazard,
+      damageObserved: this.damageObservedThisTick,
+    })
+    this.damageObservedThisTick = false
+    const goalKey = this.currentGoalKey()
+    if (evidence.active) {
+      const escapes = envHazardEscapeSpots(state, this.blacklistedMoveTargets(state))
+      const line = formatEnvHazard(goalKey, evidence, escapes)
+      if (line !== this.lastEnvHazardLine) {
+        this.lastEnvHazardLine = line
+        this.logger.warn(
+          'agent',
+          line,
+          {
+            kind: evidence.kinds.join('+'),
+            cell: evidence.cell,
+            block: evidence.block,
+            damage: evidence.damage,
+            activeMs: evidence.activeMs,
+            onFire: evidence.onFire,
+            headWet: evidence.headInWater,
+            airAbove: evidence.airAbove,
+            exits: escapes.length,
+            waterExit: escapes.some((escape) => escape.water),
+          },
+          this.tickCounter,
+        )
+      }
+      if (evidence.escapeRequired && escapes.length === 0) {
+        const gap = formatEnvHazardNoExit(goalKey, evidence, state.envHazardCells?.length ?? 0)
+        if (gap !== this.lastEnvHazardGapLine) {
+          this.lastEnvHazardGapLine = gap
+          this.logger.warn(
+            'agent',
+            gap,
+            { kind: evidence.kinds.join('+'), cell: evidence.cell, reason: 'no_safe_adjacent_cell' },
+            this.tickCounter,
+          )
+        }
+      } else {
+        this.lastEnvHazardGapLine = null
+      }
+      return
+    }
+    this.lastEnvHazardLine = null
+    this.lastEnvHazardGapLine = null
+    const cleared = this.envHazard.takeCleared()
+    if (cleared !== null) {
+      this.logger.info(
+        'agent',
+        formatEnvHazardClear(cleared),
+        {
+          lastKind: cleared.kinds.join('+'),
+          lastCell: cleared.cell,
+          lastBlock: cleared.block,
+          damage: cleared.damage,
+          activeMs: cleared.activeMs,
+        },
+        this.tickCounter,
+      )
+    }
   }
 
   /**
@@ -6900,6 +7735,19 @@ export class JevController {
     }
     this.knownRetrieveFailures.set(key, decision.attempts)
     if (decision.kind === 'charge') return
+    // The retire boundary is about reachability, not truth: the cell was never
+    // disproved, so it is dropped (bounded) rather than falsified. The typed
+    // marker keeps the two apart in the run log.
+    this.logger.warn(
+      'agent',
+      formatKnownResourceRetired(
+        typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
+        candidate.target,
+        decision.attempts,
+      ),
+      { item: candidate.meta.resource ?? knownName, cell: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
+      this.tickCounter,
+    )
     this.dropUnreachableResource(
       {
         resource: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
@@ -6919,20 +7767,34 @@ export class JevController {
    *
    *   - a completed action clears the zero-progress memory at its stand cell
    *     (and for its target), so a transient blockage is never permanent;
-   *   - a zero-observable-change action is recorded as the exact route
-   *     (kind, target, stand cell, route signature) that just proved nothing.
-   *     The candidate layer withholds that exact repeat, so the next attempt for
-   *     the target must differ in a grounded way (a different vertical plan, a
-   *     different stand cell, or a travel/approach leg);
+   *   - a route candidate that settled FAILED at any executor stage - the path
+   *     stage (`PATH_CALLBACK phase=failed outcome=noPath|stuck`) included - is
+   *     recorded as the exact route (kind, target, stand cell, route signature)
+   *     that just proved it cannot complete, even when the lease also produced
+   *     lenient body progress. The candidate layer withholds that exact repeat,
+   *     so the next attempt for the target must differ in a grounded way (a
+   *     different vertical plan, a different stand cell, or a travel/approach
+   *     leg);
    *   - `ZERO_PROGRESS_STAND_ROUTE_LIMIT` distinct zero-progress routes at one
    *     stand cell exhaust that family there (`DESCEND_RETIRED`), which forces a
    *     route change instead of sampling new cells from the same blocked body
-   *     position.
+   *     position;
+   *   - every route fact is mirrored as the typed `ROUTE_STAGE_FAILED` /
+   *     `ROUTE_SPENT` marker, and a route arm that can ground no alternative at
+   *     all reports `ROUTE_ESCALATE ... reason=all_routes_spent` (see
+   *     `noteRouteExhaustion`), so the resident log can never again show an
+   *     unchanged failing route being re-offered with no typed cause.
    *
    * Live evidence (run-muc3qbug-18vg3): 82 zero-observable chains in ten minutes,
    * 75 of them `DESCEND:down:<dir>:b...` steps whose dig removed nothing
    * (`outcome=noPath|stuck`), each with a fresh candidate id but the SAME body
    * cell - a per-id failure memory can never see that as one failure.
+   *
+   * Live evidence (run-muc620xb-1d312): the route memory DID record
+   * `ACTION_ZERO_PROGRESS ... kind=ENTER_PORTAL retry=1..20 stand=10,54,25` with
+   * an UNCHANGED signature, but nothing consumed it for the entry arm, so
+   * `ENTER:26,67,9` was re-offered 669 times. The typed markers above make the
+   * next measurement of this shape unambiguous.
    */
   private recordZeroProgressOutcome(
     result: ExecutionResult,
@@ -6955,7 +7817,17 @@ export class JevController {
       return
     }
     if (candidate.target === null) return
-    if (!isZeroProgressOutcome(result)) return
+    // A route candidate that settled FAILED at an executor stage is a spent
+    // route for its exact identity even when the lenient body-progress signal
+    // rode along with it: `PATH_CALLBACK phase=failed outcome=noPath|stuck`
+    // settles `failed`, but a lease that also nudged the body carries
+    // `progressed=true`, and that must not make the same route re-offerable from
+    // the same stand cell. A body that really moved stands in a different cell,
+    // which is a different identity and a fresh attempt.
+    const stage = result.status === 'failed' ? routeFailureStage(result.failure) : null
+    if (stage === null) {
+      if (!isZeroProgressOutcome(result)) return
+    }
     const decision = observeZeroProgressRoute(this.zeroProgressRoutes, {
       kind: result.kind,
       targetKey: cellKey(candidate.target),
@@ -6966,6 +7838,36 @@ export class JevController {
     })
     this.zeroProgressRoutes = decision.routes
     this.signals.zeroProgressRoutes = decision.routes
+    if (stage !== null) {
+      // The typed stage fact: WHERE the route broke, so a path-stage failure is
+      // never again only a `PATH_CALLBACK` line with an unchanged offer.
+      this.logger.warn(
+        'agent',
+        formatRouteStageFailed({
+          kind: result.kind,
+          target: candidate.target,
+          stand,
+          stage,
+          failure: result.failure,
+        }),
+        { actionId: result.actionId, kind: result.kind, target: candidate.target, stand, stage, failure: result.failure },
+        this.tickCounter,
+      )
+    }
+    if (decision.routeSpentNow) {
+      this.logger.warn(
+        'agent',
+        formatRouteSpent(result.kind, candidate.target, decision.attempts),
+        {
+          actionId: result.actionId,
+          kind: result.kind,
+          target: candidate.target,
+          attempts: decision.attempts,
+          routeSig: decision.entry.routeSig,
+        },
+        this.tickCounter,
+      )
+    }
     this.logger.warn(
       'agent',
       formatActionZeroProgress({
@@ -7339,6 +8241,22 @@ export class JevController {
   }
 
   /**
+   * Every want item this tick's retrieval machinery can route to: the active
+   * focus plus the queued want the explicit descent proxy exposes. The sensor
+   * verifies remembered cells for all of them (`SensorInput.retrievalItems`),
+   * because `retrievalNeeds` offers the proxied row's `RETRIEVE:known` from the
+   * same memory - verifying only the focus left that cell unproven forever.
+   */
+  private retrievalProbeItems(): string[] {
+    const out: string[] = []
+    const focus = currentFocusItem(this.goal, this.queue.state)
+    if (focus !== null) out.push(focus)
+    const proxy = queuedRetrievalProxyItem(this.queue.state)
+    if (proxy !== null && !out.includes(proxy)) out.push(proxy)
+    return out
+  }
+
+  /**
    * M2 blocker: remembered stations whose grounded retrieve the move-failure
    * memory has blacklisted (`MOVE_TARGET_SKIPPED`) or the reachability gate has
    * withheld (`CANDIDATE_WITHHELD`) are handed to the pure prerequisite planner
@@ -7642,6 +8560,115 @@ export class JevController {
         this.tickCounter,
       )
     }
+    this.logKnownResourceVerdicts(state)
+  }
+
+  /**
+   * The typed VERDICT for every remembered cell the sensor proved or disproved
+   * this tick (`state.knownResourceEvidence`), so a stale memory is observable in
+   * the run log instead of only its silent withholding.
+   *
+   *   - `KNOWN_RESOURCE_FALSIFIED ... reason=block_mined|mob_gone|drop_absent`:
+   *     the loaded world contradicts the memory. Logged once per (cell, item,
+   *     reason); a cell that is re-sighted re-arms it, so a second absence is a
+   *     second marker;
+   *   - `KNOWN_RESOURCE_RESIGHTED ... source=mob|drop`: a producer/drop cell the
+   *     memory still asserts has live evidence again, which is exactly when its
+   *     `RETRIEVE:known` route is offered again.
+   *
+   * This is enumeration of world truth: no goal, action or ranking is decided.
+   */
+  private logKnownResourceVerdicts(state: WorldState): void {
+    for (const evidence of state.knownResourceEvidence ?? []) {
+      const verdict = nextKnownResourceVerdict(this.knownResourceVerdicts, evidence)
+      if (verdict.kind === 'falsified') {
+        this.logger.warn(
+          'agent',
+          formatKnownResourceFalsified(evidence.item, evidence.name, evidence.position, verdict.reason),
+          knownResourceVerdictDetail(evidence, verdict.reason),
+          this.tickCounter,
+        )
+        continue
+      }
+      if (verdict.kind === 'resighted') {
+        this.logger.info(
+          'agent',
+          formatKnownResourceResighted(evidence.item, evidence.name, evidence.position, verdict.source),
+          knownResourceVerdictDetail(evidence, null),
+          this.tickCounter,
+        )
+      }
+    }
+  }
+
+  /**
+   * #436 section E (deterministic cancellation / failure):
+   *
+   *   "observed world state contradicts the claimed postcondition -> never report
+   *    success"; "selected block changed into another block -> stop + re-observe";
+   *    "selected entity despawned / identity invalidated -> stop + typed
+   *    target-gone outcome"; "No deterministic failure branch may silently choose
+   *    a different semantic objective."
+   *
+   * The RUNNING known-resource skill is grounded on the remembered cell's claim
+   * (the block is there / a producer is there / the drop is there). When the state
+   * this tick PROVED that claim false, the skill is CANCELLED with a typed
+   * outcome - it is never silently re-pointed at another cell or another item.
+   * The tick then continues to Jev, which owns WHICH action comes next.
+   *
+   * The boundaries that keep this a truth rule and not a retry policy:
+   *   - only `falsified` (a real contradiction) cancels. `unknown` (unloaded
+   *     chunk / outside the entity envelope) is not a verdict and a merely
+   *     UNREACHABLE target keeps the existing bounded `decideKnownRetrieve`
+   *     retry/retire - a side-effect-free transient failure may be retried inside
+   *     its explicit bound;
+   *   - a cancelled skill is never restarted by code: the falsified cell is
+   *     withheld from `signals.knownResources`, so only a real re-sighting can
+   *     put it back in front of Jev;
+   *   - when the side-effect state is unknown, nothing here retries blindly.
+   */
+  private cancelContradictedSkillTarget(state: WorldState): void {
+    const active = this.activeRetrieval
+    if (active === null) return
+    const running = this.executor.current
+    if (running === null || running.id !== active.id) return
+    const contradiction = (state.knownResourceEvidence ?? []).find(
+      (evidence) =>
+        evidence.status === 'falsified' &&
+        evidence.position.x === active.target.x &&
+        evidence.position.y === active.target.y &&
+        evidence.position.z === active.target.z,
+    )
+    if (contradiction === undefined) return
+    const reason: 'contradicted' | 'target_gone' =
+      contradiction.reason === 'mob_gone' ? 'contradicted' : 'target_gone'
+    const failure = contradiction.reason ?? 'falsified'
+    const cancelled = this.executor.cancelCurrent(`contradicted target ${active.id} (${failure})`)
+    this.logger.warn(
+      'agent',
+      // The canonical #436 vocabulary (netherPortalPlan.ts): a Skill that ended
+      // because the world contradicted the state its postcondition was grounded
+      // on, with the typed failure code.
+      formatSkillEnd(KNOWN_RETRIEVE_SKILL, 'cancelled', 'failed', `${contradiction.claim}_present`, failure),
+      {
+        actionId: active.id,
+        item: active.resource,
+        name: active.knownName,
+        cell: active.target,
+        claim: contradiction.claim,
+        observed: contradiction.observed,
+        cancelled,
+      },
+      this.tickCounter,
+    )
+    this.logger.warn(
+      'agent',
+      formatSkillInterrupt(KNOWN_RETRIEVE_SKILL, reason),
+      { actionId: active.id, item: active.resource, cell: active.target, reason: failure },
+      this.tickCounter,
+    )
+    this.activeRetrieval = null
+    this.retrievalTrack = null
   }
 
   private abortWedge(reason: string): void {
@@ -7671,6 +8698,24 @@ export class JevController {
       // `timeout` is not a usable route fact. The exact M2 wedge was a
       // GoalBlock timeout followed by a control-walk with no jump headroom;
       // treating a partial search as reachable re-admitted the same MOVE.
+      return plan.status === 'success'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * CAN fact for a plain ATTACK lease. The executor follows until it is within
+   * `MELEE_ATTACK_RANGE`; probing GoalBlock is stricter than the real action and
+   * can falsely reject a perfectly hittable target, so use the same near radius.
+   * Timeout is UNKNOWN/non-executable for this short lease, exactly like the
+   * ordinary reachability probe: only a complete path is a current CAN proof.
+   */
+  private canComputeMeleePath(position: Vec3Json): boolean {
+    if (this.bot.pathfinder === undefined) return false
+    try {
+      const goal = new goals.GoalNear(position.x, position.y, position.z, Math.max(1, MELEE_ATTACK_RANGE - 0.2))
+      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
       return plan.status === 'success'
     } catch {
       return false
@@ -8356,6 +9401,7 @@ export class JevController {
   private reachabilityGateOptions(): ReachabilityGateOptions {
     if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
     const pathCache = new Map<string, 'reachable' | 'no_path'>()
+    const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
     this.gateOptions = {
       memory: this.reachabilityProofs,
       pathProbe: (position) => {
@@ -8364,6 +9410,14 @@ export class JevController {
         if (cached !== undefined) return cached
         const result = this.canComputePath(position) ? 'reachable' : 'no_path'
         pathCache.set(key, result)
+        return result
+      },
+      attackPathProbe: (position) => {
+        const key = `${position.x},${position.y},${position.z}`
+        const cached = attackPathCache.get(key)
+        if (cached !== undefined) return cached
+        const result = this.canComputeMeleePath(position) ? 'reachable' : 'no_path'
+        attackPathCache.set(key, result)
         return result
       },
       stationApproach: this.stationApproachProbe(),

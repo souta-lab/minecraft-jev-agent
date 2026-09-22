@@ -216,6 +216,8 @@ const KIND_ALIASES: Readonly<Record<string, string>> = {
   ignite: 'light_portal',
   light_portal: 'light_portal',
   verify_portal: 'verify_portal',
+  enter_nether: 'enter_portal',
+  portal_entry: 'enter_portal',
 }
 
 const OP_ALIASES: Readonly<Record<string, string>> = {
@@ -490,6 +492,7 @@ export function groundMercuryIntent(
   phase(/\b(?:build|construct|place|create|make)\b[^.]{0,40}\b(?:portal|frame)\b/, 'build_portal_frame')
   phase(/\b(?:light|ignite|activate)\b[^.]{0,30}\bportal\b/, 'light_portal')
   phase(/\b(?:verify|confirm|check)\b[^.]{0,30}\bportal\b/, 'verify_portal')
+  phase(/\b(?:enter|go through|walk through|step through|travel through|cross through)\b[^.]{0,40}\b(?:nether )?portal\b/, 'enter_portal')
 
   const exploreModes = allowed.explore_modes ?? []
   if (kinds.has('explore') && /\bexplor|\bscout\b/i.test(lower)) {

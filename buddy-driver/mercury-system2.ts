@@ -75,11 +75,13 @@ import type {
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
 import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
+  NETHER,
   NETHER_PORTAL,
   OBSIDIAN,
   OVERWORLD,
   PORTAL_LIT_PREDICATE,
   PORTAL_OBSIDIAN_REQUIRED,
+  netherPortalEntryGoal,
 } from '../jev-agent/src/netherPortalPlan.ts'
 import {
   MERCURY_ALLOWED_GOALS,
@@ -419,6 +421,7 @@ export function validateMercuryGoal(index: number, goal: MercuryPlanGoalJson): s
     case 'light_portal':
     case 'verify':
     case 'verify_portal':
+    case 'enter_portal':
       return validatePortalParameterlessGoal(index, goal.kind, goal, { allowDimension: true })
     default:
       return `goal[${index}] unsupported kind: ${String(goal.kind)}`
@@ -667,6 +670,11 @@ function compileMercuryGoalRaw(
         detail: `mercury ${goal.kind}`,
       }
     }
+    case 'enter_portal':
+      return {
+        ...netherPortalEntryGoal(goal.dimension ?? NETHER),
+        detail: 'mercury enter_portal',
+      }
     default:
       return null
   }
@@ -779,10 +787,16 @@ export function groundMercuryPlan(
  * requiring the resident host to own the actual death coordinate. */
 export function validateMercuryPlanAgainstState(
   plan: MercuryPlanJson,
-  state: Pick<MercuryStateSummary, 'dimension' | 'postDeath'>,
+  state: Pick<MercuryStateSummary, 'dimension' | 'postDeath' | 'portal'>,
 ): string | null {
   for (let index = 0; index < plan.goals.length; index += 1) {
     const goal = plan.goals[index]
+    if (goal?.kind === 'enter_portal') {
+      if (state.portal?.verified !== true) {
+        return `goal[${index}] enter_portal unavailable: no live verified portal`
+      }
+      continue
+    }
     if (goal?.kind !== 'recover_death_site') continue
     const postDeath = state.postDeath ?? null
     if (postDeath?.latestDeathPoint === null || postDeath?.latestDeathPoint === undefined) {
@@ -821,6 +835,7 @@ export function hashMercuryState(state: MercuryStateSummary, identity: MercuryCa
     inventory: state.inventory,
     toolRank: state.toolRank,
     stations: state.stations,
+    portal: state.portal ?? null,
     ores: [...state.knownOres].sort(),
     queue: state.queue,
     objective: state.objective,
@@ -909,6 +924,8 @@ export interface MercuryStateSummary {
   toolRank: number
   inventory: Record<string, number>
   stations: { craftingTables: number; furnaces: number }
+  /** Live portal truth projected for System2; never durable as a verdict. */
+  portal?: { verified: boolean; knownSites: number }
   knownOres: string[]
   recentFailures: string[]
   consecutiveWait: number
@@ -975,8 +992,8 @@ export function mercuryCostUsd(model: string, usage: MercuryUsageLike | null | u
 // ---------------------------------------------------------------------------
 
 /** #33: Mercury cache schema/contract version. Bump when the summary contract changes. */
-export const MERCURY_CACHE_SCHEMA_VERSION = 5
-const MERCURY_CACHE_FILE_VERSION = 5
+export const MERCURY_CACHE_SCHEMA_VERSION = 6
+const MERCURY_CACHE_FILE_VERSION = 6
 
 export interface MercuryWorldKey {
   serverId: string
@@ -1465,7 +1482,8 @@ operations (e.g. craft furnace vs place furnace):
 - { kind: 'build_portal_frame' }     build the standard 4x5 obsidian Nether portal frame; takes NO item, count, y, dimension or coordinates (the site and cell geometry are code-owned)
 - { kind: 'light_portal', dimension }   light the validated frame with flint_and_steel; optional dimension defaults to minecraft:overworld. The ignition post-condition verifies the nether_portal block. 'light' is an accepted synonym.
 - { kind: 'verify_portal', dimension }  re-verify the lit nether_portal block in the dimension. 'verify' is an accepted synonym.
-When the portal materials are ready, { kind: 'build_portal_frame' }, { kind: 'light' } and { kind: 'verify' } are distinct WHAT goals you may emit in the order you choose: Code grounds the frame geometry and owns the ignition verification. Never emit coordinates, a frame cell list, or { kind: 'place', item: 'nether_portal' }.
+- { kind: 'enter_portal', dimension }   enter an already-live verified portal and transfer dimensions; optional dimension defaults to minecraft:the_nether. The entry cells and route are code-owned.
+When the portal materials are ready, { kind: 'build_portal_frame' }, { kind: 'light' } and { kind: 'verify' } are distinct WHAT goals you may emit in the order you choose: Code grounds the frame geometry and owns the ignition verification. Never emit coordinates, a frame cell list, or { kind: 'place', item: 'nether_portal' }. If state.portal.verified=true and the current rung is enter_nether, do not rebuild or relight the gate merely to make progress; enter_portal is the grounded WHAT for using the already-live gate.
 Every collect/craft/smelt goal MUST include an explicit integer count in [1,64]; when the quantity is not otherwise constrained, emit count: 1. Local normalization fills a missing count with 1, but an explicit count is required to express your intent, and a count outside [1,64] is rejected.
 Never return coordinates, block ids, entity ids, yaw/pitch, paths, action names, or motor instructions; goto references a resource name, never an x/z position.
 Do not invent a kind or a target outside the capability matrix; an impossible pair is rejected locally. Do not re-add work that is already done.

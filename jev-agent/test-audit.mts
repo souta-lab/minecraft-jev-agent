@@ -180,6 +180,8 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
     controller.includes('guardDecision')
   const familyScoped = controller.includes('criticalThreatFamily(trigger)') && controller.includes('criticalThreatFamily(critical.trigger)')
   const revalidated = controller.includes('critical trigger arrived during the Jev flight; revalidating decision')
+  const groundedThreatAdapterCalls = controller.match(/applyGroundedThreatRestriction\(/g)?.length ?? 0
+  const sameThreatProjection = groundedThreatAdapterCalls >= 2 && !controller.includes('applyThreatRestriction(')
   const threatSet = questionSetForTrigger('damage_taken') === 'threat'
   const stateA = { tick: 1, timestampMs: 1, value: 'a' } as unknown as Parameters<typeof stableStateHash>[0]
   const stateAClock = { tick: 1, timestampMs: 999, value: 'a' } as unknown as Parameters<typeof stableStateHash>[0]
@@ -212,6 +214,7 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
     wired &&
     familyScoped &&
     revalidated &&
+    sameThreatProjection &&
     threatSet &&
     hashA === hashAClock &&
     hashA !== hashB &&
@@ -223,7 +226,7 @@ addCase('D. coalescing keeps the highest priority and critical triggers revalida
     criticalAttackInterrupt &&
     healthyAttackContinues &&
     nonThreatAttackContinues
-  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}] mobRange=${nearMob}/${farMob}/${unknownMob} attackInterrupt=${criticalAttackInterrupt}/${healthyAttackContinues}/${nonThreatAttackContinues}` }
+  return { pass, detail: `kept=${keptCritical.trigger} promoted=${promoted.trigger} wired=${wired} familyScoped=${familyScoped} revalidated=${revalidated} sameThreatProjection=${sameThreatProjection}/${groundedThreatAdapterCalls} threat=${threatSet} hashStable=${hashA === hashAClock} delivered=[${delivered.join(',')}] mobRange=${nearMob}/${farMob}/${unknownMob} attackInterrupt=${criticalAttackInterrupt}/${healthyAttackContinues}/${nonThreatAttackContinues}` }
 })
 
 // E. monotonic subgoal completion ---------------------------------------------

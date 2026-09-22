@@ -9,7 +9,7 @@
 //
 // Run: bun test-reachability.mts  (wired as `bun run reachability-test`)
 import { createRequire } from 'node:module'
-import { applyReachabilityGate, blockId, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, formatCraftIngredientPrereq, formatCraftStationGap, formatSmeltInputPrereq, generateGroundedCandidates, optionsWithWithheldStationRetirements, smeltInputPrereq } from './src/candidates.ts'
+import { applyReachabilityGate, blockId, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, deriveReachabilityAbilities, formatCraftIngredientPrereq, formatCraftStationGap, formatSmeltInputPrereq, generateGroundedCandidates, optionsWithWithheldStationRetirements, smeltInputPrereq } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { MIRRORED_MARKERS, candidateStarvationLine, candidateStarvationMissing, ensureCraftStepActionable, goalStarvationBlockedBy } from './src/controller.ts'
 import { createRecipeIndex } from './src/crafting.ts'
@@ -698,6 +698,80 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
           { candidateId: id, kind: 'RETRIEVE', position: { x: 29, y: 61, z: 35 }, barrier: null },
           withheld.result,
         ),
+  )
+}
+
+// (9b) live y54 portal ascent: current AABB blocker must close CAN ----------------
+{
+  const base = {
+    position: { x: 10.6, y: 54, z: 25.4 },
+    inventory: inventory({ cobblestone: 290 }),
+    // Live restart shape: there IS a clear adjacent step at y55, but the
+    // candidate itself carries an explicit pillar plan in the current column.
+    // That alternate fact must not make the concrete pillar action executable.
+    standable: [{ x: 10, y: 54, z: 25 }, { x: 11, y: 55, z: 25 }],
+  }
+  const blocker = { x: 10, y: 55, z: 24 }
+  const blockedState = worldState({
+    ...base,
+    headroomCuts: [{ pos: blocker, name: 'stone', safe: true, reason: 'safe', currentFootprint: true }],
+    blocks: [
+      {
+        kind: 'stone',
+        name: 'stone',
+        position: blocker,
+        distance: 1,
+        diggable: true,
+        inReach: true,
+        hasAdjacentStandable: false,
+        adjacentStandable: null,
+        yield: 'cobblestone',
+        harvestTool: 'pickaxe',
+        harvestTier: 0,
+      },
+    ],
+  })
+  const blocked = deriveReachabilityAbilities(blockedState, { x: 26, y: 67, z: 9 })
+  const headroom = blocked.ascend.missing.find((capability) => capability.kind === 'headroom')
+  check(
+    'live y54 adjacent AABB blocker closes ascent CAN at the exact executor blocker cell',
+    !blocked.ascend.available &&
+      headroom?.kind === 'headroom' &&
+      headroom.cell?.x === 10 &&
+      headroom.cell?.y === 55 &&
+      headroom.cell?.z === 24,
+    `available=${blocked.ascend.available} missing=[${blocked.ascend.missing.map(capabilityKey).join(',')}]`,
+  )
+
+  const stableNeighbourOnly = worldState({
+    ...base,
+    headroomCuts: [{ pos: blocker, name: 'stone', safe: true, reason: 'safe', currentFootprint: false }],
+  })
+  const unblocked = deriveReachabilityAbilities(stableNeighbourOnly, { x: 26, y: 67, z: 9 })
+  check(
+    'adjacent clearance candidates kept only for id stability do not falsely close current ascent CAN',
+    unblocked.ascend.available && !unblocked.ascend.missing.some((capability) => capability.kind === 'headroom'),
+    `available=${unblocked.ascend.available} missing=[${unblocked.ascend.missing.map(capabilityKey).join(',')}]`,
+  )
+
+  const unknownState = worldState({
+    ...base,
+    headroomCuts: [{
+      pos: { x: 10, y: 56, z: 25 },
+      name: 'unknown',
+      safe: false,
+      reason: 'cell is unloaded/unknown',
+      currentFootprint: true,
+    }],
+  })
+  const unknown = deriveReachabilityAbilities(unknownState, { x: 26, y: 67, z: 9 })
+  check(
+    'an unknown current-footprint headroom cell closes CAN without inventing a clearance action',
+    !unknown.ascend.available &&
+      unknown.ascend.missing.some(
+        (capability) => capability.kind === 'headroom' && capability.cell?.x === 10 && capability.cell?.y === 56 && capability.cell?.z === 25,
+      ),
+    `available=${unknown.ascend.available} missing=[${unknown.ascend.missing.map(capabilityKey).join(',')}]`,
   )
 }
 

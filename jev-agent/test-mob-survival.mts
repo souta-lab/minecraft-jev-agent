@@ -29,11 +29,13 @@
 import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import {
+  applyGroundedThreatRestriction,
   applyThreatRestriction,
   CONTACT_THREAT_KINDS,
   COMBAT_CANDIDATE_RANGE,
   defaultCandidateOptions,
   generateCandidates,
+  generateGroundedCandidates,
   restrictCandidatesAtCriticalHealth,
   THREAT_SURVIVAL_KINDS,
 } from './src/candidates.ts'
@@ -47,6 +49,7 @@ import {
   formatThreatClear,
   formatThreatNearby,
   formatThreatNoEscape,
+  formatThreatOccluded,
   MELEE_THREAT_REACH,
   MIN_KEEP_DISTANCE_GAIN,
   THREAT_CLEAR_MS,
@@ -347,6 +350,147 @@ addCase('(c1) a weapon-holding body keeps ATTACK among the options with code-own
     pass,
     detail: `attack=${attack?.label ?? 'none'} retreat=${retreat?.id ?? 'none'} offered=[${ids(offer.candidates).join(',')}]`,
   }
+})
+
+addCase('(c1b) a non-contact hostile with no melee route is withheld instead of becoming the only executable ATTACK', () => {
+  // Exact live shape, 2026-09-22 04:44:47Z: body underground at y=11,
+  // skeleton at y=17 / 7.83m, los=false, engaged=false. The pre-fix generator
+  // advertised ATTACK:e53961 as its single executable candidate and the executor
+  // returned out_of_reach every 2.2s.
+  const body: Vec3Json = { x: 10.31, y: 11, z: 25.31 }
+  const state = bodyState(
+    [hostile(53961, 'skeleton', { x: 10.55, y: 17, z: 20.29 }, { lineOfSight: false, heldItem: 'bow' }, body)],
+    {
+      self: selfState(body, { health: 20, food: 15, heldItem: { name: 'cobblestone', count: 64, slot: 0 } }),
+      terrain: { standable: [body], escapeCells: [] },
+    },
+  )
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const grounded = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    reachability: { attackPathProbe: () => 'no_path' },
+  })
+  const refused = grounded.withheld.find((entry) => entry.candidate.id === 'ATTACK:e53961')
+  const offer = applyThreatRestriction(state, grounded.candidates)
+  const pass =
+    state.signals.threat.active === true &&
+    refused?.result.reachable === false &&
+    refused.result.reason === 'no_path' &&
+    refused.result.missingCapabilities.some((capability) => capability.kind === 'open_path') &&
+    !grounded.candidates.some((candidate) => candidate.id === 'ATTACK:e53961') &&
+    !offer.candidates.some((candidate) => candidate.kind === 'ATTACK') &&
+    offer.candidates.length === 1 &&
+    offer.candidates[0]?.kind === 'ESCALATE' &&
+    offer.gap?.reason === 'no_grounded_threat_response'
+  return {
+    pass,
+    detail: `refused=${refused?.result.reason ?? 'none'} offered=[${ids(offer.candidates).join(',')}] gap=${offer.gap?.reason ?? 'none'}`,
+  }
+})
+
+addCase('(c1c) a non-contact hostile with a proven melee route keeps ATTACK on offer', () => {
+  const state = bodyState([hostile(53962, 'skeleton', { x: 6, y: 10, z: 0.5 }, { heldItem: 'bow' })])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const grounded = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    reachability: { attackPathProbe: () => 'reachable' },
+  })
+  const attack = grounded.candidates.find((candidate) => candidate.id === 'ATTACK:e53962')
+  const fact = grounded.reachability.find((entry) => entry.candidate.id === 'ATTACK:e53962')
+  const pass = attack !== undefined && fact?.result.reachable === true && fact.result.reason === 'reachable'
+  return { pass, detail: `attack=${attack?.id ?? 'none'} reachable=${fact?.result.reachable}/${fact?.result.reason}` }
+})
+
+addCase('(c1d) contact-range ATTACK is never erased by a failing path probe', () => {
+  const state = bodyState([hostile(53963, 'zombie', { x: 2.5, y: 10, z: 0.5 }, { attackedSelf: true })])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const grounded = generateGroundedCandidates(state, {
+    ...defaultCandidateOptions,
+    reachability: { attackPathProbe: () => 'no_path' },
+  })
+  const attack = grounded.candidates.find((candidate) => candidate.id === 'ATTACK:e53963')
+  const fact = grounded.reachability.find((entry) => entry.candidate.id === 'ATTACK:e53963')
+  const pass = attack !== undefined && fact?.result.reachable === true && !grounded.withheld.some((entry) => entry.candidate.id === attack.id)
+  return { pass, detail: `attack=${attack?.id ?? 'none'} reachable=${fact?.result.reachable}/${fact?.result.reason}` }
+})
+
+addCase('(c1e) live occluded skeleton: no LOS + no melee path does not erase grounded goal work', () => {
+  const body: Vec3Json = { x: 10.31, y: 11, z: 25.31 }
+  const state = bodyState(
+    [hostile(53961, 'skeleton', { x: 10.55, y: 17, z: 20.29 }, { lineOfSight: false, heldItem: 'bow' }, body)],
+    { self: selfState(body, { health: 20, food: 15 }) },
+  )
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b10_13_25',
+    kind: 'MINE',
+    label: 'clear headroom for portal ascent',
+    targetName: 'stone',
+    target: { x: 10, y: 13, z: 25 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: true,
+    toolName: 'pickaxe',
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: state.tick, headroom: true },
+  }
+  const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability: { attackPathProbe: () => 'no_path' } })
+  const offer = applyGroundedThreatRestriction(state, [work], grounded.withheld)
+  const line = offer.occluded === null || offer.threat === null
+    ? ''
+    : formatThreatOccluded('enter_portal:goal', offer.threat, offer.occluded.entityIds)
+  const pass =
+    offer.threat?.active === true &&
+    offer.occluded?.reason === 'no_los_no_path' &&
+    offer.restricted === false &&
+    offer.gap === null &&
+    offer.candidates.length === 1 &&
+    offer.candidates[0]?.id === work.id &&
+    line.startsWith('THREAT_OCCLUDED ') &&
+    line.includes('ids=[53961]') &&
+    line.includes('los=false')
+  return { pass, detail: `offered=[${ids(offer.candidates).join(',')}] occluded=${offer.occluded?.reason ?? 'none'} | ${line}` }
+})
+
+addCase('(c1f) LOS=true keeps the survival restriction even when the melee path is blocked', () => {
+  const state = bodyState([hostile(53964, 'skeleton', { x: 6, y: 10, z: 0.5 }, { lineOfSight: true, heldItem: 'bow' })])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_11_0', kind: 'MINE', label: 'work', targetName: 'stone', target: { x: 0, y: 11, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set([53964]) })
+  const pass = offer.occluded === null && offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE' && !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `occluded=${offer.occluded?.reason ?? 'none'} offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1g) recent damage keeps the survival restriction through temporary cover', () => {
+  const state = bodyState([hostile(53965, 'skeleton', { x: 6, y: 10, z: 0.5 }, { lineOfSight: false, heldItem: 'bow' })])
+  state.signals.lastDamage = { atMs: NOW - 500, health: 18, sourceId: 53965, sourceName: 'skeleton' }
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities, lastDamage: state.signals.lastDamage })
+  const work: Candidate = {
+    id: 'MINE:b0_11_0', kind: 'MINE', label: 'work', targetName: 'stone', target: { x: 0, y: 11, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set([53965]) })
+  const pass = offer.occluded === null && offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE' && !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `recentDamage=${NOW - (state.signals.lastDamage?.atMs ?? 0)}ms offered=[${ids(offer.candidates).join(',')}]` }
+})
+
+addCase('(c1h) one additional danger-radius hostile without a no-path proof prevents the bypass', () => {
+  const state = bodyState([
+    hostile(53966, 'skeleton', { x: 6, y: 10, z: 0.5 }, { lineOfSight: false }),
+    hostile(53967, 'zombie', { x: 7, y: 10, z: 0.5 }, { lineOfSight: false }),
+  ])
+  state.signals.threat = new ThreatTracker().note({ atMs: NOW, entities: state.entities })
+  const work: Candidate = {
+    id: 'MINE:b0_11_0', kind: 'MINE', label: 'work', targetName: 'stone', target: { x: 0, y: 11, z: 0 },
+    targetEntityId: null, itemName: null, requiresTool: false, toolName: null, inReach: true, hasStandableAdjacent: true, meta: { tick: state.tick },
+  }
+  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set([53966]) })
+  const pass = offer.occluded === null && offer.candidates.length === 1 && offer.candidates[0]?.kind === 'ESCALATE' && !offer.candidates.some((candidate) => candidate.kind === 'MINE')
+  return { pass, detail: `proofs=[53966] hostiles=[53966,53967] offered=[${ids(offer.candidates).join(',')}]` }
 })
 
 addCase('(c2) fists are a weapon fact too, and a fed body reports the regeneration truth', () => {

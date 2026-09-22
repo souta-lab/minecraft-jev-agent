@@ -78,6 +78,7 @@ function mercurySummary(): MercuryStateSummary {
     toolRank: 3,
     inventory: { obsidian: 10, flint_and_steel: 1, diamond_pickaxe: 1 },
     stations: { craftingTables: 1, furnaces: 0 },
+    portal: { verified: true, knownSites: 1 },
     knownOres: ['raw_iron'],
     recentFailures: ['RETRIEVE:obsidian:failure:no_path'],
     consecutiveWait: 3,
@@ -237,6 +238,25 @@ addCase('(3) prose only is grounded onto the capability matrix (no JSON required
       record.intentSource === 'intent' &&
       String(record.rawText).includes('exploring a cave'),
     detail: `goals=${goals.map((g) => `${g.kind}:${g.targetItem ?? g.description}`).join(',')} grounded=${grounded ?? 'none'} source=${String(record.intentSource)}`,
+  }
+})
+
+addCase('(3b) prose can name the already-live gate as enter_portal without rebuilding it', async () => {
+  const text = 'The Nether portal is already lit and verified, so enter the Nether portal now.'
+  const { logs, result, thrown } = await runMercury(text)
+  const goal = result?.goals[0]
+  return {
+    pass:
+      thrown === null &&
+      result !== null &&
+      result.ungrounded === undefined &&
+      result.goals.length === 1 &&
+      goal?.targetItem === 'nether_portal' &&
+      goal.targetPredicate === 'portal_entered' &&
+      goal.dimension === 'minecraft:the_nether' &&
+      !result.goals.some((entry) => entry.targetItem === 'obsidian') &&
+      logs.some((line) => line.startsWith('MERCURY_INTENT_GROUNDED') && line.includes('enter_portal')),
+    detail: `goal=${goal?.kind}:${goal?.targetItem}@${goal?.targetPredicate}/${goal?.dimension} goals=${result?.goals.length ?? 0}`,
   }
 })
 

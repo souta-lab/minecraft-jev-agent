@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
@@ -33,12 +33,22 @@ import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, l
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool, strongestDigRequirement } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
-import { cellKey, isZeroProgressRouteRepeat, routeSignature, standFamilyExhausted } from './zeroProgressRoute.ts'
+import {
+  cellKey,
+  formatRouteEscalate,
+  goalSpentRouteCount,
+  isZeroProgressRouteRepeat,
+  routeSignature,
+  ROUTE_ALL_SPENT_REASON,
+  standFamilyExhausted,
+} from './zeroProgressRoute.ts'
 import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
 import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
+import { digRouteBearing, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
+import type { DigRouteRefusal, DigRouteRefusalReason } from './digRoute.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
@@ -52,11 +62,18 @@ import {
   OBSIDIAN,
   PORTAL_ENTERED_PREDICATE,
   PORTAL_LIT_PREDICATE,
+  PORTAL_ENTER_SKILL,
+  PORTAL_OPEN_FACE_MAX_DISTANCE,
+  formatReflex,
+  formatSkillPolicyBoundary,
+  formatSkillStep,
+  formatSkillStepAuthority,
   groundPortalFrame,
   planPortalIgnition,
+  portalOpenFaceCells,
   serializePortalCells,
 } from './netherPortalPlan.ts'
-import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
+import type { PortalBlockPosition, PortalEntryCandidate, PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
 import { armorEquipOffers, armorEquipRefusals, assessCombatKit, CRAFTABLE_SWORDS, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
 import type { ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
@@ -72,6 +89,12 @@ import {
   weaponFacts,
 } from './threat.ts'
 import type { KeepDistanceSpot, ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
+import {
+  envHazardProximityDenied,
+  MAX_ENV_HAZARD_ESCAPES,
+  selectEnvHazardEscapes,
+} from './envHazard.ts'
+import type { EnvHazardCell, EnvHazardEscape, EnvHazardKind, EnvHazardState } from './envHazard.ts'
 
 // The threat envelope numbers and the response predicate are owned by
 // `threat.ts` (it also keeps the bounded danger state and scans the escape
@@ -303,6 +326,11 @@ export function restrictCandidatesDuringDangerousThreat(
  * the caller can mirror `THREAT_NO_ESCAPE` when the body was left with nothing
  * but an escalation while a hostile is on it.
  */
+export interface ThreatRestrictionFacts {
+  /** Ordinary hostile ids whose current melee approach was proven no_path. */
+  unreachableThreatEntityIds?: ReadonlySet<number>
+}
+
 export interface ThreatOffer {
   candidates: Candidate[]
   /** the danger state this offer was computed against (null when none) */
@@ -313,14 +341,76 @@ export interface ThreatOffer {
   inContact: boolean
   /** code grounded no attack and no keep-distance route under threat */
   gap: { reason: string } | null
+  /**
+   * Current danger-radius hostiles are all occluded and have no melee path. The
+   * conservative tracker remains active, but this snapshot does not suppress
+   * goal work solely because Euclidean distance is small through sealed terrain.
+   */
+  occluded: { reason: 'no_los_no_path'; entityIds: number[] } | null
+}
+
+function occludedThreatBypass(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
+  facts: ThreatRestrictionFacts,
+): { reason: 'no_los_no_path'; entityIds: number[] } | null {
+  const threat = state.signals?.threat ?? null
+  const unreachable = facts.unreachableThreatEntityIds ?? new Set<number>()
+  if (threat === null || threat.active !== true || unreachable.size === 0) return null
+  // A recent hit keeps the survival envelope conservative even if the attacker
+  // has just moved behind cover. This preserves the original hysteresis safety.
+  const damage = state.signals.lastDamage ?? null
+  if (damage !== null && Number.isFinite(damage.atMs) && state.timestampMs - damage.atMs <= THREAT_MEMORY_MS) return null
+
+  const nearby = state.entities.filter(
+    (entity) => entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS,
+  )
+  if (nearby.length === 0) return null // lingering clear-state hysteresis stays unchanged
+  const allOccludedAndUnreachable = nearby.every(
+    (entity) =>
+      entity.distance > IMMEDIATE_HOSTILE_RANGE &&
+      entity.attackedSelf !== true &&
+      entity.lineOfSight === false &&
+      unreachable.has(entity.id),
+  )
+  if (!allOccludedAndUnreachable) return null
+  return { reason: 'no_los_no_path', entityIds: nearby.map((entity) => entity.id).sort((a, b) => a - b) }
+}
+
+/**
+ * Project the reachability layer's CURRENT ordinary-hostile CAN facts into the
+ * threat restriction. Both decision-time offer generation and the pre-execution
+ * guard MUST call this adapter; otherwise the same state can expose goal work to
+ * Jev and then erase it during revalidation.
+ */
+export function applyGroundedThreatRestriction(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
+  candidates: readonly Candidate[],
+  withheld: readonly CandidateReachability[],
+): ThreatOffer {
+  const unreachableThreatEntityIds = new Set<number>(
+    withheld
+      .filter(
+        (entry) =>
+          entry.candidate.kind === 'ATTACK' &&
+          entry.result.reason === 'no_path' &&
+          entry.candidate.targetEntityId !== null,
+      )
+      .map((entry) => entry.candidate.targetEntityId as number),
+  )
+  return applyThreatRestriction(state, candidates, { unreachableThreatEntityIds })
 }
 
 export function applyThreatRestriction(
-  state: Pick<WorldState, 'entities' | 'signals'>,
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
   candidates: readonly Candidate[],
+  facts: ThreatRestrictionFacts = {},
 ): ThreatOffer {
   const threat = state.signals?.threat ?? null
   const inContact = state.entities.some((entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE)
+  const occluded = occludedThreatBypass(state, facts)
+  if (occluded !== null) {
+    return { candidates: [...candidates], threat, restricted: false, inContact: false, gap: null, occluded }
+  }
   const contact = restrictCandidatesDuringImmediateThreat(state, candidates)
   const restricted = restrictCandidatesDuringDangerousThreat(state, contact)
   const onlyEscalate = restricted.length === 1 && restricted[0]?.kind === 'ESCALATE'
@@ -331,6 +421,7 @@ export function applyThreatRestriction(
     restricted: restricted.length !== candidates.length,
     inContact,
     gap,
+    occluded: null,
   }
 }
 
@@ -412,6 +503,311 @@ export function restrictCandidatesDuringCriticalDamage(
   if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
   const rescue = damageEndingCandidates(candidates)
   return rescue.length > 0 ? rescue : [...candidates]
+}
+
+// ---------------------------------------------------------------------------
+// SAFE: the body's own environmental hazard (fire / lava / burning / drowning).
+//
+// Measured live (`run-mucaq28q-1ftq1`, main 99f0020): the body burned in the
+// Nether and every tick of it arrived as `source=environment`, because fire,
+// lava and burning have no attacking entity for the entity-keyed `THREAT_*`
+// machinery to name. Nothing in the sensor read the block the body stood in, so
+// no candidate could leave it and the offer settled on `MOVE`/`ACCESS` targets
+// that were all `no_path` until the body died in lava.
+//
+// The escape candidates are ordinary MOVE candidates - the same kind, the same
+// executor, the same guard - grounded from real block truth by
+// `envHazard.selectEnvHazardEscapes`. Jev still chooses WHICH one is taken;
+// System2 still owns WHAT the body is doing.
+// ---------------------------------------------------------------------------
+
+/**
+ * The candidate kinds that can END an environmental hazard: movement carries the
+ * grounded escape, RETREAT is the wider keep-distance route, DESCEND is the
+ * "dig down instead of walking out" alternative (its own guard already refuses
+ * hazardous steps, so a DESCEND on offer is proven safe), and ESCALATE hands the
+ * situation to the semantic layer. Everything else mechanically holds the body
+ * inside the hazard.
+ *
+ * ATTACK / EAT / EQUIP are kept for the same reason `THREAT_SURVIVAL_KINDS`
+ * keeps them: they are local self-care/response actions, not work, and dropping
+ * them would let this envelope fight the threat or starvation owner for the same
+ * decision.
+ */
+export const ENV_HAZARD_KEPT_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  ...SURVIVAL_KINDS,
+  'DESCEND',
+  'ATTACK',
+  'EAT',
+  'EQUIP',
+])
+
+/** `meta.envHazardEscape` value on a generated escape: the hazard it leaves. */
+export const ENV_HAZARD_ESCAPE_META = 'envHazardEscape'
+
+/**
+ * The exact hazard-ending subset of an offer: the predicate
+ * `restrictCandidatesDuringEnvHazard` keeps, exported so the controller and its
+ * fixtures can name the code-owned fact "no grounded exit" without re-listing
+ * kinds and drifting from the restriction.
+ *
+ * A MOVE/RETREAT/STEP whose DESTINATION is itself a hazard cell is NOT an
+ * escape: "do not walk into a hazard to escape another". The destination truth
+ * comes from the sensor's classified ring (`state.envHazardCells`), so this is
+ * real block truth and never a proximity guess; a destination the ring never
+ * sampled is left untouched (unknown is not unsafe).
+ */
+export function envHazardEndingCandidates(
+  candidates: readonly Candidate[],
+  hazardCells: ReadonlySet<string>,
+): Candidate[] {
+  return candidates.filter((candidate) => {
+    // "Do not walk into a hazard to escape another" is checked FIRST and applies
+    // to every candidate, including a code-grounded escape: a destination that
+    // real block truth says is a hazard cell is never a way out.
+    if (
+      candidate.target !== null &&
+      hazardCells.has(`${candidate.target.x},${candidate.target.y},${candidate.target.z}`)
+    ) {
+      return false
+    }
+    if (candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined) return true
+    return ENV_HAZARD_KEPT_KINDS.has(candidate.kind)
+  })
+}
+
+/**
+ * The precise hazard-ending ROUTES of an offer: the physical ways OUT, counted
+ * for the reflex uniqueness rule (issue #436 section B). ESCALATE is a hand-off
+ * and EAT/EQUIP/ATTACK are local actions, so none of them is a way out of a fire;
+ * a route counts only when it is one of:
+ *
+ *   - a code-grounded environmental escape (`meta.envHazardEscape`, adjacent);
+ *   - the existing grounded surface ascent (`meta.surfaceAscent`) while the body
+ *     is drowning - the "rise toward air" route;
+ *   - a RETREAT whose destination clears the hazard cell by the bounded hazard
+ *     radius (the wider keep-distance route the candidate layer already grounded
+ *     for this hazard);
+ *   - a LOCAL DESCEND/STEP body change (the target within `LOCAL_ROUTE_RADIUS`)
+ *     that is not itself a hazard cell - the "dig down instead of walking out"
+ *     alternative, already proven safe by its own descent/step guard.
+ *
+ * An ordinary goal MOVE 20 m away is NOT counted: it was not grounded as an exit
+ * from this hazard, and counting it would make the reflex unreachable while
+ * telling Jev nothing. Every counted route must have a destination that is not a
+ * proven hazard cell, so "the only way out" can never be a way INTO the hazard.
+ */
+export const ENV_HAZARD_LOCAL_ROUTE_RADIUS = 2
+
+export function envHazardEscapeRoutes(
+  state: Pick<WorldState, 'self' | 'envHazardCells'> & { signals?: WorldState['signals'] },
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true) return []
+  const hazardCells = envHazardProvenCells(state)
+  const drowning = hazard.kinds.includes('drowning') && !hazard.escapeRequired
+  return candidates.filter((candidate) => {
+    const target = candidate.target
+    if (target === null) return false
+    if (hazardCells.has(`${target.x},${target.y},${target.z}`)) return false
+    if (candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined) return true
+    if (drowning && candidate.meta.surfaceAscent === true && candidate.kind === 'MOVE') return true
+    if (candidate.kind === 'RETREAT') {
+      // A keep-distance route only counts as a way out when it actually leaves
+      // the hazard: a threat retreat 0.7 m from the fire is not an escape.
+      return hazard.cell !== null && distance(target, hazard.cell) >= HAZARD_DANGER_RADIUS
+    }
+    if (candidate.kind === 'DESCEND' || candidate.kind === 'STEP') {
+      return distance(target, state.self.position) <= ENV_HAZARD_LOCAL_ROUTE_RADIUS
+    }
+    return false
+  })
+}
+
+/** The uniquely-determined environmental escape, as the controller reads it. */
+export interface EnvHazardReflex {
+  candidate: Candidate
+  /** the hazard kind the reflex answers */
+  kind: EnvHazardKind
+  /** which grounded route family the reflex took */
+  escapeKind: 'env' | 'retreat' | 'local' | 'surface'
+}
+
+/**
+ * The hard-safety reflex (issue #436 §8): the ONE uniquely-determined
+ * STABILISATION that leaves the body's own environmental hazard, or null when
+ * the decision is Jev's.
+ *
+ * §8 allows a reflex to "stop / stabilize / move minimally to safety" and
+ * forbids it from choosing a new destination, a long retreat strategy, a mining
+ * expedition or an Option change. So the reflex ACTION is only ever one of:
+ *
+ *   - a grounded ADJACENT escape MOVE (`meta.envHazardEscape`, <= 1.5 m);
+ *   - the existing grounded surface ascent while drowning, and only when the
+ *     sensor verified air immediately above (`airAbove`) - "rise toward air".
+ *
+ * "Uniquely determined" is a count of ALL the grounded ROUTES out
+ * ({@link envHazardEscapeRoutes}), never a direction preference: two safe
+ * directions, "dig down vs walk out", or a keep-distance RETREAT are several
+ * semantically meaningful alternatives. Their presence means code must NOT take
+ * over - even when only one of them is left, a RETREAT/DESCEND/STEP is a
+ * semantic choice and stays Jev's (the caller reports the policy boundary and
+ * exposes the alternatives).
+ *
+ * While a hostile threat is engaged the reflex deliberately does NOT fire: that
+ * decision belongs to the threat envelope, and a second safety owner would
+ * substitute one hazard response for another.
+ */
+export function envHazardReflexAction(
+  state: Pick<WorldState, 'self' | 'envHazardCells' | 'entities' | 'signals'>,
+  candidates: readonly Candidate[],
+): EnvHazardReflex | null {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true) return null
+  // One safety owner at a time: with a hostile engaged, the threat envelope owns
+  // the response.
+  const threatActive = state.signals?.threat?.active === true
+  const hostileNearby = state.entities.some(
+    (entity) => entity.hostile && entity.distance <= THREAT_DANGER_RADIUS,
+  )
+  if (threatActive || hostileNearby) return null
+  const routes = envHazardEscapeRoutes(state, candidates)
+  if (routes.length !== 1) return null
+  const route = routes[0]
+  if (route === undefined || route.target === null) return null
+  const drowningOnly = hazard.kinds.includes('drowning') && !hazard.escapeRequired
+  if (drowningOnly) {
+    // The surface ascent is the only route family this layer may take for
+    // drowning, and only with verified air immediately above.
+    if (route.meta.surfaceAscent !== true || route.kind !== 'MOVE' || !hazard.airAbove) return null
+    return { candidate: route, kind: 'drowning', escapeKind: 'surface' }
+  }
+  // Everything below is the fire/lava/burning/adjacent-lava case: the reflex may
+  // only take the minimal adjacent escape. A unique RETREAT/DESCEND/STEP is a
+  // semantic choice, not a stabilisation (§8).
+  const escapeMeta = route.meta[ENV_HAZARD_ESCAPE_META]
+  if (escapeMeta === undefined || route.kind !== 'MOVE') return null
+  const kind = hazard.kinds.find((entry) => entry !== 'drowning') ?? hazard.kinds[0] ?? 'fire'
+  return { candidate: route, kind, escapeKind: 'env' }
+}
+
+/**
+ * The cells real block truth PROVES are hazards: every ring cell whose own
+ * column (or the block it stands on) holds a hazard block, plus the body's OWN
+ * cell when the state says the body is standing in fire/lava or beside lava.
+ *
+ * The own cell is not part of the adjacent ring sample, so without it a
+ * candidate that walks back into the fire the body is standing in would not be
+ * recognised as a route INTO a hazard.
+ */
+export function envHazardProvenCells(
+  state: Pick<WorldState, 'self' | 'envHazardCells'>,
+): ReadonlySet<string> {
+  const keys = new Set(
+    (state.envHazardCells ?? [])
+      .filter((cell) => cell.hazard !== null)
+      .map((cell) => `${cell.position.x},${cell.position.y},${cell.position.z}`),
+  )
+  const hazard = state.self.envHazard
+  if (hazard != null && (hazard.inFire || hazard.inLava || hazard.adjacentLava) && hazard.cell !== null) {
+    keys.add(`${hazard.cell.x},${hazard.cell.y},${hazard.cell.z}`)
+  }
+  return keys
+}
+
+/**
+ * SAFE: while the body is in an environmental hazard it must not be walked
+ * further into it. Only the routes that can leave the hazard stay selectable -
+ * the grounded escape MOVEs, RETREAT, STEP and ESCALATE - and any survival MOVE
+ * whose destination is itself a hazard cell is dropped. If the world grounds no
+ * exit at all the original set is preserved, so the missing affordance stays
+ * observable (`ENV_HAZARD_NO_EXIT`) instead of silently erasing the offer;
+ * drowning is excluded because the existing submersion restriction already owns
+ * it (`restrictCandidatesDuringSubmersion`).
+ */
+export function restrictCandidatesDuringEnvHazard(
+  state: Pick<WorldState, 'self' | 'envHazardCells'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const hazard = state.self.envHazard ?? null
+  // Only CONTACT with fire/lava withholds the work offer: there, any grounded
+  // safe step ends the damage and staying put is definitely wrong. A body that
+  // is merely burning has one step-deliverable remedy (water), which is offered
+  // as an ordinary candidate and reflexed only when it is the single grounded
+  // route - it must not be panicked into walking around while the fire ticks out
+  // (§8: "move minimally to safety", never a new destination).
+  if (hazard?.active !== true || !(hazard.inFire || hazard.inLava)) return [...candidates]
+  const rescue = envHazardEndingCandidates(candidates, envHazardProvenCells(state))
+  return rescue.length > 0 ? rescue : [...candidates]
+}
+
+/**
+ * The grounded exits from the hazard, as plain destinations (the controller's
+ * telemetry reads the SAME selection the candidate layer offers).
+ */
+export function envHazardEscapeSpots(
+  state: Pick<WorldState, 'self' | 'blocks' | 'envHazardCells'>,
+  blacklistedMoveTargets?: ReadonlySet<string>,
+): EnvHazardEscape[] {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true) return []
+  const cells = (state.envHazardCells ?? []).filter(
+    (cell) => !isBlacklistedMoveTarget(state, blacklistedMoveTargets, cell.position),
+  )
+  return selectEnvHazardEscapes({
+    self: state.self.position,
+    hazard,
+    cells,
+    hazardBlocks: state.blocks.filter((block) => block.kind === 'hazard'),
+    max: MAX_ENV_HAZARD_ESCAPES,
+  })
+}
+
+/**
+ * The grounded escape candidates themselves: ordinary MOVEs whose destination is
+ * a real, standable, hazard-free adjacent cell. Water destinations are offered
+ * first while the body is burning, because the water is what puts the fire out.
+ * An empty list means the world grounds no exit - the caller reports the typed
+ * gap, never a route through the hazard.
+ */
+export function envHazardEscapeCandidates(
+  state: WorldState,
+  blacklistedMoveTargets?: ReadonlySet<string>,
+  reach = 4.5,
+): Candidate[] {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true || hazard.escapeRequired !== true) return []
+  const escapes = envHazardEscapeSpots(state, blacklistedMoveTargets)
+  const kind = hazard.kinds.find((entry) => entry !== 'drowning') ?? hazard.kinds[0] ?? 'fire'
+  return escapes.map((escape) => ({
+    id: `MOVE:env:${kind}:${blockId('p', escape.spot)}`,
+    kind: 'MOVE' as CandidateKind,
+    label: `${moveLabel(
+      escape.spot,
+      escape.water
+        ? 'step into the water to put the fire out'
+        : `step out of the ${kind === 'lava' || kind === 'adjacent_lava' ? 'lava' : 'fire'}`,
+      state.self.position,
+    )} (hazard at ${hazard.cell === null ? 'unknown' : `${hazard.cell.x},${hazard.cell.y},${hazard.cell.z}`})`,
+    targetName: null,
+    target: escape.spot,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(escape.spot, state.self.position) <= reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: escape.spot.x,
+      y: escape.spot.y,
+      z: escape.spot.z,
+      [ENV_HAZARD_ESCAPE_META]: kind,
+      envHazardCell: hazard.cell === null ? 'unknown' : `${hazard.cell.x},${hazard.cell.y},${hazard.cell.z}`,
+      ...(escape.water ? { envHazardWater: true } : {}),
+    },
+  }))
 }
 
 /**
@@ -546,6 +942,13 @@ export function surfaceSearchKey(dimension: string, position: Vec3Json): string 
 export interface ReachabilityGateOptions {
   /** pathfinder fact for a destination; absent = unknown (no probe) */
   pathProbe?: ((position: Vec3Json) => PathProbeResult) | null
+  /**
+   * Ordinary hostile ATTACK uses GoalFollow/near-melee semantics, not GoalBlock.
+   * The controller supplies the matching near-target path fact separately so an
+   * entity behind sealed terrain is not advertised as an executable fight.
+   * Absent = unknown and preserves pure/offline callers.
+   */
+  attackPathProbe?: ((position: Vec3Json) => PathProbeResult) | null
   /** proven-unreachable (candidateId -> fingerprint) suppression memory */
   memory?: StateFingerprintMemory | null
   /**
@@ -647,6 +1050,16 @@ export interface GroundedCandidatesResult {
    * cause instead of being silent.
    */
   columnDescentRefusal: ColumnDescentRefusal | null
+  /**
+   * Typed `DIG_ROUTE_REFUSED reason=...` facts for the travel/enter/retrieve
+   * targets this tick could not walk to AND could not dig toward: the target is
+   * named with the bearing, the refused cell/block and the sensor's own cause
+   * (`hazard`/`unbreakable`/`no_support`/`open_floor`/`protected`/`no_tool`/
+   * `no_step`/`spent`). Empty while a dig route is on offer, and empty when no
+   * travel target needed one. Non-empty means "the dead end is said" instead of
+   * the offer silently collapsing to WAIT/ESCALATE.
+   */
+  digRefusals: DigRouteRefusal[]
   /**
    * Typed `PROSPECT_REFUSED reason=hazard|unbreakable|no_support|open_floor|
    * protected|no_tool|no_safe_step` when the active descend/travel-to-acquire row
@@ -1326,9 +1739,116 @@ export interface PortalEntryRefusal {
  * supplies the live plan (lit interior + safe approach); this never chooses WHEN
  * to enter.
  */
+/**
+ * The step-aside leg onto an OPEN face of the portal, offered ALONGSIDE the
+ * entry (never instead of it).
+ *
+ * Measured live (run-mucaq28q-1ftq1, main 4c5645b): the body stood WEST of the
+ * left frame column at 24.7,67,9.7 while the entry cell (26,67,9) sat 1.8 blocks
+ * east BEHIND the obsidian column at (25,67,9). The straight walk is a 2-high
+ * frame face, so the entry could never get in and the offer collapsed to
+ * WAIT/ESCALATE - the operator's "it would get through if it stepped one block
+ * aside". The generic travel approach leg cannot ground this move either: every
+ * open-face cell is FARTHER from the target than the occluded stand cell, so the
+ * "reduce the distance" rule rejects exactly the leg that is needed.
+ *
+ * The face is derived from STRUCTURE truth - a standable cell beside an interior
+ * cell at its level, outside the frame ring - never from the plan's wording.
+ * This is a mechanically necessary prerequisite of the entry, offered as an
+ * ordinary MOVE the guard/reachability gate still own; Jev keeps the choice.
+ */
+function portalOpenFaceLegs(state: WorldState, options: CandidateOptions, entry: PortalEntryCandidate): Candidate[] {
+  const standable = new Set(state.terrain.standable.map((spot) => cellKey(spot)))
+  const interior: PortalBlockPosition[] = entry.portalCells
+  const bodyCell = cellKey(state.self.position)
+  const faces = portalOpenFaceCells(
+    interior,
+    entry.enterCell.y,
+    (spot) => standable.has(cellKey(spot)),
+    state.self.position,
+    PORTAL_OPEN_FACE_MAX_DISTANCE,
+  ).filter((spot) => cellKey(spot) !== bodyCell)
+  const faceLegs = faces.map((spot) => ({
+      id: `MOVE:${blockId('p', spot)}`,
+      kind: 'MOVE' as const,
+      label:
+        `step onto the portal's open face at (${spot.x},${spot.y},${spot.z}) so the walk into ` +
+        `(${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) is not blocked by the frame`,
+      targetName: NETHER_PORTAL,
+      target: spot,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(spot, state.self.position) <= options.reach,
+      hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: spot.x,
+      y: spot.y,
+      z: spot.z,
+      approachLeg: 'portal_open_face',
+      approachTarget: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
+    },
+  }))
+  // THE BOUNDED CONTINUATION at the site where the entry lane grounds the face:
+  // measured live (run-mucbyro1-1hqhm) the one open face was standable but NOT
+  // reachable by its own leg probe - the 1-block hole at (24,67,10)/(24,66,10)
+  // sits between the body and the face - so the offer refused `faces=1` while the
+  // generic MOVE arm never saw the pocket. The same `pocketContinuations` grounder
+  // the travel arm uses is attached here, aimed at the FACE, so the mechanical
+  // route into the pocket is on offer in the decision that owns the entry.
+  const out: Candidate[] = [...faceLegs]
+  const reachableFaces = faceLegs.filter((leg) => leg.target !== null && levelWalkReachable(state, leg.target))
+  const unreachableFaces = faceLegs.filter((leg) => leg.target !== null && !levelWalkReachable(state, leg.target))
+  for (const leg of unreachableFaces) {
+    const target = leg.target
+    if (target === null) continue
+    const continuations = pocketContinuations(state, target)
+    const unique = continuations.length === 1 && reachableFaces.length === 0 && faceLegs.length === 1
+    for (const cont of continuations) {
+      const reflex = unique
+        ? formatLegReflex({
+            skill: 'enter_portal',
+            action: cont.action,
+            cell: cont.via ?? cont.landing,
+            via: cont.via,
+            ledge: cont.ledge,
+            evidence:
+              `exactly one standable open face (${cellText(target)}) is not level-walk reachable from ` +
+              `(${cellText(state.self.position)}); the bounded continuation is ` +
+              `${cont.action === 'step_over' ? `drop into (${cont.via === null ? 'none' : cellText(cont.via)}) then ` : ''}` +
+              `step up onto (${cellText(cont.ledge)}) at (${cellText(cont.landing)}); ` +
+              `d=${round2Number(distance(state.self.position, target))}->${round2Number(cont.toTarget)}`,
+          })
+        : null
+      out.push(
+        continuationCandidate(
+          state,
+          options,
+          {
+            target,
+            targetName: NETHER_PORTAL,
+            reason: 'portal_open_face',
+            skill: PORTAL_ENTER_SKILL,
+            extraMeta: {
+              entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}`,
+              faceCell: `${target.x},${target.y},${target.z}`,
+            },
+          },
+          cont,
+          reflex,
+        ),
+      )
+    }
+  }
+  return out
+}
+
 export function entryCandidates(
   state: WorldState,
   options: CandidateOptions,
+  digRefusals: DigRouteRefusalSink = [],
 ): { candidates: Candidate[]; refusal: PortalEntryRefusal | null } {
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
@@ -1355,45 +1875,103 @@ export function entryCandidates(
     route.plan?.kind === 'reuse'
       ? planVerticalApproach({ ...verticalInputFor(state, entry.enterCell), tunnel: null })
       : null
-  return {
-    candidates: [
-      {
-        id: entry.id,
-        kind: 'ENTER_PORTAL',
-        label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
-        targetName: NETHER_PORTAL,
-        // The interior cell itself is the locomotion target: the generic MOVE
-        // machinery walks the body in (standing in a portal block is the world
-        // mechanic that transfers). Where the walk cannot reach it, the same
-        // grounded vertical plan a MOVE candidate carries supplies the dig leg.
-        target: entry.enterCell,
-        targetEntityId: null,
-        itemName: null,
-        requiresTool: false,
-        toolName: null,
-        inReach: distance(entry.enterCell, state.self.eyePosition) <= options.reach,
-        hasStandableAdjacent: true,
-        meta: {
-          tick: state.tick,
-          enterX: entry.enterCell.x,
-          enterY: entry.enterCell.y,
-          enterZ: entry.enterCell.z,
-          dimension: entry.dimension,
-          portalCells: serializePortalCells(entry.portalCells),
-          // A remembered-site route (interior unobservable from here) is offered
-          // with the fact named: the executor re-verifies the lit interior at
-          // arrival, so this can never transfer through an unlit frame.
-          ...(entry.unverified === true ? { entryUnverified: true } : {}),
-          ...verticalMeta,
-          ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
-          ...(route.plan === null && route.ascentRefusal !== null
-            ? { entryRouteRefusal: route.ascentRefusal.reason }
-            : {}),
-        },
-      },
-    ],
-    refusal: null,
+  const meta: Record<string, string | number | boolean> = {
+    tick: state.tick,
+    enterX: entry.enterCell.x,
+    enterY: entry.enterCell.y,
+    enterZ: entry.enterCell.z,
+    dimension: entry.dimension,
+    portalCells: serializePortalCells(entry.portalCells),
+    // A remembered-site route (interior unobservable from here) is offered
+    // with the fact named: the executor re-verifies the lit interior at
+    // arrival, so this can never transfer through an unlit frame.
+    ...(entry.unverified === true ? { entryUnverified: true } : {}),
+    ...verticalMeta,
+    ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+    ...(route.plan === null && route.ascentRefusal !== null
+      ? { entryRouteRefusal: route.ascentRefusal.reason }
+      : {}),
   }
+  const candidate: Candidate = {
+    id: entry.id,
+    kind: 'ENTER_PORTAL',
+    label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
+    targetName: NETHER_PORTAL,
+    // The interior cell itself is the locomotion target: the generic MOVE
+    // machinery walks the body in (standing in a portal block is the world
+    // mechanic that transfers). Where the walk cannot reach it, the same
+    // grounded vertical plan a MOVE candidate carries supplies the dig leg.
+    target: entry.enterCell,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(entry.enterCell, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta,
+  }
+  // A route that already proved it cannot complete from this body cell - a
+  // path-stage failure (`PATH_CALLBACK phase=failed outcome=noPath|stuck`) is
+  // recorded as a SPENT route exactly like zero observable change - must not be
+  // re-offered unchanged. The grounded next step is an approach leg that changes
+  // the STAND CELL, so the body meets a different mechanical situation and the
+  // entry is re-offered from there (never a premature permanent suppression).
+  const standKey = cellKey(state.self.position)
+  const targetKey = cellKey(entry.enterCell)
+  if (
+    isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+      kind: 'ENTER_PORTAL',
+      targetKey,
+      standKey,
+      routeSig: routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta }),
+      nowMs: state.timestampMs,
+    })
+  ) {
+    // Two grounded route changes, offered together: a walk leg that changes the
+    // STAND CELL, and the bounded DIG route that changes the TERRAIN toward the
+    // entry cell. A sealed body (the measured 1-wide shaft) senses no standable
+    // cell beyond its own, so only the dig route can act there; a body whose leg
+    // exists but whose path is refused keeps the dig route as the executable
+    // alternative. Neither is a replacement: Jev chooses, and the entry is
+    // re-offered from the new cell.
+    const legs = travelApproachLegs(
+      state,
+      options,
+      {
+        target: entry.enterCell,
+        targetName: NETHER_PORTAL,
+        reason: 'route_spent',
+        skill: PORTAL_ENTER_SKILL,
+        label: (best) =>
+          `walk an approach leg toward the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}): the last route there failed, so stand at (${best.x},${best.y},${best.z}) first`,
+        extraMeta: { entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}` },
+      },
+      digRefusals,
+    )
+    const faceLegs = portalOpenFaceLegs(state, options, entry)
+    const withFaces = [...legs, ...faceLegs.filter((leg) => !legs.some((other) => other.id === leg.id))]
+    if (withFaces.length > 0) return { candidates: withFaces, refusal: null }
+    // No grounded route, no grounded approach leg and no grounded dig route
+    // changes anything from here: every route this goal can ground is spent. Say
+    // it typed and let the ordinary bounded escalation reach System2 - never
+    // re-offer the dead route and never leave the offer at (failing route, WAIT).
+    const routes = goalSpentRouteCount(state.signals.zeroProgressRoutes, {
+      kind: 'ENTER_PORTAL',
+      targetKey,
+      nowMs: state.timestampMs,
+    })
+    return {
+      candidates: [],
+      refusal: {
+        reason: ROUTE_ALL_SPENT_REASON,
+        line: formatRouteEscalate(current?.id ?? 'unknown', ROUTE_ALL_SPENT_REASON, routes),
+      },
+    }
+  }
+  // Every open face stays policy-visible (#436): several ways in are a CHOICE,
+  // so code offers them all as ordinary MOVE legs and never picks one.
+  const faceLegs = portalOpenFaceLegs(state, options, entry)
+  return { candidates: [candidate, ...faceLegs], refusal: null }
 }
 
 /**
@@ -1533,17 +2111,6 @@ const FOOD_ANIMALS = new Set([
   'tropical_fish',
 ])
 
-/**
- * Deterministic Minecraft producer truth for mob-drop collect goals. This table
- * answers CAN/TRUE only: when the active collect target is one of these items,
- * every currently sensed producer is exposed as a grounded ATTACK alternative.
- * Jev still owns WHICH producer/action to pursue.
- */
-const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
-  ender_pearl: new Set(['enderman']),
-  blaze_rod: new Set(['blaze']),
-}
-
 const HAZARD_DANGER_RADIUS = 3
 
 export function blockId(prefix: 'b' | 'p', position: Vec3Json): string {
@@ -1613,7 +2180,11 @@ export function generateGroundedCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
-  const raw = generateRawCandidates(state, options)
+  // The dig-route refusals are collected across BOTH passes (the raw offer and
+  // the gate's own capability-acquisition pass), so the tick reports every travel
+  // target it could neither walk to nor dig toward.
+  const digRefusals: DigRouteRefusalSink = []
+  const raw = generateRawCandidates(state, options, digRefusals)
   const grounded = applyReachabilityGate(
     raw.candidates,
     state,
@@ -1627,6 +2198,7 @@ export function generateGroundedCandidates(
     raw.sourceExclusions,
     raw.columnDescentRefusal,
     raw.prospectRefusal,
+    digRefusals,
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
@@ -1940,6 +2512,7 @@ export function combatKitGap(
   const heldItem = state.self.heldItem?.name ?? null
   const assessment = assessCombatKit({
     heldItem,
+    carried: state.inventory.counts,
     worn: state.self.armor ?? {},
     health: state.self.health,
     food: state.self.food,
@@ -1994,6 +2567,7 @@ function armorEquipCandidates(state: WorldState): Candidate[] {
 function generateRawCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
+  digRefusals: DigRouteRefusalSink = [],
 ): RawCandidatesResult {
   let candidates: Candidate[] = []
   let placeRefusal: PlaceRefusal | null = null
@@ -2049,7 +2623,7 @@ function generateRawCandidates(
       const ignition = ignitionCandidates(state, options)
       candidates.push(...ignition.candidates)
       ignitionRefusal = ignition.refusal
-      const entry = entryCandidates(state, options)
+      const entry = entryCandidates(state, options, digRefusals)
       candidates.push(...entry.candidates)
       entryRefusal = entry.refusal
       break
@@ -2231,6 +2805,7 @@ function generateRawCandidates(
   if (goalDropTargets.length > 0) {
     const kit = assessCombatKit({
       heldItem: state.self.heldItem?.name ?? null,
+      carried: state.inventory.counts,
       worn: state.self.armor ?? {},
       health: state.self.health,
       food: state.self.food,
@@ -2339,6 +2914,14 @@ function generateRawCandidates(
     })
   }
 
+  // SAFE: the environmental-hazard exits. Ordinary MOVE candidates to real,
+  // standable, hazard-free adjacent cells, grounded by the sensor's classified
+  // ring. They are offered alongside everything else - Jev still chooses WHICH
+  // one is taken - and the controller may execute one directly as a bounded
+  // hard-safety reflex only when it is the single grounded route out
+  // (`envHazardReflexAction`).
+  candidates.push(...envHazardEscapeCandidates(state, options.blacklistedMoveTargets, options.reach))
+
   // A known-resource retrieval is grounded even when other (non-progressing)
   // candidates exist: if the wanted block is not visible but its coordinate is
   // remembered, going there is strictly better than re-issuing the front goal.
@@ -2346,7 +2929,7 @@ function generateRawCandidates(
   // retrieval for a later queue row into this Option. That is a different
   // semantic action, not an alternative mechanical route for the active goal;
   // it was observed live as raw_iron -> unrelated future log retrieval.
-  candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0))
+  candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0, digRefusals))
 
   // Clearance MINEs are route-opening safety affordances, not semantic goal
   // actions. Once the active goal has another grounded route (for example a
@@ -2468,6 +3051,7 @@ function generateRawCandidates(
     surfaceAscentRefusal: surfaceAscent.refusal,
     foodHabitatRefusal: foodHabitat.refusal,
     columnDescentRefusal: columnDescent.refusal,
+    digRefusals: dedupeDigRouteRefusals(digRefusals),
     prospectRefusal: prospect.refusal,
     sourceExclusions: resourceSourceExclusions(state),
   }
@@ -3651,9 +4235,19 @@ function headroomCandidates(state: WorldState, options: CandidateOptions): Candi
   // clearance candidate ignored failure memory. A cut that has exhausted the
   // same retry budget every other target honours is not executable now; the
   // log route / exploration fallback must take over.
-  const cuts = (state.headroomCuts ?? []).filter(
+  const observedCuts = state.headroomCuts ?? []
+  // New sensor states distinguish the exact cell currently intersecting the
+  // player's AABB from neighbouring clearance observations retained across a
+  // small shuffle. Only the binding current-footprint blocker is an executable
+  // headroom acquisition. Exposing the neighbours as peer MINE choices made Jev
+  // excavate a room per ascent (live y55-y58) even though CAN named one blocker.
+  // Legacy replay fixtures have no metadata, so preserve their historical pool.
+  const hasFootprintMetadata = observedCuts.some((cut) => cut.currentFootprint !== undefined)
+  const cuts = observedCuts.filter(
     (cut) =>
-      cut.safe && failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
+      (!hasFootprintMetadata || cut.currentFootprint === true) &&
+      cut.safe &&
+      failureCount(state.signals.failedCandidates, `MINE:${blockId('b', cut.pos)}`) < failureLimit,
   )
   if (cuts.length === 0) return []
   const feet = {
@@ -3703,6 +4297,7 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     z: Math.floor(state.self.position.z),
   }
   const scored: Array<{ cut: NonNullable<WorldState['stepCuts']>[number]; score: number }> = []
+  const standKey = cellKey(state.self.position)
   for (const cut of cuts) {
     const known = state.blocks.find(
       (block) =>
@@ -3710,6 +4305,23 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     )
     const tool = known?.harvestTool ?? null
     if (!hasTool(state, tool, tool === null ? null : known?.harvestTier ?? null)) continue
+    // The same 1-block step cut that just proved it changes nothing from this
+    // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
+    // dir/step route), so a different cut or a body that moved stays offerable.
+    if (
+      isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'STEP',
+        targetKey: cellKey(cut.cut),
+        standKey,
+        routeSig: routeSignature({
+          kind: 'STEP',
+          id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
+          meta: { dir: cut.dir, stepX: cut.step.x, stepY: cut.step.y, stepZ: cut.step.z },
+        }),
+        nowMs: state.timestampMs,
+      })
+    )
+      continue
     let penalty = 0
     if (target !== null) {
       const tdx = target.position.x - feet.x
@@ -4000,6 +4612,50 @@ function descendStepRouteSignature(step: DescentOption): string {
 }
 
 /**
+ * The STRICT dig feasibility of one sensor step: its whole 1x2 profile folded into
+ * the strongest harvest requirement and resolved against the held tools. This is
+ * the single gate both the DESCEND candidate builder (`descendCandidateFromStep`,
+ * which may relax it for a stranded body's escape dig) and `planDigRoute`'s step
+ * probe (`digRouteCandidate`) use, so the step the dig route picks can never be a
+ * step the builder then refuses - that disagreement is exactly how a route arm
+ * ends up offering nothing while a legal detour step exists.
+ */
+function strictStepDigProfile(
+  state: WorldState,
+  step: DescentOption,
+): {
+  digPlan: ReturnType<typeof descentDigPlan>
+  primary: Vec3Json
+  requirement: ReturnType<typeof strongestDigRequirement> | null
+  choice: ReturnType<typeof selectDigTool>
+} {
+  const digPlan = descentDigPlan(step)
+  const primary = descentPrimaryCell(step)
+  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
+  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
+  // produced a dig that could not finish (measured live: every cardinal step dug
+  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
+  const requirement = strongestDigRequirement(
+    digPlan.map((item) => ({
+      name: item.name ?? '',
+      harvestTool: item.harvestTool ?? null,
+      harvestTier: item.harvestTier ?? null,
+      diggable: item.diggable,
+    })),
+  )
+  const choice = selectDigTool(
+    {
+      name: requirement.name ?? '',
+      harvestTool: requirement.harvestTool ?? null,
+      harvestTier: requirement.harvestTier ?? null,
+      diggable: requirement.diggable === true,
+    },
+    (tool, tier) => hasTool(state, tool, tier),
+  )
+  return { digPlan, primary, requirement, choice }
+}
+
+/**
  * One DESCEND candidate from an already-safe step. Shared by the goal-grounded
  * descent family (`descendCandidates`) and the stranded-column descent
  * (`columnDescentCandidates`), so a body descending toward a resource and a body
@@ -4030,8 +4686,9 @@ function descendCandidateFromStep(
     escape?: boolean
   },
 ): { candidate: Candidate; toolReason: string } | null {
-  const digPlan = descentDigPlan(best)
-  const primary = descentPrimaryCell(best)
+  const profile = strictStepDigProfile(state, best)
+  const digPlan = profile.digPlan
+  const primary = profile.primary
   // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
   // broken at all (obsidian), and the state carries no hardness/hand-break fact to tell the two apart -
   // so case (c2) (a step needing a pickaxe tier the body lacks) must keep refusing. Every other
@@ -4042,32 +4699,11 @@ function descendCandidateFromStep(
   const escapeBreakable =
     spec.escape === true &&
     digPlan.every((item) => item.diggable && (item.harvestTool ?? null) !== 'pickaxe')
-  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
-  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
-  // produced a dig that could not finish (measured live: every cardinal step dug
-  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
-  const requirement = escapeBreakable
-    ? null
-    : strongestDigRequirement(
-        digPlan.map((item) => ({
-          name: item.name ?? '',
-          harvestTool: item.harvestTool ?? null,
-          harvestTier: item.harvestTier ?? null,
-          diggable: item.diggable,
-        })),
-      )
+  const requirement = escapeBreakable ? null : profile.requirement
   const choice =
     requirement === null
       ? { ok: true as const, tool: null, tier: null, reason: 'escape_breakable_without_drop_tool' }
-      : selectDigTool(
-          {
-            name: requirement.name ?? '',
-            harvestTool: requirement.harvestTool ?? null,
-            harvestTier: requirement.harvestTier ?? null,
-            diggable: requirement.diggable === true,
-          },
-          (tool, tier) => hasTool(state, tool, tier),
-        )
+      : profile.choice
   if (!choice.ok) return null
   const toward =
     spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
@@ -4731,6 +5367,11 @@ interface RawCandidatesResult {
   foodHabitatRefusal: SurfaceAscentRefusal | null
   /** typed refusal when a stranded body has no safe descent off its own column */
   columnDescentRefusal: ColumnDescentRefusal | null
+  /**
+   * Typed `DIG_ROUTE_REFUSED reason=...` facts collected while grounding this
+   * tick's offers (see `GroundedCandidatesResult.digRefusals`).
+   */
+  digRefusals: DigRouteRefusal[]
   /**
    * Typed `PROSPECT_REFUSED reason=...` when the descending body's geometry
    * grounded an exposure probe toward a sensed producer of its focus and every
@@ -6408,13 +7049,11 @@ interface RetrievalWant {
  * kill/pickup machinery still owns the actual rod. It is never a claim that
  * `nether_bricks` yields `blaze_rod` (`resourceMatches` stays exact), so the
  * MINE arm keeps withholding the body blocks for a `blaze_rod` focus.
+ *
+ * `isStructureFabricSource` lives in `state.ts` because the SENSOR needs the same
+ * classification to verify the cell against the claim it makes (a producer
+ * landmark is not verified by its own block being present).
  */
-const STRUCTURE_FABRIC_NAMES: ReadonlySet<string> = new Set(NETHER_STRUCTURE_BLOCK_NAMES)
-
-function isStructureFabricSource(blockNames: readonly string[]): boolean {
-  return blockNames.length > 0 && blockNames.every((name) => STRUCTURE_FABRIC_NAMES.has(name))
-}
-
 function retrievalWant(focusItem: string | null): RetrievalWant | null {
   if (focusItem === null) return null
   const blocks = scannedBlockNames(focusItem)
@@ -6531,6 +7170,34 @@ function allowsQueuedRetrievalProxy(current: { kind?: string; targetItem?: strin
 }
 
 /**
+ * The queued row the CURRENT row's explicit descent proxy exposes, or null.
+ *
+ * One definition for both consumers: `retrievalNeeds` offers this row's
+ * `RETRIEVE:known` route, and the sensor must verify the same row's remembered
+ * cells (`SensorInput.retrievalItems`) - verifying only the active focus left a
+ * proxied want's stale cell unproven, so it was re-offered forever.
+ */
+function queuedRetrievalProxyRow<Row extends { id?: string; status?: string; targetItem?: string | null }>(
+  queue: { current: { id?: string; kind?: string; targetItem?: string | null; description?: string } | null; goals: readonly Row[] } | null | undefined,
+): Row | null {
+  const current = queue?.current ?? null
+  if (current === null || !allowsQueuedRetrievalProxy(current)) return null
+  const rows = queue?.goals ?? []
+  const currentIndex = rows.findIndex((queued) => queued.id === current.id)
+  if (currentIndex < 0) return null
+  return rows.slice(currentIndex + 1).find((queued) => queued.status !== 'done' && queued.status !== 'impossible') ?? null
+}
+
+/** The item name of the proxied queued want, for the sensor's verification scope. */
+export function queuedRetrievalProxyItem(
+  queue: Parameters<typeof queuedRetrievalProxyRow>[0],
+): string | null {
+  const row = queuedRetrievalProxyRow(queue)
+  const item = row?.targetItem
+  return typeof item === 'string' && item.length > 0 ? item : null
+}
+
+/**
  * Ordered retrieval needs for the ACTIVE execution row.  The active focus is
  * always first.  `state.goal.targetItem` is only a legacy fallback when there
  * is no queue current; while a queue row is active it is mission-level state
@@ -6570,15 +7237,11 @@ function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueu
   push(focusItem, goalWantsFuel(current), current)
   if (current === null) {
     push(state.goal.targetItem, false, null)
-  } else if (current.kind !== 'smelt' && includeQueued && allowsQueuedRetrievalProxy(current)) {
-    const rows = state.goalQueue.goals
-    const currentIndex = rows.findIndex((queued) => queued.id === current.id)
-    if (currentIndex >= 0) {
-      const next = rows
-        .slice(currentIndex + 1)
-        .find((queued) => queued.status !== 'done' && queued.status !== 'impossible')
-      if (next !== undefined) push(next.targetItem, goalWantsFuel(next), next)
-    }
+  } else if (current.kind !== 'smelt' && includeQueued) {
+    // The proxy's OWN row decides what it exposes (`queuedRetrievalProxyRow`), so
+    // the offered route and the sensor's verification scope cannot diverge.
+    const next = queuedRetrievalProxyRow(state.goalQueue)
+    if (next !== null) push(next.targetItem, goalWantsFuel(next), next)
   }
   const wants: RetrievalWant[] = []
   for (const need of needs) {
@@ -6653,7 +7316,13 @@ function knownResourceFor(
     // site-anchor route does not depend on the entry's own kind. Dimension
     // re-anchoring above is what keeps an overworld sighting out (see (b) in
     // test-fortress-route.mts): a Nether site never routes from the overworld.
-    const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
+    // A cell remembered as the wanted item ITSELF (loot, a death drop) is a route
+    // by identity; the sensor verifies it against live dropped-item truth and
+    // withholds it (`drop_absent`) when nothing holds that item any more.
+    const matches =
+      want.kind === 'log'
+        ? resource.name.endsWith('_log')
+        : want.blockNames.includes(resource.name) || resource.name === want.item
     if (!matches) continue
     // A remembered cell inside a live structure is not a source: a retrieval
     // there would mine the structure the same way the sensed MINE would. Skip it
@@ -6671,6 +7340,13 @@ function knownResourceFor(
   }
   return best
 }
+
+/**
+ * The stable id of the executed `RETRIEVE:known` Skill, for the #436 Skill
+ * vocabulary (`SKILL_START`/`SKILL_INTERRUPT`/`SKILL_END`). One id for every
+ * remembered-cell trip, whatever item or claim it carries.
+ */
+export const KNOWN_RETRIEVE_SKILL = 'RETRIEVE(knownResource)'
 
 export const KNOWN_RESOURCE_PROOF_DISTANCE = 8
 
@@ -6722,70 +7398,698 @@ export function resourceDimensionMatches(resource: KnownResource, dimension: str
 }
 
 /**
- * The grounded travel/approach leg for a remembered resource whose own route
- * just proved zero observable change from this body cell.
- *
- * The postcondition proved the previous attempt changed nothing; the mechanical
- * fact behind it is usually "the horizontal path from HERE is blocked" (live:
- * `PATH_CALLBACK ... outcome=noPath|stuck` 17-18m from the remembered ore). The
- * grounded way to make the target observable/reachable again is to change the
- * STAND CELL, so this offers the nearest standable cell that measurably reduces
- * the distance to the remembered resource - a real MOVE the ordinary guard and
- * reachability gate still own. It is an offer, never a replacement: Jev decides
- * whether to walk it, and the retrieval is re-offered the moment the body stands
- * somewhere new.
+ * The per-tick sink the offer fills with its typed `DIG_ROUTE_REFUSED` facts.
+ * Threaded explicitly through the arms so the generator stays a pure function of
+ * its inputs (no module-level state, no logger).
  */
-function knownResourceApproachLeg(
+type DigRouteRefusalSink = DigRouteRefusal[]
+
+/** Bound on retained refusals per tick: a dead end is stated once, not N times. */
+const DIG_ROUTE_REFUSAL_CAP = 8
+
+function dedupeDigRouteRefusals(refusals: readonly DigRouteRefusal[]): DigRouteRefusal[] {
+  const seen = new Set<string>()
+  const out: DigRouteRefusal[] = []
+  for (const refusal of refusals) {
+    const line = formatDigRouteRefused(refusal)
+    if (seen.has(line)) continue
+    seen.add(line)
+    out.push(refusal)
+    if (out.length >= DIG_ROUTE_REFUSAL_CAP) break
+  }
+  return out
+}
+
+function cellText(position: Vec3Json): string {
+  return `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`
+}
+
+/**
+ * The general "the target has no walkable route, so change the TERRAIN" route.
+ *
+ * MEASURED (run-muc9k936-1f3vb, main ebec6f2, m3-live): a body sealed inside the
+ * 1-wide shaft it had climbed sensed only its OWN feet cell as standable
+ * (`state.ts#buildTerrain` samples 5x5x3), so `travelApproachLeg` found no cell
+ * that changes the stand situation, `entryCandidates` reported
+ * `ROUTE_ESCALATE reason=all_routes_spent`, and the offer collapsed to
+ * `['WAIT','ESCALATE']` while the KNOWN gate sat 21 blocks away behind ordinary
+ * stone. Every bounded recovery family was starved for the same reason: they all
+ * move the BODY to a cell the sensor already believes is standable.
+ *
+ * The sensor knows more than the walk arms use: `state.descent` carries one
+ * pre-computed cardinal option per direction x {down, level} with the concrete
+ * dig cells, the block, its harvest requirement and the SAFE verdict including
+ * its typed refusal. A `level` option is exactly "tunnel one block forward", a
+ * `down` option is "staircase one block down/forward". Grounding the one that
+ * STRICTLY reduces the distance to the goal's own target is therefore the
+ * mechanical route a player would take, and it needs no new executor, guard or
+ * postcondition: the candidate is built through the SAME
+ * `descendCandidateFromStep` and runs through the SAME `runDescend` as every
+ * other bounded dig step.
+ *
+ * CAN/TRUE/SAFE stays with code (which cells exist, which are breakable with the
+ * held tools, which direction actually closes the bearing, which the sensor
+ * proved safe). Jev still owns WHICH grounded candidate to take, System2 still
+ * owns WHAT the goal is. No portal/M3 branch, no hard-coded coordinate: the only
+ * target is the goal's own target cell and the only direction is
+ * `sign(target - feet)`.
+ */
+function digRouteCandidate(
   state: WorldState,
   options: CandidateOptions,
-  want: RetrievalWant,
-  known: KnownResource,
+  spec: {
+    target: Vec3Json
+    targetName: string | null
+    reason: string
+    extraMeta?: Record<string, string | number | boolean>
+  },
+  refusals: DigRouteRefusalSink,
 ): Candidate | null {
+  const standKey = cellKey(state.self.position)
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const decision = planDigRoute({
+    selfPosition: state.self.position,
+    target: spec.target,
+    descent: state.descent,
+    // The body's own cell is the only standable cell the sensor knows: a lateral
+    // dig here is a shaft exit, which is the difference the marker reports.
+    sealed: strandedOnColumn(state),
+    // The dig route is a ROUTE like every other: a step whose exact identity
+    // already proved zero observable change from this stand cell is withheld (the
+    // body must move first), and the ordinary ledger spends it when it fails.
+    isSpent: (step) =>
+      isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'DESCEND',
+        targetKey: cellKey(descentPrimaryCell(step)),
+        standKey,
+        routeSig: descendStepRouteSignature(step),
+        nowMs: state.timestampMs,
+      }),
+    // The tool gate the candidate builder applies, so a step the body cannot dig
+    // is never chosen as the route: the planner then offers the next-best step
+    // that still strictly reduces the distance (a detour) instead of refusing the
+    // whole arm - the measured pocket is exactly this shape (the best-closing east
+    // step is the gate's own obsidian column, needing pickaxe tier 4).
+    stepRefusal: (step) => {
+      const profile = strictStepDigProfile(state, step)
+      // #436 U5 (SAFE / protected resources): a step whose profile would break a
+      // protected station block or a member of a LIVE structure is never a route,
+      // whatever the tool gate says. The measured case is the portal frame's own
+      // obsidian: the bearing route into the interior runs THROUGH frame cells, and
+      // no route may dismantle the asset the trip is for.
+      const liveStructures = liveStructureIndexOf(state)
+      for (const cell of profile.digPlan) {
+        const name = cell.name ?? ''
+        if (name.length > 0 && isProtectedStationBlock(name)) {
+          return {
+            dir: step.dir,
+            mode: step.mode,
+            reason: 'protected' as DigRouteRefusalReason,
+            block: name,
+            detail: `${name} at (${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a protected station`,
+          }
+        }
+        if (isLiveStructureMember(liveStructures, cell.cell)) {
+          return {
+            dir: step.dir,
+            mode: step.mode,
+            reason: 'protected' as DigRouteRefusalReason,
+            block: name.length > 0 ? name : (step.digName ?? null),
+            detail: `(${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a member of a live structure`,
+          }
+        }
+      }
+      if (profile.choice.ok) return null
+      const requirement = profile.requirement
+      return {
+        dir: step.dir,
+        mode: step.mode,
+        reason: 'no_tool',
+        block: requirement?.name ?? step.digName ?? null,
+        detail: `${requirement?.name ?? 'the binding block'} needs ${requirement?.harvestTool ?? 'a tool'} tier ${requirement?.harvestTier ?? 0}`,
+      }
+    },
+  })
+  if (decision.kind === 'refuse') {
+    refusals.push(decision.refusal)
+    return null
+  }
+  const route = decision.route
+  const built = descendCandidateFromStep(state, options, route.step, {
+    focusItem: spec.targetName,
+    descendTargetY: null,
+    // The step is the sensor's own safe option and it strictly reduces the
+    // distance to the goal's target: a grounded route, never a blind search step.
+    grounded: true,
+    staircase: route.mode === 'down',
+    extraMeta: {
+      digRoute: true,
+      digRouteReason: spec.reason,
+      digRouteKind: route.kind,
+      digRouteTarget: cellText(spec.target),
+      digRouteCell: cellText(route.cell),
+      digRouteBlock: route.block ?? 'unknown',
+      digRouteFrom: round2Number(route.fromDistance),
+      digRouteTo: round2Number(route.toDistance),
+      digRouteBearing: route.dir,
+      ...(route.detour && route.skipped !== null
+        ? {
+            digRouteDetour: true,
+            digRouteSkipped: `${route.skipped.dir}:${route.skipped.reason}`,
+            digRouteSkippedBlock: route.skipped.block ?? 'unknown',
+          }
+        : {}),
+      digRouteLine: formatDigRoute(route, spec.reason, spec.target),
+      ...(spec.extraMeta ?? {}),
+    },
+    // The STRICT tool gate (no escape relaxation): a tunnel the body cannot
+    // finish must be refused with `no_tool`, never offered and then re-aimed
+    // forever. A stranded-body escape dig is a different action with its own
+    // relaxation (`columnDescentCandidates`).
+    escape: false,
+  })
+  if (built === null) {
+    refusals.push({
+      reason: 'no_tool',
+      target: spec.target,
+      bearing: digRouteBearing(feet, spec.target),
+      cell: route.dig,
+      block: route.block,
+      detail: `${route.block ?? 'the bearing block'} needs ${route.harvestTool ?? 'a tool'} tier ${route.harvestTier ?? 0}`,
+    })
+    return null
+  }
+  // Its OWN id namespace: the collect descent arm can ground the same sensor step
+  // for a stone/ore focus, and two candidates with one id in the same offer would
+  // make the guard resolve a decision to the wrong meta. The route IDENTITY for
+  // the spend ledger is (kind, dig cell, stand cell, route signature) and is
+  // deliberately unchanged, so a step spent by either arm is spent for both.
+  return {
+    ...built.candidate,
+    id: `DIG_ROUTE:${route.mode}:${route.dir}:${blockId('b', route.dig)}`,
+  }
+}
+
+/**
+ * The grounded travel/approach legs for a locomotion target whose own route just
+ * proved spent from this body cell.
+ *
+ * The postcondition proved the previous attempt changed nothing (or failed at
+ * its path stage); the mechanical fact behind it is usually "the path from HERE
+ * is blocked" (live: `PATH_CALLBACK ... outcome=noPath|stuck` 17-18m from the
+ * remembered ore, and the same shape 16m/13-bricks from a lit gate). The
+ * grounded way to make the target reachable again is to change the STAND CELL,
+ * so this offers the nearest standable cell that measurably reduces the distance
+ * to the target - a real MOVE the ordinary guard and reachability gate still
+ * own. It is an offer, never a replacement: Jev decides whether to walk it, and
+ * the route is re-offered the moment the body stands somewhere new.
+ *
+ * When the sensor knows NO standable cell that improves the distance (the
+ * measured sealed shaft), or when the only such cell is itself unreachable, the
+ * body's own cell is the whole world the walk arms can see. The terrain is then
+ * the only thing that can change, so the bounded dig route toward the same target
+ * is grounded alongside the walk leg (`digRouteCandidate`). Both are offers; when
+ * neither can be grounded the caller keeps its existing typed escalation.
+ */
+/**
+ * One bounded, mechanically-determined continuation for a travel waypoint that no
+ * sensed standable cell can WALK to.
+ *
+ * MEASURED LIVE (run-mucbyro1-1hqhm, the M3 pocket, world truth read with
+ * `tools/world-truth-plane.mjs` on chunk (1,0) y63-69):
+ *
+ *   body (24,67,9) feet y=67 on cobblestone; E (25,67,9) = the gate's own
+ *   obsidian column; S (24,67,10) = air with (24,66,10) air and (24,65,10) grass
+ *   below; the waypoint (26,67,10) is standable over the dirt at (25,66,10).
+ *
+ *   `MOVE:p26_67_10` -> `PATH_CALLBACK phase=failed outcome=stuck` x8 ->
+ *   `MOVE_FAILMEM ... reason=stuck` with an EMPTY contract (no `vertical`, no dig
+ *   profile): `runMove` (executor.ts:1921) runs the vertical contract first, finds
+ *   nothing, and then `pathTo(target, 'GoalBlock')` cannot express the only
+ *   mechanical route, which a walk-only BFS over the same grid proves is 4 moves
+ *   and needs NO dig and NO placement:
+ *
+ *     (24,67,9) --1-block drop S--> (24,66,10) --1-block step UP E onto the
+ *     verified ledge (25,66,10)--> (25,67,10) --2 level walks--> (26,67,9)
+ *
+ * So the missing piece is not a dig (a dig cannot create a floor) and not a
+ * placement (none is required): it is the ordinary 1-block STEP-UP onto a sensed
+ * ledge, which the stock MOVE contract cannot express from a cell that is itself
+ * one block below the ledge's standing level.
+ *
+ * The continuation is derived ONLY from the sensor's own facts: the pre-computed
+ * descent options (`state.descent`, `state.ts#buildDescent`) carry the controlled
+ * 1-block drop (`open_floor` + `supportSolid` + no hazard + no wall in the way),
+ * and `terrain.standable` (the same `isUsableStand` rule every walk arm uses)
+ * verifies BOTH the hole floor the body drops into and the ledge top it steps
+ * onto. `ledge` is the landing's own support cell - the block the body climbs.
+ */
+interface PocketContinuation {
+  action: 'step_over' | 'step_up'
+  /** the verified standable cell the body drops into first (null for a direct step-up) */
+  via: Vec3Json | null
+  /** the verified standable cell the body ends on (the ledge top) */
+  landing: Vec3Json
+  /** the block the body climbs onto: the landing's support cell */
+  ledge: Vec3Json
+  /** the horizontal face the body steps up through (never the own column) */
+  dir: 'E' | 'W' | 'N' | 'S'
+  /** the continuation's own distance to the leg target (strictly closer than the body's) */
+  toTarget: number
+}
+
+/** At most this many alternative continuations are enumerated (Jev still chooses). */
+const POCKET_CONTINUATION_CAP = 2
+
+function pocketContinuations(
+  state: WorldState,
+  target: Vec3Json,
+): PocketContinuation[] {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const currentDistance = distance(feet, target)
+  const standable = new Set(state.terrain.standable.map((cell) => cellKey(cell)))
+  const out: PocketContinuation[] = []
+  const seen = new Set<string>()
+  const push = (entry: PocketContinuation): void => {
+    const landingKey = cellKey(entry.landing)
+    if (seen.has(landingKey)) return
+    seen.add(landingKey)
+    out.push(entry)
+  }
+  const descent = state.descent ?? []
+  for (const level of descent) {
+    if (level.dx === 0 && level.dz === 0) continue
+    // (a) A DIRECT 1-block step-up: the front cell at feet level is the ledge
+    //     block (`wallSolid`), nothing stands above it (`headSolid` false), and
+    //     the cell above the ledge is a verified stand.
+    const upCell = { x: feet.x + level.dx, y: feet.y + 1, z: feet.z + level.dz }
+    if (level.wallSolid === true && level.headSolid === false && standable.has(cellKey(upCell))) {
+      const d = distance(upCell, target)
+      if (d <= currentDistance - DIG_ROUTE_MIN_ADVANCE) {
+        push({
+          action: 'step_up',
+          via: null,
+          landing: upCell,
+          ledge: level.wall,
+          // A horizontal option's direction is one of the four faces (`dx`/`dz`
+          // are non-zero by the guard above), never the own column.
+          dir: level.dir as PocketContinuation['dir'],
+          toTarget: d,
+        })
+      }
+    }
+    // (b) A STEP OVER a verified 1-block drop: the sensor's own controlled-drop
+    //     geometry, the hole floor is a verified stand, and from it a cardinal
+    //     1-block step-up lands on a verified stand that closes the distance.
+    const down = descent.find((step) => step.dir === level.dir && step.mode === 'down')
+    if (down === undefined) continue
+    if (
+      down.refusal !== 'open_floor' ||
+      down.supportSolid !== true ||
+      down.hazardNearby === true ||
+      down.wallSolid !== false ||
+      down.headSolid !== false
+    ) {
+      continue
+    }
+    const via = down.step
+    if (!standable.has(cellKey(via))) continue
+    for (const step of PROSPECT_CARDINALS) {
+      const landing = { x: via.x + step.dx, y: via.y + 1, z: via.z + step.dz }
+      if (!standable.has(cellKey(landing))) continue
+      const d = distance(landing, target)
+      if (!(d <= currentDistance - DIG_ROUTE_MIN_ADVANCE)) continue
+      push({
+        action: 'step_over',
+        via,
+        landing,
+        ledge: { x: landing.x, y: landing.y - 1, z: landing.z },
+        // `PROSPECT_CARDINALS` are the four horizontal faces, never the own column.
+        dir: step.dir as PocketContinuation['dir'],
+        toTarget: d,
+      })
+      if (out.length >= POCKET_CONTINUATION_CAP) return out
+    }
+  }
+  return out
+}
+
+/**
+ * Is `goal` reachable from the body's own cell by ORDINARY LEVEL WALKS over the
+ * sensed standable set? A stand the body must DROP into (or climb onto) to reach
+ * is not a walk: the stock `GoalBlock` MOVE contract can only express level
+ * walking, which is exactly why the measured leg failed `outcome=stuck` with an
+ * empty contract. Bounded by the sensor's own `terrain.standable` window.
+ */
+function levelWalkReachable(state: WorldState, goal: Vec3Json): boolean {
+  const start = cellKey(state.self.position)
+  const goalKey = cellKey(goal)
+  const stands = new Set(state.terrain.standable.map((cell) => cellKey(cell)))
+  if (!stands.has(goalKey)) return false
+  const startCell = { x: Math.floor(state.self.position.x), y: Math.floor(state.self.position.y), z: Math.floor(state.self.position.z) }
+  const seen = new Set<string>([start])
+  const queue: Vec3Json[] = [startCell]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (current === undefined) break
+    if (cellKey(current) === goalKey) return true
+    for (const step of PROSPECT_CARDINALS) {
+      const next = { x: current.x + step.dx, y: current.y, z: current.z + step.dz }
+      const nextKey = cellKey(next)
+      if (seen.has(nextKey) || !stands.has(nextKey)) continue
+      seen.add(nextKey)
+      queue.push(next)
+    }
+  }
+  return false
+}
+
+/**
+ * The grounded MOVE candidate for one continuation.
+ *
+ * TWO mechanical shapes, because the executor's order is fixed
+ * (`executor.ts#runMove` runs the vertical contract BEFORE the walk):
+ *
+ *   - `step_up` (the ledge is face-adjacent and one level up): target = the
+ *     landing WITH the SAME `vertical=staircase-up` contract the ordinary
+ *     up-staircase uses. The dig cell is the empty cell above the ledge, so
+ *     `digRetrievalStaircase` skips the dig and drives
+ *     `pathTo(step, 'GoalGetToBlock')` - an ordinary adjacent 1-block jump, which
+ *     is exactly what the contract expresses.
+ *   - `step_over` (a verified hole lies between the body and the ledge): target =
+ *     the hole FLOOR, the cell the body must stand in before it can jump. A
+ *     vertical contract here would run BEFORE the walk that gets the body into the
+ *     hole and could only fail, so the step-up is grounded as the NEXT tick's
+ *     ordinary leg from that floor (it is then face-adjacent and one up). The
+ *     landing/ledge/direction are carried in the meta so the operator and the
+ *     next offer read the same mechanical plan.
+ *
+ * Nothing is invented in the executor, and no block has to be placed.
+ */
+function continuationCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; targetName: string | null; reason: string; extraMeta: Record<string, string | number | boolean>; skill: string },
+  cont: PocketContinuation,
+  reflex: string | null,
+  boundary: string | null = null,
+): Candidate {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const target = cont.action === 'step_over' ? (cont.via ?? cont.landing) : cont.landing
+  const via = cont.via === null ? 'none' : cellText(cont.via)
+  const contract =
+    cont.action === 'step_up'
+      ? verticalPlanMeta(
+          {
+            kind: 'staircase-up',
+            dir: cont.dir,
+            fromY: feet.y,
+            toY: cont.landing.y,
+            // The cell above the ledge is already open: the step-up IS the whole HOW.
+            dig: cont.landing,
+            step: cont.landing,
+            digName: null,
+          } satisfies VerticalPlan,
+          feet.y,
+          cont.landing.y,
+        )
+      : // The hole floor comes FIRST: no vertical contract here (the executor runs
+        // the contract before the walk), but the fact is stated explicitly so the
+        // meta is never silently empty.
+        { vertical: 'none' }
+  // #436 section 17: the step states which deterministic layer justified it. A
+  // candidate-layer continuation is realized only AFTER Jev selects it, so its
+  // authority is MECHANICAL_CONTINUATION; the executor's in-skill step-over (the
+  // unique prerequisite of an already-selected entry) is MANDATORY_PREREQUISITE.
+  const line = formatSkillStep(
+    spec.skill,
+    cont.action,
+    formatSkillStepAuthority(
+      'MECHANICAL_CONTINUATION',
+      `cell=${cellText(target)} via=${via} landing=${cellText(cont.landing)} ledge=${cellText(cont.ledge)} ` +
+        `vertical=${cont.action === 'step_up' ? 'staircase-up' : 'none'} ` +
+        `envelope=movement-only(no_dig,no_place)`,
+    ),
+  )
+  const label =
+    cont.action === 'step_over'
+      ? `step over the hole into (${cellText(target)}) first: from there the ledge at (${cellText(cont.ledge)}) is one step up to (${cellText(cont.landing)}), toward (${cellText(spec.target)})`
+      : `step up onto the ledge at (${cellText(cont.ledge)}) to stand at (${cellText(cont.landing)}), toward (${cellText(spec.target)})`
+  return {
+    id: `SKILL_STEP:${cont.action}:${blockId('p', target)}`,
+    kind: 'MOVE',
+    label,
+    targetName: spec.targetName,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(target, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: target.x,
+      y: target.y,
+      z: target.z,
+      approachLeg: spec.reason,
+      approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+      ...contract,
+      legContinuation: true,
+      legContinuationAction: cont.action,
+      legContinuationSkill: spec.skill,
+      legContinuationCell: cellText(target),
+      legContinuationVia: via,
+      legContinuationLanding: cellText(cont.landing),
+      legContinuationLedge: cellText(cont.ledge),
+      legContinuationDir: cont.dir,
+      legContinuationToD: round2Number(cont.toTarget),
+      legContinuationLine: line,
+      ...(reflex === null ? {} : { legReflex: reflex }),
+      ...(boundary === null ? {} : { legPolicyBoundary: boundary }),
+      ...spec.extraMeta,
+    },
+  }
+}
+
+/**
+ * The #436 `REFLEX` line for a unique binding continuation: the landed
+ * `netherPortalPlan.formatReflex` shape (ownerSkill / reason / action / evidence),
+ * with the cell, the hole floor and the ledge carried inside `evidence` so the
+ * marker family stays ONE vocabulary across the candidate layer and the skill.
+ */
+function formatLegReflex(input: {
+  skill: string
+  action: PocketContinuation['action']
+  /** the cell the step starts from (the hole floor) or lands on (a direct step-up) */
+  cell: Vec3Json
+  via: Vec3Json | null
+  ledge: Vec3Json
+  evidence: string
+}): string {
+  return formatReflex({
+    ownerSkill: input.skill,
+    action: input.action,
+    evidence: `cell=${cellText(input.cell)} via=${input.via === null ? 'none' : cellText(input.via)} ledge=${cellText(input.ledge)} ${input.evidence}`,
+  })
+}
+
+function travelApproachLegs(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: {
+    target: Vec3Json
+    targetName: string | null
+    reason: string
+    /** the skill/option that owns this leg, for the `REFLEX ownerSkill=` fact */
+    skill: string
+    label: (spot: Vec3Json) => string
+    extraMeta: Record<string, string | number | boolean>
+  },
+  refusals: DigRouteRefusalSink,
+): Candidate[] {
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
-  const currentDistance = distance(state.self.position, known.position)
+  const currentDistance = distance(state.self.position, spec.target)
+  const standKey = cellKey(state.self.position)
+  const targetKey = cellKey(spec.target)
   let best: Vec3Json | null = null
   let bestScore = Number.POSITIVE_INFINITY
+  // A leg that IS the destination is not an approach. The destination's own route
+  // is the one that just failed, so re-offering the destination as its own approach
+  // waypoint is the same failing action under a different id. Measured live
+  // (run-mucaq28q-1ftq1, the M3 pocket): the body 2 blocks west of the portal
+  // interior with the frame's obsidian column between offered
+  // `MOVE:p26_67_9` - a walk INTO the portal interior, which failed
+  // `phase=pathing` - while the standable open face at (26,67,10), strictly closer
+  // than the body and reachable, was never offered. The destination cell is only
+  // excluded as a WAYPOINT; the destination's own candidate is untouched.
   for (const spot of state.terrain.standable) {
+    // Only a DIFFERENT stand cell can change the mechanical situation: a "leg"
+    // to the cell the body already occupies is not a route change, and the exact
+    // float distance to a target can make the body's own floor cell look
+    // "closer" than its centre.
+    if (cellKey(spot) === standKey) continue
+    if (cellKey(spot) === targetKey) continue
     if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) continue
-    const toResource = distance(spot, known.position)
-    if (toResource >= currentDistance) continue
+    const toTarget = distance(spot, spec.target)
+    if (toTarget >= currentDistance) continue
     if (
       failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) >= moveFailureLimit
     )
       continue
-    const score = toResource + distance(spot, state.self.position) * 0.1
+    const score = toTarget + distance(spot, state.self.position) * 0.1
     if (score < bestScore) {
       bestScore = score
       best = spot
     }
   }
-  if (best === null) return null
-  return {
-    id: `MOVE:${blockId('p', best)}`,
-    kind: 'MOVE',
-    label: `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
-    targetName: known.name,
-    target: best,
-    targetEntityId: null,
-    itemName: null,
-    requiresTool: false,
-    toolName: null,
-    inReach: distance(best, state.self.position) <= options.reach,
-    hasStandableAdjacent: true,
-    meta: {
-      tick: state.tick,
-      x: best.x,
-      y: best.y,
-      z: best.z,
-      approachLeg: 'target_not_observable',
-      approachTarget: `${known.position.x},${known.position.y},${known.position.z}`,
-      approachResource: want.item,
-      knownName: known.name,
-    },
+  const legs: Candidate[] = []
+  if (best !== null) {
+    legs.push({
+      id: `MOVE:${blockId('p', best)}`,
+      kind: 'MOVE',
+      label: spec.label(best),
+      targetName: spec.targetName,
+      target: best,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(best, state.self.position) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        x: best.x,
+        y: best.y,
+        z: best.z,
+        approachLeg: spec.reason,
+        approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+        ...spec.extraMeta,
+      },
+    })
   }
+  const dig = digRouteCandidate(
+    state,
+    options,
+    {
+      target: spec.target,
+      targetName: spec.targetName,
+      reason: 'no_walkable_route',
+      extraMeta: spec.extraMeta,
+    },
+    refusals,
+  )
+  if (dig !== null) legs.push(dig)
+  // The last grounded route change: a bounded, sensor-derived continuation onto a
+  // verified ledge when no sensed standable cell can walk to the waypoint at all
+  // (see `pocketContinuations`). A continuation is a DIFFERENT stand cell, so the
+  // ordinary MOVE / reachability / failure-memory machinery still owns the
+  // execution and the spend budget; a stepping stone that proves zero change is
+  // spent like any other leg.
+  // Fire the continuation grounder only when the ordinary walk cannot express the
+  // route: no advancing cell at all, or an advancing cell that is not reachable by
+  // LEVEL WALKS over the sensed stands (measured live: `MOVE:p26_67_10` was a
+  // sensed stand across a 1-block hole, so the stock MOVE contract failed `stuck`
+  // with an empty contract). A genuinely walkable leg is therefore untouched.
+  const walkable = best !== null && levelWalkReachable(state, best)
+  const continuations = walkable ? [] : pocketContinuations(state, spec.target)
+  // #436 section 7 (U3) / section 19 (8, 28) / section 22: the grounded remedies
+  // are ENUMERATED by semantic class, never ranked. `movement` is the hole
+  // step-over/step-up; `dig` is the bounded dig route, a separate DESCEND
+  // candidate (never a contract on a MOVE, so a walk never silently gains dig
+  // authority); `place` (a bridge) is a third class. When more than one class is
+  // on offer the next move is Jev's, and the boundary is stated.
+  const remedyClasses = [
+    ...(best !== null ? ['movement:walk'] : []),
+    ...continuations.map((cont) => `movement:${cont.action}`),
+    ...(dig !== null ? ['dig:route'] : []),
+  ]
+  const boundary =
+    remedyClasses.length > 1
+      ? formatSkillPolicyBoundary({
+          skill: spec.skill,
+          reason: 'multiple_non_equivalent_recoveries',
+          alternatives: remedyClasses,
+        })
+      : null
+  const uniqueContinuation = continuations.length === 1 && dig === null && !walkable
+  for (const cont of continuations) {
+    const reflex = uniqueContinuation
+      ? formatLegReflex({
+          skill: spec.skill,
+          action: cont.action,
+          // the cell the continuation MOVES INTO (the hole floor for a step-over)
+          cell: cont.via ?? cont.landing,
+          via: cont.via,
+          ledge: cont.ledge,
+          evidence:
+            (cont.via === null
+              ? `ledge@${cellText(cont.ledge)}:solid`
+              : `hole_floor@${cellText(cont.via)}:standable+support_solid;ledge@${cellText(cont.ledge)}:solid`) +
+            `;d=${round2Number(currentDistance)}->${round2Number(cont.toTarget)}`,
+        })
+      : null
+    legs.push(continuationCandidate(state, options, spec, cont, reflex, boundary))
+  }
+  // A boundary with no continuation candidate still has to be visible: attach it to
+  // the walk leg / dig route so the operator sees that BOTH classes were grounded
+  // and that code stopped.
+  if (boundary !== null && legs.length > 0) {
+    for (const leg of legs) leg.meta.legPolicyBoundary = boundary
+  }
+  return legs
 }
 
-function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
+function round2Number(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+/**
+ * The named-resource spelling of {@link travelApproachLegs}: the remembered
+ * resource's own route proved zero observable change, so the legs name the
+ * resource and the item the trip is for.
+ */
+function knownResourceApproachLegs(
+  state: WorldState,
+  options: CandidateOptions,
+  want: RetrievalWant,
+  known: KnownResource,
+  refusals: DigRouteRefusalSink,
+): Candidate[] {
+  return travelApproachLegs(
+    state,
+    options,
+    {
+      target: known.position,
+      targetName: known.name,
+      reason: 'target_not_observable',
+      skill: KNOWN_RETRIEVE_SKILL,
+      label: (best) =>
+        `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
+      extraMeta: { approachResource: want.item, knownName: known.name },
+    },
+    refusals,
+  )
+}
+
+function retrievalCandidatesForWant(
+  state: WorldState,
+  options: CandidateOptions,
+  want: RetrievalWant,
+  digRefusals: DigRouteRefusalSink = [],
+): Candidate[] {
   if (mineableBlockFor(state, want) !== null) return []
   const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
   if (known !== null) {
@@ -6850,8 +8154,10 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
         nowMs: state.timestampMs,
       })
     ) {
-      const leg = knownResourceApproachLeg(state, options, want, known)
-      return leg === null ? [] : [leg]
+      // The grounded route changes for a spent retrieval: a walk leg that changes
+      // the stand cell, and/or the bounded dig route through the terrain toward
+      // the remembered cell when no standable cell improves the distance.
+      return knownResourceApproachLegs(state, options, want, known, digRefusals)
     }
     return [candidate]
   }
@@ -6931,6 +8237,7 @@ function retrievalCandidates(
   options: CandidateOptions,
   focusItem: string | null,
   includeQueued = true,
+  digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const recipes = options.recipes ?? null
   const queuedProxy = allowsQueuedRetrievalProxy(state.goalQueue?.current ?? null)
@@ -6939,7 +8246,7 @@ function retrievalCandidates(
     // prerequisite even though its item differs from the proxy's cobblestone
     // focus.  Every ordinary row remains focus-bounded.
     if (!queuedProxy && !retrievalWantAdvancesFocus(focusItem, want, recipes)) continue
-    const candidates = retrievalCandidatesForWant(state, options, want)
+    const candidates = retrievalCandidatesForWant(state, options, want, digRefusals)
     if (candidates.length > 0) return candidates
   }
   return []
@@ -7111,7 +8418,7 @@ function pickExplore(
 }
 
 function isBlacklistedMoveTarget(
-  state: WorldState,
+  state: Pick<WorldState, 'self'>,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
   position: Vec3Json,
 ): boolean {
@@ -7406,6 +8713,7 @@ export function applyReachabilityGate(
   sourceExclusions: ResourceSourceExclusion[] | null = null,
   columnDescentRefusal: ColumnDescentRefusal | null = null,
   prospectRefusal: ProspectRefusal | null = null,
+  digRefusals: DigRouteRefusalSink = [],
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -7461,7 +8769,7 @@ export function applyReachabilityGate(
       ...presented.map((candidate) => candidate.id),
       ...withheld.map((entry) => entry.candidate.id),
     ])
-    run(capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen))
+    run(capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen, digRefusals))
     const next = retiredStationsFromWithheld(withheld)
     if (next.size === retired.size) break
     retired = next
@@ -7558,6 +8866,7 @@ export function applyReachabilityGate(
     foodHabitatRefusal,
     columnDescentRefusal,
     prospectRefusal,
+    digRefusals: dedupeDigRouteRefusals(digRefusals),
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),
@@ -7575,7 +8884,15 @@ function evaluateCandidate(
   context: ReachabilityGateContext,
 ): CandidateReachability | null {
   const position = candidate.target
-  if (position === null || !REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  if (position === null) return null
+  // A plain survival ATTACK is locomotion too: outside contact range the executor
+  // must first GoalFollow the entity into melee. The live portal run repeatedly
+  // advertised a skeleton 7.83m away through sealed terrain as the ONLY
+  // executable action; every 2.2s lease then failed `out_of_reach`. Gate that
+  // mechanical approach here. Goal-directed mob/food hunts keep their dedicated
+  // longer/re-acquisition executor contract and are intentionally unchanged.
+  if (candidate.kind === 'ATTACK') return evaluateOrdinaryAttackCandidate(candidate, context)
+  if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
   if (candidate.kind === 'MINE') return evaluateMineCandidate(candidate, context)
   const accessRefusal = digAccessRefusalOf(candidate)
   if (accessRefusal !== null) {
@@ -7636,6 +8953,44 @@ function evaluateCandidate(
   const effectiveProbe: PathProbeResult = probe === 'no_path' && farTarget ? 'unknown' : probe
   const result = evaluateReachability(target, world, context.state.inventory.counts, abilities, effectiveProbe)
   return reachabilityRecord(candidate, target, world, result, context)
+}
+
+function evaluateOrdinaryAttackCandidate(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+): CandidateReachability | null {
+  const target = candidate.target
+  if (target === null || candidate.meta.targetHostile !== true) return null
+  // Producer/food hunts have a different bounded skill: they may re-acquire and
+  // intentionally travel farther than one local self-defence lease.
+  if (typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal') return null
+
+  const distanceToTarget =
+    typeof candidate.meta.distance === 'number'
+      ? candidate.meta.distance
+      : distance(context.state.self.position, target)
+  const targetFact = reachabilityTargetFor(context.state, candidate)
+  const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+
+  // Contact is already executable: do not let a path probe erase a mob the body
+  // can hit right now. WHICH response to take remains Jev's choice.
+  if (distanceToTarget <= MELEE_THREAT_REACH) {
+    return reachabilityRecord(
+      candidate,
+      targetFact,
+      world,
+      { reachable: true, reason: 'reachable', missingCapabilities: [] },
+      context,
+    )
+  }
+
+  const probe = context.options.reachability?.attackPathProbe?.(target) ?? 'unknown'
+  if (probe === 'unknown') return null
+  const result: ReachabilityResult =
+    probe === 'reachable'
+      ? { reachable: true, reason: 'reachable', missingCapabilities: [] }
+      : { reachable: false, reason: 'no_path', missingCapabilities: [{ kind: 'open_path' }] }
+  return reachabilityRecord(candidate, targetFact, world, result, context)
 }
 
 function hasVerticalPlan(candidate: Candidate): boolean {
@@ -7794,9 +9149,18 @@ function columnFacts(state: WorldState): ColumnFacts {
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  const ownCut = (state.headroomCuts ?? []).find(
-    (cut) => cut.pos.x === feet.x && cut.pos.z === feet.z && (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
-  )
+  const cuts = state.headroomCuts ?? []
+  const ownCut =
+    cuts.find((cut) => cut.currentFootprint === true) ??
+    // Backward-compatible replay fixtures written before `currentFootprint`:
+    // only the old own-column shape may stand in for the current blocker.
+    cuts.find(
+      (cut) =>
+        cut.currentFootprint === undefined &&
+        cut.pos.x === feet.x &&
+        cut.pos.z === feet.z &&
+        (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
+    )
   // The sensor reports standable FEET cells. The body's feet cell is floor(y),
   // but a body standing on a partial block (slab/path/stair, live y=34.5) has
   // its standable cell one level above the floor cell. Live starvation (main
@@ -7826,13 +9190,24 @@ function reachabilityWorldFor(
   column: ColumnFacts,
 ): ReachabilityWorld {
   const position = candidate.target
+  // SAFE: a code-grounded environmental escape was proven hazard-free by its own
+  // selection (real block truth at the destination); the blanket proximity rule
+  // would otherwise withhold EVERY exit from a burning body, because each
+  // neighbour of the fire it stands in is inside the margin. Lava-class hazards
+  // still block it (`envHazardProximityDenied`).
+  const escape = candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined
   return {
     self: state.self.position,
     approach: candidate.hasStandableAdjacent ? position : null,
     reach,
     hazardAtTarget:
       position !== null &&
-      state.blocks.some((block) => block.kind === 'hazard' && distance(block.position, position) <= HAZARD_PROXIMITY),
+      state.blocks.some(
+        (block) =>
+          block.kind === 'hazard' &&
+          distance(block.position, position) <= HAZARD_PROXIMITY &&
+          envHazardProximityDenied(escape, block.name),
+      ),
     footingSolid: column.footingSolid,
     headroomClear: column.headroomClear,
     // A body with a walkable frontier can TRAVEL to a far target below and
@@ -7880,11 +9255,16 @@ export function deriveReachabilityAbilities(
   // executable NOW: a pillar needs a supported, safe column with jump headroom;
   // an up-staircase needs the held tool for the block it cuts, or the executor
   // would walk into a dig it cannot finish (`RETRIEVE staircase cannot dig`).
-  const ascendPlanAvailable =
-    (plan !== null &&
-      (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
-      (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')) ||
-    ascent.kind === 'clear'
+  const explicitPlanAvailable =
+    plan !== null &&
+    (plan.kind !== 'pillar' || (column.columnSafe && column.footingSolid && column.headroomClear)) &&
+    (plan.kind !== 'staircase-up' || ascent.kind !== 'refuse')
+  // `ascent.kind === clear` is only evidence for the no-explicit-plan path. If
+  // the candidate already carries a concrete pillar/staircase HOW, the executor
+  // will execute THAT plan; an unrelated adjacent step cannot make its blocked
+  // current-column mechanics executable. Live 2026-09-22 y54 proved the old OR
+  // false-positive: fingerprint head=0, ENTER reachable=true, then PILLAR_REFUSED.
+  const ascendPlanAvailable = plan === null ? ascent.kind === 'clear' : explicitPlanAvailable
 
   const ascendMissing: Capability[] = []
   if (dy > ASCEND_GAP_LIMIT && !ascendPlanAvailable) {
@@ -8134,6 +9514,7 @@ function capabilityAcquisitionCandidates(
   options: CandidateOptions,
   withheld: readonly CandidateReachability[],
   existingIds: ReadonlySet<string>,
+  digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const out: Candidate[] = []
   const seen = new Set<string>(existingIds)
@@ -8193,7 +9574,7 @@ function capabilityAcquisitionCandidates(
         // DESCEND remain available as mechanical route-opening facts because
         // they can change the topology even when their immediate landing cell
         // is not closer in Euclidean distance.
-        source = routeOpeningCandidates(state, options, entry.candidate.target)
+        source = routeOpeningCandidates(state, options, entry.candidate.target, digRefusals)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -8276,6 +9657,7 @@ function routeOpeningCandidates(
   state: WorldState,
   options: CandidateOptions,
   blockedTarget: Vec3Json | null = null,
+  digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const out: Candidate[] = [
@@ -8367,6 +9749,21 @@ function routeOpeningCandidates(
       ),
     )
   }
+  // A withheld locomotion target whose WALK cannot be re-grounded at all (a
+  // sealed body, or a refused path with no standable detour) still has one
+  // grounded route change left: the TERRAIN between the body and the destination.
+  // Ground the bounded dig step that strictly reduces the distance to the REAL
+  // destination (`goalTarget`, never the local obstacle), so the recovery family
+  // is not limited to walking to cells the body cannot reach. This is the same
+  // CAN enumeration as every other entry here: Jev still chooses, and a refusal
+  // is typed (`DIG_ROUTE_REFUSED`) instead of silent.
+  const dig = digRouteCandidate(
+    state,
+    options,
+    { target: goalTarget, targetName: null, reason: 'route_withheld' },
+    digRefusals,
+  )
+  if (dig !== null && !out.some((candidate) => candidate.id === dig.id)) out.push(dig)
   // REVERTED (da7d66e): returning the unfiltered family when the advancing set is
   // empty stopped the WAIT wedge but produced a pacing loop - the operator watched
   // the body walk east/west at the same spot (live `pos` cycled 195.5 <-> 199) for

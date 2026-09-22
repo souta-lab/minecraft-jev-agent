@@ -119,6 +119,8 @@ export const SERVER_PROPERTY_KEYS = Object.freeze([
 const TS_RE = /^\[([^\]]+)\]/
 const BOOT_RE = /\bBOOT\b(?!_)/
 const DIMENSION_RE = /\bdimension=([A-Za-z0-9:_]+)/
+/** See tools/m2-gate.mjs BODY_DIMENSION_MARKER_RE: only the body's own dimension markers count. */
+const BODY_DIMENSION_MARKER_RE = /\b(?:DIMENSION_OBSERVED|DIMENSION_TRANSITION|SPAWN|DEATH)\b/
 const RUN_ID_LINE_RE = /\brunId=(run-[A-Za-z0-9-]+)/
 const RELOAD_RE = /\bRELOAD\b(?!_)/
 const RESUME_RE = /\bRESUME\b(?!_)/
@@ -413,7 +415,7 @@ export function attributeRunLines(runId, lines) {
     const ts = timestampOf(line)
     const counts = parseInventoryMarker(line)
     if (counts !== null) inventorySamples.push({ index, ts, counts })
-    const dimension = DIMENSION_RE.exec(line)
+    const dimension = BODY_DIMENSION_MARKER_RE.test(line) ? DIMENSION_RE.exec(line) : null
     if (dimension !== null) dimensionObservations.push({ index, ts, dimension: dimension[1] })
     const portal = parsePortalMarker(line)
     if (portal !== null) portalEvents.push({ index, ts, source: 'log', ...portal })

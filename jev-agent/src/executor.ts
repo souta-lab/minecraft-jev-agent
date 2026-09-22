@@ -21,7 +21,7 @@ import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, formatBodySubmerged, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, resolveBlockHarvest, toVec3 } from './state.ts'
 import type { BodySubmersion } from './state.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
@@ -44,8 +44,8 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PRECONDITION_MISSING, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, normalizePortalDimension, parsePortalCells, verifyPortal } from './netherPortalPlan.ts'
-import type { PortalEntryRouteBlockedReason } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, PORTAL_OPEN_FACE_MAX_DISTANCE, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -79,13 +79,13 @@ import {
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
 import {
+  decidePillarFailureRecovery,
   formatPillarFail,
   formatPillarRetire,
   isPillarRefusalUnsatisfiable,
   pillarArcComplete,
   pillarStepUp,
   requiredColumnClearance,
-  shouldRelocatePillarAfterFailure,
   takeoffObservedRise,
 } from './pillarApex.ts'
 import type { PillarRefusalEvidence } from './pillarApex.ts'
@@ -372,6 +372,40 @@ const PLACE_VERIFY_SETTLE_MS = 500
  * short enough that a portal which never transfers fails loud.
  */
 const PORTAL_ENTER_TIMEOUT_MS = 8000
+/**
+ * Bounded DIRECT WALK into a portal interior cell (`walkIntoPortalEntry`): the
+ * stock actuator moves only when one of its physics simulations confirms the
+ * next node, and all of them refuse a non-solid cell one block up beside the
+ * body (measured `path_stuck` with zero movement), so the entry owns ONE
+ * control-walk of its own.
+ *
+ * `<= 3` horizontal blocks is "beside the gate"; one whole block of level
+ * difference is the frame threshold the body must step onto; the body's own
+ * horizontal position within 0.5 of the cell centre is IN the interior.
+ */
+const PORTAL_WALK_IN_MAX_DISTANCE = 3
+const PORTAL_WALK_IN_LEVEL_TOLERANCE = 1
+const PORTAL_WALK_IN_INSIDE_RADIUS = 0.5
+/** Hard time budget and distance-progress check: the walk can never spin. */
+const PORTAL_WALK_IN_BUDGET_MS = 2500
+const PORTAL_WALK_IN_NO_PROGRESS_MS = 800
+const PORTAL_WALK_IN_MIN_PROGRESS = 0.05
+/** One forward-push tick of the direct walk (the control-walk recipe's cadence). */
+const PORTAL_WALK_IN_STEP_MS = 45
+/**
+ * The bounded step-aside leg onto an OPEN face of the portal (`stepOntoPortalFace`):
+ * when a frame column sits between the body and the interior, the straight walk
+ * can never get in (measured live: the body pinned at 24.7,67,9.7 behind the
+ * left frame column at (25,67,9) while the operator watched it refuse to step
+ * one block aside). Each face candidate gets a hard budget, and at most two are
+ * tried before the ordinary typed failure.
+ */
+const PORTAL_FACE_LEG_BUDGET_MS = 1200
+/**
+ * Non-solid cells a body may walk INTO. The same shape covers every portal-like
+ * traversal target, so the direct walk is not nether-specific.
+ */
+const PORTAL_WALK_IN_CELLS = new Set([NETHER_PORTAL, 'end_portal', 'end_gateway'])
 /** A server/client inventory update can lag the equip transaction by a tick. */
 const PLACE_EQUIP_RETRIES = 4
 const PLACE_EQUIP_SETTLE_MS = 50
@@ -1397,6 +1431,16 @@ type PathGoal = import('mineflayer-pathfinder').goals.Goal
  * come within `reach` of it). When `anchor` is null the success test is the feet
  * distance to `target` (within `range + 0.5`, or 1.2 blocks by default).
  */
+/** What one bounded direct walk into the portal interior did, and why not. */
+interface PortalWalkInOutcome {
+  attempted: boolean
+  inside: boolean
+  transferred: boolean
+  fromD: number
+  toD: number
+  refusal: PortalWalkInRefusal | null
+}
+
 interface ControlWalkOptions {
   anchor?: Vec3Json | null
   range?: number
@@ -1727,7 +1771,21 @@ export class Executor {
         case 'IGNITE':
           return await this.runIgnite(candidate, epoch, signal, startedAt)
         case 'ENTER_PORTAL':
-          return await this.runEnterPortal(candidate, epoch, signal, startedAt)
+          try {
+            return await this.runEnterPortal(candidate, epoch, signal, startedAt)
+          } catch (error) {
+            const code = error instanceof ExecutorError ? error.code : 'unknown_event'
+            this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, code), {
+              actionId: candidate.id,
+              failure: code,
+            })
+            this.logger.warn(
+              'agent',
+              formatSkillEnd(PORTAL_ENTER_SKILL, 'failed', 'unverified', code),
+              { actionId: candidate.id, failure: code },
+            )
+            throw error
+          }
         case 'EAT':
           return await this.runEat(candidate, epoch, signal, startedAt)
         case 'EQUIP':
@@ -2735,6 +2793,10 @@ export class Executor {
       let climbed = 0
       let relocations = 0
       let attemptSequence = 0
+      // Per vertical step/column. A server-refused place that left the target
+      // cell empty gets one bounded retry inside this Skill; it never escapes as
+      // a fresh route decision unless that retry also fails.
+      let sameColumnPlaceRetries = 0
       const refusedColumns = new Set<string>()
       while (climbed < maxSteps) {
         this.ensureOwned(epoch, signal)
@@ -3042,6 +3104,13 @@ export class Executor {
             arcComplete: jumpTrace !== null && pillarArcComplete(jumpTrace),
             forcedRepositions,
           }
+          const blockPlaced = this.currentBlockAt(placeCell)?.boundingBox === 'block'
+          const recovery = decidePillarFailureRecovery(
+            climb.fail,
+            refusalEvidence,
+            blockPlaced,
+            sameColumnPlaceRetries,
+          )
           if (isPillarRefusalUnsatisfiable(climb.fail, refusalEvidence)) {
             this.logger.warn('executor', formatPillarRetire(feet, refusalEvidence), {
               actionId: candidate.id,
@@ -3051,7 +3120,23 @@ export class Executor {
               achievable: refusalEvidence.achievableRise,
             })
           }
-          if (shouldRelocatePillarAfterFailure(climb.fail, refusalEvidence)) {
+          if (recovery === 'retry_same_column') {
+            sameColumnPlaceRetries += 1
+            this.logger.info(
+              'agent',
+              `PILLAR_RETRY cell=${feet.x},${feet.y},${feet.z} reason=place_refused attempt=${sameColumnPlaceRetries}/1`,
+              { actionId: candidate.id, placeCell, blockPlaced },
+            )
+            // `pillarStepUp` returns immediately when the placement packet is
+            // refused, so the body can still be descending. Retry only after the
+            // same support cell is authoritatively grounded again.
+            if (await this.waitForPillarRetrySettle(feet, epoch, signal)) continue
+            this.logger.warn('executor', `PILLAR_RETRY refused: body did not settle back in (${feet.x},${feet.y},${feet.z})`, {
+              actionId: candidate.id,
+            })
+            break
+          }
+          if (recovery === 'relocate') {
             refusedColumns.add(pillarColumnKey(feet))
             const relocation = decidePillarRelocation({
               relocations,
@@ -3082,12 +3167,14 @@ export class Executor {
               }
               this.ensureOwned(epoch, signal)
               relocations += 1
+              sameColumnPlaceRetries = 0
               continue
             }
           }
           break
         }
         climbed += 1
+        sameColumnPlaceRetries = 0
         emitPillarTakeoff(climb.apexRise, null, null)
         this.logger.info(
           'agent',
@@ -3104,6 +3191,38 @@ export class Executor {
       this.bot.physicsEnabled = savedPhysics
       this.bot.setControlState('jump', false)
     }
+  }
+
+  /**
+   * After a side-effect-free server refusal, wait boundedly for the body to
+   * return to the same grounded feet cell before sending the one retry.
+   */
+  private async waitForPillarRetrySettle(
+    expectedFeet: Vec3Json,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const deadline = Date.now() + PILLAR_LANDING_BUDGET_MS
+    while (Date.now() < deadline) {
+      this.ensureOwned(epoch, signal)
+      const position = this.bot.entity.position
+      const feet = {
+        x: Math.floor(position.x),
+        y: Math.floor(position.y + 1e-4),
+        z: Math.floor(position.z),
+      }
+      if (
+        feet.x === expectedFeet.x &&
+        feet.y === expectedFeet.y &&
+        feet.z === expectedFeet.z &&
+        this.bot.entity.onGround &&
+        this.solidSupportAt(feet.x, feet.y - 1, feet.z)
+      ) {
+        return true
+      }
+      await delay(PILLAR_TAKEOFF_POLL_MS, signal)
+    }
+    return false
   }
 
   /**
@@ -5566,6 +5685,19 @@ export class Executor {
       z: readMetaNumber(candidate, 'enterZ', target.z),
     }
 
+    // Issue #436: the entry Skill states its own boundary up front - the target
+    // is the SELECTED portal site, and everything after this is code finishing
+    // that choice mechanically.
+    this.logger.info(
+      'agent',
+      formatSkillStart(
+        PORTAL_ENTER_SKILL,
+        this.portalEntrySelectionSource(candidate),
+        `site=${this.portalSiteOrigin(expectedCells, enterCell)} enter=${enterCell.x},${enterCell.y},${enterCell.z} dimension=${dimension}`,
+      ),
+      { actionId: candidate.id, target: enterCell, dimension },
+    )
+
     // Hard world truth at entry time: the interior must still be nether_portal.
     // An UNOBSERVED interior cell (chunks unloaded while the body is far from a
     // remembered gate) is not evidence that the portal is unlit, so the route is
@@ -5574,6 +5706,10 @@ export class Executor {
     // impossible. A cell that WAS observed and is not nether_portal still refuses
     // before any movement.
     if (this.portalInteriorLit(expectedCells) === false) {
+      this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, 'precondition_lit'), {
+        actionId: candidate.id,
+        target: enterCell,
+      })
       throw new ExecutorError('place_error', `${PRECONDITION_MISSING} portal=lit`)
     }
     if (this.dimensionMatches(dimension)) {
@@ -5592,6 +5728,11 @@ export class Executor {
     // portal-specific mechanic. Standing inside a portal block is a world
     // mechanic, not a skill.
     this.setPhase(candidate, epoch, 'pathing')
+    this.logger.info(
+      'agent',
+      formatSkillStep(PORTAL_ENTER_SKILL, 'path', `target=${enterCell.x},${enterCell.y},${enterCell.z}`),
+      { actionId: candidate.id, target: enterCell },
+    )
     // Abort the generic path the moment the server transfers us, so no fallback
     // keeps steering a body that is already in the other dimension.
     const transferSignal = new AbortController()
@@ -5701,9 +5842,49 @@ export class Executor {
       )
     }
     if (!this.dimensionMatches(dimension) && pathError !== null) {
-      // No route and no durable body change: ONE typed failure naming the
-      // obstruction, so the option can be abandoned instead of re-arming the
-      // same unreachable walk (the live run alternated `noPath`/`stuck`).
+      // LAST RESORT, still inside the same action: the interior cell of a lit
+      // portal is non-solid, so the stock actuator refuses to execute the plan
+      // node at all (measured: `path_stuck` with the body moved zero blocks).
+      // One bounded direct walk owns the last few blocks; it reports its own
+      // `PORTAL_WALK_IN ... transferred=...` and never claims the postcondition.
+      const walk = await this.walkIntoPortalEntry(candidate, epoch, signal, enterCell, dimension)
+      if (this.dimensionMatches(dimension)) {
+        return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+      }
+      if (walk.inside) {
+        // The body now stands in the interior: the ordinary arrival half (lit
+        // re-verification + bounded portal delay) owns the transfer wait.
+        return await this.completePortalEntry(
+          candidate,
+          epoch,
+          signal,
+          startedAt,
+          enterCell,
+          dimension,
+          expectedCells,
+          timeoutMs,
+        )
+      }
+      // The straight walk could not get in. When a frame column is what stands
+      // between the body and the interior, the mechanical next step is to STAND
+      // SOMEWHERE ELSE: one bounded step-aside onto an open face of the portal,
+      // reported as a durable chunk so the next decision re-grounds the entry
+      // from a cell that can walk in (the operator's "step one block aside").
+      const leg = await this.stepOntoPortalFace(candidate, epoch, signal, enterCell, expectedCells, dimension)
+      if (leg.moved) {
+        return this.entryProgressResult(
+          candidate,
+          epoch,
+          startedAt,
+          `stepped aside onto the portal's open face at (${leg.cell?.x ?? '?'},${leg.cell?.y ?? '?'},${leg.cell?.z ?? '?'}) ` +
+            `(bounded chunk toward the entry at (${enterCell.x},${enterCell.y},${enterCell.z}); next decision re-grounds the walk in)`,
+          false,
+        )
+      }
+      // No route, no durable body change and no step-aside: ONE typed failure
+      // naming the obstruction, so the option can be abandoned instead of
+      // re-arming the same unreachable walk (the live run alternated
+      // `noPath`/`stuck`).
       const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError, legObstruction)
       this.logger.warn('agent', blocked, {
         actionId: candidate.id,
@@ -5712,8 +5893,76 @@ export class Executor {
         fromY: Math.floor(this.bot.entity.position.y),
         toY: enterCell.y,
       })
-      throw new ExecutorError('path_no_path', blocked)
+      const finalCode: FailureCode = pathError instanceof ExecutorError ? pathError.code : 'path_no_path'
+      throw new ExecutorError(finalCode, blocked)
     }
+    if (!this.dimensionMatches(dimension)) {
+      // Arrival re-verification of the lit precondition: the route may have
+      // targeted a REMEMBERED site whose interior was unobservable from the
+      // offering position, so the world truth is read again here, where the
+      // chunks are loaded. Observed-and-unlit fails typed, once.
+      if (this.portalInteriorLit(expectedCells) === false) {
+        this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, 'precondition_lit'), {
+          actionId: candidate.id,
+          target: enterCell,
+        })
+        throw new ExecutorError('place_error', `${PRECONDITION_MISSING} portal=lit`)
+      }
+      // A route that reported arrival can stop one cell short of the interior
+      // (the walk target is a cell, the arrival test is a tolerance): when the
+      // geometry is already adjacent, ONE bounded direct walk closes the last
+      // block instead of waiting out the portal delay beside the gate.
+      const walk = await this.walkIntoPortalEntry(candidate, epoch, signal, enterCell, dimension)
+      if (this.dimensionMatches(dimension)) {
+        return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+      }
+      if (!walk.inside) {
+        // Arrival one cell short behind the frame: the same bounded step-aside,
+        // otherwise the body waits out the portal delay beside its own gate.
+        const leg = await this.stepOntoPortalFace(candidate, epoch, signal, enterCell, expectedCells, dimension)
+        if (leg.moved) {
+          return this.entryProgressResult(
+            candidate,
+            epoch,
+            startedAt,
+            `stepped aside onto the portal's open face at (${leg.cell?.x ?? '?'},${leg.cell?.y ?? '?'},${leg.cell?.z ?? '?'}) ` +
+              `(bounded chunk toward the entry at (${enterCell.x},${enterCell.y},${enterCell.z}); next decision re-grounds the walk in)`,
+            false,
+          )
+        }
+      }
+      return await this.completePortalEntry(
+        candidate,
+        epoch,
+        signal,
+        startedAt,
+        enterCell,
+        dimension,
+        expectedCells,
+        timeoutMs,
+      )
+    }
+    return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+  }
+
+  /**
+   * The arrival half of the entry, shared by the ordinary route and the direct
+   * walk: re-verify the lit precondition where the chunks are loaded, then wait
+   * out the server-side portal delay under a bounded deadline. Standing in the
+   * lit portal block is the transfer trigger because Mineflayer cannot observe
+   * the server's timer - so the postcondition stays the DIMENSION change, never
+   * the body motion.
+   */
+  private async completePortalEntry(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+    enterCell: Vec3Json,
+    dimension: string,
+    expectedCells: readonly Vec3Json[],
+    timeoutMs: number,
+  ): Promise<ExecutionResult> {
     if (!this.dimensionMatches(dimension)) {
       // Arrival re-verification of the lit precondition: the route may have
       // targeted a REMEMBERED site whose interior was unobservable from the
@@ -5725,6 +5974,11 @@ export class Executor {
       // Standing in the lit portal block is the transfer trigger; wait out the
       // server-side portal delay under a bounded deadline.
       this.setPhase(candidate, epoch, 'entering')
+      this.logger.info(
+        'agent',
+        formatSkillStep(PORTAL_ENTER_SKILL, 'enter', `cell=${enterCell.x},${enterCell.y},${enterCell.z}`),
+        { actionId: candidate.id, target: enterCell },
+      )
       const deadline = Date.now() + timeoutMs
       while (!this.dimensionMatches(dimension) && Date.now() < deadline) {
         await delay(100, signal)
@@ -5738,6 +5992,505 @@ export class Executor {
       )
     }
     return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+  }
+
+  /**
+   * Bounded DIRECT WALK into a non-solid portal interior cell - the motor of
+   * last resort when every path/vertical route is spent.
+   *
+   * MEASURED (live run-muc9k936-1f3vb + offline replay of the real
+   * `mineflayer-pathfinder@2.4.5` planner/physics on that geometry): the
+   * interior cell is NOT rejected by the movement rules - `movements.getBlock`
+   * reports it `safe=true physical=false`, and both `getMoveDiagonal` and
+   * `getMoveJumpUp` emit it as an A* neighbour (`movements.js:439-458`). The
+   * refusal is in the ACTUATOR: before it sets `forward`, the control loop asks
+   * `canStraightLine`/`canSprintJump`/`canWalkJump` (`index.js:614-629`) and
+   * zeroes `forward` when none confirms the next node, so the body never moves
+   * and the 3.5s futility watchdog fires `path_reset('stuck')`
+   * (`index.js:631-635`) -> `path_stuck`. Replaying prismarine-physics on the
+   * measured stand shows why: a walk-jump toward the cell pins the body against
+   * the frame's south face (z frozen at contact while the body is already
+   * high enough), never entering. The SAME simulation enters in 21 ticks when
+   * the body faces the cell CENTRE, holds forward and jumps pre-emptively while
+   * grounded - which is the audited control-walk recipe this method runs.
+   *
+   * Preconditions are hard world truth read before any movement: adjacency
+   * (`<= PORTAL_WALK_IN_MAX_DISTANCE`), level (one block), the destination is
+   * still a non-solid portal cell, a step-up target has a floor, and no
+   * lava/fire/fluid lies under the body or on the walk. A refusal is typed and
+   * moves nothing. The walk is bounded by a hard budget AND a distance-progress
+   * check, aborts on the observed dimension change, and reports
+   * `PORTAL_WALK_IN ... transferred=...`; it never claims the postcondition.
+   */
+  private async walkIntoPortalEntry(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    enterCell: Vec3Json,
+    dimension: string,
+  ): Promise<PortalWalkInOutcome> {
+    const fromD = this.portalCellDistance(enterCell)
+    const feetY = Math.floor(this.bot.entity.position.y)
+    const refuse = (refusal: PortalWalkInRefusal): PortalWalkInOutcome => {
+      this.logger.warn('agent', formatPortalWalkInRefused(enterCell, fromD, refusal), {
+        actionId: candidate.id,
+        cell: enterCell,
+        refusal,
+      })
+      return { attempted: false, inside: false, transferred: false, fromD, toD: fromD, refusal }
+    }
+
+    // Not beside the gate: nothing portal-specific to do, and no marker - the
+    // ordinary route's own failure is the honest report.
+    if (fromD > PORTAL_WALK_IN_MAX_DISTANCE) {
+      return { attempted: false, inside: false, transferred: false, fromD, toD: fromD, refusal: null }
+    }
+    if (Math.abs(this.bot.entity.position.y - enterCell.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE) {
+      return refuse('not_level')
+    }
+    if (!this.portalCellTraversable(enterCell)) return refuse('cell_not_traversable')
+    const hazard = this.portalWalkHazard(enterCell, feetY)
+    if (hazard !== null) return refuse(hazard)
+    const stepUp = enterCell.y - this.bot.entity.position.y > 0.5
+    if (stepUp && !this.solidSupportAt(enterCell.x, enterCell.y - 1, enterCell.z)) return refuse('no_support')
+    // A frame column between the body and the interior is an unsteppable face:
+    // the straight walk can never get in, and the caller grounds the step-aside
+    // leg onto an open face instead.
+    if (this.portalApproachOccluded(enterCell, feetY)) return refuse('approach_occluded')
+    // Already in the interior's own cell space: the server's transfer is the only
+    // thing left, so do not push the body out the far side.
+    if (this.portalInsideInterior(enterCell)) {
+      return { attempted: false, inside: true, transferred: false, fromD, toD: fromD, refusal: null }
+    }
+
+    // REFLEX (#436): with the interior cell adjacent, level and unoccluded, the
+    // continuation is the SELECTED target itself - there is no second way in to
+    // rank, so code finishes the choice with one bounded control walk.
+    this.logger.info(
+      'agent',
+      formatReflex({
+        ownerSkill: PORTAL_ENTER_SKILL,
+        action: 'walk_into_portal_interior',
+        evidence:
+          `enter=${enterCell.x},${enterCell.y},${enterCell.z} is the selected target and the only ` +
+          `non-solid portal cell within ${PORTAL_WALK_IN_MAX_DISTANCE} (d=${round2(fromD)} ` +
+          `dy=${round2(enterCell.y - this.bot.entity.position.y)} step_up=${stepUp} occluded=false)`,
+      }),
+      { actionId: candidate.id, target: enterCell },
+    )
+    this.logger.info(
+      'agent',
+      formatSkillStep(PORTAL_ENTER_SKILL, 'walk_in', `cell=${enterCell.x},${enterCell.y},${enterCell.z} from_d=${round2(fromD)}`),
+      { actionId: candidate.id, target: enterCell },
+    )
+    const savedPhysics = this.bot.physicsEnabled
+    const uninstallGroundCorrection = installGroundCorrection(this.bot, (x, y, z) => this.solidSupportAt(x, y, z))
+    this.bot.physicsEnabled = true
+    const deadline = Date.now() + PORTAL_WALK_IN_BUDGET_MS
+    let bestD = fromD
+    let lastProgressAt = Date.now()
+    let toD = fromD
+    let hops = 0
+    try {
+      while (Date.now() < deadline && !this.dimensionMatches(dimension)) {
+        this.ensureOwned(epoch, signal)
+        const position = this.bot.entity.position
+        toD = this.portalCellDistance(enterCell)
+        if (toD <= bestD - PORTAL_WALK_IN_MIN_PROGRESS) {
+          bestD = toD
+          lastProgressAt = Date.now()
+        }
+        if (toD <= PORTAL_WALK_IN_INSIDE_RADIUS) {
+          // Inside the interior: the server's portal delay owns the rest.
+          await delay(100, signal)
+          continue
+        }
+        if (Date.now() - lastProgressAt > PORTAL_WALK_IN_NO_PROGRESS_MS) break
+        if (!this.portalCellTraversable(enterCell)) break
+        this.bot.setControlState('back', false)
+        // Face the cell CENTRE (the measured recipe; the pathfinder steers at the
+        // node corner and rubs the frame instead).
+        await this.bot
+          .lookAt(this.bot.entity.position.offset(enterCell.x + 0.5 - position.x, 0, enterCell.z + 0.5 - position.z), true)
+          .catch(() => undefined)
+        if (enterCell.y - this.bot.entity.position.y > 0.5) {
+          // The threshold is a block above the feet: one audited hop. A pinned
+          // body must release forward for the pure jump (the server rejects a
+          // blocked forward push combined with a jump).
+          const pinned = this.isPinned()
+          const hop = planVerticalHop(pinned)
+          hops += 1
+          this.logger.info('agent', formatHopPlan(hop), { target: enterCell, actionId: candidate.id, pinned, hops })
+          this.logger.info(
+            'agent',
+            formatSkillStep(PORTAL_ENTER_SKILL, 'hop', `n=${hops} cell=${enterCell.x},${enterCell.y},${enterCell.z} pinned=${pinned}`),
+            { actionId: candidate.id, target: enterCell, pinned },
+          )
+          this.bot.setControlState('forward', hop.holdForward)
+          this.bot.setControlState('jump', true)
+          await delay(hop.riseMs, signal)
+          this.bot.setControlState('jump', false)
+          this.bot.setControlState('forward', true)
+          await delay(hop.pushMs, signal)
+        } else {
+          this.bot.setControlState('forward', true)
+          await delay(PORTAL_WALK_IN_STEP_MS, signal)
+        }
+      }
+    } finally {
+      uninstallGroundCorrection()
+      this.bot.setControlState('forward', false)
+      this.bot.setControlState('jump', false)
+      this.bot.setControlState('back', false)
+      this.bot.physicsEnabled = savedPhysics
+    }
+    const transferred = this.dimensionMatches(dimension)
+    toD = this.portalCellDistance(enterCell)
+    const inside = transferred || this.portalInsideInterior(enterCell)
+    this.logger.info('agent', formatPortalWalkIn({ cell: enterCell, fromD, toD, transferred }), {
+      actionId: candidate.id,
+      cell: enterCell,
+      fromD: round2(fromD),
+      toD: round2(toD),
+      transferred,
+      inside,
+      hops,
+    })
+    return { attempted: true, inside, transferred, fromD, toD, refusal: null }
+  }
+
+  /**
+   * Who selected the target this Skill executes. The executor never ranks
+   * candidates: a claim arrives here through Jev's grounded choice (or a
+   * System2-derived plan that named a strategy), and the safety envelope can
+   * only REMOVE candidates, never create a portal entry - so `hard-safety` is
+   * not reachable for this skill and is not fabricated.
+   */
+  private portalEntrySelectionSource(candidate: Candidate): SkillSelectionSource {
+    const strategy = candidate.meta.strategy
+    return typeof strategy === 'string' && strategy.length > 0 ? 'system2-derived' : 'jev'
+  }
+
+  /** The frame origin the entry was planned from (the ring's bottom-left corner). */
+  private portalSiteOrigin(expectedCells: readonly Vec3Json[], enterCell: Vec3Json): string {
+    const cells = expectedCells.length > 0 ? expectedCells : [enterCell]
+    const minX = Math.min(...cells.map((cell) => cell.x))
+    const minY = Math.min(...cells.map((cell) => cell.y))
+    const z = cells[0]?.z ?? enterCell.z
+    return `${minX - 1},${minY - 1},${z}`
+  }
+
+  /** Feet distance to the CENTRE of a cell (the walk's own progress measure). */
+  private portalCellDistance(cell: Vec3Json): number {
+    const position = this.bot.entity.position
+    return Math.hypot(position.x - (cell.x + 0.5), position.z - (cell.z + 0.5))
+  }
+
+  /**
+   * The bounded STEP-OVER floor for an open face the body cannot walk to.
+   *
+   * Measured live (run-mucbyro1-1hqhm, the M3 pocket): the unique standable open
+   * face (26,67,10) sat behind the 1-block hole at (24,67,10) over (24,66,10), so
+   * the direct control walk to the face failed and the skill reported
+   * `PORTAL_APPROACH_REFUSED reason=unreachable`. The mechanical route is: drop
+   * into the verified hole floor, then climb the ledge onto the face. The floor is
+   * derived from BLOCK TRUTH here (the front cell is open with no floor at feet
+   * level while the cell below it IS standable), never from the plan's wording.
+   *
+   * Returns the floor only when exactly ONE exists: a unique mechanical
+   * prerequisite is a #436 reflex the skill may execute, while several floors are
+   * several ways in - those stay policy-visible candidates the candidate layer
+   * already offers, so this returns null and the skill refuses typed instead of
+   * picking one.
+   */
+  private portalFaceStepOverVia(face: Vec3Json): Vec3Json | null {
+    const position = this.bot.entity.position
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+    const vias: Vec3Json[] = []
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const front = { x: feet.x + dx, y: feet.y, z: feet.z + dz }
+      const via = { x: front.x, y: feet.y - 1, z: front.z }
+      // The body must be able to walk INTO the front column (2-high clearance)...
+      if (!this.passableAt(front.x, front.y, front.z)) continue
+      if (!this.passableAt(front.x, front.y + 1, front.z)) continue
+      // ...it must be a HOLE at feet level (no floor), so the ordinary walk cannot
+      // already own this step...
+      if (this.solidSupportAt(front.x, front.y - 1, front.z)) continue
+      // ...and the cell one below must be a verified stand the body drops onto.
+      if (!isStandable(this.bot, via)) continue
+      // The face must be one level up at most and within the bounded face range.
+      if (face.y - via.y > 1) continue
+      if (Math.hypot(via.x + 0.5 - (face.x + 0.5), via.z + 0.5 - (face.z + 0.5)) > PORTAL_OPEN_FACE_MAX_DISTANCE) continue
+      vias.push(via)
+    }
+    if (vias.length > 1) {
+      // #436 section 7 U3 / section 19 (28): several verified floors are several
+      // non-equivalent ways in, so the skill must NOT pick one - state the
+      // boundary with the grounded alternatives and let the candidate layer's
+      // legs carry the choice back to Jev.
+      this.logger.warn(
+        'agent',
+        formatSkillPolicyBoundary({
+          skill: PORTAL_ENTER_SKILL,
+          reason: 'multiple_non_equivalent_recoveries',
+          alternatives: vias.map((cell) => `step_over:${cell.x},${cell.y},${cell.z}`),
+        }),
+        { alternatives: vias.length },
+      )
+      return null
+    }
+    const only = vias[0]
+    return vias.length === 1 && only !== undefined ? only : null
+  }
+
+  /** Is the body's own cell space the portal interior (its footprint + level)? */
+  private portalInsideInterior(cell: Vec3Json): boolean {
+    return (
+      this.portalCellDistance(cell) <= PORTAL_WALK_IN_INSIDE_RADIUS &&
+      Math.abs(this.bot.entity.position.y - cell.y) <= PORTAL_WALK_IN_LEVEL_TOLERANCE + 0.05
+    )
+  }
+
+  /** The destination must still be a non-solid portal cell (never walk into rock). */
+  private portalCellTraversable(cell: Vec3Json): boolean {
+    const block = this.currentBlockAt(cell)
+    return block !== null && block.boundingBox === 'empty' && PORTAL_WALK_IN_CELLS.has(block.name)
+  }
+
+  /**
+   * Typed hazard read for the direct walk: the body's own column, then the cells
+   * the straight approach crosses (both body rows and the interior's level). A
+   * hazard anywhere on that path means the walk never starts.
+   */
+  private portalWalkHazard(cell: Vec3Json, feetY: number): PortalWalkInRefusal | null {
+    const position = this.bot.entity.position
+    const bodyX = Math.floor(position.x)
+    const bodyZ = Math.floor(position.z)
+    if (this.hazardAt(bodyX, feetY, bodyZ) || this.hazardAt(bodyX, feetY + 1, bodyZ)) return 'hazard_at_body'
+    const steps = 6
+    for (let index = 1; index <= steps; index += 1) {
+      const t = index / steps
+      const x = Math.floor(position.x + (cell.x + 0.5 - position.x) * t)
+      const z = Math.floor(position.z + (cell.z + 0.5 - position.z) * t)
+      for (const y of [feetY, feetY + 1, cell.y]) {
+        if (this.hazardAt(x, y, z)) return 'hazard_between'
+      }
+    }
+    return null
+  }
+
+  /**
+   * Is the straight approach to the interior a face the body cannot step over?
+   * The vanilla step rule read from block truth: a 1-block rise is climbable (a
+   * jump), a solid cell at the feet AND at the head is a wall. Sampled along the
+   * same segment the walk would take, so the answer is about THIS body.
+   */
+  private portalApproachOccluded(cell: Vec3Json, feetY: number): boolean {
+    const position = this.bot.entity.position
+    const steps = 6
+    for (let index = 1; index <= steps; index += 1) {
+      const t = index / steps
+      const x = Math.floor(position.x + (cell.x + 0.5 - position.x) * t)
+      const z = Math.floor(position.z + (cell.z + 0.5 - position.z) * t)
+      if (this.solidSupportAt(x, feetY, z) && this.solidSupportAt(x, feetY + 1, z)) return true
+    }
+    return false
+  }
+
+  /**
+   * The bounded step-aside leg: ground ONE ordinary locomotion move onto an OPEN
+   * face of the portal (a standable cell beside an interior cell at its level,
+   * derived from structure truth - never from the plan's wording), so the next
+   * decision re-grounds the entry from a cell that can actually walk in. The
+   * body change is durable progress, never arrival: `MOVE`-style chunk, the goal
+   * stays open.
+   */
+  private async stepOntoPortalFace(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    enterCell: Vec3Json,
+    expectedCells: readonly Vec3Json[],
+    dimension: string,
+  ): Promise<{ moved: boolean; cell: Vec3Json | null; fromD: number; toD: number }> {
+    const fromD = this.portalCellDistance(enterCell)
+    const interiors = expectedCells.length > 0 ? expectedCells : [enterCell]
+    const faces = portalOpenFaceCells(
+      interiors,
+      enterCell.y,
+      (spot) => isStandable(this.bot, spot),
+      {
+        x: Math.floor(this.bot.entity.position.x),
+        y: Math.floor(this.bot.entity.position.y),
+        z: Math.floor(this.bot.entity.position.z),
+      },
+      PORTAL_OPEN_FACE_MAX_DISTANCE,
+    ).filter((spot) => !this.portalInsideInterior(spot)) // a face the body already stands on is not a step aside
+    if (faces.length === 0) {
+      this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'no_open_face'), {
+        actionId: candidate.id,
+        target: enterCell,
+      })
+      this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, 'no_open_face'), {
+        actionId: candidate.id,
+        target: enterCell,
+      })
+      return { moved: false, cell: null, fromD, toD: fromD }
+    }
+    // The governing rule (#436): code may execute a uniquely-determined
+    // safety/mechanical prerequisite; if several semantically meaningful
+    // alternatives remain, they stay policy-visible candidates for Jev. Two open
+    // faces are two different ways in, so the skill does NOT pick one - the
+    // candidate layer already offers each face as an ordinary MOVE leg.
+    if (faces.length > 1) {
+      this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'multiple_open_faces'), {
+        actionId: candidate.id,
+        target: enterCell,
+        faces: faces.map((face) => `${face.x},${face.y},${face.z}`).join(';'),
+      })
+      this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, 'multiple_open_faces'), {
+        actionId: candidate.id,
+        target: enterCell,
+        faces: faces.length,
+      })
+      return { moved: false, cell: null, fromD, toD: fromD }
+    }
+    for (const face of faces) {
+      if (this.dimensionMatches(dimension)) break
+      const arrived = (): boolean => {
+        const position = this.bot.entity.position
+        return (
+          Math.hypot(position.x - (face.x + 0.5), position.z - (face.z + 0.5)) <= 0.7 &&
+          Math.abs(position.y - face.y) <= PORTAL_WALK_IN_LEVEL_TOLERANCE
+        )
+      }
+      // REFLEX (#436): exactly ONE standable open face exists, so stepping onto
+      // it is the mechanically unique prerequisite of the selected entry.
+      this.logger.info(
+        'agent',
+        formatReflex({
+          ownerSkill: PORTAL_ENTER_SKILL,
+          action: 'step_onto_open_face',
+          evidence:
+            `exactly one standable open face of the portal is in reach: (${face.x},${face.y},${face.z}) ` +
+            `beside interior (${enterCell.x},${enterCell.y},${enterCell.z}); the straight approach is a ` +
+            `2-high frame face (d=${round2(fromD)})`,
+        }),
+        { actionId: candidate.id, cell: face, target: enterCell },
+      )
+      this.logger.info(
+        'agent',
+        formatSkillStep(PORTAL_ENTER_SKILL, 'approach_leg', `cell=${face.x},${face.y},${face.z}`),
+        { actionId: candidate.id, cell: face },
+      )
+      let reached = await this.walkByControls(face, epoch, signal, {
+        directBearing: true,
+        budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
+        arrivedAt: arrived,
+      })
+      if (!reached) {
+        // THE BOUNDED STEP-OVER CONTINUATION (#436): the face is standable but the
+        // body cannot walk to it because a verified 1-block hole lies between them.
+        // Dropping into that hole floor and then climbing the ledge is the
+        // mechanically unique prerequisite, so code may execute it - inside the
+        // SAME skill/lease, so the click-through stays one semantic choice (Jev
+        // chose the entry), with the bounded body change reported as a durable
+        // chunk. Several floors would be several ways in and stay policy-visible
+        // candidates: `portalFaceStepOverVia` returns null then and the skill
+        // refuses typed exactly as before.
+        const via = this.portalFaceStepOverVia(face)
+        if (via !== null) {
+          const from = this.bot.entity.position
+          const feetCell = { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) }
+          this.logger.info(
+            'agent',
+            formatReflex({
+              ownerSkill: PORTAL_ENTER_SKILL,
+              action: 'step_over',
+              evidence:
+                `the only standable open face (${face.x},${face.y},${face.z}) is not walk reachable from ` +
+                `(${feetCell.x},${feetCell.y},${feetCell.z}); the bounded continuation is the verified hole floor ` +
+                `(${via.x},${via.y},${via.z}) and then one step up onto the ledge (d=${round2(fromD)})`,
+            }),
+            { actionId: candidate.id, cell: via, target: enterCell },
+          )
+          this.logger.info(
+            'agent',
+            formatSkillStep(
+              PORTAL_ENTER_SKILL,
+              'step_over',
+              formatSkillStepAuthority(
+                'MANDATORY_PREREQUISITE',
+                `cell=${via.x},${via.y},${via.z} face=${face.x},${face.y},${face.z} ` +
+                  `envelope=movement-only(no_dig,no_place)`,
+                `feet=(${feetCell.x},${feetCell.y},${feetCell.z})->(${via.x},${via.y},${via.z})`,
+              ),
+            ),
+            { actionId: candidate.id, cell: via, face },
+          )
+          const reachedVia = await this.walkByControls(via, epoch, signal, {
+            directBearing: true,
+            budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
+          })
+          if (reachedVia) {
+            reached = await this.walkByControls(face, epoch, signal, {
+              directBearing: true,
+              budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
+              arrivedAt: arrived,
+            })
+          }
+        }
+      }
+      if (!reached) continue
+      const toD = this.portalCellDistance(enterCell)
+      this.logger.info(
+        'agent',
+        formatPortalApproachLeg({ cell: face, target: enterCell, fromD, toD }),
+        { actionId: candidate.id, cell: face, target: enterCell, fromD: round2(fromD), toD: round2(toD) },
+      )
+      return { moved: true, cell: face, fromD, toD }
+    }
+    this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'unreachable'), {
+      actionId: candidate.id,
+      target: enterCell,
+      faces: faces.length,
+    })
+    return { moved: false, cell: null, fromD, toD: fromD }
+  }
+
+  /**
+   * The durable-progress result of one grounded entry leg (a step-aside move or
+   * a bounded vertical chunk): DONE, never verified, the goal stays open and the
+   * next decision re-grounds the entry from the new stand cell.
+   */
+  private entryProgressResult(
+    candidate: Candidate,
+    epoch: number,
+    startedAt: number,
+    detail: string,
+    blockRemoved: boolean,
+  ): ExecutionResult {
+    // The Skill ends having changed the body but NOT having met its
+    // postcondition: `progress` is the honest execution value, and the entry
+    // stays open for the next decision (never a silent completion).
+    this.logger.info(
+      'agent',
+      formatSkillEnd(PORTAL_ENTER_SKILL, 'progress', 'unverified', 'portal_not_entered'),
+      { actionId: candidate.id },
+    )
+    return this.buildResult(candidate, epoch, startedAt, 'done', 'approaching', detail, null, {
+      verified: false,
+      blockRemoved,
+      dropObserved: false,
+      itemsGained: 0,
+      goalItemCount: this.countGoalItem(),
+      progressed: true,
+    })
   }
 
   /**
@@ -5770,11 +6523,18 @@ export class Executor {
       const nowY = Math.floor(this.bot.entity.position.y)
       const movedTowardTargetY = enterCell.y < fromY ? nowY < fromY : nowY > fromY
       if (verticalStep && movedTowardTargetY) return { progressed: true, error: null, activeVertical, obstruction: null }
+      const obstruction = this.lastVerticalFailureReason ?? `${activeVertical}_no_step`
       return {
         progressed: false,
-        error: null,
+        // A path failure followed by an actual pillar placement refusal failed in
+        // HOW, not in pathfinding. Preserve that typed final cause so #435 does
+        // not spend the route as a fictitious path-stage failure.
+        error:
+          obstruction === 'refused'
+            ? new ExecutorError('place_refused', `entry pillar placement refused after path fallback`)
+            : null,
         activeVertical,
-        obstruction: this.lastVerticalFailureReason ?? `${activeVertical}_no_step`,
+        obstruction,
       }
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
@@ -5834,6 +6594,11 @@ export class Executor {
       target: enterCell,
       dimension,
     })
+    this.logger.info(
+      'agent',
+      formatSkillEnd(PORTAL_ENTER_SKILL, 'entered', 'dimension', `portal_entered dimension=${dimension}`),
+      { actionId: candidate.id, target: enterCell, dimension },
+    )
     return this.buildResult(
       candidate,
       epoch,

@@ -657,6 +657,25 @@ addCase('jump headroom includes adjacent cells touched by the player footprint',
   }
 })
 
+addCase('jump headroom fails closed when any footprint cell is unknown/unloaded', () => {
+  const unknown = new Set(['10,56,25'])
+  const result = headroomAcrossFootprint({
+    center: { x: 10.6, z: 25.4 },
+    feetY: 54,
+    halfWidth: 0.3,
+    isPassable: (x, y, z) => !unknown.has(`${x},${y},${z}`),
+  })
+  const pass =
+    !result.clear &&
+    result.blocker?.x === 10 &&
+    result.blocker?.y === 56 &&
+    result.blocker?.z === 25
+  return {
+    pass,
+    detail: `unknown=${result.clear ? 'incorrectly-clear' : `blocked@${result.blocker?.x},${result.blocker?.y},${result.blocker?.z}`}`,
+  }
+})
+
 addCase('a hazard in the bot column refuses the pillar plan even with a placeable held', () => {
   const feet = { x: 39, y: 31, z: 33 }
   const inColumn = pillarColumnUnsafeFromBlocks(feet, [

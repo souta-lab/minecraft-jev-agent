@@ -194,7 +194,7 @@ function fullLog(runId, { terminalEye }) {
     ...PORTAL_CHAIN.map((body, index) => line(11 + index, body)),
     // M3 requires live proof of Nether arrival, so the endgame fixture records the transition the way
     // the resident does (a marker carrying `dimension=`), which the gate reads as a run-scoped fact.
-    line(19, 'HEARTBEAT pos=0.5,64.0,0.5 health=20 dimension=minecraft:the_nether'),
+    line(19, 'DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether reason=live-change source=live-world'),
     line(
       20,
       `MILESTONE name=ender_eye frontier=true index=15 queueDone=0 inventory={"ender_eye":0,"ender_pearl":12,` +
@@ -570,7 +570,7 @@ ok('a run with 12 eyes but no Nether transition: nether_reached UNKNOWN, artifac
     environmentLine(2),
     line(10, 'INVENTORY items={"diamond":3,"diamond_pickaxe":1,"obsidian":10,"ender_pearl":12,"blaze_rod":8,"ender_eye":0} pos=0.5,64.0,0.5'),
     line(11, 'PORTAL_VERIFIED=true'),
-    line(19, 'HEARTBEAT pos=0.5,64.0,0.5 health=20 dimension=minecraft:the_nether'),
+    line(19, 'DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether reason=live-change source=live-world'),
   ]
   writeFixture(root, runId, { logLines: inheritedLog })
 
