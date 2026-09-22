@@ -5726,12 +5726,9 @@ export class Executor {
           entity.position.z - this.bot.entity.position.z,
         )
         if (distanceToTarget > MELEE_ATTACK_RANGE) {
+          // The closing path itself stays allocation-free: the geometry facts the
+          // unreachable proof needs are read only when the proof is about to fire.
           const gapY = Math.floor(entity.position.y) - Math.floor(this.bot.entity.position.y)
-          const horizontal = Math.hypot(
-            entity.position.x - this.bot.entity.position.x,
-            entity.position.z - this.bot.entity.position.z,
-          )
-          const placeable = selectPlaceableBlock(this.inventoryCounts())
           // THE GEOMETRY PROOF, before any attempt. A walk cannot change the body's
           // LEVEL, and the 3-D distance is at least the vertical component of the
           // gap, so a target more than `MELEE_ATTACK_RANGE` above the body is out of
@@ -5751,7 +5748,12 @@ export class Executor {
           if (gapY > MELEE_ATTACK_RANGE) {
             stopFollowing()
             unreachable = true
+            const placeable = selectPlaceableBlock(this.inventoryCounts())
             const placeableBlock = placeable === null ? null : placeable.name
+            const horizontal = Math.hypot(
+              entity.position.x - this.bot.entity.position.x,
+              entity.position.z - this.bot.entity.position.z,
+            )
             this.logger.warn(
               'executor',
               formatContactUnreachable({
