@@ -10,10 +10,11 @@
 //   'decision' - validating the chosen candidate before the executor starts
 //   'dig'      - re-validating at the moment of the dig, after pathing moved us
 import type { Candidate, CandidateKind } from './candidates.ts'
-import { dryAwarePlacementSpots } from './candidates.ts'
+import { dryAwarePlacementSpots, ENV_HAZARD_ESCAPE_META } from './candidates.ts'
 import type { Vec3Json, WorldState } from './state.ts'
 import { bodyIsOutOfAir, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
+import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 
 export type GuardPhase = 'decision' | 'dig'
@@ -73,7 +74,8 @@ export type GuardResult =
   | { ok: true; candidate: Candidate }
   | { ok: false; candidateId: string; code: GuardCode; reason: string }
 
-const LAVA_PROXIMITY = 1.5
+/** One number for the lava margin: `reachability.ts` HAZARD_PROXIMITY is the same. */
+const LAVA_PROXIMITY = ENV_LAVA_PROXIMITY
 const VOID_FLOOR = -60
 
 function deny(candidateId: string, code: GuardCode, reason: string): GuardResult {
@@ -302,7 +304,15 @@ function guardMove(candidate: Candidate, state: WorldState, context: GuardContex
     }
   }
   const hazard = nearestHazardTo(state, target)
-  if (hazard !== null) {
+  // SAFE: a code-grounded environmental escape ("step out of the fire") has
+  // already proven its destination's own column hazard-free from real block
+  // truth (`envHazard.selectEnvHazardEscapes`), and every neighbour of a burning
+  // body sits inside the margin of that same fire. Fire does not flow and
+  // damages only a body whose box intersects it, so the proximity deny is
+  // narrowed for exactly that candidate; lava-class hazards still deny it, and
+  // every ordinary candidate is untouched (`envHazardProximityDenied`).
+  const escape = candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined
+  if (hazard !== null && envHazardProximityDenied(escape, hazard.name)) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the movement target`)
   }
   // The column/step route was already proven safe by its own planner; only the

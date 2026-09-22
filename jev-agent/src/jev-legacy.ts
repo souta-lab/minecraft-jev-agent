@@ -41,10 +41,20 @@ type EvaluateArgs = Parameters<typeof evaluate>[0]
 type EvaluationState = EvaluateArgs['state']
 type EvaluationQuestion = Experimental_EvaluationQuestion
 
-export type JevPolicyKind = 'typesafe' | 'fallback'
+/**
+ * Who produced the action answers.
+ *
+ * `reflex` is the code-owned hard-safety reflex (issue #436 section B): a
+ * uniquely-determined action for an immediate safety fact, executed by
+ * deterministic code WITHOUT a model call. It is a distinct provenance on
+ * purpose, so a reviewer can separate "Jev chose" (`typesafe`) from
+ * "deterministic fallback answered" (`fallback`) from "code finished a
+ * uniquely-determined safety action" (`reflex`).
+ */
+export type JevPolicyKind = 'typesafe' | 'fallback' | 'reflex'
 
 /** Where the answer came from, for the decision log. */
-export type JevSource = 'jev' | 'fallback'
+export type JevSource = 'jev' | 'fallback' | 'reflex'
 
 export type JevQuestionType = 'choice' | 'score' | 'boolean'
 
@@ -94,6 +104,14 @@ export interface JevRequest {
   candidates: readonly Candidate[]
   /** CORE + trigger-specific set to send; defaults to the full set. */
   questionNames?: readonly QuestionName[]
+  /**
+   * Issue #437: the versioned, bounded semantic projection Jev consumes instead
+   * of the primitive trace, plus its hash. Optional so every legacy/offline
+   * caller and fixture keeps working unchanged; when present the authority
+   * kernel ships it as the model's semantic state.
+   */
+  semanticProjection?: unknown | null
+  projectionHash?: string | null
 }
 
 export interface JevPolicy {
@@ -413,7 +431,8 @@ export function decisionIdFrom(result: JevResult): string | null {
 }
 
 export function sourceOf(policy: JevPolicyKind): JevSource {
-  return policy === 'typesafe' ? 'jev' : 'fallback'
+  if (policy === 'typesafe') return 'jev'
+  return policy === 'reflex' ? 'reflex' : 'fallback'
 }
 
 export type BooleanBand = 'strong_false' | 'uncertain' | 'strong_true'

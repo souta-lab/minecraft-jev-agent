@@ -89,6 +89,12 @@ import {
   weaponFacts,
 } from './threat.ts'
 import type { KeepDistanceSpot, ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
+import {
+  envHazardProximityDenied,
+  MAX_ENV_HAZARD_ESCAPES,
+  selectEnvHazardEscapes,
+} from './envHazard.ts'
+import type { EnvHazardCell, EnvHazardEscape, EnvHazardKind, EnvHazardState } from './envHazard.ts'
 
 // The threat envelope numbers and the response predicate are owned by
 // `threat.ts` (it also keeps the bounded danger state and scans the escape
@@ -497,6 +503,311 @@ export function restrictCandidatesDuringCriticalDamage(
   if (evidence?.active !== true && !bodyStarving(state.self)) return [...candidates]
   const rescue = damageEndingCandidates(candidates)
   return rescue.length > 0 ? rescue : [...candidates]
+}
+
+// ---------------------------------------------------------------------------
+// SAFE: the body's own environmental hazard (fire / lava / burning / drowning).
+//
+// Measured live (`run-mucaq28q-1ftq1`, main 99f0020): the body burned in the
+// Nether and every tick of it arrived as `source=environment`, because fire,
+// lava and burning have no attacking entity for the entity-keyed `THREAT_*`
+// machinery to name. Nothing in the sensor read the block the body stood in, so
+// no candidate could leave it and the offer settled on `MOVE`/`ACCESS` targets
+// that were all `no_path` until the body died in lava.
+//
+// The escape candidates are ordinary MOVE candidates - the same kind, the same
+// executor, the same guard - grounded from real block truth by
+// `envHazard.selectEnvHazardEscapes`. Jev still chooses WHICH one is taken;
+// System2 still owns WHAT the body is doing.
+// ---------------------------------------------------------------------------
+
+/**
+ * The candidate kinds that can END an environmental hazard: movement carries the
+ * grounded escape, RETREAT is the wider keep-distance route, DESCEND is the
+ * "dig down instead of walking out" alternative (its own guard already refuses
+ * hazardous steps, so a DESCEND on offer is proven safe), and ESCALATE hands the
+ * situation to the semantic layer. Everything else mechanically holds the body
+ * inside the hazard.
+ *
+ * ATTACK / EAT / EQUIP are kept for the same reason `THREAT_SURVIVAL_KINDS`
+ * keeps them: they are local self-care/response actions, not work, and dropping
+ * them would let this envelope fight the threat or starvation owner for the same
+ * decision.
+ */
+export const ENV_HAZARD_KEPT_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  ...SURVIVAL_KINDS,
+  'DESCEND',
+  'ATTACK',
+  'EAT',
+  'EQUIP',
+])
+
+/** `meta.envHazardEscape` value on a generated escape: the hazard it leaves. */
+export const ENV_HAZARD_ESCAPE_META = 'envHazardEscape'
+
+/**
+ * The exact hazard-ending subset of an offer: the predicate
+ * `restrictCandidatesDuringEnvHazard` keeps, exported so the controller and its
+ * fixtures can name the code-owned fact "no grounded exit" without re-listing
+ * kinds and drifting from the restriction.
+ *
+ * A MOVE/RETREAT/STEP whose DESTINATION is itself a hazard cell is NOT an
+ * escape: "do not walk into a hazard to escape another". The destination truth
+ * comes from the sensor's classified ring (`state.envHazardCells`), so this is
+ * real block truth and never a proximity guess; a destination the ring never
+ * sampled is left untouched (unknown is not unsafe).
+ */
+export function envHazardEndingCandidates(
+  candidates: readonly Candidate[],
+  hazardCells: ReadonlySet<string>,
+): Candidate[] {
+  return candidates.filter((candidate) => {
+    // "Do not walk into a hazard to escape another" is checked FIRST and applies
+    // to every candidate, including a code-grounded escape: a destination that
+    // real block truth says is a hazard cell is never a way out.
+    if (
+      candidate.target !== null &&
+      hazardCells.has(`${candidate.target.x},${candidate.target.y},${candidate.target.z}`)
+    ) {
+      return false
+    }
+    if (candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined) return true
+    return ENV_HAZARD_KEPT_KINDS.has(candidate.kind)
+  })
+}
+
+/**
+ * The precise hazard-ending ROUTES of an offer: the physical ways OUT, counted
+ * for the reflex uniqueness rule (issue #436 section B). ESCALATE is a hand-off
+ * and EAT/EQUIP/ATTACK are local actions, so none of them is a way out of a fire;
+ * a route counts only when it is one of:
+ *
+ *   - a code-grounded environmental escape (`meta.envHazardEscape`, adjacent);
+ *   - the existing grounded surface ascent (`meta.surfaceAscent`) while the body
+ *     is drowning - the "rise toward air" route;
+ *   - a RETREAT whose destination clears the hazard cell by the bounded hazard
+ *     radius (the wider keep-distance route the candidate layer already grounded
+ *     for this hazard);
+ *   - a LOCAL DESCEND/STEP body change (the target within `LOCAL_ROUTE_RADIUS`)
+ *     that is not itself a hazard cell - the "dig down instead of walking out"
+ *     alternative, already proven safe by its own descent/step guard.
+ *
+ * An ordinary goal MOVE 20 m away is NOT counted: it was not grounded as an exit
+ * from this hazard, and counting it would make the reflex unreachable while
+ * telling Jev nothing. Every counted route must have a destination that is not a
+ * proven hazard cell, so "the only way out" can never be a way INTO the hazard.
+ */
+export const ENV_HAZARD_LOCAL_ROUTE_RADIUS = 2
+
+export function envHazardEscapeRoutes(
+  state: Pick<WorldState, 'self' | 'envHazardCells'> & { signals?: WorldState['signals'] },
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true) return []
+  const hazardCells = envHazardProvenCells(state)
+  const drowning = hazard.kinds.includes('drowning') && !hazard.escapeRequired
+  return candidates.filter((candidate) => {
+    const target = candidate.target
+    if (target === null) return false
+    if (hazardCells.has(`${target.x},${target.y},${target.z}`)) return false
+    if (candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined) return true
+    if (drowning && candidate.meta.surfaceAscent === true && candidate.kind === 'MOVE') return true
+    if (candidate.kind === 'RETREAT') {
+      // A keep-distance route only counts as a way out when it actually leaves
+      // the hazard: a threat retreat 0.7 m from the fire is not an escape.
+      return hazard.cell !== null && distance(target, hazard.cell) >= HAZARD_DANGER_RADIUS
+    }
+    if (candidate.kind === 'DESCEND' || candidate.kind === 'STEP') {
+      return distance(target, state.self.position) <= ENV_HAZARD_LOCAL_ROUTE_RADIUS
+    }
+    return false
+  })
+}
+
+/** The uniquely-determined environmental escape, as the controller reads it. */
+export interface EnvHazardReflex {
+  candidate: Candidate
+  /** the hazard kind the reflex answers */
+  kind: EnvHazardKind
+  /** which grounded route family the reflex took */
+  escapeKind: 'env' | 'retreat' | 'local' | 'surface'
+}
+
+/**
+ * The hard-safety reflex (issue #436 §8): the ONE uniquely-determined
+ * STABILISATION that leaves the body's own environmental hazard, or null when
+ * the decision is Jev's.
+ *
+ * §8 allows a reflex to "stop / stabilize / move minimally to safety" and
+ * forbids it from choosing a new destination, a long retreat strategy, a mining
+ * expedition or an Option change. So the reflex ACTION is only ever one of:
+ *
+ *   - a grounded ADJACENT escape MOVE (`meta.envHazardEscape`, <= 1.5 m);
+ *   - the existing grounded surface ascent while drowning, and only when the
+ *     sensor verified air immediately above (`airAbove`) - "rise toward air".
+ *
+ * "Uniquely determined" is a count of ALL the grounded ROUTES out
+ * ({@link envHazardEscapeRoutes}), never a direction preference: two safe
+ * directions, "dig down vs walk out", or a keep-distance RETREAT are several
+ * semantically meaningful alternatives. Their presence means code must NOT take
+ * over - even when only one of them is left, a RETREAT/DESCEND/STEP is a
+ * semantic choice and stays Jev's (the caller reports the policy boundary and
+ * exposes the alternatives).
+ *
+ * While a hostile threat is engaged the reflex deliberately does NOT fire: that
+ * decision belongs to the threat envelope, and a second safety owner would
+ * substitute one hazard response for another.
+ */
+export function envHazardReflexAction(
+  state: Pick<WorldState, 'self' | 'envHazardCells' | 'entities' | 'signals'>,
+  candidates: readonly Candidate[],
+): EnvHazardReflex | null {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true) return null
+  // One safety owner at a time: with a hostile engaged, the threat envelope owns
+  // the response.
+  const threatActive = state.signals?.threat?.active === true
+  const hostileNearby = state.entities.some(
+    (entity) => entity.hostile && entity.distance <= THREAT_DANGER_RADIUS,
+  )
+  if (threatActive || hostileNearby) return null
+  const routes = envHazardEscapeRoutes(state, candidates)
+  if (routes.length !== 1) return null
+  const route = routes[0]
+  if (route === undefined || route.target === null) return null
+  const drowningOnly = hazard.kinds.includes('drowning') && !hazard.escapeRequired
+  if (drowningOnly) {
+    // The surface ascent is the only route family this layer may take for
+    // drowning, and only with verified air immediately above.
+    if (route.meta.surfaceAscent !== true || route.kind !== 'MOVE' || !hazard.airAbove) return null
+    return { candidate: route, kind: 'drowning', escapeKind: 'surface' }
+  }
+  // Everything below is the fire/lava/burning/adjacent-lava case: the reflex may
+  // only take the minimal adjacent escape. A unique RETREAT/DESCEND/STEP is a
+  // semantic choice, not a stabilisation (§8).
+  const escapeMeta = route.meta[ENV_HAZARD_ESCAPE_META]
+  if (escapeMeta === undefined || route.kind !== 'MOVE') return null
+  const kind = hazard.kinds.find((entry) => entry !== 'drowning') ?? hazard.kinds[0] ?? 'fire'
+  return { candidate: route, kind, escapeKind: 'env' }
+}
+
+/**
+ * The cells real block truth PROVES are hazards: every ring cell whose own
+ * column (or the block it stands on) holds a hazard block, plus the body's OWN
+ * cell when the state says the body is standing in fire/lava or beside lava.
+ *
+ * The own cell is not part of the adjacent ring sample, so without it a
+ * candidate that walks back into the fire the body is standing in would not be
+ * recognised as a route INTO a hazard.
+ */
+export function envHazardProvenCells(
+  state: Pick<WorldState, 'self' | 'envHazardCells'>,
+): ReadonlySet<string> {
+  const keys = new Set(
+    (state.envHazardCells ?? [])
+      .filter((cell) => cell.hazard !== null)
+      .map((cell) => `${cell.position.x},${cell.position.y},${cell.position.z}`),
+  )
+  const hazard = state.self.envHazard
+  if (hazard != null && (hazard.inFire || hazard.inLava || hazard.adjacentLava) && hazard.cell !== null) {
+    keys.add(`${hazard.cell.x},${hazard.cell.y},${hazard.cell.z}`)
+  }
+  return keys
+}
+
+/**
+ * SAFE: while the body is in an environmental hazard it must not be walked
+ * further into it. Only the routes that can leave the hazard stay selectable -
+ * the grounded escape MOVEs, RETREAT, STEP and ESCALATE - and any survival MOVE
+ * whose destination is itself a hazard cell is dropped. If the world grounds no
+ * exit at all the original set is preserved, so the missing affordance stays
+ * observable (`ENV_HAZARD_NO_EXIT`) instead of silently erasing the offer;
+ * drowning is excluded because the existing submersion restriction already owns
+ * it (`restrictCandidatesDuringSubmersion`).
+ */
+export function restrictCandidatesDuringEnvHazard(
+  state: Pick<WorldState, 'self' | 'envHazardCells'>,
+  candidates: readonly Candidate[],
+): Candidate[] {
+  const hazard = state.self.envHazard ?? null
+  // Only CONTACT with fire/lava withholds the work offer: there, any grounded
+  // safe step ends the damage and staying put is definitely wrong. A body that
+  // is merely burning has one step-deliverable remedy (water), which is offered
+  // as an ordinary candidate and reflexed only when it is the single grounded
+  // route - it must not be panicked into walking around while the fire ticks out
+  // (§8: "move minimally to safety", never a new destination).
+  if (hazard?.active !== true || !(hazard.inFire || hazard.inLava)) return [...candidates]
+  const rescue = envHazardEndingCandidates(candidates, envHazardProvenCells(state))
+  return rescue.length > 0 ? rescue : [...candidates]
+}
+
+/**
+ * The grounded exits from the hazard, as plain destinations (the controller's
+ * telemetry reads the SAME selection the candidate layer offers).
+ */
+export function envHazardEscapeSpots(
+  state: Pick<WorldState, 'self' | 'blocks' | 'envHazardCells'>,
+  blacklistedMoveTargets?: ReadonlySet<string>,
+): EnvHazardEscape[] {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true) return []
+  const cells = (state.envHazardCells ?? []).filter(
+    (cell) => !isBlacklistedMoveTarget(state, blacklistedMoveTargets, cell.position),
+  )
+  return selectEnvHazardEscapes({
+    self: state.self.position,
+    hazard,
+    cells,
+    hazardBlocks: state.blocks.filter((block) => block.kind === 'hazard'),
+    max: MAX_ENV_HAZARD_ESCAPES,
+  })
+}
+
+/**
+ * The grounded escape candidates themselves: ordinary MOVEs whose destination is
+ * a real, standable, hazard-free adjacent cell. Water destinations are offered
+ * first while the body is burning, because the water is what puts the fire out.
+ * An empty list means the world grounds no exit - the caller reports the typed
+ * gap, never a route through the hazard.
+ */
+export function envHazardEscapeCandidates(
+  state: WorldState,
+  blacklistedMoveTargets?: ReadonlySet<string>,
+  reach = 4.5,
+): Candidate[] {
+  const hazard = state.self.envHazard ?? null
+  if (hazard?.active !== true || hazard.escapeRequired !== true) return []
+  const escapes = envHazardEscapeSpots(state, blacklistedMoveTargets)
+  const kind = hazard.kinds.find((entry) => entry !== 'drowning') ?? hazard.kinds[0] ?? 'fire'
+  return escapes.map((escape) => ({
+    id: `MOVE:env:${kind}:${blockId('p', escape.spot)}`,
+    kind: 'MOVE' as CandidateKind,
+    label: `${moveLabel(
+      escape.spot,
+      escape.water
+        ? 'step into the water to put the fire out'
+        : `step out of the ${kind === 'lava' || kind === 'adjacent_lava' ? 'lava' : 'fire'}`,
+      state.self.position,
+    )} (hazard at ${hazard.cell === null ? 'unknown' : `${hazard.cell.x},${hazard.cell.y},${hazard.cell.z}`})`,
+    targetName: null,
+    target: escape.spot,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(escape.spot, state.self.position) <= reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: escape.spot.x,
+      y: escape.spot.y,
+      z: escape.spot.z,
+      [ENV_HAZARD_ESCAPE_META]: kind,
+      envHazardCell: hazard.cell === null ? 'unknown' : `${hazard.cell.x},${hazard.cell.y},${hazard.cell.z}`,
+      ...(escape.water ? { envHazardWater: true } : {}),
+    },
+  }))
 }
 
 /**
@@ -2602,6 +2913,14 @@ function generateRawCandidates(
       },
     })
   }
+
+  // SAFE: the environmental-hazard exits. Ordinary MOVE candidates to real,
+  // standable, hazard-free adjacent cells, grounded by the sensor's classified
+  // ring. They are offered alongside everything else - Jev still chooses WHICH
+  // one is taken - and the controller may execute one directly as a bounded
+  // hard-safety reflex only when it is the single grounded route out
+  // (`envHazardReflexAction`).
+  candidates.push(...envHazardEscapeCandidates(state, options.blacklistedMoveTargets, options.reach))
 
   // A known-resource retrieval is grounded even when other (non-progressing)
   // candidates exist: if the wanted block is not visible but its coordinate is
@@ -8099,7 +8418,7 @@ function pickExplore(
 }
 
 function isBlacklistedMoveTarget(
-  state: WorldState,
+  state: Pick<WorldState, 'self'>,
   blacklistedMoveTargets: ReadonlySet<string> | undefined,
   position: Vec3Json,
 ): boolean {
@@ -8871,13 +9190,24 @@ function reachabilityWorldFor(
   column: ColumnFacts,
 ): ReachabilityWorld {
   const position = candidate.target
+  // SAFE: a code-grounded environmental escape was proven hazard-free by its own
+  // selection (real block truth at the destination); the blanket proximity rule
+  // would otherwise withhold EVERY exit from a burning body, because each
+  // neighbour of the fire it stands in is inside the margin. Lava-class hazards
+  // still block it (`envHazardProximityDenied`).
+  const escape = candidate.meta[ENV_HAZARD_ESCAPE_META] !== undefined
   return {
     self: state.self.position,
     approach: candidate.hasStandableAdjacent ? position : null,
     reach,
     hazardAtTarget:
       position !== null &&
-      state.blocks.some((block) => block.kind === 'hazard' && distance(block.position, position) <= HAZARD_PROXIMITY),
+      state.blocks.some(
+        (block) =>
+          block.kind === 'hazard' &&
+          distance(block.position, position) <= HAZARD_PROXIMITY &&
+          envHazardProximityDenied(escape, block.name),
+      ),
     footingSolid: column.footingSolid,
     headroomClear: column.headroomClear,
     // A body with a walkable frontier can TRAVEL to a far target below and
