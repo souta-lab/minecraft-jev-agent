@@ -5752,6 +5752,14 @@ export class Executor {
    * require the live armor slot to name it. The post-condition is asserted here
    * and surfaced as the greppable `EQUIP_ARMOR ...` marker; an equip that did
    * not stick is a `verify_failed`, never a silent success.
+   *
+   * `slot: 'hand'` is the combat weapon-in-hand destination (see `gearPlan.ts`
+   * `weaponArmOffers`): the same bounded retry and the same live post-condition,
+   * read from the main hand instead of an armor slot, and surfaced as
+   * `EQUIP_WEAPON ...`. Measured live the body retreated from a magma_cube with a
+   * `stone_pickaxe` in hand and a `diamond_sword` in the inventory, because the
+   * only code that could arm it lived inside the ATTACK lease; this destination is
+   * what makes arming an action Jev can choose on any tick.
    */
   private async runEquip(
     candidate: Candidate,
@@ -5762,8 +5770,11 @@ export class Executor {
     const itemName = candidate.itemName
     if (itemName === null) throw new ExecutorError('target_gone', 'EQUIP candidate has no item')
     const slot = readMetaString(candidate, 'slot')
+    if (slot === 'hand') {
+      return await this.runEquipWeapon(candidate, itemName, epoch, signal, startedAt)
+    }
     if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
-      throw new ExecutorError('target_gone', `EQUIP candidate names no valid armor slot (${slot ?? 'none'})`)
+      throw new ExecutorError('target_gone', `EQUIP candidate names no valid equip slot (${slot ?? 'none'})`)
     }
     const armorSlot: ArmorSlot = slot
     const replaced = readMetaString(candidate, 'replaced')
@@ -5802,6 +5813,69 @@ export class Executor {
     throw new ExecutorError(
       'verify_failed',
       `equip ${itemName} was not reflected in the ${armorSlot} armor slot (found ${observed ?? 'empty'})`,
+    )
+  }
+
+  /**
+   * The combat weapon-in-hand action (`slot: 'hand'`): equip the NAMED carried
+   * weapon and require the live main hand to name it, surfaced as the greppable
+   * `EQUIP_WEAPON ... reason=combat` marker.
+   *
+   * Measured live (`buddy.log` 2026-09-22T10:49:5x) the only code that ever moved
+   * a weapon into the hand was `equipCombatWeapon` INSIDE the ATTACK lease, so a
+   * tick where Jev chose RETREAT left the body holding a `stone_pickaxe` with a
+   * `diamond_sword` in the inventory and the damage race was lost disarmed. This
+   * destination is what makes arming an action Jev can choose on any tick; the
+   * lease keeps its own pre-swing arm as the mechanical precondition it always was.
+   *
+   * Like every equip it goes through `equipItemTo` (effect envelope assertion) and
+   * `ensureOwned` (actuation lease), and it never substitutes a different weapon:
+   * the selected item is the target identity.
+   */
+  private async runEquipWeapon(
+    candidate: Candidate,
+    itemName: string,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const replaced = readMetaString(candidate, 'replaced')
+    const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
+    if (item === undefined) {
+      throw new ExecutorError('item_unavailable', `${itemName} is not in the inventory (no substitute is chosen)`)
+    }
+    let observed = this.bot.heldItem?.name ?? null
+    for (let attempt = 1; attempt <= PLACE_EQUIP_RETRIES; attempt += 1) {
+      if (observed !== itemName) {
+        this.setPhase(candidate, epoch, 'equipping')
+        await this.equipItemTo(item, 'hand', epoch, signal)
+      }
+      observed = this.bot.heldItem?.name ?? null
+      if (observed === itemName) {
+        const damage = readMetaNumber(candidate, 'weaponDamage', 0)
+        this.logger.info(
+          'executor',
+          formatWeaponEquip({
+            itemName,
+            damage,
+            replaced,
+            heldDamage: readMetaNumber(candidate, 'heldDamage', 0),
+          }),
+          { actionId: candidate.id, itemName, replaced, heldItem: observed, attempt },
+        )
+        return this.buildResult(candidate, epoch, startedAt, 'done', 'equipped', `holds ${itemName}`, null, {
+          verified: true,
+          dropObserved: false,
+          blockRemoved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+        })
+      }
+      if (attempt < PLACE_EQUIP_RETRIES) await delay(PLACE_EQUIP_SETTLE_MS, signal)
+    }
+    throw new ExecutorError(
+      'verify_failed',
+      `equip ${itemName} was not reflected in the live held item (found ${observed ?? 'empty'})`,
     )
   }
 

@@ -579,8 +579,11 @@ function guardEat(candidate: Candidate, state: WorldState): GuardResult {
 
 /**
  * EQUIP is mechanically valid only while the carried piece is still in the
- * inventory and the candidate names one of the four armor destinations. Which
- * slot wins is Jev's choice; this guard only refuses a stale/foreign candidate.
+ * inventory and the candidate names a real equip destination. Which destination
+ * (and, when a fight is on the table, which carried weapon) wins is Jev's choice;
+ * this guard only refuses a stale/foreign candidate. `hand` is the combat
+ * weapon-in-hand destination (`gearPlan.ts` `weaponArmOffers`), verified by the
+ * executor against the live main hand like every other equip.
  */
 function guardEquip(candidate: Candidate, state: WorldState): GuardResult {
   const itemName = candidate.itemName
@@ -591,8 +594,8 @@ function guardEquip(candidate: Candidate, state: WorldState): GuardResult {
     return deny(candidate.id, 'EMPTY_HAND', `${itemName} is not in the inventory`)
   }
   const slot = readMetaString(candidate, 'slot')
-  if (slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
-    return deny(candidate.id, 'TARGET_GONE', `EQUIP candidate names no valid armor slot (${slot ?? 'none'})`)
+  if (slot !== 'hand' && slot !== 'head' && slot !== 'torso' && slot !== 'legs' && slot !== 'feet') {
+    return deny(candidate.id, 'TARGET_GONE', `EQUIP candidate names no valid equip slot (${slot ?? 'none'})`)
   }
   return { ok: true, candidate }
 }

@@ -102,7 +102,7 @@ import {
   serializePortalCells,
 } from './netherPortalPlan.ts'
 import type { PortalBlockPosition, PortalEntryCandidate, PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
-import { armorEquipOffers, armorEquipRefusals, assessCombatKit, CRAFTABLE_SWORDS, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
+import { armorEquipOffers, armorEquipRefusals, assessCombatKit, combatSwingFor, CRAFTABLE_SWORDS, weaponArmOffers, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
 import type { ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
   activeThreats,
@@ -369,15 +369,26 @@ export const SURVIVAL_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>
 export const MAX_RETREAT_CANDIDATES = 3
 
 /**
- * The kinds that answer a hostile at contact range. Identical to the historical
- * immediate-threat set: an attack with whatever the body holds, a grounded
- * keep-distance route, or a bounded escalation. `WAIT`/work actions mechanically
- * leave the body inside a hit window, which is the measured death shape.
+ * The kinds that answer a hostile at contact range: an attack with whatever the
+ * body holds, a grounded keep-distance route, a bounded escalation, and the two
+ * local self-care actions that change what the body can survive with (eat to keep
+ * regeneration running, arm the best carried weapon).
+ *
+ * `WAIT`/work actions mechanically leave the body inside a hit window, which is
+ * the measured death shape, so they stay out. But the narrower contact envelope
+ * must not be STRICTER than the wider `THREAT_SURVIVAL_KINDS` danger envelope:
+ * measured live (`buddy.log` 2026-09-22T10:49:5x) the body was in contact with a
+ * magma_cube while both EAT and the weapon arm were erased by this filter, and
+ * the measured starvation attrition (`food:0` under attack, never one EAT) is the
+ * same shape at the danger band. Self-care is CAN, and WHICH action is taken
+ * stays Jev's choice.
  */
 export const CONTACT_THREAT_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'ATTACK',
   'RETREAT',
   'ESCALATE',
+  'EAT',
+  'EQUIP',
 ])
 
 /**
@@ -3416,9 +3427,17 @@ export function combatKitGap(
     food: state.self.food,
   })
   if (!assessment.insufficient) return null
+  // The reported prerequisite must be a route that CLOSES a reported gap. A sword
+  // craft is a prerequisite only while `sword` is missing; an armour gap is only
+  // closed by an armour equip. Otherwise the marker would name a prerequisite that
+  // cannot close the gap it is printed next to.
   const prerequisite =
-    offered.find((candidate) => candidate.meta.combatKit === 'sword')?.id ??
-    offered.find((candidate) => candidate.kind === 'EQUIP' && typeof candidate.meta.slot === 'string')?.id ??
+    (assessment.missing.includes('sword')
+      ? offered.find((candidate) => candidate.meta.combatKit === 'sword')?.id
+      : undefined) ??
+    (assessment.missing.includes('armor')
+      ? offered.find((candidate) => candidate.kind === 'EQUIP' && candidate.meta.slot !== 'hand')?.id
+      : undefined) ??
     null
   return {
     focus: focusItem,
@@ -3458,6 +3477,47 @@ function armorEquipCandidates(state: WorldState): Candidate[] {
       replaced: offer.replaced ?? 'none',
       itemTier: offer.itemTier,
       wornTier: offer.wornTier,
+    },
+  }))
+}
+
+/**
+ * The ARM affordance as candidates: one `EQUIP:hand:<item>` per carried weapon
+ * that out-damages the item in hand, at most one per weapon class, and nothing at
+ * all while no fight is on the table or the hand already holds a carried weapon.
+ *
+ * The candidate is an ordinary `EQUIP` (the executor equips the NAMED item and
+ * verifies the live main hand), so it travels the same guard (`policy.ts`
+ * `guardEquip`), the same effect envelope (`executor.ts` `assertEffect`) and the
+ * same actuation lease as every other equip. It is `slot: 'hand'`, which is what
+ * distinguishes it from the armor destinations.
+ */
+export function weaponArmCandidates(state: WorldState, fightOnTheTable: boolean): Candidate[] {
+  if (!fightOnTheTable) return []
+  const held = state.self.heldItem?.name ?? null
+  return weaponArmOffers(held, state.inventory.counts).map((offer) => ({
+    id: `EQUIP:hand:${offer.itemName}`,
+    kind: 'EQUIP' as const,
+    label:
+      `hold ${offer.itemName} (${offer.damage} damage) instead of ${offer.replaced ?? 'an empty hand'} ` +
+      `(${offer.klass}: a fight is on the table)`,
+    targetName: offer.itemName,
+    target: null,
+    targetEntityId: null,
+    itemName: offer.itemName,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      slot: 'hand',
+      itemName: offer.itemName,
+      replaced: offer.replaced ?? 'none',
+      weaponDamage: offer.damage,
+      weaponClass: offer.klass,
+      heldDamage: offer.heldDamage,
+      weaponArm: true,
     },
   }))
 }
@@ -3708,17 +3768,29 @@ function generateRawCandidates(
   }
   // The body's own capability facts for a fight. Code owns CAN: which item the
   // body is holding (fists are a weapon too), its vanilla damage when this
-  // module can pin it, and whether the body can heal between hits at all
-  // (natural regeneration needs food >= 18; the measured resident held food 0-2
-  // for the whole attrition window and never executed a single EAT). These are
-  // reported on the ATTACK candidate and never used to rank it away: Jev still
-  // chooses ATTACK versus keep-distance versus escalate.
+  // module can pin it, whether the body can heal between hits at all (natural
+  // regeneration needs food >= 18; the measured resident held food 0-2 for the
+  // whole attrition window and never executed a single EAT), and - measured live
+  // in the fatal 10:49 window - the weapon the ATTACK LEASE will actually swing.
+  // The lease arms the best carried weapon before the first swing
+  // (`executor.ts` `equipCombatWeapon`), so a candidate that reported only the
+  // held `stone_pickaxe` while a `diamond_sword` sat in the inventory described a
+  // weaker fight than the one Jev was choosing. These are reported on the ATTACK
+  // candidate and never used to rank it away: Jev still chooses ATTACK versus
+  // keep-distance versus escalate.
   const weapon = weaponFacts(state.self.heldItem?.name ?? null)
+  const swing = combatSwingFor(state.self.heldItem?.name ?? null, state.inventory.counts)
   const body = bodySurvivalFacts(state.self)
   for (const entity of attackTargets) {
     const isFoodTarget = huntTargets.includes(entity)
     const goalDrop = goalDropByEntity.get(entity.id) ?? null
-    const weaponNote = weapon.name === null ? 'with bare fists' : `with ${weapon.label}`
+    // The label states the fight the LEASE will run, not only what the hand holds
+    // right now: `with diamond_sword (armed on attack from stone_pickaxe)`.
+    const armNote =
+      swing.willArm === null
+        ? null
+        : ` (armed on attack from ${state.self.heldItem?.name ?? 'an empty hand'})`
+    const weaponNote = swing.itemName === null ? 'with bare fists' : `with ${swing.itemName}${armNote ?? ''}`
     candidates.push({
       id: `ATTACK:e${entity.id}`,
       kind: 'ATTACK',
@@ -3744,6 +3816,16 @@ function generateRawCandidates(
         weaponKind: weapon.kind,
         ...(weapon.name === null ? {} : { weaponItem: weapon.name }),
         ...(weapon.damage === null ? {} : { weaponDamage: weapon.damage }),
+        // The swing the lease will actually run once it arms the best carried
+        // weapon, and the item that arming will displace. Absent when the hand
+        // already holds the best carried weapon (no churn, no new fact).
+        ...(swing.willArm === null
+          ? {}
+          : {
+              swingItem: swing.willArm,
+              swingDamage: swing.damage,
+              armOnAttackFrom: state.self.heldItem?.name ?? 'empty_hand',
+            }),
         bodyHealth: body.health,
         bodyFood: body.food,
         bodyRegenerates: body.regenerating,
@@ -3803,9 +3885,17 @@ function generateRawCandidates(
       food: state.self.food,
     })
     if (kit.insufficient) {
-      candidates.push(
-        ...combatKitPrerequisiteCandidates(state, options, goalDropTargets[0]?.name ?? focusItem ?? 'unknown'),
-      )
+      // A sword craft closes the `sword` gap only. Measured live
+      // (`buddy.log` 2026-09-22T11:57:25) the marker read
+      // `swingDamage=7 armor=0 missing=armor prerequisite=CRAFT:iron_sword` while a
+      // `diamond_sword` was already carried - the body was told to craft a weapon
+      // it had, when the missing half was armour. The prerequisite is enumerated
+      // from the missing half the assessment actually reported.
+      if (kit.missing.includes('sword')) {
+        candidates.push(
+          ...combatKitPrerequisiteCandidates(state, options, goalDropTargets[0]?.name ?? focusItem ?? 'unknown'),
+        )
+      }
     }
   }
 
@@ -3854,6 +3944,21 @@ function generateRawCandidates(
   // (EAT/ATTACK/RETREAT), independent of the active goal. The generator reports
   // CAN; Jev owns whether the body puts on better armor this tick.
   candidates.push(...armorEquipCandidates(state))
+
+  // The ARM affordance: a carried weapon that out-damages the item in hand, while
+  // a fight is on the table this tick. Same CAN shape as the armor offer, and for
+  // the same measured reason: measured live (`buddy.log` 2026-09-22T10:49:5x) the
+  // hand held a `stone_pickaxe` with a `diamond_sword` in the inventory while the
+  // body retreated from a magma_cube, `ATTACK:e45891` was reachable and offered,
+  // and Jev chose RETREAT twice - so the only code that could have armed the body
+  // (the ATTACK lease's own `equipCombatWeapon`) never ran and the damage race was
+  // lost with a pickaxe. Arming is therefore its own grounded action, not a side
+  // effect of one kind of action.
+  //
+  // Offered only while a fight is on the table (a hostile is being answered or an
+  // ATTACK is enumerated) so a body mining with a tool never churns its held item;
+  // an armed body gets nothing at all (see `weaponArmOffers`).
+  candidates.push(...weaponArmCandidates(state, attackTargets.length > 0 || state.signals?.threat?.active === true))
 
   const danger = nearestDanger(state, HAZARD_DANGER_RADIUS)
   // Every threat the body must answer right now, nearest first: hostiles inside
