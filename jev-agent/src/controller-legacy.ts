@@ -127,6 +127,7 @@ import type { GatedScore } from './gating.ts'
 import {
   PLAN_IDENTITY_CHANGED,
   PLAN_ROW_RETIRED,
+  PLAN_HEAD_REPLACED,
   ROW_DEFERRED_NOT_EXECUTABLE_HERE,
   ROW_NOT_EXECUTABLE_HERE,
   formatNonProgressEscalated,
@@ -141,7 +142,7 @@ import {
   planReplanRequest,
   toGoalQueueStateLog,
 } from './goalQueue.ts'
-import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, PlanIdentity, PlanObsoleteProof, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, HeadAnswerWarrant, PlanIdentity, PlanObsoleteProof, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
@@ -1494,6 +1495,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // geometry, the vertical planner's own refusal, and the carried block a pillar
   // would consume), so unreachable and merely-missed are distinct run evidence.
   'HUNT_CONTACT_UNREACHABLE',
+  // The DROP half of the same vocabulary. A killed mob leaves an item ENTITY on
+  // the ground, and the only thing that proves the kill produced anything is the
+  // inventory delta after walking onto it. Without these two markers a run that
+  // killed a blaze and then failed to collect the rod is indistinguishable, in
+  // the run log, from one that never killed anything: `blaze_rod 0` with no
+  // explanation. Positive (`PICKUP_ACQUIRED`) and typed-negative
+  // (`PICKUP_NOT_ACQUIRED`) are separate, mirrored facts.
+  'PICKUP_ACQUIRED',
+  'PICKUP_NOT_ACQUIRED',
   // Starvation is a run-scoped survival fact, not a private diagnostic. The
   // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
   // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and
@@ -1562,6 +1572,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // had anything to say about it.
   PLAN_IDENTITY_CHANGED,
   PLAN_ROW_RETIRED,
+  PLAN_HEAD_REPLACED,
   'PLAN_IDENTITY_ADOPTED',
   'PLAN_IDENTITY_UNAVAILABLE',
   ROW_NOT_EXECUTABLE_HERE,
@@ -1569,6 +1580,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'NO_PRODUCTIVE_HEAD_BOUND',
   'NO_PRODUCTIVE_HEAD_WINDOW',
   'ROW_NOT_EXECUTABLE_HERE_REPEATS',
+  'PLAN_HEAD_REPLACEMENT_APPLIED',
 ])
 
 /**
@@ -2049,6 +2061,17 @@ export class JevController {
    */
   private notExecutableKey: string | null = null
   private notExecutableRepeats = 0
+  /**
+   * #plan-reconciliation: the head row the IN-FLIGHT System2 request was asked
+   * about, and why. When the answer carries a real plan for that same head, the
+   * row is replaced on the strength of the answer (see
+   * `GoalQueue.replaceAnsweredHead`) - otherwise `patch` keeps the very row the
+   * question was about and the escalation cannot close its own loop.
+   *
+   * Only a summon whose reason is about the head being unable to proceed arms
+   * this; every other request leaves the conservative rule untouched.
+   */
+  private headAnswerWarrant: HeadAnswerWarrant | null = null
   /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
@@ -7804,6 +7827,20 @@ export class JevController {
     const resummon: DecisionLlmResummonLog = { triggered: true, reason, detail: groundedDetail }
     this.tickResummonLog.push(resummon)
 
+    // #plan-reconciliation: remember WHICH row and WHICH question this request is
+    // about. `action_impossible`/`no_progress` are the summons that say "this head
+    // cannot proceed"; if the answer authors a real plan, that plan supersedes the
+    // head the model was asked about. One slot: the newest question wins.
+    this.headAnswerWarrant =
+      (reason === 'action_impossible' || reason === 'no_progress') && currentOption !== null
+        ? {
+            requestId: requestContext.requestId,
+            headId: currentOption.id,
+            headKey: `${currentOption.kind}:${currentOption.targetItem ?? currentOption.description}:${currentOption.requiredCount}`,
+            reason,
+          }
+        : null
+
     this.logger.warn(
       'system2',
       `SUMMON LLM reason=${reason} queueDepth=${queueState.depth} current=${queueState.current?.description ?? 'none'} :: ${groundedDetail}`,
@@ -7862,9 +7899,61 @@ export class JevController {
             },
             this.tickCounter,
           )
+          if (this.headAnswerWarrant?.requestId === requestContext.requestId) this.headAnswerWarrant = null
           this.llmInFlight = false
           this.requestDecision('llm_plan', { reason, discarded: true, reasons: validity.reasons })
           return
+        }
+        // #plan-reconciliation: an answer that carries a real plan for the head the
+        // model was asked about supersedes that head. `patch` alone would keep the
+        // active row - the measured loop survived its own escalation that way - so
+        // the row is retired first, with typed mirrored evidence naming it and the
+        // request, and only then is the plan applied. `abandon`/`abort`/`complete`
+        // already resolve the head themselves and are left exactly as they were, and
+        // a valueless answer replaces nothing.
+        const warrant =
+          this.headAnswerWarrant !== null && this.headAnswerWarrant.requestId === requestContext.requestId
+            ? this.headAnswerWarrant
+            : null
+        if (warrant !== null) this.headAnswerWarrant = null
+        // A pending/active HUMAN row owns WHAT until it is cleared, and `applyPlan`
+        // refuses an llm plan while one exists - so the warrant must not retire the
+        // head on an answer that could never be applied.
+        const humanOwnsWhat = this.queue.state.goals.some(
+          (queued) => queued.origin === 'human' && (queued.status === 'pending' || queued.status === 'active'),
+        )
+        const answersTheHead =
+          warrant !== null &&
+          !humanOwnsWhat &&
+          plan.goals.length > 0 &&
+          (plan.op === undefined || plan.op === 'patch' || plan.op === 'replace')
+        if (answersTheHead) {
+          const replaced = this.queue.replaceAnsweredHead({
+            headId: warrant.headId,
+            requestId: warrant.requestId,
+            reason: warrant.reason,
+            note: plan.note,
+            onReplaced: (line, detail) => this.logger.warn('queue', line, detail, this.tickCounter),
+          })
+          if (replaced !== null) {
+            this.recentEvents.push(
+              `head replaced by System2 answer: ${replaced.id} (${replaced.description}) reason=${warrant.reason} requestId=${warrant.requestId}`,
+            )
+            this.logger.warn(
+              'system2',
+              `PLAN_HEAD_REPLACEMENT_APPLIED requestId=${warrant.requestId} replaced=${replaced.id} goalQueueHead=${this.queue.current?.id ?? 'none'} op=${plan.op ?? 'replace'} goals=${plan.goals.length}`,
+              {
+                requestId: warrant.requestId,
+                replaced: replaced.id,
+                replacedKey: warrant.headKey,
+                reason: warrant.reason,
+                op: plan.op ?? 'replace',
+                goals: plan.goals.map((goal) => goal.description),
+                head: this.queue.current?.id ?? null,
+              },
+              this.tickCounter,
+            )
+          }
         }
         const depthBefore = this.queue.state.depth
         const added = this.queue.applyPlan(plan.goals, 'llm', plan.op ?? 'replace', {
@@ -7904,6 +7993,7 @@ export class JevController {
         this.requestDecision('llm_plan', { reason, goals: added.length })
       })
       .catch((error: unknown) => {
+        if (this.headAnswerWarrant?.requestId === requestContext.requestId) this.headAnswerWarrant = null
         this.llmInFlight = false
         if (!this.running) {
           this.logger.warn(
@@ -7993,7 +8083,17 @@ export class JevController {
     else if (code === 'verify_failed') {
       this.logger.info('agent', `LOCAL_VERIFY_FAILURE system2=false detail=${detail}`, { code, detail }, this.tickCounter)
     }
-    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure && code !== 'verify_failed') {
+    // `verify_failed` used to be excluded here on the theory that the unverified
+    // ACTION budget bounds it instead. Measured live: that budget is keyed per plan
+    // (falling back to the action id) and both rotate as the body re-decides - the log
+    // shows `ACTION_UNVERIFIED planId=null ... attempts=1` every time and
+    // `ABANDON_REASON=action_unverified` ZERO times in the whole run, while one ATTACK
+    // ended `MECHANICALLY_BLOCKED failure=verify_failed` three times in a row (30 such
+    // attacks: the single most common ATTACK outcome). The operator saw the result
+    // directly - "ずっと攻撃モードになってて次の行動を再開しない", stuck in attack mode and
+    // never resuming. A repeated verification failure is exactly what this streak bound
+    // exists for, so it is no longer excluded.
+    if (this.failureStreak >= this.options.failureStreakLimit && !localRouteFailure) {
       this.escalate('same_failure_3x', `${code ?? 'unknown'} failed ${this.failureStreak}x: ${detail}`)
     }
   }

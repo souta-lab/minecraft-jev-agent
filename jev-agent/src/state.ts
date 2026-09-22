@@ -431,6 +431,20 @@ export type EntityState = {
    * an inference from proximity. Optional so old fixtures still type-check.
    */
   attackedSelf?: boolean
+  /**
+   * A dropped item is an ENTITY in the world (`entity.name === 'item'`), and this
+   * is WHICH item it carries, decoded from its own spawn metadata
+   * (`entity.getDroppedItem()`), or `null` when the entity is not a dropped item.
+   *
+   * The sensor previously reported the entity with its position but not its
+   * identity, so the decision layer could see "some item is lying there" and
+   * never "the `blaze_rod` this goal needs is lying there" - which is why a drop
+   * that outlived the bounded executor pickup window had no route back into the
+   * inventory. Only ever set for a dropped-item entity, so an ordinary tick's
+   * entity shape is unchanged (fail closed: an undecodable item is `null`, never
+   * an invented name).
+   */
+  droppedItem?: string | null
 }
 
 /**
@@ -1984,6 +1998,7 @@ function buildEntities(
     // where the body must be able to name what is shooting it before it is hit).
     const hostile = isHostile(name, entity.kind) || (attackerId !== null && entity.id === attackerId)
     if (distanceToBot > (hostile ? hostileRadius : options.entityRadius)) continue
+    const dropped = droppedItemName(entity)
     out.push({
       id: entity.id,
       name,
@@ -1996,6 +2011,9 @@ function buildEntities(
       heldItem: heldItemName(entity),
       health: typeof entity.health === 'number' && Number.isFinite(entity.health) ? entity.health : null,
       attackedSelf: attackerId !== null && entity.id === attackerId,
+      // Only a real dropped item carries the key, so every other entity's shape
+      // (and every existing fixture/replay) stays byte-identical.
+      ...(dropped === null ? {} : { droppedItem: dropped }),
     })
   }
   out.sort((a, b) => a.distance - b.distance)
@@ -2024,6 +2042,29 @@ function canSeeEntity(bot: Bot, entity: { position: Vec3Json }): boolean | undef
 function heldItemName(entity: { heldItem?: { name?: string } | null }): string | null {
   const held = entity.heldItem
   return held != null && typeof held.name === 'string' && held.name.length > 0 ? held.name : null
+}
+
+/** The entity names Mineflayer/prismarine-entity use for a dropped-item entity. */
+const DROPPED_ITEM_ENTITY_NAMES: ReadonlySet<string> = new Set(['item', 'Item', 'item_stack'])
+
+/**
+ * WHICH item a dropped-item entity carries, or null when the entity is not one.
+ *
+ * `getDroppedItem()` decodes the entity's own spawn metadata; it is the same
+ * accessor the executor's pickup already uses, so the sensor and the executor
+ * read one definition of "this drop is that item". A fixture entity that does not
+ * implement it, or metadata this client cannot decode, yields `null` (UNKNOWN),
+ * never an invented name - an unknown drop is not offered as a route.
+ */
+function droppedItemName(entity: { name?: string; getDroppedItem?: () => { name?: string } | null }): string | null {
+  if (typeof entity.name !== 'string' || !DROPPED_ITEM_ENTITY_NAMES.has(entity.name)) return null
+  if (typeof entity.getDroppedItem !== 'function') return null
+  try {
+    const item = entity.getDroppedItem()
+    return item != null && typeof item.name === 'string' && item.name.length > 0 ? item.name : null
+  } catch {
+    return null
+  }
 }
 
 const HOSTILE_NAMES = new Set([
