@@ -3512,7 +3512,17 @@ export class Executor {
           break
         }
         const probe = probeBridgeDirection(this.bot, here, dir, BRIDGE_PROBE_DEPTH)
-        const decision = planBridgeSpan({ probe, selfFeet: here, target })
+        // The SAME placement identity the OFFER used (`planBridgeRoute` passes
+        // `placeBlockName: input.placeable.name`, bridgeRoute.ts:738). Without it
+        // `planBridgeSpan` cannot answer "this step CREATES ITS FLOOR with this
+        // block" and falls back to its historical `no_verified_landing`
+        // (bridgeRoute.ts:520-571), so an offer grounded ONLY as a SELF-LANDING
+        // scaffold over a void - the fortress-lava-basin shape, and the unsupported
+        // span between a ledge and a floated gate - was refused on the FIRST
+        // iteration and could never place a single block. The declared
+        // `bridgeBlock` is that identity; it is what the envelope authorises and
+        // what the placement below consumes.
+        const decision = planBridgeSpan({ probe, selfFeet: here, target, placeBlockName: block })
         if (decision.kind === 'not_a_gap') {
           // The next cell in this direction is ALREADY a verified stand (the far
           // side the span was planned against, or ordinary ground). When it is the
