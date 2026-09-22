@@ -3166,7 +3166,7 @@ function generateRawCandidates(
   let prospect: ProspectResult = { candidates: [], refusal: null }
   const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
   const current = state.goalQueue?.current ?? null
-  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  const focusItem = current === null ? (state.goal.targetItem ?? null) : current.targetItem
   const goalKind = current?.kind ?? 'collect'
   const strategy = current?.strategy ?? null
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
@@ -3199,6 +3199,9 @@ function generateRawCandidates(
       }
       break
     }
+    case 'explore':
+      candidates.push(...exploreFallbackCandidates(state, options, null, goalKind))
+      break
     case 'craft': {
       const craft = craftCandidates(state, options, focusItem)
       candidates.push(...craft.candidates)

@@ -82,6 +82,48 @@ export interface System2PlanRequest {
   requestContext?: System2RequestContext
 }
 
+/**
+ * The typed provenance of the semantic answer that produced a plan's `goals`.
+ *
+ * System2 owns WHAT; the queue only compiles/validates/applies. That hand-off was
+ * previously visible only through the plan note and the provider log, so a live
+ * run could apply zero rows - or rows whose meaning code had invented - without
+ * any typed line naming the words the model wrote or why nothing was compiled.
+ * This record is evidence, never policy: code may read it only to REPORT, and
+ * must never pick a goal from it.
+ */
+export interface System2PlanProvenance {
+  /**
+   * Route that produced the goals: a structured block inside the answer
+   * (`enrichment`), the answer's own prose grounded onto the capability matrix
+   * (`intent`), a cache replay (`cached`), an answer that grounded nothing
+   * (`ungrounded`), an explicit deterministic baseline (`deterministic`), or a
+   * plan with no recorded route (`none`).
+   */
+  intentSource: 'enrichment' | 'intent' | 'cached' | 'ungrounded' | 'deterministic' | 'none'
+  /** The model's own answer (bounded). Evidence only - never a policy input. */
+  intent?: string
+  /**
+   * Typed reason `goals` is empty, naming WHY the answer could not become rows
+   * (e.g. `answer_ungrounded`, `goals_not_compilable`, `plan_carried_no_goals`).
+   * An empty plan with no reason is a hand-off gap, not a valid outcome.
+   */
+  noGoalsReason?: string
+  /**
+   * Model goals the executable lowering could NOT compile, with their index and
+   * identifying fields. Present so a partial compile is observable instead of
+   * looking like an answer that named fewer goals.
+   */
+  uncompiled?: readonly { index: number; kind: string; detail: string }[]
+  /**
+   * The typed field-level reason a STRUCTURED block inside the answer was
+   * unusable. Present so the queue can name the rejection (`stage`/`path`/
+   * `expected`) instead of reporting a generic "no goals"; when it is set, no row
+   * from that block was applied.
+   */
+  rejectedBlock?: { stage: string; path: string; expected: string }
+}
+
 export interface System2Plan {
   goals: PlannedGoal[]
   note: string
@@ -90,6 +132,8 @@ export interface System2Plan {
    * only; GoalQueue owns the transition represented by this value.
    */
   op?: PlanOp
+  /** Typed System2 -> queue hand-off provenance (see System2PlanProvenance). */
+  provenance?: System2PlanProvenance
 }
 
 /**
