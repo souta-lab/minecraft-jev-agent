@@ -1303,6 +1303,100 @@ export function formatSkillEnd(
   return `${SKILL_END} skill=${skill} execution=${execution} verification=${verification} postcondition=${postcondition}`
 }
 
+/**
+ * Issue #436 §17: three deterministic layers must be distinguishable in the
+ * evidence, and every multi-step Skill must state the commitment it realizes.
+ */
+export const SKILL_COMMIT = 'SKILL_COMMIT'
+export const SKILL_POLICY_BOUNDARY = 'SKILL_POLICY_BOUNDARY'
+
+export type SkillAuthority = 'MECHANICAL_CONTINUATION' | 'MANDATORY_PREREQUISITE' | 'HARD_SAFETY_REFLEX'
+
+export interface SkillCommitInput {
+  readonly skill: string
+  readonly commitmentId: string
+  readonly optionInstanceId: string
+  readonly decisionId: string
+  readonly candidateId: string
+  readonly skillKind: string
+  readonly targetIdentity: string
+  readonly postconditionHash: string
+  readonly effectEnvelopeHash: string
+}
+
+/** The exact `SKILL_COMMIT` line: the one Jev decision this Skill realizes. */
+export function formatSkillCommit(input: SkillCommitInput): string {
+  return (
+    `${SKILL_COMMIT} skill=${input.skill} commitmentId=${input.commitmentId}` +
+    ` optionInstanceId=${input.optionInstanceId} decisionId=${input.decisionId}` +
+    ` candidateId=${input.candidateId} skillKind=${input.skillKind}` +
+    ` targetIdentity=${input.targetIdentity} postconditionHash=${input.postconditionHash}` +
+    ` effectEnvelopeHash=${input.effectEnvelopeHash}`
+  )
+}
+
+export interface SkillStepInput {
+  readonly skill: string
+  readonly commitmentId: string
+  readonly stepKind: string
+  readonly authority: SkillAuthority
+  readonly evidence: string
+  readonly worldDelta: string
+}
+
+/** The exact `SKILL_STEP` line: one mechanical step under one commitment. */
+export function formatSkillStepV2(input: SkillStepInput): string {
+  return (
+    `${SKILL_STEP} skill=${input.skill} commitmentId=${input.commitmentId} stepKind=${input.stepKind}` +
+    ` authority=${input.authority} evidence=${input.evidence} worldDelta=${input.worldDelta}`
+  )
+}
+
+/** The exact `SKILL_POLICY_BOUNDARY` line: code stopped, Jev owns the choice. */
+export function formatSkillPolicyBoundary(
+  skill: string,
+  commitmentId: string,
+  reason: string,
+  alternatives: readonly string[],
+): string {
+  return (
+    `${SKILL_POLICY_BOUNDARY} skill=${skill} commitmentId=${commitmentId}` +
+    ` reason=${reason} alternatives=[${alternatives.join(',')}]`
+  )
+}
+
+export interface SkillEndInput {
+  readonly skill: string
+  readonly commitmentId: string
+  readonly execution: string
+  readonly verification: string
+  readonly progress: string
+  readonly failureCode: string
+  readonly targetIdentity: string
+}
+
+/** The exact `SKILL_END` line (issue #436 §17 field set). */
+export function formatSkillEndV2(input: SkillEndInput): string {
+  return (
+    `${SKILL_END} skill=${input.skill} commitmentId=${input.commitmentId} execution=${input.execution}` +
+    ` verification=${input.verification} progress=${input.progress} failureCode=${input.failureCode}` +
+    ` targetIdentity=${input.targetIdentity}`
+  )
+}
+
+/**
+ * A deterministic short hash for commitment fields (postcondition / effect
+ * envelope identities). Not cryptographic: the point is a STABLE identity a
+ * reviewer can diff between runs, owned by code, with no model input.
+ */
+export function skillHash(value: string): string {
+  let hash = 5381
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) + hash + value.charCodeAt(index)) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
 export interface ReflexInput {
   readonly ownerSkill: string
   /** what code did (a bounded mechanical continuation, never a new destination) */
@@ -1336,31 +1430,48 @@ export function portalOpenFaceCells(
   maxDistance: number,
 ): PortalBlockPosition[] {
   const found = new Map<string, PortalBlockPosition>()
-  for (const interior of interiorCells) {
-    if (interior.y !== standingLevel) continue
-    for (const dir of [
-      { x: 1, z: 0 },
-      { x: -1, z: 0 },
-      { x: 0, z: 1 },
-      { x: 0, z: -1 },
-    ]) {
-      const spot: PortalBlockPosition = { x: interior.x + dir.x, y: interior.y, z: interior.z + dir.z }
-      const key = formatPos(spot)
-      if (found.has(key)) continue
-      // The interior itself is never an approach cell, and a cell outside the
-      // body's reach of the gate is not a step aside.
-      if (interiorCells.some((cell) => formatPos(cell) === key)) continue
-      if (Math.hypot(spot.x + 0.5 - (from.x + 0.5), spot.z + 0.5 - (from.z + 0.5)) > maxDistance) continue
-      if (!isStandable(spot)) continue
-      found.set(key, spot)
+  // MEASURED (run-mucbyro1-1hqhm): the terrain on the open side of a gate is
+  // often NOT at the interior's standing level - the corridor south of this gate
+  // is one block lower, so the standable cell beside the interior is
+  // (26,66,10) and the search that only looked at y=67 named air and then
+  // refused its own leg (`faces=1 ... unreachable`). A face is therefore any
+  // standable cell orthogonally beside an interior cell at the interior's level
+  // OR exactly one level below OR one above (the 3-tall interior makes the level
+  // above a legitimate walk-in: the body steps DOWN into the portal block).
+  // Anything further away is a climb the walk must not invent.
+  for (const level of [standingLevel, standingLevel - 1, standingLevel + 1]) {
+    for (const interior of interiorCells) {
+      if (interior.y !== standingLevel) continue
+      for (const dir of [
+        { x: 1, z: 0 },
+        { x: -1, z: 0 },
+        { x: 0, z: 1 },
+        { x: 0, z: -1 },
+      ]) {
+        const spot: PortalBlockPosition = { x: interior.x + dir.x, y: level, z: interior.z + dir.z }
+        const key = formatPos(spot)
+        if (found.has(key)) continue
+        // The interior itself is never an approach cell, and a cell outside the
+        // body's reach of the gate is not a step aside.
+        if (interiorCells.some((cell) => formatPos(cell) === key)) continue
+        if (Math.hypot(spot.x + 0.5 - (from.x + 0.5), spot.z + 0.5 - (from.z + 0.5)) > maxDistance) continue
+        if (!isStandable(spot)) continue
+        found.set(key, spot)
+      }
     }
   }
-  return [...found.values()].sort(
-    (left, right) =>
+  return [...found.values()].sort((left, right) => {
+    const distance =
       Math.hypot(left.x + 0.5 - (from.x + 0.5), left.z + 0.5 - (from.z + 0.5)) -
-      Math.hypot(right.x + 0.5 - (from.x + 0.5), right.z + 0.5 - (from.z + 0.5)),
-  )
+      Math.hypot(right.x + 0.5 - (from.x + 0.5), right.z + 0.5 - (from.z + 0.5))
+    if (Math.abs(distance) > 0.001) return distance
+    // equal distance: prefer the interior's own level, then one below, then one above
+    return Math.abs(left.y - standingLevel) - Math.abs(right.y - standingLevel)
+  })
 }
+
+/** A face may be one block below/above the interior; further is a climb. */
+export const PORTAL_OPEN_FACE_LEVEL_TOLERANCE = 1
 
 /** The exact `PORTAL_ENTRY_UNVERIFIED` line: a remembered-site route, no lit claim. */
 export function formatPortalEntryUnverified(

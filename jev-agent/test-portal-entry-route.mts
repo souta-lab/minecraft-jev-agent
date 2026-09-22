@@ -48,6 +48,7 @@ import {
   REFLEX,
   SKILL_END,
   SKILL_INTERRUPT,
+  SKILL_POLICY_BOUNDARY,
   SKILL_START,
   SKILL_STEP,
   PORTAL_WALK_IN,
@@ -267,6 +268,75 @@ function stubStuckPath(fixture: FixtureBot): (executor: Executor) => void {
   }
 }
 
+/** The standable level of a column near `aroundY`: solid support + 2 passable cells. */
+function standableLevelAt(grid: Map<string, Cell>, x: number, z: number, aroundY: number): number | null {
+  for (let y = Math.floor(aroundY) + 2; y >= Math.floor(aroundY) - 4; y -= 1) {
+    const block = grid.get(`${x},${y},${z}`)
+    if (block === undefined || block.boundingBox !== 'block') continue
+    const feet = grid.get(`${x},${y + 1},${z}`)
+    const head = grid.get(`${x},${y + 2},${z}`)
+    const passable = (cell: Cell | undefined): boolean => cell === undefined || cell.boundingBox === 'empty'
+    if (!passable(feet) || !passable(head)) return null
+    return y + 1
+  }
+  return null
+}
+
+/**
+ * The fixture's PATHFINDER model: a small BFS over standable cells, so a leg that
+ * must route around the frame column is planned (the live `unreachable` came from
+ * a straight bearing into that column; the real pathfinder routes it).
+ */
+function routeTo(fixture: FixtureBot, goal: Vec3Json): Vec3Json[] {
+  const startLevel = Math.floor(fixture.position.y)
+  const start = { x: Math.floor(fixture.position.x), z: Math.floor(fixture.position.z) }
+  const startKey = `${start.x},${startLevel},${start.z}`
+  const queue: Array<{ x: number; y: number; z: number }> = [{ x: start.x, y: startLevel, z: start.z }]
+  const previous = new Map<string, string | null>([[startKey, null]])
+  const nodes = new Map<string, { x: number; y: number; z: number }>([[startKey, queue[0] ?? { x: start.x, y: startLevel, z: start.z }]])
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (current === undefined) break
+    if (current.x === goal.x && current.y === goal.y && current.z === goal.z) {
+      const path: Vec3Json[] = []
+      let key: string | null = `${current.x},${current.y},${current.z}`
+      while (key !== null) {
+        const node = nodes.get(key)
+        if (node !== undefined) path.unshift({ x: node.x, y: node.y, z: node.z })
+        key = previous.get(key) ?? null
+      }
+      return path
+    }
+    for (const dir of [
+      { x: 1, z: 0 },
+      { x: -1, z: 0 },
+      { x: 0, z: 1 },
+      { x: 0, z: -1 },
+    ]) {
+      const level = standableLevelAt(fixture.grid, current.x + dir.x, current.z + dir.z, current.y)
+      if (level === null || Math.abs(level - current.y) > 1) continue
+      const key = `${current.x + dir.x},${level},${current.z + dir.z}`
+      if (previous.has(key)) continue
+      previous.set(key, `${current.x},${current.y},${current.z}`)
+      const node = { x: current.x + dir.x, y: level, z: current.z + dir.z }
+      nodes.set(key, node)
+      queue.push(node)
+    }
+  }
+  return []
+}
+
+/** The top of the solid column at (x,z) near `aroundY`, or null when unsupported. */
+function surfaceTopAt(grid: Map<string, Cell>, x: number, z: number, aroundY: number): number | null {
+  const column = { x: Math.floor(x), z: Math.floor(z) }
+  for (let y = Math.floor(aroundY) + 2; y >= Math.floor(aroundY) - 4; y -= 1) {
+    const block = grid.get(`${column.x},${y},${column.z}`)
+    if (block === undefined || block.boundingBox !== 'block') continue
+    return y + 1
+  }
+  return null
+}
+
 interface WalkModel {
   /** every control state the executor turned ON, in order */
   controls: string[]
@@ -282,25 +352,57 @@ interface WalkModel {
  * walk's own no-progress bound can end it. `transfer` flips the fake dimension
  * the moment the body's own cell space becomes the interior.
  */
-function installWalkModel(fixture: FixtureBot, options: { transfer: boolean; blocked?: boolean }): WalkModel {
+function installWalkModel(
+  fixture: FixtureBot,
+  options: { transfer: boolean; blocked?: boolean; vanishFace?: boolean },
+): WalkModel {
   const bot = fixture.bot as unknown as { game: { dimension: string } }
   const controls: string[] = []
   const start = fixture.position.clone()
   let moved = 0
+  let jumped = false
+  let vanished = false
   // the real actuator faces its target with `lookAt` and then pushes forward, so
   // the model walks the body along the LAST faced direction (one step per push)
   let heading = { x: 0, z: 0 }
-  const openFaces = new Set(['25,67,10', '26,67,10', '25,67,8', '26,67,8', '27,67,10', '27,67,8'])
+  const openFaces = new Set<string>()
+  for (const interior of [ENTER_CELL, { x: ENTER_CELL.x + 1, y: ENTER_CELL.y, z: ENTER_CELL.z }]) {
+    for (const level of [interior.y - 1, interior.y, interior.y + 1]) {
+      for (const dir of [
+        { x: 1, z: 0 },
+        { x: -1, z: 0 },
+        { x: 0, z: 1 },
+        { x: 0, z: -1 },
+      ]) {
+        openFaces.add(`${interior.x + dir.x},${level},${interior.z + dir.z}`)
+      }
+    }
+  }
   const bodyCell = (): string =>
     `${Math.floor(fixture.position.x)},${Math.floor(fixture.position.y)},${Math.floor(fixture.position.z)}`
   const inside = (): boolean =>
     Math.hypot(fixture.position.x - (ENTER_CELL.x + 0.5), fixture.position.z - (ENTER_CELL.z + 0.5)) <= 0.5 &&
     Math.abs(fixture.position.y - ENTER_CELL.y) <= 1.05
+  ;(fixture.bot as unknown as {
+    pathfinder: {
+      getPathTo: (movements: unknown, goal: { x: number; y: number; z: number }) => { status: string; path: Vec3Json[] }
+    }
+  }).pathfinder.getPathTo = (_movements, goal) => {
+    if (goal.x === ENTER_CELL.x && goal.y === ENTER_CELL.y && goal.z === ENTER_CELL.z) {
+      return { status: 'noPath', path: [] }
+    }
+    const route = routeTo(fixture, { x: goal.x, y: goal.y, z: goal.z })
+    return route.length > 0 ? { status: 'found', path: route } : { status: 'noPath', path: [] }
+  }
+  let lookTarget = { x: fixture.position.x, z: fixture.position.z }
   ;(fixture.bot as unknown as { lookAt: (point: { x: number; z: number }) => Promise<void> }).lookAt = async (point) => {
     const dx = point.x - fixture.position.x
     const dz = point.z - fixture.position.z
     const length = Math.hypot(dx, dz) || 1
     heading = { x: dx / length, z: dz / length }
+    // `walkByControls` faces `position.offset(dx, 0, dz)`, i.e. the target centre:
+    // the body decelerates into it instead of overrunning it
+    lookTarget = { x: point.x, z: point.z }
   }
   ;(fixture.bot as unknown as { setControlState: (control: string, state: boolean) => void }).setControlState = (
     control,
@@ -309,6 +411,7 @@ function installWalkModel(fixture: FixtureBot, options: { transfer: boolean; blo
     if (state) controls.push(control)
     if (!state) return
     if (control === 'jump') {
+      jumped = true
       // the measured hop lands ON the threshold top (one block up); a wall stops it
       if (
         options.blocked !== true &&
@@ -326,10 +429,49 @@ function installWalkModel(fixture: FixtureBot, options: { transfer: boolean; blo
       moved += 0.15
       return
     }
-    fixture.position.x += heading.x * 0.25
-    fixture.position.z += heading.z * 0.25
+    // Vanilla collision resolution: the push moves along the axes that are free,
+    // so a body walking diagonally into a wall SLIDES along it (the measured live
+    // body slid along the frame column). A step higher than the feet needs a jump;
+    // anything more than one block is a wall.
+    const remaining = Math.min(0.25, Math.hypot(lookTarget.x - fixture.position.x, lookTarget.z - fixture.position.z))
+    const stepX = heading.x * remaining
+    const stepZ = heading.z * remaining
+    const blocked = (toX: number, toZ: number): boolean => {
+      const landing = surfaceTopAt(fixture.grid, toX, toZ, fixture.position.y)
+      if (landing === null) return false
+      if (landing > fixture.position.y + 1) return true
+      return landing > fixture.position.y + 0.05 && !jumped
+    }
+    let movedThisPush = false
+    if (!blocked(fixture.position.x + stepX, fixture.position.z + stepZ)) {
+      fixture.position.x += stepX
+      fixture.position.z += stepZ
+      movedThisPush = true
+    } else if (Math.abs(stepX) > 0 && !blocked(fixture.position.x + stepX, fixture.position.z)) {
+      fixture.position.x += stepX
+      movedThisPush = true
+    } else if (Math.abs(stepZ) > 0 && !blocked(fixture.position.x, fixture.position.z + stepZ)) {
+      fixture.position.z += stepZ
+      movedThisPush = true
+    }
+    if (!movedThisPush) return
+    const landing = surfaceTopAt(fixture.grid, fixture.position.x, fixture.position.z, fixture.position.y)
+    if (vanished === false && landing !== null && landing <= fixture.position.y + 1) fixture.position.y = landing
+    jumped = false
     moved = Math.hypot(fixture.position.x - start.x, fixture.position.z - start.z)
-    if (openFaces.has(bodyCell())) fixture.movedToFace = true
+    if (openFaces.has(bodyCell())) {
+      fixture.movedToFace = true
+      if (options.vanishFace === true && vanished === false) {
+        // the postcondition disappears under the body: the support is gone, and
+        // the body stays where it arrived so ONLY the re-observation decides
+        fixture.position.y = ENTER_CELL.y
+        fixture.grid.set(
+          `${Math.floor(fixture.position.x)},${ENTER_CELL.y - 1},${Math.floor(fixture.position.z)}`,
+          cell('air'),
+        )
+        vanished = true
+      }
+    }
     if (inside() && options.transfer) bot.game.dimension = NETHER
   }
   return { controls, travelled: () => moved }
@@ -1233,6 +1375,7 @@ function occludedFixture(): FixtureBot {
   // the z=8 side has no floor, so the step-aside is mechanically UNIQUE and code
   // may finish the selected entry's prerequisite (#436).
   grid.set('27,67,10', cell('obsidian'))
+  grid.set('27,68,10', cell('obsidian'))
   // complete the world model: an unset cell reads as `null` (unknown = blocked)
   // to the headroom/standability probes, which would veto honest geometry
   for (const x of [23, 24, 25, 26, 27, 28])
@@ -1297,7 +1440,10 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
         (line) => line.startsWith(REFLEX) && line.includes('action=step_onto_open_face'),
       ) &&
       first.messages.some(
-        (line) => line.startsWith(SKILL_STEP) && line.includes('step=approach_leg'),
+        (line) =>
+          line.startsWith(SKILL_STEP) &&
+          line.includes('stepKind=approach_leg') &&
+          line.includes('authority=MANDATORY_PREREQUISITE'),
       ) &&
       first.messages.some(
         (line) => line.startsWith(SKILL_END) && line.includes('execution=progress'),
@@ -1343,15 +1489,17 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
 }
 
 {
-  // (k-4) SEVERAL open faces: the skill must NOT pick one - it interrupts typed
-  // and leaves every alternative in the offer for Jev
+  // (k-4) SEVERAL open faces are ONE remedy class (walk around the frame): the
+  // skill refines mechanically to the nearest reachable face, NAMES every face it
+  // considered, and still offers all of them to Jev.
   const fixture = occludedFixture()
   fixture.grid.set('27,67,10', cell('air'))
+  fixture.grid.set('27,68,10', cell('air'))
   const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
   const model = installWalkModel(fixture, { transfer: true })
   const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
-  const interrupt = result.messages.find((line) => line.startsWith(SKILL_INTERRUPT)) ?? ''
-  const refused = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_REFUSED)) ?? ''
+  const step = result.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('stepKind=approach_leg')) ?? ''
+  const legLine = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_LEG)) ?? ''
   const state = worldState(OCCLUDED_STAND, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
     OCCLUDED_STAND,
     ENTER_CELL,
@@ -1361,15 +1509,211 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
   const offered = entryCandidates(state, { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) })
   const legs = offered.candidates.filter((entry) => entry.meta.approachLeg === 'portal_open_face')
   check(
-    '(k-4) several open faces: the skill interrupts typed, moves nothing, and leaves every face offered to Jev',
+    '(k-4) several faces in one remedy class: code refines to the nearest reachable face, names them all, and every face stays offered',
+    result.status === 'done' &&
+      step.includes('class=DETOUR') &&
+      step.includes('refined_by=nearest_reachable') &&
+      step.includes('faces=[') &&
+      step.includes('26,67,10') &&
+      step.includes('27,67,10') &&
+      legLine.includes('cell=26,67,10') &&
+      fixture.digs.length === 0 &&
+      legs.length >= 2,
+    `status=${result.status} digs=${fixture.digs.length} legs=${legs.length} step=[${step}] marker=[${legLine}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (m) THE MEASURED LOWER-CORRIDOR SHAPE (run-mucbyro1-1hqhm, source c54fa6f) and
+// the issue #436 §7 U1..U6 contract for deterministic prerequisites. World truth
+// read from the save (tools/world-truth-plane.mjs, read-only):
+//   body (24,67,9) on cobblestone (24,66,9) top y=67 | frame column 25,67..69,9
+//   interior 26,67..69,9 + obsidian threshold 26,66,9 (top 67)
+//   the open side z=10: the corridor floor is y=65, so the standable cell beside
+//   the interior is (26,66,10) - ONE LEVEL BELOW the interior - while the
+//   interior-level cell the old search named was air, so its own leg was refused
+//   (`REFLEX cell={26,67,10} -> PORTAL_APPROACH_REFUSED ... faces=1`).
+// ---------------------------------------------------------------------------
+function lowerCorridorFixture(): FixtureBot {
+  const grid = gateGrid()
+  // the corridor south of the gate: floor y=65, standable at feet y=66
+  grid.set('25,65,10', cell('cobblestone'))
+  grid.set('26,65,10', cell('cobblestone'))
+  grid.set('24,65,10', cell('cobblestone'))
+  grid.set('25,66,10', cell('air'))
+  grid.set('26,66,10', cell('air'))
+  grid.set('24,66,9', cell('cobblestone'))
+  grid.set('25,66,9', cell('cobblestone'))
+  // complete the world model so headroom/standability probes see explicit air
+  for (const x of [23, 24, 25, 26, 27, 28])
+    for (const z of [8, 9, 10, 11, 12])
+      for (const y of [67, 68, 69, 70]) {
+        const k = `${x},${y},${z}`
+        if (!grid.has(k)) grid.set(k, cell('air'))
+      }
+  return makeBot({ x: 24.2, y: 67, z: 9.2 }, grid, true)
+}
+
+const LOWER_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
+
+{
+  // (m-a) the measured shape: the leg names the ONE-LOWER face and the walk then
+  // steps UP into the interior and transfers
+  const fixture = lowerCorridorFixture()
+  const candidate = measuredCandidate(fixture, LOWER_STAND)
+  const model = installWalkModel(fixture, { transfer: true })
+  const first = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const legLine = first.messages.find((line) => line.startsWith(PORTAL_APPROACH_LEG)) ?? ''
+  const blocked = first.messages.find((line) => line.startsWith('PORTAL_WALK_IN_BLOCKED')) ?? ''
+  check(
+    '(m-a) the measured lower-corridor pocket: the leg names the one-level-below face, and the walk-in completes',
+    first.status === 'done' &&
+      legLine.includes('cell=26,66,10') &&
+      first.messages.some(
+        (line) =>
+          line.startsWith(SKILL_STEP) &&
+          line.includes('stepKind=approach_leg') &&
+          line.includes('authority=MANDATORY_PREREQUISITE'),
+      ) &&
+      blocked.includes('obsidian@25,67,9') &&
+      fixture.movedToFace &&
+      fixture.digs.length === 0,
+    `status=${first.status} face=${fixture.movedToFace} digs=${fixture.digs.length} marker=[${legLine}] blocked=[${blocked}]`,
+  )
+  // the walk-in from the lower face: one step UP into the non-solid portal cell
+  const state = worldState(
+    { x: fixture.position.x, y: fixture.position.y, z: fixture.position.z },
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+  )
+  const reoffered = entryCandidates(state, { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) })
+  const second = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const walkLine = second.messages.find((line) => line.startsWith(`${PORTAL_WALK_IN} `)) ?? ''
+  const hop = second.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('stepKind=hop')) ?? ''
+  check(
+    '(m-a) from the lower face the bounded walk steps UP into the interior and the transfer is observed',
+    reoffered.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL') &&
+      second.status === 'done' &&
+      second.verified === true &&
+      walkLine.includes('transferred=true') &&
+      hop.includes('cell=26,67,9') &&
+      second.messages.some((line) => line.startsWith('PORTAL_ENTERED')),
+    `reoffered=[${reoffered.candidates.map((candidate) => candidate.id).join(',')}] status=${second.status} verified=${second.verified} marker=[${walkLine}] hop=[${hop}]`,
+  )
+}
+
+{
+  // (m-c) an open side two levels lower is a climb the skill must not invent
+  const fixture = lowerCorridorFixture()
+  // sink the corridor to y=64: now the standable cell (26,65,10) is TWO below
+  fixture.grid.set('25,65,10', cell('air'))
+  fixture.grid.set('26,65,10', cell('air'))
+  fixture.grid.set('25,66,10', cell('air'))
+  fixture.grid.set('26,66,10', cell('air'))
+  fixture.grid.set('25,64,10', cell('cobblestone'))
+  fixture.grid.set('26,64,10', cell('cobblestone'))
+  const candidate = measuredCandidate(fixture, LOWER_STAND)
+  const model = installWalkModel(fixture, { transfer: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const refused = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_REFUSED)) ?? ''
+  const boundary = result.messages.find((line) => line.startsWith(SKILL_POLICY_BOUNDARY)) ?? ''
+  check(
+    '(m-c) an open side two levels below yields no face: typed refusal, a policy boundary, and zero movement',
     result.status === 'failed' &&
-      result.failure === 'path_stuck' &&
-      interrupt.includes('multiple_open_faces') &&
-      refused.includes('reason=multiple_open_faces') &&
+      refused.includes('reason=no_open_face') &&
+      boundary.includes('reason=no_in_envelope_remedy') &&
+      !result.messages.some((line) => line.startsWith(PORTAL_APPROACH_LEG)) &&
+      model.controls.length === 0,
+    `status=${result.status} controls=[${model.controls.join(',')}] refused=[${refused}] boundary=[${boundary}]`,
+  )
+}
+
+{
+  // (m-d) mixed levels: every face (same level AND one below) is offered and named
+  const fixture = occludedFixture()
+  // a same-level face at (26,67,10) and a one-lower face at (27,66,10)
+  fixture.grid.set('27,67,10', cell('air'))
+  fixture.grid.set('27,66,10', cell('leaf_litter'))
+  fixture.grid.set('27,65,10', cell('stone'))
+  const state = worldState(OCCLUDED_STAND, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
+    OCCLUDED_STAND,
+    ENTER_CELL,
+    { x: 26, y: 67, z: 10 },
+    { x: 27, y: 66, z: 10 },
+  ])
+  const offered = entryCandidates(state, { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) })
+  const legs = offered.candidates.filter((entry) => entry.meta.approachLeg === 'portal_open_face')
+  check(
+    '(m-d) a mixed-level open side offers BOTH the same-level and the one-below face (neither hard-coded)',
+    legs.some((leg) => leg.target?.x === 26 && leg.target?.y === 67) &&
+      legs.some((leg) => leg.target?.x === 27 && leg.target?.y === 66) &&
+      legs.length >= 2,
+    `legs=[${legs.map((leg) => `${leg.target?.x},${leg.target?.y},${leg.target?.z}`).join(' ')}]`,
+  )
+}
+
+{
+  // (m-e) U3: a genuinely available NON-locomotion remedy (a hand-diggable wall
+  // that is NOT the portal's structure) is a different semantic class -> the skill
+  // chooses none and surfaces every grounded alternative
+  const fixture = occludedFixture()
+  // the wall between the body and the gate is now dirt (hand-harvestable, not the
+  // frame): both DETOUR and MINE are genuinely available
+  fixture.grid.set('25,67,9', cell('dirt'))
+  fixture.grid.set('25,68,9', cell('dirt'))
+  fixture.grid.set('25,66,9', cell('dirt'))
+  const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
+  const model = installWalkModel(fixture, { transfer: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const boundary = result.messages.find((line) => line.startsWith(SKILL_POLICY_BOUNDARY)) ?? ''
+  check(
+    '(m-e) U3/U4: with mine AND detour genuinely available the skill chooses none and surfaces both',
+    result.status === 'failed' &&
+      boundary.includes('reason=several_remedy_classes') &&
+      boundary.includes('alternatives=[') &&
+      boundary.includes('walk_face@') &&
+      boundary.includes('dig@25,67,9(dirt,available:') &&
       !result.messages.some((line) => line.startsWith(PORTAL_APPROACH_LEG)) &&
       model.controls.length === 0 &&
-      legs.length >= 2,
-    `status=${result.status} failure=${result.failure ?? 'none'} controls=[${model.controls.join(',')}] legs=${legs.length} interrupt=[${interrupt}] refused=[${refused}]`,
+      fixture.digs.length === 0,
+    `status=${result.status} controls=[${model.controls.join(',')}] digs=${fixture.digs.length} boundary=[${boundary}]`,
+  )
+}
+
+{
+  // (m-f) U6: a face that is not there any more after execution is NOT assumed to
+  // have worked - bounded, re-observed, no progress claimed
+  const fixture = occludedFixture()
+  const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
+  const model = installWalkModel(fixture, { transfer: true, vanishFace: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const boundary = result.messages.find((line) => line.startsWith(SKILL_POLICY_BOUNDARY)) ?? ''
+  check(
+    '(m-f) U6: a face that vanished under the body is re-observed, claims no progress, and fails honestly',
+    result.status === 'failed' &&
+      boundary.includes('reason=face_unverified') &&
+      !result.messages.some((line) => line.startsWith(PORTAL_APPROACH_LEG)) &&
+      !result.messages.some((line) => line.startsWith(SKILL_END) && line.includes('execution=progress')),
+    `status=${result.status} boundary=[${boundary}]`,
+  )
+}
+
+{
+  // (m-g) U4: a wall that appears after the offer grants this skill NO dig/place
+  // authority - it stops, and zero world mutation happens
+  const fixture = lowerCorridorFixture()
+  const candidate = measuredCandidate(fixture, LOWER_STAND)
+  // the wall appears between offer and execution
+  fixture.grid.set('25,67,9', cell('dirt'))
+  fixture.grid.set('25,68,9', cell('dirt'))
+  const model = installWalkModel(fixture, { transfer: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  check(
+    '(m-g) U4: a wall appearing after the offer never grants the entry dig/place authority',
+    fixture.digs.length === 0 &&
+      result.messages.every((line) => !line.includes('MINE')) &&
+      result.status === 'failed',
+    `status=${result.status} digs=${fixture.digs.length} controls=[${model.controls.join(',')}]`,
   )
 }
 
