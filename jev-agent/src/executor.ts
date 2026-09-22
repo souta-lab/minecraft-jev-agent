@@ -25,7 +25,10 @@ import { bodySubmersion, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AI
 import {
   BRIDGE_BLOCK_META,
   BRIDGE_DIR_META,
+  BRIDGE_LANDING_META,
+  BRIDGE_META,
   BRIDGE_MIN_ADVANCE,
+  BRIDGE_PLACE_META,
   BRIDGE_PROBE_DEPTH,
   BRIDGE_SPAN_META,
   BRIDGE_STEP_CAP,
@@ -154,8 +157,8 @@ import type {
   SkillOutcome,
   StepAuthority,
 } from './skillCommitment.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PORTAL_WALK_IN_LEVEL_TOLERANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryClimb, formatPortalEntryClimbRefused, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
-import type { PortalEntryClimbLeg } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PORTAL_WALK_IN_LEVEL_TOLERANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryClimb, formatPortalEntryClimbRefused, formatPortalEntryCross, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import type { PortalEntryClimbLeg, PortalEntryCrossOutcome } from './netherPortalPlan.ts'
 import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource, SkillStepAuthority } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
@@ -653,12 +656,21 @@ const PORTAL_FACE_LEG_NO_PROGRESS_MS = 600
  * way: the typed envelope already derives `mayDigGroundedRoute` /
  * `mayPlaceGroundedRoute` from these same meta keys (`skillCommitment.ts`), so a
  * plain entry still gets neither.
+ *
+ * The CROSSING half declares itself the same way (the operator's trial, second
+ * half): an entry whose grounded route includes a `bridge*` contract places the
+ * block that contract names, so the declaration must name it - otherwise the
+ * crossing's own `assertEffect({type:'place'})` fails closed with
+ * `place_cell_not_declared` and the body can never lay the floor it just grounded
+ * (the exact "declaration that contradicts the leg" shape this function exists to
+ * prevent).
  */
 function portalEntryEffectEnvelope(candidate: Candidate): string {
   const vertical = readMetaString(candidate, 'vertical') ?? 'none'
   const fallback = readMetaString(candidate, 'fallbackVertical') ?? 'none'
   const digRoute = candidate.meta.digRoute === true
-  if (vertical === 'none' && fallback === 'none' && !digRoute) return 'movement-only(no_dig,no_place)'
+  const crossing = candidate.meta[BRIDGE_META] === true
+  if (vertical === 'none' && fallback === 'none' && !digRoute && !crossing) return 'movement-only(no_dig,no_place)'
   const place = declaredRoutePlaceBlocks(candidate)
   const digs =
     vertical === 'staircase' || vertical === 'staircase-up' || candidate.meta.digStep === true || digRoute
@@ -3430,6 +3442,77 @@ export class Executor {
     signal: AbortSignal,
     startedAt: number,
   ): Promise<ExecutionResult> {
+    const outcome = await this.runBridgeLeg(candidate, epoch, signal)
+    if (outcome.completed) {
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'done',
+        outcome.arrived ? 'arrived' : 'leg',
+        outcome.detail,
+        null,
+        {
+          verified: outcome.verified,
+          blockRemoved: false,
+          dropObserved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+          // A bridge that really placed a block and advanced is observable progress
+          // even when the declared far side was not reached in this leg. A stale
+          // candidate already standing on its target claims neither.
+          progressed: outcome.observed,
+        },
+      )
+    }
+    return this.buildResult(candidate, epoch, startedAt, 'failed', 'bridging', outcome.detail, outcome.failure, {
+      verified: false,
+      blockRemoved: false,
+      dropObserved: false,
+      itemsGained: 0,
+      goalItemCount: this.countGoalItem(),
+      progressed: false,
+    })
+  }
+
+  /**
+   * ONE bounded bridge/scaffold leg: the motor recipe above, without any
+   * `ExecutionResult` wrapping.
+   *
+   * Split out (2026-09-23, the portal entry's CROSSING leg) because the entry
+   * route is not a bridge MOVE: it is the ENTER action's own composed leg, and it
+   * must report its raw facts - how many blocks it really placed and whether the
+   * body really ADVANCED - in the entry route's own vocabulary
+   * (`PORTAL_ENTRY_CROSS`) instead of pretending a whole MOVE finished. The MOVE
+   * path (`runBridge` above) wraps this into exactly the result it always built
+   * (the same `detail`, stage and failure code, carried on the outcome), so its
+   * behaviour and evidence are unchanged.
+   */
+  private async runBridgeLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<{
+    placed: number
+    arrived: boolean
+    verified: boolean
+    /** the leg should be reported as a completed chunk (a placement, an arrival, or a real distance gain) */
+    completed: boolean
+    /** observable change a caller may claim as PROGRESS (a real placement or a measured distance gain) */
+    observed: boolean
+    /** blocks that really appeared in the world (the placement half, verified before it counts) */
+    blocksPlaced: number
+    /** times the body really stood on the floor a placement made (the ADVANCE half) */
+    landings: number
+    reason: string
+    dir: BridgeDir
+    from: number
+    to: number
+    /** the exact `detail=` string the caller reports, built where the facts are */
+    detail: string
+    /** the typed failure code when the leg claimed no progress, else null */
+    failure: FailureCode | null
+  }> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'BRIDGE candidate has no coordinates')
     const dirMeta = readMetaString(candidate, BRIDGE_DIR_META)
@@ -3446,6 +3529,16 @@ export class Executor {
     const from = this.distanceToFeet(target)
     const firstLanding = this.bridgeCell(feetCellOf(this.bot), dir, 0)
     let placed = 0
+    // The two facts `placed` alone cannot tell apart (the operator's trial,
+    // measured: "a placement without a proven advance"): a block that really
+    // appeared in the world, and a body that really stood on the floor that block
+    // made. `placed` counts only COMPLETED steps (place + verified landing +
+    // strict distance gain), so it is 0 both when nothing happened and when a
+    // block was laid but the body could not step onto it - which are different
+    // routes. These count each half separately, so the entry's crossing evidence
+    // can never read a placement as a crossing.
+    let blocksPlaced = 0
+    let landings = 0
     let reason = 'reached'
     // The typed `no_block` refusal at execution time: the item the offer declared
     // may have left the inventory between the decision and the lease (a death, a
@@ -3460,23 +3553,21 @@ export class Executor {
       }
       this.logBridgeRefused(candidate, refusal)
       this.logBridgeEnd(candidate, 0, false, 'no_block')
-      return this.buildResult(
-        candidate,
-        epoch,
-        startedAt,
-        'failed',
-        'bridging',
-        `bridge ${dir} refused: ${refusal.detail}`,
-        'target_gone',
-        {
-          verified: false,
-          blockRemoved: false,
-          dropObserved: false,
-          itemsGained: 0,
-          goalItemCount: this.countGoalItem(),
-          progressed: false,
-        },
-      )
+      return {
+        placed: 0,
+        arrived: false,
+        verified: false,
+        completed: false,
+        observed: false,
+        blocksPlaced: 0,
+        landings: 0,
+        reason: 'no_block',
+        dir,
+        from,
+        to: from,
+        detail: `bridge ${dir} refused: ${refusal.detail}`,
+        failure: 'target_gone',
+      }
     }
     this.setPhase(candidate, epoch, 'bridging')
     this.logger.info(
@@ -3625,6 +3716,7 @@ export class Executor {
           })
           break
         }
+        blocksPlaced += 1
         const before = this.distanceToFeet(target)
         this.setPhase(candidate, epoch, 'pathing')
         try {
@@ -3644,6 +3736,7 @@ export class Executor {
           reason = 'advance_failed'
           break
         }
+        landings += 1
         const after = this.distanceToFeet(target)
         if (!(after < before)) {
           reason = 'no_progress'
@@ -3671,29 +3764,25 @@ export class Executor {
     const detail =
       `bridge ${dir}: placed=${placed} from_d=${round2(from)} to_d=${round2(remaining)} ` +
       `reason=${reason} verified=${verified}`
+    const closedDistance = remaining <= from - BRIDGE_MIN_ADVANCE
     // Observable change: a real placement, or a real measured distance gain. A
     // stale candidate that was already standing on its target claims neither.
-    const closedDistance = remaining <= from - BRIDGE_MIN_ADVANCE
-    if (placed > 0 || arrived || closedDistance) {
-      return this.buildResult(candidate, epoch, startedAt, 'done', arrived ? 'arrived' : 'leg', detail, null, {
-        verified,
-        blockRemoved: false,
-        dropObserved: false,
-        itemsGained: 0,
-        goalItemCount: this.countGoalItem(),
-        // A bridge that really placed a block and advanced is observable progress
-        // even when the declared far side was not reached in this leg.
-        progressed: placed > 0 || closedDistance,
-      })
+    const observed = placed > 0 || closedDistance
+    return {
+      placed,
+      arrived,
+      verified,
+      completed: observed || arrived,
+      observed,
+      blocksPlaced,
+      landings,
+      reason,
+      dir,
+      from,
+      to: remaining,
+      detail,
+      failure: observed || arrived ? null : bridgeFailureCode(reason),
     }
-    return this.buildResult(candidate, epoch, startedAt, 'failed', 'bridging', detail, bridgeFailureCode(reason), {
-      verified: false,
-      blockRemoved: false,
-      dropObserved: false,
-      itemsGained: 0,
-      goalItemCount: this.countGoalItem(),
-      progressed: false,
-    })
   }
 
   /** The block the bridge body is standing on: the face it places against. */
@@ -8186,6 +8275,7 @@ export class Executor {
     let activeVertical = 'none'
     let legObstruction: string | null = null
     let climbEvidence: string | null = null
+    let crossEvidence: string | null = null
     try {
       await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
     } catch (error) {
@@ -8288,6 +8378,76 @@ export class Executor {
       )
     }
     if (!this.dimensionMatches(dimension) && pathError !== null) {
+      // THE CROSSING LEG, before the walk-in (the operator's trial, second half):
+      // an entry whose way across is open AIR needs its floor laid before any
+      // forward push is safe, and the stock actuator cannot express "place a block
+      // into the void and step onto it". The candidate carries this leg only when
+      // the offering layer grounded a real span at the interior's own level, so a
+      // level gate, a one-block step-up and an ordinary walkable gate never reach
+      // here and keep their exact behaviour. `runEntryCrossingLeg` runs ONE bounded
+      // bridge chunk through the SAME motor a bridge MOVE uses.
+      const crossing = await this.runEntryCrossingLeg(candidate, epoch, signal, enterCell)
+      if (crossing.evidence !== null) crossEvidence = crossing.evidence
+      if (this.dimensionMatches(dimension)) {
+        return this.enteredResult(candidate, epoch, startedAt, enterCell, dimension)
+      }
+      if (crossing.attempted && crossing.inside) {
+        // The crossing reached the interior cell: the ordinary arrival half (lit
+        // re-verification + bounded portal delay) owns the transfer wait.
+        return await this.completePortalEntry(
+          candidate,
+          epoch,
+          signal,
+          startedAt,
+          enterCell,
+          dimension,
+          expectedCells,
+          timeoutMs,
+        )
+      }
+      if (crossing.attempted && crossing.advanced) {
+        // A bounded crossing chunk: the floor cell(s) are REALLY placed and the body
+        // durably stood on the floor it made. The `PORTAL_ENTRY_CROSS` marker says
+        // how many blocks appeared and how many landings were verified, so a
+        // placement is never read as a crossing. The next decision re-grounds the
+        // entry from the new cell (the same one-chunk policy the climb chunk uses).
+        return this.entryProgressResult(
+          candidate,
+          epoch,
+          startedAt,
+          `crossing ${String(crossing.evidence ?? '')}: laid ${crossing.blocksPlaced} block(s) and advanced onto the floor it made ` +
+            `(${crossing.landings} verified landing(s)) toward the entry at (${enterCell.x},${enterCell.y},${enterCell.z}) ` +
+            '(bounded chunk; next decision re-grounds)',
+          crossing.blocksPlaced > 0,
+        )
+      }
+      if (crossing.attempted && !crossing.gapClosed) {
+        // The DECLARED crossing leg did not close the gap: either the live re-probe
+        // refused it (nothing was placed) or a block was laid and the body could NOT
+        // step onto it. Both are the entry route's own horizontal leg failing, so the
+        // refusal is terminal and NAMES it (`cross=`). Walking forward here would
+        // push the body into the very gap the crossing was grounded to fill - the
+        // walk-in reads solid cells as blockers, never a missing floor - so the route
+        // stops with the typed cause instead, and the next decision re-grounds from a
+        // world that now has whatever this leg really placed.
+        const blockedCrossing = this.portalEntryRouteBlockedLine(
+          candidate,
+          enterCell,
+          pathError,
+          legObstruction,
+          climbEvidence,
+          crossEvidence,
+        )
+        this.logger.warn('agent', blockedCrossing, {
+          actionId: candidate.id,
+          failure: crossing.error?.code ?? 'route_blocked',
+          target: enterCell,
+          fromY: Math.floor(this.bot.entity.position.y),
+          toY: enterCell.y,
+          cross: crossEvidence,
+        })
+        throw new ExecutorError(crossing.error?.code ?? 'path_stuck', blockedCrossing)
+      }
       // LAST RESORT, still inside the same action: the interior cell of a lit
       // portal is non-solid, so the stock actuator refuses to execute the plan
       // node at all (measured: `path_stuck` with the body moved zero blocks).
@@ -8331,7 +8491,14 @@ export class Executor {
       // naming the obstruction, so the option can be abandoned instead of
       // re-arming the same unreachable walk (the live run alternated
       // `noPath`/`stuck`).
-      const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError, legObstruction, climbEvidence)
+      const blocked = this.portalEntryRouteBlockedLine(
+        candidate,
+        enterCell,
+        pathError,
+        legObstruction,
+        climbEvidence,
+        crossEvidence,
+      )
       this.logger.warn('agent', blocked, {
         actionId: candidate.id,
         failure: pathError instanceof ExecutorError ? pathError.code : 'unknown_event',
@@ -9489,6 +9656,163 @@ export class Executor {
   }
 
   /**
+   * THE CROSSING LEG of the entry route (the operator's trial, second half).
+   *
+   * Measured live (body `(26.3,64.0,6.3)` on a ledge, floated gate interior
+   * `(26,67,9)`): the gate's frame bottom is obsidian at `y=66`, so the interior's
+   * floor is a cell that must be CREATED, and the pinned `canDig=false`
+   * pathfinder cannot express "place a block into the void and step onto it".
+   * Every ENTER realization ended `PATH_CALLBACK phase=failed outcome=stuck`; the
+   * previous lane composed the CLIMB half (`runEntryRouteLeg`) and this is the
+   * other half.
+   *
+   * It runs the candidate's OWN grounded crossing contract (the `bridge*` meta
+   * `candidates.ts#entryCandidates` grounded with the SAME `planBridgeRoute` every
+   * bridge leg uses, and only at the interior's own level) through the SAME
+   * `runBridgeLeg` a bridge MOVE uses - ONE bounded chunk, so this adds no second
+   * bridge motor and no second bridge rule.
+   *
+   * The route is climb legs -> crossing leg -> the verified walk-in; each leg is
+   * typed and mirrored, and the terminal refusal names which one failed and why
+   * (`PORTAL_ENTRY_CLIMB*`, `PORTAL_ENTRY_CROSS`, and `climb=`/`cross=` on
+   * `PORTAL_ENTRY_ROUTE_BLOCKED`).
+   *
+   * FAIL CLOSED on a stale offer: the crossing is only valid at the interior's own
+   * level, so a body that is no longer there (it fell, or the climb has not run
+   * yet) does not cross - the climb owns the height and this returns idle without
+   * a marker, exactly like a missing vertical plan.
+   */
+  private async runEntryCrossingLeg(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    enterCell: Vec3Json,
+  ): Promise<{
+    attempted: boolean
+    /** completed steps: a block placed, the body landed on it, and distance closed */
+    placed: number
+    /** blocks that REALLY appeared in the world (verified before they count) */
+    blocksPlaced: number
+    /** the body durably stood on the floor a placement made (the ADVANCE half) */
+    landings: number
+    /** the body advanced onto its own placed floor at least once */
+    advanced: boolean
+    /** the body now occupies the interior cell: the ordinary arrival half owns the transfer */
+    inside: boolean
+    /** the live re-probe answered a typed refusal and NOTHING was placed */
+    refused: boolean
+    /** the live re-probe found no gap: the ordinary walk owns the rest */
+    gapClosed: boolean
+    /** the entry route's own `PORTAL_ENTRY_CROSS` line, for the terminal `cross=` field */
+    evidence: string | null
+    /** the leg's own typed failure, when it ran and threw */
+    error: ExecutorError | null
+  }> {
+    const idle = {
+      attempted: false,
+      placed: 0,
+      blocksPlaced: 0,
+      landings: 0,
+      advanced: false,
+      inside: false,
+      refused: false,
+      gapClosed: false,
+      evidence: null,
+      error: null,
+    }
+    if (candidate.meta[BRIDGE_META] !== true) return idle
+    const dir = readMetaString(candidate, BRIDGE_DIR_META) ?? 'unknown'
+    const block = readMetaString(candidate, BRIDGE_BLOCK_META) ?? 'unknown'
+    const span = Math.floor(readMetaNumber(candidate, BRIDGE_SPAN_META, 0))
+    const place = readMetaString(candidate, BRIDGE_PLACE_META) ?? 'unknown'
+    const landing = readMetaString(candidate, BRIDGE_LANDING_META) ?? 'unknown'
+    const fromY = Math.floor(this.bot.entity.position.y)
+    // Fail closed on a stale offer: a crossing grounded for the interior's own
+    // level is not a crossing from anywhere else.
+    if (Math.abs(enterCell.y - fromY) > PORTAL_WALK_IN_LEVEL_TOLERANCE) return idle
+    const record = (outcome: PortalEntryCrossOutcome, blocksPlaced: number, detail: string | undefined): string => {
+      const line = formatPortalEntryCross({
+        cell: enterCell,
+        fromY,
+        toY: enterCell.y,
+        dir,
+        block,
+        span,
+        place,
+        landing,
+        outcome,
+        placed: blocksPlaced,
+        ...(detail === undefined ? {} : { detail }),
+      })
+      this.logger[outcome === 'advanced' || outcome === 'gap_closed' ? 'info' : 'warn']('agent', line, {
+        actionId: candidate.id,
+        target: enterCell,
+        dir,
+        block,
+        span,
+        outcome,
+        placed,
+      })
+      // The terminal line's `cross=` carries the plan facts AND the outcome in the
+      // entry route's own compact vocabulary, so a failed route says which leg
+      // failed: `cross=dir=S,span=2,place=...,landing=...,outcome=...,placed=N,detail=...`.
+      return `dir=${dir},span=${span},place=${place},landing=${landing},outcome=${outcome},placed=${blocksPlaced}` +
+        (detail === undefined ? '' : `,detail=${detail}`)
+    }
+    let placed = 0
+    let blocksPlaced = 0
+    let landings = 0
+    let advanced = false
+    let inside = false
+    let gapClosed = false
+    let legError: ExecutorError | null = null
+    let outcome: PortalEntryCrossOutcome = 'failed'
+    let detail: string | undefined
+    try {
+      const leg = await this.runBridgeLeg(candidate, epoch, signal)
+      placed = leg.placed
+      blocksPlaced = leg.blocksPlaced
+      landings = leg.landings
+      // The ADVANCE half is the body standing on the floor a placement made - the
+      // SAME fact `placed` counts, named separately so a placement without a proven
+      // advance can never be read as a crossing.
+      advanced = landings > 0
+      inside = leg.arrived || this.portalInsideInterior(enterCell)
+      gapClosed = blocksPlaced === 0 && !advanced && !inside && leg.reason === 'gap_closed'
+      outcome =
+        inside || advanced
+          ? 'advanced'
+          : blocksPlaced > 0
+            ? 'placed'
+            : gapClosed
+              ? 'gap_closed'
+              : 'refused'
+      detail = `${leg.reason} verified=${leg.verified} blocks=${blocksPlaced} landings=${landings}`
+    } catch (error) {
+      // A cancellation is not a route fact: it propagates exactly like every other
+      // leg's. Anything else is THIS leg's typed failure (a refused placement, a
+      // lost footing): it is recorded with the leg that owns it.
+      if (error instanceof ActionCancelled) throw error
+      legError = error instanceof ExecutorError ? error : new ExecutorError('path_stuck', String(error))
+      outcome = 'failed'
+      detail = legError.code
+    }
+    const evidence = record(outcome, blocksPlaced, detail)
+    return {
+      attempted: true,
+      placed,
+      blocksPlaced,
+      landings,
+      advanced,
+      inside,
+      refused: outcome === 'refused',
+      gapClosed,
+      evidence,
+      error: legError,
+    }
+  }
+
+  /**
    * The typed, STABLE reason the entry approach cannot be completed. `reason` is
    * one of `no_route` / `route_blocked` / `budget_exhausted` and `detail` names
    * the obstruction: the offering layer's ascent refusal, the executed leg's own
@@ -9502,12 +9826,20 @@ export class Executor {
     pathError: unknown,
     legObstruction: string | null,
     climbEvidence: string | null = null,
+    crossEvidence: string | null = null,
   ): string {
     const refusal = readMetaString(candidate, 'entryRouteRefusal')
     const vertical = readMetaString(candidate, 'vertical') ?? 'none'
     const code = pathError instanceof ExecutorError ? pathError.code : null
+    // A DECLARED crossing leg that ran and refused is a blocked ROUTE, not "no
+    // route": the offering layer grounded a span here and the live world refused
+    // it, which is exactly the distinction the `cross=` field exists to carry.
     const reason: PortalEntryRouteBlockedReason =
-      code === 'path_timeout' ? 'budget_exhausted' : vertical !== 'none' ? 'route_blocked' : 'no_route'
+      code === 'path_timeout'
+        ? 'budget_exhausted'
+        : vertical !== 'none' || crossEvidence !== null
+          ? 'route_blocked'
+          : 'no_route'
     const detail = refusal ?? legObstruction ?? code
     return formatPortalEntryRouteBlocked({
       reason,
@@ -9516,6 +9848,7 @@ export class Executor {
       toY: enterCell.y,
       ...(detail === null || detail.length === 0 ? {} : { detail }),
       ...(climbEvidence === null ? {} : { climb: climbEvidence }),
+      ...(crossEvidence === null ? {} : { cross: crossEvidence }),
     })
   }
 
