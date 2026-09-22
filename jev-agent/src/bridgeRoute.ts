@@ -29,10 +29,33 @@
 //
 //   * the ONE rule for "may this cell be bridged onto, and is the far side
 //     verified": {@link planBridgeSpan};
+//   * the SELF-LANDING SCAFFOLD case of that rule: when no already-standable far
+//     side exists inside the bounded probe, the first column's own landing can
+//     still be the far side, because this step CREATES ITS FLOOR and steps onto it
+//     (one held block per leg, the next leg re-grounded from the new stand cell).
+//     Its pocket is judged by the SAME per-cell verdict the wall entry and the level
+//     scan read (`wallEntry.ts#wallPocketOccupationRefusal` +
+//     `#wallPocketFloodRefusal`, composed in {@link scaffoldPocketRefusal}), so a
+//     fluid that could pour into the cell the body is about to occupy refuses in the
+//     shared vocabulary - there is no second flood rule here;
 //   * the typed refusals: `no_block | no_verified_landing | hazard | protected |
-//     budget`;
+//     budget | would_flood | portal_plane | unbreakable`;
 //   * the typed markers `BRIDGE_START` / `BRIDGE_STEP` / `BRIDGE_END` /
 //     `BRIDGE_REFUSED`, carried in candidate meta and mirrored by the controller.
+//     `BRIDGE_START` carries `self_landing=true pocket=<per-cell evidence>` for the
+//     scaffold case only, so a verified span's line is byte-identical to before.
+//
+// MEASURED (live, main cd7b38b, the operator's Nether run): the body dug from the
+// arrival island toward the fortress and stopped at `DIG_ROUTE:level:N:b24_57_-12
+// target=35,61,-23 fromD=16.76 toD=16.06` (LIVE:472244 / 472270) with `no_support`
+// 633x - the dominant refusal of the whole run - and `BRIDGE_REFUSED
+// reason=no_verified_landing` at every step of that final approach (LIVE:474855,
+// 474877, 474937, 475029, 475446, 475503). The world truth behind it: the body's
+// reachable ground ends at x=28, z=-20 and the nearest fortress fabric standable
+// cell is (37,60,-20); every column between has its topmost non-air block at y=31
+// and that block is lava, so the span is open air with NO floor at any level. The
+// far side of that span cannot be pre-verified because it is not reachable on foot
+// at all - only a body that lays its own floor can cross it.
 //
 // It is deliberately NOT a "stuck" recovery: it is grounded on the sensor's own
 // typed no-support step plus a bounded forward probe, it is enumerated as an
@@ -46,6 +69,8 @@
 
 import type { Vec3Json } from './state.ts'
 import { ENV_FIRE_BLOCKS, ENV_LAVA_BLOCKS } from './envHazard.ts'
+import type { WallEntryRefusal, WallEntryRefusalReason, WallPocketFacts } from './wallEntry.ts'
+import { wallPocketFloodRefusal, wallPocketOccupationRefusal } from './wallEntry.ts'
 
 /**
  * The candidate-meta key that marks a MOVE as a bridge/scaffold leg. The value is
@@ -77,6 +102,16 @@ export const BRIDGE_LANDING_META = 'bridgeLanding'
 export const BRIDGE_MAY_PLACE_META = 'mayPlaceBlocks'
 /** The `BRIDGE_START` line the offer carries and the controller mirrors. */
 export const BRIDGE_LINE_META = 'bridgeLine'
+/**
+ * TRUE when this leg is a SELF-LANDING SCAFFOLD: the far side of the span is the
+ * landing itself, because this step lays the floor of the cell it occupies. The
+ * machine-readable half of the `self_landing=true` field on the `BRIDGE_START`
+ * line, so a contract can audit "this leg creates the ground it stands on"
+ * without parsing prose.
+ */
+export const BRIDGE_SELF_LANDING_META = 'bridgeSelfLanding'
+/** The per-cell pocket verdict evidence of a self-landing scaffold step. */
+export const BRIDGE_POCKET_EVIDENCE_META = 'bridgePocketEvidence'
 /** The section 17 `SKILL_STEP ... authority=` line for the bridge step. */
 export const BRIDGE_AUTHORITY_META = 'bridgeAuthorityLine'
 /** The typed `BRIDGE_REFUSED` line when a bridge was needed but not groundable. */
@@ -155,6 +190,25 @@ export interface BridgeProbeCell {
   cellName: string | null
   /** live name of the floor cell (`null` when unloaded) */
   floorName: string | null
+  /**
+   * Live name of the HEAD cell (`null` when unloaded, absent on hand-built
+   * probes). The SELF-LANDING scaffold judges the 1x2 pocket with the shared
+   * per-cell rule (`wallEntry.ts#wallPocketRefusal`), and that rule cannot decide
+   * "standing in a fluid" or "the cell is a portal plane" without the head cell's
+   * name. Absent means "not sensed", which the rule treats as a refusal.
+   */
+  headName?: string | null
+  /**
+   * A fluid is FACE-ADJACENT to a cell of this column's 1x2 pocket, so a body
+   * standing in the pocket this step creates would be poured on
+   * (`wallEntry.ts#floodEvidence`, read by the sensor). Absent means "not
+   * sensed"; the SELF-LANDING rule refuses rather than assuming dry.
+   */
+  flood?: boolean
+  /** the fluid cell that would pour in, when `flood` */
+  floodCell?: Vec3Json | null
+  /** the fluid block that would pour in, when `flood` */
+  floodBlock?: string | null
 }
 
 /** One cardinal direction's bounded forward probe. */
@@ -175,7 +229,23 @@ export interface BridgeProbe {
 /** Structural probe shape, so the pure rule and the fixture can both feed it. */
 export type BridgeProbeLike = Pick<BridgeProbe, 'dir' | 'dx' | 'dz' | 'cells' | 'footing'>
 
-export type BridgeRefusalReason = 'no_block' | 'no_verified_landing' | 'hazard' | 'protected' | 'budget'
+export type BridgeRefusalReason =
+  | 'no_block'
+  | 'no_verified_landing'
+  | 'hazard'
+  | 'protected'
+  | 'budget'
+  /**
+   * SELF-LANDING only: mining/placing into this column would pour a neighbouring
+   * fluid into the pocket the body would stand in. The verdict comes from the
+   * shared per-cell rule (`wallEntry.ts#wallPocketRefusal`), so a scanner and a
+   * wall entry cannot disagree about what "this pocket may be occupied" means.
+   */
+  | 'would_flood'
+  /** SELF-LANDING only: the pocket is a DIMENSION TRANSFER plane (standing there teleports the body) */
+  | 'portal_plane'
+  /** SELF-LANDING only: a pocket cell is unobserved or cannot be opened (unknown is never stood in) */
+  | 'unbreakable'
 
 export interface BridgeRefusal {
   reason: BridgeRefusalReason
@@ -206,6 +276,16 @@ export interface BridgeSpan {
   from: number
   /** distance from the verified far side to the leg target */
   to: number
+  /**
+   * TRUE when the far side is the LANDING ITSELF: the body does not jump a gap
+   * with a verified far bank, it lays the floor of the very cell it is about to
+   * occupy and steps onto it, one cell per leg. `span` is then 1 by construction
+   * and the bounded continuation is the next offer from the new stand cell (see
+   * `planBridgeSpan`'s self-landing rule).
+   */
+  selfLanding?: boolean
+  /** the per-cell pocket verdict the self-landing step was grounded on (evidence) */
+  pocketEvidence?: string
 }
 
 export type BridgeSpanDecision =
@@ -223,6 +303,18 @@ export interface BridgeSpanInput {
   /** the #436 U5 protected-resource test (a protected station / live-structure member) */
   isProtected?: (cell: Vec3Json, name: string | null) => boolean
   maxSpan?: number
+  /**
+   * The item this leg would PLACE (`state.selectPlaceableBlock`), or absent/empty
+   * when the caller has no placement identity to declare.
+   *
+   * It enables exactly ONE case: when no already-standable far side exists inside
+   * the bounded probe, the first column's own landing can still be the far side,
+   * because this step CREATES ITS FLOOR with this block and steps onto it. Without
+   * the name the rule cannot state which block the new floor is, so it answers its
+   * historical `no_verified_landing` instead - a hand-built probe keeps its old
+   * verdict.
+   */
+  placeBlockName?: string | null
 }
 
 function key(cell: Vec3Json): string {
@@ -324,12 +416,31 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
   }
 
   // (6) The bounded continuation: the first verified stand forward bounds the span.
+  //
+  // WHEN THE CALLER DECLARED A PLACEMENT IDENTITY the search can only NARROW, never
+  // refuse: the first column's own verdict (rules 1-5 above, already answered with
+  // their own typed causes) is the authority for THIS step, and the self-landing
+  // case below is the answer whenever no already-standable far side exists inside
+  // the budget. A hazard, an over-budget span or a protected cell FURTHER ALONG is
+  // not a property of the cell the body is about to occupy - and it stops the step
+  // exactly where it matters (as the next leg's own first cell) rather than
+  // blocking a legal one-cell advance. Without a placement identity every
+  // historical refusal below is unchanged, so a hand-built probe keeps its verdict.
+  const declaredPlacement =
+    typeof input.placeBlockName === 'string' && input.placeBlockName.length > 0 ? input.placeBlockName : null
+  // The scaffold is available for THIS step only when the caller declared what it
+  // would place AND the probe carries the pocket's own face-adjacency read. Only then
+  // may the continuation search NARROW instead of refusing: the first column's own
+  // verdict is then the authority. Otherwise every historical refusal below stands
+  // verbatim, so an existing caller's verdict never changes.
+  const scaffoldAvailable = declaredPlacement !== null && first.flood !== undefined
   let span = 1
   let far: Vec3Json | null = null
   for (let index = 1; index < cells.length; index += 1) {
     const cell = cells[index]
     if (cell === undefined) break
     if (cell.hazard) {
+      if (scaffoldAvailable) break
       return {
         kind: 'refuse',
         refusal: {
@@ -349,6 +460,7 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
     if (!cell.open || !cell.headOpen || cell.supported || !cell.placeable) break
     if (cell.floorName !== null && isBridgeUnsafeBlockName(cell.floorName)) break
     if (isProtected(cell.floor, cell.floorName)) {
+      if (scaffoldAvailable) break
       return {
         kind: 'refuse',
         refusal: {
@@ -362,6 +474,7 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
     }
     span += 1
     if (span > maxSpan) {
+      if (scaffoldAvailable) break
       return {
         kind: 'refuse',
         refusal: {
@@ -372,6 +485,77 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
           detail: `verified span exceeds the bounded budget (maxSpan=${maxSpan})`,
         },
       }
+    }
+  }
+  if (far === null) {
+    // (6b) THE SELF-LANDING SCAFFOLD. No already-standable far side exists inside
+    // the bounded probe, so the historical answer was `no_verified_landing` and the
+    // route stopped at the edge of the span. That refusal is correct for a JUMP and
+    // wrong for a SCAFFOLD: a body that lays the floor of the cell it is about to
+    // occupy does not need a far bank to be pre-verified, because it never leaves
+    // the cell it just floored. The span is then 1 by construction, and the
+    // bounded continuation is the NEXT offer, re-grounded from the new stand cell -
+    // exactly how a player bridges one block at a time.
+    //
+    // WHAT BOUNDS IT (nothing here is an unbounded project):
+    //   * one held block per leg, and the leg is spent through the ordinary
+    //     zero-progress route identity, so a step that changes nothing is withheld;
+    //   * the SAME strict-reduction test as every verified span (rule 7): the
+    //     landing must close real distance to the leg target, so a scaffold can
+    //     never wander sideways or away;
+    //   * the SAME per-cell pocket rule the wall entry and the level scan use
+    //     (`wallEntry.ts#wallPocketRefusal`, via `scaffoldPocketRefusal`), with the
+    //     block this leg places as the pocket's floor: a column a fluid could pour
+    //     into, an unobserved column, a protected cell and a dimension-transfer
+    //     plane are all refused in the shared vocabulary, never in a second one.
+    const placeBlockName = typeof input.placeBlockName === 'string' && input.placeBlockName.length > 0
+      ? input.placeBlockName
+      : null
+    // The scaffold needs the pocket's OWN sensed facts: the sensor fills the
+    // face-adjacency flood read for the first column on every probe it builds
+    // (`state.ts#probeBridgeDirection`). A probe that does not carry it (a hand-built
+    // one) cannot ground a step whose whole safety fact is that read, so it keeps the
+    // historical `no_verified_landing` verdict below - fail closed, and no verdict of
+    // an existing caller changes.
+    if (placeBlockName !== null && first.flood !== undefined) {
+      const pocket = scaffoldPocketRefusal(
+        {
+          landing: first.cell,
+          pocket: [
+            { cell: first.cell, name: first.cellName, open: first.open, solid: !first.open, breakable: !first.open, observed: first.cellName !== null && first.cellName !== undefined },
+            {
+              cell: { x: first.cell.x, y: first.cell.y + 1, z: first.cell.z },
+              name: first.headName ?? null,
+              open: first.headOpen,
+              solid: !first.headOpen,
+              breakable: !first.headOpen,
+              observed: first.headName !== null && first.headName !== undefined,
+            },
+          ],
+          // The floor of the pocket is the block THIS leg places. It is read from
+          // the placement, not from the world, because the world's cell is air -
+          // that is the whole mechanic.
+          floor: { cell: first.floor, name: placeBlockName, open: false, solid: true, breakable: true, observed: true },
+          flood: first.flood === true,
+          floodCell: first.floodCell ?? null,
+          floodBlock: first.floodBlock ?? null,
+        },
+        isProtected,
+        `the ${input.probe.dir} self-landing scaffold`,
+      )
+      if (pocket !== null) {
+        return {
+          kind: 'refuse',
+          refusal: {
+            reason: bridgeRefusalReasonFor(pocket.reason),
+            cell: pocket.cell ?? first.cell,
+            target: input.target,
+            block: pocket.block,
+            detail: pocket.detail,
+          },
+        }
+      }
+      far = first.cell
     }
   }
   if (far === null) {
@@ -403,6 +587,8 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
       },
     }
   }
+  const selfLanding = far !== null && key(far) === key(landing)
+  const placedBlock = typeof input.placeBlockName === 'string' && input.placeBlockName.length > 0 ? input.placeBlockName : null
   return {
     kind: 'span',
     span: {
@@ -412,9 +598,11 @@ export function planBridgeSpan(input: BridgeSpanInput): BridgeSpanDecision {
       landing,
       place: first.floor,
       far,
-      span,
+      span: selfLanding ? 1 : span,
       from,
       to,
+      ...(selfLanding ? { selfLanding: true } : {}),
+      ...(selfLanding && placedBlock !== null ? { pocketEvidence: selfLandingPocketEvidence(first, placedBlock) } : {}),
     },
   }
 }
@@ -426,6 +614,75 @@ export interface BridgePlan extends BridgeSpan {
   remaining: number
   /** the `BRIDGE_START` line the offer carries */
   line: string
+}
+
+/**
+ * The shared per-cell verdict of a pocket the body will CREATE THE FLOOR OF.
+ *
+ * A self-landing scaffold does not mine its pocket - the 1x2 column is already
+ * open air - it puts a block into the cell below and stands on it. So the
+ * DIG-only questions ("is there anything to mine", "is the pre-existing floor
+ * real ground") do not apply, while every OCCUPATION question does, and they are
+ * answered by the SAME functions the wall entry and the level scan use
+ * (`wallEntry.ts#wallPocketOccupationRefusal` and `#wallPocketFloodRefusal`):
+ *
+ *   protected      - a protected station / a live structure's member;
+ *   unbreakable    - the column was not observed (unknown is never safe);
+ *   hazard         - an open pocket cell IS a fluid: the body would stand in it;
+ *   portal_plane   - standing there transfers the body to another dimension;
+ *   would_flood    - a fluid is FACE-ADJACENT to a pocket cell and would pour into
+ *                    the cell this step is about to make the body occupy.
+ *
+ * The order is the occupation order first (protection, observation, fluid,
+ * transfer) and the flood rule last, which is the same relative order the dig
+ * path uses. This is a composition of the one rule, never a second copy of it: no
+ * block name, distance or direction is decided here.
+ */
+export function scaffoldPocketRefusal(
+  facts: WallPocketFacts,
+  isProtected: (cell: Vec3Json, name: string | null) => boolean,
+  describe: string = 'the',
+): WallEntryRefusal | null {
+  return wallPocketOccupationRefusal(facts, isProtected, describe) ?? wallPocketFloodRefusal(facts, describe)
+}
+
+/**
+ * Map the shared per-cell verdict's reason into the bridge vocabulary. Every cause
+ * `scaffoldPocketRefusal` can return is named IDENTICALLY in both vocabularies
+ * (`protected` / `unbreakable` / `hazard` / `portal_plane` / `would_flood`), so the
+ * log never translates a shared verdict. Anything else can only be a dig-only cause
+ * the scaffold never reaches, and falls back to the bridge's own `hazard`: a
+ * refusal is never dropped, only named.
+ */
+function bridgeRefusalReasonFor(reason: WallEntryRefusalReason): BridgeRefusalReason {
+  switch (reason) {
+    case 'would_flood':
+    case 'portal_plane':
+    case 'unbreakable':
+    case 'hazard':
+    case 'protected':
+      return reason
+    default:
+      return 'hazard'
+  }
+}
+
+/**
+ * The self-landing step's evidence, in the same per-cell vocabulary the wall
+ * entry's own `evidence` string uses: the column the body will occupy, the block
+ * it places as that column's floor, and the flood verdict. One line, so
+ * "the body scaffolded into a dry pocket" is auditable without the world.
+ */
+function selfLandingPocketEvidence(cell: BridgeProbeCell, placeBlockName: string): string {
+  const head = `${cell.cell.x},${cell.cell.y + 1},${cell.cell.z}`
+  const flood =
+    cell.flood === true
+      ? `flood=${cell.floodBlock ?? 'fluid'}@${cell.floodCell === null || cell.floodCell === undefined ? 'unknown' : key(cell.floodCell)}`
+      : 'flood=none'
+  return (
+    `profile=${key(cell.cell)}:${cell.cellName ?? 'unknown'}+${head}:${cell.headName ?? 'unknown'}:open;` +
+    `floor=${key(cell.floor)}:${placeBlockName}:placed;${flood}`
+  )
 }
 
 export interface BridgeRouteInput {
@@ -476,6 +733,9 @@ export function planBridgeRoute(input: BridgeRouteInput): BridgeRouteDecision {
       probe,
       selfFeet: input.selfFeet,
       target: input.target,
+      // The placement identity: it is what lets the rule answer "this step CREATES
+      // ITS FLOOR" instead of "no verified landing" for a span with no far bank.
+      placeBlockName: input.placeable.name,
       ...(input.isProtected === undefined ? {} : { isProtected: input.isProtected }),
       ...(input.maxSpan === undefined ? {} : { maxSpan: input.maxSpan }),
     })
@@ -526,6 +786,8 @@ export function planBridgeRoute(input: BridgeRouteInput): BridgeRouteDecision {
     block: input.placeable.name,
     span: best.span,
     remaining: Math.max(0, input.placeable.count - best.span),
+    ...(best.selfLanding === true ? { selfLanding: true } : {}),
+    ...(best.selfLanding === true && best.pocketEvidence !== undefined ? { pocketEvidence: best.pocketEvidence } : {}),
   })
   return {
     plan: {
@@ -548,20 +810,32 @@ export function bridgeBearingDir(from: Vec3Json, to: Vec3Json): BridgeDir {
 }
 
 /**
- * `BRIDGE_START cell=<x,y,z> block=<item> span=<n> remaining=<n>`
+ * `BRIDGE_START cell=<x,y,z> block=<item> span=<n> remaining=<n>
+ *  [self_landing=true pocket=<evidence>]`
  *
  * Emitted when a bridge leg begins to execute. `cell` is the FIRST landing the
  * span reaches, `block` the item it consumes, `span` the verified number of
  * placements, and `remaining` the item count left in the inventory after them
  * (so a reviewer reads the supply bound, not just the intent).
+ *
+ * `self_landing=true` is appended only for the SCAFFOLD case, where the far side
+ * is the landing itself (this step lays the floor of the cell it occupies) and
+ * `pocket` carries the per-cell verdict evidence the shared rule was read on. A
+ * verified-span line is byte-identical to before, so the two are never confused.
  */
 export function formatBridgeStart(input: {
   cell: Vec3Json
   block: string
   span: number
   remaining: number
+  selfLanding?: boolean
+  pocketEvidence?: string
 }): string {
-  return `BRIDGE_START cell=${cellText(input.cell)} block=${input.block} span=${input.span} remaining=${input.remaining}`
+  const scaffold =
+    input.selfLanding === true
+      ? ` self_landing=true pocket=${input.pocketEvidence ?? 'none'}`
+      : ''
+  return `BRIDGE_START cell=${cellText(input.cell)} block=${input.block} span=${input.span} remaining=${input.remaining}${scaffold}`
 }
 
 /** `BRIDGE_STEP from=<x,y,z> to=<x,y,z> block=<item>` - one VERIFIED placement + advance. */
