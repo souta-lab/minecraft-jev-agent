@@ -94,3 +94,26 @@ jobs:
         run: bun run reachability-test
       - name: Recovery policy regressions
         run: bun run candidate-policy-test && bun run move-failmem-test && bun run pit-escape-test && bun run pillar-search-test && bun run hop-policy-test && bun run pillar-jump-test && bun run pillar-apex-test
+
+  jev-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: jev-harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Bun workspace
+        working-directory: .
+        run: bun install --frozen-lockfile
+      - name: Verify movement patch
+        working-directory: .
+        run: bun run movement-patch:check
+      - name: Harness typecheck
+        run: bun run typecheck
+      - name: Harness invariants I1-I12 and section 25 regressions
+        run: bun test --timeout=120000 --max-concurrency=1 ./bun-tests
+      - name: Jev import firewall (section 22 I1/I10)
+        working-directory: .
+        run: bun jev-harness/tools/firewall.ts

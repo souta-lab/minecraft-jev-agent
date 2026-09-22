@@ -61,6 +61,17 @@
         "typescript": "^5.7.2",
       },
     },
+    "jev-harness": {
+      "name": "jev-harness",
+      "version": "0.1.0",
+      "dependencies": {
+        "ai": "^7.0.105",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "^5.7.2",
+      },
+    },
     "mcbot": {
       "name": "mcbot",
       "version": "1.0.0",
@@ -331,6 +342,8 @@
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 
     "jev-agent": ["jev-agent@workspace:jev-agent"],
+
+    "jev-harness": ["jev-harness@workspace:jev-harness"],
 
     "jose": ["jose@6.2.12", "", {}, "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw=="],
 
