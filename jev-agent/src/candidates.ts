@@ -550,6 +550,147 @@ function occludedThreatBypass(
  * guard MUST call this adapter; otherwise the same state can expose goal work to
  * Jev and then erase it during revalidation.
  */
+// ---------------------------------------------------------------------------
+// #plan-reconciliation: the code-owned not-executable-here fact bound to the OFFER
+// ---------------------------------------------------------------------------
+//
+// Measured live (`run-muctsqt6-27ocr`, main 3002d84): the durable head was
+// `g14:descend:raw_iron` declaring `minecraft:overworld` with the success
+// predicate `levelAtMost y32`, while the body was in the NETHER at y37 and hp 10.
+// The queue layer had already PROVEN the row cannot run there
+// (`ROW_NOT_EXECUTABLE_HERE declared=overworld live=the_nether`), and the
+// escalation that replaces it was in flight - yet the offer still carried the
+// row's own descent, so the body kept DESCENDING toward y32 in the Nether, which
+// is where the lava is. The safe verdict and the physical actions disagreed, and
+// the disagreement pointed at the hazard.
+//
+// This binding keeps the OFFER honest while the proof holds: only control and
+// self-care kinds stay on offer, so the next decision cannot drive the body toward
+// a predicate it cannot reach here. It never reorders or retires a queue row, and
+// a code-owned safety envelope always outranks it (an escape route must never be
+// removed by this rule).
+
+/** The queue's proven "this head cannot execute in the live dimension" fact. */
+export interface NotExecutableHereBinding {
+  goalId: string
+  goalKey: string
+  declaredDimension: string | null
+  liveDimension: string | null
+  /** the queue's own reason (`no_executable_alternative`, `defer_budget_exhausted`) */
+  reason: string
+}
+
+/**
+ * Kinds that cannot advance a row's own predicate: control hand-off and self-care.
+ * Everything else (MINE/MOVE/CRAFT/PLACE/SMELT/CONTAINER/IGNITE/ENTER_PORTAL/
+ * DESCEND/STEP/RETRIEVE) is work toward the row and is withheld while the proof
+ * holds.
+ */
+export const NOT_EXECUTABLE_HERE_KEEP_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'WAIT',
+  'ESCALATE',
+  'RETREAT',
+  'EAT',
+  'ATTACK',
+  'EQUIP',
+])
+
+export function isNotExecutableHereKeepKind(kind: CandidateKind): boolean {
+  return NOT_EXECUTABLE_HERE_KEEP_KINDS.has(kind)
+}
+
+export type NotExecutableHereOfferReason =
+  | 'no_binding'
+  | 'safety_envelope_active'
+  | 'no_kept_candidates'
+  | 'bound'
+  | 'not_narrowing'
+
+export interface NotExecutableHereOfferRestriction {
+  candidates: Candidate[]
+  withheld: Candidate[]
+  bound: boolean
+  reason: NotExecutableHereOfferReason
+}
+
+/**
+ * Is a code-owned safety envelope narrowing the raw offer right now?
+ *
+ * Reuses the SAME restriction functions that shape the live offer, applied to the
+ * pre-safety-envelope list, so a new safety envelope automatically vetoes this
+ * binding instead of having to be added here. A body in lava/fire, out of air, in
+ * critical damage, at critical health with a hostile on it, or under a named
+ * attacker is in a safety envelope and keeps its full escape offer.
+ */
+export function safetyEnvelopeActive(state: WorldState, rawCandidates: readonly Candidate[]): boolean {
+  if (rawCandidates.length === 0) return false
+  const probes: Candidate[][] = [
+    restrictCandidatesAtCriticalHealth(state, rawCandidates),
+    restrictCandidatesDuringCriticalDamage(state, rawCandidates),
+    restrictCandidatesDuringSubmersion(state, rawCandidates),
+    restrictCandidatesDuringEnvHazard(state, rawCandidates),
+    restrictCandidatesDuringUnseenAttacker(state, rawCandidates),
+    applyGroundedThreatRestriction(state, rawCandidates, []).candidates,
+  ]
+  return probes.some((probe) => probe.length < rawCandidates.length)
+}
+
+/**
+ * Bind the queue's not-executable-here proof to the physical offer. Pure.
+ * `rawCandidates` is the offer BEFORE the safety-envelope restrictions, so the
+ * safety veto sees what the body would otherwise be allowed to do.
+ */
+export function restrictCandidatesNotExecutableHere(
+  state: WorldState,
+  candidates: readonly Candidate[],
+  binding: NotExecutableHereBinding | null,
+  rawCandidates: readonly Candidate[] = candidates,
+): NotExecutableHereOfferRestriction {
+  if (binding === null) {
+    return { candidates: [...candidates], withheld: [], bound: false, reason: 'no_binding' }
+  }
+  if (safetyEnvelopeActive(state, rawCandidates)) {
+    return { candidates: [...candidates], withheld: [], bound: false, reason: 'safety_envelope_active' }
+  }
+  const kept = candidates.filter((candidate) => isNotExecutableHereKeepKind(candidate.kind))
+  if (kept.length === 0) {
+    // Never hand an empty offer to the decision layer: with no control/self-care
+    // candidate the pre-existing starvation/escalation machinery owns the tick.
+    return { candidates: [...candidates], withheld: [], bound: false, reason: 'no_kept_candidates' }
+  }
+  const withheld = candidates.filter((candidate) => !isNotExecutableHereKeepKind(candidate.kind))
+  if (withheld.length === 0) {
+    return { candidates: kept, withheld: [], bound: false, reason: 'not_narrowing' }
+  }
+  return { candidates: kept, withheld, bound: true, reason: 'bound' }
+}
+
+export function formatNotExecutableHereBinding(
+  binding: NotExecutableHereBinding,
+  restriction: NotExecutableHereOfferRestriction,
+  goalQueueHead: string,
+): string {
+  return (
+    `ROW_NOT_EXECUTABLE_HERE_BINDING goalId=${binding.goalId} goal=${binding.goalKey}` +
+    ` declared=${binding.declaredDimension ?? 'none'} live=${binding.liveDimension ?? 'unknown'}` +
+    ` queueReason=${binding.reason} withheld=${restriction.withheld.length}` +
+    ` kept=[${restriction.candidates.map((candidate) => candidate.kind).join(',')}]` +
+    ` action=${restriction.reason} head=${goalQueueHead}`
+  )
+}
+
+export function formatNotExecutableHereInterrupt(
+  binding: NotExecutableHereBinding,
+  actionId: string,
+  actionKind: CandidateKind,
+): string {
+  return (
+    `ROW_NOT_EXECUTABLE_HERE_INTERRUPT actionId=${actionId} actionKind=${actionKind}` +
+    ` goalId=${binding.goalId} goal=${binding.goalKey}` +
+    ` declared=${binding.declaredDimension ?? 'none'} live=${binding.liveDimension ?? 'unknown'}`
+  )
+}
+
 export function applyGroundedThreatRestriction(
   state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
   candidates: readonly Candidate[],
