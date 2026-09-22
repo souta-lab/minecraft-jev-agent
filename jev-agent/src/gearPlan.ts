@@ -241,3 +241,122 @@ export function formatWeaponEquip(offer: WeaponEquipOffer): string {
 export function formatWeaponRefusal(heldItemName: string | null): string {
   return `EQUIP_WEAPON_REFUSED item=${heldItemName ?? 'none'} reason=no_better_weapon`
 }
+
+// ---------------------------------------------------------------------------
+// COMBAT_KIT_GAP: a goal-directed kill the body's kit cannot win.
+// ---------------------------------------------------------------------------
+//
+// M3's remaining items are both mob drops: `blaze_rod` from a blaze (Nether
+// fortress) and `ender_pearl` from an enderman. Measured live
+// (`run-muc3qbug-18vg3`, first 18 s in the Nether) the body arrived with NO
+// armour and NO sword - 3 iron ingots, a stone pickaxe and logs - and the
+// candidate layer offered `ATTACK:e900 hunt blaze 3m away for blaze_rod with
+// bare fists` with no typed statement that the fight is unwinnable and no
+// offer of the prerequisite that would make it winnable. The body therefore had
+// a "route" (walk at the mob and punch it) that any post-mortem would read as a
+// real capability.
+//
+// This module owns only the mechanical facts: what the hand swings with, how
+// much of it is protected, and what is missing. It never removes the ATTACK
+// (Jev owns whether to fight anyway) and never picks an objective; the
+// prerequisite CRAFT is enumerated by the candidate layer with the same
+// `planNextCraftStep` the other craft routes use.
+
+export const COMBAT_KIT_GAP = 'COMBAT_KIT_GAP'
+
+/** Sword families the craft route can aim for, best (highest vanilla damage) first. */
+export const CRAFTABLE_SWORDS: readonly string[] = [
+  'netherite_sword',
+  'diamond_sword',
+  'iron_sword',
+  'golden_sword',
+  'stone_sword',
+  'wooden_sword',
+]
+
+/** Vanilla damage of a swing with an empty hand (mirrors `threat.ts`). */
+const FIST_DAMAGE = 1
+
+export interface CombatKitFacts {
+  /** the item in the main hand right now, or null for an empty hand */
+  heldItem: string | null
+  /** armour currently WORN per slot (carried pieces do not count) */
+  worn: ArmorWorn
+  health: number
+  food: number
+}
+
+export interface CombatKitAssessment {
+  /** true when the body cannot win the required kill with what it has */
+  insufficient: boolean
+  /** the hand holds a real weapon (known damage above a fist) */
+  hasWeapon: boolean
+  /** at least one armour piece is worn */
+  hasArmor: boolean
+  /** how many of the four armour slots are filled */
+  wornArmorCount: number
+  /** vanilla damage of the current swing (fists = 1) */
+  swingDamage: number
+  /** typed shortfall, empty when the kit is sufficient */
+  missing: readonly ('sword' | 'armor')[]
+  /** natural regeneration is possible right now (food >= 18) */
+  regenerating: boolean
+}
+
+/**
+ * Assess the body's combat kit for a REQUIRED kill.
+ *
+ * A required kill is a different mechanical situation from "a hostile is on the
+ * body": the body must close, trade hits until the mob dies, and survive the
+ * return damage. The code-owned facts that make that winnable are a weapon that
+ * out-damages a fist and some worn protection. Both absent is the measured live
+ * arrival kit, and it is reported - never silently treated as a route.
+ */
+export function assessCombatKit(facts: CombatKitFacts): CombatKitAssessment {
+  const swingDamage = facts.heldItem === null ? FIST_DAMAGE : weaponDamage(facts.heldItem) ?? FIST_DAMAGE
+  const hasWeapon = swingDamage > FIST_DAMAGE
+  const wornArmorCount = ARMOR_SLOTS.filter((slot) => {
+    const piece = facts.worn[slot]
+    return piece !== null && piece !== undefined && typeof piece.name === 'string' && piece.name.length > 0
+  }).length
+  const hasArmor = wornArmorCount > 0
+  const missing: ('sword' | 'armor')[] = []
+  if (!hasWeapon) missing.push('sword')
+  if (!hasArmor) missing.push('armor')
+  return {
+    insufficient: missing.length > 0,
+    hasWeapon,
+    hasArmor,
+    wornArmorCount,
+    swingDamage,
+    missing,
+    regenerating: Number.isFinite(facts.food) && facts.food >= 18,
+  }
+}
+
+/**
+ * `COMBAT_KIT_GAP focus=blaze_rod target=blaze ... missing=["sword","armor"]` -
+ * the typed, bounded prerequisite fact. A gap with no grounded prerequisite is
+ * still stated: silence is what let the body walk into a fight it could not win.
+ */
+export function formatCombatKitGap(input: {
+  focus: string
+  target: string
+  distance: number | null
+  assessment: CombatKitAssessment
+  heldItem: string | null
+  /** the craft step offered as the prerequisite, or null when none is craftable */
+  prerequisite: string | null
+}): string {
+  const { assessment } = input
+  // Whole metres: the marker is deduped on its whole line, so a sub-metre
+  // distance wobble must not produce a line per tick.
+  const distance = input.distance === null ? 'unknown' : `${Math.round(input.distance)}m`
+  return (
+    `${COMBAT_KIT_GAP} focus=${input.focus} target=${input.target} distance=${distance} ` +
+    `held=${input.heldItem ?? 'none'} swingDamage=${assessment.swingDamage} armor=${assessment.wornArmorCount}/4 ` +
+    `missing=[${assessment.missing.join(',')}] regenerating=${assessment.regenerating} ` +
+    `prerequisite=${input.prerequisite ?? 'none'} -> the required kill is not winnable with this kit; ` +
+    `the attack stays offered for Jev, the prerequisite route is grounded CAN`
+  )
+}

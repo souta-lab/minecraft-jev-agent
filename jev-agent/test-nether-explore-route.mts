@@ -233,12 +233,20 @@ function offered(state: WorldState, gate = options()): Candidate[] {
   return [...grounded.candidates, ...grounded.withheld.map((entry) => entry.candidate)]
 }
 
-/** A MOVE that is a real exploration frontier, never a clearance dig or the body cell. */
+/**
+ * A MOVE that is a real exploration frontier, never a clearance dig, the body
+ * cell, or a STRUCTURE APPROACH. A sensed fortress body now grounds its own
+ * `MOVE:b<cell>` (`meta.structureApproach === true`, `resourceKind: structure`):
+ * that is a route to the structure the goal's producer lives in - the same trip
+ * the remembered-site `RETRIEVE:known:*` makes - not the generic exploration arm,
+ * so it must not be counted as one here.
+ */
 function explorationMoves(candidates: readonly Candidate[], self: Vec3Json): Candidate[] {
   return candidates.filter(
     (candidate) =>
       candidate.kind === 'MOVE' &&
       candidate.meta.clearance !== true &&
+      candidate.meta.structureApproach !== true &&
       candidate.target !== null &&
       (candidate.target.x !== Math.floor(self.x) ||
         candidate.target.y !== Math.floor(self.y) ||

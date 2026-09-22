@@ -732,6 +732,19 @@ export interface SensorOptions {
   maxTerrain: number
   hazardRadius: number
   entityRadius: number
+  /**
+   * Radius (blocks) that HOSTILE entities stay visible in even when they are
+   * beyond `entityRadius`. `entityRadius` bounds the general entity budget (food
+   * animals, item entities, other players); it must not also bound the safety
+   * layer, because the Nether's ranged attacker outranges it: a ghast opens fire
+   * from up to 64 m, so a body with a 24 m entity radius is shelled by an
+   * invisible mob. Measured live (`run-muc3qbug-18vg3`, the 18 s Nether death
+   * window) the ghast that took the body from 9.5 HP to 7.5 HP never appeared in
+   * a single sensor line: `mob_appeared` only ever listed a skeleton at 94 m and
+   * magma cubes at 95-100 m. Widening HOSTILE perception is truth, not policy:
+   * it grounds no action by itself.
+   */
+  hostileRadius: number
   maxStoneBlocks: number
   maxPlacementSpots: number
   /**
@@ -768,6 +781,7 @@ export const defaultSensorOptions: SensorOptions = {
   maxTerrain: 8,
   hazardRadius: 6,
   entityRadius: 24,
+  hostileRadius: 48,
   maxStoneBlocks: 16,
   maxPlacementSpots: 6,
   escapeRadius: 6,
@@ -1159,12 +1173,17 @@ function buildEntities(
   const out: EntityState[] = []
   const selfId = bot.entity.id
   const attackerId = lastDamage?.sourceId ?? null
+  const hostileRadius = Math.max(options.entityRadius, options.hostileRadius ?? options.entityRadius)
   for (const entity of Object.values(bot.entities)) {
     if (entity.id === selfId) continue
     if (entity.isValid === false) continue
     const distanceToBot = entity.position.distanceTo(bot.entity.position)
-    if (distanceToBot > options.entityRadius) continue
     const name = entity.username ?? entity.name ?? entity.kind ?? 'unknown'
+    // A hostile stays visible out to `hostileRadius` even when it is beyond the
+    // general entity radius (see `hostileRadius`): the safety layer must be able
+    // to name what is shooting the body.
+    const hostile = isHostile(name, entity.kind)
+    if (distanceToBot > (hostile ? hostileRadius : options.entityRadius)) continue
     out.push({
       id: entity.id,
       name,
@@ -1172,7 +1191,7 @@ function buildEntities(
       username: entity.username ?? null,
       position: vecJson(entity.position),
       distance: round2(distanceToBot),
-      hostile: isHostile(name, entity.kind),
+      hostile,
       lineOfSight: canSeeEntity(bot, entity),
       heldItem: heldItemName(entity),
       health: typeof entity.health === 'number' && Number.isFinite(entity.health) ? entity.health : null,
@@ -1180,7 +1199,10 @@ function buildEntities(
     })
   }
   out.sort((a, b) => a.distance - b.distance)
-  return out.slice(0, options.maxEntities)
+  // Hostiles inside the widened envelope are never crowded out by passive
+  // entities: a full animal budget must not hide the mob that is shooting.
+  const hostiles = out.filter((entity) => entity.hostile).length
+  return out.slice(0, Math.max(options.maxEntities, hostiles))
 }
 
 /**

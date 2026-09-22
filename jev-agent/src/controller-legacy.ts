@@ -25,9 +25,10 @@ import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
-import { bodySurvivalFacts, formatThreatClear, formatThreatNearby, formatThreatNoEscape, MELEE_THREAT_REACH, ThreatTracker, weaponFacts } from './threat.ts'
-import { formatArmorRefusal } from './gearPlan.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { ARMOR_SLOTS } from './gearPlan.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
@@ -1108,6 +1109,25 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'BODY_STARVING',
   'CRITICAL_DAMAGE',
   'CRITICAL_DAMAGE_EXHAUSTED',
+  // Mob-fight state is run-scoped survival evidence, exactly like the hunger and
+  // critical-damage vocabulary above. Measured live (run-muc3qbug-18vg3): the
+  // body died in the Nether 18 s after arriving, and `THREAT_NEARBY` - which
+  // names the mob, its distance, contact/danger, the code-owned weapon and
+  // whether the body can regenerate - had been written 8 times to the
+  // generation event stream but NEVER to buddy.log (0 occurrences in 71 MB),
+  // because none of the threat tokens rode the mirrored event path. A
+  // post-mortem of the death window therefore could not see that a spider was
+  // inside melee contact. Keep the whole threat vocabulary, plus the
+  // survival-regrounding pair, on the mirrored path.
+  THREAT_NEARBY,
+  THREAT_NO_ESCAPE,
+  THREAT_CLEAR,
+  SURVIVAL_REGROUND,
+  SURVIVAL_NO_GROUNDED_ACTION,
+  GUARD_REJECTIONS,
+  'COMBAT_KIT_GAP',
+  THREAT_RANGED_UNANSWERED,
+  DEATH_CAUSE,
   'FOOD_LOW',
   'EAT_REFUSED',
   'FOOD_ROUTE',
@@ -1488,6 +1508,16 @@ export class JevController {
   private tickCounter = 0
   private jevCalls = 0
   private guardRejections = 0
+  /**
+   * Chosen SURVIVAL actions re-grounded from the fresh offer after their
+   * volatile id changed between the Jev answer and execution (see
+   * `regroundVanishedSurvivalChoice`). Counted separately from
+   * `guardRejections` so the mirrored roll-up tells a repaired identity apart
+   * from a dropped decision.
+   */
+  private survivalRegrounds = 0
+  /** Doubling milestone of `guardRejections + survivalRegrounds` last mirrored. */
+  private lastGuardRollupAt = 0
   private conflictDeferrals = 0
   private escalations: EscalationReason[] = []
   private triggerCounts: Record<string, number> = {}
@@ -1682,6 +1712,10 @@ export class JevController {
   private lastSourceGapKey: string | null = null
   /** Dedupe key for the last mirrored `FOOD_SOURCE_NONE` line. */
   private lastFoodSourceGapKey: string | null = null
+  /** Signature of the last `COMBAT_KIT_GAP` line, so the gap logs on a change. */
+  private lastCombatKitGapLine: string | null = null
+  /** Signature of the last `THREAT_RANGED_UNANSWERED` line (dedup, not a state). */
+  private lastRangedThreatLine: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -2183,7 +2217,59 @@ export class JevController {
     this.finish('disconnected', false)
   }
 
+  /**
+   * The generation half of the death telemetry.
+   *
+   * The host `DEATH` line owns position/dimension/inventory and the block-probe
+   * cause; the ATTRIBUTED attacker, the code-owned danger state and the kit the
+   * body died with are owned here and would otherwise be lost when this
+   * generation is disposed. Measured live (`run-muc3qbug-18vg3`): the body died
+   * in the Nether with `cause=damage` and no buddy.log line ever named the
+   * spider that had been inside melee contact, or the ghast that had been
+   * shelling it from outside perception.
+   */
   private readonly onBotDeath = (): void => {
+    const state = this.lastWorldState
+    if (state !== null) {
+      const lastDamage = state.signals.lastDamage ?? null
+      const threat = state.signals.threat ?? null
+      const at = state.self.position
+      const line = formatDeathCause({
+        dimension: state.self.dimension,
+        position: at,
+        health: state.self.health,
+        food: state.self.food,
+        hostCause: null,
+        lastDamage,
+        threat,
+        hostiles: state.entities.map((entity) => ({
+          name: entity.name,
+          distance: entity.distance,
+          hostile: entity.hostile,
+        })),
+        weapon: weaponFacts(state.self.heldItem?.name ?? null),
+        wornArmorCount: ARMOR_SLOTS.filter((slot) => {
+          const piece = state.self.armor?.[slot]
+          return piece !== null && piece !== undefined
+        }).length,
+        damageAgeMs: lastDamage === null ? null : Math.max(0, Math.round(state.timestampMs - lastDamage.atMs)),
+      })
+      this.logger.warn(
+        'agent',
+        line,
+        {
+          dimension: state.self.dimension,
+          killer: lastDamage?.sourceName ?? null,
+          killerId: lastDamage?.sourceId ?? null,
+          threat: threat?.threatName ?? null,
+          threatDistance: threat?.threatDistance ?? null,
+          contact: threat?.inContact ?? false,
+          health: state.self.health,
+          food: state.self.food,
+        },
+        this.tickCounter,
+      )
+    }
     this.escalate('unexpected_world_state', 'bot died')
   }
 
@@ -2410,6 +2496,7 @@ export class JevController {
       // payload read. Runs before candidate generation so the escape-cell scan,
       // the retreat grounding and the restriction all see the same state.
       this.observeThreatState(state)
+      this.observeUnansweredRangedThreat(state)
 
       const unreachableStations = this.unreachableStationKeys(state)
       const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
@@ -2438,6 +2525,7 @@ export class JevController {
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
+      this.logCombatKitGap(grounded.combatKitGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.noteColumnDig(grounded.candidates)
       this.noteFoodHabitat(grounded.foodHabitatRefusal)
@@ -2725,7 +2813,9 @@ export class JevController {
       const heldId = this.applyActionCommitment(committedId, candidates, state)
       const dangerGate = gateDanger(decision.answers.danger)
       const gated = this.applyDangerGate(heldId, dangerGate, candidates)
-      const chosenId = gated.chosenId
+      // Re-groundable: a vanished survival action is replaced below by the SAME
+      // action kind from the fresh offer (see the guard at the revalidation).
+      let chosenId = gated.chosenId
       this.noteWaitStreak(chosenId, actionable)
       this.checkWedge(chosenId)
       if (this.wedgeAborted) return
@@ -2801,14 +2891,68 @@ export class JevController {
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
       if (!freshIds.has(chosenId)) {
-        this.guardRejections += 1
-        this.logger.warn(
-          'guard',
-          `chosen candidate ${chosenId} vanished between the Jev answer and execution`,
-          { chosenId },
-          this.tickCounter,
-        )
-        return
+        // SAFE: a chosen SURVIVAL action whose id is anchored to volatile sensed
+        // truth (an escape cell recomputed around a knocked-back body, a sensed
+        // entity that left the sensor) is re-grounded to the SAME action kind
+        // from the fresh offer. Measured live (run-muc3qbug-18vg3, first 18 s in
+        // the Nether): every retreat Jev chose was dropped here, so the tick
+        // returned with NO action while a spider was in melee contact and health
+        // went 18 -> 7.5 (630 drops in the run). Rejecting is the correct answer
+        // only when nothing grounded survives; it is never correct to leave the
+        // body standing in a fight.
+        const vanishedChoice = candidates.find((candidate) => candidate.id === chosenId) ?? null
+        const reground = regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates)
+        const threatEvidence = state.signals.threat ?? null
+        const body = bodySurvivalFacts(state.self)
+        if (reground.candidateId !== null) {
+          this.survivalRegrounds += 1
+          chosenId = reground.candidateId
+          freshIds.add(chosenId)
+          this.logger.warn(
+            'guard',
+            formatSurvivalReground(vanishedChoice?.id ?? chosenId, reground, freshCandidates.length, threatEvidence, body),
+            {
+              from: vanishedChoice?.id ?? null,
+              to: chosenId,
+              kind: reground.kind,
+              reason: reground.reason,
+              freshOffer: freshCandidates.length,
+              threat: threatEvidence?.threatName ?? null,
+              distance: threatEvidence?.threatDistance ?? null,
+              contact: threatEvidence?.inContact ?? false,
+              health: body.health,
+            },
+            this.tickCounter,
+          )
+        } else {
+          this.guardRejections += 1
+          if (reground.kind !== null) {
+            this.logger.warn(
+              'guard',
+              formatSurvivalNoGroundedAction(vanishedChoice?.id ?? chosenId, reground, freshCandidates.length, threatEvidence, body),
+              {
+                chosenId,
+                kind: reground.kind,
+                reason: reground.reason,
+                freshOffer: freshCandidates.length,
+                threat: threatEvidence?.threatName ?? null,
+                distance: threatEvidence?.threatDistance ?? null,
+                contact: threatEvidence?.inContact ?? false,
+                health: body.health,
+              },
+              this.tickCounter,
+            )
+          } else {
+            this.logger.warn(
+              'guard',
+              `chosen candidate ${chosenId} vanished between the Jev answer and execution`,
+              { chosenId, freshOffer: freshCandidates.length, reground: reground.reason },
+              this.tickCounter,
+            )
+          }
+        }
+        this.logGuardRejections()
+        if (reground.candidateId === null) return
       }
       const guarded = guardDecision(chosenId, freshCandidates, freshState, {
         phase: 'decision',
@@ -6054,6 +6198,83 @@ export class JevController {
   }
 
   /**
+   * Bounded roll-up of the revalidation-guard counters.
+   *
+   * Measured live (`run-muc3qbug-18vg3`): 630 `chosen candidate ... vanished
+   * between the Jev answer and execution` drops, five of them inside the 18 s
+   * Nether death window, and the run log carried no aggregate anywhere - so a
+   * post-mortem reading buddy.log could not see that the body had spent the
+   * whole death window dropping every survival choice it made. Emitted on
+   * doubling milestones so the total is visible without one line per drop.
+   */
+  private logGuardRejections(): void {
+    const total = this.guardRejections + this.survivalRegrounds
+    if (total < 1 || total < this.lastGuardRollupAt * 2) return
+    this.lastGuardRollupAt = total
+    this.logger.warn(
+      'guard',
+      `${GUARD_REJECTIONS} total=${total} dropped=${this.guardRejections} regrounded=${this.survivalRegrounds} ` +
+        `-> chosen candidates revalidated against the fresh offer (dropped = tick ended without that action)`,
+      { total, dropped: this.guardRejections, regrounded: this.survivalRegrounds },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * SAFE: name the attacker the local layer cannot answer.
+   *
+   * Measured live (`run-muc3qbug-18vg3`, the 18 s Nether death window): a ghast
+   * (`attackerId=49201 attackerName=ghast`) took the body 9.5 HP -> 7.5 HP while
+   * never appearing in the sensor at all (`entityRadius` was 24 m; a ghast fires
+   * from 64 m), so no `THREAT_NEARBY` line named it and the run said nothing
+   * about the shelling. This is the typed GAP for that situation: the attacker
+   * is reported from real damage attribution and from the widened hostile
+   * envelope, and NO action is invented for a mob whose position the body cannot
+   * ground a response from.
+   */
+  private observeUnansweredRangedThreat(state: WorldState): void {
+    const unanswered = unansweredRangedThreats(state.entities)
+    const threat = unanswered[0] ?? null
+    const sourceName = state.signals.lastDamage?.sourceName ?? null
+    // The unsensed case: the recorded attacker is a hostile the sensor cannot
+    // place at all. Only a damage attribution may name it (never a guess).
+    const unsensed =
+      threat === null &&
+      sourceName !== null &&
+      state.signals.lastDamage !== null &&
+      state.signals.lastDamage !== undefined &&
+      state.timestampMs - (state.signals.lastDamage.atMs ?? 0) <= THREAT_MEMORY_MS &&
+      !state.entities.some((entity) => entity.id === (state.signals.lastDamage?.sourceId ?? -1))
+    if (threat === null && !unsensed) {
+      this.lastRangedThreatLine = null
+      return
+    }
+    const line = formatThreatRangedUnanswered({
+      goalKey: this.currentGoalKey(),
+      threat,
+      sourceName: unsensed ? sourceName : null,
+      body: bodySurvivalFacts(state.self),
+      weapon: weaponFacts(state.self.heldItem?.name ?? null),
+    })
+    if (line === this.lastRangedThreatLine) return
+    this.lastRangedThreatLine = line
+    this.logger.warn(
+      'agent',
+      line,
+      {
+        threat: threat?.name ?? sourceName,
+        distance: threat?.distance ?? null,
+        sensed: threat !== null,
+        standoff: threat?.standoff ?? null,
+        health: state.self.health,
+        weapon: state.self.heldItem?.name ?? 'fists',
+        source: sourceName,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
    * Mirror the code-owned threat capability gap: the body is under threat and
    * the deterministic layer could ground neither an attack nor a keep-distance
    * route, so only a bounded ESCALATE is offered. This is the honest replacement
@@ -7698,6 +7919,51 @@ export class JevController {
    * an escalating one (`starving=true`) is visible as the body reaches the
    * code-owned starvation floor. It never selects an action.
    */
+  /**
+   * Mirror the combat-kit prerequisite gap once per distinct line.
+   *
+   * M3's remaining items are mob drops, and the measured Nether arrival body
+   * had no armour and no sword: the tick offered `hunt blaze ... with bare
+   * fists` and nothing said the fight was unwinnable. This marker names the
+   * target, the swing damage, the worn-armour count, what is missing, and
+   * whichever grounded prerequisite route (sword craft / armour equip) the tick
+   * actually offers - so a post-mortem can tell "walked into a fight it could
+   * not win" apart from "had a route and lost".
+   */
+  private logCombatKitGap(gap: CombatKitGapEvidence | null): void {
+    const line =
+      gap === null
+        ? null
+        : formatCombatKitGap({
+            focus: gap.focus,
+            target: gap.target,
+            distance: gap.distance,
+            assessment: gap.assessment,
+            heldItem: gap.heldItem,
+            prerequisite: gap.prerequisite,
+          })
+    if (line === this.lastCombatKitGapLine) return
+    this.lastCombatKitGapLine = line
+    if (line === null || gap === null) return
+    this.logger.warn(
+      'agent',
+      line,
+      {
+        focus: gap.focus,
+        target: gap.target,
+        distance: gap.distance,
+        held: gap.heldItem,
+        swingDamage: gap.assessment.swingDamage,
+        armor: gap.assessment.wornArmorCount,
+        missing: gap.assessment.missing.join(','),
+        regenerating: gap.assessment.regenerating,
+        prerequisite: gap.prerequisite,
+        goal: this.currentGoalKey(),
+      },
+      this.tickCounter,
+    )
+  }
+
   private logFoodSourceGap(gap: FoodSourceGap | null): void {
     const key = gap === null ? null : formatFoodSourceGap(gap)
     if (key === this.lastFoodSourceGapKey) return

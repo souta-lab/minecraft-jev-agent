@@ -56,8 +56,8 @@ import {
   serializePortalCells,
 } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameValidation } from './netherPortalPlan.ts'
-import { armorEquipOffers, armorEquipRefusals } from './gearPlan.ts'
-import type { ArmorRefusal } from './gearPlan.ts'
+import { armorEquipOffers, armorEquipRefusals, assessCombatKit, CRAFTABLE_SWORDS, weaponDamage as gearWeaponDamage } from './gearPlan.ts'
+import type { ArmorRefusal, CombatKitAssessment } from './gearPlan.ts'
 import {
   activeThreats,
   bodySurvivalFacts,
@@ -631,6 +631,13 @@ export interface GroundedCandidatesResult {
    * is said", never a silent WAIT.
    */
   exploreRouteBlocked: ExploreRouteBlocked | null
+  /**
+   * Typed `COMBAT_KIT_GAP` fact when the active collect goal needs a kill the
+   * body's kit cannot win: the missing capability is named and the grounded
+   * prerequisite route (if any) is carried. Null when no producer is sensed or
+   * the kit is sufficient.
+   */
+  combatKitGap: CombatKitGapEvidence | null
   /**
    * Typed `COLUMN_DESCENT_REFUSED reason=no_safe_step|no_tool|exhausted` when the
    * body is stranded on its own support column and no bounded, damage-free
@@ -1455,9 +1462,13 @@ function moveLabel(target: Vec3Json, role: string, botPosition: Vec3Json): strin
   return `${role} (${target.x},${target.y},${target.z}), ${distance(target, botPosition)}m away`
 }
 
-function moveToBlockLabel(block: BlockState, spot: Vec3Json): string {
+function moveToBlockLabel(block: BlockState, spot: Vec3Json, routeOnly = false): string {
   const where = `(${block.position.x},${block.position.y},${block.position.z})`
-  const tool = block.harvestTool === null ? 'hand-harvestable' : `needs a ${block.harvestTool}`
+  const tool = routeOnly
+    ? 'route to the structure, nothing is mined'
+    : block.harvestTool === null
+      ? 'hand-harvestable'
+      : `needs a ${block.harvestTool}`
   const reach = block.inReach ? 'not pickup-adjacent yet' : 'out of reach'
   return `walk to ${block.name} at ${where}, ${block.distance}m away (${reach}), stand at (${spot.x},${spot.y},${spot.z}), ${tool}`
 }
@@ -1510,7 +1521,11 @@ export function generateGroundedCandidates(
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
-  return { ...grounded, foodGap: foodSourceGap(state, options, grounded.candidates) }
+  return {
+    ...grounded,
+    foodGap: foodSourceGap(state, options, grounded.candidates),
+    combatKitGap: combatKitGap(state, grounded.candidates),
+  }
 }
 
 /**
@@ -1722,6 +1737,112 @@ function foodCookCandidates(state: WorldState, options: CandidateOptions): Candi
     if (out.length >= FOOD_COOK_CAP) break
   }
   return out
+}
+
+/** Bounded: one prerequisite step per tick, so the offer cannot be crowded. */
+const COMBAT_KIT_CANDIDATE_CAP = 1
+
+/**
+ * The grounded PREREQUISITE for a required kill the body's kit cannot win.
+ *
+ * M3's two remaining items are both mob drops (`blaze_rod` <- blaze,
+ * `ender_pearl` <- enderman). A required kill is not the same mechanical
+ * situation as "a hostile is on the body": the body must close and trade hits
+ * until the mob dies. Measured live (`run-muc3qbug-18vg3`, arrival in the
+ * Nether) the body had no armour and no sword, so the offered "route" was
+ * `hunt blaze ... with bare fists` - a route any post-mortem would read as a
+ * capability. This enumerates the grounded step that would make the kill
+ * winnable instead: the best sword the LIVE inventory can produce right now,
+ * through the same `planNextCraftStep`/`craftPlanStepCandidate` pair every other
+ * craft route uses, so a candidate can never be a craft the executor refuses.
+ *
+ * CAN only: the ATTACK stays on offer and Jev owns whether to fight or arm
+ * first. The typed `COMBAT_KIT_GAP` fact is computed from the OFFERED set
+ * (`combatKitGap`), so it can never claim a missing prerequisite while this
+ * route is on offer.
+ */
+function combatKitPrerequisiteCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  target: string,
+): Candidate[] {
+  const recipes = options.recipes ?? null
+  if (recipes === null) return []
+  const counts = state.inventory.counts
+  const out: Candidate[] = []
+  for (const sword of CRAFTABLE_SWORDS) {
+    if (gearWeaponDamage(sword) === null) continue
+    const plan = planNextCraftStep(
+      recipes,
+      sword,
+      counts,
+      sensedCraftingTableAvailable(state, options, sword),
+      1,
+    )
+    if (plan.op === null) continue
+    const step = craftPlanStepCandidate(state, options, plan.op, `combat:${sword}`)
+    if (step.candidate === null) continue
+    out.push({
+      ...step.candidate,
+      meta: { ...step.candidate.meta, combatKit: 'sword', combatWeapon: sword, combatTarget: target },
+    })
+    if (out.length >= COMBAT_KIT_CANDIDATE_CAP) break
+  }
+  return out
+}
+
+/** The typed `COMBAT_KIT_GAP` evidence for one required kill, or null. */
+export interface CombatKitGapEvidence {
+  focus: string
+  target: string
+  distance: number | null
+  assessment: CombatKitAssessment
+  heldItem: string | null
+  /** the grounded sword/armour route on offer, or null when none is */
+  prerequisite: string | null
+}
+
+/**
+ * The typed fact that the active collect goal needs a kill the body's kit cannot
+ * win, plus whichever prerequisite route the tick actually offers.
+ *
+ * Computed from the OFFERED set (like `foodSourceGap`), never from the raw one:
+ * a gap is only reported when the route that would close it is genuinely absent.
+ * Null when the focus item has no mob producer, no producer is sensed, or the
+ * kit is sufficient.
+ */
+export function combatKitGap(
+  state: WorldState,
+  offered: readonly Candidate[],
+): CombatKitGapEvidence | null {
+  const current = state.goalQueue?.current ?? null
+  const goalKind = current?.kind ?? 'collect'
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem === null || goalKind !== 'collect') return null
+  const producers = MOB_DROP_PRODUCERS[focusItem]
+  if (producers === undefined) return null
+  const target = state.entities.find((entity) => producers.has(entity.name)) ?? null
+  if (target === null) return null
+  const heldItem = state.self.heldItem?.name ?? null
+  const assessment = assessCombatKit({
+    heldItem,
+    worn: state.self.armor ?? {},
+    health: state.self.health,
+    food: state.self.food,
+  })
+  if (!assessment.insufficient) return null
+  const prerequisite =
+    offered.find((candidate) => candidate.meta.combatKit === 'sword')?.id ??
+    offered.find((candidate) => candidate.kind === 'EQUIP' && typeof candidate.meta.slot === 'string')?.id ??
+    null
+  return {
+    focus: focusItem,
+    target: target.name,
+    distance: target.distance,
+    assessment,
+    heldItem,
+    prerequisite,
+  }
 }
 
 /**
@@ -1963,8 +2084,31 @@ function generateRawCandidates(
         // animal it targets. The marker reader/log must not infer it from the
         // entity name alone (a hostile and a food animal can share no name).
         ...(isFoodTarget ? { foodAnimal: true, foodRoute: 'animal', foodTarget: entity.name } : {}),
+        // Real capability facts of the FIGHT: a hostile returns damage from its
+        // own reach (a blaze and a ghast hit from 12 m, a skeleton from ~16 m),
+        // so the distance a mob can answer from is part of whether this ATTACK
+        // is survivable, not just what the body swings with.
+        ...(entity.hostile ? { targetHostile: true, targetStandoff: threatStandoffRange(entity.name) } : {}),
       },
     })
+  }
+
+  // The grounded PREREQUISITE for a required kill the kit cannot win (M3: blaze
+  // rod / ender pearl are mob drops). Offered alongside the ATTACK so Jev can
+  // choose to arm first instead of trading bare-handed; the typed
+  // `COMBAT_KIT_GAP` fact is derived from the OFFERED set by `combatKitGap`.
+  if (goalDropTargets.length > 0) {
+    const kit = assessCombatKit({
+      heldItem: state.self.heldItem?.name ?? null,
+      worn: state.self.armor ?? {},
+      health: state.self.health,
+      food: state.self.food,
+    })
+    if (kit.insufficient) {
+      candidates.push(
+        ...combatKitPrerequisiteCandidates(state, options, goalDropTargets[0]?.name ?? focusItem ?? 'unknown'),
+      )
+    }
   }
 
   const foodName = heldFood
@@ -2542,6 +2686,25 @@ function mineCandidates(
   // that hosts blazes, never a source that yields `blaze_rod`.
   const want = focusItem === null ? null : retrievalWant(focusItem)
   const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+  // M3 structure route: when the focus item's only declared source is structure
+  // FABRIC (`blaze_rod` -> the Nether-fortress body), a SENSED fabric block
+  // grounds an APPROACH - a MOVE to a standable cell beside the fortress - and
+  // never a MINE. The durable-site `RETRIEVE:known:*` arm only exists after the
+  // host has minted a structure site; measured live on arrival in the Nether
+  // (run-muc3qbug-18vg3) the body held 65 remembered sites, but a body whose
+  // first sighting has not been recorded yet was offered nothing but
+  // `MOVE ... unexplored terrain` + WAIT (probe: `blaze_rod` focus + sensed
+  // `nether_bricks` at 8 m => explore only). The fabric is a landmark that hosts
+  // the mob, never a block that yields the item (`resourceMatches` stays exact),
+  // so this pool is built from the sensed blocks directly - it is deliberately
+  // NOT part of `mineable`, which excludes live-structure members to protect
+  // them - and the MINE branch is skipped for these cells.
+  const structureFabricNames =
+    want !== null && want.kind === 'structure' ? new Set(want.blockNames) : null
+  const structureApproach =
+    structureFabricNames === null
+      ? []
+      : state.blocks.filter((block) => structureFabricNames.has(block.name))
   // Tagging only: the food cells are offered by their own bounded call
   // (`foodForageCandidates`), never by crowding the focus pool's mechanical cap.
   const foodCells = foodRouteCells(state, options)
@@ -2553,7 +2716,9 @@ function mineCandidates(
   )
   const fallback =
     focusItem === null && matching.length === 0 ? mineable.filter((block) => block.kind === 'log') : matching
-  const pool = fallback
+  const pool = [...fallback, ...structureApproach]
+  const isStructureFabricCell = (block: BlockState): boolean =>
+    structureFabricNames !== null && structureFabricNames.has(block.name)
   const mineActions: Candidate[] = []
   const moveActions: Candidate[] = []
   const accessActions: Candidate[] = []
@@ -2566,7 +2731,10 @@ function mineCandidates(
 
   for (const block of pool) {
     if (mineActions.length + moveActions.length + accessActions.length >= options.maxMineCandidates) break
-    if (!block.diggable) continue
+    const fabricCell = isStructureFabricCell(block)
+    // A fortress body block is a ROUTE landmark, not a source: it needs neither a
+    // diggable cell nor the harvest tool, because nothing is ever mined from it.
+    if (!fabricCell && !block.diggable) continue
     // Owner vertical-safety rule: never offer the block the bot is standing on as
     // a MINE. The sensor records the air-exposed support block at feet.y - 1
     // (buildStoneBlocks), and because it is pickup-adjacent the stock MINE branch
@@ -2577,9 +2745,15 @@ function mineCandidates(
     if (digsBotSupport(state.self.position, block.position) !== null) continue
     const harvestTool = block.harvestTool ?? null
     const tier = block.harvestTier ?? null
-    if (!hasTool(state, harvestTool, tier)) continue
+    if (!fabricCell && !hasTool(state, harvestTool, tier)) continue
 
-    const requiresTool = harvestTool !== null
+    // A structure-approach cell is never harvested here, so the MOVE must not
+    // inherit the fabric's harvest-tool requirement: a fortress is a place to
+    // walk to with or without a pickaxe, and gating the approach on
+    // `tool:pickaxe@<nether_bricks tier>` withheld the only route to it.
+    const requiresTool = !fabricCell && harvestTool !== null
+    const approachTool = fabricCell ? null : harvestTool
+    const approachTier = fabricCell ? null : tier
     const foodCell = foodCells.get(blockCellKey(block.position))
     const baseMeta = {
       tick: state.tick,
@@ -2588,6 +2762,10 @@ function mineCandidates(
       z: block.position.z,
       diggable: block.diggable,
       yieldItem: block.yield ?? block.name,
+      // Typed CAN fact for a structure-route MOVE: this cell is fortress fabric,
+      // so the candidate is an APPROACH to the structure hosting the wanted mob
+      // and carries no yield claim for the focus item.
+      ...(fabricCell ? { resourceKind: 'structure', structureApproach: true } : {}),
       ...(block.kind === 'log' ? { [LOG_ROUTE_META]: 'mine_sensed' } : {}),
       // Typed CAN fact: this cell is a grounded route to food and which item it
       // yields. The survival restriction and the FOOD_ROUTE marker read this
@@ -2606,7 +2784,9 @@ function mineCandidates(
 
     // In reach, visible AND pickup-adjacent: mine it now. Anything farther would
     // drop the item outside the pickup volume, so it becomes a MOVE instead.
-    if (block.inReach && block.visible !== false && pickupSafe) {
+    // A structure-fabric cell is skipped: the fortress body never yields the
+    // wanted mob drop, so the only route it can ground is the APPROACH below.
+    if (!fabricCell && block.inReach && block.visible !== false && pickupSafe) {
       mineActions.push({
         id: `MINE:${blockId('b', block.position)}`,
         kind: 'MINE',
@@ -2616,8 +2796,8 @@ function mineCandidates(
         targetEntityId: null,
         itemName: null,
         requiresTool,
-        toolName: harvestTool,
-        toolTier: tier,
+        toolName: approachTool,
+        toolTier: approachTier,
         inReach: true,
         hasStandableAdjacent: block.hasAdjacentStandable,
         meta: { ...baseMeta, requiresPickup },
@@ -2661,14 +2841,14 @@ function mineCandidates(
       moveActions.push({
         id: `MOVE:${blockId('b', block.position)}`,
         kind: 'MOVE',
-        label: moveToBlockLabel(block, spot),
+        label: moveToBlockLabel(block, spot, fabricCell),
         targetName: block.name,
         target: spot,
         targetEntityId: null,
         itemName: null,
         requiresTool,
-        toolName: harvestTool,
-        toolTier: tier,
+        toolName: approachTool,
+        toolTier: approachTier,
         inReach: false,
         hasStandableAdjacent: true,
         meta: {
@@ -6709,6 +6889,7 @@ export function applyReachabilityGate(
     // Filled by `generateGroundedCandidates` from the OFFERED set, once the gate
     // has finished; the raw gate has no survival fact of its own.
     foodGap: null,
+    combatKitGap: null,
   }
 }
 
