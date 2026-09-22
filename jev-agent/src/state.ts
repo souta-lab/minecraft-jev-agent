@@ -32,6 +32,7 @@ import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
 import {
   detectPortalVerification,
+  isDimensionTransferBlock,
   isPortalIgnitionPostconditionMet,
   NETHER_PORTAL,
   OBSIDIAN,
@@ -42,7 +43,6 @@ import {
   validatePortalFrame,
 } from './netherPortalPlan.ts'
 import type { PortalBlockPosition, PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
-import { isDimensionTransferBlock } from './netherPortalPlan.ts'
 import { isProtectedStationBlock, liveStructureCellKey } from './blockSafety.ts'
 import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
