@@ -54,6 +54,7 @@
 //
 // This file is intentionally dependency-free beyond the repository gates.
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -81,10 +82,19 @@ export const RECORD = 'milestone-run-artifact'
 // latestReload/latestSourceReload + effectiveSourceSha + provenance + the read-only
 // control-socket cross-check). `run.boot.sourceSha` and every schema-3 field are
 // unchanged.
-// 5 = additive: `verdicts.M2.chain` (the delegated gate's ORDERED
-// build->light->verify trace, one fact per link with the evidence source that
-// proved it + the marker indices + the frame's own blocks/shape). It is present
-// only when the gate emitted `m2_chain:` lines; every schema-4 field is unchanged.
+// 5 = additive, from two independent needs:
+//   * `verdicts.M2.chain` - the delegated gate's ORDERED build->light->verify trace,
+//     one fact per link with the evidence source that proved it, the marker indices
+//     and the frame's own blocks/shape. Present only when the gate emitted `m2_chain:`
+//     lines; never a fabricated empty chain.
+//   * `verdicts.<M>.operatorDecisionPremise` (what a recorded operator decision COVERS,
+//     its `gateFacts` from the delegated gate's STRUCTURED verdict instead of a regex
+//     over its lines, and whether THIS run inherits or must build; the operator's own
+//     entry is never rewritten), `verdicts.<M>.facts`,
+//     `operatorDecisions.{sha256,considered,premises}`, `acceptance.evidenceClass`
+//     (+ top-level `evidenceClasses`) and `gateEvidence` (the exact authority evidence
+//     both delegated gates received).
+// Every schema-4 field is kept.
 export const SCHEMA_VERSION = 5
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
 /** Repo-level operator decision file; run-scoped by each entry's own runId. */
@@ -106,6 +116,34 @@ export const ACCEPTANCE_WRITER = Object.freeze({
   pathPattern: 'buddy-driver/data/resident/acceptance-<runId>.json',
   firesOn: ['generation-reload-commit', 'control:freeze', 'control:resume', 'control:acceptance', 'shutdown'],
   note: 'attests the run/HOST state (provenance, listeners, epoch); it never asserts a milestone PASS and is not written at boot',
+  /**
+   * What the record DOES attest, so an absent record is a named evidence-class gap
+   * rather than a hole in the artifact. The milestone question is answered by
+   * `milestoneAcceptance` (delegated gate verdicts), never by this record.
+   */
+  attests: [
+    'run source identity (boot commit + mutable checkout HEAD)',
+    'generation hash/id and the contract/state schema versions',
+    'server id / dimension / worldEpoch / level name / seed',
+    'inventory-independent HOST counters: reloads, reconnects, freeze cycles',
+    'listener baseline/expected/current counts and the leak flag',
+    'the MODE (llm|deterministic) derived from the live policyKind',
+  ],
+  /**
+   * Safe, non-disruptive ways to make the record exist for a run that has not hit
+   * one yet. All of them are HOST lifecycle events, so a tool can never fabricate
+   * the record: it can only say which trigger would produce it. `freeze` (and
+   * `resume`) are reversible per AGENTS.md 4.0; the read-only `acceptance` control
+   * query both refreshes and returns the record.
+   */
+  safeTriggers: [
+    'control command `acceptance` (read-only query that also writes the record)',
+    'control command `freeze` (reversible) then `resume`',
+    'a generation reload commit',
+    'a clean resident shutdown',
+    'the next BOOT of the resident is NOT a trigger: a record is never written at boot',
+  ],
+  fabricatable: false,
 })
 
 /** The M3-relevant inventory subset, in a stable order. */
@@ -934,16 +972,26 @@ export function readServerProperties(path) {
 
 export function readOperatorDecisions(path) {
   if (typeof path !== 'string' || path === '' || !existsSync(path)) {
-    return { present: false, path: path ?? null, reason: 'operator_decisions_missing', decisions: [] }
+    return { present: false, path: path ?? null, reason: 'operator_decisions_missing', sha256: null, decisions: [] }
   }
+  let text
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return { present: false, path, reason: 'operator_decisions_unreadable', sha256: null, decisions: [] }
+  }
+  // The decision file is a REPO-level product record and more than one checkout of
+  // this repo exists; the content hash is what makes `source` exact, so a reviewer
+  // can tell WHICH copy of the ruling an artifact was built against.
+  const sha256 = createHash('sha256').update(text).digest('hex')
   let parsed
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'))
+    parsed = JSON.parse(text)
   } catch {
-    return { present: false, path, reason: 'operator_decisions_unreadable', decisions: [] }
+    return { present: false, path, reason: 'operator_decisions_unreadable', sha256, decisions: [] }
   }
   const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.decisions) ? parsed.decisions : null
-  if (list === null) return { present: false, path, reason: 'operator_decisions_shape_mismatch', decisions: [] }
+  if (list === null) return { present: false, path, reason: 'operator_decisions_shape_mismatch', sha256, decisions: [] }
   const decisions = list.filter(
     (entry) =>
       isPlainObject(entry) &&
@@ -951,13 +999,21 @@ export function readOperatorDecisions(path) {
       typeof entry.milestone === 'string' &&
       (entry.status === 'PASS' || entry.status === 'FAIL'),
   )
-  return { present: true, path, reason: null, decisions }
+  return { present: true, path, reason: null, sha256, decisions }
 }
 
 function decisionAppliesToRun(entry, runId) {
   if (typeof entry.runId === 'string' && entry.runId.length > 0) return entry.runId === runId
   if (Array.isArray(entry.runIds)) return entry.runIds.includes(runId)
   return entry.standing === true
+}
+
+/** The scope a decision entry declares: its own runId / runIds / `standing`, else null. */
+export function operatorDecisionScope(entry) {
+  if (typeof entry?.runId === 'string' && entry.runId.length > 0) return entry.runId
+  if (Array.isArray(entry?.runIds)) return [...entry.runIds]
+  if (entry?.standing === true) return 'standing'
+  return null
 }
 
 /** The gate facts that must corroborate a decision's `basis` before it is applied. */
@@ -989,6 +1045,157 @@ export function selectOperatorDecision(decisions, { milestone, runId, gateVerdic
     reason: `basis_not_corroborated:${first.basis ?? 'none'}`,
     entry: first,
     evidence: corroborateOperatorDecision(first, gateVerdict).evidence,
+  }
+}
+
+/**
+ * The STRUCTURED gate facts an operator decision's `basis` is corroborated against.
+ * Before schema 5 the assembler kept only the gate's human `factsLine`, so
+ * "inherited (live_world_truth / runtime_verified_without_build_chain) vs built"
+ * survived only as prose. This is a reader: it copies what the gate computed.
+ */
+export function summarizeGateFacts(gateVerdict) {
+  const conditions = isPlainObject(gateVerdict?.conditions) ? { ...gateVerdict.conditions } : {}
+  const facts = isPlainObject(gateVerdict?.facts) ? gateVerdict.facts : null
+  if (facts === null) return { available: false, conditions, reason: 'gate_facts_unavailable' }
+  const inheritedPortal = isPlainObject(facts.inheritedPortal) ? facts.inheritedPortal : null
+  const eyes = isPlainObject(facts.eyes) ? facts.eyes : null
+  return {
+    available: true,
+    conditions,
+    missing: Array.isArray(facts.missing) ? [...facts.missing] : null,
+    framePass: typeof facts.framePass === 'boolean' ? facts.framePass : null,
+    litPass: typeof facts.litPass === 'boolean' ? facts.litPass : null,
+    netherReached: typeof facts.netherReached === 'boolean' ? facts.netherReached : null,
+    inheritedPortal:
+      inheritedPortal === null
+        ? null
+        : {
+            detected: inheritedPortal.detected === true,
+            observations: (Array.isArray(inheritedPortal.observations) ? inheritedPortal.observations : []).map((observation) => ({
+              kind: observation?.kind ?? null,
+              source: observation?.source ?? null,
+              reason: observation?.reason ?? null,
+            })),
+          },
+    eyes:
+      eyes === null
+        ? null
+        : {
+            ready: eyes.ready === true,
+            enderEye: eyes.enderEye ?? null,
+            enderPearl: eyes.enderPearl ?? null,
+            blazeRod: eyes.blazeRod ?? null,
+            blazePowder: eyes.blazePowder ?? null,
+            materialInputsComplete: eyes.materialInputsComplete === true,
+          },
+  }
+}
+
+/**
+ * WHAT a recorded operator decision COVERS, per run — and whether THIS run inherits
+ * it or must build the milestone on its own facts.
+ *
+ * This is a DERIVED VIEW: it never edits the operator's entry, never rewrites the
+ * delegated gate verdict, and never turns an UNKNOWN into a PASS. It exists because
+ * an operator decision is scoped to its own runId, so on every OTHER run the
+ * artifact used to say nothing at all about the milestone's premise (the annotation
+ * was simply null) even though `verdicts.M2.reason` was `inherited_portal`.
+ */
+export function operatorDecisionPremise({ decisions, milestone, runId, gateVerdict = null, decisionsPath = null } = {}) {
+  const entries = (Array.isArray(decisions) ? decisions : []).filter((entry) => entry.milestone === milestone)
+  const base = {
+    milestone,
+    runId,
+    source: decisionsPath,
+    gateStatus: gateVerdict?.status ?? null,
+    gateReason: gateVerdict?.reason ?? null,
+    gateFacts: summarizeGateFacts(gateVerdict),
+  }
+  const note =
+    'derived view of the recorded operator decision(s): the entry itself is never rewritten and the delegated gate verdict above is UNCHANGED'
+  if (entries.length === 0) {
+    return {
+      ...base,
+      present: false,
+      reason: 'no_operator_decision_recorded',
+      thisRunInherits: false,
+      thisRunBasis: null,
+      thisRunMust: 'build',
+      consequence:
+        `no operator decision for ${milestone} is recorded, so this run's ${milestone} premise can only be met by this run's own facts ` +
+        `(delegated gate status=${gateVerdict?.status ?? 'UNKNOWN'} reason=${gateVerdict?.reason ?? 'unknown'})`,
+      decisions: [],
+      note,
+    }
+  }
+  const considered = entries.map((entry) => {
+    const applies = decisionAppliesToRun(entry, runId)
+    const corroboration = applies ? corroborateOperatorDecision(entry, gateVerdict) : null
+    const outcome = applies
+      ? corroboration.corroborated
+        ? 'inherited_by_this_run'
+        : 'basis_not_corroborated_by_this_run'
+      : 'scoped_to_another_run'
+    return {
+      status: entry.status,
+      authority: typeof entry.authority === 'string' ? entry.authority : 'operator',
+      basis: typeof entry.basis === 'string' ? entry.basis : null,
+      // The entry's OWN declared scope string (e.g. "M2 only"), carried verbatim.
+      decisionScope: typeof entry.scope === 'string' ? entry.scope : null,
+      runScope: operatorDecisionScope(entry),
+      recordedAt: typeof entry.recordedAt === 'string' ? entry.recordedAt : null,
+      ruling: typeof entry.ruling === 'string' ? entry.ruling : null,
+      appliesToThisRun: applies,
+      corroboratedByThisRun: corroboration === null ? null : corroboration.corroborated,
+      outcome,
+      reason: applies ? (corroboration.corroborated ? null : `basis_not_corroborated:${entry.basis ?? 'none'}`) : 'scoped_to_another_run',
+    }
+  })
+  const inherited = considered.find((decision) => decision.outcome === 'inherited_by_this_run') ?? null
+  const covering = considered.filter((decision) => decision.appliesToThisRun)
+  const scoped = considered.filter((decision) => !decision.appliesToThisRun)
+  let consequence
+  if (inherited !== null) {
+    consequence =
+      `this run INHERITS the recorded ${milestone} ${inherited.status} on basis=${inherited.basis ?? 'none'} ` +
+      `(runScope=${JSON.stringify(inherited.runScope)}${inherited.decisionScope === null ? '' : `, scope=${JSON.stringify(inherited.decisionScope)}`}); ` +
+      `the delegated gate verdict stays ${base.gateStatus} reason=${base.gateReason}`
+  } else if (covering.length > 0) {
+    consequence =
+      `a recorded decision covers this run (runScope=${JSON.stringify(covering[0].runScope)}) but this run's gate facts do NOT corroborate ` +
+      `basis=${covering[0].basis ?? 'none'} (${covering[0].reason}); the ${milestone} premise is UNRESOLVED for this run and the delegated verdict stays ` +
+      `${base.gateStatus} reason=${base.gateReason}`
+  } else {
+    consequence =
+      `the recorded ${milestone} ${scoped[0].status} is scoped to runScope=${JSON.stringify(scoped[0].runScope)}` +
+      `${scoped[0].decisionScope === null ? '' : ` (scope=${JSON.stringify(scoped[0].decisionScope)})`} and does NOT cover this run ` +
+      `(runId=${runId}): the ${milestone} premise must be BUILT in-run for this run, or a new operator decision scoped to runId=${runId} must be recorded. ` +
+      `The recorded ruling is unchanged for its own scope; the delegated verdict stays ${base.gateStatus} reason=${base.gateReason}`
+  }
+  return {
+    ...base,
+    present: true,
+    reason: inherited !== null ? null : covering.length > 0 ? covering[0].reason : 'scoped_to_another_run',
+    thisRunInherits: inherited !== null,
+    thisRunBasis: inherited?.basis ?? null,
+    thisRunMust: inherited !== null ? 'inherit' : 'build',
+    consequence,
+    decisions: considered,
+    note,
+  }
+}
+
+/** The per-run fields of one considered decision (used by `operatorDecisions.considered`). */
+function decisionSummary(decision) {
+  return {
+    status: decision.status,
+    basis: decision.basis,
+    decisionScope: decision.decisionScope,
+    runScope: decision.runScope,
+    appliesToThisRun: decision.appliesToThisRun,
+    outcome: decision.outcome,
+    reason: decision.reason,
   }
 }
 
@@ -1549,6 +1756,11 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
   const lines = []
   let code = 2
   let error = null
+  // The gate's STRUCTURED verdict (conditions + facts), captured additively via
+  // `onResult`. It is what an operator decision's `basis` is corroborated against,
+  // so `inherited_portal` provenance is machine-readable instead of a regex over
+  // the human lines.
+  let gateResult = null
   try {
     code = await gateRunner({
       expectedRunId: runId,
@@ -1564,6 +1776,9 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
       sourceSha,
       json: false,
       write: (line) => lines.push(String(line)),
+      onResult: (result) => {
+        gateResult = result
+      },
     })
   } catch (thrown) {
     error = thrown instanceof Error ? thrown.message : String(thrown)
@@ -1596,7 +1811,11 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
     status,
     reason: parsed?.reason ?? error ?? `gate_emitted_no_status code=${code}`,
     statusLine: parsed === null ? null : `${id}_RUN_RESULT`,
-    conditions: parseConditions(lines),
+    // The gate's own CONDITIONS and structured FACTS (schema 5, additive). Both are
+    // exactly what the delegated gate computed - never re-derived here - and the
+    // line parser stays the fallback for a gate that did not return them.
+    conditions: isPlainObject(gateResult?.conditions) ? { ...gateResult.conditions } : parseConditions(lines),
+    facts: isPlainObject(gateResult?.facts) ? gateResult.facts : null,
     factsLine,
     lines,
   }
@@ -1641,12 +1860,57 @@ function unscopedArtifact({ root, now, reason }) {
     complete: false,
     reason,
     verdicts: {
-      M2: { id: 'M2', gate: 'tools/m2-gate.mjs', runId: null, status: 'UNKNOWN', reason, conditions: {}, lines: [] },
-      M3: { id: 'M3', gate: 'tools/m3-gate.mjs', runId: null, status: 'UNKNOWN', reason, conditions: {}, lines: [] },
+      M2: {
+        id: 'M2',
+        gate: 'tools/m2-gate.mjs',
+        runId: null,
+        status: 'UNKNOWN',
+        reason,
+        conditions: {},
+        facts: null,
+        lines: [],
+        operatorDecision: null,
+        operatorDecisionPremise: {
+          milestone: 'M2',
+          runId: null,
+          present: false,
+          reason,
+          thisRunInherits: false,
+          thisRunBasis: null,
+          thisRunMust: 'build',
+          consequence: 'no run scope was given, so no M2 premise can be stated for a run',
+          decisions: [],
+        },
+      },
+      M3: {
+        id: 'M3',
+        gate: 'tools/m3-gate.mjs',
+        runId: null,
+        status: 'UNKNOWN',
+        reason,
+        conditions: {},
+        facts: null,
+        lines: [],
+        operatorDecision: null,
+        operatorDecisionPremise: {
+          milestone: 'M3',
+          runId: null,
+          present: false,
+          reason,
+          thisRunInherits: false,
+          thisRunBasis: null,
+          thisRunMust: 'build',
+          consequence: 'no run scope was given, so no M3 premise can be stated for a run',
+          decisions: [],
+        },
+      },
     },
     milestonePredicates: null,
     milestoneAcceptance: { status: 'UNKNOWN', reason, basis: 'delegated gate verdicts', milestones: {}, incompleteMilestones: ['M2', 'M3'] },
-    operatorDecisions: { present: false, path: null, reason: 'run_scope_required', applied: [] },
+    operatorDecisions: { present: false, path: null, sha256: null, reason: 'run_scope_required', applied: [], considered: [], premises: { M2: null, M3: null } },
+    acceptance: { present: false, path: null, reason, writer: ACCEPTANCE_WRITER, record: null, evidenceClass: null },
+    gateEvidence: { authority: null, socketBinding: null, note: 'run scope required' },
+    evidenceClasses: [{ id: 'runId', status: 'MISSING', source: null, reason }],
     missingEvidence: ['runId'],
     missingEvidenceDetail: [{ field: 'runId', reason }],
   }
@@ -1981,6 +2245,53 @@ export async function buildRunArtifact({
   })
   m2.verdict.operatorDecision = m2Decision
   m3.verdict.operatorDecision = m3Decision
+  // The PREMISE (schema 5): what each recorded decision covers and whether THIS run
+  // inherits it or must build the milestone itself. Present for every milestone,
+  // including when no decision exists at all, so a fresh run's reader never has to
+  // guess why `verdicts.M2.reason` is `inherited_portal`.
+  const m2Premise = operatorDecisionPremise({
+    decisions: operatorDecisions.decisions,
+    milestone: 'M2',
+    runId,
+    gateVerdict: m2.verdict,
+    decisionsPath: paths.operatorDecisions,
+  })
+  const m3Premise = operatorDecisionPremise({
+    decisions: operatorDecisions.decisions,
+    milestone: 'M3',
+    runId,
+    gateVerdict: m3.verdict,
+    decisionsPath: paths.operatorDecisions,
+  })
+  // WHICH copy of the ruling this premise was derived from (more than one checkout of
+  // this repo exists; the content hash makes the per-run scoping exact).
+  m2Premise.sha256 = operatorDecisions.sha256
+  m3Premise.sha256 = operatorDecisions.sha256
+  m2.verdict.operatorDecisionPremise = m2Premise
+  m3.verdict.operatorDecisionPremise = m3Premise
+  // A milestone whose gate did NOT pass while a recorded decision exists for it and
+  // does not cover this run is a NAMED gap: this is the one case where the premise
+  // must be visible in the single gap list, and it can only ever appear on a
+  // milestone that is already not PASS (so it can never make a PASS complete=false).
+  for (const [id, premise, verdict] of [
+    ['M2', m2Premise, m2.verdict],
+    ['M3', m3Premise, m3.verdict],
+  ]) {
+    // Only when the recorded decision is actually RELEVANT to why this milestone is
+    // undecided: this run inherited (or is recorded as inheriting) a premise it did
+    // not build. A run that simply has not reached the milestone yet is already named
+    // by the gate's own `verdict:<id>` gap, and duplicating it would be noise.
+    const decisionRelevant =
+      premise.thisRunInherits ||
+      verdict.reason === 'inherited_portal' ||
+      premise.decisions.some((decision) => decision.appliesToThisRun)
+    if (premise.present && !premise.thisRunInherits && verdict.status !== 'PASS' && decisionRelevant) {
+      missing.add(
+        `premise:${id}`,
+        `${premise.consequence} — recorded at ${premise.source ?? 'operator-decisions'} (sha256=${operatorDecisions.sha256 ?? 'unknown'})`,
+      )
+    }
+  }
 
   const verdicts = { M2: m2.verdict, M3: m3.verdict }
   const statuses = [verdicts.M2.status, verdicts.M3.status]
@@ -2029,11 +2340,21 @@ export async function buildRunArtifact({
     operatorDecisions: {
       present: operatorDecisions.present,
       path: operatorDecisions.path,
+      // WHICH copy of the ruling was read (several checkouts of this repo exist).
+      sha256: operatorDecisions.sha256,
       reason: operatorDecisions.reason,
       applied: [
         ...(m2Decision !== null && m2Decision.status !== 'NOT_APPLIED' ? [{ milestone: 'M2', status: m2Decision.status }] : []),
         ...(m3Decision !== null && m3Decision.status !== 'NOT_APPLIED' ? [{ milestone: 'M3', status: m3Decision.status }] : []),
       ],
+      // Every recorded decision for M2/M3 with its outcome for THIS run, including
+      // the ones that do NOT apply (schema 5). `applied` above keeps its schema-2/3/4
+      // shape; `considered` is the per-run truth a reviewer needs.
+      considered: [
+        ...m2Premise.decisions.map((decision) => ({ milestone: 'M2', ...decisionSummary(decision) })),
+        ...m3Premise.decisions.map((decision) => ({ milestone: 'M3', ...decisionSummary(decision) })),
+      ],
+      premises: { M2: m2Premise, M3: m3Premise },
     },
     acceptance: {
       present: acceptance.present,
@@ -2041,6 +2362,41 @@ export async function buildRunArtifact({
       reason: acceptance.reason,
       writer: ACCEPTANCE_WRITER,
       record: acceptance.record,
+      // The EVIDENCE CLASS, stated precisely (schema 5). This record is a HOST
+      // lifecycle attestation, not a milestone verdict: absent stays absent, and the
+      // reason + the safe triggers that would produce it are named here so a reader
+      // never has to guess what `missingEvidence: ['acceptance']` means.
+      evidenceClass: {
+        id: 'acceptance',
+        kind: 'host-lifecycle-attestation',
+        status: acceptance.present ? 'PRESENT' : 'MISSING',
+        reason: acceptance.present ? null : acceptance.reason,
+        attests: ACCEPTANCE_WRITER.attests,
+        safeTriggers: ACCEPTANCE_WRITER.safeTriggers,
+        fabricatable: ACCEPTANCE_WRITER.fabricatable,
+        blocksMilestoneVerdict: false,
+        milestoneQuestionAnsweredBy: 'milestoneAcceptance (the delegated gate verdicts)',
+      },
+    },
+    // Which authority evidence the delegated gates actually judged. Two tools that
+    // read the same tree can only disagree here when one of them obtained a live
+    // control-socket report and the other did not, so the fact is recorded instead of
+    // being left to a reader to infer from `authority.reason`.
+    gateEvidence: {
+      authority: {
+        injected: true,
+        gateBound: authority.gateBound === true,
+        source: policy?.generation?.source ?? null,
+        decisionsSource: policy?.decisions?.source ?? null,
+        reason: policy?.reason ?? null,
+        runId: policy?.generation?.runId ?? policy?.decisions?.runId ?? null,
+      },
+      socketBinding:
+        socketBinding === null
+          ? null
+          : { runId: socketBinding.runId ?? null, matched: socketBinding.runId === runId, frozen: socketBinding.frozen ?? null },
+      note:
+        'both delegated gates (tools/m2-gate.mjs, tools/m3-gate.mjs) received this exact policy evidence object; a gate invoked separately with a LIVE control-socket report can judge a different authority bundle for the same run, so a bundle that must not disagree pins ONE binding and runs both from it',
     },
     snapshot: {
       present: snapshot.present,
@@ -2054,6 +2410,42 @@ export async function buildRunArtifact({
       worldKey: snapshot.record?.worldKey ?? null,
       markerCount: Array.isArray(snapshot.record?.markers) ? snapshot.record.markers.length : null,
     },
+    // ONE place a reviewer (or a script) can read WHICH evidence class is missing and
+    // WHY, instead of inferring it from a flat `missingEvidence` string list. A class
+    // that is MISSING never becomes a fabricated fact: it stays MISSING with its
+    // reason, and the milestone question remains with the delegated gate verdicts.
+    evidenceClasses: [
+      {
+        id: 'runLog',
+        status: attribution.status === 'valid' ? 'PRESENT' : 'MISSING',
+        source: paths.logPath,
+        reason: attribution.status === 'valid' ? null : attribution.reason,
+      },
+      {
+        id: 'snapshot',
+        status: snapshot.present ? 'PRESENT' : 'MISSING',
+        source: snapshot.path,
+        reason: snapshot.present ? null : snapshot.reason,
+      },
+      {
+        id: 'milestonePredicates',
+        status: milestonePredicates.mismatches.length > 0 ? 'REJECTED' : hostObservation?.present === true ? 'PRESENT' : 'DERIVED',
+        source: hostObservation?.path ?? `derived from ${paths.logPath} + ${paths.snapshotDir}`,
+        reason: milestonePredicates.mismatches.length > 0 ? milestonePredicates.mismatches.join('; ') : null,
+      },
+      {
+        id: 'authority',
+        status: authority.gateBound === true ? 'PRESENT' : 'MISSING',
+        source: policy?.generation?.source ?? paths.runnerOutPath,
+        reason: authority.gateBound === true ? null : (policy?.reason ?? authority.reason ?? 'generation_status_unavailable'),
+      },
+      {
+        id: 'acceptance',
+        status: acceptance.present ? 'PRESENT' : 'MISSING',
+        source: acceptance.path,
+        reason: acceptance.present ? null : acceptance.reason,
+      },
+    ],
     verdicts,
     missingEvidence: missing.fields,
     missingEvidenceDetail: missing.detail,
