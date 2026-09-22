@@ -792,6 +792,15 @@ export type WorldState = {
   inventory: InventoryState
   entities: EntityState[]
   blocks: BlockState[]
+  /**
+   * The spawn context of every mob the tick declared a producer for: where that
+   * mob can exist, and whether the body's own column currently satisfies the
+   * rule. Populated only when the active focus item has a declared mob producer
+   * (`MOB_DROP_PRODUCERS`), so an ordinary tick carries no extra read and no
+   * extra state. Absent means "no producer context was asked for", which is why
+   * every pre-existing fixture stays behaviourally unchanged.
+   */
+  spawnContexts?: MobSpawnContextObservation[]
   terrain: {
     standable: Vec3Json[]
     /**
@@ -1154,6 +1163,285 @@ export function scannedBlockNames(focusItem: string | null): readonly string[] |
 export const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
   ender_pearl: new Set(['enderman']),
   blaze_rod: new Set(['blaze']),
+}
+
+/**
+ * WHERE a declared mob producer can exist: the vanilla spawn-context rule for a
+ * mobile producer, as data.
+ *
+ * `MOB_DROP_PRODUCERS` answers "which mob drops the item". It does NOT answer
+ * "where is that mob", and for the whole pearl half of M3 that missing half was
+ * the real gap: the producer table named `enderman`, the sensor reported
+ * `sensed=0`, and nothing in the system could express whether the body was
+ * standing in a spawn context where an enderman CAN exist. The arrival chunk
+ * genuinely was a soul sand valley (`soul_soil 630 | soul_sand 287` measured) -
+ * an environment that spawns endermen in vanilla - and the body still never met
+ * one, because "look for a producer" had no context to be grounded on.
+ *
+ * This is the same deterministic-truth convention as `ORE_SOURCES`,
+ * `DIRECT_BLOCK_SOURCES` and `NETHER_STRUCTURE_BLOCK_NAMES`: public vanilla
+ * facts, no ranking, no policy. It is deliberately PRODUCER-GENERIC - one entry
+ * per mob, any future `MOB_DROP_PRODUCERS` entry gets a context by adding a row
+ * here and nothing else - and never item-, milestone- or coordinate-specific.
+ *
+ * Semantics:
+ *   - `dimensions`           the dimension ids in which the mob can exist at all;
+ *   - `lightGatedDimensions` the subset of those where a spawn is gated on block
+ *                            light (vanilla's hostile-monster rule is an
+ *                            OVERWORLD rule: the Nether and the End halves of the
+ *                            same mob spawn light-independently), so a
+ *                            light-independent dimension never needs a light
+ *                            sample to be a valid context;
+ *   - `spawnLightMax`        the highest block light that still permits a spawn
+ *                            in a gated dimension;
+ *   - `surface`              what the mob needs to stand on;
+ *   - `enclosure`            `open_sky` when the surface must not be roofed.
+ */
+export type MobSpawnSurface = 'solid_surface'
+export type MobSpawnEnclosure = 'open_sky'
+
+export interface MobSpawnContextFact {
+  dimensions: readonly string[]
+  /**
+   * the dimensions where the light gate applies. A dimension in `dimensions` but
+   * NOT here spawns this mob regardless of light, which is what makes the Nether
+   * a valid enderman context without any light sample.
+   */
+  lightGatedDimensions: readonly string[]
+  /** highest block light that still permits a spawn in a gated dimension */
+  spawnLightMax: number
+  surface: MobSpawnSurface
+  enclosure: MobSpawnEnclosure | null
+  /** the vanilla rule this row encodes, so a reader never has to guess */
+  note: string
+}
+
+/**
+ * The spawn-context rows for the declared mob producers. Data only; pure readers
+ * below. Kept next to `MOB_DROP_PRODUCERS` so the two halves of producer truth
+ * ("what it drops", "where it lives") cannot drift apart.
+ *
+ * `enderman`: hostile-monster rules. Overworld spawns require block light <= 7 on
+ * an opaque surface under open sky; the Nether and the End are the
+ * light-independent halves of the same mob - which is why the measured soul sand
+ * valley arrival chunk is a valid enderman context on the dimension alone.
+ * `blaze`: fortress-hosted, Nether only, never light-gated.
+ */
+export const MOB_SPAWN_CONTEXTS: Readonly<Record<string, MobSpawnContextFact>> = {
+  enderman: {
+    dimensions: ['minecraft:overworld', 'minecraft:the_nether', 'minecraft:the_end'],
+    // The overworld half of the rule. The Nether/End halves are expressed by
+    // omission: they are in `dimensions` and not here, so no light is required
+    // there and a missing sample cannot make a nether enderman unspawnable.
+    lightGatedDimensions: ['minecraft:overworld'],
+    spawnLightMax: 7,
+    surface: 'solid_surface',
+    enclosure: 'open_sky',
+    note: 'hostile monster: overworld spawn needs block light <= 7 on an opaque surface under open sky; the Nether and the End are light-independent',
+  },
+  blaze: {
+    dimensions: ['minecraft:the_nether'],
+    lightGatedDimensions: [],
+    spawnLightMax: 0,
+    surface: 'solid_surface',
+    enclosure: null,
+    note: 'fortress spawner mob: Nether only, no light gate, no sky requirement',
+  },
+}
+
+/** The spawn-context rule for a mob name, or null when none is declared (CAN truth). */
+export function mobSpawnContextFor(entityName: string): MobSpawnContextFact | null {
+  return MOB_SPAWN_CONTEXTS[entityName] ?? null
+}
+
+/**
+ * The block-light gate this rule imposes in `dimension`, or null when the
+ * dimension does not gate this mob on light at all.
+ *
+ * The sensor needs this to decide whether it must read a light level before it
+ * can state a verdict, and the evidence carries it so a reader can tell a
+ * `spawnLightMax=none` (the dimension has no gate) from a missing measurement.
+ */
+export function mobSpawnLightGate(
+  fact: MobSpawnContextFact,
+  dimension: string,
+): number | null {
+  return fact.lightGatedDimensions.includes(dimension) ? fact.spawnLightMax : null
+}
+
+/**
+ * Pure context-rule predicate: does a body in `dimension` with a sampled block
+ * light of `light` satisfy this mob's spawn rule?
+ *
+ * `light` is read ONLY in a dimension the rule actually gates on; everywhere else
+ * it is ignored, so a missing light sample in the Nether cannot make a nether
+ * producer look unspawnable. Deliberately free of any policy: it answers "can
+ * this mob exist in this context", never "should the body go there".
+ */
+export function mobSpawnContextMet(
+  fact: MobSpawnContextFact,
+  dimension: string,
+  light: number | null,
+): boolean {
+  if (!fact.dimensions.includes(dimension)) return false
+  const gate = mobSpawnLightGate(fact, dimension)
+  if (gate === null) return true
+  // A light-gated rule with no sample is not "met" - the caller must not read an
+  // unmeasured context as a proven one.
+  if (light === null) return false
+  return light <= gate
+}
+
+/**
+ * Typed verdict for a mob's spawn context AT ONE CELL of the live world.
+ *
+ *   `met`                the dimension and (where the rule gates on it) the
+ *                        measured light permit a spawn here;
+ *   `dimension_unmet`    this dimension cannot host the mob at all;
+ *   `light_unmet`        the dimension is right but the measured light is too high;
+ *   `context_unknown`    the dimension is right, but the cell could not be read
+ *                        (`probeReason` names which fact was missing).
+ *
+ * `context_unknown` is a REAL answer, not a failure: it is what an unmeasured
+ * context looks like, and the search route stays grounded on it (the body must
+ * go somewhere it can measure one).
+ */
+export type MobSpawnContextVerdict = 'met' | 'dimension_unmet' | 'light_unmet' | 'context_unknown'
+
+export type MobSpawnProbeReason = 'no_sensed_surface' | 'light_unavailable'
+
+/** One mob's spawn-context observation for the live tick. */
+export interface MobSpawnContextObservation {
+  mob: string
+  dimension: string
+  verdict: MobSpawnContextVerdict
+  /** the cell the surface fact was read at, or null when no surface was sampled */
+  cell: Vec3Json | null
+  /** the block sampled under the body (the surface a spawn would stand on) */
+  surfaceBlock: string | null
+  /** block light at the sampled cell, or null when the world data could not answer */
+  light: number | null
+  /** the block-light gate this dimension imposes, null when it imposes none */
+  spawnLightMax: number | null
+  /** biome name at the sampled cell, when the world data exposes one */
+  biome: string | null
+  /** only set on `context_unknown`: which fact was missing */
+  probeReason: MobSpawnProbeReason | null
+}
+
+/**
+ * Read the surface spawn context at the body's own column.
+ *
+ * The cell is the block directly under the body's feet when it is solid (the
+ * surface a spawn would stand on), else the body's own feet cell. `blockAt` is
+ * the same synchronous call `buildTerrain` already makes for every cell of its
+ * 5x5x3 window, so this adds one bounded read, and it is invoked only for a
+ * focus item that declared a mob producer.
+ *
+ * `bot.blockAt` returns a prismarine block whose `light` is the block light and
+ * whose `biome` is the numeric biome id (prismarine-chunk `getBlock`), and
+ * `bot.world.getBiome` is the async form. Both are read defensively: an absent
+ * field is `context_unknown`, never a fabricated value.
+ */
+export function sampleMobSpawnContext(
+  bot: Bot,
+  mobName: string,
+  dimension: string,
+  selfPosition: Vec3Json,
+): MobSpawnContextObservation {
+  const fact = mobSpawnContextFor(mobName)
+  const gate = fact === null ? null : mobSpawnLightGate(fact, dimension)
+  const base: MobSpawnContextObservation = {
+    mob: mobName,
+    dimension,
+    verdict: 'context_unknown',
+    cell: null,
+    surfaceBlock: null,
+    light: null,
+    spawnLightMax: gate,
+    biome: null,
+    probeReason: null,
+  }
+  // No declared rule for this mob, or a dimension that cannot host it: the answer
+  // is already complete and no world read is needed to state it.
+  if (fact === null) return { ...base, probeReason: 'no_sensed_surface' }
+  if (!fact.dimensions.includes(dimension)) return { ...base, verdict: 'dimension_unmet' }
+  const feet = {
+    x: Math.floor(selfPosition.x),
+    y: Math.floor(selfPosition.y),
+    z: Math.floor(selfPosition.z),
+  }
+  const surfaceCell = { x: feet.x, y: feet.y - 1, z: feet.z }
+  const read = (cell: Vec3Json): { name: string | null; light: number | null; biomeId: number | null } => {
+    try {
+      const block = bot.blockAt(cell as never) as unknown as
+        | { name?: unknown; light?: unknown; biome?: unknown }
+        | null
+        | undefined
+      if (block === null || block === undefined) return { name: null, light: null, biomeId: null }
+      return {
+        name: typeof block.name === 'string' ? block.name : null,
+        light: typeof block.light === 'number' && Number.isFinite(block.light) ? block.light : null,
+        biomeId: typeof block.biome === 'number' && Number.isFinite(block.biome) ? block.biome : null,
+      }
+    } catch {
+      // An unloaded chunk / malformed world read is a MISSING fact, not a crash
+      // and not a silent "spawnable".
+      return { name: null, light: null, biomeId: null }
+    }
+  }
+  // Prefer the support block; fall back to the feet cell when the body is in the
+  // air (a sampled column that has no floor still has a light level).
+  let sampled = read(surfaceCell)
+  let cell: Vec3Json = surfaceCell
+  if (sampled.name === null) {
+    sampled = read(feet)
+    cell = feet
+  }
+  // A dimension-only rule (no light gate here: the Nether/End) is already MET by
+  // the dimension check alone, so an unreadable cell cannot change the verdict -
+  // but the cell is still read while it can be, so the evidence says where the
+  // context was observed. `probeReason` stays null because nothing was missing.
+  if (gate === null) {
+    return sampled.name === null
+      ? { ...base, verdict: 'met' }
+      : { ...base, verdict: 'met', cell, surfaceBlock: sampled.name, light: sampled.light, biome: biomeNameFor(bot, sampled.biomeId) }
+  }
+  if (sampled.name === null) {
+    return { ...base, probeReason: 'no_sensed_surface' }
+  }
+  const biome = biomeNameFor(bot, sampled.biomeId)
+  const measured = {
+    ...base,
+    cell,
+    surfaceBlock: sampled.name,
+    light: sampled.light,
+    biome,
+  }
+  if (sampled.light === null) return { ...measured, probeReason: 'light_unavailable' }
+  return {
+    ...measured,
+    verdict: mobSpawnContextMet(fact, dimension, sampled.light) ? 'met' : 'light_unmet',
+  }
+}
+
+/**
+ * The biome NAME for a numeric biome id the world data exposed, or null.
+ *
+ * The name is corroboration only - the spawn verdict never depends on it, so a
+ * data version that cannot resolve an id yields null instead of a verdict
+ * change. Resolved through the same pinned `minecraft-data` registry the rest of
+ * the sensor uses.
+ */
+function biomeNameFor(bot: Bot, biomeId: number | null): string | null {
+  if (biomeId === null) return null
+  try {
+    const registry = (bot as unknown as { registry?: { biomes?: Record<number, { name?: unknown }> } }).registry
+    const name = registry?.biomes?.[biomeId]?.name
+    return typeof name === 'string' ? name : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -2462,6 +2750,20 @@ function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): B
   }
   out.sort((a, b) => a.distance - b.distance)
   return out
+}
+
+/**
+ * The mob names the tick declared a producer FOR: the active focus item's
+ * `MOB_DROP_PRODUCERS` row, or null when the focus is not a mob drop.
+ *
+ * The focus is read in the same order `buildBlocks` reads it (`input.focusItem`,
+ * then the goal's own target), so the scan and the spawn context can never
+ * disagree about which item the tick is about. Pure.
+ */
+function focusMobProducers(input: SensorInput): ReadonlySet<string> | null {
+  const focus = input.focusItem ?? input.goal.targetItem ?? null
+  if (focus === null) return null
+  return MOB_DROP_PRODUCERS[focus] ?? null
 }
 
 function buildBlocks(
@@ -4015,6 +4317,18 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     inventory,
     entities,
     blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
+    // The spawn-context observations are read ONLY for a focus whose item
+    // declared a mob producer (`ender_pearl` <- enderman, `blaze_rod` <- blaze):
+    // an ordinary tick pays nothing, and the fact exists exactly where the
+    // producer search needs it. A missing dimension string is not a context, so
+    // nothing is sampled for it.
+    ...(focusMobProducers(input) === null
+      ? {}
+      : {
+          spawnContexts: [...(focusMobProducers(input) as ReadonlySet<string>)]
+            .sort()
+            .map((mob) => sampleMobSpawnContext(bot, mob, self.dimension, self.position)),
+        }),
     // The hazard cell sample is carried only while a hazard is actually present:
     // an inactive body's state keeps exactly the shape it had before this fact
     // existed, and the candidate layer reads "no cells" as "no hazard".

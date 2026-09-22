@@ -23,8 +23,8 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, MobSpawnContextObservation, StationEntry, Vec3Json, WorldState } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, MOB_SPAWN_CONTEXTS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, mobSpawnContextFor, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
@@ -1515,6 +1515,75 @@ export type MobDropSourceGapReason =
   /** a producer is sensed, but no offered route reaches it (reachability gate) */
   | 'producer_withheld'
 
+export const MOB_DROP_SOURCE_NONE = 'MOB_DROP_SOURCE_NONE'
+
+export const MOB_SPAWN_CONTEXT = 'MOB_SPAWN_CONTEXT'
+
+/**
+ * WHY a producer search can be grounded at all, from the vanilla spawn-context
+ * rule (`MOB_SPAWN_CONTEXTS`) plus the sensor's own observation of the body's
+ * column:
+ *
+ *   - `met`             the body's context satisfies the rule (right dimension,
+ *                       and where the rule gates on it a measured light level
+ *                       that permits a spawn): a producer SEARCH here is grounded
+ *                       on the live world, not on a guess;
+ *   - `context_unknown` the dimension is right but the context could not be read
+ *                       (`probeReason` names the missing fact): the search is
+ *                       still the grounded next step, and this verdict is the
+ *                       honest statement that it is a search for the context
+ *                       rather than a proven spawn surface;
+ *   - `light_unmet`     right dimension, measured light too high: a search must
+ *                       find a darker surface (still a search, not a dead end);
+ *   - `dimension_unmet` this dimension cannot host the mob at all: a search here
+ *                       cannot ever succeed, so it is NOT grounded.
+ */
+export type MobDropSpawnContextReason = 'met' | 'context_unknown' | 'light_unmet' | 'dimension_unmet'
+
+/**
+ * The SPAWN CONTEXT half of the mob-drop producer fact: "item X's producers are
+ * mobs with spawn context C".
+ *
+ * Before this existed the producer table answered only "which mob drops the
+ * item", the gap said `sensed=0`, and no layer could express whether the body
+ * was standing anywhere the mob could exist. The measured pearl half of M3 is
+ * exactly that shape: the arrival chunk was a soul sand valley
+ * (`soul_soil 630 | soul_sand 287`) - a vanilla enderman environment - and the
+ * body still never met one.
+ */
+export interface MobDropSpawnContext {
+  /** the producer mobs covered by this observation, sorted */
+  mobs: string[]
+  /** the dimension ids the union of those mobs' rules permits */
+  dimensions: string[]
+  /** the body's dimension this tick */
+  dimension: string
+  /** the reasoned verdict for the body's own column */
+  reason: MobDropSpawnContextReason
+  /** the sampled cell, or null when the observation did not read one */
+  cell: Vec3Json | null
+  /** the mob name that produced `reason`, when a rule exists for it */
+  mob: string | null
+  /** the block the spawn surface was read at (the block under the body), or null */
+  surfaceBlock: string | null
+  /** the block-light gate the rule imposes at this dimension, null when none */
+  spawnLightMax: number | null
+  /** the measured block light, or null when the world data could not answer */
+  light: number | null
+  /** the biome name at the sampled cell, when the world exposes one */
+  biome: string | null
+  /** only set on `context_unknown`: which fact was missing */
+  probeReason: MobSpawnContextObservation['probeReason']
+  /**
+   * TRUE when the mechanical layer may ground a SEARCH for the producer from
+   * this context. False ONLY for `dimension_unmet` - the one verdict that says a
+   * search here can never succeed. It is deliberately NOT gated on `met`: a
+   * search that is the way to FIND a valid context is still a grounded route,
+   * and withholding it would leave the body with no step at all.
+   */
+  searchGrounded: boolean
+}
+
 export interface MobDropSourceGap {
   /** the item the active collect goal wants */
   item: string
@@ -1531,9 +1600,89 @@ export interface MobDropSourceGap {
   reason: MobDropSourceGapReason
   /** the grounded next step the mechanical layer can offer right now */
   next: 'explore' | 'escalate'
+  /**
+   * WHERE the producers can exist, from the sensor's own spawn-context
+   * observation. Null when the item's producers have no declared spawn rule at
+   * all - an honest "the context is not expressible", never a silent no-op.
+   */
+  spawnContext: MobDropSpawnContext | null
 }
 
-export const MOB_DROP_SOURCE_NONE = 'MOB_DROP_SOURCE_NONE'
+/**
+ * The spawn-context half of a mob-drop gap, or null when the item's producers
+ * have no declared rule (`MOB_SPAWN_CONTEXTS` absent for all of them: a
+ * production fact the repo does not know, reported as null, never invented).
+ *
+ * Pure. The verdict is read from the SENSOR's observation
+ * (`state.spawnContexts`), never from the offered set, so it can never claim a
+ * spawn surface the sensor did not look at.
+ */
+export function mobDropSpawnContextFor(
+  state: Pick<WorldState, 'self' | 'spawnContexts'>,
+  producers: readonly string[],
+): MobDropSpawnContext | null {
+  const observed = state.spawnContexts ?? []
+  const rules = producers.filter((mob) => mobSpawnContextFor(mob) !== null)
+  if (rules.length === 0) return null
+  const row = observed.find((entry) => rules.includes(entry.mob)) ?? null
+  const dimensions = [...new Set(rules.flatMap((mob) => mobSpawnContextFor(mob)?.dimensions ?? []))].sort()
+  // The verdict is the SENSOR's, verbatim. The gap layer must never recompute it:
+  // a second implementation here could disagree with the observation the run log
+  // actually carries (and did, in this lane's own fixture: it reported `met` for a
+  // body the sensor had measured as `dimension_unmet`).
+  const reason: MobDropSpawnContextReason =
+    row !== null
+      ? row.verdict
+      : dimensions.includes(state.self.dimension)
+        ? 'context_unknown'
+        : 'dimension_unmet'
+  return {
+    mobs: rules.slice().sort(),
+    dimensions,
+    dimension: state.self.dimension,
+    reason,
+    cell: row?.cell ?? null,
+    mob: row?.mob ?? null,
+    surfaceBlock: row?.surfaceBlock ?? null,
+    spawnLightMax: row?.spawnLightMax ?? mobSpawnContextFor(rules[0] as string)?.spawnLightMax ?? null,
+    light: row?.light ?? null,
+    biome: row?.biome ?? null,
+    probeReason: row?.probeReason ?? (row === null ? 'no_sensed_surface' : null),
+    searchGrounded: reason !== 'dimension_unmet',
+  }
+}
+
+/**
+ * `MOB_SPAWN_CONTEXT` - the typed "where this producer can exist, and whether the
+ * live context was actually read" fact.
+ *
+ * Its own line (the `MOB_DROP_SOURCE_NONE` wording is stable and pinned) so a
+ * reader of the run log can tell apart the three shapes that all looked like
+ * `sensed=0` before it existed: the body IS in a valid spawn context and the
+ * search is grounded on live world truth; the context could not be measured, so
+ * the search is a search FOR the context; or this dimension can never host the
+ * producer, so a search here is not grounded at all.
+ */
+export function formatMobSpawnContext(
+  item: string,
+  producers: readonly string[],
+  context: MobDropSpawnContext | null,
+): string {
+  const head = `${MOB_SPAWN_CONTEXT} item=${item} producers=${JSON.stringify([...producers].sort())}`
+  if (context === null) {
+    return `${head} context=none reason=no_declared_spawn_rule mobs=[] dimensions=[] searchGrounded=false`
+  }
+  const cell = context.cell === null ? 'unknown' : `${context.cell.x},${context.cell.y},${context.cell.z}`
+  const light = context.light === null ? 'unknown' : String(context.light)
+  const gate = context.spawnLightMax === null ? 'none' : String(context.spawnLightMax)
+  const probe = context.probeReason === null ? '' : ` probe=${context.probeReason}`
+  return (
+    `${head} mobs=${JSON.stringify(context.mobs)} dimensions=${JSON.stringify(context.dimensions)} ` +
+    `dimension=${context.dimension} reason=${context.reason} cell=${cell} light=${light} ` +
+    `spawnLightMax=${gate} biome=${context.biome ?? 'unknown'}${probe} searchGrounded=${context.searchGrounded}`
+  )
+}
+
 
 export function formatMobDropSourceGap(gap: MobDropSourceGap): string {
   return (
@@ -1566,13 +1715,17 @@ export function mobDropSourceGap(
   // exploration arm's own trigger.
   const explores = offered.some((candidate) => candidate.meta.explore === true)
   const offeredRoutes = explores ? ['explore'] : []
+  const producers = [...producerNames].sort()
   return {
     item: focusItem,
-    producers: [...producerNames].sort(),
+    producers,
     sensed,
     offered: offeredRoutes,
     reason: sensed > 0 ? 'producer_withheld' : 'no_producer_sensed',
     next: explores ? 'explore' : 'escalate',
+    // The context half travels with the gap so a `sensed=0` tick is never again
+    // indistinguishable from "the producer cannot exist here" or "nobody looked".
+    spawnContext: mobDropSpawnContextFor(state, producers),
   }
 }
 
@@ -9414,12 +9567,74 @@ function isBlacklistedMoveTarget(
   return blacklistedMoveTargets?.has(moveFailureKey(state.self.dimension, position)) ?? false
 }
 
+/**
+ * The facts that make an exploration MOVE a PRODUCER SEARCH rather than generic
+ * wandering: which item the active collect focus wants, which mobs produce it,
+ * and whether the live context was actually read.
+ *
+ * This is the search objective a `collect <mob drop>` need grounds when no
+ * producer instance is sensed. It travels on the SAME `meta.explore` MOVEs the
+ * generic exploration arm already offers - the arm is reused, never forked - so
+ * code adds no route, no ranking and no new locomotion mechanism; it only makes
+ * the existing search state WHY it is being run.
+ */
+export interface ProducerSearchFacts {
+  item: string
+  producers: string[]
+  spawnContext: MobDropSpawnContext | null
+}
+
+/** Candidate-meta projection of {@link ProducerSearchFacts}, or nothing when null. */
+function producerSearchMeta(
+  facts: ProducerSearchFacts | null,
+): Record<string, string | boolean | number> {
+  if (facts === null) return {}
+  const context = facts.spawnContext
+  return {
+    producerSearch: true,
+    producerItem: facts.item,
+    producerMobs: JSON.stringify(facts.producers),
+    ...(context === null
+      ? { producerSpawnContext: 'none' }
+      : {
+          producerSpawnContext: context.reason,
+          producerSpawnMobs: JSON.stringify(context.mobs),
+          producerSpawnDimensions: JSON.stringify(context.dimensions),
+          producerSpawnSearchGrounded: context.searchGrounded,
+        }),
+  }
+}
+
+/**
+ * The producer SEARCH facts for the active collect focus, or null when the tick
+ * is not a search for a mob-drop producer.
+ *
+ * Null whenever a producer IS sensed (the hunt route owns that situation and the
+ * search is over), whenever the focus has no declared producer, and whenever the
+ * context verdict says a search here can never succeed (`dimension_unmet`).
+ * Pure.
+ */
+function producerSearchFacts(state: WorldState): ProducerSearchFacts | null {
+  const current = state.goalQueue?.current ?? null
+  const goalKind = current?.kind ?? 'collect'
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem === null || goalKind !== 'collect') return null
+  const producerNames = MOB_DROP_PRODUCERS[focusItem]
+  if (producerNames === undefined) return null
+  if (state.entities.some((entity) => producerNames.has(entity.name))) return null
+  const producers = [...producerNames].sort()
+  const spawnContext = mobDropSpawnContextFor(state, producers)
+  if (spawnContext !== null && !spawnContext.searchGrounded) return null
+  return { item: focusItem, producers, spawnContext }
+}
+
 function exploreMoveCandidate(
   state: WorldState,
   options: CandidateOptions,
   spot: Vec3Json,
   label: string,
   logRoute: LogRouteMode | null,
+  producerSearch: ProducerSearchFacts | null = null,
 ): Candidate {
   return {
     id: `MOVE:${blockId('p', spot)}`,
@@ -9443,6 +9658,12 @@ function exploreMoveCandidate(
       // gap reads it to report `next=explore` instead of `next=escalate`.
       explore: true,
       ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
+      // The producer SEARCH facts, when this search exists because the active
+      // collect focus declared a mob producer nobody has sensed yet. Fully
+      // generic across mob drops (the facts come from `MOB_DROP_PRODUCERS` and
+      // `MOB_SPAWN_CONTEXTS`, never from a mob/item name here) and honest about
+      // whether the context was actually measured.
+      ...producerSearchMeta(producerSearch),
     },
   }
 }
@@ -9506,6 +9727,11 @@ function exploreFallbackCandidates(
   )
   if (best === null) return []
   const logRoute = focusWantsLog(goalKind, focusItem) ? 'explore' : null
+  // A `collect <mob drop>` focus with no sensed producer turns these same
+  // frontier MOVEs into a producer SEARCH: the route is unchanged (reused, not
+  // forked), and the facts say which item/mobs the search is for and whether the
+  // body's own spawn context was actually measured.
+  const producerSearch = producerSearchFacts(state)
   const out = [
     exploreMoveCandidate(
       state,
@@ -9513,6 +9739,7 @@ function exploreFallbackCandidates(
       best,
       moveLabel(best, 'walk toward unexplored terrain', state.self.position),
       logRoute,
+      producerSearch,
     ),
   ]
   const bestKey = blockId('p', best)
@@ -9540,6 +9767,7 @@ function exploreFallbackCandidates(
         spot,
         moveLabel(spot, 'walk toward unexplored terrain', state.self.position),
         logRoute,
+        producerSearch,
       ),
     )
   }

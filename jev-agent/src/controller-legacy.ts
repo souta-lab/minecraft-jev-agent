@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
@@ -2094,6 +2094,8 @@ export class JevController {
    * enderman was invisible in the run log).
    */
   private lastMobDropGapKey: string | null = null
+  /** Signature of the last `MOB_SPAWN_CONTEXT` line, so the context logs on a change. */
+  private lastMobSpawnContextKey: string | null = null
   /** Signature of the last `COMBAT_KIT_GAP` line, so the gap logs on a change. */
   private lastCombatKitGapLine: string | null = null
   /** Signature of the last `THREAT_RANGED_UNANSWERED` line (dedup, not a state). */
@@ -2967,6 +2969,7 @@ export class JevController {
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
       this.logMobDropSourceGap(grounded.mobDropGap)
+      this.logMobSpawnContext(grounded.mobDropGap)
       this.logCombatKitGap(grounded.combatKitGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.noteColumnDig(grounded.candidates)
@@ -10370,6 +10373,31 @@ export class JevController {
     this.lastMobDropGapKey = key
     if (gap === null) return
     this.logger.warn('agent', formatMobDropSourceGap(gap), { ...gap, goal: this.currentGoalKey() }, this.tickCounter)
+  }
+
+  /**
+   * The typed "where this producer can exist, and whether the live context was
+   * actually read" fact (`MOB_SPAWN_CONTEXT item=ender_pearl ... reason=met|context_unknown|light_unmet|dimension_unmet ... searchGrounded=true`).
+   *
+   * Emitted whenever the producer search is live and its spawn context could NOT
+   * be positively confirmed, so the three shapes that all looked like
+   * `MOB_DROP_SOURCE_NONE ... sensed=0` in the measured M3 run are now
+   * distinguishable: a valid spawn context ahead, a context nobody could
+   * measure, and a dimension that can never host the producer. A `met` verdict
+   * is already carried on the offered search MOVE, so it is not mirrored again
+   * here. Deduped per distinct line; descriptive only.
+   */
+  private logMobSpawnContext(gap: MobDropSourceGap | null): void {
+    if (gap === null) {
+      this.lastMobSpawnContextKey = null
+      return
+    }
+    const context = gap.spawnContext
+    if (context !== null && context.reason === 'met') return
+    const line = formatMobSpawnContext(gap.item, gap.producers, context)
+    if (line === this.lastMobSpawnContextKey) return
+    this.lastMobSpawnContextKey = line
+    this.logger.warn('agent', line, { item: gap.item, producers: gap.producers, spawnContext: context, goal: this.currentGoalKey() }, this.tickCounter)
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */
