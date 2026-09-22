@@ -22,6 +22,11 @@
 import type { Epistemic, ProjectionId, SemanticProjection } from './contract.ts'
 import { UNKNOWN } from './contract.ts'
 import { assertPlainData, deepFreeze, epistemicEntry } from './canonical.ts'
+import {
+  LANDED_437_PROJECTION_ID,
+  LANDED_437_PROJECTION_MODEL_FIELDS,
+  LANDED_437_PROJECTION_VERSION,
+} from './links437.ts'
 
 // Projection ids referenced by the head registry (#438 section 4). Exported so
 // the registry and this schema list cannot drift apart.
@@ -93,6 +98,18 @@ export const PROJECTION_SCHEMAS: readonly ProjectionSchema[] = [
     owner: 'buddy-driver/planner.ts',
     description: 'PlannerBrain compact System2 state (compactSystem2State()).',
     fields: ['objective', 'missionFacts', 'frontier', 'capabilities', 'inventoryFacts', 'recentFailures'],
+  },
+  {
+    // The #437 projection that is now on main. It is registered here so the
+    // harness can carry it VERBATIM (`projectionModelView(buildJevSemanticProjection(...))`)
+    // with a declared, closed field set, instead of a second parallel contract.
+    // The field list is drift-tested against jev-agent/src/jevSemanticProjection.ts.
+    projectionId: LANDED_437_PROJECTION_ID,
+    version: LANDED_437_PROJECTION_VERSION,
+    owner: 'jev-agent/src/jevSemanticProjection.ts',
+    description:
+      '#437 jev-semantic-projection/v1 model view: banded/compacted semantic facts only, `counts` excluded as evidence.',
+    fields: LANDED_437_PROJECTION_MODEL_FIELDS,
   },
 ]
 
