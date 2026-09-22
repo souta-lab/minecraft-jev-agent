@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { bodySurvivalFacts, formatThreatClear, formatThreatNearby, formatThreatNoEscape, MELEE_THREAT_REACH, ThreatTracker, weaponFacts } from './threat.ts'
 import { formatArmorRefusal } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
@@ -1091,6 +1091,19 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
   'RESOURCE_SOURCE_NONE',
+  // The M3 producer side of the same observability rule. A pearl need with no
+  // sensed enderman produced MOVEs and nothing else in the run log: no marker
+  // named the need, its producer mob, the absence of any sensed instance, or the
+  // grounded search the tick was offering. `MOB_DROP_SOURCE_NONE` is that fact.
+  'MOB_DROP_SOURCE_NONE',
+  // A hunt is a bounded Skill; how it ended is run-scoped evidence, not a
+  // private executor line. The measured live shape (an enderman that left the
+  // tracked set before the first swing) reached only `status=failed`, so the
+  // mechanical cause was unrecoverable from the log.
+  'HUNT_END',
+  'HUNT_RETARGET',
+  'HUNT_TARGET_LOST',
+  'HUNT_REACQUIRE_EXHAUSTED',
   // Starvation is a run-scoped survival fact, not a private diagnostic. The
   // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
   // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and
@@ -1674,6 +1687,12 @@ export class JevController {
   private lastSourceGapKey: string | null = null
   /** Dedupe key for the last mirrored `FOOD_SOURCE_NONE` line. */
   private lastFoodSourceGapKey: string | null = null
+  /**
+   * Dedupe key for the last mirrored `MOB_DROP_SOURCE_NONE` line (the M3 pearl
+   * half had NO producer-side marker at all, so a pearl need with no sensed
+   * enderman was invisible in the run log).
+   */
+  private lastMobDropGapKey: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -2429,6 +2448,7 @@ export class JevController {
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
+      this.logMobDropSourceGap(grounded.mobDropGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.noteColumnDig(grounded.candidates)
       this.noteFoodHabitat(grounded.foodHabitatRefusal)
@@ -7676,6 +7696,25 @@ export class JevController {
     this.lastFoodSourceGapKey = key
     if (gap === null) return
     this.logger.warn('agent', formatFoodSourceGap(gap), { ...gap, goal: this.currentGoalKey() }, this.tickCounter)
+  }
+
+  /**
+   * The typed "the active collect goal needs a MOB DROP and no producer route is
+   * on offer" fact
+   * (`MOB_DROP_SOURCE_NONE item=ender_pearl reason=no_producer_sensed producers=["enderman"] sensed=0 offered=["explore"] next=explore`).
+   *
+   * This is the producer-side half of the M3 pearl gap: the run log had no line
+   * that said the pearl need existed, that its producer is an enderman, that no
+   * enderman was sensed, and that the tick was offering the generic exploration
+   * arm instead. Descriptive only - it names the missing affordance and the
+   * grounded next step, never a chosen action. Deduped per distinct line.
+   */
+  private logMobDropSourceGap(gap: MobDropSourceGap | null): void {
+    const key = gap === null ? null : formatMobDropSourceGap(gap)
+    if (key === this.lastMobDropGapKey) return
+    this.lastMobDropGapKey = key
+    if (gap === null) return
+    this.logger.warn('agent', formatMobDropSourceGap(gap), { ...gap, goal: this.currentGoalKey() }, this.tickCounter)
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */

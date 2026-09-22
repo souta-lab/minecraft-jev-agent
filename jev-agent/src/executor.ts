@@ -207,6 +207,17 @@ export interface ExecutionResult {
    */
   targetHealthDelta?: number
   /**
+   * Why a goal-directed hunt (`goalDrop` ATTACK) ended, and what the bounded
+   * re-acquisition did. Set only on a hunt: an ordinary ATTACK has no producer
+   * contract. `untracked`/`no_reacquire` name the teleport/despawn shape, so a
+   * hunt that ends with nothing is never a silent end.
+   */
+  huntEnd?: HuntEndReason
+  /** how many times the bounded hunt adopted another sensed producer of the same mob */
+  huntReacquired?: number
+  /** the target's last OBSERVED position during the hunt (the only bearing a teleport leaves) */
+  huntLastKnown?: Vec3Json
+  /**
    * A RETRIEVE proved the remaining feet-distance to the remembered target
    * shrank by the meaningful epsilon. This is completion evidence the truth
    * layer may trust; `progressed` (a vertical chunk step) never is.
@@ -315,6 +326,14 @@ export interface ExecutorOptions {
   actuationPort?: ActuationPort
   packetStepMs: number
   maxStepsPerWaypoint: number
+  /**
+   * Bounded re-acquisition window for a goal-directed hunt (see
+   * `HUNT_REACQUIRE_MS`). Optional so a fixture can shorten it; the hunt lease
+   * itself still bounds the closed loop.
+   */
+  huntReacquireMs?: number
+  /** The local action envelope a hunt re-acquires inside (`HUNT_REACQUIRE_RADIUS`). */
+  huntReacquireRadius?: number
   hooks?: ExecutorHooks
 }
 
@@ -886,6 +905,119 @@ export const ATTACK_LEASE_MS = 2_200
 /** Goal-directed mob hunts are bounded Skills long enough to defeat an enderman. */
 export const GOAL_HUNT_LEASE_MS = 10_000
 export const ATTACK_COOLDOWN_MS = 500
+
+/**
+ * Bounded RE-ACQUISITION for a goal-directed hunt (`goalDrop` ATTACK).
+ *
+ * Measured live (run-muc3qbug-18vg3 lineage, 2026-09-21T17:07-17:08,
+ * `ATTACK:e1758` an enderman): the sensor offered the producer, Jev chose the
+ * hunt, and the lease ended after 1.0-2.0 s with ZERO swings because the target
+ * had already left `bot.entities` - the enderman teleported out of tracking
+ * range between the decision and the first swing. The lease was restarted five
+ * times and never re-acquired: the mob the hunt had chosen was gone, so the
+ * skill ended `failed/out_of_reach` with nothing, and the next tick had to
+ * notice a *new* enderman from scratch.
+ *
+ * This is the mechanical loop that was missing. Within the SAME bounded lease
+ * the executor now:
+ *
+ *   1. adopts another SENSED entity of the SAME `targetName` when the chosen
+ *      target is no longer tracked (or has moved outside the local action
+ *      envelope) - the semantic action ("hunt <mob> for <item>") is unchanged,
+ *      so this stays mechanics, not a second WHICH;
+ *   2. otherwise re-approaches the target's LAST OBSERVED position for a bounded
+ *      window and keeps re-scanning there, which is the only grounded bearing a
+ *      teleporting mob leaves behind.
+ *
+ * Both steps happen INSIDE `GOAL_HUNT_LEASE_MS`, so the closed loop is bounded
+ * by construction. Only ever the SAME mob name is adopted: code never widens
+ * the hunt to a different producer.
+ */
+export const HUNT_REACQUIRE_MS = 2_500
+/** The mob must be inside this envelope for the hunt to close inside one lease. */
+export const HUNT_REACQUIRE_RADIUS = 24
+/** Re-scan / re-approach poll period. */
+export const HUNT_REACQUIRE_POLL_MS = 150
+/**
+ * How long the body may stop closing distance to a still-tracked target before
+ * the follow goal is re-issued. A stock `GoalFollow` that hit `path_reset stuck`
+ * otherwise leaves the body standing while the distance never changes.
+ */
+export const HUNT_FOLLOW_STALL_MS = 1_500
+
+/**
+ * Why a goal-directed hunt ended. Typed and honest: "the target teleported" is
+ * NOT observable, so `untracked` is the fact (the entity left the client's
+ * tracked set - teleport out of range, despawn or chunk unload) and
+ * `no_reacquire` says the bounded re-acquisition could not replace it.
+ */
+export type HuntEndReason =
+  /** the server `entityDead` event proved the target died during this lease */
+  | 'killed'
+  /** the target left the tracked entity set with no death event */
+  | 'untracked'
+  /** the target was untracked and the bounded re-acquisition found no replacement */
+  | 'no_reacquire'
+  /** the target stayed tracked but never entered melee range inside the lease */
+  | 'out_of_range'
+  /** swings landed, the target survived, and the bounded lease ran out */
+  | 'lease_expired'
+
+/** The exact `HUNT_END reason=...` line for one bounded hunt. */
+export function formatHuntEnd(input: {
+  actionId: string
+  targetName: string | null
+  goalDrop: string
+  reason: HuntEndReason
+  swings: number
+  hits: number
+  reacquired: number
+  lastKnown: Vec3Json
+  ms: number
+}): string {
+  return (
+    `HUNT_END reason=${input.reason} actionId=${input.actionId} target=${input.targetName ?? 'unknown'} ` +
+    `for=${input.goalDrop} swings=${input.swings} hits=${input.hits} reacquired=${input.reacquired} ` +
+    `lastKnown=${input.lastKnown.x},${input.lastKnown.y},${input.lastKnown.z} ms=${input.ms}`
+  )
+}
+
+/** The exact `HUNT_RETARGET ...` line when the bounded hunt adopts another producer. */
+export function formatHuntRetarget(input: {
+  actionId: string
+  targetName: string | null
+  goalDrop: string
+  fromEntityId: number
+  toEntityId: number
+  reason: 'untracked' | 'out_of_range'
+  distance: number
+  attempt: number
+}): string {
+  return (
+    `HUNT_RETARGET reason=${input.reason} actionId=${input.actionId} target=${input.targetName ?? 'unknown'} ` +
+    `for=${input.goalDrop} from=e${input.fromEntityId} to=e${input.toEntityId} ` +
+    `distance=${Math.round(input.distance * 100) / 100}m attempt=${input.attempt}`
+  )
+}
+
+/** The exact `HUNT_TARGET_LOST ...` line when the bounded re-acquisition is exhausted. */
+export function formatHuntTargetLost(input: {
+  actionId: string
+  targetName: string | null
+  goalDrop: string
+  entityId: number
+  swings: number
+  hits: number
+  /** how many replacements were actually ADOPTED (attempts are the `polls=` field of HUNT_REACQUIRE_EXHAUSTED) */
+  reacquired: number
+  lastKnown: Vec3Json
+}): string {
+  return (
+    `HUNT_TARGET_LOST actionId=${input.actionId} entity=e${input.entityId} target=${input.targetName ?? 'unknown'} ` +
+    `for=${input.goalDrop} swings=${input.swings} hits=${input.hits} reacquired=${input.reacquired} ` +
+    `lastKnown=${input.lastKnown.x},${input.lastKnown.y},${input.lastKnown.z} -> typed non-completion, not a silent end`
+  )
+}
 
 /**
  * #391: how a swung lease proves it CONNECTED. Issuing `bot.attack()` is an
@@ -3769,8 +3901,21 @@ export class Executor {
     const goalDrop = readMetaString(candidate, 'goalDrop')
     const beforeDropCount = this.countItem(goalDrop)
     const leaseMs = goalDrop === null ? ATTACK_LEASE_MS : GOAL_HUNT_LEASE_MS
+    const huntRadius = this.options.huntReacquireRadius ?? HUNT_REACQUIRE_RADIUS
+    /**
+     * The hunt's CURRENT target id. A goal-directed hunt may adopt another SENSED
+     * entity of the same mob when the chosen one teleports out of tracking range
+     * (`reacquireHuntTarget`), so the listeners below track this mutable id and
+     * not the candidate's original one. An ordinary ATTACK never re-acquires: its
+     * semantic content is "answer THIS threat", which a different entity is not.
+     */
+    let huntTargetId = entityId
+    let huntReacquired = 0
+    let huntLost = false
     let attacks = 0
     let following = false
+    let followBestDistance = Number.POSITIVE_INFINITY
+    let followClosingAt = Date.now()
     let entityDefeated = false
     // #391: hits are observed, never assumed. `hits` counts damage events on
     // THIS target attributable to THIS lease; `lastSwingAt` is the fail-closed
@@ -3781,17 +3926,17 @@ export class Executor {
     let healthLast: number | null = null
     let lastTarget = candidate.target ?? { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z }
     const onEntityDead = (entity: Entity): void => {
-      if (entity.id !== entityId) return
+      if (entity.id !== huntTargetId) return
       entityDefeated = true
       lastTarget = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
-      this.logger.info('executor', `ATTACK_TARGET_DEAD action#${epoch} entity=${entityId}`, {
+      this.logger.info('executor', `ATTACK_TARGET_DEAD action#${epoch} entity=${huntTargetId}`, {
         actionId: candidate.id,
-        targetEntityId: entityId,
+        targetEntityId: huntTargetId,
         goalDrop: goalDrop ?? 'none',
       })
     }
     const onTargetHurt = (entity: Entity, source?: Entity): void => {
-      if (entity.id !== entityId) return
+      if (entity.id !== huntTargetId) return
       const health = readEntityHealth(entity)
       if (health !== null) healthLast = health
       // The server attributes the cause: `source` is the entity that dealt the
@@ -3804,10 +3949,10 @@ export class Executor {
       hits += 1
       this.logger.info(
         'executor',
-        `ATTACK_HIT action#${epoch} entity=${entityId} hits=${hits} attribution=${sourcedToSelf ? 'source' : 'swing-window'} targetHealth=${health ?? 'unknown'}`,
+        `ATTACK_HIT action#${epoch} entity=${huntTargetId} hits=${hits} attribution=${sourcedToSelf ? 'source' : 'swing-window'} targetHealth=${health ?? 'unknown'}`,
         {
           actionId: candidate.id,
-          targetEntityId: entityId,
+          targetEntityId: huntTargetId,
           hits,
           attribution: sourcedToSelf ? 'source' : 'swing-window',
           targetHealth: health,
@@ -3817,11 +3962,45 @@ export class Executor {
     this.bot.on('entityDead', onEntityDead)
     this.bot.on('entityHurt', onTargetHurt)
     const deadline = Date.now() + leaseMs
+    const stopFollowing = (): void => {
+      if (!following) return
+      this.bot.pathfinder?.setGoal(null)
+      following = false
+    }
     try {
       while (Date.now() < deadline && !entityDefeated) {
         this.ensureOwned(epoch, signal)
-        const entity = this.bot.entities[entityId]
-        if (entity === undefined) break
+        const entity = this.bot.entities[huntTargetId]
+        if (entity === undefined) {
+          // The chosen producer left the client's tracked set: the measured
+          // teleport shape (an enderman that blinks out of tracking range between
+          // the decision and the first swing, so the lease ended with ZERO swings
+          // and was restarted from scratch - live `ATTACK:e1758`, 5 attempts).
+          // For a HUNT the mob name is the semantic content Jev chose, so the
+          // bounded re-acquisition below may adopt another sensed entity of the
+          // same mob, or re-approach the last observed position. An ordinary
+          // ATTACK has no such contract and ends here as before.
+          if (goalDrop === null) break
+          stopFollowing()
+          this.setPhase(candidate, epoch, 'reacquiring-target')
+          const adopted = await this.reacquireHuntTarget({
+            candidate,
+            epoch,
+            signal,
+            deadline,
+            lastKnown: lastTarget,
+            lostEntityId: huntTargetId,
+            attempt: huntReacquired + 1,
+            radius: huntRadius,
+          })
+          if (adopted === null) {
+            huntLost = true
+            break
+          }
+          huntTargetId = adopted
+          huntReacquired += 1
+          continue
+        }
         lastTarget = { x: entity.position.x, y: entity.position.y, z: entity.position.z }
         // SAFE: an ATTACK lease is a body-holding action. Following a target into
         // water is how the measured death happened (2026-09-21T16:59:34.792Z:
@@ -3840,19 +4019,66 @@ export class Executor {
           entity.position.z - this.bot.entity.position.z,
         )
         if (distanceToTarget > MELEE_ATTACK_RANGE) {
+          // A tracked producer outside the local action envelope cannot be closed
+          // inside this lease (a teleporting enderman keeps its id but lands
+          // 20-40 blocks away). Adopt the nearest SAME-mob entity inside the
+          // envelope when there is one; otherwise keep closing on this one.
+          if (goalDrop !== null && distanceToTarget > huntRadius && entity.name !== undefined) {
+            const closer = this.nearestHuntTarget(entity.name, huntRadius, lastTarget, huntTargetId)
+            if (closer !== null) {
+              this.logger.info(
+                'executor',
+                formatHuntRetarget({
+                  actionId: candidate.id,
+                  targetName: entity.name,
+                  goalDrop,
+                  fromEntityId: huntTargetId,
+                  toEntityId: closer.id,
+                  reason: 'out_of_range',
+                  distance: closer.distance,
+                  attempt: huntReacquired + 1,
+                }),
+                {
+                  actionId: candidate.id,
+                  target: entity.name,
+                  goalDrop,
+                  fromEntityId: huntTargetId,
+                  toEntityId: closer.id,
+                  distance: closer.distance,
+                  reason: 'out_of_range',
+                  attempt: huntReacquired + 1,
+                },
+              )
+              huntTargetId = closer.id
+              huntReacquired += 1
+              stopFollowing()
+              continue
+            }
+          }
           if (!following && this.bot.pathfinder !== undefined) {
             this.setPhase(candidate, epoch, 'closing-to-melee-range')
             this.bot.pathfinder.setGoal(new goals.GoalFollow(entity, MELEE_ATTACK_RANGE - 0.2), true)
             following = true
+            followBestDistance = distanceToTarget
+            followClosingAt = Date.now()
+          } else if (following && goalDrop !== null) {
+            // A stock `GoalFollow` that hit `path_reset stuck` leaves the body
+            // standing while the distance never changes. Re-issue the follow goal
+            // after a bounded stall; the lease deadline still bounds the loop.
+            if (distanceToTarget < followBestDistance - 0.5) {
+              followBestDistance = distanceToTarget
+              followClosingAt = Date.now()
+            } else if (Date.now() - followClosingAt > HUNT_FOLLOW_STALL_MS) {
+              this.bot.pathfinder?.setGoal(null)
+              this.bot.pathfinder?.setGoal(new goals.GoalFollow(entity, MELEE_ATTACK_RANGE - 0.2), true)
+              followClosingAt = Date.now()
+            }
           }
           await delay(100, signal)
           continue
         }
 
-        if (following) {
-          this.bot.pathfinder?.setGoal(null)
-          following = false
-        }
+        stopFollowing()
         this.setPhase(candidate, epoch, goalDrop === null ? 'attacking' : `hunting-for-${goalDrop}`)
         await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
         this.ensureOwned(epoch, signal)
@@ -3861,7 +4087,7 @@ export class Executor {
         lastSwingAt = Date.now()
         this.logger.info('executor', `ATTACK_LEASE action#${epoch} attempt=${attacks} hits=${hits} distance=${Math.round(distanceToTarget * 100) / 100}m`, {
           actionId: candidate.id,
-          targetEntityId: entityId,
+          targetEntityId: huntTargetId,
           distance: distanceToTarget,
           attempt: attacks,
           hits,
@@ -3872,9 +4098,85 @@ export class Executor {
     } finally {
       this.bot.removeListener('entityDead', onEntityDead)
       this.bot.removeListener('entityHurt', onTargetHurt)
-      if (following) this.bot.pathfinder?.setGoal(null)
+      stopFollowing()
     }
-    if (attacks === 0) throw new ExecutorError('out_of_reach', `could not reach ${candidate.targetName ?? entityId} during ATTACK lease`)
+
+    // Why the bounded hunt ended. `untracked` is the honest fact for the
+    // teleport/despawn/out-of-tracking-range shape ("teleported" is not directly
+    // observable); `no_reacquire` says the bounded re-acquisition could not
+    // replace it. Computed from the same variables the loop acted on, so the
+    // marker can never disagree with what happened.
+    const huntEnd: HuntEndReason | null =
+      goalDrop === null
+        ? null
+        : entityDefeated
+          ? 'killed'
+          : huntLost
+            ? 'no_reacquire'
+            : this.bot.entities[huntTargetId] === undefined
+              ? 'untracked'
+              : attacks === 0
+                ? 'out_of_range'
+                : 'lease_expired'
+    if (goalDrop !== null && huntEnd !== null) {
+      this.logger.info(
+        'executor',
+        formatHuntEnd({
+          actionId: candidate.id,
+          targetName: candidate.targetName,
+          goalDrop,
+          reason: huntEnd,
+          swings: attacks,
+          hits,
+          reacquired: huntReacquired,
+          lastKnown: lastTarget,
+          ms: Date.now() - startedAt,
+        }),
+        {
+          actionId: candidate.id,
+          target: candidate.targetName ?? 'unknown',
+          goalDrop,
+          reason: huntEnd,
+          swings: attacks,
+          hits,
+          reacquired: huntReacquired,
+        },
+      )
+    }
+    if (huntEnd === 'no_reacquire' || huntEnd === 'untracked') {
+      this.logger.warn(
+        'executor',
+        formatHuntTargetLost({
+          actionId: candidate.id,
+          targetName: candidate.targetName,
+          goalDrop: goalDrop ?? 'unknown',
+          entityId: huntTargetId,
+          swings: attacks,
+          hits,
+          reacquired: huntReacquired,
+          lastKnown: lastTarget,
+        }),
+        {
+          actionId: candidate.id,
+          target: candidate.targetName ?? 'unknown',
+          goalDrop: goalDrop ?? 'unknown',
+          entityId: huntTargetId,
+          swings: attacks,
+          hits,
+          reacquired: huntReacquired,
+          lastKnown: { x: lastTarget.x, y: lastTarget.y, z: lastTarget.z },
+        },
+      )
+    }
+
+    // A plain ATTACK that never reached its target keeps the historical typed
+    // `out_of_reach` error. A HUNT does not: its contract is the kill, so failing
+    // to defeat the producer (including being teleported away from before the
+    // first swing) is the same typed non-completion as any other unmet hunt
+    // post-condition, carrying `huntEnd` as the mechanical cause.
+    if (goalDrop === null && attacks === 0) {
+      throw new ExecutorError('out_of_reach', `could not reach ${candidate.targetName ?? entityId} during ATTACK lease`)
+    }
 
     // Typed lease evidence (#391). `entityDead` inside the lease is terminal
     // proof that a damaging blow landed; the attributable hurt count is the
@@ -3884,11 +4186,24 @@ export class Executor {
       healthBefore !== null && healthLast !== null ? Math.max(0, Math.round((healthBefore - healthLast) * 100) / 100) : 0
     const damageObserved = hits > 0 || entityDefeated || targetHealthDelta > 0
     const attackEvidence = { attackHits: hits, damageObserved, targetHealthDelta }
+    // Honest telemetry for the whole hunt path, on every hunt outcome: why it
+    // ended, how often the bounded re-acquisition had to replace the target, and
+    // where the target was last observed. Additive; never a substitute for
+    // `verified` or `entityDefeated`.
+    const huntEvidence =
+      goalDrop === null
+        ? {}
+        : {
+            huntEnd: huntEnd ?? 'lease_expired',
+            huntReacquired,
+            huntLastKnown: { x: lastTarget.x, y: lastTarget.y, z: lastTarget.z },
+          }
 
     if (goalDrop !== null) {
-      // The mob despawned, escaped or was never killed: the hunt's typed
-      // post-condition (`isMobHuntPostconditionMet`) is unmet, so this is a
-      // non-completion rather than a silent "the mob disappeared" success.
+      // The mob despawned, escaped, teleported out of tracking range or was never
+      // killed: the hunt's typed post-condition (`isMobHuntPostconditionMet`) is
+      // unmet, so this is a non-completion rather than a silent "the mob
+      // disappeared" success. `huntEnd` names the mechanical cause.
       if (!isMobHuntPostconditionMet(entityDefeated)) {
         return this.buildResult(
           candidate,
@@ -3896,7 +4211,7 @@ export class Executor {
           startedAt,
           'failed',
           'target-not-defeated',
-          `attacked ${candidate.targetName ?? entityId} ${attacks} time(s) with ${hits} hit(s) but no entityDead event was observed`,
+          `hunt for ${goalDrop} ended reason=${huntEnd ?? 'lease_expired'}: attacked ${candidate.targetName ?? entityId} ${attacks} time(s) with ${hits} hit(s), no entityDead event observed, reacquired=${huntReacquired}`,
           'verify_failed',
           {
             verified: false,
@@ -3906,6 +4221,7 @@ export class Executor {
             goalItemCount: this.countItem(goalDrop),
             entityDefeated: false,
             ...attackEvidence,
+            ...huntEvidence,
           },
         )
       }
@@ -3929,6 +4245,7 @@ export class Executor {
           goalItemCount: report.goalItemCount,
           entityDefeated: true,
           ...attackEvidence,
+          ...huntEvidence,
         },
       )
       result.yieldItem = goalDrop
@@ -3992,6 +4309,145 @@ export class Executor {
         ...attackEvidence,
       },
     )
+  }
+
+  /**
+   * The nearest SENSED entity of `name` inside `radius` of the body, excluding
+   * the id the hunt already lost. Deterministic tie-break (distance, then id) so
+   * a fixture can assert which producer was adopted.
+   *
+   * This is CAN/mechanics only: it answers "is there another grounded instance of
+   * the mob the hunt already chose". It never widens the hunt to a different mob
+   * name, so WHICH producer to hunt stays Jev's decision.
+   */
+  private nearestHuntTarget(
+    name: string,
+    radius: number,
+    near: Vec3Json,
+    excludeId: number,
+  ): { id: number; distance: number } | null {
+    const self = this.bot.entity
+    if (self === undefined) return null
+    let best: { id: number; distance: number } | null = null
+    for (const candidate of Object.values(this.bot.entities) as Entity[]) {
+      if (candidate === undefined || candidate === null) continue
+      if (candidate.id === excludeId) continue
+      if (candidate.name !== name) continue
+      const position = candidate.position
+      if (position === undefined || position === null) continue
+      const distance = Math.hypot(
+        position.x - self.position.x,
+        position.y - self.position.y,
+        position.z - self.position.z,
+      )
+      if (distance > radius) continue
+      if (
+        best === null ||
+        distance < best.distance ||
+        (distance === best.distance && candidate.id < best.id)
+      ) {
+        best = { id: candidate.id, distance }
+      }
+    }
+    return best
+  }
+
+  /**
+   * Bounded re-acquisition of a goal-directed hunt's producer (`HUNT_REACQUIRE_*`).
+   *
+   * Called when the chosen target left `bot.entities`. Two grounded moves, in
+   * order, inside ONE bounded window that never outlives the hunt lease:
+   *
+   *   1. adopt another SENSED entity of the SAME mob inside the local action
+   *      envelope (the mob name is what Jev chose; the instance is mechanics);
+   *   2. otherwise walk back to the target's LAST OBSERVED position and keep
+   *      re-scanning there. A teleporting mob leaves no other bearing, and the
+   *      last sighting is the only cell where a re-sighting is grounded.
+   *
+   * Returns the adopted entity id, or null when the bounded window is spent. The
+   * caller turns null into the typed `HUNT_TARGET_LOST` / `huntEnd=no_reacquire`
+   * outcome, so this never ends a hunt silently.
+   */
+  private async reacquireHuntTarget(input: {
+    candidate: Candidate
+    epoch: number
+    signal: AbortSignal
+    deadline: number
+    lastKnown: Vec3Json
+    lostEntityId: number
+    attempt: number
+    radius: number
+  }): Promise<number | null> {
+    const budgetMs = this.options.huntReacquireMs ?? HUNT_REACQUIRE_MS
+    const windowEnd = Math.min(input.deadline, Date.now() + Math.max(0, budgetMs))
+    const name = input.candidate.targetName
+    if (name === null) return null
+    const goalDrop = readMetaString(input.candidate, 'goalDrop') ?? 'unknown'
+    let approachIssued = false
+    let polls = 0
+    try {
+      while (Date.now() < windowEnd) {
+        this.ensureOwned(input.epoch, input.signal)
+        const found = this.nearestHuntTarget(name, input.radius, input.lastKnown, input.lostEntityId)
+        if (found !== null) {
+          this.logger.info(
+            'executor',
+            formatHuntRetarget({
+              actionId: input.candidate.id,
+              targetName: name,
+              goalDrop,
+              fromEntityId: input.lostEntityId,
+              toEntityId: found.id,
+              reason: 'untracked',
+              distance: found.distance,
+              attempt: input.attempt,
+            }),
+            {
+              actionId: input.candidate.id,
+              target: name,
+              goalDrop,
+              fromEntityId: input.lostEntityId,
+              toEntityId: found.id,
+              distance: found.distance,
+              reason: 'untracked',
+              attempt: input.attempt,
+            },
+          )
+          return found.id
+        }
+        if (!approachIssued && this.bot.pathfinder !== undefined) {
+          // Re-approach the last observed position: bounded by construction, and
+          // cleared in the `finally` so an aborted/submerged re-acquire can never
+          // leave the body walking after the skill has ended.
+          this.setPhase(input.candidate, input.epoch, 're-approaching-last-known')
+          this.bot.pathfinder.setGoal(
+            new goals.GoalNear(input.lastKnown.x, input.lastKnown.y, input.lastKnown.z, 2),
+            false,
+          )
+          approachIssued = true
+        }
+        // SAFE: the re-approach is a body-holding walk, so it obeys the same
+        // breath boundary as the melee chase (the measured drowning death).
+        this.requireBreath(input.candidate, input.lastKnown, 're-acquiring a hunt target')
+        polls += 1
+        await delay(HUNT_REACQUIRE_POLL_MS, input.signal)
+      }
+    } finally {
+      if (approachIssued) this.bot.pathfinder?.setGoal(null)
+    }
+    this.logger.info(
+      'executor',
+      `HUNT_REACQUIRE_EXHAUSTED actionId=${input.candidate.id} target=${name} for=${goalDrop} lost=e${input.lostEntityId} polls=${polls} lastKnown=${input.lastKnown.x},${input.lastKnown.y},${input.lastKnown.z}`,
+      {
+        actionId: input.candidate.id,
+        target: name,
+        goalDrop,
+        lostEntityId: input.lostEntityId,
+        polls,
+        lastKnown: { x: input.lastKnown.x, y: input.lastKnown.y, z: input.lastKnown.z },
+      },
+    )
+    return null
   }
 
   private async runWait(
@@ -6351,6 +6807,9 @@ export class Executor {
       attackHits?: number
       damageObserved?: boolean
       targetHealthDelta?: number
+      huntEnd?: HuntEndReason
+      huntReacquired?: number
+      huntLastKnown?: Vec3Json
     },
   ): ExecutionResult {
     return {

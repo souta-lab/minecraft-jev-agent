@@ -661,6 +661,16 @@ export interface GroundedCandidatesResult {
    * affordance instead of leaving a silent food-less WAIT.
    */
   foodGap: FoodSourceGap | null
+  /**
+   * Typed `MOB_DROP_SOURCE_NONE ...` when the active collect goal's item is a mob
+   * drop (`ender_pearl` <- enderman, `blaze_rod` <- blaze) and NO producer route
+   * is on offer: the missing affordance is named together with the producer mob
+   * names, how many instances the sensor reported, and the grounded next step.
+   * Null as soon as a hunt candidate for the focus is offered. Orthogonal to
+   * `exploreRouteBlocked` (MOVEMENT-side) and to `sourceGap` (block sources):
+   * this is the PRODUCER-side fact the M3 pearl half had no marker for at all.
+   */
+  mobDropGap: MobDropSourceGap | null
 }
 
 /**
@@ -894,6 +904,94 @@ export function resourceSourceGapFor(
     falsified,
     excluded,
     next,
+  }
+}
+
+/**
+ * The typed "the active collect goal needs a MOB DROP and no producer instance is
+ * on offer" fact - the mob-drop sibling of `ResourceSourceGap` (block sources)
+ * and `FoodSourceGap` (edible routes).
+ *
+ * The measured M3 gap (`run-muc3qbug-18vg3`, source 35dfd29): the pearl rung had
+ * no sensed enderman at all. The candidate generator DID offer the generic
+ * exploration arm (a `MobDrop`-producer focus gets the same frontier MOVEs a
+ * scanned block source gets), but nothing in the run-scoped log said WHY: the
+ * pearl need produced no candidate id naming a producer, no `RETRIEVE:known:*`
+ * (there is no remembered pearl source of any kind) and no typed gap, because
+ * `resourceSourceGapFor` only covers `kind === 'ore'` wants and
+ * `exploreRouteBlocked` is silent whenever any exploration MOVE is on offer.
+ *
+ * This marker closes that observability hole. It is enumerated from the OFFERED
+ * set, exactly like `foodSourceGap`, so it can never claim a missing producer
+ * while a producer route is actually on offer. CAN/TRUE only: it names the mob
+ * names that drop the item (deterministic Minecraft producer truth), how many
+ * producer instances the SENSOR reported, and which grounded route kinds the
+ * tick offers. Choosing among them stays Jev's.
+ */
+export type MobDropSourceGapReason =
+  /** no producer instance is in the sensed entity list at all */
+  | 'no_producer_sensed'
+  /** a producer is sensed, but no offered route reaches it (reachability gate) */
+  | 'producer_withheld'
+
+export interface MobDropSourceGap {
+  /** the item the active collect goal wants */
+  item: string
+  /** the deterministic mob producers of that item, sorted */
+  producers: string[]
+  /** producer instances in the sensor's entity list, at any distance */
+  sensed: number
+  /**
+   * grounded route kinds on offer this tick. A hunt candidate for the focus
+   * would have closed the gap, so the only value this can carry is `explore`
+   * (the generic search arm), or nothing at all on a dead end.
+   */
+  offered: string[]
+  reason: MobDropSourceGapReason
+  /** the grounded next step the mechanical layer can offer right now */
+  next: 'explore' | 'escalate'
+}
+
+export const MOB_DROP_SOURCE_NONE = 'MOB_DROP_SOURCE_NONE'
+
+export function formatMobDropSourceGap(gap: MobDropSourceGap): string {
+  return (
+    `${MOB_DROP_SOURCE_NONE} item=${gap.item} reason=${gap.reason} ` +
+    `producers=${JSON.stringify(gap.producers)} sensed=${gap.sensed} ` +
+    `offered=${JSON.stringify(gap.offered)} next=${gap.next}`
+  )
+}
+
+/**
+ * The typed no-producer gap for the active mob-drop collect focus, or null when
+ * a producer route is on offer / the focus has no declared mob producer. Pure.
+ */
+export function mobDropSourceGap(
+  state: WorldState,
+  offered: readonly Candidate[],
+): MobDropSourceGap | null {
+  const current = state.goalQueue?.current ?? null
+  const goalKind = current?.kind ?? 'collect'
+  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  if (focusItem === null || goalKind !== 'collect') return null
+  const producerNames = MOB_DROP_PRODUCERS[focusItem]
+  if (producerNames === undefined) return null
+  // A hunt candidate for this focus IS the grounded producer route (the executor
+  // verifies the kill plus the drop), so the gap is closed.
+  if (offered.some((candidate) => candidate.meta.goalDrop === focusItem)) return null
+  const sensed = state.entities.filter((entity) => producerNames.has(entity.name)).length
+  // `meta.explore` is the grounded-exploration marker `exploreMoveCandidate`
+  // sets, so the gap's `next` agrees with the no-source gap and with the
+  // exploration arm's own trigger.
+  const explores = offered.some((candidate) => candidate.meta.explore === true)
+  const offeredRoutes = explores ? ['explore'] : []
+  return {
+    item: focusItem,
+    producers: [...producerNames].sort(),
+    sensed,
+    offered: offeredRoutes,
+    reason: sensed > 0 ? 'producer_withheld' : 'no_producer_sensed',
+    next: explores ? 'explore' : 'escalate',
   }
 }
 
@@ -1506,7 +1604,13 @@ export function generateGroundedCandidates(
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
-  return { ...grounded, foodGap: foodSourceGap(state, options, grounded.candidates) }
+  // The mob-drop producer gap follows the same rule: it is derived from the same
+  // offered set, so it can never claim a missing producer while one is on offer.
+  return {
+    ...grounded,
+    foodGap: foodSourceGap(state, options, grounded.candidates),
+    mobDropGap: mobDropSourceGap(state, grounded.candidates),
+  }
 }
 
 /**
@@ -1955,6 +2059,15 @@ function generateRawCandidates(
         bodyFood: body.food,
         bodyRegenerates: body.regenerating,
         ...(goalDrop === null ? {} : { goalDrop, requiresKill: true }),
+        // Typed producer facts: this ATTACK is the mob-drop route to `goalDrop`
+        // and the mob instance is a real sensed producer. The executor verifies
+        // the kill plus the drop and, when this instance teleports out of
+        // tracking range, the bounded hunt may adopt another sensed instance of
+        // the SAME mob - so the producer NAME (not the entity id) is what the
+        // semantic action is bound to. Never a preference; Jev still chose it.
+        ...(goalDrop === null
+          ? {}
+          : { producerMob: entity.name, producerRoute: 'mob_drop' as const }),
         // Typed CAN fact: this ATTACK is the grounded route to food, and which
         // animal it targets. The marker reader/log must not infer it from the
         // entity name alone (a hostile and a food animal can share no name).
@@ -6680,6 +6793,7 @@ export function applyReachabilityGate(
     // Filled by `generateGroundedCandidates` from the OFFERED set, once the gate
     // has finished; the raw gate has no survival fact of its own.
     foodGap: null,
+    mobDropGap: null,
   }
 }
 
