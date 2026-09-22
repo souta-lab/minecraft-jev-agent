@@ -20,10 +20,14 @@ import { join } from 'node:path'
 import {
   INHERITED_PORTAL_REASON,
   M2_REQUIRED_STAGES,
+  M2_RUN_CHAIN,
   M2_RUN_RESULT,
   detectInheritedPortal,
   evaluateM2Gate,
+  evaluatePortalChain,
+  formatPortalChainLine,
   parseInventoryMarker,
+  parsePortalChainLine,
   readM2Snapshot,
   requestedRunId,
   runM2Gate,
@@ -251,6 +255,124 @@ for (const [label, marker] of [
   assert.equal(code, 1, `${label} must FAIL:\n${text}`)
   assert.match(text, /status=FAIL/, text)
   ok(`${label} -> FAIL/exit 1`)
+}
+
+// ---------------------------------------------------------------------------
+// 5b. RED: the ordered chain trace names each link and its evidence source
+// ---------------------------------------------------------------------------
+// The four stage conditions say WHAT passed; the `m2_chain:` line says WHICH
+// evidence source proved each link of the ordered build->light->verify chain, so a
+// run-scoped artifact can carry the chain instead of only its verdict.
+function chainLinksOf(text) {
+  return text
+    .split('\n')
+    .filter((entry) => entry.startsWith(`${M2_RUN_CHAIN}:`))
+    .map((entry) => parsePortalChainLine(entry))
+}
+
+{
+  const { code, text } = await judge()
+  assert.equal(code, 0, text)
+  const links = chainLinksOf(text)
+  assert.equal(links.length, 1, `one trace per evidence source:\n${text}`)
+  const link = links[0]
+  assert.equal(link.source, 'fixture:log')
+  assert.equal(link.built, 'PASS')
+  assert.equal(link.lit, 'PASS')
+  assert.equal(link.verified, 'PASS')
+  assert.equal(link.ordered, true)
+  assert.equal(link.overworld, true)
+  assert.equal(link.blocks, 10)
+  assert.equal(link.shape, 'ok')
+  assert.equal(link.dimension, 'minecraft:overworld')
+  const { placed, frame, lit, verified } = link.indices
+  assert.ok(placed >= 0 && placed < frame && frame < lit && lit < verified, `indices must be ordered: ${JSON.stringify(link.indices)}`)
+  // The printed line and the parsed record are the same fact (typed, mirrored).
+  assert.deepEqual(parsePortalChainLine(formatPortalChainLine(link)), link)
+  ok('a full same-run chain reports built/lit/verified PASS, ordered, with its source')
+}
+
+{
+  // NEGATIVE CONTROL (fixture i): a portal that is BUILT but UNLIT must not
+  // satisfy `portal_lit`, and the trace must not claim a light.
+  const lines = [boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN.slice(0, 3)]
+  const { code, text } = await judge({ lines })
+  assert.equal(code, 2, text)
+  assert.match(text, /portal_built: PASS/, text)
+  assert.match(text, /portal_lit: UNKNOWN/, text)
+  const link = chainLinksOf(text)[0]
+  assert.equal(link.built, 'PASS')
+  assert.equal(link.lit, 'UNKNOWN')
+  assert.equal(link.verified, 'UNKNOWN')
+  assert.equal(link.ordered, false)
+  assert.equal(link.indices.lit, -1)
+  assert.equal(link.indices.verified, -1)
+  ok('built but unlit: portal_built PASS, portal_lit UNKNOWN, trace lit=UNKNOWN (never a chain)')
+}
+
+{
+  // NEGATIVE CONTROL: lit but never verified -> the light link is real, the
+  // verification link is not.
+  const { code, text } = await judge({ lines: [boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN.slice(0, -1)] })
+  assert.equal(code, 2, text)
+  const link = chainLinksOf(text)[0]
+  assert.equal(link.lit, 'PASS')
+  assert.equal(link.verified, 'UNKNOWN')
+  assert.equal(link.ordered, false)
+  ok('lit but never verified: lit=PASS verified=UNKNOWN (the trace keeps the gap)')
+}
+
+{
+  // A light in the Nether is a real light link but NOT the contract's overworld
+  // stage. The trace reports the observation; the stage condition stays the judge.
+  const netherLit = '[2026-09-20T10:00:05.000Z] PORTAL_LIT pos=11,65,20 dimension=minecraft:the_nether'
+  const { code, text } = await judge({
+    lines: [boot(RUN), DIAMOND_READY, MATERIALS_READY, ...PORTAL_CHAIN.slice(0, 3), netherLit, '[2026-09-20T10:00:06.000Z] PORTAL_VERIFIED=true'],
+  })
+  assert.equal(code, 2, text)
+  assert.match(text, /portal_lit: UNKNOWN/, text)
+  const link = chainLinksOf(text)[0]
+  assert.equal(link.lit, 'PASS')
+  assert.equal(link.overworld, false)
+  assert.equal(link.dimension, 'minecraft:the_nether')
+  ok('a Nether light: lit=PASS with overworld=false, while the stage condition stays UNKNOWN')
+}
+
+{
+  // The inherited gate: the strongest single fact is true but no link was proven.
+  const { code, text } = await judge({ lines: [boot(RUN), DIAMOND_READY, MATERIALS_READY, PORTAL_TRUTH_LIVE] })
+  assert.equal(code, 2, text)
+  const link = chainLinksOf(text)[0]
+  assert.equal(link.built, 'UNKNOWN')
+  assert.equal(link.lit, 'UNKNOWN')
+  assert.equal(link.verified, 'UNKNOWN')
+  assert.equal(link.source, 'fixture:log')
+  ok('an inherited portal carries a trace with no PASS link (source named, links UNKNOWN)')
+}
+
+{
+  // Unscoped/unavailable evidence still emits the trace, naming that no source
+  // was examined - absent evidence can never look like an unasked question.
+  const { code, text } = await judge({ expectedRunId: null, lines: [] })
+  assert.equal(code, 2, text)
+  const link = chainLinksOf(text)[0]
+  assert.equal(link.source, 'none')
+  assert.equal(link.ordered, false)
+  assert.equal(link.built, 'UNKNOWN')
+  ok('unscoped evidence still prints one chain trace with source=none')
+}
+
+{
+  // A forged/renamed state is rejected: only PASS/FAIL/UNKNOWN parse, and a
+  // non-chain line is never chain evidence.
+  assert.equal(parsePortalChainLine('m2_facts: diamond=true'), null)
+  assert.equal(parsePortalChainLine('m2_chain: source=log built=YES lit=PASS verified=PASS ordered=true'), null)
+  assert.equal(parsePortalChainLine('m2_chain: source=none'), null)
+  const forged = evaluatePortalChain([{ name: 'PORTAL_FRAME_READY', shape: 'ok', blocks: 10 }])
+  assert.equal(forged.frameVerified, false, 'a frame with no placed block is not a build')
+  assert.equal(forged.litObserved, false)
+  assert.equal(forged.verifiedObserved, false)
+  ok('parsePortalChainLine accepts only complete, known-state trace lines')
 }
 
 // ---------------------------------------------------------------------------

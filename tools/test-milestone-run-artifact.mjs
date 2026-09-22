@@ -381,6 +381,101 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
 
 
 // ---------------------------------------------------------------------------
+// A2. the M2 chain is carried per link WITH the source that proved each link
+// ---------------------------------------------------------------------------
+// The delegated gate's stage conditions say WHAT passed; they cannot say WHICH
+// evidence source proved each link, and its structured `facts` object is not part
+// of the artifact. The gate's `m2_chain:` line is the ordered trace, and the
+// artifact must carry it as `verdicts.M2.chain` with built/lit/verified.
+{
+  assert.equal(passArtifact.schemaVersion, 5)
+  const chain = passArtifact.verdicts.M2.chain
+  assert.ok(chain !== null && typeof chain === 'object', `M2 chain missing: ${JSON.stringify(passArtifact.verdicts.M2)}`)
+  assert.equal(chain.ordered, true)
+  assert.deepEqual(chain.sources, ['log'])
+  // built: the validated frame, with the frame's OWN blocks/shape and its index.
+  assert.equal(chain.built.status, 'PASS')
+  assert.equal(chain.built.source, 'log')
+  assert.equal(chain.built.blocks, 10)
+  assert.equal(chain.built.shape, 'ok')
+  assert.equal(chain.placedIndex, 0)
+  assert.ok(chain.built.index > chain.placedIndex, 'the frame must come after the first placed block')
+  // lit: the PORTAL_LIT in the overworld.
+  assert.equal(chain.lit.status, 'PASS')
+  assert.equal(chain.lit.source, 'log')
+  assert.equal(chain.lit.dimension, 'minecraft:overworld')
+  assert.equal(chain.lit.overworld, true)
+  // verified: PORTAL_VERIFIED=true AFTER the light.
+  assert.equal(chain.verified.status, 'PASS')
+  assert.equal(chain.verified.source, 'log')
+  assert.ok(chain.verified.index > chain.lit.index, 'verification must come after the light')
+  assert.ok(chain.lit.index > chain.built.index, 'the light must come after the frame')
+  ok('the artifact carries built/lit/verified in order, each with its evidence source')
+
+  // The raw gate line is still kept verbatim beside the parsed facts.
+  assert.ok(
+    passArtifact.verdicts.M2.lines.some((entry) => /^m2_chain: source=log built=PASS lit=PASS verified=PASS ordered=true\b/.test(entry)),
+    passArtifact.verdicts.M2.lines.join('\n'),
+  )
+  ok('the raw m2_chain: gate line is preserved in verdicts.M2.lines')
+}
+
+{
+  // NEGATIVE: a built-but-unlit frame. The artifact must carry `built` PASS while
+  // `lit`/`verified` are UNKNOWN - the chain records the gap instead of filling it.
+  const unlitRun = 'run-fixture-unlit'
+  const unlitRoot = makeRoot('unlit')
+  const unlitLog = [
+    boot(0, unlitRun),
+    spawnLine(1),
+    line(10, 'INVENTORY items={"diamond":3,"diamond_pickaxe":1,"flint_and_steel":1,"obsidian":10} pos=0.5,64.0,0.5'),
+    ...PORTAL_CHAIN.slice(0, 3).map((body, index) => line(11 + index, body)),
+  ]
+  writeFixture(unlitRoot, unlitRun, { logLines: unlitLog, acceptance: false, runner: { released: true } })
+  const unlit = cli(['--run', unlitRun, '--root', unlitRoot, '--json', '--no-control-socket'])
+  const unlitArtifact = unlit.json()
+  assert.notEqual(unlitArtifact.verdicts.M2.status, 'PASS')
+  assert.equal(unlitArtifact.verdicts.M2.conditions.portal_built, 'PASS')
+  assert.equal(unlitArtifact.verdicts.M2.conditions.portal_lit, 'UNKNOWN')
+  const unlitChain = unlitArtifact.verdicts.M2.chain
+  assert.equal(unlitChain.ordered, false)
+  assert.equal(unlitChain.built.status, 'PASS')
+  assert.equal(unlitChain.lit.status, 'UNKNOWN')
+  assert.equal(unlitChain.verified.status, 'UNKNOWN')
+  assert.equal(unlitChain.lit.index, -1)
+  assert.equal(unlitChain.verified.index, -1)
+  ok('a built-but-unlit portal is carried as built=PASS lit=UNKNOWN (never a chain)')
+}
+
+{
+  // NEGATIVE: a chain-less PORTAL_VERIFIED=true (the inherited-gate shape) must
+  // never produce a PASS link, even though the strongest single fact is true.
+  const inheritedRun = 'run-fixture-inherited'
+  const inheritedRoot = makeRoot('inherited')
+  const inheritedLog = [
+    boot(0, inheritedRun),
+    spawnLine(1),
+    line(10, 'INVENTORY items={"diamond":3,"diamond_pickaxe":1,"flint_and_steel":1,"obsidian":10} pos=0.5,64.0,0.5'),
+    line(11, 'PORTAL_TRUTH verified=true reason=status source=live-world'),
+  ]
+  writeFixture(inheritedRoot, inheritedRun, { logLines: inheritedLog, acceptance: false, runner: { released: true } })
+  const inherited = cli(['--run', inheritedRun, '--root', inheritedRoot, '--json', '--no-control-socket'])
+  const inheritedArtifact = inherited.json()
+  const inheritedChain = inheritedArtifact.verdicts.M2.chain
+  assert.equal(inheritedArtifact.verdicts.M2.reason, 'inherited_portal')
+  assert.equal(inheritedChain.ordered, false)
+  // No source proved any link, so no link fact exists at all (null, never a PASS).
+  for (const link of ['built', 'lit', 'verified']) {
+    assert.equal(inheritedChain[link], null, `${link} must not exist without a chain`)
+  }
+  assert.deepEqual(inheritedChain.sources, ['log'])
+  assert.equal(inheritedChain.links.length, 1)
+  assert.equal(inheritedChain.links[0].source, 'log')
+  assert.equal(inheritedChain.links[0].built, 'UNKNOWN')
+  ok('an inherited portal carries no PASS link (the chain is the only source of built/lit/verified)')
+}
+
+// ---------------------------------------------------------------------------
 // B. FAIL-shaped run (materials complete, eyes short)
 // ---------------------------------------------------------------------------
 const failRoot = makeRoot('fail')
