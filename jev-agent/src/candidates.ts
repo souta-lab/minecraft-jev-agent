@@ -2214,6 +2214,9 @@ const LOCOMOTION_CANDIDATE_KINDS: ReadonlySet<CandidateKind> = new Set<Candidate
   'STEP',
   'DESCEND',
   'ENTER_PORTAL',
+  // Walking onto a dropped item moves the body to another cell, so it is a way
+  // out of the current cell exactly like RETRIEVE.
+  'PICKUP',
 ])
 
 /**
@@ -10925,7 +10928,8 @@ function exploreRouteBlockedFact(
   if (item === null) return null
   if (candidates.some(hasAdvancingGoalRoute)) return null
   const movementWithheld = withheld.some(
-    (entry) => entry.candidate.kind === 'MOVE' || entry.candidate.kind === 'RETRIEVE',
+    (entry) =>
+      entry.candidate.kind === 'MOVE' || entry.candidate.kind === 'RETRIEVE' || entry.candidate.kind === 'PICKUP',
   )
   const frontierExists = !strandedOnColumn(state)
   const reason: ExploreRouteBlockedReason = movementWithheld
@@ -11155,6 +11159,12 @@ const MECHANICAL_LOCOMOTION_KINDS: ReadonlySet<CandidateKind> = new Set<Candidat
   'MOVE',
   'RETRIEVE',
   'RETREAT',
+  // A pickup is a walk to a cell, so it is subject to the dimension-transfer
+  // refusal like every other mechanical locomotion realization: routing onto a
+  // lit portal plane to reach an item would CROSS a dimension, and no goal item
+  // is worth an unauthorized transfer. Leaving PICKUP out of this set would have
+  // exempted it from the one safety check the locomotion family shares.
+  'PICKUP',
 ])
 
 function dimensionTransferRefusal(
