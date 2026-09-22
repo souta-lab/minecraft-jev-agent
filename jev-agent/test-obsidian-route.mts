@@ -232,7 +232,9 @@ addCase('(2) the diamond-pickaxe tool gate keeps obsidian out of reach without t
 // --- (3) remembered coordinates: a known obsidian cell is a route --------------
 
 addCase('(3) a level remembered obsidian coordinate yields a presented RETRIEVE:known:obsidian', () => {
-  const known: KnownResource = { name: 'obsidian', kind: 'ore', position: { x: 60, y: 48, z: 35 } }
+  // #14: the row names the world it was recorded in (this fixture body is in the
+  // overworld). An un-attributed row is refused in EVERY world by the fail-closed gate.
+  const known: KnownResource = { name: 'obsidian', kind: 'ore', position: { x: 60, y: 48, z: 35 }, dimension: 'minecraft:overworld' }
   const state = perceive({ diamond_pickaxe: 1 }, { obsidian: [] }, [known])
   // The host supplies a path fact; 'reachable' is the walkable case.
   const options = { ...defaultCandidateOptions, reachability: { memory: null, pathProbe: () => 'reachable' as const } }
@@ -246,7 +248,7 @@ addCase('(3) a level remembered obsidian coordinate yields a presented RETRIEVE:
 })
 
 addCase('(3) a remembered obsidian cell below the bot is offered with a typed vertical verdict, never silently dropped', () => {
-  const known: KnownResource = { name: 'obsidian', kind: 'ore', position: { x: 60, y: 30, z: 35 } }
+  const known: KnownResource = { name: 'obsidian', kind: 'ore', position: { x: 60, y: 30, z: 35 }, dimension: 'minecraft:overworld' }
   const state = perceive({ diamond_pickaxe: 1 }, { obsidian: [] }, [known])
   const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
   const offered = [

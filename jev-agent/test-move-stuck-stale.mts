@@ -262,9 +262,9 @@ function queueWith(current: QueuedGoal): GoalQueueState {
   return { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] }
 }
 
-const KNOWN_LOG: KnownResource = { name: 'birch_log', kind: 'log', position: { x: 26, y: 68, z: 26 } }
+const KNOWN_LOG: KnownResource = { name: 'birch_log', kind: 'log', dimension: OVERWORLD, position: { x: 26, y: 68, z: 26 } }
 /** A second remembered log at the bot's own level, so the plan CAN advance to it. */
-const REACHABLE_LOG: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 45, y: 59, z: 36 } }
+const REACHABLE_LOG: KnownResource = { name: 'oak_log', kind: 'log', dimension: OVERWORLD, position: { x: 45, y: 59, z: 36 } }
 const UNREACHABLE_ID = 'RETRIEVE:known:oak_log:b26_68_26'
 const REACHABLE_ID = 'RETRIEVE:known:oak_log:b45_59_36'
 

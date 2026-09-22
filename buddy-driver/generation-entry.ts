@@ -390,11 +390,16 @@ export function evictStaleKnownResources(
     // dimension it was scanned in. A portal transfer changes the dimension while
     // the worldEpoch stays the same, so a same-epoch entry from another
     // dimension must be evicted instead of live-probed at this coordinate.
-    if (
-      resource.dimension !== undefined &&
-      resource.dimension.length > 0 &&
-      normalizeDimensionId(resource.dimension) !== normalizeDimensionId(worldKey.dimension)
-    ) {
+    //
+    // An entry that records NO dimension cannot be re-anchored at all: probing it
+    // here would read THIS world's block at that coordinate and could "prove
+    // absent" (`block_mined`) a cell that belongs to another world - deleting
+    // durable memory on wrong-world evidence. It is therefore neither probed nor
+    // evicted (see `resourceDimensionVerdict`): the row is kept, reported typed
+    // by the jev layer (`reason=dimension_unattributed`) and re-stamped by the
+    // next observation of the cell in a real world.
+    if (resource.dimension === undefined || resource.dimension.length === 0) continue
+    if (normalizeDimensionId(resource.dimension) !== normalizeDimensionId(worldKey.dimension)) {
       stale.push(resource)
       staleKeys.add(resourceKey(resource))
       log?.('KNOWN_RESOURCE_STALE', {
@@ -2273,6 +2278,26 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       })
     }
   }
+  // Fail-closed attribution evidence (measured, run-mucqgrdo-21plr): a durable
+  // row that records no dimension cannot be offered as a locomotion target in
+  // ANY world, so it is reported here ONCE per generation-start scan instead of
+  // being silently dropped or silently defaulted. The row stays in durable
+  // memory and is re-stamped by the next observation of the cell.
+  const unattributedResources = world.knownResources.filter(
+    (resource) => resource.dimension === undefined || resource.dimension.length === 0,
+  )
+  if (unattributedResources.length > 0) {
+    ctx.log('KNOWN_RESOURCE_UNATTRIBUTED', {
+      count: unattributedResources.length,
+      recordedDimension: null,
+      liveDimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
+      cells: unattributedResources
+        .slice(0, 8)
+        .map((resource) => `${resource.name}@${resourceAt(resource)}`),
+      action: 'kept-not-offered',
+    })
+  }
   const staleRemovals = evictStaleKnownResources(bot, world.knownResources, ctx.worldKey, (event, detail) => ctx.log(event, detail))
   const newKnownResources = mergeKnownResources(
     world.knownResources,
@@ -2302,6 +2327,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     discoveredOres: world.discoveredOres,
     knownResources: world.knownResources.length,
     newKnownResources,
+    // Fail-closed attribution: durable rows that name no dimension. They are
+    // kept (never deleted) and refused as targets in every world.
+    knownResourcesUnattributed: unattributedResources.length,
     knownTraversals: world.knownTraversals.length,
     moveFailures: world.moveFailures.length,
     removedStations: removedStations.length,
@@ -2513,21 +2541,36 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
         name: resource.name,
         kind: resource.kind,
         position: { x: resource.x, y: resource.y, z: resource.z },
+        // The row's OWN dimension is the only attribution evidence. A row that
+        // records none stays unattributed here - never defaulted from the durable
+        // bucket, which has been measured to hold wrong-world cells - so the jev
+        // dimension gate refuses it typed (`reason=dimension_unattributed`)
+        // instead of letting the body walk to it.
         ...(resource.dimension === undefined ? {} : { dimension: resource.dimension }),
         ...(resource.worldEpoch === undefined ? {} : { worldEpoch: resource.worldEpoch }),
       })),
     // Keep durable stations in the controller envelope even when the same
     // item is held.  `planPrereqOptions` still ranks a valid held placement
     // first; these entries are the fallback when placement geometry refuses.
+    //
+    // A `KnownStation` row has no dimension field of its own, so the envelope is
+    // the only place that can carry its attribution. The value is the world key
+    // this memory belongs to - the world the station was registered in - not a
+    // default: `world` is exactly `worldMemoryByKey[serverId|dimension|epoch]`.
+    // Without it every station route dies at the fail-closed dimension gate.
     ...world.furnaces.map((furnace) => ({
       name: 'furnace',
       kind: 'station' as const,
       position: { x: furnace.x, y: furnace.y, z: furnace.z },
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
     })),
     ...world.craftingTables.map((table) => ({
       name: 'crafting_table',
       kind: 'station' as const,
       position: { x: table.x, y: table.y, z: table.z },
+      dimension: ctx.worldKey.dimension,
+      worldEpoch: ctx.worldKey.worldEpoch,
     })),
     // #80: durable verified-portal sites ride the same known-resource envelope.
     // The `portal` kind is CAN-only: it is the grounded route back to a site the

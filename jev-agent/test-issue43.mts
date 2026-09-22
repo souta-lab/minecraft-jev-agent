@@ -229,7 +229,7 @@ addCase('exhausted replans turn a repeated WAIT into a wedge', () => {
 // --- known-resource retrieval ---------------------------------------------------
 
 addCase('underground log goal emits a RETRIEVE toward the remembered coordinate', () => {
-  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 40, y: 70, z: 40 } }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 40, y: 70, z: 40 } }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
@@ -289,7 +289,7 @@ addCase('a visible log suppresses retrieval (normal mining keeps priority)', () 
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
     goalQueue: queueWith(queuedGoal({})),
-    signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 40, y: 70, z: 40 } }] }),
+    signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 40, y: 70, z: 40 } }] }),
     blocks: [logBlock],
   })
   const candidates = generateCandidates(state, defaultCandidateOptions)
@@ -302,14 +302,14 @@ addCase('a depleted remembered log does not trigger a retrieve loop', () => {
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
     goalQueue: queueWith(queuedGoal({})),
-    signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 5, y: 60, z: 0 } }] }),
+    signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 5, y: 60, z: 0 } }] }),
   })
   const found = retrievalCandidate(generateCandidates(state, defaultCandidateOptions))
   return { pass: found === null, detail: found === null ? 'no RETRIEVE' : found.id }
 })
 
 addCase('an underground ore goal emits a RETRIEVE toward the remembered ore coordinate', () => {
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: 40 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 40, y: 59, z: 40 } }
   const oreGoal = queuedGoal({ kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 })
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
@@ -343,7 +343,7 @@ addCase('a non-oak held log is accepted as charcoal fuel instead of waiting', ()
 // --- guard grounding ------------------------------------------------------------
 
 addCase('the guard accepts a retrieval grounded in knownResources', () => {
-  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 40, y: 70, z: 40 } }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 40, y: 70, z: 40 } }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),
@@ -356,7 +356,7 @@ addCase('the guard accepts a retrieval grounded in knownResources', () => {
 })
 
 addCase('the guard rejects a retrieval whose coordinate is not remembered', () => {
-  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 40, y: 70, z: 40 } }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 40, y: 70, z: 40 } }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goal: goal({}),

@@ -279,7 +279,7 @@ addCase('KNOWN_RESOURCE logs the remembered coordinate with its worldEpoch (#14)
 // --- retrieval candidate selection (#14) ---------------------------------------
 
 addCase('an ore goal with no visible ore emits a grounded RETRIEVE to the remembered cell', () => {
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goalQueue: queueWith(queuedGoal({})),
@@ -297,7 +297,7 @@ addCase('an ore goal with no visible ore emits a grounded RETRIEVE to the rememb
 })
 
 addCase('a visible matching ore suppresses retrieval so MINE keeps priority', () => {
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goalQueue: queueWith(queuedGoal({})),
@@ -312,7 +312,7 @@ addCase('a visible matching ore suppresses retrieval so MINE keeps priority', ()
 })
 
 addCase('a remembered surface log beyond reach grounds a RETRIEVE for the charcoal goal (#44)', () => {
-  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 6, y: 68, z: 0 } }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 6, y: 68, z: 0 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' })),
@@ -330,7 +330,7 @@ addCase('a remembered surface log beyond reach grounds a RETRIEVE for the charco
 })
 
 addCase('a remembered log within proof distance but absent from the scan stays depleted', () => {
-  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 3, y: 60, z: 0 } }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 3, y: 60, z: 0 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' })),
@@ -342,7 +342,7 @@ addCase('a remembered log within proof distance but absent from the scan stays d
 })
 
 addCase('a remembered ore far above the resident grounds a bounded pillar-up retrieval (#45 up)', () => {
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 61, z: 0 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 61, z: 0 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: { x: 39, y: 31, z: 33 },
     goalQueue: queueWith(queuedGoal({})),
@@ -372,7 +372,7 @@ addCase('a station 56 blocks above sustains pillar chunks across decisions (#45 
         queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
       ),
       goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
-      knownResources: [{ name: 'furnace', kind: 'station', position: target }],
+      knownResources: [{ name: 'furnace', kind: 'station', position: target, dimension: 'minecraft:overworld' }],
       inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
     })
     const retrieve = generateCandidates(state, defaultCandidateOptions).find(
@@ -404,7 +404,7 @@ addCase('a hazard in the resident column refuses the station pillar plan (#45 up
       queuedGoal({ kind: 'smelt', targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
     ),
     goal: goal({ targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
-    knownResources: [{ name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 } }],
+    knownResources: [{ name: 'furnace', kind: 'station', position: { x: 22, y: 66, z: 29 }, dimension: 'minecraft:overworld' }],
     inventory: inventory({ cobblestone: 119, stone_pickaxe: 1 }),
     blocks: [hazardBlock({ x: 39, y: 11, z: 33 })],
   })
@@ -434,7 +434,7 @@ addCase('a safe step-cut above the resident grounds an up-staircase retrieval (#
     safe: true,
     reason: 'safe',
   }
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 60, y: 55, z: 33 } }
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 60, y: 55, z: 33 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: feet,
     goalQueue: queueWith(queuedGoal({})),

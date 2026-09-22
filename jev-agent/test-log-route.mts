@@ -176,7 +176,7 @@ function options(): CandidateOptions {
 }
 
 const LIVE_FEET: Vec3Json = { x: 30, y: 33, z: 35 }
-const LIVE_REMEMBERED_LOG: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 34, y: 65, z: 35 } }
+const LIVE_REMEMBERED_LOG: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 34, y: 65, z: 35 } }
 const LIVE_CEILING: BlockState = stoneBlock({ x: 30, y: 35, z: 35 })
 const LIVE_CUT: HeadroomCut = { pos: { x: 30, y: 35, z: 35 }, name: 'stone', safe: true, reason: 'safe' }
 
@@ -226,7 +226,7 @@ addCase('the LOG_ROUTE marker is mirrored and renders mode + target', () => {
 // (1) a remembered log above with a feasible ascent -> ascend_then_mine ----------
 addCase('a remembered log above with a feasible ascent presents the ascend route', () => {
   const feet: Vec3Json = { x: 0, y: 60, z: 0 }
-  const rememberedLog: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 0, y: 70, z: 0 } }
+  const rememberedLog: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 0, y: 70, z: 0 } }
   const state = worldState({
     position: feet,
     inventory: inventory({ cobblestone: 16, stone_pickaxe: 1 }),
@@ -279,7 +279,7 @@ addCase('a log outside sensor range with no route falls back to exploration', ()
 
 addCase('after a known retrieve retry budget is spent, exploration still approaches the known resource', () => {
   const feet: Vec3Json = { x: 0, y: 52, z: 0 }
-  const known: KnownResource = { name: 'oak_log', kind: 'log', position: { x: 0, y: 69, z: 4 } }
+  const known: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 0, y: 69, z: 4 } }
   const knownId = `RETRIEVE:known:log:b${known.position.x}_${known.position.y}_${known.position.z}`
   const state = worldState({
     position: feet,
