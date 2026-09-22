@@ -154,7 +154,8 @@ import type {
   SkillOutcome,
   StepAuthority,
 } from './skillCommitment.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PORTAL_WALK_IN_LEVEL_TOLERANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryClimb, formatPortalEntryClimbRefused, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import type { PortalEntryClimbLeg } from './netherPortalPlan.ts'
 import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource, SkillStepAuthority } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
@@ -598,7 +599,6 @@ const PORTAL_ENTER_TIMEOUT_MS = 8000
  * horizontal position within 0.5 of the cell centre is IN the interior.
  */
 const PORTAL_WALK_IN_MAX_DISTANCE = 3
-const PORTAL_WALK_IN_LEVEL_TOLERANCE = 1
 const PORTAL_WALK_IN_INSIDE_RADIUS = 0.5
 /** Hard time budget and distance-progress check: the walk can never spin. */
 const PORTAL_WALK_IN_BUDGET_MS = 2500
@@ -617,23 +617,53 @@ const PORTAL_WALK_IN_STEP_MS = 45
 const PORTAL_FACE_LEG_BUDGET_MS = 1200
 /** One class, several equivalent faces: at most two attempts, each bounded. */
 const PORTAL_FACE_LEG_MAX_ATTEMPTS = 2
+/**
+ * The composed entry climb (`runEntryRouteLeg`): at most TWO bounded legs - the
+ * candidate's primary grounded vertical plan and the second plan of the SAME
+ * contract (`fallbackVertical`, e.g. the own-column pillar behind a remembered
+ * tunnel). One commitment owns both, exactly like the face leg's two attempts:
+ * a third leg is a re-decision, not a continuation.
+ */
+const ENTRY_CLIMB_LEG_MAX = 2
 /** One forward-push tick of the face leg, and its livelock bound. */
 const PORTAL_FACE_LEG_STEP_MS = 45
 const PORTAL_FACE_LEG_NO_PROGRESS_MS = 600
 /**
- * The entry Skill's DECLARED effect envelope (issue #436 §5/U4): realization of
- * a selected portal entry is LOCOMOTION ONLY. The skill may move, look, jump and
- * sprint; it may NOT dig, place, equip or use a station - so a wall that appears
- * between the body and the gate can never grant it dig/place authority. Any
- * remedy outside this envelope (mine the blocker, pillar, bridge) is a semantic
- * recovery and must go back to Jev as a `SKILL_POLICY_BOUNDARY` alternative.
+ * The entry Skill's DECLARED effect envelope (issue #436 §5/U4). A plain entry is
+ * LOCOMOTION ONLY: the skill may move, look, jump and sprint; it may NOT dig,
+ * place, equip or use a station - so a wall that appears between the body and the
+ * gate can never grant it dig/place authority, and any remedy outside that
+ * envelope (mine the blocker, pillar, bridge) is a semantic recovery that must go
+ * back to Jev as a `SKILL_POLICY_BOUNDARY` alternative.
+ *
+ * The declaration must be the TRUTH about the legs THIS entry was grounded with,
+ * so it is derived from the candidate's own route contract rather than being a
+ * fixed string: an entry whose grounded route places blocks (a PILLAR climb -
+ * exactly what the operator's floated gate needs) DECLARES the consumed block,
+ * and one whose route digs declares the dig. The live run (run.jsonl
+ * 2026-09-22T15:47:20Z) emitted `ROUTE_PLACE_DECLARED actionId=ENTER:27,67,9
+ * skill=ENTER_PORTAL blocks=cobblestone source=fallbackPillarPlaceName` while the
+ * Skill's own start line still claimed `movement-only(no_dig,no_place)` - a
+ * declaration that contradicted the leg the commitment was about to run.
  *
  * The TYPED `EffectEnvelope` and the `SKILL_COMMIT ... effectEnvelopeHash=` line
- * are owned by lane task/skill-commitment-phase1 (`skillCommitment.ts`): this
- * skill states the same fact in the Phase-1 vocabulary (the `envelope=` field of
- * its own start/step lines) instead of forking a second commitment formatter.
+ * are owned by `skillCommitment.ts`: this skill states the same fact in the
+ * Phase-1 vocabulary (the `envelope=` field of its own start/step lines) instead
+ * of forking a second commitment formatter. The AUTHORITY is unchanged either
+ * way: the typed envelope already derives `mayDigGroundedRoute` /
+ * `mayPlaceGroundedRoute` from these same meta keys (`skillCommitment.ts`), so a
+ * plain entry still gets neither.
  */
-const PORTAL_ENTER_EFFECT_ENVELOPE = 'movement-only(no_dig,no_place)'
+function portalEntryEffectEnvelope(candidate: Candidate): string {
+  const vertical = readMetaString(candidate, 'vertical') ?? 'none'
+  const fallback = readMetaString(candidate, 'fallbackVertical') ?? 'none'
+  const digRoute = candidate.meta.digRoute === true
+  if (vertical === 'none' && fallback === 'none' && !digRoute) return 'movement-only(no_dig,no_place)'
+  const place = declaredRoutePlaceBlocks(candidate)
+  const digs =
+    vertical === 'staircase' || vertical === 'staircase-up' || candidate.meta.digStep === true || digRoute
+  return `movement+route(dig=${digs ? 'grounded_route' : 'none'},place=${place.length > 0 ? place.join('|') : 'none'})`
+}
 /** The entry Skill's declared postcondition identity (stable, code-owned). */
 const PORTAL_ENTER_POSTCONDITION = 'portal_entered:dimension=minecraft:the_nether'
 
@@ -8078,7 +8108,7 @@ export class Executor {
         `site=${this.portalSiteOrigin(expectedCells, enterCell)} enter=${enterCell.x},${enterCell.y},${enterCell.z} dimension=${dimension}` +
           ` commitmentId=${this.portalCommitmentId(candidate, epoch)}` +
           ` targetIdentity=${this.portalTargetIdentity(enterCell, dimension)}` +
-          ` postcondition=${PORTAL_ENTER_POSTCONDITION} envelope=${PORTAL_ENTER_EFFECT_ENVELOPE}`,
+          ` postcondition=${PORTAL_ENTER_POSTCONDITION} envelope=${portalEntryEffectEnvelope(candidate)}`,
       ),
       { actionId: candidate.id, target: enterCell, dimension },
     )
@@ -8145,6 +8175,7 @@ export class Executor {
     let progressedChunk = false
     let activeVertical = 'none'
     let legObstruction: string | null = null
+    let climbEvidence: string | null = null
     try {
       await this.pathTo(enterCell, epoch, transferSignal.signal, 'GoalBlock', { requireLevel: true })
     } catch (error) {
@@ -8152,7 +8183,14 @@ export class Executor {
       // (including a caller abort) is a real failure.
       if (!this.dimensionMatches(dimension)) {
         pathError = error
-        let leg: { progressed: boolean; error: ExecutorError | null; activeVertical: string; obstruction: string | null }
+        let leg: {
+          progressed: boolean
+          error: ExecutorError | null
+          activeVertical: string
+          obstruction: string | null
+          climbRefusal: string | null
+          climbEvidence: string | null
+        }
         try {
           leg = await this.runEntryRouteLeg(candidate, epoch, transferSignal.signal, enterCell, startY)
         } catch (legThrow) {
@@ -8160,11 +8198,21 @@ export class Executor {
           // failure: if the dimension changed, the postcondition is already met;
           // otherwise the cancellation is real and must propagate.
           if (!this.dimensionMatches(dimension)) throw legThrow
-          leg = { progressed: false, error: null, activeVertical: 'none', obstruction: null }
+          leg = {
+            progressed: false,
+            error: null,
+            activeVertical: 'none',
+            obstruction: null,
+            climbRefusal: null,
+            climbEvidence: null,
+          }
           pathError = null
         }
         activeVertical = leg.activeVertical
         legObstruction = leg.obstruction
+        // Every composed-climb leg's own outcome travels into the terminal line's
+        // `climb=` field: which climb ran, in which order, and how each ended.
+        if (leg.climbEvidence !== null) climbEvidence = leg.climbEvidence
         if (leg.progressed) {
           // The chunk durably moved the body toward the cell: the same bounded
           // ONE-chunk-per-action policy MOVE uses. Retry the walk once inside
@@ -8273,7 +8321,7 @@ export class Executor {
       // naming the obstruction, so the option can be abandoned instead of
       // re-arming the same unreachable walk (the live run alternated
       // `noPath`/`stuck`).
-      const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError, legObstruction)
+      const blocked = this.portalEntryRouteBlockedLine(candidate, enterCell, pathError, legObstruction, climbEvidence)
       this.logger.warn('agent', blocked, {
         actionId: candidate.id,
         failure: pathError instanceof ExecutorError ? pathError.code : 'unknown_event',
@@ -9125,7 +9173,7 @@ export class Executor {
               formatSkillStepAuthority(
                 'MANDATORY_PREREQUISITE',
                 `via=${via.x},${via.y},${via.z} to=${face.x},${face.y},${face.z} blocker=${blockerEvidence} ` +
-                  `from_feet=${feetCell.x},${feetCell.y},${feetCell.z} envelope=${PORTAL_ENTER_EFFECT_ENVELOPE}`,
+                  `from_feet=${feetCell.x},${feetCell.y},${feetCell.z} envelope=${portalEntryEffectEnvelope(candidate)}`,
                 'none',
               ) + ` commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
             ),
@@ -9207,6 +9255,19 @@ export class Executor {
    * DURABLY climbed; a route that could not dig/step returns the typed error
    * instead, so `runEnterPortal` can fail ONCE with the obstruction rather than
    * re-arming an unreachable walk.
+   *
+   * THE COMPOSED CLIMB (the operator's trial, run.jsonl 2026-09-22T15:47:37Z): when
+   * the portal interior is ABOVE the body beyond `PORTAL_WALK_IN_LEVEL_TOLERANCE`,
+   * the entry must actually climb to the interior's LEVEL before the ordinary
+   * verified walk-in can run. Both plans it needs were ALREADY grounded by the
+   * offering layer through the SAME `planVerticalApproachDetailed` the other
+   * ascents use (`candidates.ts#entryCandidates` compiles `verticalPlanMeta` plus
+   * the `fallbackVertical*` half). What was missing was the composition: the
+   * primary leg was a `reuse` plan pointing at a remembered tunnel 34 blocks away,
+   * it STALLED rather than refusing typed, and `runVerticalContract` consults the
+   * fallback ONLY on the typed `refused` outcome - so the grounded own-column climb
+   * was never executed. This runs, in order and bounded, the primary leg then the
+   * grounded fallback leg, and reports each one's own outcome.
    */
   private async runEntryRouteLeg(
     candidate: Candidate,
@@ -9214,50 +9275,207 @@ export class Executor {
     signal: AbortSignal,
     enterCell: Vec3Json,
     startY: number,
-  ): Promise<{ progressed: boolean; error: ExecutorError | null; activeVertical: string; obstruction: string | null }> {
-    if ((readMetaString(candidate, 'vertical') ?? 'none') === 'none') {
-      return { progressed: false, error: null, activeVertical: 'none', obstruction: null }
+  ): Promise<{
+    progressed: boolean
+    error: ExecutorError | null
+    activeVertical: string
+    obstruction: string | null
+    climbRefusal: string | null
+    climbEvidence: string | null
+  }> {
+    const primary = readMetaString(candidate, 'vertical') ?? 'none'
+    const fallback = readMetaString(candidate, 'fallbackVertical') ?? 'none'
+    const climbNeeded = enterCell.y - Math.floor(this.bot.entity.position.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE
+    const idle = {
+      progressed: false,
+      error: null,
+      activeVertical: 'none',
+      obstruction: null,
+      climbRefusal: null,
+      climbEvidence: null,
     }
-    try {
-      const { activeVertical, verticalStep } = await this.runVerticalContract(candidate, epoch, signal, enterCell, startY)
-      // A vertical leg is progress when it durably moved the body toward the
-      // entry cell's Y - DOWN when the entry is below (a gate under a ledge or in
-      // a cave), UP when it is above. The ascent-only test made a real descent
-      // chunk look like a failed route, so the entry then reported
-      // `PORTAL_ENTRY_ROUTE_BLOCKED reason=no_route` on a body that had just
-      // descended one block toward a reachable gate.
-      const fromY = Math.floor(startY)
-      const nowY = Math.floor(this.bot.entity.position.y)
-      const movedTowardTargetY = enterCell.y < fromY ? nowY < fromY : nowY > fromY
-      if (verticalStep && movedTowardTargetY) return { progressed: true, error: null, activeVertical, obstruction: null }
-      const obstruction = this.lastVerticalFailureReason ?? `${activeVertical}_no_step`
-      return {
-        progressed: false,
+    if (primary === 'none') {
+      // No grounded vertical plan at all. When the interior is above beyond the
+      // walk-in tolerance this is NOT a silent no-op: the composed climb is
+      // refused typed, naming the interior's height, the (absent) climb and the
+      // offering layer's own reason the plan was null.
+      if (!climbNeeded) return idle
+      const refusal = formatPortalEntryClimbRefused({
+        cell: enterCell,
+        fromY: Math.floor(this.bot.entity.position.y),
+        toY: enterCell.y,
+        climb: 'none',
+        fallback: 'none',
+        reason: 'no_grounded_climb',
+        detail: readMetaString(candidate, 'entryRouteRefusal') ?? 'no_vertical_plan',
+      })
+      this.logger.warn('agent', refusal, { actionId: candidate.id, target: enterCell })
+      return { ...idle, climbRefusal: refusal }
+    }
+    const legs: PortalEntryClimbLeg[] = ['primary']
+    // The second grounded plan of the SAME contract is a legitimate next leg only
+    // when the interior is still above beyond the walk-in tolerance and it is a
+    // different plan (a `fallbackVertical` equal to the primary is the same leg).
+    if (climbNeeded && fallback !== 'none' && fallback !== primary) legs.push('fallback')
+    // The FIRST failing leg's obstruction is what `detail=` reports, exactly as
+    // the single-leg route did before this composition existed: the primary leg is
+    // the plan the candidate was OFFERED with, so its cause is the one a reviewer
+    // must see. Every leg's own outcome still travels in the `climb=` summary.
+    let firstObstruction: string | null = null
+    let lastObstruction: string | null = null
+    let lastError: ExecutorError | null = null
+    const outcomes: string[] = []
+    let ranAny = false
+    // `runVerticalContract` runs its OWN fallback when the reuse leg refuses
+    // typed (`TUNNEL_ENTRY_FALLBACK vertical=...`). When that happened the
+    // fallback leg is already spent, and the line must name the climb that
+    // ACTUALLY ran - never the plan kind that was merely declared.
+    let contractFallbackSpent = false
+    for (const leg of legs.slice(0, ENTRY_CLIMB_LEG_MAX)) {
+      this.ensureOwned(epoch, signal)
+      const fromY = Math.floor(this.bot.entity.position.y)
+      // Still above the tolerance after the previous leg: nothing left to do.
+      if (leg === 'fallback' && (!(enterCell.y - fromY > PORTAL_WALK_IN_LEVEL_TOLERANCE) || contractFallbackSpent)) break
+      let kind = leg === 'primary' ? primary : fallback
+      let plan = this.entryClimbPlanEvidence(candidate, leg, kind, enterCell)
+      const record = (outcome: 'climbed' | 'no_rise' | 'failed', obstruction: string | null): void => {
+        // One mirrored line per leg: which climb, its own bound, its outcome and
+        // (when it did not rise) the executed leg's own cause.
+        const line = formatPortalEntryClimb({
+          cell: enterCell,
+          fromY,
+          toY: enterCell.y,
+          leg,
+          climb: kind,
+          plan,
+          outcome,
+          detail: outcome === 'climbed' ? undefined : (obstruction ?? undefined),
+        })
+        this.logger[outcome === 'climbed' ? 'info' : 'warn']('agent', line, {
+          actionId: candidate.id,
+          target: enterCell,
+          leg,
+          climb: kind,
+        })
+        outcomes.push(`${leg}=${kind}:${outcome}${outcome === 'climbed' ? '' : `:${obstruction ?? 'unknown'}`}`)
+        if (outcome !== 'climbed' && firstObstruction === null) firstObstruction = obstruction
+        if (outcome !== 'climbed') lastObstruction = obstruction
+      }
+      try {
+        this.lastVerticalFailureReason = null
+        let step: boolean
+        if (leg === 'primary') {
+          const contract = await this.runVerticalContract(candidate, epoch, signal, enterCell, startY)
+          step = contract.verticalStep
+          if (contract.activeVertical !== primary) {
+            contractFallbackSpent = true
+            kind = contract.activeVertical
+            plan = this.entryClimbPlanEvidence(candidate, 'fallback', kind, enterCell)
+          }
+        } else {
+          step = await this.runVerticalLeg(candidate, kind, true, epoch, signal, enterCell, startY)
+        }
+        ranAny = true
+        const nowY = Math.floor(this.bot.entity.position.y)
+        const movedTowardTargetY = enterCell.y < fromY ? nowY < fromY : nowY > fromY
+        const obstruction = this.lastVerticalFailureReason ?? `${kind}_no_step`
+        if (step && movedTowardTargetY) {
+          record('climbed', null)
+          return {
+            progressed: true,
+            error: null,
+            activeVertical: kind,
+            obstruction: null,
+            climbRefusal: null,
+            climbEvidence: outcomes.join(','),
+          }
+        }
+        record('no_rise', obstruction)
         // A path failure followed by an actual pillar placement refusal failed in
         // HOW, not in pathfinding. Preserve that typed final cause so #435 does
         // not spend the route as a fictitious path-stage failure.
-        error:
+        lastError =
           obstruction === 'refused'
-            ? new ExecutorError('place_refused', `entry pillar placement refused after path fallback`)
-            : null,
-        activeVertical,
-        obstruction,
-      }
-    } catch (error) {
-      if (error instanceof ActionCancelled) throw error
-      return {
-        progressed: false,
-        error:
+            ? new ExecutorError('place_refused', `entry ${kind} placement refused after path fallback`)
+            : null
+      } catch (error) {
+        if (error instanceof ActionCancelled) throw error
+        ranAny = true
+        lastError =
           error instanceof ExecutorError
             ? error
             : new ExecutorError(
                 'path_stuck',
-                `entry route leg failed: ${error instanceof Error ? error.message : String(error)}`,
-              ),
-        activeVertical: readMetaString(candidate, 'vertical') ?? 'none',
-        obstruction: this.lastVerticalFailureReason ?? (error instanceof ExecutorError ? error.code : null),
+                `entry ${kind} leg failed: ${error instanceof Error ? error.message : String(error)}`,
+              )
+        record('failed', this.lastVerticalFailureReason ?? lastError.code)
       }
     }
+    // Every grounded climb leg was run and none raised the body: the composed
+    // climb is refused typed with the executed legs' own cause, so the entry can
+    // never report a bare "no route" when a route existed and ran.
+    const climbRefusal =
+      climbNeeded && ranAny
+        ? formatPortalEntryClimbRefused({
+            cell: enterCell,
+            fromY: Math.floor(this.bot.entity.position.y),
+            toY: enterCell.y,
+            climb: primary,
+            fallback,
+            reason: 'climb_no_rise',
+            detail: lastObstruction ?? 'no_rise',
+          })
+        : null
+    if (climbRefusal !== null) {
+      this.logger.warn('agent', climbRefusal, { actionId: candidate.id, target: enterCell })
+    }
+    return {
+      progressed: false,
+      error: lastError,
+      activeVertical: primary,
+      obstruction: firstObstruction ?? lastObstruction,
+      climbRefusal,
+      climbEvidence: outcomes.length === 0 ? null : outcomes.join(','),
+    }
+  }
+
+  /**
+   * The plan's OWN bound, in its own vocabulary, for the `PORTAL_ENTRY_CLIMB`
+   * evidence: the same meta keys each vertical leg reads before it executes
+   * (`runVerticalLeg`), never a claim about the world.
+   */
+  private entryClimbPlanEvidence(
+    candidate: Candidate,
+    leg: PortalEntryClimbLeg,
+    kind: string,
+    enterCell: Vec3Json,
+  ): string {
+    const base = leg === 'fallback' ? 'fallback' : ''
+    const keyBase =
+      kind === 'pillar'
+        ? `${base}Pillar`
+        : kind === 'staircase-up'
+          ? base === ''
+            ? 'up'
+            : 'fallbackUp'
+          : kind === 'staircase'
+            ? base === ''
+              ? 'stair'
+              : 'fallbackStair'
+            : null
+    if (keyBase === null) {
+      const tunnel = readMetaPoint(candidate, 'tunnelX', 'tunnelY', 'tunnelZ')
+      return tunnel === null ? 'kind=reuse,tunnel=unknown' : `kind=reuse,at=${tunnel.x},${tunnel.y},${tunnel.z}`
+    }
+    const toY = Math.floor(readMetaNumber(candidate, `${keyBase}ToY`, enterCell.y))
+    if (kind === 'pillar') {
+      const steps = Math.floor(readMetaNumber(candidate, `${keyBase}Steps`, 0))
+      const place = readMetaString(candidate, `${keyBase}PlaceName`) ?? 'none'
+      return `kind=pillar,to_y=${toY},steps=${steps},place=${place}`
+    }
+    const dig = readMetaPoint(candidate, `${keyBase}DigX`, `${keyBase}DigY`, `${keyBase}DigZ`)
+    const digFact = dig === null ? 'unknown' : `${dig.x},${dig.y},${dig.z}`
+    return `kind=${kind},to_y=${toY},dig=${digFact}`
   }
 
   /**
@@ -9273,6 +9491,7 @@ export class Executor {
     enterCell: Vec3Json,
     pathError: unknown,
     legObstruction: string | null,
+    climbEvidence: string | null = null,
   ): string {
     const refusal = readMetaString(candidate, 'entryRouteRefusal')
     const vertical = readMetaString(candidate, 'vertical') ?? 'none'
@@ -9286,6 +9505,7 @@ export class Executor {
       fromY: Math.floor(this.bot.entity.position.y),
       toY: enterCell.y,
       ...(detail === null || detail.length === 0 ? {} : { detail }),
+      ...(climbEvidence === null ? {} : { climb: climbEvidence }),
     })
   }
 

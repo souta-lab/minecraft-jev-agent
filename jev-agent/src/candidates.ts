@@ -90,6 +90,7 @@ import {
   PORTAL_LIT_PREDICATE,
   PORTAL_ENTER_SKILL,
   PORTAL_OPEN_FACE_MAX_DISTANCE,
+  PORTAL_WALK_IN_LEVEL_TOLERANCE,
   formatReflex,
   formatSkillPolicyBoundary,
   formatSkillStep,
@@ -2722,12 +2723,48 @@ export function entryCandidates(
   // ONCE with the obstruction instead of re-arming the same unreachable walk.
   const route = planVerticalApproachDetailed(verticalInputFor(state, entry.enterCell))
   const verticalMeta = verticalPlanMeta(route.plan, Math.floor(state.self.position.y), entry.enterCell.y)
-  // The same reuse fallback a MOVE candidate carries, so a remembered tunnel
-  // entry that turns out to be unusable live still has a second grounded leg.
+  // The SECOND grounded plan of the SAME contract, so the entry's vertical leg
+  // has a composed fallback the executor can run when the first one cannot close
+  // the height. Two live shapes made this necessary (both the operator's floated
+  // gate, both ending in `PORTAL_WALK_IN_REFUSED ... refusal=not_level`):
+  //
+  //   * run.jsonl 2026-09-22T15:47:37Z `ENTER:27,67,9`, interior (27,67,9) five
+  //     above a body at y=62: the primary was a `reuse` plan whose remembered
+  //     tunnel sat at (-7,66,9), 34 blocks west. The leg STALLED rather than
+  //     refusing typed, and `runVerticalContract` consults `fallbackVertical`
+  //     only on the typed refusal - so the already-grounded own-column pillar
+  //     (`routeSig ...:pillar=0:fallback=pillar`) was never executed.
+  //   * run.jsonl 2026-09-22T15:56:03Z `ENTER:26,67,9`, seven above: the primary
+  //     was a `staircase-up` whose dig/step cell was (22,67,1) - a sensor step cut
+  //     four blocks west and eight north of the interior - and it carried
+  //     `fallback=none`, so there was nothing to fall back to at all.
+  //
+  // Both legs come from the ONE planner (`planVerticalApproachDetailed`): the
+  // primary is its answer with the body's remembered tunnel, the fallback is its
+  // answer with that tunnel and the sensor's step-cut pool removed - i.e. the
+  // own-column ascent (`pillar` / the up-staircase the body's own column can
+  // cut) that `ascentRouteTo` grounds for every other ascent. No second planner,
+  // no ranking: both plans realize the SAME climb to the interior's level and are
+  // executed in a fixed order, primary first. Gated to an interior ABOVE the body
+  // beyond the walk-in tolerance, so a level gate and a one-block step-up keep
+  // exactly the meta they had.
+  const climbInput = verticalInputFor(state, entry.enterCell)
+  const climbNeeded = entry.enterCell.y - Math.floor(state.self.position.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE
   const tunnelFallback =
-    route.plan?.kind === 'reuse'
-      ? planVerticalApproach({ ...verticalInputFor(state, entry.enterCell), tunnel: null })
+    route.plan?.kind === 'reuse' ? planVerticalApproach({ ...climbInput, tunnel: null }) : null
+  // The portal plane is never mined: the own-column ascent is grounded WITHOUT
+  // the sensor's step cuts, so the fallback can never choose a dig that opens the
+  // frame (`candidates.ts` filters protected structure out of `stepCuts` too, but
+  // the entry must not depend on that filter alone).
+  const ownColumnFallback =
+    tunnelFallback === null && climbNeeded && route.plan !== null && route.plan.kind !== 'pillar'
+      ? planVerticalApproach({ ...climbInput, tunnel: null, stepCuts: null })
       : null
+  const fallbackPlan = tunnelFallback ?? ownColumnFallback
+  // EXACTLY the same condition as before for a `reuse` primary (byte-identical
+  // meta, including the `fallbackVertical: 'none'` a tunnel-less descent emits),
+  // plus the own-column ascent only where it is a genuinely different second leg.
+  const declaresFallback = route.plan?.kind === 'reuse' || ownColumnFallback !== null
   const meta: Record<string, string | number | boolean> = {
     tick: state.tick,
     enterX: entry.enterCell.x,
@@ -2740,7 +2777,7 @@ export function entryCandidates(
     // arrival, so this can never transfer through an unlit frame.
     ...(entry.unverified === true ? { entryUnverified: true } : {}),
     ...verticalMeta,
-    ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+    ...(declaresFallback ? fallbackVerticalMeta(fallbackPlan) : {}),
     ...(route.plan === null && route.ascentRefusal !== null
       ? { entryRouteRefusal: route.ascentRefusal.reason }
       : {}),
