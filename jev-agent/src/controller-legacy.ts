@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
@@ -75,7 +75,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -917,41 +917,6 @@ export function formatKnownResourceRetired(item: string, cell: Vec3Json, attempt
   return `KNOWN_RESOURCE_RETIRED item=${item} cell=${cell.x},${cell.y},${cell.z} attempts=${attempts}`
 }
 
-/**
- * `SKILL_END execution=<outcome> verification=<failed|blocked> postcondition=<what
- * was contradicted> failure=<code>` (#436 section E observability).
- *
- * The skill that was RUNNING ended because the world contradicted the state its
- * postcondition was grounded on. It is a cancellation with a typed outcome, never
- * a silent re-target: the tick continues to Jev, which owns WHAT comes next.
- */
-export function formatSkillEnd(
-  execution: string,
-  verification: 'failed' | 'blocked',
-  postcondition: string,
-  failure: string,
-): string {
-  return `SKILL_END execution=${execution} verification=${verification} postcondition=${postcondition} failure=${failure}`
-}
-
-/**
- * `SKILL_INTERRUPT reason=<contradicted|target_gone> item=<item> cell=<x,y,z>`.
- *
- *   - `target_gone`: the selected target no longer exists (`block_mined` - the
- *     block is air/another block; `drop_absent` - the remembered item stack is
- *     not held by anything);
- *   - `contradicted`: the target CELL still exists but the claim the skill was
- *     sent there for does not (`mob_gone` - the landmark stands, no producer is
- *     inside the entity envelope).
- *
- * A merely UNREACHABLE target is NOT an interrupt: it keeps the existing bounded
- * `KNOWN_RESOURCE_RETIRED` retire, and a cell whose state is UNKNOWN (unloaded /
- * outside the envelope) is not a verdict at all.
- */
-export function formatSkillInterrupt(reason: 'contradicted' | 'target_gone', item: string, cell: Vec3Json): string {
-  return `SKILL_INTERRUPT reason=${reason} item=${item} cell=${cell.x},${cell.y},${cell.z}`
-}
-
 /** Dedupe state for remembered-cell verdict lines (one per generation). */
 export interface KnownResourceVerdictLatch {
   /** `<item>:<name>@<cell>:<reason>` already reported */
@@ -1227,8 +1192,8 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'KNOWN_RESOURCE_FALSIFIED',
   'KNOWN_RESOURCE_RESIGHTED',
   'KNOWN_RESOURCE_RETIRED',
-  'SKILL_END',
-  'SKILL_INTERRUPT',
+  SKILL_END,
+  SKILL_INTERRUPT,
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
@@ -8183,7 +8148,10 @@ export class JevController {
     const cancelled = this.executor.cancelCurrent(`contradicted target ${active.id} (${failure})`)
     this.logger.warn(
       'agent',
-      formatSkillEnd('cancelled', 'failed', `${contradiction.claim}_present`, failure),
+      // The canonical #436 vocabulary (netherPortalPlan.ts): a Skill that ended
+      // because the world contradicted the state its postcondition was grounded
+      // on, with the typed failure code.
+      formatSkillEnd(KNOWN_RETRIEVE_SKILL, 'cancelled', 'failed', `${contradiction.claim}_present`, failure),
       {
         actionId: active.id,
         item: active.resource,
@@ -8197,7 +8165,7 @@ export class JevController {
     )
     this.logger.warn(
       'agent',
-      formatSkillInterrupt(reason, active.resource, active.target),
+      formatSkillInterrupt(KNOWN_RETRIEVE_SKILL, reason),
       { actionId: active.id, item: active.resource, cell: active.target, reason: failure },
       this.tickCounter,
     )

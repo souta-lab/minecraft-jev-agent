@@ -63,10 +63,9 @@ import {
   formatKnownResourceFalsified,
   formatKnownResourceResighted,
   formatKnownResourceRetired,
-  formatSkillEnd,
-  formatSkillInterrupt,
   nextKnownResourceVerdict,
 } from '../jev-agent/src/controller-legacy.ts'
+import { formatSkillEnd, formatSkillInterrupt } from '../jev-agent/src/netherPortalPlan.ts'
 import type { KnownResourceVerdictLatch } from '../jev-agent/src/controller-legacy.ts'
 
 const require = createRequire(import.meta.url)
@@ -486,14 +485,16 @@ addCase('(c) the typed markers name the item, cell and reason', () => {
 addCase('(E) a contradicted target ends the skill with SKILL_END/SKILL_INTERRUPT, never a re-target', () => {
   // `block_mined`/`drop_absent` are the selected target itself disappearing;
   // `mob_gone` is the cell standing while the claim it was chosen for is gone.
-  const skillEnd = formatSkillEnd('cancelled', 'failed', 'block_present', 'block_mined')
-  const gone = formatSkillInterrupt('target_gone', 'raw_iron', { x: 24, y: 22, z: 11 })
-  const contradicted = formatSkillInterrupt('contradicted', 'blaze_rod', { x: 39, y: 59, z: -20 })
+  const skillEnd = formatSkillEnd('RETRIEVE(knownResource)', 'cancelled', 'failed', 'block_present', 'block_mined')
+  const noFailure = formatSkillEnd('ENTER_PORTAL(portalSite)', 'entered', 'dimension', 'portal_entered')
+  const gone = formatSkillInterrupt('RETRIEVE(knownResource)', 'target_gone')
+  const contradicted = formatSkillInterrupt('RETRIEVE(knownResource)', 'contradicted')
   return {
     pass:
-      skillEnd === 'SKILL_END execution=cancelled verification=failed postcondition=block_present failure=block_mined' &&
-      gone === 'SKILL_INTERRUPT reason=target_gone item=raw_iron cell=24,22,11' &&
-      contradicted === 'SKILL_INTERRUPT reason=contradicted item=blaze_rod cell=39,59,-20',
+      skillEnd === 'SKILL_END skill=RETRIEVE(knownResource) execution=cancelled verification=failed postcondition=block_present failure=block_mined' &&
+      noFailure === 'SKILL_END skill=ENTER_PORTAL(portalSite) execution=entered verification=dimension postcondition=portal_entered' &&
+      gone === 'SKILL_INTERRUPT skill=RETRIEVE(knownResource) reason=target_gone' &&
+      contradicted === 'SKILL_INTERRUPT skill=RETRIEVE(knownResource) reason=contradicted',
     detail: `${skillEnd} | ${gone} | ${contradicted}`,
   }
 })
@@ -504,7 +505,7 @@ addCase('(E) the cancellation is wired into the tick, stops the running skill, a
   const cancels = /this\.executor\.cancelCurrent\(`contradicted target/.test(source)
   const falsifiedOnly = /evidence\.status === 'falsified' &&/.test(source)
   const noRetarget = !/cancelContradictedSkillTarget[\s\S]{0,3000}RETRIEVAL_ESCALATION/.test(source)
-  const markers = ["'SKILL_END'", "'SKILL_INTERRUPT'", "'KNOWN_RESOURCE_FALSIFIED'", "'KNOWN_RESOURCE_RETIRED'"].every(
+  const markers = ["SKILL_END", "SKILL_INTERRUPT", "'KNOWN_RESOURCE_FALSIFIED'", "'KNOWN_RESOURCE_RETIRED'"].every(
     (token) => source.includes(token),
   )
   const boundedRetryIntact = /KNOWN_RETRIEVE_RETIRE_LIMIT = 2/.test(source)

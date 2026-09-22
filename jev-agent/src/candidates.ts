@@ -6965,6 +6965,13 @@ function knownResourceFor(
   return best
 }
 
+/**
+ * The stable id of the executed `RETRIEVE:known` Skill, for the #436 Skill
+ * vocabulary (`SKILL_START`/`SKILL_INTERRUPT`/`SKILL_END`). One id for every
+ * remembered-cell trip, whatever item or claim it carries.
+ */
+export const KNOWN_RETRIEVE_SKILL = 'RETRIEVE(knownResource)'
+
 export const KNOWN_RESOURCE_PROOF_DISTANCE = 8
 
 function resourceDepleted(
