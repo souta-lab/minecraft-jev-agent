@@ -149,6 +149,15 @@ export interface ReplanInputs {
    * replan gate releases the wake instead of suppressing it as `no_new_info`.
    */
   waitStreakExhausted?: string | null
+  /**
+   * #plan-reconciliation: the live plan/objective identity
+   * (`rung@index|objective`). A row authored under a superseded plan is a
+   * stale-plan wake; a genuinely different identity is information the throttle
+   * must not swallow as `no_new_info`, while the identical supersession repeated
+   * stays bounded by the same window/streak rules. Optional so pre-existing
+   * fixtures and callers that only have world inputs keep their old hashes.
+   */
+  planIdentityKey?: string | null
 }
 
 /** Canonical, order-independent inventory signature (counts > 0 only). */
@@ -174,6 +183,7 @@ export function hashReplanInputs(inputs: ReplanInputs): string {
     goal: inputs.goalKey ?? null,
     actionFailureExhausted: inputs.actionFailureExhausted ?? null,
     waitStreakExhausted: inputs.waitStreakExhausted ?? null,
+    planIdentity: inputs.planIdentityKey ?? null,
   }
   return createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
@@ -195,6 +205,7 @@ export function replanInputsChanged(
   if (current.capabilityGap !== null) return true
   if (previous.capabilityGap !== current.capabilityGap) return true
   if ((previous.goalKey ?? null) !== (current.goalKey ?? null)) return true
+  if ((previous.planIdentityKey ?? null) !== (current.planIdentityKey ?? null)) return true
   if ((previous.actionFailureExhausted ?? null) !== (current.actionFailureExhausted ?? null)) return true
   if ((previous.waitStreakExhausted ?? null) !== (current.waitStreakExhausted ?? null)) return true
   if (inventorySignature(previous.inventory) !== inventorySignature(current.inventory)) return true

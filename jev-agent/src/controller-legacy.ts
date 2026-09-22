@@ -124,8 +124,23 @@ import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } fro
 import type { ActuationPort } from './actuationPort.ts'
 import { applyDangerGate, DANGER_CONFIDENCE_THRESHOLD, gateBoolean, gateDanger, gateScore } from './gating.ts'
 import type { GatedScore } from './gating.ts'
-import { formatNonProgressEscalated, formatNonProgressYield, GoalQueue, toGoalQueueStateLog } from './goalQueue.ts'
-import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
+import {
+  PLAN_IDENTITY_CHANGED,
+  PLAN_ROW_RETIRED,
+  ROW_DEFERRED_NOT_EXECUTABLE_HERE,
+  ROW_NOT_EXECUTABLE_HERE,
+  formatNonProgressEscalated,
+  formatNonProgressYield,
+  formatPlanIdentity,
+  formatPlanIdentityChanged,
+  formatRowDeferredNotExecutableHere,
+  formatRowNotExecutableHere,
+  GoalQueue,
+  notExecutableReplanRequest,
+  planReplanRequest,
+  toGoalQueueStateLog,
+} from './goalQueue.ts'
+import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, PlanIdentity, PlanObsoleteProof, PlanOp, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
@@ -431,6 +446,22 @@ export interface JevAgentOptions {
     goal: QueuedGoal,
     counts: Readonly<Record<string, number>>,
   ) => DominatedPrerequisiteDecision | null
+  /**
+   * #plan-reconciliation: the LIVE plan/objective identity the durable queue is
+   * reconciled against. The resident derives it from the same durable-aware
+   * ladder frontier that seeds the controller, so a plan whose frontier has moved
+   * on is a typed fact, not a guess. The objective item/count ride along as
+   * evidence; the COMPARISON is the frontier projection (`planIdentityId`).
+   * Absent in standalone tests / deterministic baselines, where the whole
+   * reconciliation stays inert and behaviour is unchanged.
+   */
+  planIdentity?: () => PlanIdentity | null
+  /**
+   * #plan-reconciliation: code-owned proof that a row authored under a
+   * superseded plan is obsolete for the CURRENT objective. Returning null keeps
+   * the row: "the plan that authored me is gone" alone is never obsolescence.
+   */
+  supersededGoalReason?: (goal: QueuedGoal, identity: PlanIdentity) => PlanObsoleteProof | null
   /** coordinate-level movement failures restored from the resident's class-A memory */
   moveFailureEntries?: readonly MoveFailEntry[]
   /** called after movement failure memory changes so the HOST can persist a DTO snapshot */
@@ -1500,6 +1531,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SKILL_ENVELOPE_VIOLATION',
   'SKILL_INVALIDATED',
   'SKILL_SELECTED',
+  // #plan-reconciliation: the objective-identity reconciliation and the bounded
+  // cross-dimension escalation. Unmirrored markers never reach buddy.log, which
+  // is how the measured `g1:descend:raw_iron`-while-in-the-Nether stall stayed
+  // invisible: the row's own predicate was unsatisfied, so no existing boundary
+  // had anything to say about it.
+  PLAN_IDENTITY_CHANGED,
+  PLAN_ROW_RETIRED,
+  ROW_NOT_EXECUTABLE_HERE,
+  ROW_DEFERRED_NOT_EXECUTABLE_HERE,
+  'NO_PRODUCTIVE_HEAD_BOUND',
 ])
 
 /**
@@ -1973,6 +2014,14 @@ export class JevController {
   private noProductiveRepeats = 0
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
+  /**
+   * #plan-reconciliation: decisions that presented no productive candidate for
+   * the SAME queue row, counted regardless of body motion. `noProductiveRepeats`
+   * resets whenever the rounded position changes, so a body that paces or climbs
+   * while producing nothing never reaches its own bound.
+   */
+  private noProductiveHeadKey: string | null = null
+  private noProductiveHeadCount = 0
   /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
@@ -2872,6 +2921,13 @@ export class JevController {
       // subgoal and advances it, recording the transition with the trigger.
       this.syncQueue(trigger)
       this.syncGoalToQueue()
+      // #plan-reconciliation: the queue's plan/objective identity, and the
+      // bounded cross-dimension head fact. Both run before the yield watchdog and
+      // before the state build, so the row order and head the candidates are
+      // generated against are the reconciled ones, and a stale-plan head produces
+      // its typed System2 request this tick instead of an unbounded WAIT.
+      this.reconcilePlanIdentity()
+      this.reconcileHeadDimension()
       // #nonprogress-yield: an OPTIONAL row that has made zero semantic progress
       // for a bounded window in one pocket may not keep holding the head while
       // the frontier's own goal waits. Runs before the state build so the
@@ -3307,6 +3363,60 @@ export class JevController {
         this.noProductiveRepeats = 0
         this.noProductiveKey = null
         this.starvationContext = null
+      }
+      // #plan-reconciliation: the bounded SEMANTIC starvation bound.
+      //
+      // `noProductiveRepeats` only advances while the goal + rounded position +
+      // inventory are unchanged (`noProductiveSignature`), so a body that MOVES
+      // while producing nothing launders the stall: measured live
+      // (`run-mucpugqn-20evo`) the durable head was `g1:descend:raw_iron`
+      // (declared dimension `minecraft:overworld`, success `levelAtMost y32`)
+      // while the body climbed to y102 in the NETHER, the signature changed on
+      // every ascent, the repeat counter never reached `waitLimit`, and
+      // `CANDIDATE_STARVATION` repeated unbounded with no System2 request. This
+      // bound counts the decisions that presented NO productive candidate for the
+      // SAME queue head with zero semantic progress, which body motion cannot
+      // reset. It is code-owned evidence about the local CAN envelope - it never
+      // chooses the replacement WHAT, it wakes the layer that does.
+      if (noProductive) {
+        const headKey = `${this.queue.current?.id ?? 'none'}|${this.currentGoalKey()}`
+        if (headKey === this.noProductiveHeadKey) this.noProductiveHeadCount += 1
+        else {
+          this.noProductiveHeadKey = headKey
+          this.noProductiveHeadCount = 1
+        }
+        if (this.noProductiveHeadCount >= this.options.waitLimit) {
+          this.noProductiveHeadCount = 0
+          this.logger.warn(
+            'agent',
+            `NO_PRODUCTIVE_HEAD_BOUND count=${this.options.waitLimit}/${this.options.waitLimit} goal="${this.currentGoalKey()}" blocker=${this.starvationContext?.blockedBy ?? 'unknown'}${(this.starvationContext?.missing.length ?? 0) > 0 ? ` missing=${JSON.stringify(this.starvationContext?.missing ?? [])}` : ''} -> wake System2`,
+            {
+              goal: this.currentGoalKey(),
+              goalId: this.queue.current?.id ?? null,
+              blocker: this.starvationContext?.blockedBy ?? null,
+              missing: this.starvationContext?.missing ?? [],
+              limit: this.options.waitLimit,
+              boundary: 'semantic_boundary',
+            },
+            this.tickCounter,
+          )
+          this.escalate(
+            'all_candidates_invalid',
+            `NO_PRODUCTIVE_HEAD_BOUND: ${this.options.waitLimit} decisions presented no productive candidate for the same queue head "${this.currentGoalKey()}" with zero semantic progress; blocker=${this.starvationContext?.blockedBy ?? 'unknown'}`,
+          )
+          return
+        }
+        if (this.noProductiveHeadCount === 1) {
+          this.logger.info(
+            'agent',
+            `NO_PRODUCTIVE_HEAD_WINDOW goal="${this.currentGoalKey()}" limit=${this.options.waitLimit}`,
+            { goal: this.currentGoalKey(), count: this.noProductiveHeadCount, limit: this.options.waitLimit },
+            this.tickCounter,
+          )
+        }
+      } else {
+        this.noProductiveHeadKey = null
+        this.noProductiveHeadCount = 0
       }
       this.breakFailureDeadlock(candidates)
 
@@ -3912,14 +4022,140 @@ export class JevController {
   }
 
   /**
+   * #plan-reconciliation: reconcile the durable queue's plan/objective identity
+   * against the live one, once per tick.
+   *
+   * The measured blocker (m3-live): a durable row authored by an M2-era
+   * exploration plan (declared overworld, `levelAtMost y32`) held the queue head
+   * while the objective had moved to M3/blaze_rods and the body was in the
+   * Nether. Nothing compared the two: the row's own predicate was genuinely
+   * unsatisfied, so predicate retirement left it (correctly), and every other
+   * boundary asked only about the ROW's own condition. This is the comparison.
+   *
+   * Retirement uses the resident-injected code-owned proof only. A superseded row
+   * without a proof is KEPT and reported (`kept`), because "the plan that
+   * authored me is gone" is not by itself obsolescence - the current objective
+   * may still want the same work. The preferred repair is the System2 re-plan
+   * request below: WHAT stays with the model.
+   */
+  private reconcilePlanIdentity(): void {
+    const provider = this.options.planIdentity
+    if (provider === undefined) return
+    let live: PlanIdentity | null = null
+    try {
+      live = provider()
+    } catch (error) {
+      this.logger.warn(
+        'agent',
+        `PLAN_IDENTITY_UNAVAILABLE error=${error instanceof Error ? error.message : String(error)}`,
+        {},
+        this.tickCounter,
+      )
+      return
+    }
+    if (live === null) return
+    const proof = this.options.supersededGoalReason
+    const result = this.queue.reconcilePlanIdentity({
+      current: live,
+      isObsolete: proof === undefined ? undefined : (goal) => proof(goal, live as PlanIdentity),
+      onSuperseded: (line, detail) => this.logger.warn('queue', line, detail, this.tickCounter),
+    })
+    if (result.adoptedLegacy > 0 && result.previous === null) {
+      // First reconciliation of a legacy/queued ledger: rows adopt the live
+      // identity, so nothing is misread as superseded. Evidence only.
+      this.logger.info(
+        'queue',
+        `PLAN_IDENTITY_ADOPTED identity=${formatPlanIdentity(result.current)} rows=${result.adoptedLegacy}`,
+        { identity: formatPlanIdentity(result.current), rows: result.adoptedLegacy },
+        this.tickCounter,
+      )
+    }
+    if (result.retired.length > 0 || (result.changed && result.superseded > 0)) {
+      this.logger.warn(
+        'agent',
+        formatPlanIdentityChanged(result),
+        {
+          from: formatPlanIdentity(result.previous),
+          to: formatPlanIdentity(result.current),
+          superseded: result.superseded,
+          retired: result.retired.map((entry) => entry.id),
+          kept: result.kept.map((entry) => entry.id),
+          headSuperseded: result.headSuperseded,
+        },
+        this.tickCounter,
+      )
+    }
+    if (result.superseded === 0) return
+    // The preferred arm: ask System2 (the WHAT owner) to re-plan, carrying the
+    // compact state the request already builds (objective, queue head, recent
+    // outcomes/events, grounded alternatives, world facts, blocker detail). The
+    // replan throttle and the model cooldown bound it; `planIdentityKey` in
+    // `replanInputs()` makes a genuinely new objective new information while a
+    // repeated identical supersession is held.
+    const request = planReplanRequest(result)
+    if (request === null) return
+    this.summonLlm(request.reason, request.detail)
+  }
+
+  /**
+   * #plan-reconciliation: the bounded cross-dimension head reconciliation.
+   *
+   * A head row that declares a dimension the body is not in cannot execute HERE
+   * AND NOW. It is NOT marked impossible (it may be legitimate work scheduled for
+   * the other side) and it is NOT reordered by preference: only a BOUNDED demotion
+   * behind a row that IS executable in the live dimension is allowed, and with no
+   * such row the fact becomes a typed System2 request instead of an unbounded
+   * `CANDIDATE_STARVATION`/ascent loop.
+   */
+  private reconcileHeadDimension(): void {
+    if (this.queue.isEmpty) return
+    const live = this.bot.game?.dimension ?? null
+    const result = this.queue.reconcileNotExecutableHead({ liveDimension: live })
+    if (result.action === 'hold') return
+    if (result.action === 'defer') {
+      this.logger.warn(
+        'agent',
+        formatRowDeferredNotExecutableHere(result),
+        {
+          goalId: result.goalId,
+          goalKey: result.goalKey,
+          declaredDimension: result.declaredDimension,
+          liveDimension: result.liveDimension,
+          defers: result.defers,
+          limit: result.limit,
+          nextGoalId: result.nextGoalId,
+        },
+        this.tickCounter,
+      )
+      return
+    }
+    this.logger.warn(
+      'agent',
+      `${formatRowNotExecutableHere(result)} -> wake System2`,
+      {
+        goalId: result.goalId,
+        goalKey: result.goalKey,
+        declaredDimension: result.declaredDimension,
+        liveDimension: result.liveDimension,
+        reason: result.reason,
+        defers: result.defers,
+        limit: result.limit,
+      },
+      this.tickCounter,
+    )
+    const request = notExecutableReplanRequest(result)
+    if (request === null) return
+    this.summonLlm(request.reason, request.detail)
+  }
+
+  /**
    * #nonprogress-yield: the controller half of the bounded optional-head yield.
    * It supplies the two facts the queue cannot see - the code-owned critical
    * survival predicate (a starving low-health body still prioritises food) and
    * the goal key for the typed marker - and never selects WHAT runs next: the
    * plan's own order does, and System2 still owns the repair.
    */
-  private reconcileNonProgressingOptionalHead(): void {
-    if (this.queue.isEmpty) return
+  private reconcileNonProgressingOptionalHead(): void {    if (this.queue.isEmpty) return
     const critical = bodyStarving({
       food: typeof this.bot.food === 'number' ? this.bot.food : Number.NaN,
       health: this.bot.health,
@@ -5500,6 +5736,13 @@ export class JevController {
     // #nonprogress-yield: a settled decision that showed `goal`/`search` progress
     // clears the optional-head bound. `body`/`none` deliberately do not.
     this.queue.noteSemanticProgress(taxonomy.progressKinds)
+    // #plan-reconciliation: the same settled semantic progress clears the
+    // no-productive-head bound, so only a head that genuinely never advances is
+    // escalated.
+    if (taxonomy.progressKinds.some((kind) => kind === 'goal' || kind === 'search')) {
+      this.noProductiveHeadKey = null
+      this.noProductiveHeadCount = 0
+    }
 
     writeOutcome(this.jevWriter, {
       callId: decision.callId,
@@ -9378,6 +9621,18 @@ export class JevController {
       failureSignature,
       capabilityGap: this.capabilityGapActive ? this.capabilityGapSignature : null,
       goalKey: this.currentGoalKey(),
+      // #plan-reconciliation: a genuinely different plan/objective identity is new
+      // information for the replan gate (so the supersession wake is not swallowed
+      // as `no_new_info`), while the identical supersession repeated stays bounded
+      // by the same throttle.
+      planIdentityKey: (() => {
+        try {
+          const identity = this.options.planIdentity?.() ?? null
+          return identity === null ? null : formatPlanIdentity(identity)
+        } catch {
+          return null
+        }
+      })(),
       // The Nth identical typed action failure is proof the local recovery is
       // exhausted, so it is genuine new information for the replan gate even
       // though the cheap world inputs are identical. Null at every count < N.

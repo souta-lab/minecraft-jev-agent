@@ -1,7 +1,7 @@
 // state-snapshot.ts - issue #40 class-A snapshot schema, migration and the
 // single-writer commit rules. This is the HOST layer: pure functions, no bot,
 // no network, so the schema contract is unit-testable without a live server.
-import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
+import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis, PlanIdentity } from '../jev-agent/src/goalQueue.ts'
 import type { AgentSnapshot, ResidentWorldMemory } from './resident-types.ts'
 import { normalizeWorldMemory } from './resident-types.ts'
 
@@ -112,10 +112,32 @@ function sanitizeLedgerBasis(value: unknown): LedgerBasis | undefined {
 }
 
 function sanitizeGoalQueueSnapshot(value: GoalQueueSnapshot): GoalQueueSnapshot {
+  const planIdentity = sanitizePlanIdentity(value.planIdentity)
   return {
     counter: Math.max(0, asInt(value.counter, 0)),
     goals: value.goals.map((goal) => ({ ...goal })),
     ...(sanitizeLedgerBasis(value.basis) === undefined ? {} : { basis: sanitizeLedgerBasis(value.basis) }),
+    ...(planIdentity === undefined ? {} : { planIdentity }),
+  }
+}
+
+/**
+ * #plan-reconciliation: the plan/objective identity a durable queue was authored
+ * under must survive the host round-trip, or a restore cannot tell a superseded
+ * row from a current one. Unknown/malformed shapes are dropped (never guessed).
+ */
+function sanitizePlanIdentity(value: unknown): PlanIdentity | undefined {
+  if (!isRecord(value)) return undefined
+  if (typeof value.rungId !== 'string' || value.rungId.length === 0) return undefined
+  if (typeof value.rungIndex !== 'number' || !Number.isInteger(value.rungIndex)) return undefined
+  return {
+    rungId: value.rungId,
+    rungIndex: value.rungIndex,
+    objectiveItem: typeof value.objectiveItem === 'string' ? value.objectiveItem : null,
+    objectiveCount:
+      typeof value.objectiveCount === 'number' && Number.isFinite(value.objectiveCount)
+        ? Math.max(0, Math.floor(value.objectiveCount))
+        : 0,
   }
 }
 
