@@ -470,7 +470,7 @@ export function envelopeForCandidate(
       const firstPlaceCell = bridge ? metaCell(candidate.meta[BRIDGE_PLACE_META]) : null
       return {
         ...base,
-        mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.vertical !== undefined,
+        mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.digStep === true || candidate.meta.vertical !== undefined,
         mayPlaceGroundedRoute: candidate.meta.vertical !== undefined || bridge,
         mayPlaceBlocks:
           bridge && firstPlaceCell !== null && bridgeBlock !== null

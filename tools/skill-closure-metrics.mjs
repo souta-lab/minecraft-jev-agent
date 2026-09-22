@@ -160,6 +160,9 @@ const out = {
   projectionStability: projectionStability(window),
   // MUST-be-zero counters (#436 §20): reported UNKNOWN until the lanes emit the markers, never as 0 by default.
   targetSwitchWithoutJev: num('TARGET_SWITCH_WITHOUT_JEV') === 0 && num('SKILL_POLICY_BOUNDARY') === 0 ? 'UNKNOWN' : num('TARGET_SWITCH_WITHOUT_JEV'),
-  effectEnvelopeViolations: num('EFFECT_ENVELOPE_VIOLATION') === 0 && num('SKILL_COMMIT') === 0 ? 'UNKNOWN' : num('EFFECT_ENVELOPE_VIOLATION'),
+  // The executor emits SKILL_ENVELOPE_VIOLATION (executor.ts assertEffect); the old name here
+  // matched nothing, so a MUST-be-zero counter read 0 while the live run had 100+ real
+  // violations - a false-clean evidence signal. Keep the UNKNOWN-until-the-plane-exists rule.
+  effectEnvelopeViolations: num('SKILL_ENVELOPE_VIOLATION') === 0 && num('SKILL_COMMIT') === 0 ? 'UNKNOWN' : num('SKILL_ENVELOPE_VIOLATION'),
 }
 console.log(JSON.stringify(out, null, 2))

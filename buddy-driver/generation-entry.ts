@@ -1825,7 +1825,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   ): { position: Vec3Json; kind: 'nether_fortress'; blocks: string[] }[] => {
     const entity = ctx.bot.entity
     if (entity === undefined) return []
-    const scanned = scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64) ?? []
+    // No coalesce here: the `scanned === null` guard below is the whole point of #377. With
+    // `?? []` the guard was unreachable and one transient scan failure silently erased a
+    // verified fortress site (the live set looked empty near a remembered site).
+    const scanned = scanBlockPositions(ctx.bot, NETHER_STRUCTURE_BLOCK_NAMES, 64, 64)
     if (scanned === null) {
       // #377: a failed scan is NOT evidence of absence. `syncKnownStructureSites`
       // treats an empty live set near a remembered site as negative proof, so
