@@ -1315,9 +1315,17 @@ export function evaluateLedgerRestoreBasis(
   live: LedgerBasis,
 ): { accept: boolean; reasons: string[] } {
   const unfinished = snapshot.goals.some((goal) => goal.status === 'active' || goal.status === 'pending')
-  if (!unfinished) return { accept: true, reasons: [] }
   const basis = snapshot.basis
-  if (basis === undefined) return { accept: false, reasons: ['missing_frontier_basis'] }
+  // A scoped snapshot is scoped even when every row is done. Restoring a
+  // done-only snapshot replaces the controller queue just like an unfinished
+  // snapshot does; accepting one from another dimension/frontier can therefore
+  // erase the freshly-grounded live plan (measured: Nether death -> Overworld
+  // respawn lost the enter_nether row and fell into an unrelated System2 repair).
+  // Legacy basis-less history remains harmless only when it has no unfinished
+  // work, preserving the compatibility rule documented above.
+  if (basis === undefined) {
+    return unfinished ? { accept: false, reasons: ['missing_frontier_basis'] } : { accept: true, reasons: [] }
+  }
   const reasons: string[] = []
   if (basis.worldKey !== live.worldKey) reasons.push('world_key_changed')
   if (basis.frontierRungIndex !== live.frontierRungIndex) reasons.push('frontier_index_changed')
