@@ -3932,8 +3932,17 @@ export const STATION_WALK_PROBE_BUDGET = 6
 
 function stationUnreachableSet(state: WorldState, options: CandidateOptions): ReadonlySet<string> {
   const explicit = options.unreachableStations ?? EMPTY_STATIONS
+  const blacklisted = options.blacklistedMoveTargets
+  let extended: Set<string> | null = null
+  for (const entry of state.furnaces ?? []) {
+    const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
+    const key = knownStationKey({ name: 'furnace', position })
+    if (!isBlacklistedMoveTarget(state, blacklisted, position)) continue
+    extended ??= new Set(explicit)
+    extended.add(key)
+  }
   const probe = options.reachability?.pathProbe ?? null
-  if (probe === null) return explicit
+  if (probe === null) return extended ?? explicit
   const walkable: { position: Vec3Json; key: string; walk: number }[] = []
   for (const entry of state.furnaces ?? []) {
     const position: Vec3Json = { x: entry.x, y: entry.y, z: entry.z }
@@ -3942,9 +3951,8 @@ function stationUnreachableSet(state: WorldState, options: CandidateOptions): Re
     walkable.push({ position, key: knownStationKey({ name: 'furnace', position }), walk })
   }
   walkable.sort((a, b) => a.walk - b.walk)
-  let extended: Set<string> | null = null
   for (const station of walkable.slice(0, STATION_WALK_PROBE_BUDGET)) {
-    if (explicit.has(station.key)) continue
+    if (explicit.has(station.key) || extended?.has(station.key)) continue
     if (probe(station.position) !== 'no_path') continue
     extended ??= new Set(explicit)
     extended.add(station.key)
