@@ -86,6 +86,7 @@ import {
   classifyContactApproach,
   formatContactUnreachable,
   HUNT_APPROACH_BUDGET,
+  MELEE_ATTACK_REACH,
 } from './combatClosure.ts'
 import type { CombatOutcome } from './combatClosure.ts'
 import type { ArmorSlot } from './gearPlan.ts'
@@ -1216,8 +1217,12 @@ const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker'])
  * swings while that intent owns the actuation lease.  Target/mode selection
  * remains in the candidate and therefore in Jev; this is only the melee
  * mechanics envelope.
+ *
+ * The NUMBER lives in `combatClosure.ts MELEE_ATTACK_REACH`, because the
+ * candidate-side stance gate must measure hittability with the same envelope
+ * this loop swings inside. One number, two readers, no drift.
  */
-export const MELEE_ATTACK_RANGE = 3.1
+export const MELEE_ATTACK_RANGE = MELEE_ATTACK_REACH
 export const ATTACK_LEASE_MS = 2_200
 /** Goal-directed mob hunts are bounded Skills long enough to defeat an enderman. */
 export const GOAL_HUNT_LEASE_MS = 10_000
