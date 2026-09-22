@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
@@ -152,8 +152,23 @@ import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
-import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, isZeroProgressOutcome, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import type { ActionOutcomeTaxonomy } from './actionPostcondition.ts'
+import {
+  cellKey,
+  clearZeroProgressStand,
+  clearZeroProgressTarget,
+  formatActionZeroProgress,
+  formatApproachLeg,
+  formatDescendRetired,
+  formatRetrieveRetired,
+  formatRetrieveRouteBlocked,
+  isZeroProgressRouteKind,
+  observeZeroProgressRoute,
+  routeSignature,
+  ZERO_PROGRESS_STAND_ROUTE_LIMIT,
+} from './zeroProgressRoute.ts'
+import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
@@ -1099,6 +1114,19 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
   'RESOURCE_SOURCE_NONE',
+  // The M3 producer side of the same observability rule. A pearl need with no
+  // sensed enderman produced MOVEs and nothing else in the run log: no marker
+  // named the need, its producer mob, the absence of any sensed instance, or the
+  // grounded search the tick was offering. `MOB_DROP_SOURCE_NONE` is that fact.
+  'MOB_DROP_SOURCE_NONE',
+  // A hunt is a bounded Skill; how it ended is run-scoped evidence, not a
+  // private executor line. The measured live shape (an enderman that left the
+  // tracked set before the first swing) reached only `status=failed`, so the
+  // mechanical cause was unrecoverable from the log.
+  'HUNT_END',
+  'HUNT_RETARGET',
+  'HUNT_TARGET_LOST',
+  'HUNT_REACQUIRE_EXHAUSTED',
   // Starvation is a run-scoped survival fact, not a private diagnostic. The
   // measured live failure (run-muc0l5fp-158ak: `food=0` for the whole run, the
   // body pinned at the server's 1 HP starvation floor) emitted BODY_STARVING and
@@ -1678,6 +1706,14 @@ export class JevController {
   private readonly stationApproachLogged = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
   private moveFailMemory: MoveFailMemory
+  /**
+   * Zero-observable-change route memory: (kind, target cell, stand cell, route
+   * signature) -> attempts. The postcondition layer owns the verdict; this owns
+   * only what happens NEXT - a repeat of the same action with unchanged
+   * preconditions is never re-issued, and a bounded number of distinct
+   * zero-progress routes at one stand cell exhausts that family there.
+   */
+  private zeroProgressRoutes: ZeroProgressRoutes = {}
   /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
   private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
@@ -1716,6 +1752,12 @@ export class JevController {
   private lastSourceGapKey: string | null = null
   /** Dedupe key for the last mirrored `FOOD_SOURCE_NONE` line. */
   private lastFoodSourceGapKey: string | null = null
+  /**
+   * Dedupe key for the last mirrored `MOB_DROP_SOURCE_NONE` line (the M3 pearl
+   * half had NO producer-side marker at all, so a pearl need with no sensed
+   * enderman was invisible in the run log).
+   */
+  private lastMobDropGapKey: string | null = null
   /** Signature of the last `COMBAT_KIT_GAP` line, so the gap logs on a change. */
   private lastCombatKitGapLine: string | null = null
   /** Signature of the last `THREAT_RANGED_UNANSWERED` line (dedup, not a state). */
@@ -2404,6 +2446,7 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
+      this.signals.zeroProgressRoutes = this.zeroProgressRoutes
       this.signals.knownResources = filterKnownResources(
         this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.currentDimension())),
         this.unreachableResources,
@@ -2530,6 +2573,7 @@ export class JevController {
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
+      this.logMobDropSourceGap(grounded.mobDropGap)
       this.logCombatKitGap(grounded.combatKitGap)
       this.noteSurfaceAscent(grounded.surfaceAscentRefusal, grounded.candidates)
       this.noteColumnDig(grounded.candidates)
@@ -3012,6 +3056,7 @@ export class JevController {
 
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
+      if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -4244,6 +4289,7 @@ export class JevController {
     }
 
     this.retireFailedKnownRetrieve(candidate, result)
+    this.recordZeroProgressOutcome(result, candidate, truth)
     if (result.unverifiedPostcondition !== undefined) {
       this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
     } else if (truth.status === 'done' && truth.verified) {
@@ -4628,6 +4674,29 @@ export class JevController {
     )
   }
 
+  /**
+   * An APPROACH_LEG candidate: the remembered target's own route proved zero
+   * observable change, so the generator offers a travel leg that changes the
+   * stand cell (a grounded MOVE toward the target) instead of re-issuing the same
+   * action. Logged when Jev actually selects it, so the marker means "this body
+   * is now walking the approach", not "a leg existed".
+   */
+  private logApproachLeg(candidate: Candidate): void {
+    const target = candidate.target
+    if (target === null) return
+    const reason = typeof candidate.meta.approachLeg === 'string' ? candidate.meta.approachLeg : 'target_not_observable'
+    this.logger.info(
+      'agent',
+      formatApproachLeg(reason, target),
+      {
+        actionId: candidate.id,
+        target,
+        resource: typeof candidate.meta.approachResource === 'string' ? candidate.meta.approachResource : null,
+      },
+      this.tickCounter,
+    )
+  }
+
   private logDescendPlan(candidate: Candidate): void {
     const dir = typeof candidate.meta.dir === 'string' ? candidate.meta.dir : 'unknown'
     const mode = candidate.meta.mode === 'down' ? 'down' : 'level'
@@ -4639,6 +4708,38 @@ export class JevController {
       { actionId: candidate.id, mode, dir, depth },
       this.tickCounter,
     )
+    // The heading PLAN of the descent: held while the world offers a safe step
+    // under it, changed only with the typed obstruction that forced it. Without
+    // this line a heading change was invisible in the log (the measured
+    // `W 23 | E 17 | N 12 | S 8` histogram over 60 steps).
+    const headingLine = typeof candidate.meta.headingLine === 'string' ? candidate.meta.headingLine : null
+    if (headingLine !== null) {
+      const changed = candidate.meta.planHeadingHeld === false
+      this.logger[changed ? 'warn' : 'info'](
+        'agent',
+        headingLine,
+        {
+          actionId: candidate.id,
+          planHeading: typeof candidate.meta.planHeading === 'string' ? candidate.meta.planHeading : dir,
+          headingChangeReason:
+            typeof candidate.meta.headingChangeReason === 'string' ? candidate.meta.headingChangeReason : null,
+          headingChangeCell:
+            typeof candidate.meta.headingChangeCell === 'string' ? candidate.meta.headingChangeCell : null,
+          headingChangeBlock:
+            typeof candidate.meta.headingChangeBlock === 'string' ? candidate.meta.headingChangeBlock : null,
+        },
+        this.tickCounter,
+      )
+    }
+    const digCells = typeof candidate.meta.digCells === 'string' ? candidate.meta.digCells : null
+    if (digCells !== null) {
+      this.logger.info(
+        'agent',
+        `DESCEND_PROFILE cells=${digCells} count=${String(candidate.meta.digCount ?? 1)} tool=${String(candidate.meta.profileTool ?? 'hand')}`,
+        { actionId: candidate.id, digCells },
+        this.tickCounter,
+      )
+    }
     const tunnel = this.digMemory.lastTunnel
     if (this.digMemory.dirCount > 0 && tunnel !== null) {
       this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id }, this.tickCounter)
@@ -4692,7 +4793,14 @@ export class JevController {
           this.tickCounter,
         )
         this.signals.descendLimitReached = true
-        this.digMemory.resetPath()
+        // A `descend_to:Y=<n>` predicate makes progress by losing altitude, not by
+        // finding an item, so `resourceDelta=0` says nothing about the plan: the
+        // lateral-search reset would drop the descent heading every 4 steps and
+        // re-open the zig-zag (measured live: `DESCEND_LIMIT` fired at every
+        // fourth D step, `DIG_PATH dir=D depth=1` restarted each time). Keep the
+        // heading for a predicate descent; `DESCEND_STALLED` still bounds a
+        // genuinely impossible one. Item-goal search keeps the reset.
+        if (!descending) this.digMemory.resetPath()
       }
     }
     if (this.digMemory.isOscillating()) {
@@ -6804,6 +6912,111 @@ export class JevController {
     this.retrievalTrack = null
   }
 
+  /**
+   * The postcondition layer owns the verdict (`isZeroProgressOutcome` is a
+   * FAILURE). This owns what happens NEXT for the route families whose
+   * postcondition is a world change (RETRIEVE/DESCEND/STEP/ENTER_PORTAL):
+   *
+   *   - a completed action clears the zero-progress memory at its stand cell
+   *     (and for its target), so a transient blockage is never permanent;
+   *   - a zero-observable-change action is recorded as the exact route
+   *     (kind, target, stand cell, route signature) that just proved nothing.
+   *     The candidate layer withholds that exact repeat, so the next attempt for
+   *     the target must differ in a grounded way (a different vertical plan, a
+   *     different stand cell, or a travel/approach leg);
+   *   - `ZERO_PROGRESS_STAND_ROUTE_LIMIT` distinct zero-progress routes at one
+   *     stand cell exhaust that family there (`DESCEND_RETIRED`), which forces a
+   *     route change instead of sampling new cells from the same blocked body
+   *     position.
+   *
+   * Live evidence (run-muc3qbug-18vg3): 82 zero-observable chains in ten minutes,
+   * 75 of them `DESCEND:down:<dir>:b...` steps whose dig removed nothing
+   * (`outcome=noPath|stuck`), each with a fresh candidate id but the SAME body
+   * cell - a per-id failure memory can never see that as one failure.
+   */
+  private recordZeroProgressOutcome(
+    result: ExecutionResult,
+    candidate: Candidate,
+    truthful: ReturnType<typeof truthfulActionOutcome>,
+  ): void {
+    if (!isZeroProgressRouteKind(result.kind)) return
+    const stand = this.actionStart
+    if (stand === null) return
+    const standKey = cellKey(stand)
+    const targetKey = candidate.target === null ? null : cellKey(candidate.target)
+    if (truthful.verified) {
+      const clearedStand = clearZeroProgressStand(this.zeroProgressRoutes, result.kind, standKey)
+      const clearedTarget =
+        targetKey === null ? clearedStand : clearZeroProgressTarget(clearedStand, result.kind, targetKey)
+      if (clearedTarget !== this.zeroProgressRoutes) {
+        this.zeroProgressRoutes = clearedTarget
+        this.signals.zeroProgressRoutes = clearedTarget
+      }
+      return
+    }
+    if (candidate.target === null) return
+    if (!isZeroProgressOutcome(result)) return
+    const decision = observeZeroProgressRoute(this.zeroProgressRoutes, {
+      kind: result.kind,
+      targetKey: cellKey(candidate.target),
+      standKey,
+      routeSig: routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta }),
+      reason: result.failure ?? result.status,
+      nowMs: Date.now(),
+    })
+    this.zeroProgressRoutes = decision.routes
+    this.signals.zeroProgressRoutes = decision.routes
+    this.logger.warn(
+      'agent',
+      formatActionZeroProgress({
+        action: result.actionId,
+        target: candidate.target,
+        kind: result.kind,
+        retry: decision.attempts,
+        routeChanged: decision.routeChanged,
+        stand,
+      }),
+      {
+        actionId: result.actionId,
+        kind: result.kind,
+        target: candidate.target,
+        stand,
+        retry: decision.attempts,
+        routeChanged: decision.routeChanged,
+        routeSig: decision.entry.routeSig,
+      },
+      this.tickCounter,
+    )
+    if (result.kind === 'DESCEND' && decision.familyExhausted) {
+      this.logger.warn(
+        'agent',
+        formatDescendRetired('zero_progress_exhausted', stand, decision.familyAttempts),
+        { stand, routes: decision.familyAttempts, limit: ZERO_PROGRESS_STAND_ROUTE_LIMIT },
+        this.tickCounter,
+      )
+    }
+    if (result.kind === 'RETRIEVE') {
+      if (decision.attempts >= KNOWN_RETRIEVE_RETIRE_LIMIT) {
+        this.logger.warn(
+          'agent',
+          formatRetrieveRetired('zero_progress_budget', candidate.target, decision.attempts),
+          { target: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
+          this.tickCounter,
+        )
+      }
+      if (candidate.meta.retrieval === 'known') {
+        // This exact route is now withheld from this stand cell: re-offering it
+        // would be the same action with unchanged preconditions.
+        this.logger.warn(
+          'agent',
+          formatRetrieveRouteBlocked('zero_progress_route_unchanged', candidate.target, stand),
+          { target: candidate.target, stand, retry: decision.attempts },
+          this.tickCounter,
+        )
+      }
+    }
+  }
+
   private checkWedge(actionId: string): void {
     const waitPath = actionId === 'WAIT' && !this.options.singleShotPlanner
     const limit = waitPath ? this.options.waitLimit : this.options.wedgeRepeatLimit
@@ -8006,6 +8219,25 @@ export class JevController {
     this.lastFoodSourceGapKey = key
     if (gap === null) return
     this.logger.warn('agent', formatFoodSourceGap(gap), { ...gap, goal: this.currentGoalKey() }, this.tickCounter)
+  }
+
+  /**
+   * The typed "the active collect goal needs a MOB DROP and no producer route is
+   * on offer" fact
+   * (`MOB_DROP_SOURCE_NONE item=ender_pearl reason=no_producer_sensed producers=["enderman"] sensed=0 offered=["explore"] next=explore`).
+   *
+   * This is the producer-side half of the M3 pearl gap: the run log had no line
+   * that said the pearl need existed, that its producer is an enderman, that no
+   * enderman was sensed, and that the tick was offering the generic exploration
+   * arm instead. Descriptive only - it names the missing affordance and the
+   * grounded next step, never a chosen action. Deduped per distinct line.
+   */
+  private logMobDropSourceGap(gap: MobDropSourceGap | null): void {
+    const key = gap === null ? null : formatMobDropSourceGap(gap)
+    if (key === this.lastMobDropGapKey) return
+    this.lastMobDropGapKey = key
+    if (gap === null) return
+    this.logger.warn('agent', formatMobDropSourceGap(gap), { ...gap, goal: this.currentGoalKey() }, this.tickCounter)
   }
 
   /** Mirror an ignition refusal once per distinct line: malformed frame or no flint_and_steel. */
