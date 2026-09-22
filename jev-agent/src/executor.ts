@@ -4233,33 +4233,57 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', 'DESCEND candidate has no dig target')
+    // The step is a 1x2 PROFILE, not one block: a staircase step down needs the
+    // front cell at the current feet level (the body's upper half standing in the
+    // landing cell) as well as the floor, and a level step needs front + head.
+    // Digging only the primary left the landing cell un-enterable, so every
+    // offered step ended in `PATH_CALLBACK outcome=noPath|stuck` and the descent
+    // fell through to a new heading - the measured live bowl. The passage cells
+    // are dug first and the primary/landing cell last, so a dig can never open a
+    // drop the body cannot leave.
+    const cells = descentDigCellsFromMeta(candidate, target)
     if (this.distanceToEyes(target) > this.options.reach) {
       this.setPhase(candidate, epoch, 'pathing')
       await this.pathToNear(target, 2, epoch, signal)
       this.ensureOwned(epoch, signal)
     }
-    const block = this.currentBlockAt(target)
-    if (block === null) {
-      throw new ExecutorError('target_gone', `block at (${target.x},${target.y},${target.z}) is gone before the dig`)
-    }
     this.setPhase(candidate, epoch, 'digging')
-    const live = this.resolveLiveDigTool(block)
-    if (!live.ok) {
-      throw new ExecutorError('dig_error', `cannot dig ${block.name} at (${target.x},${target.y},${target.z}): ${live.reason}`)
+    let dug = 0
+    for (let index = 0; index < cells.length; index += 1) {
+      const cell = cells[index]
+      if (cell === undefined) continue
+      const block = this.currentBlockAt(cell)
+      if (block === null || block.boundingBox === 'empty') continue
+      const live = this.resolveLiveDigTool(block)
+      if (!live.ok) {
+        throw new ExecutorError('dig_error', `cannot dig ${block.name} at (${cell.x},${cell.y},${cell.z}): ${live.reason}`)
+      }
+      await this.equipTool(
+        {
+          ...candidate,
+          toolName: live.tool,
+          toolTier: live.tier,
+          requiresTool: live.tool !== null,
+          meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
+        },
+        epoch,
+        signal,
+      )
+      this.logger.info('agent', `DESCEND_DIG cell=${cell.x},${cell.y},${cell.z} block=${block.name} n=${index + 1}/${cells.length}`, {
+        actionId: candidate.id,
+        cell,
+        block: block.name,
+      })
+      await this.digBlock(block, epoch, signal)
+      this.ensureOwned(epoch, signal)
+      dug += 1
     }
-    await this.equipTool(
-      {
-        ...candidate,
-        toolName: live.tool,
-        toolTier: live.tier,
-        requiresTool: live.tool !== null,
-        meta: { ...candidate.meta, digBlockName: block.name, toolReason: `live:${live.reason}` },
-      },
-      epoch,
-      signal,
-    )
-    await this.digBlock(block, epoch, signal)
-    this.ensureOwned(epoch, signal)
+    if (dug === 0) {
+      throw new ExecutorError(
+        'target_gone',
+        `every cell of the descent step at (${target.x},${target.y},${target.z}) is already open`,
+      )
+    }
 
     const step = {
       x: readMetaNumber(candidate, 'stepX', Number.NaN),
@@ -6576,6 +6600,28 @@ function readMetaPoint(candidate: Candidate, xKey: string, yKey: string, zKey: s
   const z = candidate.meta[zKey]
   if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return null
   return { x, y, z }
+}
+
+/**
+ * The descent step's dig sequence from the candidate's own profile meta
+ * (`digCells`, `"x,y,z;x,y,z"`, passage cells first / primary last). The meta is
+ * written by the same pure `descentDigPlan` the guard and the offer use, so the
+ * executed shape cannot drift from the offered one. A legacy/hand-built
+ * candidate without the meta keeps the historical single-primary dig.
+ */
+function descentDigCellsFromMeta(candidate: Candidate, target: Vec3Json): Vec3Json[] {
+  const raw = candidate.meta.digCells
+  if (typeof raw === 'string' && raw.length > 0) {
+    const cells: Vec3Json[] = []
+    for (const part of raw.split(';')) {
+      const [x, y, z] = part.split(',').map((value) => Number(value))
+      if (x === undefined || y === undefined || z === undefined) continue
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue
+      cells.push({ x, y, z })
+    }
+    if (cells.length > 0) return cells
+  }
+  return [target]
 }
 
 function toPathStatus(outcome: PathOutcome): PathStatus {

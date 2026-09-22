@@ -23,21 +23,21 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import type { BlockState, DescentDir, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
 import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, liveStructureMemberIndex } from './blockSafety.ts'
 import { failureCount } from './failureMemory.ts'
-import { selectDigTool } from './toolChoice.ts'
+import { selectDigTool, strongestDigRequirement } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
 import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
-import { pickBestDescendStep } from './descendPlan.ts'
-import type { DescendScoreInput } from './descendPlan.ts'
+import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
+import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
@@ -2929,6 +2929,10 @@ function mineCandidates(
   candidates.push(...accessActions)
   const descent = descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY)
   if (candidates.length === 0) {
+    // Reuse before carve: an opening the world already has, or the shaft the body
+    // already dug, is offered as a grounded route BEFORE the new dig step. Both
+    // stay on offer (nothing is suppressed) and Jev owns the choice.
+    candidates.push(...existingDescentRouteCandidates(state, options))
     candidates.push(...descent)
     // A descend goal whose direct column offers NO safe step must not leave an
     // escalate-only offer on an active row (live: y=55 idle, `kinds=['ESCALATE']`
@@ -3412,13 +3416,41 @@ function descendCandidates(
   const fixedDir = state.signals.digDir ?? null
   const fixedCount = state.signals.digDirCount ?? 0
 
-  let pool = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
-  if (oscillate) {
-    pool = pool.filter((step) => step.mode === 'down' && (fixedDir === null || step.dir === fixedDir))
-  } else if (fixedDir !== null && fixedCount > 0 && fixedCount < DIG_PATH_CAP) {
-    pool = pool.filter((step) => step.dir === fixedDir)
-  }
-  if (pool.length === 0) pool = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
+  const base = steps.filter((step) => downEvidence || oscillate || step.mode !== 'down')
+  if (base.length === 0) return []
+  // HEADING COHERENCE (#staircase): the heading of a running descent is held for
+  // as long as the world offers an eligible step under it, and a change is a
+  // typed event naming the obstruction. The measured live shape
+  // (run-muc3qbug-18vg3, main ab19403) re-picked a heading almost every step:
+  //   DESCEND:down:W:b7_35_20 | DESCEND:down:N:b8_35_19 | DESCEND:down:W:b7_34_20 ...
+  //   heading histogram of 60 steps: W 23 | E 17 | N 12 | S 8
+  // because the only memory of a chosen heading was a SUCCESSFUL-completion
+  // record, and the pool silently widened to every heading whenever the held one
+  // had no safe step (`if (pool.length === 0) pool = steps.filter(...)`). Neither
+  // the cap nor a sensor refusal may be a silent licence to re-pick.
+  //
+  // `DIG_PATH_CAP` still bounds a LEVEL search tunnel (no altitude change, so it
+  // can run away); a DOWN staircase is bounded by Y (descend target / known stone
+  // level / DESCEND_STALLED) and holding its heading is what makes it a staircase
+  // instead of a one-block bowl per level.
+  const downOnly = oscillate ? base.filter((step) => step.mode === 'down') : base
+  const eligible = downOnly.length > 0 ? downOnly : base
+  const usable = eligible.filter((step) => step.mode === 'down' || fixedCount < DIG_PATH_CAP)
+  const poolSteps = usable.length > 0 ? usable : eligible
+  const availableDirs = dedupeDirs(poolSteps)
+  const headingPlan = resolveDescentHeading({
+    previous: fixedDir,
+    available: availableDirs,
+    obstruction:
+      fixedDir === null || availableDirs.includes(fixedDir)
+        ? null
+        // The obstruction is read from the RAW sensor list (safe AND refused):
+        // `steps` above keeps only the safe ones, so it can never say why the
+        // held heading disappeared.
+        : headingObstructionFor(state.descent ?? [], fixedDir, oscillate, fixedCount),
+  })
+  if (headingPlan === null) return []
+  const pool = poolSteps.filter((step) => step.dir === headingPlan.dir)
   if (pool.length === 0) return []
 
   const scoreInput: DescendScoreInput = {
@@ -3469,8 +3501,35 @@ function descendCandidates(
     descendTargetY,
     grounded: descendToY || hasGoalTarget || knownStoneBelow || stoneGoal,
     staircase: oscillate || (best.mode === 'down' && fixedCount === 0),
+    // The plan heading is `best`'s own direction by construction (the pool was
+    // filtered to it), so the resolved plan and the selected step cannot disagree.
+    heading: { ...headingPlan, dir: best.dir },
   })
   return built === null ? [] : [built.candidate]
+}
+
+/** The distinct headings of a step list, in list order (deterministic). */
+function dedupeDirs(steps: readonly DescentOption[]): DescentDir[] {
+  const out: DescentDir[] = []
+  for (const step of steps) if (!out.includes(step.dir)) out.push(step.dir)
+  return out
+}
+
+/**
+ * Why the held heading has no eligible step left. The sensor's typed refusal when
+ * the world obstructs it, `cap` when only the level-tunnel cap retired it, and
+ * `oscillation` when the oscillation recovery forced the mode.
+ */
+function headingObstructionFor(
+  steps: readonly DescentOption[],
+  dir: DescentDir,
+  oscillate: boolean,
+  fixedCount: number,
+): DescentHeadingObstruction {
+  if (oscillate) return { reason: 'oscillation', cell: null, block: null }
+  const found = descentHeadingObstruction(steps, dir)
+  if (found.reason !== 'no_step') return found
+  return { reason: fixedCount >= DIG_PATH_CAP ? 'cap' : 'no_step', cell: null, block: null }
 }
 
 function descendId(step: DescentOption): string {
@@ -3495,6 +3554,8 @@ function descendCandidateFromStep(
     descendTargetY: number | null
     grounded: boolean
     staircase: boolean
+    /** the coherent plan heading this step belongs to (see `resolveDescentHeading`) */
+    heading?: DescentHeadingPlan
     extraMeta?: Record<string, string | number | boolean>
     /**
      * A stranded body's own-column ESCAPE dig. Such a step is gated on whether the block can be
@@ -3507,31 +3568,50 @@ function descendCandidateFromStep(
     escape?: boolean
   },
 ): { candidate: Candidate; toolReason: string } | null {
-  const primary = best.mode === 'down' ? best.floor : best.wallSolid ? best.wall : best.head
+  const digPlan = descentDigPlan(best)
+  const primary = descentPrimaryCell(best)
   // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
   // broken at all (obsidian), and the state carries no hardness/hand-break fact to tell the two apart -
   // so case (c2) (a step needing a pickaxe tier the body lacks) must keep refusing. Every other
   // harvest tool only decides DROPS (leaves: shears/hoe, logs: axe, dirt/sand: shovel), so for a
   // stranded body's escape step the dig is offered and the block is simply broken without its drop.
+  // The relaxation covers the WHOLE profile: a step whose passage cell is pickaxe-gated is refused
+  // like any other pickaxe gate, because an escape the body cannot finish is not an escape.
   const escapeBreakable =
     spec.escape === true &&
-    best.diggable === true &&
-    (best.digHarvestTool ?? null) !== 'pickaxe'
+    digPlan.every((item) => item.diggable && (item.harvestTool ?? null) !== 'pickaxe')
+  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
+  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
+  // produced a dig that could not finish (measured live: every cardinal step dug
+  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
+  const requirement = escapeBreakable
+    ? null
+    : strongestDigRequirement(
+        digPlan.map((item) => ({
+          name: item.name ?? '',
+          harvestTool: item.harvestTool ?? null,
+          harvestTier: item.harvestTier ?? null,
+          diggable: item.diggable,
+        })),
+      )
   const choice =
-    escapeBreakable
+    requirement === null
       ? { ok: true as const, tool: null, tier: null, reason: 'escape_breakable_without_drop_tool' }
       : selectDigTool(
           {
-            name: best.digName ?? '',
-            harvestTool: best.digHarvestTool ?? null,
-            harvestTier: best.digHarvestTier ?? null,
-            diggable: best.diggable === true,
+            name: requirement.name ?? '',
+            harvestTool: requirement.harvestTool ?? null,
+            harvestTier: requirement.harvestTier ?? null,
+            diggable: requirement.diggable === true,
           },
           (tool, tier) => hasTool(state, tool, tier),
         )
   if (!choice.ok) return null
   const toward =
     spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
+  const headingDir = spec.heading?.dir ?? best.dir
+  const headingLine = spec.heading === undefined ? null : formatDescentHeading(spec.heading)
+  const digList = digPlan.map((item) => `${item.cell.x},${item.cell.y},${item.cell.z}`).join(';')
   return {
     toolReason: choice.reason,
     candidate: {
@@ -3574,12 +3654,36 @@ function descendCandidateFromStep(
         wallSolid: best.wallSolid,
         headSolid: best.headSolid,
         floorSolid: best.floorSolid,
+        supportSolid: best.supportSolid === true,
+        // The full 1x2 dig profile, passage first / primary last: the executor
+        // digs exactly these cells, so the offered step and the executed step
+        // cannot disagree about the shape being opened.
+        digCells: digList,
+        digCount: digPlan.length,
+        profileTool: requirement?.harvestTool ?? choice.tool ?? 'hand',
+        profileTier: requirement?.harvestTier ?? choice.tier ?? 0,
+        // HEADING PLAN: the coherent heading of this descent and whether it was
+        // held from the previous step or changed with a typed obstruction.
+        planHeading: headingDir,
+        planHeadingHeld: spec.heading === undefined ? true : spec.heading.status !== 'changed',
+        ...(spec.heading?.change === null || spec.heading?.change === undefined
+          ? {}
+          : {
+              headingChangeFrom: spec.heading.change.from,
+              headingChangeReason: spec.heading.change.reason,
+              headingChangeCell:
+                spec.heading.change.cell === null
+                  ? 'none'
+                  : `${spec.heading.change.cell.x},${spec.heading.change.cell.y},${spec.heading.change.cell.z}`,
+              headingChangeBlock: spec.heading.change.block ?? 'unknown',
+            }),
         digX: primary.x,
         digY: primary.y,
         digZ: primary.z,
         diggable: true,
         safe: best.safe,
         grounded: spec.grounded,
+        ...(headingLine === null ? {} : { headingLine }),
         ...(spec.extraMeta ?? {}),
       },
     },
@@ -3632,8 +3736,25 @@ function columnDescentCandidates(
   if (safeDown.length === 0) {
     return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
   }
+  // The SAME heading plan the goal-grounded descent uses: this is the same
+  // staircase mechanic, so a stranded body's shaft must also hold one heading
+  // instead of re-picking one per step (the measured live `W 23 | E 17 | N 12 | S 8`).
+  const fixedDir = state.signals.digDir ?? null
+  const fixedCount = state.signals.digDirCount ?? 0
+  const availableDirs = dedupeDirs(safeDown)
+  const headingPlan = resolveDescentHeading({
+    previous: fixedDir,
+    available: availableDirs,
+    obstruction:
+      fixedDir === null || availableDirs.includes(fixedDir)
+        ? null
+        : headingObstructionFor(state.descent ?? [], fixedDir, false, fixedCount),
+  })
+  if (headingPlan === null) return { candidates: [], refusal: { reason: 'no_safe_step', cell: feet } }
+  const heading = safeDown.filter((step) => step.dir === headingPlan.dir)
   const failureLimit = options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT
-  const retryable = safeDown.filter(
+  const pool = heading.length > 0 ? heading : safeDown
+  const retryable = pool.filter(
     (step) => failureCount(state.signals.failedCandidates, descendId(step)) < failureLimit,
   )
   if (retryable.length === 0) {
@@ -3656,6 +3777,7 @@ function columnDescentCandidates(
     // A cardinal step is a staircase step; the own-column dig (`dx === dz === 0`)
     // is "dig straight down", so it is not labelled a staircase.
     staircase: !(best.dx === 0 && best.dz === 0),
+    heading: { ...headingPlan, dir: best.dir },
     extraMeta: { columnDescent: true },
     // This is the body's only way off its own support column: gate it on breakability, not drops.
     escape: true,
@@ -7604,6 +7726,7 @@ function routeOpeningCandidates(
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const out: Candidate[] = [
     ...stepCutCandidates(state, options),
+    ...existingDescentRouteCandidates(state, options),
     ...descendCandidates(state, options, focus, [], null),
     ...openLevelStepMoves(state, options),
   ]
@@ -7754,6 +7877,94 @@ function openLevelStepMoves(state: WorldState, options: CandidateOptions): Candi
         null,
       ),
     )
+  }
+  return out
+}
+
+/**
+ * Descent routes the world ALREADY has, so a staircase is not carved beside one.
+ *
+ * Two grounded facts, both of them world truth rather than a preference:
+ *
+ *   1. an opening the sensor can see beside the body - a `down` step whose floor
+ *      cell is already air while the cell under it is solid. That is exactly the
+ *      `open_floor` refusal, and its geometry is a one-block drop onto support, so
+ *      it is a safe step down, not an uncontrolled fall. `hazardNearby` is checked
+ *      separately because the refusal chain reports a single highest-priority
+ *      reason (an `open_floor` step can still sit next to lava).
+ *   2. the shaft the body itself carved and still remembers (`signals.lastTunnel`)
+ *      when it is at least two blocks below the feet - the body climbed back up
+ *      and the known route down is still there. It is offered with the existing
+ *      `vertical: reuse` contract, so the executor validates the entry live and
+ *      refuses it with a typed reason instead of walking into a wall.
+ *
+ * A DESCEND cannot express either one: a DESCEND is a DIG action, and these cells
+ * have nothing left to dig. Both are therefore ordinary MOVEs. Reuse-before-carve
+ * is expressed as enumeration order (existing routes first) and never as a
+ * ranking: nothing is suppressed and Jev still chooses between walking the known
+ * route and cutting a new step.
+ */
+function existingDescentRouteCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const key = (cell: Vec3Json): string => `${cell.x}_${cell.y}_${cell.z}`
+  const seen = new Set<string>()
+  const out: Candidate[] = []
+  for (const step of state.descent ?? []) {
+    if (step.mode !== 'down') continue
+    if (step.dx === 0 && step.dz === 0) continue
+    if (step.refusal !== 'open_floor') continue
+    if (step.supportSolid !== true) continue
+    if (step.hazardNearby === true) continue
+    if (step.wallSolid) continue
+    const target = step.step
+    if (target.y >= feet.y) continue
+    const cellKey = key(target)
+    if (seen.has(cellKey)) continue
+    seen.add(cellKey)
+    const candidate = exploreMoveCandidate(
+      state,
+      options,
+      target,
+      moveLabel(target, 'step down into the opening the world already has', state.self.position),
+      null,
+    )
+    out.push({
+      ...candidate,
+      meta: {
+        ...candidate.meta,
+        verticalRecovery: 'open_shaft_step',
+        shaftSource: 'sensed_open_floor',
+      },
+    })
+  }
+  const tunnel = state.signals.lastTunnel ?? null
+  if (
+    tunnel !== null &&
+    tunnel.y <= feet.y - 2 &&
+    distance(tunnel, state.self.position) <= (options.tunnelMaxDistance ?? DEFAULT_TUNNEL_MAX_DISTANCE) &&
+    !seen.has(key(tunnel))
+  ) {
+    const targetY = state.goalQueue?.current?.targetY ?? tunnel.y
+    const candidate = exploreMoveCandidate(
+      state,
+      options,
+      tunnel,
+      moveLabel(tunnel, 'descend through the shaft the body already dug', state.self.position),
+      null,
+    )
+    out.push({
+      ...candidate,
+      meta: {
+        ...candidate.meta,
+        verticalRecovery: 'remembered_shaft',
+        ...verticalPlanMeta({ kind: 'reuse', tunnel, fromY: feet.y, toY: Math.min(tunnel.y, targetY) }, feet.y, targetY),
+        fallbackVertical: 'none',
+      },
+    })
   }
   return out
 }

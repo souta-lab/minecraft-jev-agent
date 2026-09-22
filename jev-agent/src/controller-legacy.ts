@@ -4626,6 +4626,38 @@ export class JevController {
       { actionId: candidate.id, mode, dir, depth },
       this.tickCounter,
     )
+    // The heading PLAN of the descent: held while the world offers a safe step
+    // under it, changed only with the typed obstruction that forced it. Without
+    // this line a heading change was invisible in the log (the measured
+    // `W 23 | E 17 | N 12 | S 8` histogram over 60 steps).
+    const headingLine = typeof candidate.meta.headingLine === 'string' ? candidate.meta.headingLine : null
+    if (headingLine !== null) {
+      const changed = candidate.meta.planHeadingHeld === false
+      this.logger[changed ? 'warn' : 'info'](
+        'agent',
+        headingLine,
+        {
+          actionId: candidate.id,
+          planHeading: typeof candidate.meta.planHeading === 'string' ? candidate.meta.planHeading : dir,
+          headingChangeReason:
+            typeof candidate.meta.headingChangeReason === 'string' ? candidate.meta.headingChangeReason : null,
+          headingChangeCell:
+            typeof candidate.meta.headingChangeCell === 'string' ? candidate.meta.headingChangeCell : null,
+          headingChangeBlock:
+            typeof candidate.meta.headingChangeBlock === 'string' ? candidate.meta.headingChangeBlock : null,
+        },
+        this.tickCounter,
+      )
+    }
+    const digCells = typeof candidate.meta.digCells === 'string' ? candidate.meta.digCells : null
+    if (digCells !== null) {
+      this.logger.info(
+        'agent',
+        `DESCEND_PROFILE cells=${digCells} count=${String(candidate.meta.digCount ?? 1)} tool=${String(candidate.meta.profileTool ?? 'hand')}`,
+        { actionId: candidate.id, digCells },
+        this.tickCounter,
+      )
+    }
     const tunnel = this.digMemory.lastTunnel
     if (this.digMemory.dirCount > 0 && tunnel !== null) {
       this.logger.info('agent', `REUSE_TUNNEL at=${tunnel.x},${tunnel.y},${tunnel.z}`, { actionId: candidate.id }, this.tickCounter)
@@ -4679,7 +4711,14 @@ export class JevController {
           this.tickCounter,
         )
         this.signals.descendLimitReached = true
-        this.digMemory.resetPath()
+        // A `descend_to:Y=<n>` predicate makes progress by losing altitude, not by
+        // finding an item, so `resourceDelta=0` says nothing about the plan: the
+        // lateral-search reset would drop the descent heading every 4 steps and
+        // re-open the zig-zag (measured live: `DESCEND_LIMIT` fired at every
+        // fourth D step, `DIG_PATH dir=D depth=1` restarted each time). Keep the
+        // heading for a predicate descent; `DESCEND_STALLED` still bounds a
+        // genuinely impossible one. Item-goal search keeps the reset.
+        if (!descending) this.digMemory.resetPath()
       }
     }
     if (this.digMemory.isOscillating()) {
