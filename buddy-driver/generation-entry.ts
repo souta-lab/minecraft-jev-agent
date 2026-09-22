@@ -60,9 +60,11 @@ import {
   goalsForStrategy,
   has,
   inventoryCounts,
+  isMandatoryRung,
   resolvePlannerMode,
+  worldOutcomeRungFloor,
 } from './planner.ts'
-import type { Counts, Rung } from './planner.ts'
+import type { Counts, DurableLadderProgress, DurableLadderSource, Rung } from './planner.ts'
 import type {
   DeathRecoveryContext,
   GenerationContext,
@@ -1366,6 +1368,86 @@ export function snapshotGoals(snapshot: GoalQueueSnapshot | null | undefined): G
 }
 
 /**
+ * Compose the run-scoped DURABLE ladder record from the two durable sources the
+ * generation can see, for `deriveResumeRung` / `computeFrontier`. Evidence only:
+ * the ladder decides how far the record may raise the resume floor
+ * (`achievedRungFloor`).
+ *
+ *  - the HOST-committed class-A ledger: its own frontier basis (a ledger written
+ *    from frontier index k says this run had already reached every mandatory rung
+ *    before k, because the ladder is a prerequisite chain) and its `done` rows (a
+ *    row finished in this run owns the rung that emits it; a `done` row outlives
+ *    the basis on a ledger written by an older inventory-shaped resume - the
+ *    measured `run-mubobiq6-12onv` collapse);
+ *  - durable world outcomes (`worldOutcomeRungFloor`): a remembered station, a
+ *    lit+verified portal site, standing in the Nether.
+ *
+ * Scoped by `basis.worldKey`: a ledger committed in another world or another
+ * worldEpoch is NOT this run's record, so a world reset / epoch change cannot be
+ * papered over by it (task requirement: lost world state still resets).
+ *
+ * The basis is REQUIRED. A basis-less (legacy) ledger carries no world scope and
+ * may not contribute; the world-outcome half still stands on its own.
+ *
+ * Returns null when neither source proves anything, so callers that pass it on
+ * behave exactly like the pre-fix inventory-only path.
+ */
+export function durableLadderProgressFromLedger(
+  ledger: GoalQueueSnapshot | null | undefined,
+  liveWorldKey: string,
+  counts: Counts,
+  world: ResidentWorldMemory,
+): DurableLadderProgress | null {
+  const sources: DurableLadderSource[] = []
+  const evidence: string[] = []
+  let rungIndex = -1
+  const basis = ledger?.basis
+  if (ledger !== null && ledger !== undefined && basis !== undefined && basis.worldKey === liveWorldKey) {
+    rungIndex = Number.isInteger(basis.frontierRungIndex)
+      ? Math.min(RUNGS.length - 1, Math.max(-1, basis.frontierRungIndex - 1))
+      : -1
+    if (rungIndex >= 0) {
+      sources.push('ledger-basis')
+      evidence.push(`basis:frontier=${basis.frontierRungId}@${basis.frontierRungIndex}`)
+    }
+    for (const goal of snapshotGoals(ledger)) {
+      if (goal.status !== 'done') continue
+      const owners = RUNGS.map((rung, index) => ({ rung, index }))
+        .filter((entry) => isMandatoryRung(entry.rung) && rungOwnsGoal(entry.rung, goal, counts, world))
+        .map((entry) => entry.index)
+      if (owners.length === 0) continue
+      const owner = Math.max(...owners)
+      if (owner > rungIndex) rungIndex = owner
+      if (!sources.includes('ledger-goal')) sources.push('ledger-goal')
+      evidence.push(`goal:${goal.id}@${RUNGS[owner]?.id ?? owner}`)
+    }
+  }
+  const worldFloor = worldOutcomeRungFloor(world)
+  if (worldFloor > rungIndex) {
+    rungIndex = worldFloor
+    if (!sources.includes('world-outcome')) sources.push('world-outcome')
+    evidence.push(`world:${RUNGS[worldFloor]?.id ?? worldFloor}@${worldFloor}`)
+  }
+  if (rungIndex < 0) return null
+  return { rungIndex, rungId: RUNGS[rungIndex]?.id ?? null, sources, evidence }
+}
+
+/**
+ * The durable record is only usable when the death did NOT lose the inventory.
+ * A generation that starts from a genuinely empty kit must re-climb from wood
+ * (task requirement 3), so its durable floor is discarded for its whole lifetime
+ * - including `proposeLedger()`/`status()`, which then rewrite the durable basis
+ * from the retained inventory instead of resurrecting the position the total loss
+ * just erased.
+ */
+export function durableProgressForGeneration(
+  resume: { invEmpty: boolean },
+  progress: DurableLadderProgress | null,
+): DurableLadderProgress | null {
+  return resume.invEmpty ? null : progress
+}
+
+/**
  * Restore the durable ledger into the controller. Class A says the HOST snapshot
  * is the authority (#40): the generation reads `ctx.ledgerSnapshot` first and only
  * falls back to the derived `buddy-ledger.json` compatibility mirror. A ledger
@@ -1460,10 +1542,14 @@ export function buildMercurySummary(
   request: System2PlanRequest,
   trigger: MercuryTriggerReason,
   deathRecovery: DeathRecoveryContext | null = null,
+  durable?: DurableLadderProgress | null,
 ): MercuryStateSummary {
   const counts = inventoryCounts(bot)
   const entity = bot.entity
-  const frontier = deriveResumeRung(counts, world)
+  // The Mercury frontier is the SAME rung source of truth as the ladder: a
+  // non-lossy resume must not tell the semantic layer a lower rung than the
+  // generation actually resumed.
+  const frontier = deriveResumeRung(counts, world, undefined, durable)
   const inventory: Record<string, number> = {}
   for (const [name, n] of Object.entries(counts)) if (n > 0) inventory[name] = n
   let wait = 0
@@ -1993,7 +2079,35 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     removedStations: removedStations.length,
   })
 
-  const resume = deriveResumeRung(counts, world, (event, detail) => ctx.log(event, detail))
+  const liveWorldKey = `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`
+  // The run's own durable ladder record (class-A ledger + durable world outcomes).
+  // This is what makes a NON-LOSSY death non-lossy: the resume may not re-enter at
+  // the earliest rung the leftover kit implies when this run already reached a
+  // higher one. The record is evidence only; the ladder owns the floor decision.
+  const ledgerProgress = durableLadderProgressFromLedger(ctx.ledgerSnapshot, liveWorldKey, counts, world)
+  if (ledgerProgress !== null) {
+    ctx.log('LADDER_DURABLE_BASIS', {
+      rungId: ledgerProgress.rungId,
+      rungIndex: ledgerProgress.rungIndex,
+      sources: ledgerProgress.sources,
+      evidence: ledgerProgress.evidence,
+      ledgerFrontierRungId: ctx.ledgerSnapshot?.basis?.frontierRungId ?? null,
+      ledgerFrontierRungIndex: ctx.ledgerSnapshot?.basis?.frontierRungIndex ?? null,
+    })
+  }
+  const resume = deriveResumeRung(counts, world, (event, detail) => ctx.log(event, detail), ledgerProgress)
+  // A genuine total loss still resets, as today: an empty kit discards the durable
+  // record for this generation's whole lifetime, so `proposeLedger()` below cannot
+  // write the erased position back into the durable state.
+  const durableLadderProgress = durableProgressForGeneration(resume, ledgerProgress)
+  if (ledgerProgress !== null && durableLadderProgress === null) {
+    ctx.log('LADDER_DURABLE_BASIS_DISCARDED', {
+      reason: 'inventory-empty',
+      rungId: ledgerProgress.rungId,
+      rungIndex: ledgerProgress.rungIndex,
+      invEmpty: resume.invEmpty,
+    })
+  }
   const ledger = resolveLedgerPath(ctx, counts, world, id)
   const ledgerPath = ledger.usablePath
   const ladder = buildLadder(counts, world, (event, detail) => ctx.log(event, detail), {
@@ -2025,6 +2139,11 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       rungIndex: resume.rungIndex,
       reason: resumeReason,
       invEmpty: resume.invEmpty,
+      // The typed resume basis: what raised the floor above the leftover kit.
+      resumeBasis: resume.resumeBasis,
+      achievedRungId: resume.achievedRungId ?? null,
+      achievedRungIndex: resume.achievedRungIndex ?? -1,
+      achievedSources: resume.achievedSources ?? [],
       ...(resume.fallbackFrom === null ? {} : { fallbackFrom: resume.fallbackFrom, fallbackNeed: resume.fallbackNeed }),
       inventory: counts,
     })
@@ -2036,6 +2155,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       invEmpty: resume.invEmpty,
       rungIndex: ladder.rungIndex,
       rungId: ladder.rungId,
+      // `durable` here means the reset resumed a rung the run had already reached
+      // (non-lossy death); `inventory` means the kit alone decided it.
+      resumeBasis: resume.resumeBasis,
+      achievedRungId: resume.achievedRungId ?? null,
+      achievedRungIndex: resume.achievedRungIndex ?? -1,
+      achievedSources: resume.achievedSources ?? [],
       goals: ladder.goals.map((goal) => goal.description),
     })
   }
@@ -2075,7 +2200,8 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   const mercuryCachePath = fileURLToPath(new URL(`./mercury-cache-${cacheNamespace}.json`, import.meta.url))
   const mercury = mercuryEnablement.enabled
     ? new MercurySystem2({
-        summarize: (request, trigger) => buildMercurySummary(bot, world, request, trigger, ctx.deathRecovery ?? null),
+        summarize: (request, trigger) =>
+          buildMercurySummary(bot, world, request, trigger, ctx.deathRecovery ?? null, durableLadderProgress),
         log: (event, detail) => ctx.log(event, detail),
         callsPath: mercuryCallsPath(ctx.logDir),
         cachePath: mercuryCachePath,
@@ -2286,7 +2412,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // forever and wedges. Hazards from death are excluded here.
   installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
   const liveLedgerBasis: LedgerBasis = {
-    worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+    worldKey: liveWorldKey,
     frontierRungId: resume.rungId,
     frontierRungIndex: resume.rungIndex,
   }
@@ -2303,6 +2429,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
     terminate: terminateResident,
     postDeathRecovery,
     refreshLiveFacts: () => refreshLiveFacts('system2-grounding'),
+    durableLadderProgress,
   })
 
   // #21: opt-in Option compiler. OFF by default, so the planner output continues
@@ -2507,11 +2634,30 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function proposeLedger(): void {
     try {
       const holder = controller as unknown as { queue: { snapshot(): GoalQueueSnapshot } }
-      const current = deriveResumeRung(inventoryCounts(bot), world)
+      // The durable basis must NOT shrink to the inventory-only frontier: this
+      // proposal is what the next generation reads as the run's ladder record, so
+      // proposing the inventory-shaped rung here was exactly how a non-lossy death
+      // erased the position it was supposed to keep (measured `run-mubobiq6-12onv`:
+      // basis frontierRungId=charcoal/6 while the portal was verified and the run
+      // had reached blaze_rods).
+      const current = deriveResumeRung(inventoryCounts(bot), world, undefined, durableLadderProgress)
+      const inventoryOnly = deriveResumeRung(inventoryCounts(bot), world)
       const basis: LedgerBasis = {
-        worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+        worldKey: liveWorldKey,
         frontierRungId: current.rungId,
         frontierRungIndex: current.rungIndex,
+      }
+      if (current.rungIndex !== inventoryOnly.rungIndex || current.rungId !== inventoryOnly.rungId) {
+        ctx.log('LEDGER_BASIS_DURABLE', {
+          rungId: current.rungId,
+          rungIndex: current.rungIndex,
+          inventoryRungId: inventoryOnly.rungId,
+          inventoryRungIndex: inventoryOnly.rungIndex,
+          achievedRungId: current.achievedRungId ?? null,
+          achievedRungIndex: current.achievedRungIndex ?? -1,
+          achievedSources: current.achievedSources ?? [],
+          resumeBasis: current.resumeBasis,
+        })
       }
       ctx.proposeLedger({ generationId: id, baseRevision: ctx.snapshotRevision, ledger: { ...holder.queue.snapshot(), basis } })
     } catch (error) {
@@ -2536,7 +2682,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   function status(): GenerationStatus {
     refreshLiveFacts('status')
     const truth = readTruth()
-    const frontier = deriveResumeRung(truth.inventory, world)
+    // The HOST's observe loop reads this rung (MILESTONE high-water + the ledger
+    // basis it commits at heartbeat), so it must be the SAME durable-aware frontier
+    // the generation resumed at, not an inventory-only projection.
+    const frontier = deriveResumeRung(truth.inventory, world, undefined, durableLadderProgress)
     // The control socket's `milestone` reply is served by the HOST, so carry the
     // same frontier projection the controller is seeded with: the frontier's own
     // item-bearing goal, never the host's historical `iron_ingot x3` default.
@@ -2567,7 +2716,7 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       goalItem: rootGoal.goalItem,
       goalCount: rootGoal.goalCount,
       ledgerBasis: {
-        worldKey: `${ctx.worldKey.serverId}|${ctx.worldKey.dimension}|${ctx.worldKey.worldEpoch}`,
+        worldKey: liveWorldKey,
         frontierRungId: frontier.rungId,
         frontierRungIndex: frontier.rungIndex,
       },
