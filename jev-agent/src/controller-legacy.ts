@@ -152,8 +152,23 @@ import { evaluateOscillation, positionKey } from './oscillation.ts'
 import type { OscillationState } from './oscillation.ts'
 import { betaAuthorityDecision, formatJevHeads } from './betaAuthority.ts'
 import type { BetaAuthorityDecision } from './betaAuthority.ts'
-import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
+import { classifyActionOutcome, evaluateUnverifiedBudget, formatActionUnverified, hasObservableProgress, isZeroProgressOutcome, truthfulActionOutcome, UNVERIFIED_ACTION_LIMIT } from './actionPostcondition.ts'
 import type { ActionOutcomeTaxonomy } from './actionPostcondition.ts'
+import {
+  cellKey,
+  clearZeroProgressStand,
+  clearZeroProgressTarget,
+  formatActionZeroProgress,
+  formatApproachLeg,
+  formatDescendRetired,
+  formatRetrieveRetired,
+  formatRetrieveRouteBlocked,
+  isZeroProgressRouteKind,
+  observeZeroProgressRoute,
+  routeSignature,
+  ZERO_PROGRESS_STAND_ROUTE_LIMIT,
+} from './zeroProgressRoute.ts'
+import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
@@ -1691,6 +1706,14 @@ export class JevController {
   private readonly stationApproachLogged = new Set<string>()
   /** #8: exact coordinate failure memory (count, cooldown, dimension). */
   private moveFailMemory: MoveFailMemory
+  /**
+   * Zero-observable-change route memory: (kind, target cell, stand cell, route
+   * signature) -> attempts. The postcondition layer owns the verdict; this owns
+   * only what happens NEXT - a repeat of the same action with unchanged
+   * preconditions is never re-issued, and a bounded number of distinct
+   * zero-progress routes at one stand cell exhausts that family there.
+   */
+  private zeroProgressRoutes: ZeroProgressRoutes = {}
   /** #11 v2 §6: reachability proved a target unreachable under a state fingerprint. */
   private readonly reachabilityProofs = new StateFingerprintMemory({ maxEntries: MOVE_FAILMEM_MAX_ENTRIES })
   /** candidates the affordance gate withheld in the latest generation. */
@@ -2419,6 +2442,7 @@ export class JevController {
       this.signals.consecutiveFailures = this.failureStreak
       this.signals.escalationRecommended = Date.now() - this.lastEscalationMs < this.options.escalationWindowMs
       this.signals.failedCandidates = this.failureSnapshot()
+      this.signals.zeroProgressRoutes = this.zeroProgressRoutes
       this.signals.knownResources = filterKnownResources(
         this.knownResourcesForSensor().filter((resource) => resourceDimensionMatches(resource, this.currentDimension())),
         this.unreachableResources,
@@ -3019,6 +3043,7 @@ export class JevController {
 
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
+      if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -4251,6 +4276,7 @@ export class JevController {
     }
 
     this.retireFailedKnownRetrieve(candidate, result)
+    this.recordZeroProgressOutcome(result, candidate, truth)
     if (result.unverifiedPostcondition !== undefined) {
       this.onUnverifiedAction(result, result.unverifiedPostcondition, pending)
     } else if (truth.status === 'done' && truth.verified) {
@@ -4631,6 +4657,29 @@ export class JevController {
       'agent',
       `LOCAL_OSCILLATION_ESCAPE pair=${state.pair ?? 'pair'} cycles=${state.cycles} system2=false`,
       { pair: state.pair, cycles: state.cycles, boundary: 'local_recovery' },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * An APPROACH_LEG candidate: the remembered target's own route proved zero
+   * observable change, so the generator offers a travel leg that changes the
+   * stand cell (a grounded MOVE toward the target) instead of re-issuing the same
+   * action. Logged when Jev actually selects it, so the marker means "this body
+   * is now walking the approach", not "a leg existed".
+   */
+  private logApproachLeg(candidate: Candidate): void {
+    const target = candidate.target
+    if (target === null) return
+    const reason = typeof candidate.meta.approachLeg === 'string' ? candidate.meta.approachLeg : 'target_not_observable'
+    this.logger.info(
+      'agent',
+      formatApproachLeg(reason, target),
+      {
+        actionId: candidate.id,
+        target,
+        resource: typeof candidate.meta.approachResource === 'string' ? candidate.meta.approachResource : null,
+      },
       this.tickCounter,
     )
   }
@@ -6848,6 +6897,111 @@ export class JevController {
     )
     this.activeRetrieval = null
     this.retrievalTrack = null
+  }
+
+  /**
+   * The postcondition layer owns the verdict (`isZeroProgressOutcome` is a
+   * FAILURE). This owns what happens NEXT for the route families whose
+   * postcondition is a world change (RETRIEVE/DESCEND/STEP/ENTER_PORTAL):
+   *
+   *   - a completed action clears the zero-progress memory at its stand cell
+   *     (and for its target), so a transient blockage is never permanent;
+   *   - a zero-observable-change action is recorded as the exact route
+   *     (kind, target, stand cell, route signature) that just proved nothing.
+   *     The candidate layer withholds that exact repeat, so the next attempt for
+   *     the target must differ in a grounded way (a different vertical plan, a
+   *     different stand cell, or a travel/approach leg);
+   *   - `ZERO_PROGRESS_STAND_ROUTE_LIMIT` distinct zero-progress routes at one
+   *     stand cell exhaust that family there (`DESCEND_RETIRED`), which forces a
+   *     route change instead of sampling new cells from the same blocked body
+   *     position.
+   *
+   * Live evidence (run-muc3qbug-18vg3): 82 zero-observable chains in ten minutes,
+   * 75 of them `DESCEND:down:<dir>:b...` steps whose dig removed nothing
+   * (`outcome=noPath|stuck`), each with a fresh candidate id but the SAME body
+   * cell - a per-id failure memory can never see that as one failure.
+   */
+  private recordZeroProgressOutcome(
+    result: ExecutionResult,
+    candidate: Candidate,
+    truthful: ReturnType<typeof truthfulActionOutcome>,
+  ): void {
+    if (!isZeroProgressRouteKind(result.kind)) return
+    const stand = this.actionStart
+    if (stand === null) return
+    const standKey = cellKey(stand)
+    const targetKey = candidate.target === null ? null : cellKey(candidate.target)
+    if (truthful.verified) {
+      const clearedStand = clearZeroProgressStand(this.zeroProgressRoutes, result.kind, standKey)
+      const clearedTarget =
+        targetKey === null ? clearedStand : clearZeroProgressTarget(clearedStand, result.kind, targetKey)
+      if (clearedTarget !== this.zeroProgressRoutes) {
+        this.zeroProgressRoutes = clearedTarget
+        this.signals.zeroProgressRoutes = clearedTarget
+      }
+      return
+    }
+    if (candidate.target === null) return
+    if (!isZeroProgressOutcome(result)) return
+    const decision = observeZeroProgressRoute(this.zeroProgressRoutes, {
+      kind: result.kind,
+      targetKey: cellKey(candidate.target),
+      standKey,
+      routeSig: routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta }),
+      reason: result.failure ?? result.status,
+      nowMs: Date.now(),
+    })
+    this.zeroProgressRoutes = decision.routes
+    this.signals.zeroProgressRoutes = decision.routes
+    this.logger.warn(
+      'agent',
+      formatActionZeroProgress({
+        action: result.actionId,
+        target: candidate.target,
+        kind: result.kind,
+        retry: decision.attempts,
+        routeChanged: decision.routeChanged,
+        stand,
+      }),
+      {
+        actionId: result.actionId,
+        kind: result.kind,
+        target: candidate.target,
+        stand,
+        retry: decision.attempts,
+        routeChanged: decision.routeChanged,
+        routeSig: decision.entry.routeSig,
+      },
+      this.tickCounter,
+    )
+    if (result.kind === 'DESCEND' && decision.familyExhausted) {
+      this.logger.warn(
+        'agent',
+        formatDescendRetired('zero_progress_exhausted', stand, decision.familyAttempts),
+        { stand, routes: decision.familyAttempts, limit: ZERO_PROGRESS_STAND_ROUTE_LIMIT },
+        this.tickCounter,
+      )
+    }
+    if (result.kind === 'RETRIEVE') {
+      if (decision.attempts >= KNOWN_RETRIEVE_RETIRE_LIMIT) {
+        this.logger.warn(
+          'agent',
+          formatRetrieveRetired('zero_progress_budget', candidate.target, decision.attempts),
+          { target: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
+          this.tickCounter,
+        )
+      }
+      if (candidate.meta.retrieval === 'known') {
+        // This exact route is now withheld from this stand cell: re-offering it
+        // would be the same action with unchanged preconditions.
+        this.logger.warn(
+          'agent',
+          formatRetrieveRouteBlocked('zero_progress_route_unchanged', candidate.target, stand),
+          { target: candidate.target, stand, retry: decision.attempts },
+          this.tickCounter,
+        )
+      }
+    }
   }
 
   private checkWedge(actionId: string): void {

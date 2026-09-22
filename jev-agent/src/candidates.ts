@@ -33,6 +33,7 @@ import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, l
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool, strongestDigRequirement } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
+import { cellKey, isZeroProgressRouteRepeat, routeSignature, standFamilyExhausted } from './zeroProgressRoute.ts'
 import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
@@ -3478,11 +3479,29 @@ function descendCandidates(
   // `ESCALATE`, which promoted local route starvation into a Mercury mission
   // switch and left the active Option behind a control-only loop.
   const lateralSearchOnly = state.signals.descendLimitReached === true && descendTargetY === null
+  const nowMs = state.timestampMs
+  const standKey = cellKey(state.self.position)
+  // Zero-progress route memory: a descend step whose dig provably removed nothing
+  // (`ACTION_ZERO_PROGRESS ... kind=DESCEND`) must not be re-attempted with the
+  // same plan from the same body cell - that is the same action with unchanged
+  // preconditions. Once ZERO_PROGRESS_STAND_ROUTE_LIMIT distinct down routes have
+  // proved nothing at this stand cell, the family itself is withheld there so the
+  // body must change its stand cell (a level/lateral step, MOVE, or the existing
+  // bounded DESCEND_STALLED escalation) instead of sampling more cells forever.
+  const standDownSpent = standFamilyExhausted(state.signals.zeroProgressRoutes, 'DESCEND', standKey, { nowMs })
+  const suppressDown = lateralSearchOnly || standDownSpent
   const steps = (state.descent ?? []).filter(
     (step) =>
       step.safe &&
       !isProtectedStationBlock(step.digName ?? '') &&
-      (!lateralSearchOnly || step.mode !== 'down'),
+      (!suppressDown || step.mode !== 'down') &&
+      !isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'DESCEND',
+        targetKey: cellKey(descentPrimaryCell(step)),
+        standKey,
+        routeSig: descendStepRouteSignature(step),
+        nowMs,
+      }),
   )
   if (steps.length === 0) return []
 
@@ -3647,6 +3666,30 @@ function headingObstructionFor(
 function descendId(step: DescentOption): string {
   const primary = step.mode === 'down' ? step.floor : step.wall
   return `DESCEND:${step.mode}:${step.dir}:${blockId('b', primary)}`
+}
+
+/**
+ * The exact route signature `descendCandidateFromStep` will attach to this step's
+ * candidate, derived from the step itself so the pre-selection filter and the
+ * settled outcome agree on what "this same descend action" means. The primary cell
+ * is the canonical `descentPrimaryCell` the builder uses for `target`/`dig*`.
+ */
+function descendStepRouteSignature(step: DescentOption): string {
+  const primary = descentPrimaryCell(step)
+  return routeSignature({
+    kind: 'DESCEND',
+    id: descendId(step),
+    meta: {
+      mode: step.mode,
+      dir: step.dir,
+      digX: primary.x,
+      digY: primary.y,
+      digZ: primary.z,
+      stepX: step.step.x,
+      stepY: step.step.y,
+      stepZ: step.step.z,
+    },
+  })
 }
 
 /**
@@ -6364,6 +6407,70 @@ export function resourceDimensionMatches(resource: KnownResource, dimension: str
   return normalize(resource.dimension) === normalize(dimension)
 }
 
+/**
+ * The grounded travel/approach leg for a remembered resource whose own route
+ * just proved zero observable change from this body cell.
+ *
+ * The postcondition proved the previous attempt changed nothing; the mechanical
+ * fact behind it is usually "the horizontal path from HERE is blocked" (live:
+ * `PATH_CALLBACK ... outcome=noPath|stuck` 17-18m from the remembered ore). The
+ * grounded way to make the target observable/reachable again is to change the
+ * STAND CELL, so this offers the nearest standable cell that measurably reduces
+ * the distance to the remembered resource - a real MOVE the ordinary guard and
+ * reachability gate still own. It is an offer, never a replacement: Jev decides
+ * whether to walk it, and the retrieval is re-offered the moment the body stands
+ * somewhere new.
+ */
+function knownResourceApproachLeg(
+  state: WorldState,
+  options: CandidateOptions,
+  want: RetrievalWant,
+  known: KnownResource,
+): Candidate | null {
+  const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
+  const currentDistance = distance(state.self.position, known.position)
+  let best: Vec3Json | null = null
+  let bestScore = Number.POSITIVE_INFINITY
+  for (const spot of state.terrain.standable) {
+    if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) continue
+    const toResource = distance(spot, known.position)
+    if (toResource >= currentDistance) continue
+    if (
+      failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) >= moveFailureLimit
+    )
+      continue
+    const score = toResource + distance(spot, state.self.position) * 0.1
+    if (score < bestScore) {
+      bestScore = score
+      best = spot
+    }
+  }
+  if (best === null) return null
+  return {
+    id: `MOVE:${blockId('p', best)}`,
+    kind: 'MOVE',
+    label: `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
+    targetName: known.name,
+    target: best,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(best, state.self.position) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: best.x,
+      y: best.y,
+      z: best.z,
+      approachLeg: 'target_not_observable',
+      approachTarget: `${known.position.x},${known.position.y},${known.position.z}`,
+      approachResource: want.item,
+      knownName: known.name,
+    },
+  }
+}
+
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
   if (mineableBlockFor(state, want) !== null) return []
   const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
@@ -6388,33 +6495,51 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
     }
     const verticalLabel = verticalPlanLabel(vertical)
     const logRoute = want.kind === 'log' ? logRetrieveMode(state, known.position, vertical) : null
-    return [
-      {
-        id,
-        kind: 'RETRIEVE',
-        label: `return to remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}, ${distance(known.position, state.self.position)}m away${verticalLabel}`,
-        targetName: known.name,
-        target: known.position,
-        targetEntityId: null,
-        itemName: null,
-        requiresTool: false,
-        toolName: null,
-        inReach: distance(known.position, state.self.eyePosition) <= options.reach,
-        hasStandableAdjacent: true,
-        meta: {
-          tick: state.tick,
-          retrieval: 'known',
-          resource: want.item,
-          resourceKind: want.kind,
-          knownName: known.name,
-          x: known.position.x,
-          y: known.position.y,
-          z: known.position.z,
-          ...verticalMeta,
-          ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
-        },
+    const candidate: Candidate = {
+      id,
+      kind: 'RETRIEVE',
+      label: `return to remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}, ${distance(known.position, state.self.position)}m away${verticalLabel}`,
+      targetName: known.name,
+      target: known.position,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(known.position, state.self.eyePosition) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        retrieval: 'known',
+        resource: want.item,
+        resourceKind: want.kind,
+        knownName: known.name,
+        x: known.position.x,
+        y: known.position.y,
+        z: known.position.z,
+        ...verticalMeta,
+        ...(logRoute === null ? {} : { [LOG_ROUTE_META]: logRoute }),
       },
-    ]
+    }
+    // The settled postcondition proved this exact route changes NOTHING from this
+    // body cell (`ACTION_ZERO_PROGRESS ... kind=RETRIEVE route_changed=false`).
+    // Re-offering the same action with unchanged preconditions is the forbidden
+    // retry; a grounded approach leg that changes the stand cell is the
+    // alternative, and if none exists the target waits for the existing bounded
+    // retire/stall machinery instead of burning another action.
+    const standKey = cellKey(state.self.position)
+    if (
+      isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'RETRIEVE',
+        targetKey: cellKey(known.position),
+        standKey,
+        routeSig: routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta }),
+        nowMs: state.timestampMs,
+      })
+    ) {
+      const leg = knownResourceApproachLeg(state, options, want, known)
+      return leg === null ? [] : [leg]
+    }
+    return [candidate]
   }
   if (want.kind !== 'log') return []
   const spot = surfaceSpot(
