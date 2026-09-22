@@ -66,6 +66,17 @@ import type { ActionCommitmentState, CandidateFlapState, FlapCandidate } from '.
 import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
+// Issue #436 Phase 1: the structural SkillCommitment / CausalTargetIdentity /
+// EffectEnvelope contract. This module owns the decision EPOCH and the outcome
+// PACKET (see jevSemanticProjection.ts); the commitment module owns what a
+// selection is allowed to DO and feeds its real id + contract hashes here.
+import {
+  commitmentInvalidation,
+  effectEnvelopeHash,
+  formatSkillInvalidated,
+  postconditionHash,
+  targetIdentityKey,
+} from './skillCommitment.ts'
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
 // Issue #437: the Skill <-> Jev semantic boundary (projection, decision epochs,
 // stable candidate identity, typed SkillOutcomePacket). Raw mechanical telemetry
@@ -2836,6 +2847,10 @@ export class JevController {
       // so stop it with a typed outcome BEFORE this tick's decision. Jev owns the
       // replacement; code never substitutes one.
       this.cancelContradictedSkillTarget(state)
+      // issue #436 section 14/23: the same rule for the commitment's OWN
+      // lifecycle - a world/epoch/dimension change it was not grounded in ends it
+      // with a typed outcome. The lease is the HOST's (`ensureOwned`).
+      this.cancelInvalidCommitment(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
       this.lastStateFingerprint = this.stateFingerprint(state)
       // Retain the sensor facts the pure vertical-plan refusal needs (step cuts,
@@ -3502,7 +3517,11 @@ export class JevController {
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
-      const claim = this.executor.claim(guarded.candidate)
+      // issue #436 section 4: the claimed candidate carries the provenance the
+      // commitment/evidence layer needs - the decision epoch that authorized it,
+      // the decision id, the semantic Option instance, the state fingerprint, the
+      // world epoch and WHO selected it. Additive meta only; the id is untouched.
+      const claim = this.executor.claim(this.stampSelectionProvenance(guarded.candidate, decision, record))
       if (!claim.kept) this.actionStart = this.bot.entity.position.clone()
       if (claim.kept) {
         this.logger.info(
@@ -3524,7 +3543,13 @@ export class JevController {
         const identity =
           this.lastSemanticProjection?.candidates.find((view) => view.id === guarded.candidate.id)?.identity ??
           guarded.candidate.id
-        const commitmentId = commitmentRefFor({ candidateId: guarded.candidate.id, epoch: claim.epoch })
+        // issue #436 Phase 1: the commitment the EXECUTOR built for this lease is
+        // the authority object. Its real id and contract hashes replace the
+        // placeholder lease ref, so `SKILL_COMMIT` and the later
+        // `SKILL_OUTCOME_PACKET` name the same identity (section 4).
+        const commitment = this.executor.current?.commitment ?? null
+        const commitmentId =
+          commitment?.commitmentId ?? commitmentRefFor({ candidateId: guarded.candidate.id, epoch: claim.epoch })
         // §3: `authorize` re-checks that this epoch is still ACTIVE. A lease that
         // arrives after the epoch was superseded/invalidated is NOT committed and
         // is logged as a dropped stale result instead of silently acting.
@@ -3553,8 +3578,14 @@ export class JevController {
             leaseEpoch: claim.epoch,
             candidateId: guarded.candidate.id,
             selectedIdentity: identity,
-            skillKind: guarded.candidate.kind,
+            skillKind: commitment?.skillKind ?? guarded.candidate.kind,
             projectionHash: authorizing.projectionHash,
+            // section 17: the declared contract this selection authorized.
+            targetIdentity: commitment === null ? null : targetIdentityKey(commitment.target),
+            postconditionHash: commitment === null ? null : postconditionHash(commitment.expectedPostconditions),
+            effectEnvelopeHash: commitment === null ? null : effectEnvelopeHash(commitment.allowedEffects),
+            selectedBy: commitment?.selectedBy ?? null,
+            budgetMs: commitment?.budget.ms ?? null,
           }),
           { trigger, leaseEpoch: claim.epoch },
           this.tickCounter,
@@ -4545,6 +4576,14 @@ export class JevController {
       this.lastSemanticProjection = projection
       this.lastProjectionHash = hash
       this.skillOutcomeBoundary = false
+      // issue #436 section 3: `candidates.length === 1` is deliberately NOT a
+      // Jev bypass here. A superficially single remaining candidate does not prove
+      // there is no semantic choice (generation may be incomplete, the active
+      // Option may be stale, and beta still owns semantic termination), so policy
+      // is consulted on every decision regardless of the candidate count. The only
+      // deterministic authority classes are a selected Skill's mechanical
+      // continuation / DONE / hard safety / the U1..U6 prerequisite contract, and
+      // each of those is recorded by the executor's `SKILL_STEP authority=`.
       const result = await this.jev.decide({
         stage: `policy-tick-${this.tickCounter}-${trigger}`,
         state,
@@ -5061,6 +5100,78 @@ export class JevController {
         progressDelta: 0,
       },
       Date.now(),
+    )
+  }
+
+  /**
+   * issue #436 section 4: stamp the selection provenance onto the candidate the
+   * executor will claim. `selectedBy` is honest about which policy chose it, the
+   * epoch ties the commitment to the decision that authorized it, and the world
+   * epoch is what a later lifecycle revalidation compares against.
+   */
+  private stampSelectionProvenance(candidate: Candidate, decision: JevResult, record: DecisionRecord): Candidate {
+    const optionInstanceId = record.semanticOptionInstanceId ?? record.optionId ?? null
+    return {
+      ...candidate,
+      meta: {
+        ...candidate.meta,
+        decisionEpoch: this.decisionEpochs.active?.epoch ?? 0,
+        decisionId: decision.callId,
+        selectedBy: decision.policy === 'typesafe' ? 'jev' : 'deterministic',
+        stateFingerprint: record.stateHash,
+        worldEpoch: this.options.worldEpoch,
+        ...(optionInstanceId === null ? {} : { optionInstanceId }),
+      },
+    }
+  }
+
+  /**
+   * issue #436 section 14/23: the running commitment's contract can be broken by
+   * the world it was grounded in, independently of any target-claim
+   * contradiction: the dimension changed, or the host's world epoch moved.
+   *
+   * This is deterministic cancellation, never a recovery: the commitment's
+   * `CausalTargetIdentity` is meaningless in another world, so the action is
+   * CANCELLED with the typed `WORLD_CHANGED` outcome (`SKILL_INVALIDATED`, then
+   * the ordinary `SKILL_OUTCOME_PACKET`/`SKILL_END` close it). Code does not pick
+   * a replacement target; the tick continues to Jev, which owns WHICH is next.
+   */
+  private cancelInvalidCommitment(state: WorldState): void {
+    const running = this.executor.current
+    const commitment = running?.commitment ?? null
+    if (running === null || commitment === null) return
+    const observedDimension = typeof state.self.dimension === 'string' ? state.self.dimension : 'unknown'
+    const reason = commitmentInvalidation({
+      commitment,
+      observedDimension,
+      observedWorldEpoch: this.options.worldEpoch,
+      // The actuation lease is the HOST's: a revoked lease already aborts this
+      // action through `ensureOwned` and settles it LEASE_REVOKED.
+      leaseHeld: true,
+    })
+    if (reason === null) return
+    this.executor.cancelCurrent(`commitment ${commitment.commitmentId} invalidated (${reason})`)
+    this.logger.warn(
+      'agent',
+      formatSkillInvalidated({
+        commitmentId: commitment.commitmentId,
+        decisionEpoch: commitment.decisionEpoch,
+        skillKind: commitment.skillKind,
+        candidateId: commitment.candidateId,
+        reason,
+        targetKey: targetIdentityKey(commitment.target),
+        observedDimension,
+        observedWorldEpoch: this.options.worldEpoch,
+        detail: 'live commitment revalidation at the tick boundary',
+      }),
+      {
+        actionId: commitment.candidateId,
+        commitmentId: commitment.commitmentId,
+        reason,
+        observedDimension,
+        observedWorldEpoch: this.options.worldEpoch,
+      },
+      this.tickCounter,
     )
   }
 
@@ -10597,6 +10708,11 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
     goalItem: options.goalItem,
     actuation: options.actuation,
     actuationPort: options.actuationPort,
+    // issue #436 section 14/23: the world epoch this generation runs in, so the
+    // executor can revalidate a live commitment against an epoch the host mutates
+    // in-place. A world reset that arrives as a host reload builds a new
+    // controller+executor, so the old commitment dies with its action anyway.
+    observedWorldEpoch: () => options.worldEpoch,
     hooks: {
       onPathCompleted: (event) => {
         options.eventSink?.('PATH_CALLBACK', { phase: 'completed', ...event })
