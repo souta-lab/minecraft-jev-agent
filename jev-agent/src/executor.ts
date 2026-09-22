@@ -107,7 +107,6 @@ import type { SkillTerminalReason } from './jevSemanticProjection.ts'
 // Skill with a bounded closed loop (see `walkSkill.ts` for the measured symptom and
 // the contract). The loop decision is pure and lives there; this file only drives it.
 import {
-  WALK_LEG_CONTINUABLE,
   WALK_SKILL_MIN_PROGRESS,
   WALK_STRICT_ARRIVAL_RANGE,
   WALK_STRICT_ARRIVAL_TOLERANCE,
@@ -122,7 +121,7 @@ import {
   walkSkillIdFor,
   walkTargetOf,
 } from './walkSkill.ts'
-import type { WalkLegFailure, WalkSkillBudget, WalkSkillId, WalkStop } from './walkSkill.ts'
+import type { WalkLegFailure, WalkSkillId, WalkStop } from './walkSkill.ts'
 import type {
   Effect,
   EffectEnvelope,

@@ -60,7 +60,7 @@ import type { Candidate, CandidateKind } from './candidates.ts'
 import { effectEnvelopeHash, formatCommittedStep } from './skillCommitment.ts'
 import type { EffectEnvelope, SkillCommitment, SkillOutcome, StepAuthority } from './skillCommitment.ts'
 import { formatSkillPolicyBoundary } from './skillCommitment.ts'
-import { formatSkillStart, formatSkillStepAuthority } from './netherPortalPlan.ts'
+import { formatSkillStart } from './netherPortalPlan.ts'
 import type { SkillSelectionSource } from './netherPortalPlan.ts'
 import type { Vec3Json } from './state.ts'
 
