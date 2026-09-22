@@ -8109,6 +8109,17 @@ function travelApproachLegs(
   return legs
 }
 
+/** What one bridge offer (and its candidate) is aimed at. */
+interface BridgeLegSpec {
+  target: Vec3Json
+  targetName: string | null
+  /** why this leg exists, carried into the meta (`route_spent` / `route_withheld`) */
+  reason: string
+  /** the owning Skill, or null for a route-opening offer no Skill encloses */
+  skill: string | null
+  extraMeta?: Record<string, string | number | boolean>
+}
+
 /**
  * The bridge offer for one leg. Returns the verified plan or the typed refusal;
  * `plan === null` NEVER becomes a candidate, so "no placeable block" and "no
@@ -8176,7 +8187,7 @@ function ascendAlternativeAvailable(state: WorldState, target: Vec3Json): boolea
 function bridgeLegCandidate(
   state: WorldState,
   options: CandidateOptions,
-  spec: { target: Vec3Json; targetName: string | null; reason: string; extraMeta: Record<string, string | number | boolean>; skill: string },
+  spec: BridgeLegSpec,
   plan: BridgePlan,
   authority: string,
   reflex: string | null,
@@ -8227,8 +8238,9 @@ function bridgeLegCandidate(
       [BRIDGE_AUTHORITY_META]: authority,
       // The skill that owns this leg, in the SAME meta key the hole
       // step-over/step-up continuation uses, so the controller's `SKILL_STEP`
-      // mirror names one skill vocabulary (never a parallel one).
-      legContinuationSkill: spec.skill,
+      // mirror names one skill vocabulary (never a parallel one). Null for a
+      // route-opening offer, which no enclosing Skill owns.
+      ...(spec.skill === null ? {} : { legContinuationSkill: spec.skill }),
       approachLeg: spec.reason,
       approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
       ...(reflex === null ? {} : { legReflex: reflex }),
@@ -9952,6 +9964,38 @@ function routeOpeningCandidates(
     digRefusals,
   )
   if (dig !== null && !out.some((candidate) => candidate.id === dig.id)) out.push(dig)
+  // The SAME blocker, the other grounded remedy: when the withheld target lies
+  // across a gap (a landing cell with no support), the bounded bridge span changes
+  // the route by PLACING a floor instead of removing rock. Grounded here as well as
+  // in `travelApproachLegs`, so the capability is a general MOVE remedy for ANY
+  // blocked locomotion target (a GOTO, a retrieve, a goalDrop approach) rather than
+  // a portal-leg-only trick. No enclosing Skill owns this offer, so it is an
+  // ordinary candidate: `MECHANICAL_CONTINUATION`, no section 7 prerequisite claim,
+  // no boundary ranking - Jev chooses, and the `moveAdvancesTowardTarget` gate below
+  // still owns the validity of every MOVE in this family.
+  const bridge = groundBridgeLeg(state, options, { target: goalTarget, targetName: null }, false)
+  if (bridge.plan !== null) {
+    const bridged = bridgeLegCandidate(
+      state,
+      options,
+      { target: goalTarget, targetName: null, reason: 'route_withheld', skill: null },
+      bridge.plan,
+      formatSkillStepAuthority(
+        'MECHANICAL_CONTINUATION',
+        `cell=${cellText(bridge.plan.landing)} place=${cellText(bridge.plan.place)} far=${cellText(bridge.plan.far)} ` +
+          `dir=${bridge.plan.dir} block=${bridge.plan.block} span=${bridge.plan.span}`,
+        'place_blocks=1',
+        { budget: bridge.plan.span },
+      ),
+      null,
+      null,
+    )
+    if (!out.some((candidate) => candidate.id === bridged.id)) out.push(bridged)
+  }
+  if (bridge.refusal !== null && out.length > 0) {
+    const line = formatBridgeRefused(bridge.refusal)
+    for (const leg of out) leg.meta[BRIDGE_REFUSED_META] = line
+  }
   // REVERTED (da7d66e): returning the unfiltered family when the advancing set is
   // empty stopped the WAIT wedge but produced a pacing loop - the operator watched
   // the body walk east/west at the same spot (live `pos` cycled 195.5 <-> 199) for

@@ -371,6 +371,27 @@ function queuedPlace(enterCell: Vec3Json): QueuedGoal {
   }
 }
 
+/** A `goto` goal whose own locomotion target is across the gap. */
+function queuedGoto(target: Vec3Json): QueuedGoal {
+  return {
+    id: 'g-goto',
+    kind: 'goto',
+    description: `return to the code-grounded target`,
+    targetItem: null,
+    requiredCount: 1,
+    targetPredicate: null,
+    dimension: OVERWORLD,
+    targetPosition: target,
+    startCount: 0,
+    haveCount: 0,
+    status: 'active',
+    origin: 'mechanical',
+    createdAt: 0,
+    updatedAt: 0,
+    detail: null,
+  }
+}
+
 function queueWith(current: QueuedGoal): GoalQueueState {
   return { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] }
 }
@@ -879,6 +900,37 @@ function ledgeTerrain(
 }
 
 // ===========================================================================
+// (viii) a blocked locomotion target (any goal, not a portal leg): the bridge is a
+//        general MOVE remedy, offered through the route-opening family
+// ===========================================================================
+{
+  // A bottomless 1-cell gap between the body and the goal cell: the goal's own MOVE
+  // is withheld `no_path`, so the route-opening family runs for the blocked target.
+  const world = ledgeTerrain(1, { ledgeTo: 6 })
+  const target: Vec3Json = { x: 5, y: 64, z: 0 }
+  const counts = { cobblestone: 381 }
+  const state = worldState({ feet: world.feet, terrain: world.terrain, counts, current: queuedGoto(target) })
+  const options = optionsFor({ feet: world.feet, terrain: world.terrain, current: queuedGoto(target) })
+  const grounded = generateGroundedCandidates(state, options)
+  const bridge = bridgeCandidates(grounded.candidates)[0]
+  const withheldGoto = grounded.withheld.find((entry) => entry.candidate.kind === 'MOVE')
+  check(
+    '(viii) a blocked GOTO across a void gap grounds the bridge as an ordinary MOVE remedy',
+    bridge !== undefined &&
+      bridge.target !== null &&
+      key(bridge.target) === '2,64,0' &&
+      bridge.meta[BRIDGE_META] === true &&
+      bridge.meta[BRIDGE_MAY_PLACE_META] === true &&
+      bridge.meta.approachLeg === 'route_withheld' &&
+      typeof bridge.meta[BRIDGE_AUTHORITY_META] === 'string' &&
+      (bridge.meta[BRIDGE_AUTHORITY_META] as string).startsWith('authority=MECHANICAL_CONTINUATION') &&
+      bridge.meta.legContinuationSkill === undefined &&
+      withheldGoto !== undefined,
+    `offer=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] withheld=[${grounded.withheld.map((entry) => entry.candidate.id).join(',')}] target=${bridge?.target === null || bridge?.target === undefined ? 'none' : key(bridge.target)}`,
+  )
+}
+
+// ===========================================================================
 // (vi) the executor: cross the gap, and a mid-bridge interruption leaves the body
 //      standing safely with a typed end
 // ===========================================================================
@@ -1180,9 +1232,12 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
   check(
     '(vii) the bridge is enumerated beside the walk leg / dig route, never as a fallback',
     /const bridge = groundBridgeLeg\(state, options, spec, walkable\)/.test(candidatesSource) &&
+      // and grounded in the route-opening family too, so it is a general MOVE
+      // remedy for ANY blocked locomotion target rather than a portal-leg trick
+      /const bridge = groundBridgeLeg\(state, options, \{ target: goalTarget, targetName: null \}, false\)/.test(candidatesSource) &&
       /'place:bridge'/.test(candidatesSource) &&
       /remedyClasses.length > 1/.test(candidatesSource),
-    `enumerated=${/groundBridgeLeg\(state, options, spec, walkable\)/.test(candidatesSource)} boundary=${/remedyClasses/.test(candidatesSource)}`,
+    `legFamily=${/groundBridgeLeg\(state, options, spec, walkable\)/.test(candidatesSource)} routeOpening=${/target: goalTarget, targetName: null \}, false\)/.test(candidatesSource)} boundary=${/remedyClasses/.test(candidatesSource)}`,
   )
   check(
     '(vii) the executor dispatches a bridge MOVE to the bounded bridge leg before the walk',
