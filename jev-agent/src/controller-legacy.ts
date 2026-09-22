@@ -163,9 +163,13 @@ import {
   formatDescendRetired,
   formatRetrieveRetired,
   formatRetrieveRouteBlocked,
+  formatRouteSpent,
+  formatRouteStageFailed,
   isZeroProgressRouteKind,
   observeZeroProgressRoute,
+  routeFailureStage,
   routeSignature,
+  ROUTE_ALL_SPENT_REASON,
   ZERO_PROGRESS_STAND_ROUTE_LIMIT,
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
@@ -203,6 +207,14 @@ export type EscalationReason =
   | 'progress_stall'
   | 'unexpected_world_state'
   | 'all_candidates_invalid'
+  /**
+   * Every grounded route for the active goal's target is spent (`ROUTE_ESCALATE
+   * ... reason=all_routes_spent`) and no approach leg changes the stand cell.
+   * This is a STRUCTURAL capability boundary, not a local path/stall signal:
+   * code proved it can ground no route at all, so WHAT comes next belongs to
+   * System2. It is deliberately NOT in the facade's `LOCAL_POLICY_ESCALATIONS`.
+   */
+  | 'route_exhausted'
   | 'goal_complete'
   | 'unknown_event'
   | 'policy_error'
@@ -220,6 +232,7 @@ const ESCALATION_TO_SUMMON: Record<EscalationReason, LlmSummonReason> = {
   progress_stall: 'no_progress',
   unexpected_world_state: 'unknown_situation',
   all_candidates_invalid: 'action_impossible',
+  route_exhausted: 'action_impossible',
   goal_complete: 'queue_empty',
   unknown_event: 'unknown_situation',
   policy_error: 'unknown_situation',
@@ -1110,6 +1123,22 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ABANDON_REASON=action_unverified',
   'ACTION_UNVERIFIED',
   ACTION_REJECTED,
+  // The route-family vocabulary is run-scoped evidence: a settled route stage
+  // failure, the exact route it spends, and a goal whose grounded routes are all
+  // spent. Measured live (run-muc620xb-1d312) the recorder DID write
+  // `ACTION_ZERO_PROGRESS ... kind=ENTER_PORTAL retry=1..20`, but the marker was
+  // not mirrored, so the resident log showed zero of them and the frozen route
+  // looked like a route that was never spent. Keep every existing route marker
+  // here too (`ACTION_ZERO_PROGRESS`, the retirements, the approach leg) so the
+  // next measurement reads the same facts the runtime acted on.
+  'ROUTE_STAGE_FAILED',
+  'ROUTE_SPENT',
+  'ROUTE_ESCALATE',
+  'ACTION_ZERO_PROGRESS',
+  'DESCEND_RETIRED',
+  'RETRIEVE_RETIRED',
+  'RETRIEVE_ROUTE_BLOCKED',
+  'APPROACH_LEG',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -2566,6 +2595,7 @@ export class JevController {
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
+      this.noteRouteExhaustion(grounded.entryRefusal)
       this.logEntryUnverified(portalEntry)
       this.logArmorRefusal(grounded.armorRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
@@ -5311,6 +5341,21 @@ export class JevController {
     this.logger.warn('agent', refusal.line, { reason: refusal.reason }, this.tickCounter)
   }
 
+  /**
+   * A route arm that reports `all_routes_spent` has proved a STRUCTURAL
+   * capability boundary: every route it can ground from this body cell to the
+   * goal's target is spent, and no grounded approach leg changes the stand cell.
+   * That is exactly the WHAT-next boundary System2 owns, so it goes through the
+   * ordinary bounded escalation (`escalationCooldownMs` / `escalationWindowMs`
+   * and the `ESCALATION_TO_SUMMON` mapping) instead of re-offering the dead
+   * route. Code still owns the fact (CAN/TRUE); Jev still chooses WHICH among
+   * the remaining grounded offers; System2 owns WHAT comes next.
+   */
+  private noteRouteExhaustion(refusal: PortalEntryRefusal | null): void {
+    if (refusal === null || refusal.reason !== ROUTE_ALL_SPENT_REASON) return
+    this.escalate('route_exhausted', refusal.line)
+  }
+
   private effectiveHave(): number {
     const current = this.queue.current
     if (current === null || current.targetItem === null) return 0
@@ -6937,20 +6982,34 @@ export class JevController {
    *
    *   - a completed action clears the zero-progress memory at its stand cell
    *     (and for its target), so a transient blockage is never permanent;
-   *   - a zero-observable-change action is recorded as the exact route
-   *     (kind, target, stand cell, route signature) that just proved nothing.
-   *     The candidate layer withholds that exact repeat, so the next attempt for
-   *     the target must differ in a grounded way (a different vertical plan, a
-   *     different stand cell, or a travel/approach leg);
+   *   - a route candidate that settled FAILED at any executor stage - the path
+   *     stage (`PATH_CALLBACK phase=failed outcome=noPath|stuck`) included - is
+   *     recorded as the exact route (kind, target, stand cell, route signature)
+   *     that just proved it cannot complete, even when the lease also produced
+   *     lenient body progress. The candidate layer withholds that exact repeat,
+   *     so the next attempt for the target must differ in a grounded way (a
+   *     different vertical plan, a different stand cell, or a travel/approach
+   *     leg);
    *   - `ZERO_PROGRESS_STAND_ROUTE_LIMIT` distinct zero-progress routes at one
    *     stand cell exhaust that family there (`DESCEND_RETIRED`), which forces a
    *     route change instead of sampling new cells from the same blocked body
-   *     position.
+   *     position;
+   *   - every route fact is mirrored as the typed `ROUTE_STAGE_FAILED` /
+   *     `ROUTE_SPENT` marker, and a route arm that can ground no alternative at
+   *     all reports `ROUTE_ESCALATE ... reason=all_routes_spent` (see
+   *     `noteRouteExhaustion`), so the resident log can never again show an
+   *     unchanged failing route being re-offered with no typed cause.
    *
    * Live evidence (run-muc3qbug-18vg3): 82 zero-observable chains in ten minutes,
    * 75 of them `DESCEND:down:<dir>:b...` steps whose dig removed nothing
    * (`outcome=noPath|stuck`), each with a fresh candidate id but the SAME body
    * cell - a per-id failure memory can never see that as one failure.
+   *
+   * Live evidence (run-muc620xb-1d312): the route memory DID record
+   * `ACTION_ZERO_PROGRESS ... kind=ENTER_PORTAL retry=1..20 stand=10,54,25` with
+   * an UNCHANGED signature, but nothing consumed it for the entry arm, so
+   * `ENTER:26,67,9` was re-offered 669 times. The typed markers above make the
+   * next measurement of this shape unambiguous.
    */
   private recordZeroProgressOutcome(
     result: ExecutionResult,
@@ -6973,7 +7032,17 @@ export class JevController {
       return
     }
     if (candidate.target === null) return
-    if (!isZeroProgressOutcome(result)) return
+    // A route candidate that settled FAILED at an executor stage is a spent
+    // route for its exact identity even when the lenient body-progress signal
+    // rode along with it: `PATH_CALLBACK phase=failed outcome=noPath|stuck`
+    // settles `failed`, but a lease that also nudged the body carries
+    // `progressed=true`, and that must not make the same route re-offerable from
+    // the same stand cell. A body that really moved stands in a different cell,
+    // which is a different identity and a fresh attempt.
+    const stage = result.status === 'failed' ? routeFailureStage(result.failure) : null
+    if (stage === null) {
+      if (!isZeroProgressOutcome(result)) return
+    }
     const decision = observeZeroProgressRoute(this.zeroProgressRoutes, {
       kind: result.kind,
       targetKey: cellKey(candidate.target),
@@ -6984,6 +7053,36 @@ export class JevController {
     })
     this.zeroProgressRoutes = decision.routes
     this.signals.zeroProgressRoutes = decision.routes
+    if (stage !== null) {
+      // The typed stage fact: WHERE the route broke, so a path-stage failure is
+      // never again only a `PATH_CALLBACK` line with an unchanged offer.
+      this.logger.warn(
+        'agent',
+        formatRouteStageFailed({
+          kind: result.kind,
+          target: candidate.target,
+          stand,
+          stage,
+          failure: result.failure,
+        }),
+        { actionId: result.actionId, kind: result.kind, target: candidate.target, stand, stage, failure: result.failure },
+        this.tickCounter,
+      )
+    }
+    if (decision.routeSpentNow) {
+      this.logger.warn(
+        'agent',
+        formatRouteSpent(result.kind, candidate.target, decision.attempts),
+        {
+          actionId: result.actionId,
+          kind: result.kind,
+          target: candidate.target,
+          attempts: decision.attempts,
+          routeSig: decision.entry.routeSig,
+        },
+        this.tickCounter,
+      )
+    }
     this.logger.warn(
       'agent',
       formatActionZeroProgress({

@@ -33,7 +33,15 @@ import { isProtectedStationBlock, isLiveStructureMember, liveStructureCellKey, l
 import { failureCount } from './failureMemory.ts'
 import { selectDigTool, strongestDigRequirement } from './toolChoice.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock, planVerticalApproach, planVerticalApproachDetailed, pillarColumnUnsafeFromBlocks, evaluateAscentColumn, VERTICAL_GAP } from './verticalPlan.ts'
-import { cellKey, isZeroProgressRouteRepeat, routeSignature, standFamilyExhausted } from './zeroProgressRoute.ts'
+import {
+  cellKey,
+  formatRouteEscalate,
+  goalSpentRouteCount,
+  isZeroProgressRouteRepeat,
+  routeSignature,
+  ROUTE_ALL_SPENT_REASON,
+  standFamilyExhausted,
+} from './zeroProgressRoute.ts'
 import type { UpwardRefusalReason, VerticalInput, VerticalPlan } from './verticalPlan.ts'
 import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectForGoal } from './prereqOption.ts'
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
@@ -1430,45 +1438,85 @@ export function entryCandidates(
     route.plan?.kind === 'reuse'
       ? planVerticalApproach({ ...verticalInputFor(state, entry.enterCell), tunnel: null })
       : null
-  return {
-    candidates: [
-      {
-        id: entry.id,
-        kind: 'ENTER_PORTAL',
-        label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
-        targetName: NETHER_PORTAL,
-        // The interior cell itself is the locomotion target: the generic MOVE
-        // machinery walks the body in (standing in a portal block is the world
-        // mechanic that transfers). Where the walk cannot reach it, the same
-        // grounded vertical plan a MOVE candidate carries supplies the dig leg.
-        target: entry.enterCell,
-        targetEntityId: null,
-        itemName: null,
-        requiresTool: false,
-        toolName: null,
-        inReach: distance(entry.enterCell, state.self.eyePosition) <= options.reach,
-        hasStandableAdjacent: true,
-        meta: {
-          tick: state.tick,
-          enterX: entry.enterCell.x,
-          enterY: entry.enterCell.y,
-          enterZ: entry.enterCell.z,
-          dimension: entry.dimension,
-          portalCells: serializePortalCells(entry.portalCells),
-          // A remembered-site route (interior unobservable from here) is offered
-          // with the fact named: the executor re-verifies the lit interior at
-          // arrival, so this can never transfer through an unlit frame.
-          ...(entry.unverified === true ? { entryUnverified: true } : {}),
-          ...verticalMeta,
-          ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
-          ...(route.plan === null && route.ascentRefusal !== null
-            ? { entryRouteRefusal: route.ascentRefusal.reason }
-            : {}),
-        },
-      },
-    ],
-    refusal: null,
+  const meta: Record<string, string | number | boolean> = {
+    tick: state.tick,
+    enterX: entry.enterCell.x,
+    enterY: entry.enterCell.y,
+    enterZ: entry.enterCell.z,
+    dimension: entry.dimension,
+    portalCells: serializePortalCells(entry.portalCells),
+    // A remembered-site route (interior unobservable from here) is offered
+    // with the fact named: the executor re-verifies the lit interior at
+    // arrival, so this can never transfer through an unlit frame.
+    ...(entry.unverified === true ? { entryUnverified: true } : {}),
+    ...verticalMeta,
+    ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+    ...(route.plan === null && route.ascentRefusal !== null
+      ? { entryRouteRefusal: route.ascentRefusal.reason }
+      : {}),
   }
+  const candidate: Candidate = {
+    id: entry.id,
+    kind: 'ENTER_PORTAL',
+    label: `walk into the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}) and transfer to ${entry.dimension}`,
+    targetName: NETHER_PORTAL,
+    // The interior cell itself is the locomotion target: the generic MOVE
+    // machinery walks the body in (standing in a portal block is the world
+    // mechanic that transfers). Where the walk cannot reach it, the same
+    // grounded vertical plan a MOVE candidate carries supplies the dig leg.
+    target: entry.enterCell,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(entry.enterCell, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta,
+  }
+  // A route that already proved it cannot complete from this body cell - a
+  // path-stage failure (`PATH_CALLBACK phase=failed outcome=noPath|stuck`) is
+  // recorded as a SPENT route exactly like zero observable change - must not be
+  // re-offered unchanged. The grounded next step is an approach leg that changes
+  // the STAND CELL, so the body meets a different mechanical situation and the
+  // entry is re-offered from there (never a premature permanent suppression).
+  const standKey = cellKey(state.self.position)
+  const targetKey = cellKey(entry.enterCell)
+  if (
+    isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+      kind: 'ENTER_PORTAL',
+      targetKey,
+      standKey,
+      routeSig: routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta }),
+      nowMs: state.timestampMs,
+    })
+  ) {
+    const leg = travelApproachLeg(state, options, {
+      target: entry.enterCell,
+      targetName: NETHER_PORTAL,
+      reason: 'route_spent',
+      label: (best) =>
+        `walk an approach leg toward the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}): the last route there failed, so stand at (${best.x},${best.y},${best.z}) first`,
+      extraMeta: { entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}` },
+    })
+    if (leg !== null) return { candidates: [leg], refusal: null }
+    // No grounded route and no grounded approach leg changes the stand cell:
+    // every route this goal can ground from here is spent. Say it typed and let
+    // the ordinary bounded escalation reach System2 - never re-offer the dead
+    // route and never leave the offer at (failing route, WAIT).
+    const routes = goalSpentRouteCount(state.signals.zeroProgressRoutes, {
+      kind: 'ENTER_PORTAL',
+      targetKey,
+      nowMs: state.timestampMs,
+    })
+    return {
+      candidates: [],
+      refusal: {
+        reason: ROUTE_ALL_SPENT_REASON,
+        line: formatRouteEscalate(current?.id ?? 'unknown', ROUTE_ALL_SPENT_REASON, routes),
+      },
+    }
+  }
+  return { candidates: [candidate], refusal: null }
 }
 
 /**
@@ -3778,6 +3826,7 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     z: Math.floor(state.self.position.z),
   }
   const scored: Array<{ cut: NonNullable<WorldState['stepCuts']>[number]; score: number }> = []
+  const standKey = cellKey(state.self.position)
   for (const cut of cuts) {
     const known = state.blocks.find(
       (block) =>
@@ -3785,6 +3834,23 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
     )
     const tool = known?.harvestTool ?? null
     if (!hasTool(state, tool, tool === null ? null : known?.harvestTier ?? null)) continue
+    // The same 1-block step cut that just proved it changes nothing from this
+    // body cell is not re-offered: the identity is (STEP, cut cell, stand cell,
+    // dir/step route), so a different cut or a body that moved stays offerable.
+    if (
+      isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'STEP',
+        targetKey: cellKey(cut.cut),
+        standKey,
+        routeSig: routeSignature({
+          kind: 'STEP',
+          id: `STEP:${cut.dir}:${blockId('b', cut.cut)}`,
+          meta: { dir: cut.dir, stepX: cut.step.x, stepY: cut.step.y, stepZ: cut.step.z },
+        }),
+        nowMs: state.timestampMs,
+      })
+    )
+      continue
     let penalty = 0
     if (target !== null) {
       const tdx = target.position.x - feet.x
@@ -6797,38 +6863,49 @@ export function resourceDimensionMatches(resource: KnownResource, dimension: str
 }
 
 /**
- * The grounded travel/approach leg for a remembered resource whose own route
- * just proved zero observable change from this body cell.
+ * The grounded travel/approach leg for a locomotion target whose own route just
+ * proved spent from this body cell.
  *
- * The postcondition proved the previous attempt changed nothing; the mechanical
- * fact behind it is usually "the horizontal path from HERE is blocked" (live:
- * `PATH_CALLBACK ... outcome=noPath|stuck` 17-18m from the remembered ore). The
- * grounded way to make the target observable/reachable again is to change the
- * STAND CELL, so this offers the nearest standable cell that measurably reduces
- * the distance to the remembered resource - a real MOVE the ordinary guard and
- * reachability gate still own. It is an offer, never a replacement: Jev decides
- * whether to walk it, and the retrieval is re-offered the moment the body stands
- * somewhere new.
+ * The postcondition proved the previous attempt changed nothing (or failed at
+ * its path stage); the mechanical fact behind it is usually "the path from HERE
+ * is blocked" (live: `PATH_CALLBACK ... outcome=noPath|stuck` 17-18m from the
+ * remembered ore, and the same shape 16m/13-bricks from a lit gate). The
+ * grounded way to make the target reachable again is to change the STAND CELL,
+ * so this offers the nearest standable cell that measurably reduces the distance
+ * to the target - a real MOVE the ordinary guard and reachability gate still
+ * own. It is an offer, never a replacement: Jev decides whether to walk it, and
+ * the route is re-offered the moment the body stands somewhere new.
  */
-function knownResourceApproachLeg(
+function travelApproachLeg(
   state: WorldState,
   options: CandidateOptions,
-  want: RetrievalWant,
-  known: KnownResource,
+  spec: {
+    target: Vec3Json
+    targetName: string | null
+    reason: string
+    label: (spot: Vec3Json) => string
+    extraMeta: Record<string, string | number | boolean>
+  },
 ): Candidate | null {
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
-  const currentDistance = distance(state.self.position, known.position)
+  const currentDistance = distance(state.self.position, spec.target)
+  const standKey = cellKey(state.self.position)
   let best: Vec3Json | null = null
   let bestScore = Number.POSITIVE_INFINITY
   for (const spot of state.terrain.standable) {
+    // Only a DIFFERENT stand cell can change the mechanical situation: a "leg"
+    // to the cell the body already occupies is not a route change, and the exact
+    // float distance to a target can make the body's own floor cell look
+    // "closer" than its centre.
+    if (cellKey(spot) === standKey) continue
     if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) continue
-    const toResource = distance(spot, known.position)
-    if (toResource >= currentDistance) continue
+    const toTarget = distance(spot, spec.target)
+    if (toTarget >= currentDistance) continue
     if (
       failureCount(state.signals.failedCandidates, `MOVE:${blockId('p', spot)}`) >= moveFailureLimit
     )
       continue
-    const score = toResource + distance(spot, state.self.position) * 0.1
+    const score = toTarget + distance(spot, state.self.position) * 0.1
     if (score < bestScore) {
       bestScore = score
       best = spot
@@ -6838,8 +6915,8 @@ function knownResourceApproachLeg(
   return {
     id: `MOVE:${blockId('p', best)}`,
     kind: 'MOVE',
-    label: `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
-    targetName: known.name,
+    label: spec.label(best),
+    targetName: spec.targetName,
     target: best,
     targetEntityId: null,
     itemName: null,
@@ -6852,12 +6929,32 @@ function knownResourceApproachLeg(
       x: best.x,
       y: best.y,
       z: best.z,
-      approachLeg: 'target_not_observable',
-      approachTarget: `${known.position.x},${known.position.y},${known.position.z}`,
-      approachResource: want.item,
-      knownName: known.name,
+      approachLeg: spec.reason,
+      approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+      ...spec.extraMeta,
     },
   }
+}
+
+/**
+ * The named-resource spelling of {@link travelApproachLeg}: the remembered
+ * resource's own route proved zero observable change, so the leg names the
+ * resource and the item the trip is for.
+ */
+function knownResourceApproachLeg(
+  state: WorldState,
+  options: CandidateOptions,
+  want: RetrievalWant,
+  known: KnownResource,
+): Candidate | null {
+  return travelApproachLeg(state, options, {
+    target: known.position,
+    targetName: known.name,
+    reason: 'target_not_observable',
+    label: (best) =>
+      `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
+    extraMeta: { approachResource: want.item, knownName: known.name },
+  })
 }
 
 function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {

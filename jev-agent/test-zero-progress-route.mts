@@ -28,12 +28,13 @@
 //
 // Run: bun test-zero-progress-route.mts
 import { readFileSync } from 'node:fs'
-import { defaultCandidateOptions, generateCandidates, generateGroundedCandidates } from './src/candidates.ts'
-import type { Candidate } from './src/candidates.ts'
+import { defaultCandidateOptions, entryCandidates, generateCandidates, generateGroundedCandidates } from './src/candidates.ts'
+import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import { descentPrimaryCell } from './src/state.ts'
 import type { AgentSignals, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import { NETHER, NETHER_PORTAL, PORTAL_ENTERED_PREDICATE } from './src/netherPortalPlan.ts'
 import {
   cellKey,
   clearZeroProgressStand,
@@ -42,9 +43,16 @@ import {
   formatApproachLeg,
   formatDescendRetired,
   formatRetrieveRetired,
+  formatRouteEscalate,
+  formatRouteSpent,
+  formatRouteStageFailed,
+  goalSpentRouteCount,
   isZeroProgressRouteRepeat,
   observeZeroProgressRoute,
+  routeFailureStage,
+  routePlanSignature,
   routeSignature,
+  ROUTE_ALL_SPENT_REASON,
   standFamilyExhausted,
   standFamilyRouteCount,
   ZERO_PROGRESS_STAND_ROUTE_LIMIT,
@@ -225,6 +233,69 @@ function ledgerFor(kind: string, target: Vec3Json, stand: Vec3Json, routeSig: st
     nowMs: NOW,
   })
   return decision.routes
+}
+
+// --- the measured travel/enter shape (run-muc620xb-1d312, gen-muc8zwpv-ddlzrh) ----
+//
+// The body stood at 10,54,25 (13 blocks below and ~16 blocks away from the lit
+// gate at 26,67,9) inside the `enter_portal` goal. Every tick the offer was
+// `[ENTER:26,67,9, ASCEND:habitat:p10_65_25, WAIT]`, the entry settled
+// `PATH_CALLBACK phase=failed outcome=noPath|stuck`, and the identical entry was
+// re-offered 669 times. Nothing below hard-codes the portal: it is a route-shaped
+// locomotion candidate whose path stage keeps failing, exactly like a remembered
+// ore behind blocked terrain.
+
+const PORTAL_ENTER_CELL: Vec3Json = { x: 26, y: 67, z: 9 }
+const PORTAL_BODY: Vec3Json = { x: 10, y: 54, z: 25 }
+
+function portalQueuedGoal(): QueuedGoal {
+  return queuedGoal({
+    id: 'g-portal-entered',
+    kind: 'place',
+    description: 'portal_entered nether_portal',
+    targetItem: NETHER_PORTAL,
+    targetPredicate: PORTAL_ENTERED_PREDICATE,
+    dimension: NETHER,
+  })
+}
+
+/** The gate's grounded entry route as the controller supplies it (no world plan needed here). */
+function portalEntryOptions(enterCell: Vec3Json = PORTAL_ENTER_CELL): CandidateOptions {
+  return {
+    ...defaultCandidateOptions,
+    portalEntry: {
+      ok: true,
+      candidate: {
+        id: `ENTER:${enterCell.x},${enterCell.y},${enterCell.z}`,
+        portalCells: [enterCell],
+        enterCell,
+        dimension: NETHER,
+        line: `PORTAL_ENTRY site=${enterCell.x},${enterCell.y},${enterCell.z}`,
+      },
+    },
+  }
+}
+
+function portalWorld(overrides: {
+  position: Vec3Json
+  standable: Vec3Json[]
+  routes?: ZeroProgressRoutes
+}): WorldState {
+  return worldState({
+    position: overrides.position,
+    standable: overrides.standable,
+    goalQueue: queueWith(portalQueuedGoal()),
+    signals: signals({ zeroProgressRoutes: overrides.routes }),
+  })
+}
+
+/** The route identity the controller records for a settled entry attempt. */
+function enterRouteSig(candidate: Candidate): string {
+  return routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta })
+}
+
+function withRoutes(state: WorldState, routes: ZeroProgressRoutes): WorldState {
+  return { ...state, signals: { ...state.signals, zeroProgressRoutes: routes } }
 }
 
 // --- pure rule -------------------------------------------------------------------
@@ -563,25 +634,259 @@ addCase('(b) after one approach leg the retrieval is offered again (no premature
   }
 })
 
+// --- (a') the measured travel/enter shape: a PATH-STAGE failure spends the route --
+
+addCase("(a') a path-stage failure spends the ENTER route: the identical candidate is not re-offered and the goal escalates typed", () => {
+  const state = portalWorld({ position: PORTAL_BODY, standable: [PORTAL_BODY] })
+  const options = portalEntryOptions()
+  const first = entryCandidates(state, options)
+  const entry = first.candidates[0]
+  if (entry === undefined) return { pass: false, detail: 'the fresh state offered no entry route' }
+  // The controller's verdict for `PATH_CALLBACK phase=failed outcome=noPath`.
+  const stage = routeFailureStage('path_no_path')
+  const decision = observeZeroProgressRoute(undefined, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(PORTAL_ENTER_CELL),
+    standKey: cellKey(PORTAL_BODY),
+    routeSig: enterRouteSig(entry),
+    reason: 'path_no_path',
+    nowMs: NOW,
+  })
+  const after = entryCandidates(withRoutes(state, decision.routes), options)
+  const line = formatRouteEscalate('g-portal-entered', ROUTE_ALL_SPENT_REASON, 1)
+  return {
+    pass:
+      stage === 'path' &&
+      decision.routeSpentNow &&
+      first.candidates.length === 1 &&
+      first.refusal === null &&
+      after.candidates.length === 0 &&
+      after.refusal?.reason === ROUTE_ALL_SPENT_REASON &&
+      after.refusal.line === line &&
+      line === 'ROUTE_ESCALATE goal=g-portal-entered reason=all_routes_spent routes=1',
+    detail: `stage=${stage} spentNow=${decision.routeSpentNow} fresh=[${first.candidates.map((candidate) => candidate.id).join(',')}] after=[${after.candidates.map((candidate) => candidate.id).join(',')}] refusal=${after.refusal?.line ?? 'none'}`,
+  }
+})
+
+addCase("(a') the spent route travels as the goal-level budget: routes=n grows with each distinct stand/plan identity", () => {
+  const first = observeZeroProgressRoute(undefined, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(PORTAL_ENTER_CELL),
+    standKey: cellKey(PORTAL_BODY),
+    routeSig: 'ENTER_PORTAL:staircase-up:W:54->67:dig=9,55,24:step=9,55,24:pillar=0:fallback=none',
+    reason: 'path_no_path',
+    nowMs: NOW,
+  })
+  const second = observeZeroProgressRoute(first.routes, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(PORTAL_ENTER_CELL),
+    standKey: cellKey({ x: 11, y: 55, z: 25 }),
+    routeSig: 'ENTER_PORTAL:pillar:unknown:55->67:dig=none:step=none:pillar=12:fallback=none',
+    reason: 'path_stuck',
+    nowMs: NOW + 1,
+  })
+  const count = goalSpentRouteCount(second.routes, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(PORTAL_ENTER_CELL),
+    nowMs: NOW + 2,
+  })
+  return {
+    pass: goalSpentRouteCount(first.routes, { kind: 'ENTER_PORTAL', targetKey: cellKey(PORTAL_ENTER_CELL), nowMs: NOW }) === 1 && count === 2,
+    detail: `first=${goalSpentRouteCount(first.routes, { kind: 'ENTER_PORTAL', targetKey: cellKey(PORTAL_ENTER_CELL), nowMs: NOW })} afterSecondStand=${count}`,
+  }
+})
+
+// --- (b') a grounded route change re-opens the entry ------------------------------
+
+addCase("(b') a spent ENTER route offers the approach leg, and the entry returns once the body stands somewhere new", () => {
+  const closer: Vec3Json = { x: 12, y: 54, z: 25 }
+  const state = portalWorld({ position: PORTAL_BODY, standable: [PORTAL_BODY, closer] })
+  const options = portalEntryOptions()
+  const entry = entryCandidates(state, options).candidates[0]
+  if (entry === undefined) return { pass: false, detail: 'the fresh state offered no entry route' }
+  const routes = ledgerFor('ENTER_PORTAL', PORTAL_ENTER_CELL, PORTAL_BODY, enterRouteSig(entry))
+  const afterSpent = entryCandidates(withRoutes(state, routes), options)
+  const leg = afterSpent.candidates.find((candidate) => candidate.meta.approachLeg === 'route_spent')
+  if (leg === undefined || leg.target === null) {
+    return { pass: false, detail: `no approach leg: [${afterSpent.candidates.map((candidate) => candidate.id).join(',')}]` }
+  }
+  // The leg target is a DIFFERENT stand cell (never the body's own cell), so the
+  // body that walks it meets a new mechanical situation.
+  const legIsNewCell = cellKey(leg.target) !== cellKey(PORTAL_BODY)
+  const movedOffer = entryCandidates(
+    portalWorld({ position: leg.target, standable: [PORTAL_BODY, closer], routes }),
+    options,
+  )
+  const reoffered = movedOffer.candidates.find((candidate) => candidate.kind === 'ENTER_PORTAL')
+  const blockedAtNewStand =
+    reoffered === undefined ||
+    isZeroProgressRouteRepeat(routes, {
+      kind: 'ENTER_PORTAL',
+      targetKey: cellKey(PORTAL_ENTER_CELL),
+      standKey: cellKey(leg.target),
+      routeSig: enterRouteSig(reoffered),
+      nowMs: NOW,
+    })
+  return {
+    pass:
+      afterSpent.candidates.every((candidate) => candidate.kind !== 'ENTER_PORTAL') &&
+      afterSpent.refusal === null &&
+      legIsNewCell &&
+      leg?.kind === 'MOVE' &&
+      leg.target.x === closer.x &&
+      reoffered !== undefined &&
+      !blockedAtNewStand,
+    detail: `afterSpent=[${afterSpent.candidates.map((candidate) => candidate.id).join(',')}] legIsNewCell=${legIsNewCell} reoffered=${reoffered?.id ?? 'none'} blockedAtNewStand=${blockedAtNewStand}`,
+  }
+})
+
+addCase("(b') a DIFFERENT grounded plan from the same stand cell is a route change, not a repeat (no over-suppression)", () => {
+  const sig = 'ENTER_PORTAL:staircase-up:W:54->67:dig=9,55,24:step=9,55,24:pillar=0:fallback=none'
+  const routes = ledgerFor('ENTER_PORTAL', PORTAL_ENTER_CELL, PORTAL_BODY, sig)
+  const identical = isZeroProgressRouteRepeat(routes, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(PORTAL_ENTER_CELL),
+    standKey: cellKey(PORTAL_BODY),
+    routeSig: sig,
+    nowMs: NOW,
+  })
+  const samePlanDifferentSignature = routePlanSignature({
+    kind: 'ENTER_PORTAL',
+    id: 'ENTER:26,67,9',
+    meta: { vertical: 'staircase-up', upDir: 'W', upDigX: 9, upDigY: 55, upDigZ: 24, upStepX: 9, upStepY: 55, upStepZ: 24, verticalFromY: 54, verticalToY: 67 },
+  })
+  const differentPlan = isZeroProgressRouteRepeat(routes, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(PORTAL_ENTER_CELL),
+    standKey: cellKey(PORTAL_BODY),
+    routeSig: routePlanSignature({
+      kind: 'ENTER_PORTAL',
+      id: 'ENTER:26,67,9',
+      meta: { vertical: 'pillar', verticalFromY: 54, verticalToY: 67, pillarSteps: 13 },
+    }),
+    nowMs: NOW,
+  })
+  const idOnlySignature = routeSignature({ kind: 'ENTER_PORTAL', id: 'ENTER:26,67,9', meta: {} })
+  return {
+    pass:
+      identical &&
+      !differentPlan &&
+      samePlanDifferentSignature === sig &&
+      samePlanDifferentSignature !== idOnlySignature,
+    detail: `identical=${identical} differentPlan=${differentPlan} planSig=${samePlanDifferentSignature} idOnly=${idOnlySignature}`,
+  }
+})
+
+// --- (c') a genuinely reachable entry is untouched --------------------------------
+
+addCase("(c') with no memory the entry offer is unchanged, and a memory from another stand cell never suppresses it", () => {
+  const state = portalWorld({ position: PORTAL_BODY, standable: [PORTAL_BODY] })
+  const options = portalEntryOptions()
+  const fresh = entryCandidates(state, options)
+  const elsewhere = ledgerFor('ENTER_PORTAL', PORTAL_ENTER_CELL, { x: 11, y: 55, z: 25 }, 'ENTER_PORTAL:other')
+  const stillOffered = entryCandidates(withRoutes(state, elsewhere), options)
+  return {
+    pass:
+      fresh.candidates.length === 1 &&
+      fresh.candidates[0]?.kind === 'ENTER_PORTAL' &&
+      fresh.candidates[0]?.id === 'ENTER:26,67,9' &&
+      fresh.candidates[0]?.target?.x === PORTAL_ENTER_CELL.x &&
+      fresh.refusal === null &&
+      stillOffered.candidates.length === 1 &&
+      stillOffered.candidates[0]?.kind === 'ENTER_PORTAL' &&
+      stillOffered.refusal === null,
+    detail: `fresh=[${fresh.candidates.map((candidate) => candidate.id).join(',')}] otherStand=[${stillOffered.candidates.map((candidate) => candidate.id).join(',')}]`,
+  }
+})
+
+// --- (d') the same bounded rule for a non-portal route kind -----------------------
+
+addCase("(d') a RETRIEVE with a path-stage failure obeys the identical rule (no portal knowledge)", () => {
+  const feet = { x: 10, y: 21, z: 20 }
+  const standable = [{ x: 10, y: 21, z: 20 }, { x: 12, y: 21, z: 20 }]
+  const base = worldState({ position: feet, standable, signals: signals({ knownResources: [ORE_ABOVE] }) })
+  const retrieve = generateGroundedCandidates(base).candidates.find(
+    (candidate) => candidate.id === 'RETRIEVE:known:raw_iron:b24_22_11',
+  )
+  if (retrieve === undefined) return { pass: false, detail: 'no retrieval candidate' }
+  const stage = routeFailureStage('path_stuck')
+  const decision = observeZeroProgressRoute(undefined, {
+    kind: 'RETRIEVE',
+    targetKey: cellKey(ORE_ABOVE.position),
+    standKey: cellKey(feet),
+    routeSig: routeSignature({ kind: retrieve.kind, id: retrieve.id, meta: retrieve.meta }),
+    reason: 'path_stuck',
+    nowMs: NOW,
+  })
+  const afterSpent = generateGroundedCandidates(
+    worldState({ position: feet, standable, signals: signals({ knownResources: [ORE_ABOVE], zeroProgressRoutes: decision.routes }) }),
+  )
+  const stillOffered = afterSpent.candidates.some((candidate) => candidate.id === retrieve.id)
+  const leg = afterSpent.candidates.find((candidate) => candidate.meta.approachLeg === 'target_not_observable')
+  return {
+    pass: stage === 'path' && decision.routeSpentNow && !stillOffered && leg !== undefined && leg.kind === 'MOVE',
+    detail: `stage=${stage} spentNow=${decision.routeSpentNow} stillOffered=${stillOffered} leg=${leg?.id ?? 'none'}`,
+  }
+})
+
 // --- controller wiring (the markers must be reachable from the live loop) ---------
 
 addCase('the live controller records the verdict and emits the typed markers', () => {
   const source = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const candidatesSource = readFileSync(new URL('./src/candidates.ts', import.meta.url), 'utf8')
+  const facade = readFileSync(new URL('./src/controller.ts', import.meta.url), 'utf8')
+  const routeSource = readFileSync(new URL('./src/zeroProgressRoute.ts', import.meta.url), 'utf8')
   const checks: Array<[string, boolean]> = [
     ['recordZeroProgressOutcome call', /this\.recordZeroProgressOutcome\(result, candidate, truth\)/.test(source)],
     ['zero-progress verdict', /if \(!isZeroProgressOutcome\(result\)\) return/.test(source)],
+    ['path-stage verdict', /routeFailureStage\(result\.failure\)/.test(source)],
     ['ACTION_ZERO_PROGRESS', /formatActionZeroProgress\(\{/.test(source)],
     ['DESCEND_RETIRED', /formatDescendRetired\('zero_progress_exhausted'/.test(source)],
     ['RETRIEVE_RETIRED', /formatRetrieveRetired\('zero_progress_budget'/.test(source)],
     ['RETRIEVE_ROUTE_BLOCKED', /formatRetrieveRouteBlocked\('zero_progress_route_unchanged'/.test(source)],
     ['APPROACH_LEG', /formatApproachLeg\(reason, target\)/.test(source)],
+    ['ROUTE_STAGE_FAILED marker', /formatRouteStageFailed\(\{/.test(source)],
+    ['ROUTE_SPENT marker', /formatRouteSpent\(result\.kind/.test(source)],
+    ['ROUTE_ESCALATE handling', /this\.noteRouteExhaustion\(grounded\.entryRefusal\)/.test(source)],
+    ['route_exhausted escalation', /this\.escalate\('route_exhausted', refusal\.line\)/.test(source)],
+    ['typed escalation reason', /route_exhausted: 'action_impossible'/.test(source)],
+    // The route markers must be MIRRORED, or the resident log shows an unchanged
+    // failing route and zero spent-route evidence (the run-muc620xb measurement).
+    ['ROUTE_STAGE_FAILED mirrored', /const MIRRORED_MARKERS[\s\S]*?'ROUTE_STAGE_FAILED'/.test(source)],
+    ['ROUTE_SPENT mirrored', /const MIRRORED_MARKERS[\s\S]*?'ROUTE_SPENT'/.test(source)],
+    ['ROUTE_ESCALATE mirrored', /const MIRRORED_MARKERS[\s\S]*?'ROUTE_ESCALATE'/.test(source)],
+    ['ACTION_ZERO_PROGRESS mirrored', /const MIRRORED_MARKERS[\s\S]*?'ACTION_ZERO_PROGRESS'/.test(source)],
     ['publishes the ledger', /this\.signals\.zeroProgressRoutes = this\.zeroProgressRoutes/.test(source)],
     ['descend family gate', /standFamilyExhausted\(state\.signals\.zeroProgressRoutes, 'DESCEND'/.test(candidatesSource)],
     ['retrieve repeat gate', /isZeroProgressRouteRepeat\(state\.signals\.zeroProgressRoutes/.test(candidatesSource)],
+    ['entry repeat gate', /kind: 'ENTER_PORTAL',\s*\n\s*targetKey,\s*\n\s*standKey,/.test(candidatesSource)],
+    ['step repeat gate', /kind: 'STEP',\s*\n\s*targetKey: cellKey\(cut\.cut\),/.test(candidatesSource)],
+    ['grounded plan signature', /return routePlanSignature\(candidate\)/.test(routeSource)],
+    // A STRUCTURAL route boundary must reach System2 with real Jev: it may not be
+    // silently swallowed by the #11 facade's local policy-signal quarantine.
+    ['route_exhausted is structural', !/LOCAL_POLICY_ESCALATIONS = new Set\(\[[\s\S]*?'route_exhausted'/.test(facade)],
   ]
   const failed = checks.filter(([, ok]) => !ok).map(([name]) => name)
   return { pass: failed.length === 0, detail: failed.length === 0 ? 'all markers wired' : `missing: ${failed.join(', ')}` }
+})
+
+addCase('the typed route markers are stable and greppable', () => {
+  const stage = formatRouteStageFailed({
+    kind: 'ENTER_PORTAL',
+    target: { x: 26, y: 67, z: 9 },
+    stand: { x: 10.6, y: 54, z: 25.4 },
+    stage: 'path',
+    failure: 'path_no_path',
+  })
+  const spent = formatRouteSpent('ENTER_PORTAL', { x: 26, y: 67, z: 9 }, 1)
+  const escalate = formatRouteEscalate('g-portal-entered', ROUTE_ALL_SPENT_REASON, 2)
+  return {
+    pass:
+      stage === 'ROUTE_STAGE_FAILED kind=ENTER_PORTAL target=26,67,9 stand=10,54,25 stage=path failure=path_no_path' &&
+      spent === 'ROUTE_SPENT kind=ENTER_PORTAL target=26,67,9 attempts=1' &&
+      escalate === 'ROUTE_ESCALATE goal=g-portal-entered reason=all_routes_spent routes=2',
+    detail: `${stage} | ${spent} | ${escalate}`,
+  }
 })
 
 // --- runner ----------------------------------------------------------------------

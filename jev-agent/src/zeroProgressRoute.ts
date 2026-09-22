@@ -98,6 +98,39 @@ export function zeroProgressRouteKey(kind: string, targetKey: string, standKey: 
   return `${kind}|${targetKey}|${standKey}`
 }
 
+/**
+ * The typed reason a route arm reports when EVERY grounded route for the active
+ * goal's target is spent from the current body cell: the dead route was
+ * withheld and no grounded approach leg changes the stand cell. That is a
+ * structural capability boundary (code can ground no route at all), so it is
+ * the one route fact that belongs to System2's WHAT - never an offer of the
+ * same failing route again.
+ */
+export const ROUTE_ALL_SPENT_REASON = 'all_routes_spent'
+
+/** The executor stage a route-shaped action failed at, from its typed failure code. */
+export type RouteFailureStage = 'path' | 'move'
+
+/**
+ * The executor STAGE a settled failure happened at, from the typed failure code
+ * the executor returned: the pathfinder stage (`path_no_path` / `path_stuck`) or
+ * the mechanical leg (any other settled failure). Null when the action did not
+ * fail, so a `done`-but-unverified outcome keeps the zero-observable-change
+ * verdict as its only route evidence.
+ *
+ * This is what makes a PATH-STAGE failure a spent route: the executor reports
+ * `PATH_CALLBACK phase=failed ... outcome=noPath|stuck` and settles `failed`,
+ * but a lease that also nudged the body can carry the lenient `progressed`
+ * signal - the route still did not complete, and re-offering it from the same
+ * stand cell is the same action with unchanged preconditions.
+ */
+export function routeFailureStage(failure: string | null | undefined): RouteFailureStage | null {
+  if (failure === null || failure === undefined || failure.length === 0) return null
+  if (failure === 'cancelled') return null
+  if (failure === 'path_no_path' || failure === 'path_stuck') return 'path'
+  return 'move'
+}
+
 function quantize(value: number): number {
   return Math.floor(value / SPATIAL_GRID)
 }
@@ -152,6 +185,37 @@ function metaText(meta: RouteSignatureInput['meta'], key: string): string | null
 }
 
 /**
+ * The grounded identity of a route-shaped action that TRAVELS the body to a
+ * target cell (the enter/dimension-transfer family today, any future
+ * travel/route kind that carries the same `vertical` plan contract a MOVE
+ * candidate carries): the plan that decides HOW the body gets there.
+ *
+ * The default `${kind}:${id}` signature cannot see a route change at all: a
+ * fresh candidate id is minted for every decision, but the mechanical plan is
+ * what makes two attempts the same or different. Two attempts with the same
+ * signature used the same route from the same stand cell; a different vertical
+ * plan, dig/step cell, direction, pillar length or tunnel fallback is a real
+ * route change and stays offerable.
+ */
+export function routePlanSignature(candidate: RouteSignatureInput): string {
+  const meta = candidate.meta
+  const vertical = metaText(meta, 'vertical') ?? 'none'
+  const dir = metaText(meta, 'stairDir') ?? metaText(meta, 'upDir') ?? 'unknown'
+  const dig =
+    metaCell(meta, 'stairDig') ??
+    metaCell(meta, 'upDig') ??
+    metaCell(meta, 'tunnel') ??
+    metaCell(meta, 'tunnelClear') ??
+    'none'
+  const step = metaCell(meta, 'stairStep') ?? metaCell(meta, 'upStep') ?? 'none'
+  const from = metaText(meta, 'verticalFromY') ?? 'unknown'
+  const to = metaText(meta, 'verticalToY') ?? 'unknown'
+  const pillar = metaText(meta, 'pillarSteps') ?? '0'
+  const fallback = metaText(meta, 'fallbackVertical') ?? 'none'
+  return `${candidate.kind}:${vertical}:${dir}:${from}->${to}:dig=${dig}:step=${step}:pillar=${pillar}:fallback=${fallback}`
+}
+
+/**
  * The grounded identity of HOW an action was attempted. Two attempts with the
  * same signature target the same cell with the same mechanical plan; two
  * attempts with a different signature differ in a grounded way (a different
@@ -184,6 +248,11 @@ export function routeSignature(candidate: RouteSignatureInput): string {
       return `${candidate.kind}:${vertical}:${from}->${to}:leg=${leg}`
     }
     default:
+      // A route kind that travels the body to a cell and carries a grounded
+      // vertical/dig plan: the plan IS the route, so it belongs in the identity.
+      if (isZeroProgressRouteKind(candidate.kind) && typeof meta.vertical === 'string' && meta.vertical !== 'none') {
+        return routePlanSignature(candidate)
+      }
       return `${candidate.kind}:${candidate.id}`
   }
 }
@@ -212,6 +281,13 @@ export interface ZeroProgressRouteDecision {
    * false for the first recorded attempt: nothing has changed yet.
    */
   routeChanged: boolean
+  /**
+   * true when THIS attempt is the one that spends this exact route signature at
+   * this stand cell (the first record for it). Subsequent records of the same
+   * signature mean the withholding did not happen, which is a defect - they are
+   * counted, never silently merged.
+   */
+  routeSpentNow: boolean
   /** distinct zero-progress routes recorded at this stand cell's bucket, INCLUDING this one */
   familyAttempts: number
   /** true once the family budget at this stand cell is spent */
@@ -272,6 +348,7 @@ export function observeZeroProgressRoute(
     entry,
     attempts,
     routeChanged,
+    routeSpentNow: previous === undefined || previous.routeSig !== input.routeSig,
     familyAttempts,
     familyExhausted: familyAttempts >= standLimit,
   }
@@ -332,6 +409,28 @@ export function standFamilyRouteCount(
   input: { nowMs: number; ttlMs?: number },
 ): number {
   return familyRouteCount(routes ?? {}, kind, standKey, input.nowMs, input.ttlMs ?? ZERO_PROGRESS_TTL_MS)
+}
+
+/**
+ * Distinct spent routes recorded for ONE (kind, target) across stand cells: the
+ * goal-level route budget. A route identity is (stand cell, route signature), so
+ * a grounded approach leg that moves the body adds a NEW identity instead of
+ * re-charging the old one - the goal is only "out of routes" when no stand cell
+ * and no plan is left offerable.
+ */
+export function goalSpentRouteCount(
+  routes: ZeroProgressRoutes | undefined,
+  input: { kind: string; targetKey: string; nowMs: number; ttlMs?: number },
+): number {
+  const ttlMs = input.ttlMs ?? ZERO_PROGRESS_TTL_MS
+  const identities = new Set<string>()
+  for (const entry of Object.values(routes ?? {})) {
+    if (entry.kind !== input.kind) continue
+    if (entry.targetKey !== input.targetKey) continue
+    if (!entryIsFresh(entry, input.nowMs, ttlMs)) continue
+    identities.add(`${entry.standKey}|${entry.routeSig}`)
+  }
+  return identities.size
 }
 
 /** True once `limit` distinct zero-progress routes were recorded at this stand cell. */
@@ -430,4 +529,31 @@ export function formatDescendRetired(reason: string, stand: Vec3Json, routes: nu
 /** `APPROACH_LEG reason=<reason> target=x,y,z` - a travel leg toward an unobservable target. */
 export function formatApproachLeg(reason: string, target: Vec3Json): string {
   return `APPROACH_LEG reason=${reason} target=${target.x},${target.y},${target.z}`
+}
+
+/** `ROUTE_STAGE_FAILED kind=<K> target=x,y,z stand=x,y,z stage=path|move failure=<code>`. */
+export function formatRouteStageFailed(input: {
+  kind: string
+  target: Vec3Json
+  stand: Vec3Json
+  stage: string
+  failure: string | null
+}): string {
+  const target = `${Math.floor(input.target.x)},${Math.floor(input.target.y)},${Math.floor(input.target.z)}`
+  const stand = `${Math.floor(input.stand.x)},${Math.floor(input.stand.y)},${Math.floor(input.stand.z)}`
+  return (
+    `ROUTE_STAGE_FAILED kind=${input.kind} target=${target} stand=${stand} ` +
+    `stage=${input.stage} failure=${input.failure ?? 'unknown'}`
+  )
+}
+
+/** `ROUTE_SPENT kind=<K> target=x,y,z attempts=n` - the exact route is now withheld. */
+export function formatRouteSpent(kind: string, target: Vec3Json, attempts: number): string {
+  const cell = `${Math.floor(target.x)},${Math.floor(target.y)},${Math.floor(target.z)}`
+  return `ROUTE_SPENT kind=${kind} target=${cell} attempts=${attempts}`
+}
+
+/** `ROUTE_ESCALATE goal=<goal> reason=<reason> routes=n` - every grounded route is spent. */
+export function formatRouteEscalate(goal: string, reason: string, routes: number): string {
+  return `ROUTE_ESCALATE goal=${goal} reason=${reason} routes=${routes}`
 }
