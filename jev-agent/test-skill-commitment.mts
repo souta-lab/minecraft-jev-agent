@@ -54,6 +54,12 @@ import {
   sameTargetIdentity,
 } from './src/skillCommitment.ts'
 import type { CausalTargetIdentity, EffectEnvelope } from './src/skillCommitment.ts'
+import {
+  declaredRoutePlaceBlocks,
+  declaredRoutePlacements,
+  ROUTE_PLACE_DECLARED,
+} from './src/routePlaceDeclaration.ts'
+import { MIRRORED_MARKERS } from './src/controller-legacy.ts'
 import * as skillCommitment from './src/skillCommitment.ts'
 import {
   buildSkillOutcomePacket,
@@ -102,7 +108,43 @@ interface Fixture {
   armorSlots: ({ name?: string } | null)[]
 }
 
-function makeFixture(options: { armorWorn?: string } = {}): Fixture {
+/**
+ * The Vec3 shape mineflayer hands the locomotion legs. The walk leg clones the
+ * body position before it can reach any vertical leg (`executor.ts#runMoveLeg`),
+ * so a plain `{x,y,z}` literal cannot execute a MOVE/STEP/RETRIEVE leg at all.
+ */
+class FixtureVec {
+  constructor(
+    public x: number,
+    public y: number,
+    public z: number,
+  ) {}
+  set(x: number, y: number, z: number): this {
+    this.x = x
+    this.y = y
+    this.z = z
+    return this
+  }
+  clone(): FixtureVec {
+    return new FixtureVec(this.x, this.y, this.z)
+  }
+  offset(x: number, y: number, z: number): FixtureVec {
+    return new FixtureVec(this.x + x, this.y + y, this.z + z)
+  }
+  distanceTo(other: { x: number; y: number; z: number }): number {
+    return Math.hypot(this.x - other.x, this.y - other.y, this.z - other.z)
+  }
+}
+
+function makeFixture(
+  options: {
+    armorWorn?: string
+    /** the item in hand at fixture start (default `cobblestone`, exactly as before) */
+    held?: string | null
+    /** carried stacks appended after the two default ones (default: none) */
+    extraItems?: Array<{ name: string; count: number; slot: number }>
+  } = {},
+): Fixture {
   const emitter = new EventEmitter()
   const chestId = REGISTRY.itemsByName.iron_chestplate.id
   const swordId = REGISTRY.itemsByName.iron_sword.id
@@ -111,13 +153,13 @@ function makeFixture(options: { armorWorn?: string } = {}): Fixture {
   let equips = 0
   let swings = 0
   const mob = { id: 31, name: 'zombie', kind: 'hostile', height: 1.95, isValid: true, position: { x: 1, y: 64, z: 0 } }
-  let heldName: string | null = 'cobblestone'
+  let heldName: string | null = options.held === undefined ? 'cobblestone' : options.held
   const bot = emitter as EventEmitter & Record<string, any>
   Object.assign(bot, {
     registry: REGISTRY,
     health: 20,
     physicsEnabled: true,
-    entity: { id: 1, position: { x: 0, y: 64, z: 0 }, yaw: 0, pitch: 0, onGround: true, width: 0.6, height: 1.8 },
+    entity: { id: 1, position: new FixtureVec(0, 64, 0), yaw: 0, pitch: 0, onGround: true, width: 0.6, height: 1.8 },
     entities: { 31: mob },
     game: { dimension: 'minecraft:overworld' },
     inventory: {
@@ -125,6 +167,7 @@ function makeFixture(options: { armorWorn?: string } = {}): Fixture {
       items: () => [
         { name: 'iron_chestplate', type: chestId, count: 1, slot: 39 },
         { name: 'iron_sword', type: swordId, count: 1, slot: 36 },
+        ...(options.extraItems ?? []),
       ],
       count: (id: number) => (id === chestId ? 1 : id === swordId ? 1 : 0),
     },
@@ -205,6 +248,94 @@ function retrieveCandidate(meta: Record<string, unknown> = {}): Candidate {
     inReach: false,
     hasStandableAdjacent: true,
     meta: { tick: 1, ...PROVENANCE, ...meta },
+  }
+}
+
+/**
+ * The measured PILLAR route meta `candidates.ts#verticalPlanMeta` writes for a
+ * `VerticalPlan{kind:'pillar'}` (candidates.ts:7080-7086), including the block the
+ * executor's own pillar leg reads and equips (`executor.ts#runVerticalLeg` ->
+ * `${keyBase}PlaceName`). `placeName` is the item frozen at plan time by
+ * `selectPlaceableBlock` (`PILLAR_PLACE_PRIORITY[0]` = cobblestone).
+ */
+function pillarMeta(placeName: string, fromY = 57, toY = 60): Record<string, unknown> {
+  return {
+    vertical: 'pillar',
+    verticalFromY: fromY,
+    verticalToY: toY,
+    pillarFromY: fromY,
+    pillarToY: toY,
+    pillarSteps: toY - fromY,
+    pillarPlaceName: placeName,
+    pillarPlaceCount: 1,
+  }
+}
+
+/**
+ * The exact live candidate that produced the measured defect - a known-resource
+ * RETRIEVE whose grounded route is a pillar climb toward y=60 (the body stands at
+ * y=57). Declaring the consuming block belongs to the ROUTE, not to the envelope.
+ */
+function measuredRetrieveCandidate(meta: Record<string, unknown> = {}): Candidate {
+  return {
+    ...retrieveCandidate(meta),
+    id: 'RETRIEVE:known:blaze_rod:b35_60_-22',
+    target: { x: 35, y: 60, z: -22 },
+    meta: { tick: 1, ...PROVENANCE, ...meta },
+  }
+}
+
+/**
+ * The sibling measured shape: `PILLAR_UP actionId=MOVE:b35_60_-26` failed
+ * `SKILL_ENVELOPE_VIOLATION violation=equip_item_not_declared:cobblestone` thirty
+ * times on the fortress ascent. A MOVE with the same pillar route.
+ */
+function measuredMoveCandidate(meta: Record<string, unknown> = {}): Candidate {
+  return {
+    id: 'MOVE:b35_60_-26',
+    kind: 'MOVE',
+    label: 'ascend the pillar route toward (35,60,-26)',
+    targetName: null,
+    target: { x: 36, y: 59, z: -26 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { tick: 1, ...PROVENANCE, ...meta },
+  }
+}
+
+/** A bridge MOVE exactly as `candidates.ts#bridgeLegCandidate` declares one. */
+function bridgeCandidate(): Candidate {
+  return {
+    id: 'BRIDGE:E:p1_64_0',
+    kind: 'MOVE',
+    label: 'bridge the gap E',
+    targetName: null,
+    target: { x: 3, y: 64, z: 0 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: 1,
+      x: 3,
+      y: 64,
+      z: 0,
+      ...PROVENANCE,
+      bridge: true,
+      bridgeDir: 'E',
+      bridgeBlock: 'cobblestone',
+      bridgeSpan: 3,
+      bridgeTarget: '3,64,0',
+      mayPlaceBlocks: true,
+      bridgeLanding: '1,64,0',
+      bridgePlace: '1,63,0',
+    },
   }
 }
 
@@ -292,6 +423,305 @@ process.stdout.write('issue #437 §2/§3 - SkillOutcomePacket + decision-epoch i
     `pillar place=${pillar.mayPlaceGroundedRoute} dig=${pillar.mayDigGroundedRoute} | ` +
       `digRoute dig=${digRoute.mayDigGroundedRoute} place=${digRoute.mayPlaceGroundedRoute} | ` +
       `plain place=${plain.mayPlaceGroundedRoute} dig=${plain.mayDigGroundedRoute}`,
+  )
+}
+
+// ===========================================================================
+// 8b-8g. a route that PLACES declares the block it consumes (the measured
+//        `equip_item_not_declared:cobblestone` defect); an UNDECLARED block is
+//        still refused
+// ===========================================================================
+//
+// Live shapes this pins (main cd7b38b):
+//
+//   PILLAR_UP actionId=MOVE:b35_60_-26 ... failed
+//     SKILL_ENVELOPE_VIOLATION violation=equip_item_not_declared:cobblestone
+//   SKILL_ENVELOPE_VIOLATION actionId=RETRIEVE:known:blaze_rod:b35_60_-22
+//     effect={"type":"equip","itemName":"cobblestone","destination":"hand"}
+//     violation=equip_item_not_declared:cobblestone
+//
+// One root cause: the route's own placement step equips the block it grounded
+// and named in meta (`pillarPlaceName`, the exact key `runVerticalLeg` reads),
+// while the commitment authorized only tools (plus a bridge's `bridgeBlock`).
+// The fix authorizes exactly the DECLARED block(s) - never "any carried
+// placeable block", and never a ranked pick.
+
+/** Poll a predicate without a bot event loop (the shape the bridge fixture uses). */
+async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<boolean> {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  return predicate()
+}
+
+// ---------------------------------------------------------------------------
+// (i) the measured shape: a locomotion route that must place a DECLARED block
+// ---------------------------------------------------------------------------
+{
+  const carried: Record<string, number> = { cobblestone: 8, iron_pickaxe: 1 }
+  const retrieve = measuredRetrieveCandidate(pillarMeta('cobblestone'))
+  const move = measuredMoveCandidate(pillarMeta('cobblestone'))
+  // The declaration is the route's OWN meta that the executor's leg reads (no new
+  // candidate-side field): `runVerticalLeg` equips `meta.pillarPlaceName`.
+  const retrieveDeclared = declaredRoutePlaceBlocks(retrieve)
+  const moveDeclared = declaredRoutePlaceBlocks(move)
+  const retrieveEnvelope = envelopeForCandidate(retrieve, {
+    equipItems: retrieveDeclared.filter((name) => (carried[name] ?? 0) > 0),
+  })
+  // The PLACE the same leg performs (`pillarUp` places at its own pose cell) goes
+  // through the SAME envelope object: the route authority is what admits it.
+  const routeCell = { x: 35, y: 57, z: -22 }
+  const equipReason = effectViolation(retrieveEnvelope, { type: 'equip', itemName: 'cobblestone', destination: 'hand' })
+  const placeReason = effectViolation(retrieveEnvelope, { type: 'place', position: routeCell, itemName: 'cobblestone' })
+  report(
+    JSON.stringify(retrieveDeclared) === JSON.stringify(['cobblestone']) &&
+      JSON.stringify(moveDeclared) === JSON.stringify(['cobblestone']) &&
+      equipReason === null &&
+      placeReason === null,
+    '(i) the measured RETRIEVE/MOVE pillar route declares the block it places, so the equip AND the place pass the SAME envelope',
+    `retrieve=${JSON.stringify(retrieveDeclared)} move=${JSON.stringify(moveDeclared)} equip=${equipReason} place=${placeReason}`,
+  )
+}
+
+{
+  // The SAME declaration through the REAL executor path: `claim` ->
+  // `buildCommitment` -> `groundedEquipItems` -> `envelopeForCandidate`, and then
+  // the real pillar leg's equip side effect, then the block's consumption.
+  const stack = [{ name: 'cobblestone', count: 8, slot: 10 }]
+  const fixture = makeFixture({ held: null, extraItems: stack })
+  ;(fixture.bot as unknown as Record<string, unknown>).blockAt = (): null => null
+  const executor = makeExecutor(fixture)
+  const claim = executor.claim(measuredMoveCandidate(pillarMeta('cobblestone')))
+  const commitmentEnvelope = executor.current?.commitment?.allowedEffects ?? null
+  const declaredLine = fixture.logger.matching('ROUTE_PLACE_DECLARED')[0] ?? 'none'
+  // Let the committed leg reach its equip step (the measured PILLAR_UP equip
+  // site), then stop it: the side effect is the evidence, not the climb. Wait for
+  // the item IN HAND (the fixture's `equip` sets it after its modelled delay).
+  const equipped = await waitFor(() => fixture.bot.heldItem?.name === 'cobblestone')
+  const held = fixture.bot.heldItem?.name ?? 'none'
+  executor.cancelCurrent('fixture 8b: the equip side effect is the measured fact')
+  await claim.completion
+  const violations = fixture.logger.matching('SKILL_ENVELOPE_VIOLATION')
+  report(
+    commitmentEnvelope !== null &&
+      JSON.stringify(commitmentEnvelope.mayEquipItems) === JSON.stringify(['cobblestone']) &&
+      equipped &&
+      held === 'cobblestone' &&
+      violations.length === 0,
+    '(i) the executor AUTHORIZES the declared block and the pillar leg really equips it (no violation, route not spent)',
+    `equipItems=${JSON.stringify(commitmentEnvelope?.mayEquipItems)} equips=${fixture.equips()} held=${held} violations=${violations.length}`,
+  )
+  report(
+    declaredLine.startsWith('ROUTE_PLACE_DECLARED ') &&
+      declaredLine.includes('blocks=cobblestone') &&
+      declaredLine.includes('source=pillarPlaceName') &&
+      declaredLine.includes('carried=cobblestone') &&
+      MIRRORED_MARKERS.has(ROUTE_PLACE_DECLARED),
+    '(i) the declaration is run-scoped evidence and its marker is MIRRORED (unmirrored markers never reach buddy.log)',
+    `mirrored=${MIRRORED_MARKERS.has(ROUTE_PLACE_DECLARED)} line="${declaredLine}"`,
+  )
+  // Consumption: the placed block leaves the stack, and the SAME route then
+  // refuses before any equip - the declaration authorizes the item, never a
+  // placement of an item the body does not have.
+  const equipsBefore = fixture.equips()
+  stack.splice(0)
+  const second = makeExecutor(fixture)
+  const secondClaim = second.claim(measuredMoveCandidate(pillarMeta('cobblestone')))
+  const secondEnvelope = second.current?.commitment?.allowedEffects ?? null
+  const refused = await waitFor(() => fixture.logger.containing('is not in the inventory').length > 0)
+  const equipsAfter = fixture.equips()
+  second.cancelCurrent('fixture 8b: the consumed block is what the leg refuses on')
+  await secondClaim.completion
+  report(
+    JSON.stringify(secondEnvelope?.mayEquipItems) === JSON.stringify(['cobblestone']) &&
+      refused &&
+      equipsAfter === equipsBefore,
+    '(i) once the declared block is consumed the leg refuses it before any equip (declaration != a supply)',
+    `declared=${JSON.stringify(secondEnvelope?.mayEquipItems)} refused=${refused} equips=${equipsBefore}->${equipsAfter}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (ii) the same route with an UNDECLARED block still FAILS CLOSED
+// ---------------------------------------------------------------------------
+{
+  const carried: Record<string, number> = { cobblestone: 8, dirt: 4 }
+  const declaredOnly = measuredRetrieveCandidate(pillarMeta('cobblestone'))
+  const noDeclaration = measuredRetrieveCandidate({
+    vertical: 'pillar',
+    verticalFromY: 57,
+    verticalToY: 60,
+    pillarFromY: 57,
+    pillarToY: 60,
+    pillarSteps: 3,
+  })
+  const declaredEnvelope = envelopeForCandidate(declaredOnly, {
+    equipItems: declaredRoutePlaceBlocks(declaredOnly).filter((name) => (carried[name] ?? 0) > 0),
+  })
+  const bareEnvelope = envelopeForCandidate(noDeclaration, { equipItems: declaredRoutePlaceBlocks(noDeclaration) })
+  const bareReason = effectViolation(bareEnvelope, { type: 'equip', itemName: 'cobblestone', destination: 'hand' })
+  const undeclaredReason = effectViolation(declaredEnvelope, { type: 'equip', itemName: 'dirt', destination: 'hand' })
+  report(
+    declaredRoutePlaceBlocks(noDeclaration).length === 0 &&
+      bareReason === 'equip_item_not_declared:cobblestone' &&
+      undeclaredReason === 'equip_item_not_declared:dirt',
+    '(ii) a route that declared no block, and a carried block the route did not declare, are BOTH refused (typed)',
+    `bare=${JSON.stringify(declaredRoutePlaceBlocks(noDeclaration))} undeclaredEquip=${bareReason} dirt=${undeclaredReason}`,
+  )
+
+  // The real pillar leg with an envelope that does NOT declare the block: the
+  // typed refusal fires at the equip site and NO side effect is performed.
+  const fixture = makeFixture({ held: null, extraItems: [{ name: 'cobblestone', count: 8, slot: 10 }] })
+  ;(fixture.bot as unknown as Record<string, unknown>).blockAt = (): null => null
+  const result = await makeExecutor(fixture, { envelopeOverride: { ...FULL_ENVELOPE } })
+    .claim(measuredMoveCandidate(pillarMeta('cobblestone'))).completion
+  const violations = fixture.logger.matching('SKILL_ENVELOPE_VIOLATION')
+  report(
+    result.failure === 'effect_envelope_violation' &&
+      fixture.equips() === 0 &&
+      fixture.bot.heldItem === null &&
+      violations.length === 1 &&
+      (violations[0]?.includes('reason=equip_item_not_declared:cobblestone') ?? false) &&
+      fixture.logger.matching('SKILL_END').some((line) => line.includes('failureCode=effect_envelope_violation')),
+    '(ii) an undeclared equip on the real pillar leg throws effect_envelope_violation and performs NO side effect',
+    `failure=${result.failure ?? 'none'} equips=${fixture.equips()} held=${fixture.bot.heldItem?.name ?? 'none'} violations=${JSON.stringify(violations)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (iii) an ordinary walk with no placing route authorizes no equip (byte-identical)
+// ---------------------------------------------------------------------------
+{
+  const walk = measuredMoveCandidate({ x: 36, y: 64, z: -26 })
+  // The exact envelope the pre-fix code produced for this candidate.
+  const preFixWalkEnvelope: EffectEnvelope = {
+    mayMove: true,
+    mayLook: true,
+    mayJump: true,
+    maySprint: true,
+    mayAttackEntityIds: [],
+    mayAttackMobTypes: [],
+    mayDigBlocks: [],
+    mayDigGroundedRoute: false,
+    mayPlaceGroundedRoute: false,
+    mayPlaceBlocks: [],
+    mayEquipItems: [],
+    mayUseStations: [],
+    mayTransferInventory: [],
+  }
+  const walkEnvelope = envelopeForCandidate(walk, { equipItems: [] })
+  // A route-opening DIG route with no declared placement keeps exactly the tool
+  // list it had: the fix only ever APPENDS declared blocks.
+  const toolFixture = makeFixture({
+    held: null,
+    extraItems: [
+      { name: 'iron_pickaxe', count: 1, slot: 11 },
+      { name: 'cobblestone', count: 8, slot: 10 },
+    ],
+  })
+  const toolExecutor = makeExecutor(toolFixture)
+  const toolClaim = toolExecutor.claim(measuredRetrieveCandidate({ digRoute: true }))
+  const toolEnvelope = toolExecutor.current?.commitment?.allowedEffects ?? null
+  toolExecutor.cancelCurrent('fixture 8d: read the undeclared route envelope only')
+  await toolClaim.completion
+  report(
+    declaredRoutePlaceBlocks(walk).length === 0 &&
+      JSON.stringify(walkEnvelope) === JSON.stringify(preFixWalkEnvelope) &&
+      effectViolation(walkEnvelope, { type: 'equip', itemName: 'cobblestone', destination: 'hand' }) ===
+        'equip_item_not_declared:cobblestone' &&
+      JSON.stringify(toolEnvelope?.mayEquipItems ?? null) === JSON.stringify(['iron_pickaxe']),
+    '(iii) a walk with no placing route is BYTE-IDENTICAL (no equip, no route flags) and a dig route still authorizes tools only',
+    `walkEquip=${JSON.stringify(walkEnvelope.mayEquipItems)} identical=${JSON.stringify(walkEnvelope) === JSON.stringify(preFixWalkEnvelope)} ` +
+      `digRouteEquip=${JSON.stringify(toolEnvelope?.mayEquipItems)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (iv) a bridge move is UNCHANGED: `bridgeBlock` only, never tools
+// ---------------------------------------------------------------------------
+{
+  const bridge = bridgeCandidate()
+  const envelope = envelopeForCandidate(bridge)
+  // Real executor path, with a pickaxe carried so "tools were added" would show.
+  const fixture = makeFixture({
+    held: null,
+    extraItems: [
+      { name: 'cobblestone', count: 8, slot: 10 },
+      { name: 'iron_pickaxe', count: 1, slot: 11 },
+    ],
+  })
+  const executor = makeExecutor(fixture)
+  const claim = executor.claim(bridge)
+  const commitmentEnvelope = executor.current?.commitment?.allowedEffects ?? null
+  executor.cancelCurrent('fixture 8e: read the bridge envelope only')
+  await claim.completion
+  report(
+    JSON.stringify(declaredRoutePlaceBlocks(bridge)) === JSON.stringify(['cobblestone']) &&
+      JSON.stringify(envelope.mayEquipItems) === JSON.stringify(['cobblestone']) &&
+      JSON.stringify(commitmentEnvelope?.mayEquipItems ?? null) === JSON.stringify(['cobblestone']) &&
+      JSON.stringify(commitmentEnvelope?.mayPlaceBlocks ?? null) ===
+        JSON.stringify([{ position: { x: 1, y: 63, z: 0 }, itemName: 'cobblestone' }]) &&
+      commitmentEnvelope?.mayPlaceGroundedRoute === true,
+    '(iv) a BRIDGE move is unchanged: it declares `bridgeBlock` only (no tools) plus its exact first place cell',
+    `equip=${JSON.stringify(envelope.mayEquipItems)} realEquip=${JSON.stringify(commitmentEnvelope?.mayEquipItems)} ` +
+      `place=${JSON.stringify(commitmentEnvelope?.mayPlaceBlocks)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (v) several genuinely placeable blocks: ALL declared blocks authorized, in
+//     declaration order, and code never ranks
+// ---------------------------------------------------------------------------
+{
+  // The REAL two-key shape: a `reuse` primary whose own grounded FALLBACK is a
+  // pillar route declares `fallbackPillarPlaceName` (candidates.ts:7153-7159).
+  // A primary-key-only fix would leave this block unauthorized.
+  const reuseFallback = measuredRetrieveCandidate({
+    vertical: 'reuse',
+    verticalFromY: 57,
+    verticalToY: 60,
+    tunnelX: 35,
+    tunnelY: 58,
+    tunnelZ: -22,
+    fallbackVertical: 'pillar',
+    fallbackPillarToY: 60,
+    fallbackPillarSteps: 3,
+    fallbackPillarPlaceName: 'cobblestone',
+  })
+  // The multi-block shape: a route that declares a primary AND a fallback block.
+  // Today no locomotion builder emits both at once (`verticalPlanMeta` writes the
+  // primary, `fallbackVerticalMeta` the fallback, and the primary is only named
+  // for a pillar plan), so this pins the reader's contract for the case that must
+  // never become a silent pick.
+  const twoBlocks = measuredRetrieveCandidate({
+    ...pillarMeta('dirt'),
+    fallbackVertical: 'pillar',
+    fallbackPillarToY: 60,
+    fallbackPillarSteps: 3,
+    fallbackPillarPlaceName: 'cobblestone',
+  })
+  const carried: Record<string, number> = { dirt: 4, cobblestone: 8, netherrack: 12, iron_pickaxe: 1 }
+  const declarations = declaredRoutePlacements(twoBlocks)
+  const blocks = declaredRoutePlaceBlocks(twoBlocks)
+  const envelope = envelopeForCandidate(twoBlocks, {
+    equipItems: blocks.filter((name) => (carried[name] ?? 0) > 0),
+  })
+  const equip = (itemName: string): string | null => effectViolation(envelope, { type: 'equip', itemName, destination: 'hand' })
+  report(
+    JSON.stringify(declaredRoutePlaceBlocks(reuseFallback)) === JSON.stringify(['cobblestone']) &&
+      JSON.stringify(blocks) === JSON.stringify(['dirt', 'cobblestone']) &&
+      declarations.map((entry) => entry.source).join(',') === 'pillarPlaceName,fallbackPillarPlaceName' &&
+      JSON.stringify(envelope.mayEquipItems) === JSON.stringify(['dirt', 'cobblestone']) &&
+      equip('dirt') === null &&
+      equip('cobblestone') === null &&
+      // `netherrack` is carried and is a PILLAR_PLACE_PRIORITY block, but no route
+      // declared it: it must NOT be authorized just for being placeable.
+      equip('netherrack') === 'equip_item_not_declared:netherrack',
+    '(v) the fallback declaration is read, several declared blocks are ALL authorized in declaration order, and an undeclared placeable is refused',
+    `fallback=${JSON.stringify(declaredRoutePlaceBlocks(reuseFallback))} declared=${JSON.stringify(declarations)} ` +
+      `equip=${JSON.stringify(envelope.mayEquipItems)} netherrack=${equip('netherrack')}`,
   )
 }
 
