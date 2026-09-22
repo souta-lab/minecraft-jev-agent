@@ -42,6 +42,19 @@ export type ReachabilityReason =
    */
   | 'hunt_approach_budget'
   /**
+   * SAFE/CAN: an ATTACK whose target no STANCE can hit. A path to some adjacent
+   * cell is not a position from which a swing lands: the offer is grounded on a
+   * cell that is standable, hazard-free, inside the melee envelope AND has line
+   * of sight to the entity. When no such cell exists - a mob embedded in
+   * geometry (the operator's Nether screenshot: line of sight fails from every
+   * stance) or a mob no stance within melee reach can be walked to (the measured
+   * enderman at 6.11 m, `pathfinder goal WAS set 5x`, distance frozen for ~47 s,
+   * ZERO swings) - the ATTACK is withheld with this typed reason instead of
+   * being leased into `out_of_reach`/`verify_failed`. The entity, the melee
+   * constant and the nearest refused stance are mirrored as `NO_ATTACK_STAND`.
+   */
+  | 'no_attack_stand'
+  /**
    * SAFE/CAN: a mechanical locomotion leg whose realization would stand the body
    * in a dimension-transfer cell (a lit portal block) - either as its
    * destination or along the route it would walk.

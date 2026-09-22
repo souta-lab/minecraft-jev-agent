@@ -126,8 +126,9 @@ import {
   contactGapY,
   formatContactUnreachable,
   HUNT_APPROACH_BUDGET,
+  MELEE_ATTACK_REACH,
 } from './combatClosure.ts'
-import type { ContactApproach } from './combatClosure.ts'
+import type { AttackStandEvidence, AttackStandFact, ContactApproach } from './combatClosure.ts'
 import {
   envHazardProximityDenied,
   MAX_ENV_HAZARD_ESCAPES,
@@ -189,6 +190,15 @@ export interface Candidate {
   placementCells?: Vec3Json[]
   /** plane axis of a placement sequence; 'x' spans x (normal z), 'z' spans z */
   placementAxis?: 'x' | 'z'
+  /**
+   * The typed stance refusal this candidate was withheld with (`no_attack_stand`),
+   * when the ATTACK gate could not ground a cell the body can stand on, legally,
+   * inside the melee envelope AND see the entity from. Typed rather than a `meta`
+   * scalar because a reviewer needs the whole geometry (entity, melee constant,
+   * nearest refused stance and the route verdict), and it is mirrored verbatim as
+   * `NO_ATTACK_STAND`. Absent on every other candidate, so nothing else changes.
+   */
+  attackStandRefusal?: AttackStandEvidence
   meta: Record<string, string | number | boolean>
 }
 
@@ -703,7 +713,13 @@ export function applyGroundedThreatRestriction(
       .filter(
         (entry) =>
           entry.candidate.kind === 'ATTACK' &&
-          entry.result.reason === 'no_path' &&
+          // `no_path` and `no_attack_stand` are the SAME fact for this set ("this
+          // hostile's melee approach is not groundable by CAN"), with the more
+          // precise name now that the stance geometry is checked: a mob behind
+          // sealed terrain has no path AND no stance that can hit it, so omitting
+          // the new reason would silently stop releasing work for exactly the
+          // occluded shape this bypass exists for.
+          (entry.result.reason === 'no_path' || entry.result.reason === 'no_attack_stand') &&
           entry.candidate.targetEntityId !== null,
       )
       .map((entry) => entry.candidate.targetEntityId as number),
@@ -1441,6 +1457,23 @@ export interface ReachabilityGateOptions {
    * Absent = unknown and preserves pure/offline callers.
    */
   attackPathProbe?: ((position: Vec3Json) => PathProbeResult) | null
+  /**
+   * The live STANCE fact for an ATTACK: is there a cell the body can stand on,
+   * legally, from which the entity is inside the melee envelope AND visible?
+   * `combatClosure.selectAttackStand` is the pure search; the controller wires
+   * the world questions to live truth (the sensor's own standability rule, the
+   * `envHazard` classes, and the same `world.raycast` the threat-cover logic
+   * casts). This is the fact a path probe cannot answer: a path to a cell beside
+   * the target is not a position from which a swing lands (the operator's
+   * embedded magma cube; the measured 6.11 m enderman with zero swings).
+   *
+   * Absent, or `null` for this entity (the host could not read its geometry),
+   * means NO VERDICT and preserves the previous gate exactly - an unavailable
+   * probe never deletes the only productive action.
+   */
+  attackStandProbe?:
+    | ((query: { entityId: number; position: Vec3Json }) => AttackStandFact | null)
+    | null
   /**
    * SAFE: does the body's own route to this destination stand it in a
    * dimension-transfer cell (a lit portal block)? The destination-side half of
@@ -11637,6 +11670,102 @@ function evaluateCandidate(
   return reachabilityRecord(candidate, target, world, result, context)
 }
 
+/**
+ * THE STANCE FACT for one ATTACK: is there a cell the body can stand on,
+ * legally, from which this entity is inside the melee envelope AND visible?
+ *
+ * `null` means NO VERDICT - the host did not supply a stance probe, or could not
+ * read the entity's own geometry - and every existing rule then applies
+ * unchanged. That is deliberate: an unavailable probe must never delete the only
+ * productive action (the same rule every other probe in this gate follows), and
+ * it is what keeps every pre-existing fixture and offline caller byte-identical.
+ *
+ * A verdict of `stand === null` (no legal, visible cell inside the envelope) or
+ * a stance the body cannot walk to is a CAN refusal. The ATTACK is withheld with
+ * the typed `no_attack_stand` reason and the full evidence, never leased into a
+ * `out_of_reach` / `verify_failed` attempt that could not have swung.
+ */
+interface AttackStandVerdict {
+  reachable: boolean
+  result: ReachabilityResult
+  missingCapabilities: Capability[]
+  evidence: AttackStandEvidence | null
+}
+
+function attackStandVerdict(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+): AttackStandVerdict | null {
+  const probe = context.options.reachability?.attackStandProbe ?? null
+  if (probe === null) return null
+  const position = candidate.target
+  const entityId =
+    typeof candidate.meta.entityId === 'number' ? candidate.meta.entityId : candidate.targetEntityId
+  if (position === null || entityId === null) return null
+  const fact = probe({ entityId, position })
+  if (fact === null) return null
+  const base = {
+    actionId: candidate.id,
+    entityId,
+    targetName: candidate.targetName,
+    entityPosition: position,
+    reach: MELEE_ATTACK_REACH,
+  }
+  if (fact.stand === null) {
+    // No cell inside the melee envelope is a legal stance from which the entity
+    // is visible: the screenshot shape (embedded in geometry) and the shape of a
+    // target only reachable from cells that are solid, on fire, or occluded.
+    return {
+      reachable: false,
+      result: { reachable: false, reason: 'no_attack_stand', missingCapabilities: [] },
+      missingCapabilities: [{ kind: 'standable_approach' }],
+      evidence: {
+        ...base,
+        refusal: fact.refusal ?? 'no_standable_cell',
+        nearest: fact.nearest,
+        stand: null,
+        path: null,
+      },
+    }
+  }
+  if (fact.onBody) {
+    // The body already stands on a legal, visible cell inside the envelope, so a
+    // swing can land right now. This is the engaged-attacker response: a mob that
+    // walked up to the body stays attackable whatever any path probe says.
+    return {
+      reachable: true,
+      result: { reachable: true, reason: 'reachable', missingCapabilities: [] },
+      missingCapabilities: [],
+      evidence: null,
+    }
+  }
+  // The stance exists; the body must be able to WALK to it. Same probe (and same
+  // far-leg relaxation) every other locomotion leg in this gate uses, so a stance
+  // is not refused by a probe of the body's own neighbourhood.
+  const standFar = distance(context.state.self.position, fact.stand) > FAR_LEG_PROBE_RADIUS
+  const path = standFar ? 'unknown' : (context.options.reachability?.pathProbe?.(fact.stand) ?? 'unknown')
+  if (path === 'no_path') {
+    return {
+      reachable: false,
+      result: { reachable: false, reason: 'no_attack_stand', missingCapabilities: [] },
+      missingCapabilities: [{ kind: 'open_path' }],
+      evidence: {
+        ...base,
+        refusal: 'no_reachable_stand',
+        nearest: fact.nearest,
+        stand: fact.stand,
+        path,
+      },
+    }
+  }
+  return {
+    reachable: true,
+    result: { reachable: true, reason: 'reachable', missingCapabilities: [] },
+    missingCapabilities: [],
+    evidence: null,
+  }
+}
+
 function evaluateOrdinaryAttackCandidate(
   candidate: Candidate,
   context: ReachabilityGateContext,
@@ -11663,6 +11792,27 @@ function evaluateOrdinaryAttackCandidate(
   const targetFact = reachabilityTargetFor(context.state, candidate)
   const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
   if (isHunt) return evaluateHuntAttackCandidate(candidate, context, distanceToTarget, targetFact, world)
+
+  // THE STANCE GATE. Contact is only executable from a position that can actually
+  // hit the target: `distanceToTarget <= MELEE_THREAT_REACH` used to be accepted
+  // unconditionally, which is how a magma cube embedded in the wall beside the
+  // body was leased into `MECHANICALLY_BLOCKED failure=verify_failed` /
+  // `out_of_reach` on repeat. A stance that is standable, hazard-free, inside the
+  // melee envelope and has line of sight to the entity is required, and when the
+  // body is not already on one the stance must be walkable.
+  const stance = attackStandVerdict(candidate, context)
+  if (stance !== null) {
+    return stance.reachable
+      ? reachabilityRecord(candidate, targetFact, world, stance.result, context, stance.evidence)
+      : reachabilityRecord(
+          candidate,
+          targetFact,
+          world,
+          { reachable: false, reason: 'no_attack_stand', missingCapabilities: stance.missingCapabilities },
+          context,
+          stance.evidence,
+        )
+  }
 
   // Contact is already executable: do not let a path probe erase a mob the body
   // can hit right now. WHICH response to take remains Jev's choice.
@@ -11752,6 +11902,31 @@ function evaluateHuntAttackCandidate(
       },
       context,
     )
+  }
+  // THE STANCE GATE for a kill, applied where the hunt's walking budget says the
+  // body is expected to be able to fight: inside `HUNT_APPROACH_BUDGET`. A target
+  // that far away still needs a stance it can reach and hit from - the measured
+  // enderman at 6.11 m was INSIDE this budget, so the budget branch below accepted
+  // it and the lease burned 47 s with zero swings. Beyond the budget the ordinary
+  // route candidates advance the body and the target is re-evaluated as it closes,
+  // so the existing `attackPathProbe` / `hunt_approach_budget` contract stays in
+  // charge there and nothing is refused before it is walked toward.
+  if (distanceToTarget <= HUNT_APPROACH_BUDGET) {
+    const stance = attackStandVerdict(candidate, context)
+    if (stance !== null && !stance.reachable) {
+      return reachabilityRecord(
+        candidate,
+        targetFact,
+        world,
+        {
+          reachable: false,
+          reason: 'no_attack_stand',
+          missingCapabilities: stance.missingCapabilities,
+        },
+        context,
+        stance.evidence,
+      )
+    }
   }
   if (distanceToTarget <= MELEE_THREAT_REACH || distanceToTarget <= HUNT_APPROACH_BUDGET) {
     return reachabilityRecord(
@@ -11865,9 +12040,18 @@ function reachabilityRecord(
   world: ReachabilityWorld,
   result: ReachabilityResult,
   context: ReachabilityGateContext,
+  /**
+   * Optional typed refusal evidence for this verdict, carried on the candidate's
+   * own `meta` (the same seam `digAccessRefusal` uses) so the controller can
+   * mirror the fact when it logs the withhold. Absent for every verdict that has
+   * nothing extra to say, which keeps every existing marker unchanged.
+   */
+  evidence: AttackStandEvidence | null = null,
 ): CandidateReachability {
+  const withEvidence: Candidate =
+    evidence === null ? candidate : { ...candidate, attackStandRefusal: evidence }
   return {
-    candidate: withAffordance(candidate, result),
+    candidate: withAffordance(withEvidence, result),
     result,
     fingerprint: reachabilityFingerprint({
       target,

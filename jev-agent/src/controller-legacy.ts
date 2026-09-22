@@ -26,13 +26,14 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer, isNotExecutableHereKeepKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
-import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
+import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
-import { formatContactUnreachable } from './combatClosure.ts'
+import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
+import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
@@ -1559,6 +1560,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // geometry, the vertical planner's own refusal, and the carried block a pillar
   // would consume), so unreachable and merely-missed are distinct run evidence.
   'HUNT_CONTACT_UNREACHABLE',
+  // The HORIZONTAL/STANCE half of the same vocabulary, the one the operator's
+  // screenshot was made of: a hostile in contact but embedded in geometry (line of
+  // sight fails from every stance) or a hostile no stance within melee reach can be
+  // walked to (the measured enderman at 6.11 m, distance frozen ~47 s, ZERO
+  // swings). `NO_ATTACK_STAND` names the entity, the melee constant, the nearest
+  // stance the search examined and the fact that refused it, so the withhold is
+  // run evidence instead of a later 0-swing `out_of_reach` / `verify_failed` lease
+  // that only LOOKS like a failed attempt.
+  'NO_ATTACK_STAND',
   // The DROP half of the same vocabulary. A killed mob leaves an item ENTITY on
   // the ground, and the only thing that proves the kill produced anything is the
   // inventory delta after walking onto it. Without these two markers a run that
@@ -11078,6 +11088,27 @@ export class JevController {
       if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
         this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
       }
+      // THE STANCE REFUSAL, mirrored with the full geometry: the entity, the melee
+      // constant, the nearest stance the search examined and the fact that refused
+      // it. Without this the only evidence that the body could not hit the target
+      // would be a 0-swing `out_of_reach` / `verify_failed` lease later.
+      const stance = entry.candidate.attackStandRefusal
+      if (entry.result.reason === 'no_attack_stand' && stance !== undefined) {
+        this.logger.warn(
+          'agent',
+          formatNoAttackStand(stance),
+          {
+            ...detail,
+            marker: NO_ATTACK_STAND,
+            entityId: stance.entityId,
+            refusal: stance.refusal,
+            nearestStand: stance.nearest,
+            stand: stance.stand,
+            path: stance.path,
+          },
+          this.tickCounter,
+        )
+      }
     }
   }
 
@@ -11657,9 +11688,123 @@ export class JevController {
       },
       stationApproach: this.stationApproachProbe(),
       digApproach: this.digApproachProbe(),
+      attackStandProbe: this.attackStandProbe(),
     }
     this.gateOptionsTick = this.tickCounter
     return this.gateOptions
+  }
+
+  /**
+   * THE STANCE PROBE: the live world questions `combatClosure.selectAttackStand`
+   * asks, answered from real block truth - the sensor's own standability rule,
+   * the `envHazard` classes, and the SAME `bot.world.raycast` the threat-cover
+   * logic casts (`state.ts threatSightLineBlocked`). No parallel geometry: the
+   * only thing added here is the eye origin the cover logic already uses, moved
+   * to a stance the body is not standing in yet.
+   *
+   * This is the fact the melee path probe cannot answer. `GoalNear(entity, 2.9)`
+   * proves a route to WITHIN 2.9 m of the entity's feet; it says nothing about
+   * whether a cell there is a legal stance or whether the entity is visible from
+   * it. Measured live: a magma cube embedded in the wall beside the body (every
+   * stance occluded, every swing `verify_failed`) and an enderman at 6.11 m whose
+   * `GoalFollow` never closed while the distance froze for ~47 s with zero swings.
+   *
+   * Cached per entity per tick (the gate options themselves are tick-cached), and
+   * `null` when the live entity's own height cannot be read: no verdict, so the
+   * gate keeps its previous behaviour rather than refusing on a missing fact.
+   */
+  private attackStandProbe(): (query: { entityId: number; position: Vec3Json }) => AttackStandFact | null {
+    const cache = new Map<number, AttackStandFact | null>()
+    return (query) => {
+      const cached = cache.get(query.entityId)
+      if (cached !== undefined) return cached
+      const entity = this.bot.entities[query.entityId]
+      const height = entity === undefined ? Number.NaN : (entity as { height?: number }).height ?? Number.NaN
+      if (!Number.isFinite(height) || height <= 0) {
+        // The aim point is `position + height / 2` (the SAME point `runAttack`
+        // looks at). Without it there is no visibility question to answer, so the
+        // fact is UNKNOWN - never an invented stance.
+        cache.set(query.entityId, null)
+        return null
+      }
+      const fact = selectAttackStand({
+        entity: { position: query.position, height },
+        feet: { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z },
+        reach: MELEE_ATTACK_REACH,
+        world: {
+          standable: (x, y, z) => isStandable(this.bot, { x, y, z }),
+          hazard: (x, y, z) => this.botStandColumnHazardAt(x, y, z),
+          visible: (x, y, z) => this.botSeesEntityFrom(x, y, z, query.position, height),
+        },
+      })
+      cache.set(query.entityId, fact)
+      return fact
+    }
+  }
+
+  /**
+   * Is the 1x2 stance column at this cell a hazard? The same classification the
+   * `envHazard` layer owns (`envHazardKindOfBlock`) for the stance's own feet,
+   * head and support cells, plus the `envHazard` lava proximity margin for a
+   * lava-class neighbour - the same two rules `reachabilityWorldFor` applies to
+   * a locomotion destination (`HAZARD_PROXIMITY` IS `ENV_LAVA_PROXIMITY`).
+   */
+  private botStandColumnHazardAt(x: number, y: number, z: number): boolean {
+    const scratch = this.bot.entity.position.clone()
+    const nameAt = (cx: number, cy: number, cz: number): string | null => {
+      const block = this.bot.blockAt(scratch.set(cx, cy, cz))
+      return block === null || block === undefined ? null : (block.name ?? null)
+    }
+    // The stance's OWN body column: fire/lava the body would be inside.
+    if (envHazardKindOfBlock(nameAt(x, y, z)) !== null) return true
+    if (envHazardKindOfBlock(nameAt(x, y + 1, z)) !== null) return true
+    if (envHazardKindOfBlock(nameAt(x, y - 1, z)) !== null) return true
+    // A lava-class neighbour inside the shared margin: standing there means
+    // standing in it (`envHazardProximityDenied(false, name)` semantics). A cell
+    // whose offset has any component >= 2 is at least 2 away, so it can never be
+    // inside a 1.5 margin: `floor` is the exact bound, not a truncation.
+    const span = Math.floor(ENV_LAVA_PROXIMITY)
+    for (let dx = -span; dx <= span; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dz = -span; dz <= span; dz += 1) {
+          const cx = x + dx
+          const cy = y + dy
+          const cz = z + dz
+          if (!isLavaClassBlock(nameAt(cx, cy, cz))) continue
+          if (Math.hypot(cx - x, cy - y, cz - z) <= ENV_LAVA_PROXIMITY) return true
+        }
+      }
+    }
+    return false
+  }
+
+  /**
+   * Can a body standing on this stance see the entity? ONE ray, the same call the
+   * cover logic makes (`bot.world.raycast`), from the eyes at the stance to the
+   * entity's aim point - the point `runAttack` looks at before it swings. Absence
+   * of a raycast (a structural double) answers `true`: "not occluded" is the
+   * fail-open direction here, so a missing world never refutes a visible mob.
+   */
+  private botSeesEntityFrom(x: number, y: number, z: number, entityPosition: Vec3Json, height: number): boolean {
+    const world = this.bot.world as unknown as
+      | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
+      | undefined
+    if (world === undefined || typeof world.raycast !== 'function') return true
+    try {
+      const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
+      const eye = this.bot.entity.position.clone().set(x + 0.5, y + eyeHeight, z + 0.5)
+      const aim = this.bot.entity.position.clone().set(entityPosition.x, entityPosition.y + height / 2, entityPosition.z)
+      const dx = aim.x - eye.x
+      const dy = aim.y - eye.y
+      const dz = aim.z - eye.z
+      const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (!Number.isFinite(range) || range <= 0) return true
+      const direction = this.bot.entity.position.clone().set(dx / range, dy / range, dz / range)
+      const hit = world.raycast(eye, direction, range, null)
+      return hit === null || hit === undefined
+    } catch {
+      return true
+    }
   }
 
   /**
