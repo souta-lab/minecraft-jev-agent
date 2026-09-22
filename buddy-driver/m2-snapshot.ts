@@ -20,11 +20,32 @@ export const M2_SNAPSHOT_SCHEMA_VERSION = 2
 export const M2_SNAPSHOT_RECORD = 'm2-snapshot'
 
 /**
- * The required M2 marker set, in the one and only accepted order. This is the
- * same set m2-watch enforces; it is deliberately NOT configurable here so the
- * snapshot can never be written against a weaker chain.
+ * The IRON-age marker set, in its accepted order. Superseded by the portal chain
+ * below and kept ONLY as a legacy record (`legacyChain`), so no history is lost.
  */
-export const M2_REQUIRED_MARKERS = ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'] as const
+export const M2_LEGACY_MARKERS = ['PREREQ_OPTION', 'FURNACE_READY', 'SMELT_DONE'] as const
+
+/**
+ * The required M2 marker set, in the one and only accepted order: the NETHR GATE
+ * chain (build -> light -> verify), which is the same order `tools/m2-gate.mjs`
+ * evaluates as `m2_chain`.
+ *
+ * This used to be the legacy IRON set, and the consequence was measured: every
+ * run-scoped snapshot in `data/resident/` carried
+ * `chain: { status: "INCOMPLETE", required: [PREREQ_OPTION, FURNACE_READY, SMELT_DONE] }`
+ * while the run that ACTUALLY built, lit and verified a portal
+ * (`run-mubhx20x-pie2`: PORTAL_BLOCK_PLACED x9 -> PORTAL_FRAME_READY blocks=10 shape=ok
+ * -> PORTAL_LIT -> PORTAL_VERIFIED=true, in runs/supervisor-live10.out and its own
+ * snapshot) reported a chain that had nothing to do with what it did. The
+ * operator's M2 premise is exactly this chain, so the run-scoped artifact must
+ * carry it.
+ */
+export const M2_REQUIRED_MARKERS = [
+  'PORTAL_BLOCK_PLACED',
+  'PORTAL_FRAME_READY',
+  'PORTAL_LIT',
+  'PORTAL_VERIFIED',
+] as const
 export type M2RequiredMarker = (typeof M2_REQUIRED_MARKERS)[number]
 
 /** Current M2 (diamond -> Nether gate) markers captured by the same recorder. */
@@ -42,6 +63,7 @@ export const M2_SNAPSHOT_MAX_SEQUENCE = 64
 
 const REQUIRED_MARKER_SET: ReadonlySet<string> = new Set<string>([
   ...M2_REQUIRED_MARKERS,
+  ...M2_LEGACY_MARKERS,
   ...M2_PORTAL_MARKERS,
 ])
 
@@ -113,6 +135,12 @@ export interface M2Snapshot {
   markers: M2SnapshotMarker[]
   sequence: string[]
   chain: M2SnapshotChain
+  /**
+   * The superseded IRON-age chain (`PREREQ_OPTION -> FURNACE_READY -> SMELT_DONE`),
+   * still evaluated from the same sequence so a historical reader loses nothing
+   * when `chain` became the portal chain the M2 premise and the canonical gate use.
+   */
+  legacyChain: M2SnapshotChain
   inventory: Counts
   terminal: M2SnapshotTerminal | null
 }
@@ -124,19 +152,22 @@ export interface M2Snapshot {
  * arrival order, so a chain broken by a fresh PREREQ_OPTION after SMELT_DONE is
  * not silently promoted to VALID.
  */
-export function orderedM2Chain(sequence: readonly string[]): M2SnapshotChain {
+export function orderedM2Chain(
+  sequence: readonly string[],
+  required: readonly string[] = M2_REQUIRED_MARKERS,
+): M2SnapshotChain {
   const observed: string[] = []
   let cursor = 0
   for (const marker of sequence) {
-    const want = M2_REQUIRED_MARKERS[cursor]
+    const want = required[cursor]
     if (want === undefined) break
     if (marker !== want) continue
     observed.push(marker)
     cursor += 1
   }
   return {
-    status: cursor === M2_REQUIRED_MARKERS.length ? 'VALID' : 'INCOMPLETE',
-    required: [...M2_REQUIRED_MARKERS],
+    status: cursor === required.length ? 'VALID' : 'INCOMPLETE',
+    required: [...required],
     observed,
   }
 }
@@ -190,6 +221,7 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
   if (!isCounts(candidate.inventory)) return null
   if (candidate.terminal !== undefined && candidate.terminal !== null && !isSnapshotTerminal(candidate.terminal)) return null
   const chain = orderedM2Chain(candidate.sequence)
+  const legacyChain = orderedM2Chain(candidate.sequence, M2_LEGACY_MARKERS)
   return {
     schemaVersion: typeof candidate.schemaVersion === 'number' ? candidate.schemaVersion : M2_SNAPSHOT_SCHEMA_VERSION,
     record: M2_SNAPSHOT_RECORD,
@@ -205,6 +237,7 @@ export function parseM2Snapshot(value: unknown): M2Snapshot | null {
     markers: candidate.markers.map((marker) => ({ ...marker, inventory: { ...marker.inventory } })),
     sequence: [...candidate.sequence],
     chain,
+    legacyChain,
     inventory: { ...candidate.inventory },
     terminal: isSnapshotTerminal(candidate.terminal) ? { ...candidate.terminal, inventory: { ...candidate.terminal.inventory } } : null,
   }
@@ -279,6 +312,7 @@ export class M2SnapshotRecorder {
             markers: [],
             sequence: [],
             chain: orderedM2Chain([]),
+            legacyChain: orderedM2Chain([], M2_LEGACY_MARKERS),
             inventory: {},
             terminal: null,
           }
@@ -366,6 +400,10 @@ export class M2SnapshotRecorder {
     }
     if (this.snapshot.sequence.length < M2_SNAPSHOT_MAX_SEQUENCE) this.snapshot.sequence.push(event)
     this.snapshot.chain = orderedM2Chain(this.snapshot.sequence)
+    // Both chains are derived from the same sequence and must be refreshed together:
+    // recomputing only `chain` left `legacyChain` frozen at its construction value,
+    // which silently stopped the iron terminal from ever being recorded.
+    this.snapshot.legacyChain = orderedM2Chain(this.snapshot.sequence, M2_LEGACY_MARKERS)
     this.snapshot.atMs = atMs
     this.snapshot.at = marker.at
     this.snapshot.inventory = { ...marker.inventory }
@@ -406,7 +444,11 @@ export class M2SnapshotRecorder {
    */
   recordTerminal(actionId: string, outcome: { verified: boolean; status: string }): M2SnapshotTerminal | null {
     if (actionId !== 'CRAFT:iron_pickaxe' || outcome.verified !== true || outcome.status !== 'done') return null
-    if (this.snapshot.chain.status !== 'VALID') return null
+    // The one defined terminal is the verified `CRAFT:iron_pickaxe` (see
+    // `isTerminal`), so its ordering precondition is the LEGACY iron chain - the
+    // chain that terminal belongs to. `chain` is the portal chain now, and reading
+    // it here would silently stop recording the iron terminal.
+    if (this.snapshot.legacyChain.status !== 'VALID') return null
     const now = this.options.now ?? Date.now
     const atMs = now()
     const terminal: M2SnapshotTerminal = {
