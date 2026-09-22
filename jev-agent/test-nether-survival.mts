@@ -336,14 +336,29 @@ addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable S
   const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const guard = text.indexOf('const reground = regroundVanishedSurvivalChoice(')
   const reject = text.indexOf('this.guardRejections += 1', guard)
+  // The ungrounded branch must (a) requeue the decision so the tick is never the
+  // LAST thing that happens, and (b) when a hostile is in contact and a grounded
+  // CONTROL action is on offer, EXECUTE it (issue #436 section 9 / the measured
+  // DEATH 32) - a bare rejection or a bare requeue is not enough, and only a
+  // missing control action may let the tick end without one.
   const ungrounded = text.indexOf('if (reground.candidateId === null) {', reject)
   const requeue = text.indexOf("this.requestDecision('damage_taken'", ungrounded)
   const tagged = text.indexOf("source: 'survival_reground_failed'", ungrounded)
+  const returnsOnlyWhenUngrounded = text.includes('if (reground.candidateId === null && controlId === null) return')
+  const hasControlFallback = text.includes('survivalControlFallback({')
   return {
-    pass: guard > 0 && reject > guard && ungrounded > reject && requeue > ungrounded && tagged > ungrounded,
+    pass:
+      guard > 0 &&
+      reject > guard &&
+      ungrounded > reject &&
+      requeue > ungrounded &&
+      tagged > ungrounded &&
+      returnsOnlyWhenUngrounded &&
+      hasControlFallback,
     detail:
       `regroundCallAt=${guard} guardRejectAt=${reject} ungroundedBlockAt=${ungrounded} ` +
-      `requeuesDecisionAt=${requeue} tagged=${tagged > ungrounded}`,
+      `requeuesDecisionAt=${requeue} tagged=${tagged > ungrounded} ` +
+      `returnsOnlyWhenUngrounded=${returnsOnlyWhenUngrounded} controlFallback=${hasControlFallback}`,
   }
 })
 

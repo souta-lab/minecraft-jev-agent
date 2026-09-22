@@ -703,6 +703,56 @@ export function regroundVanishedSurvivalChoice(
   return { candidateId: null, kind: 'RETREAT', reason: 'no_grounded_equivalent', entityId: threatEntityId, outcome: 'CAPABILITY_LOST' }
 }
 
+/**
+ * The grounded CONTROL action a tick executes when a chosen survival action can
+ * neither be re-grounded nor served by the restricted fresh offer while a hostile
+ * is IN CONTACT.
+ *
+ * This is the measured death shape (operator report + run log: a wither skeleton
+ * at 0.57m, health 4.37, `freshOffer=1`, the lone candidate not an equivalent of
+ * the chosen `RETREAT:p23_57_-20` -> `candidateId: null` -> NO action -> DEATH 32),
+ * and the same shape at 2.38m / health 2.51 for `ATTACK:e15787`.
+ *
+ * The control action mutates nothing: `ESCALATE`/`WAIT` only hand the decision
+ * back to the semantic layer, so executing one is not a fight/flight choice, not
+ * a target choice and not a destination choice. It exists so a tick can never end
+ * actionless with a hostile on the body.
+ */
+export interface SurvivalControlFallbackInput {
+  reground: SurvivalRegroundResult
+  /** the threat envelope says a hostile is inside contact range right now */
+  threatInContact: boolean
+  /** the RESTRICTED fresh offer the re-ground ran against */
+  freshCandidates: readonly { id: string; kind: string }[]
+}
+
+export interface SurvivalControlFallback {
+  candidateId: string | null
+  /** why a control action was or was not taken (greppable) */
+  reason:
+    | 'regrounded'
+    | 'control_action_escalate'
+    | 'control_action_wait'
+    | 'not_a_survival_action'
+    | 'threat_not_in_contact'
+    | 'no_control_action_offered'
+}
+
+/**
+ * Decide the fallback for one vanished survival choice. Pure; the CALLER owns the
+ * re-ground attempt (this only answers "what if nothing could serve it").
+ */
+export function survivalControlFallback(input: SurvivalControlFallbackInput): SurvivalControlFallback {
+  if (input.reground.candidateId !== null) return { candidateId: null, reason: 'regrounded' }
+  if (input.reground.kind === null) return { candidateId: null, reason: 'not_a_survival_action' }
+  if (!input.threatInContact) return { candidateId: null, reason: 'threat_not_in_contact' }
+  const escalate = input.freshCandidates.find((candidate) => candidate.kind === 'ESCALATE')
+  if (escalate !== undefined) return { candidateId: escalate.id, reason: 'control_action_escalate' }
+  const wait = input.freshCandidates.find((candidate) => candidate.kind === 'WAIT')
+  if (wait !== undefined) return { candidateId: wait.id, reason: 'control_action_wait' }
+  return { candidateId: null, reason: 'no_control_action_offered' }
+}
+
 /** `SURVIVAL_REGROUND from=... to=... kind=... reason=... offer=... threat=...`. */
 export function formatSurvivalReground(
   from: string,

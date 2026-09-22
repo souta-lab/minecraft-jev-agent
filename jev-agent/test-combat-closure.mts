@@ -32,7 +32,13 @@ import type { AgentLevel } from './src/jev-legacy.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
-import { MELEE_THREAT_REACH, regroundVanishedSurvivalChoice, formatSurvivalNoGroundedAction, formatSurvivalReground } from './src/threat.ts'
+import {
+  MELEE_THREAT_REACH,
+  regroundVanishedSurvivalChoice,
+  survivalControlFallback,
+  formatSurvivalNoGroundedAction,
+  formatSurvivalReground,
+} from './src/threat.ts'
 import { combatFailureCode, classifyCombatOutcome, formatCombatOutcome, HUNT_APPROACH_BUDGET } from './src/combatClosure.ts'
 import { weaponClass, carriedWeaponClasses, weaponHoldAlternatives, holdsCarriedWeapon } from './src/gearPlan.ts'
 import { targetIdentityOf, targetIdentityViolation, effectViolation, envelopeForCandidate } from './src/skillCommitment.ts'
@@ -789,6 +795,173 @@ function optionsWithProbe(probe: 'reachable' | 'no_path' | null): CandidateOptio
     pass,
     'B2. a hostile in CONTACT always produces an ATTACK, even with no route probe',
     `withProbe=${contactAttack?.id ?? 'none'} noProbe=${contactNoProbeAttack?.id ?? 'none'}`,
+  )
+}
+
+// ===========================================================================
+// Live ask A2 (operator-confirmed, DEATH 32): a hostile IN CONTACT at 0.57m with
+// `freshOffer=1` must never leave the tick actionless.
+// ===========================================================================
+
+{
+  // The measured branch: the chosen survival action cannot be re-grounded and the
+  // restricted fresh offer holds ONE candidate that is not an equivalent.
+  const chosenRetreat = { id: 'RETREAT:p23_57_-20', kind: 'RETREAT', targetEntityId: null, meta: { threatEntityId: 15787 } }
+  const loneControl = [{ id: 'ESCALATE', kind: 'ESCALATE' }]
+  const reground = regroundVanishedSurvivalChoice(chosenRetreat, [{ id: 'WAIT', kind: 'WAIT' }])
+  const fallback = survivalControlFallback({
+    reground,
+    threatInContact: true,
+    freshCandidates: loneControl,
+  })
+  // health 4.37 / contact 0.57 is exactly the measured state
+  const contactAt057 = true
+  const pass =
+    // the re-ground genuinely failed (the old behaviour was `candidateId: null`)
+    reground.candidateId === null &&
+    reground.outcome === 'CAPABILITY_LOST' &&
+    // and the tick now produces an ACTION instead of nothing
+    fallback.candidateId === 'ESCALATE' &&
+    fallback.reason === 'control_action_escalate' &&
+    contactAt057
+  report(
+    pass,
+    'A2. measured branch (freshOffer=1, not equivalent, hostile in contact) produces an action, never a silent no-op',
+    `reground=${reground.candidateId ?? 'null'}/${reground.outcome} fallback=${fallback.candidateId ?? 'null'}/${fallback.reason}`,
+  )
+}
+
+{
+  // The invariant, stated as the OLD behaviour being impossible: with a hostile in
+  // contact, a vanished survival choice can never yield "no action".
+  const chosenAttack = { id: 'ATTACK:e15787', kind: 'ATTACK', targetEntityId: 15787, meta: { entityId: 15787 } }
+  const loneNotEquivalent = [{ id: 'ATTACK:e14544', kind: 'ATTACK' }]
+  const attackReground = regroundVanishedSurvivalChoice(chosenAttack, loneNotEquivalent)
+  const attackFallback = survivalControlFallback({
+    reground: attackReground,
+    threatInContact: true,
+    freshCandidates: [...loneNotEquivalent, { id: 'WAIT', kind: 'WAIT' }],
+  })
+  // a hostile NOT in contact keeps the ordinary behaviour (no control action)
+  const calmFallback = survivalControlFallback({
+    reground: attackReground,
+    threatInContact: false,
+    freshCandidates: [{ id: 'ESCALATE', kind: 'ESCALATE' }],
+  })
+  // a non-survival choice is untouched by this rule
+  const otherFallback = survivalControlFallback({
+    reground: regroundVanishedSurvivalChoice({ id: 'MINE:x', kind: 'MINE' }, []),
+    threatInContact: true,
+    freshCandidates: [{ id: 'ESCALATE', kind: 'ESCALATE' }],
+  })
+  const noCandidate = survivalControlFallback({
+    reground: attackReground,
+    threatInContact: true,
+    freshCandidates: [],
+  })
+  const pass =
+    // §9: the different entity is NEVER adopted
+    attackReground.candidateId === null &&
+    attackReground.outcome === 'TARGET_LOST' &&
+    attackReground.entityId === 15787 &&
+    attackFallback.candidateId === 'WAIT' &&
+    attackFallback.reason === 'control_action_wait' &&
+    calmFallback.candidateId === null &&
+    calmFallback.reason === 'threat_not_in_contact' &&
+    otherFallback.candidateId === null &&
+    otherFallback.reason === 'not_a_survival_action' &&
+    // genuinely nothing offered: the caller must re-ask immediately (typed end)
+    noCandidate.candidateId === null &&
+    noCandidate.reason === 'no_control_action_offered'
+  report(
+    pass,
+    'A3. never-actionless rule: in contact -> control action; no substitute entity; calm/no-action cases unchanged',
+    `attack=${attackFallback.candidateId ?? 'null'}/${attackFallback.reason} calm=${calmFallback.reason} other=${otherFallback.reason} empty=${noCandidate.reason}`,
+  )
+}
+
+// ===========================================================================
+// CAN legality: a dig never proceeds with a non-harvesting item in hand
+// ===========================================================================
+
+{
+  const block = {
+    name: 'stone',
+    position: new P(1, 64, 0),
+    boundingBox: 'block',
+    diggable: true,
+    harvestTools: { [REGISTRY.itemsByName.wooden_pickaxe.id]: true, [REGISTRY.itemsByName.stone_pickaxe.id]: true },
+  }
+  const fixture = makeFight({ carried: { diamond_sword: 1 }, heldItem: 'diamond_sword' })
+  // the MINE candidate declares the pickaxe contract; the sword is in hand
+  const mine: Candidate = {
+    id: 'MINE:1_64_0',
+    kind: 'MINE',
+    label: 'mine stone',
+    targetName: 'stone',
+    target: { x: 1, y: 64, z: 0 },
+    targetEntityId: null,
+    itemName: 'cobblestone',
+    requiresTool: true,
+    toolName: 'pickaxe',
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 1, digBlockName: 'stone', decisionEpoch: 1, worldEpoch: 1 },
+  }
+  const executor = makeExecutor(fixture)
+  // drive the legality guard directly: it is the single dig choke point
+  const guard = executor as unknown as {
+    requireHarvestTool: (b: unknown, epoch: number, signal: AbortSignal) => Promise<void>
+  }
+  let thrown: string | null = null
+  try {
+    await guard.requireHarvestTool(block, 1, new AbortController().signal)
+  } catch (error) {
+    thrown = error instanceof Error ? (error as { code?: string }).code ?? error.message : String(error)
+  }
+  report(
+    thrown === 'dig_no_tool' && fixture.held() === 'diamond_sword' && fixture.logger.matching('DIG_TOOL_LEGALITY').length === 0,
+    'CAN-a. a sword in hand with no admissible tool carried -> typed dig_no_tool, no dig',
+    `thrown=${thrown} held=${fixture.held()}`,
+  )
+}
+
+{
+  const block = {
+    name: 'stone',
+    position: new P(1, 64, 0),
+    boundingBox: 'block',
+    diggable: true,
+    harvestTools: { [REGISTRY.itemsByName.iron_pickaxe.id]: true },
+  }
+  const fixture = makeFight({ carried: { iron_pickaxe: 1, diamond_sword: 1 }, heldItem: 'diamond_sword' })
+  const executor = makeExecutor(fixture)
+  const guard = executor as unknown as {
+    requireHarvestTool: (b: unknown, epoch: number, signal: AbortSignal) => Promise<void>
+  }
+  // epoch 0 = the executor's own idle epoch (no action claimed in this unit probe)
+  await guard.requireHarvestTool(block, 0, new AbortController().signal)
+  report(
+    fixture.logger.matching('DIG_TOOL_LEGALITY').length === 1 && fixture.held() === 'iron_pickaxe',
+    'CAN-b. a carried admissible tool replaces the sword before the dig (legality, not preference)',
+    `markers=${JSON.stringify(fixture.logger.matching('DIG_TOOL_LEGALITY'))} held=${fixture.held()}`,
+  )
+}
+
+{
+  // A block with no harvestTools contract (dirt/leaves) is untouched: any item,
+  // including the hand, is legal there.
+  const block = { name: 'dirt', position: new P(1, 64, 0), boundingBox: 'block', diggable: true }
+  const fixture = makeFight({ carried: { diamond_sword: 1 }, heldItem: 'diamond_sword' })
+  const executor = makeExecutor(fixture)
+  const guard = executor as unknown as {
+    requireHarvestTool: (b: unknown, epoch: number, signal: AbortSignal) => Promise<void>
+  }
+  await guard.requireHarvestTool(block, 0, new AbortController().signal)
+  report(
+    fixture.logger.matching('DIG_TOOL_LEGALITY').length === 0 && fixture.held() === 'diamond_sword',
+    'CAN-c. a block with no harvest-tool contract is untouched (no invented tool requirement)',
+    `markers=${fixture.logger.matching('DIG_TOOL_LEGALITY').length} held=${fixture.held()}`,
   )
 }
 

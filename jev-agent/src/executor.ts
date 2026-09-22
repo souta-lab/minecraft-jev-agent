@@ -8866,6 +8866,16 @@ export class Executor {
     if (!this.bot.canDigBlock(block)) {
       throw new ExecutorError('dig_error', `canDigBlock() returned false for ${block.name}`)
     }
+    // CAN / LEGALITY (operator report: "stone being mined with the sword").
+    // Mineflayer's own `canDigBlock` checks only diggable + distance, and its
+    // `digTime` reads whatever is in hand, so nothing below this line stops the
+    // body from mining a block with an item that is not a harvest tool for it -
+    // stone mined with a sword yields no drop and burns the dig budget. The
+    // block's own `harvestTools` map (minecraft-data, the same authority
+    // `cutApproachStep` already uses) is the legality contract: an inadmissible
+    // held item is replaced by a carried admissible tool, and when none exists the
+    // dig FAILS CLOSED with the typed `dig_no_tool` instead of proceeding.
+    await this.requireHarvestTool(block, epoch, signal)
     this.assertEffect({
       type: 'dig',
       position: { x: block.position.x, y: block.position.y, z: block.position.z },
@@ -9255,6 +9265,45 @@ export class Executor {
     const registry = this.bot.registry as { itemsByName?: Record<string, { id?: number }> } | undefined
     const id = registry?.itemsByName?.[name]?.id
     return typeof id === 'number' ? id : null
+  }
+
+  /**
+   * issue #436 section 9 / CAN legality: a dig is mechanically legal only with an
+   * item the block itself declares as a harvest tool.
+   *
+   * Returns immediately for a block with no `harvestTools` contract (dirt, sand,
+   * leaves: any item, including the hand, breaks it). Otherwise the hand must hold
+   * an admissible item; a carried admissible tool is equipped through the ordinary
+   * leased equip path, and if the body carries none the dig is refused with the
+   * typed `dig_no_tool`. It never selects a tool family by preference - only the
+   * block's own declared set is consulted - and it never mutates the world.
+   */
+  private async requireHarvestTool(block: Block, epoch: number, signal: AbortSignal): Promise<void> {
+    const harvestTools = (block as { harvestTools?: Record<string, boolean> }).harvestTools
+    if (harvestTools === undefined) return
+    const admissible = new Set(
+      Object.entries(harvestTools)
+        .filter(([, ok]) => ok)
+        .map(([id]) => Number(id)),
+    )
+    if (admissible.size === 0) return
+    const held = this.bot.heldItem
+    if (held !== null && held !== undefined && admissible.has(held.type)) return
+    const tool = this.bot.inventory.items().find((item) => admissible.has(item.type))
+    if (tool === undefined) {
+      throw new ExecutorError(
+        'dig_no_tool',
+        `no harvest tool for ${block.name} in the inventory (held ${held?.name ?? 'nothing'} is not admissible); refusing to dig with a non-harvesting item`,
+      )
+    }
+    this.logger.warn(
+      'executor',
+      `DIG_TOOL_LEGALITY block=${block.name} at=${block.position.x},${block.position.y},${block.position.z} ` +
+        `held=${held?.name ?? 'none'} -> equip=${tool.name} reason=non_harvesting_held_item`,
+      { block: block.name, held: held?.name ?? null, equipped: tool.name },
+    )
+    this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
+    await this.equipItemTo(tool, 'hand', epoch, signal)
   }
 
   private async equipTool(candidate: Candidate, epoch: number, signal: AbortSignal): Promise<void> {
