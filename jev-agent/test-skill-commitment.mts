@@ -177,6 +177,30 @@ function equipCandidate(): Candidate {
   }
 }
 
+/**
+ * A locomotion candidate as `candidates.ts` actually offers one: the grounded
+ * route it was offered with lives in its own `meta` (`verticalPlanMeta` is spread
+ * into a RETRIEVE/RETREAT exactly as into a MOVE), so the envelope must read it
+ * from there - live case `RETRIEVE:known:blaze_rod:b35_60_-24`, whose pillar
+ * route (57->60) had its own step refused until this contract was honoured.
+ */
+function retrieveCandidate(meta: Record<string, unknown> = {}): Candidate {
+  return {
+    id: 'RETRIEVE:known:blaze_rod:b35_60_-24',
+    kind: 'RETRIEVE',
+    label: 'return to the remembered blaze_rod at (35,60,-24)',
+    targetName: null,
+    target: { x: 35, y: 60, z: -24 },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: false,
+    hasStandableAdjacent: true,
+    meta: { tick: 1, ...PROVENANCE, ...meta },
+  }
+}
+
 function attackCandidate(entityId: number): Candidate {
   return {
     id: `ATTACK:e${entityId}`,
@@ -232,6 +256,38 @@ const report = (pass: boolean, name: string, detail: string): void => {
 
 process.stdout.write('issue #436 Phase 1 - SkillCommitment identity, effect envelope, evidence\n')
 process.stdout.write('issue #437 §2/§3 - SkillOutcomePacket + decision-epoch isolation\n')
+// ===========================================================================
+// 8. a locomotion route keeps the authority its own contract declares
+// ===========================================================================
+
+{
+  // The measured regression: a RETRIEVE offered with a vertical (pillar) route
+  // must be allowed to place the cells of THAT route - otherwise its own step
+  // fails closed (`effect_envelope_violation`), the route is spent, and the body
+  // can never climb to the cells it was offered (live: 51 zero-progress actions
+  // at y=57 with the target at y=60).
+  const pillar = envelopeForCandidate(retrieveCandidate({ vertical: 'pillar-up' }))
+  const digRoute = envelopeForCandidate(retrieveCandidate({ digRoute: true }))
+  const plain = envelopeForCandidate(retrieveCandidate({}))
+  const pass =
+    pillar.mayPlaceGroundedRoute === true &&
+    pillar.mayDigGroundedRoute === true &&
+    digRoute.mayDigGroundedRoute === true &&
+    digRoute.mayPlaceGroundedRoute === false &&
+    // section 7 U4: no declared route -> no route authority, on any locomotion kind
+    plain.mayPlaceGroundedRoute === false &&
+    plain.mayDigGroundedRoute === false &&
+    (plain.mayDigBlocks ?? []).length === 0 &&
+    (plain.mayPlaceBlocks ?? []).length === 0
+  report(
+    pass,
+    '8. RETRIEVE/RETREAT carry their own grounded route authority, and a plain one carries none (U4)',
+    `pillar place=${pillar.mayPlaceGroundedRoute} dig=${pillar.mayDigGroundedRoute} | ` +
+      `digRoute dig=${digRoute.mayDigGroundedRoute} place=${digRoute.mayPlaceGroundedRoute} | ` +
+      `plain place=${plain.mayPlaceGroundedRoute} dig=${plain.mayDigGroundedRoute}`,
+  )
+}
+
 process.stdout.write(`${'-'.repeat(84)}\n`)
 
 // ===========================================================================
