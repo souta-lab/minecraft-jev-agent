@@ -1,18 +1,32 @@
 #!/usr/bin/env bun
 // current-status: derive a CURRENT-STATUS.md snapshot from real evidence only.
-// Usage: bun tools/current-status.mjs [--write]
-//   --write   also write CURRENT-STATUS.md to the current working directory.
+// Usage: bun tools/current-status.mjs [--write] [--runtime-root <tree>]
+//   --write         write CURRENT-STATUS.md to the current working directory.
+//   --runtime-root  inspect a resident rooted in another worktree.
 // Every section is labeled EVIDENCE or UNKNOWN. Values are never invented: if a
 // command fails, the section is UNKNOWN and the failure is shown verbatim.
 // The command runner and the resident reader are injectable for offline tests.
 import { execFile } from 'node:child_process'
 import { existsSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const RESIDENT_SOCKET = '/home/s0u7a/mc-ai/buddy-driver/data/resident/control.sock'
+export const CODE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export const DEFAULT_RUNTIME_ROOT = CODE_ROOT
+export const RESIDENT_SOCKET = join(CODE_ROOT, 'buddy-driver', 'data', 'resident', 'control.sock')
 export const RESIDENT_TIMEOUT_MS = 2000
+
+/**
+ * Resolve the resident control plane explicitly. Code and runtime roots are
+ * independent: a status tool checked out in one worktree must not silently
+ * read another worktree's resident state.
+ */
+export function resolveResidentSocket({ runtimeRoot = DEFAULT_RUNTIME_ROOT, residentSocket = null } = {}) {
+  if (typeof residentSocket === 'string' && residentSocket.length > 0) return resolve(residentSocket)
+  if (typeof runtimeRoot !== 'string' || runtimeRoot.length === 0) return RESIDENT_SOCKET
+  return join(resolve(runtimeRoot), 'buddy-driver', 'data', 'resident', 'control.sock')
+}
 
 export function formatCommand(command, args = []) {
   return [command, ...args].map((part) => (/\s/.test(part) ? JSON.stringify(part) : part)).join(' ')
@@ -117,6 +131,7 @@ function labelNames(issue) {
 export async function deriveStatus(options = {}) {
   const run = options.run ?? runCommand
   const residentReader = options.readResident === false ? null : (options.readResident ?? readResidentReport)
+  const residentSocket = resolveResidentSocket(options)
   const commands = []
   const trackedRun = async (command, args = []) => {
     commands.push(formatCommand(command, args))
@@ -204,10 +219,10 @@ export async function deriveStatus(options = {}) {
   }
 
   if (residentReader) {
-    commands.push(`socket ${RESIDENT_SOCKET} <- {"cmd":"report"} (${RESIDENT_TIMEOUT_MS}ms timeout)`)
+    commands.push(`socket ${residentSocket} <- {"cmd":"report"} (${RESIDENT_TIMEOUT_MS}ms timeout)`)
     let report = null
     try {
-      report = await residentReader(RESIDENT_SOCKET)
+      report = await residentReader(residentSocket)
     } catch {
       report = null
     }
@@ -228,9 +243,21 @@ export async function deriveStatus(options = {}) {
   return { markdown: `${lines.join('\n').replace(/\n+$/, '')}\n`, commands, sections }
 }
 
+function optionValue(argv, name) {
+  const index = argv.indexOf(name)
+  return index === -1 ? null : argv[index + 1] ?? null
+}
+
 export async function main(argv = process.argv.slice(2), options = {}) {
   const cwd = options.cwd ?? process.cwd()
-  const { markdown } = await deriveStatus(options)
+  const runtimeRoot = options.runtimeRoot ?? optionValue(argv, '--runtime-root')
+  const residentSocket = options.residentSocket ?? optionValue(argv, '--resident-socket')
+  const statusOptions = {
+    ...options,
+    ...(runtimeRoot === null ? {} : { runtimeRoot }),
+    ...(residentSocket === null ? {} : { residentSocket }),
+  }
+  const { markdown } = await deriveStatus(statusOptions)
   let written = null
   if (argv.includes('--write')) {
     written = join(cwd, 'CURRENT-STATUS.md')
