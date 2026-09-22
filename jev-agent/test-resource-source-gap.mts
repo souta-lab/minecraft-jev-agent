@@ -307,6 +307,9 @@ addCase('(a) a directly-built state with falsified evidence refuses the stale en
       position,
       observed: 'stone',
       status: 'falsified' as const,
+      claim: 'block' as const,
+      item: 'obsidian',
+      reason: 'block_mined' as const,
     })),
   }
   const result = generated(injected)

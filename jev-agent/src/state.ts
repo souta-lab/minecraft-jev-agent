@@ -131,28 +131,48 @@ export type KnownResource = {
  * Live-world verdict for ONE remembered resource cell (see
  * `probeKnownResources`). Positive replacement evidence, not absence:
  *
- *  - `present`   the remembered block is still there;
+ *  - `present`   the memory is still true. For a `producer`/`drop` claim that
+ *                means the live producer instance / dropped item was SENSED at
+ *                the cell - the landmark block standing there is not the claim;
  *  - `replaced`  a same-family variant occupies the cell (iron_ore ->
  *                deepslate_iron_ore); the coordinate is still a valid route;
- *  - `falsified` a DIFFERENT, non-proving block occupies the cell. This is the
- *                world disproving the memory (the measured M2 case: remembered
- *                obsidian cells now read as stone);
- *  - `unknown`   no verdict: the chunk is unloaded, the cell is air/fluid (a
- *                mined-out cell is not distinguishable from a not-yet-sent
- *                section here), or the read failed.
+ *  - `falsified` the loaded world DISPROVES the claim, with the typed `reason`:
+ *                `block_mined` (the block is gone/replaced), `mob_gone` (a
+ *                landmark whose producers are absent from the entity envelope)
+ *                or `drop_absent` (a remembered item stack nothing is holding);
+ *  - `unknown`   no verdict: the chunk is unloaded, the cell is outside the
+ *                evidence envelope the sensor actually covers, or the read
+ *                failed. UNKNOWN is never absence.
  *
  * The verdict is world truth (CAN/TRUE), never a preference. It exists so a
  * collect goal cannot keep re-targeting a memory the loaded world contradicts.
  */
 export type KnownResourceEvidenceStatus = 'present' | 'replaced' | 'falsified' | 'unknown'
 
+/** Why the loaded world disproved a remembered cell; only ever set on `falsified`. */
+export type KnownResourceFalsifiedReason =
+  /** the cell no longer holds the remembered block (air/fluid/another block) */
+  | 'block_mined'
+  /** the landmark stands, but no producer instance is inside the entity envelope */
+  | 'mob_gone'
+  /** the cell was remembered as the item itself and nothing holds that item */
+  | 'drop_absent'
+
 export interface KnownResourceEvidence {
-  /** block name the durable memory asserted */
+  /** block (or item) name the durable memory asserted */
   name: string
   position: Vec3Json
   /** live block name at the cell, or null when the chunk is unloaded */
   observed: string | null
   status: KnownResourceEvidenceStatus
+  /** what the cell asserts, and therefore how it was verified */
+  claim: KnownResourceClaim
+  /** the want item this verdict was computed for */
+  item: string
+  /** why `falsified`; absent for every other status */
+  reason?: KnownResourceFalsifiedReason
+  /** the live evidence behind a `present` producer/drop verdict */
+  source?: 'mob' | 'drop'
 }
 
 export type HeldItemState = {
@@ -883,6 +903,15 @@ export interface SensorInput {
   recentOutcomes?: readonly System2Outcome[]
   /** the item the current subgoal targets, used to focus the block scan */
   focusItem?: string | null
+  /**
+   * Every want item the candidate generator can route to this tick: the active
+   * focus plus any queued want the explicit descent proxy exposes
+   * (`candidates.ts#retrievalNeeds`). Remembered cells are verified for ALL of
+   * them, because a queued want's `RETRIEVE:known` route is offered from the same
+   * memory: verifying only the focus left a queued want's stale cell unproven and
+   * therefore permanently re-offered. Defaults to `focusItem`.
+   */
+  retrievalItems?: readonly string[]
   recentEvents: string[]
   signals: AgentSignals
   /**
@@ -1012,6 +1041,74 @@ export const DIRECT_BLOCK_SOURCES: Readonly<Record<string, readonly string[]>> =
 export function scannedBlockNames(focusItem: string | null): readonly string[] | undefined {
   if (focusItem === null) return undefined
   return ORE_SOURCES[focusItem] ?? DIRECT_BLOCK_SOURCES[focusItem]
+}
+
+/**
+ * Deterministic Minecraft producer truth for the items whose only grounded
+ * source is a mob drop. CAN/TRUE only: every sensed producer instance is exposed
+ * as a grounded alternative and Jev still owns WHICH one to pursue.
+ *
+ * It lives in the sensor (not the candidate layer) because the sensor must
+ * verify a remembered producer landmark against live entity truth (see
+ * `probeKnownResources`); `candidates.ts` imports this one table instead of
+ * keeping a second copy.
+ */
+export const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
+  ender_pearl: new Set(['enderman']),
+  blaze_rod: new Set(['blaze']),
+}
+
+/**
+ * True when every declared source name for a want is structure fabric: the block
+ * is a LANDMARK that hosts the producers, not a deposit that drops the item
+ * (`nether_bricks` does not yield `blaze_rod`; `resourceMatches` stays exact).
+ */
+export function isStructureFabricSource(blockNames: readonly string[]): boolean {
+  return blockNames.length > 0 && blockNames.every((name) => NETHER_STRUCTURE_BLOCK_NAMES.includes(name))
+}
+
+/**
+ * What a remembered cell ASSERTS about how the want item is obtained. Derived
+ * from the name the memory recorded, never from the entry's durability `kind`
+ * (#80/#342 reuse `kind` for portal/fortress envelopes that are not deposits):
+ *
+ *   `block`    the cell holds a block whose own drop is the item (iron_ore ->
+ *              raw_iron, gravel -> flint, obsidian -> obsidian): live block
+ *              truth at the cell is the whole verdict;
+ *   `producer` the cell is a structure LANDMARK that hosts the item's mob
+ *              producers (nether_bricks -> blaze_rod). The block standing there
+ *              does not put the drop there, so the cell is a deposit route only
+ *              while a producer instance (or its dropped item) is SENSED;
+ *   `drop`     the cell is remembered as the item itself (loot, a death drop),
+ *              so it is a route only while a dropped item entity is SENSED.
+ *
+ * Pure. This is the classification the offer/withhold rule is built on: a memory
+ * must be verified against the thing it actually claims.
+ */
+export type KnownResourceClaim = 'block' | 'producer' | 'drop'
+
+export function knownResourceClaimFor(name: string, item: string | null): KnownResourceClaim {
+  if (item !== null) {
+    const sources = scannedBlockNames(item)
+    // A declared block source for this item is a BLOCK claim even when the block
+    // and the item share a name (`obsidian` -> `obsidian` is a mine, not a drop).
+    if (sources !== undefined && sources.includes(name)) {
+      return isStructureFabricSource(sources) ? 'producer' : 'block'
+    }
+    // Remembered as the item itself (loot, a death drop) rather than as a block.
+    if (name === item) return 'drop'
+  }
+  if (NETHER_STRUCTURE_BLOCK_NAMES.includes(name)) return 'producer'
+  return 'block'
+}
+
+/** The mob producers a landmark block can host (`nether_bricks` -> `blaze`). */
+function landmarkProducers(name: string): ReadonlySet<string> {
+  const out = new Set<string>()
+  for (const [item, producers] of Object.entries(MOB_DROP_PRODUCERS)) {
+    if ((scannedBlockNames(item) ?? []).includes(name)) for (const producer of producers) out.add(producer)
+  }
+  return out
 }
 
 /** Resolve a block's primary drop, required tool class and required pickaxe rank. */
@@ -1765,6 +1862,9 @@ function sameRememberedFamily(remembered: string, observed: string): boolean {
 /** Does a remembered cell belong to the active focus's scanned source names? */
 function rememberedMatchesFocus(focusItem: string | null, name: string): boolean {
   if (focusItem === null) return false
+  // A cell remembered as the item itself (loot, a death drop) is matched by
+  // identity: no block-source table can name it.
+  if (name === focusItem) return true
   const sources = scannedBlockNames(focusItem)
   if (sources !== undefined) return sources.includes(name)
   if (
@@ -1779,9 +1879,33 @@ function rememberedMatchesFocus(focusItem: string | null, name: string): boolean
   return false
 }
 
+/** A raw entity from `bot.entities`, defensively typed (fixture doubles included). */
+interface LiveEntityLike {
+  name?: string
+  username?: string | null
+  kind?: string
+  position?: { x: number; y: number; z: number }
+  getDroppedItem?: () => { name?: string } | null
+}
+
+/** Live producer/drop evidence a remembered producer/drop claim needs. */
+export interface KnownResourceProbeOptions {
+  /**
+   * Every want item this tick's retrieval machinery could route to: the active
+   * focus PLUS any queued want the explicit descent proxy exposes (see
+   * `candidates.ts#retrievalNeeds`). Defaults to the single `focusItem`, so a
+   * caller that does not know about queued wants keeps its exact scope.
+   */
+  items?: readonly (string | null)[]
+  /** live general-entity radius (`SensorOptions.entityRadius`) */
+  entityRadius?: number
+  /** widened hostile radius (`SensorOptions.hostileRadius`) */
+  hostileRadius?: number
+}
+
 /**
  * #14-world-proof: positive live-world evidence for the remembered resource
- * cells the active focus would otherwise retrieve.
+ * cells the retrieval machinery would otherwise offer as targets.
  *
  * The durable staleness eviction (`generation-entry.ts#evictStaleKnownResources`)
  * only probes cells inside a 24-block "definitely loaded" radius. A memory that
@@ -1790,49 +1914,240 @@ function rememberedMatchesFocus(focusItem: string | null, name: string): boolean
  * stayed a live `RETRIEVE:known:obsidian` route forever and the body kept walking
  * to it. This probe reads the actual block at the cell: `bot.blockAt` returns
  * null for an unloaded chunk, so a far-but-loaded replacement is provable while
- * an unloaded one stays `unknown`. It is world truth only (CAN/TRUE): the sensor
- * removes `falsified` cells from `signals.knownResources` and reports the typed
- * evidence; no goal, action or ranking is decided here.
+ * an unloaded one stays `unknown`.
+ *
+ * The verdict follows the CLAIM the cell makes (`knownResourceClaimFor`), because
+ * "the block is still there" is not the truth a mob-drop memory asserts: a
+ * remembered fortress body whose producers are all absent is a stale route even
+ * though every `nether_bricks` block still stands (the measured M3 shape: the
+ * body walked to remembered fortress cells for `blaze_rod` while the run's own
+ * entity sensor reported `sensed=0`). A `producer`/`drop` claim is therefore
+ * verified against the live ENTITY envelope, and absence is only a verdict inside
+ * the radius that envelope actually covers: an unloaded cell, a read failure, or
+ * a cell beyond the sensor's radius stays `unknown`, never "gone".
+ *
+ * It is world truth only (CAN/TRUE): the sensor removes `falsified` cells from
+ * `signals.knownResources` and reports the typed evidence; no goal, action or
+ * ranking is decided here. Pure aside from the read-only `bot` probes.
  */
 export function probeKnownResources(
   bot: Bot,
   focusItem: string | null,
   remembered: readonly KnownResource[],
+  options: KnownResourceProbeOptions = {},
 ): KnownResourceEvidence[] {
-  if (focusItem === null) return []
-  const focusSources = scannedBlockNames(focusItem)
-  const out: KnownResourceEvidence[] = []
+  const items = (options.items ?? [focusItem]).filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  )
+  if (items.length === 0) return []
+  const entityRadius = options.entityRadius ?? defaultSensorOptions.entityRadius
+  const hostileRadius = options.hostileRadius ?? defaultSensorOptions.hostileRadius
+  const entities = liveEntities(bot)
+  // One cell, one verdict: a cell matching several wants resolves to the
+  // strongest one (falsified wins), because the candidate layer withholds a cell
+  // by coordinate regardless of which want it was serving.
+  const byCell = new Map<string, KnownResourceEvidence>()
   for (const resource of remembered) {
-    if (resource.kind !== 'ore' && resource.kind !== 'log') continue
-    if (!rememberedMatchesFocus(focusItem, resource.name)) continue
-    const position = resource.position
-    let block: { name?: string; boundingBox?: string } | null = null
-    try {
-      block = (bot.blockAt(new Vec3(position.x, position.y, position.z)) ?? null) as {
-        name?: string
-        boundingBox?: string
-      } | null
-    } catch {
-      block = null
+    if (resource.kind !== 'ore' && resource.kind !== 'log' && resource.kind !== 'structure') continue
+    for (const item of items) {
+      if (!rememberedMatchesFocus(item, resource.name)) continue
+      const evidence = probeRememberedCell(bot, entities, resource, item, entityRadius, hostileRadius)
+      if (evidence === null) continue
+      const cell = `${evidence.position.x},${evidence.position.y},${evidence.position.z}`
+      byCell.set(cell, preferredEvidence(byCell.get(cell), evidence))
     }
-    const observed = typeof block?.name === 'string' ? block.name : null
-    let status: KnownResourceEvidenceStatus
-    if (observed === null) status = 'unknown'
-    else if (observed === resource.name) status = 'present'
-    // A same-family variant (ore -> deepslate ore) or another declared source
-    // name for this focus (nether_bricks -> nether_brick_fence) still serves the
-    // want, so the cell stays a valid route and is reported as `replaced`.
-    else if (sameRememberedFamily(resource.name, observed) || focusSources?.includes(observed) === true)
-      status = 'replaced'
-    // Any other LOADED block falsifies the memory: `null` above is the only
-    // no-verdict case (unloaded cell). Air/fluids and empty-shape blocks are a
-    // loaded cell whose resource is gone, so a stale RETRIEVE route must not
-    // survive them (#406).
-    else if (ABSENCE_PROVING_CELL_BLOCKS.has(observed) || block?.boundingBox === 'empty') status = 'falsified'
-    else status = 'falsified'
-    out.push({ name: resource.name, position: { x: position.x, y: position.y, z: position.z }, observed, status })
   }
-  return out
+  return [...byCell.values()]
+}
+
+const EVIDENCE_RANK: Readonly<Record<KnownResourceEvidenceStatus, number>> = {
+  unknown: 0,
+  replaced: 1,
+  present: 2,
+  falsified: 3,
+}
+
+function preferredEvidence(
+  previous: KnownResourceEvidence | undefined,
+  next: KnownResourceEvidence,
+): KnownResourceEvidence {
+  if (previous === undefined) return next
+  return EVIDENCE_RANK[next.status] >= EVIDENCE_RANK[previous.status] ? next : previous
+}
+
+/** `bot.entities`, or null when this bot double cannot report entities at all. */
+function liveEntities(bot: Bot): Record<string, LiveEntityLike> | null {
+  const entities = (bot as { entities?: unknown }).entities
+  if (entities === null || typeof entities !== 'object') return null
+  return entities as Record<string, LiveEntityLike>
+}
+
+/** The bot's own feet cell, or null when the double exposes no entity. */
+function botSelfPosition(bot: Bot): Vec3Json | null {
+  const position = (bot as { entity?: { position?: { x: number; y: number; z: number } } }).entity?.position
+  if (position === undefined) return null
+  return { x: position.x, y: position.y, z: position.z }
+}
+
+/**
+ * The cell's live block. `loaded: false` is Mineflayer's "chunk not loaded" (or a
+ * read failure); a loaded cell always yields a name, `air` included (#406).
+ */
+function readCellBlock(
+  bot: Bot,
+  cell: Vec3Json,
+): { name: string | null; loaded: boolean; boundingBox: string | null } {
+  try {
+    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z)) as {
+      name?: string
+      boundingBox?: string
+    } | null
+    if (block === null || block === undefined) return { name: null, loaded: false, boundingBox: null }
+    return {
+      name: typeof block.name === 'string' ? block.name : null,
+      loaded: true,
+      boundingBox: typeof block.boundingBox === 'string' ? block.boundingBox : null,
+    }
+  } catch {
+    return { name: null, loaded: false, boundingBox: null }
+  }
+}
+
+/** A dropped item's item name, or null when this entity is not a dropped item. */
+function droppedItemOf(entity: LiveEntityLike): string | null {
+  if (entity.name !== 'item' && entity.name !== 'Item' && entity.name !== 'item_stack') return null
+  try {
+    const item = entity.getDroppedItem?.()
+    return item != null && typeof item.name === 'string' && item.name.length > 0 ? item.name : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is a live producer instance (or a dropped instance of the wanted item) sensed
+ * inside the cell's own neighbourhood? `entities === null` means the bot double
+ * cannot report entities, which is NOT "nothing is there".
+ */
+function liveProducerOrDrop(
+  entities: Record<string, LiveEntityLike> | null,
+  cell: Vec3Json,
+  producers: ReadonlySet<string>,
+  item: string,
+  radius: number,
+): 'mob' | 'drop' | null {
+  if (entities === null) return null
+  for (const entity of Object.values(entities)) {
+    const position = entity?.position
+    if (position === undefined) continue
+    if (distance({ x: position.x, y: position.y, z: position.z }, cell) > radius) continue
+    // A PLAYER is never the producer: `buildEntities` reads `username` first, so
+    // an online player named `blaze` must not verify a fortress.
+    if (typeof entity.username !== 'string') {
+      if (typeof entity.name === 'string' && producers.has(entity.name)) return 'mob'
+      if (typeof entity.kind === 'string' && producers.has(entity.kind)) return 'mob'
+    }
+    if (droppedItemOf(entity) === item) return 'drop'
+  }
+  return null
+}
+
+/** The radius the entity sensor covers for these producers (hostiles are widened). */
+function producerProofRadius(
+  producers: ReadonlySet<string>,
+  entityRadius: number,
+  hostileRadius: number,
+): number {
+  let radius = 0
+  for (const producer of producers) {
+    radius = Math.max(radius, isHostile(producer, undefined) ? hostileRadius : entityRadius)
+  }
+  return radius
+}
+
+function probeRememberedCell(
+  bot: Bot,
+  entities: Record<string, LiveEntityLike> | null,
+  resource: KnownResource,
+  item: string,
+  entityRadius: number,
+  hostileRadius: number,
+): KnownResourceEvidence | null {
+  const position = resource.position
+  const cell: Vec3Json = { x: position.x, y: position.y, z: position.z }
+  const block = readCellBlock(bot, cell)
+  const claim = knownResourceClaimFor(resource.name, item)
+  if (claim === 'producer' || claim === 'drop') {
+    const producers = claim === 'producer' ? landmarkProducers(resource.name) : new Set<string>()
+    // A landmark with no declared producers is not a producer route: verify it as
+    // the block it is instead of inventing a mob claim for it.
+    if (claim === 'producer' && producers.size === 0) {
+      return blockEvidence(resource, item, block, 'block', [])
+    }
+    const radius = claim === 'drop' ? entityRadius : producerProofRadius(producers, entityRadius, hostileRadius)
+    const source = liveProducerOrDrop(entities, cell, producers, item, radius)
+    if (source !== null) {
+      return { name: resource.name, position: cell, observed: block.name, status: 'present', claim, item, source }
+    }
+    const self = botSelfPosition(bot)
+    // No producer/drop inside the envelope. That is a contradiction only when the
+    // cell is actually observable (loaded + inside the radius the entity sensor
+    // covers); otherwise it is UNKNOWN - a mob that walked away, a chunk that is
+    // not loaded or a cell out of sensor range is never proof of absence.
+    if (entities === null || self === null || !block.loaded || distance(self, cell) > radius) {
+      return { name: resource.name, position: cell, observed: block.name, status: 'unknown', claim, item }
+    }
+    return {
+      name: resource.name,
+      position: cell,
+      observed: block.name,
+      status: 'falsified',
+      claim,
+      item,
+      reason: claim === 'drop' ? 'drop_absent' : 'mob_gone',
+    }
+  }
+  return blockEvidence(resource, item, block, claim, scannedBlockNames(item) ?? [])
+}
+
+/** The live-block verdict for a cell whose claim is the block itself. */
+function blockEvidence(
+  resource: KnownResource,
+  item: string,
+  block: { name: string | null; loaded: boolean; boundingBox: string | null },
+  claim: KnownResourceClaim,
+  focusSources: readonly string[],
+): KnownResourceEvidence {
+  const cell: Vec3Json = { x: resource.position.x, y: resource.position.y, z: resource.position.z }
+  const observed = block.loaded ? block.name : null
+  let status: KnownResourceEvidenceStatus
+  let reason: KnownResourceFalsifiedReason | undefined
+  if (observed === null) status = 'unknown'
+  else if (observed === resource.name) status = 'present'
+  // A same-family variant (ore -> deepslate ore) or another declared source
+  // name for this focus (nether_bricks -> nether_brick_fence) still serves the
+  // want, so the cell stays a valid route and is reported as `replaced`.
+  else if (sameRememberedFamily(resource.name, observed) || focusSources.includes(observed)) status = 'replaced'
+  // Any other LOADED block falsifies the memory: `null` above is the only
+  // no-verdict case (unloaded cell). Air/fluids and empty-shape blocks are a
+  // loaded cell whose resource is gone, so a stale RETRIEVE route must not
+  // survive them (#406).
+  else if (ABSENCE_PROVING_CELL_BLOCKS.has(observed) || block.boundingBox === 'empty') {
+    status = 'falsified'
+    reason = 'block_mined'
+  } else {
+    status = 'falsified'
+    reason = 'block_mined'
+  }
+  return {
+    name: resource.name,
+    position: cell,
+    observed,
+    status,
+    claim,
+    item,
+    ...(reason === undefined ? {} : { reason }),
+  }
 }
 
 function buildHazardBlocks(bot: Bot, options: SensorOptions, self: SelfState): BlockState[] {
@@ -2925,6 +3240,11 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     bot,
     input.focusItem ?? null,
     input.signals.knownResources ?? [],
+    {
+      ...(input.retrievalItems === undefined ? {} : { items: input.retrievalItems }),
+      entityRadius: options.entityRadius,
+      hostileRadius: options.hostileRadius,
+    },
   )
   const falsifiedKnownCells = new Set(
     knownResourceEvidence
