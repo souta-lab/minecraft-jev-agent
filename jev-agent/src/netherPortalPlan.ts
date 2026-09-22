@@ -1350,48 +1350,20 @@ export function formatSkillEnd(
 }
 
 /**
- * Issue #436 §17: every multi-step Skill states the commitment it realizes. The
- * Phase-1 vocabulary (`formatSkillStep` + `formatSkillStepAuthority`,
- * `formatSkillPolicyBoundary`, `formatSkillEnd`) owns the evidence layers; these
- * additive fields name WHICH commitment a step belongs to.
+ * Issue #436 §17: the COMMITMENT shape (`SKILL_COMMIT commitmentId=... skillKind=
+ * ... effectEnvelopeHash=...`) is NOT declared here. It is a second, semantic-
+ * identity vocabulary that lane task/skill-commitment-phase1 owns in
+ * `skillCommitment.ts` (`SkillCommitment`, `EffectEnvelope`, `formatSkillCommit`,
+ * `postconditionHash`, `effectEnvelopeHash`), and #436's §5 forbidden
+ * "expand the envelope because execution got inconvenient" rule is enforced
+ * there. This module keeps only the Phase-1 layer vocabulary that is already
+ * live on main (`formatSkillStep` + `formatSkillStepAuthority`,
+ * `formatSkillPolicyBoundary`, `formatSkillEnd`, `formatReflex`), and call sites
+ * name WHICH commitment a step belongs to with the additive `commitmentId=` /
+ * `targetIdentity=` fields. Migrating the portal call site onto
+ * `formatSkillCommit(commitment)` is that lane's Phase 5 work, in one place, so
+ * there is exactly one formatter for the marker.
  */
-export const SKILL_COMMIT = 'SKILL_COMMIT'
-
-export interface SkillCommitInput {
-  readonly skill: string
-  readonly commitmentId: string
-  readonly optionInstanceId: string
-  readonly decisionId: string
-  readonly candidateId: string
-  readonly skillKind: string
-  readonly targetIdentity: string
-  readonly postconditionHash: string
-  readonly effectEnvelopeHash: string
-}
-
-/** The exact `SKILL_COMMIT` line: the one Jev decision this Skill realizes. */
-export function formatSkillCommit(input: SkillCommitInput): string {
-  return (
-    `${SKILL_COMMIT} skill=${input.skill} commitmentId=${input.commitmentId}` +
-    ` optionInstanceId=${input.optionInstanceId} decisionId=${input.decisionId}` +
-    ` candidateId=${input.candidateId} skillKind=${input.skillKind}` +
-    ` targetIdentity=${input.targetIdentity} postconditionHash=${input.postconditionHash}` +
-    ` effectEnvelopeHash=${input.effectEnvelopeHash}`
-  )
-}
-
-/**
- * A deterministic short hash for commitment fields (postcondition / effect
- * envelope identities). Not cryptographic: the point is a STABLE identity a
- * reviewer can diff between runs, owned by code, with no model input.
- */
-export function skillHash(value: string): string {
-  let hash = 5381
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) + hash + value.charCodeAt(index)) >>> 0
-  }
-  return hash.toString(16).padStart(8, '0')
-}
 
 export interface ReflexInput {
   readonly ownerSkill: string

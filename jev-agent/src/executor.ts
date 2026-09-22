@@ -44,7 +44,7 @@ import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillCommit, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, skillHash, verifyPortal } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
 import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource, SkillStepAuthority } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
@@ -413,8 +413,13 @@ const PORTAL_FACE_LEG_NO_PROGRESS_MS = 600
  * between the body and the gate can never grant it dig/place authority. Any
  * remedy outside this envelope (mine the blocker, pillar, bridge) is a semantic
  * recovery and must go back to Jev as a `SKILL_POLICY_BOUNDARY` alternative.
+ *
+ * The TYPED `EffectEnvelope` and the `SKILL_COMMIT ... effectEnvelopeHash=` line
+ * are owned by lane task/skill-commitment-phase1 (`skillCommitment.ts`): this
+ * skill states the same fact in the Phase-1 vocabulary (the `envelope=` field of
+ * its own start/step lines) instead of forking a second commitment formatter.
  */
-const PORTAL_ENTER_EFFECT_ENVELOPE = 'mayMove=1,mayLook=1,mayJump=1,maySprint=1,mayDig=0,mayPlace=0,mayEquip=0,mayUse=0'
+const PORTAL_ENTER_EFFECT_ENVELOPE = 'movement-only(no_dig,no_place)'
 /** The entry Skill's declared postcondition identity (stable, code-owned). */
 const PORTAL_ENTER_POSTCONDITION = 'portal_entered:dimension=minecraft:the_nether'
 
@@ -5704,18 +5709,23 @@ export class Executor {
 
     // Issue #436: the entry Skill states its own boundary up front - the target
     // is the SELECTED portal site, and everything after this is code finishing
-    // that choice mechanically.
+    // that choice mechanically. The commitment identity, the declared
+    // postcondition and the declared effect envelope travel with it, so every
+    // later SKILL_STEP/SKILL_POLICY_BOUNDARY/SKILL_END line can be tied to this
+    // one Jev decision (§17). The `SKILL_COMMIT` line itself is emitted by the
+    // canonical commitment module (lane task/skill-commitment-phase1), not here.
     this.logger.info(
       'agent',
       formatSkillStart(
         PORTAL_ENTER_SKILL,
         this.portalEntrySelectionSource(candidate),
-        `site=${this.portalSiteOrigin(expectedCells, enterCell)} enter=${enterCell.x},${enterCell.y},${enterCell.z} dimension=${dimension}`,
+        `site=${this.portalSiteOrigin(expectedCells, enterCell)} enter=${enterCell.x},${enterCell.y},${enterCell.z} dimension=${dimension}` +
+          ` commitmentId=${this.portalCommitmentId(candidate, epoch)}` +
+          ` targetIdentity=${this.portalTargetIdentity(enterCell, dimension)}` +
+          ` postcondition=${PORTAL_ENTER_POSTCONDITION} envelope=${PORTAL_ENTER_EFFECT_ENVELOPE}`,
       ),
       { actionId: candidate.id, target: enterCell, dimension },
     )
-    // Issue #436 §17: the commitment every mechanical step below realizes.
-    this.commitPortalSkill(candidate, epoch, enterCell, dimension)
 
     // Hard world truth at entry time: the interior must still be nether_portal.
     // An UNOBSERVED interior cell (chunks unloaded while the body is far from a
@@ -6224,28 +6234,6 @@ export class Executor {
     return `enter=${enterCell.x},${enterCell.y},${enterCell.z}|dimension=${dimension}`
   }
 
-  /** `SKILL_COMMIT`: the one Jev decision every mechanical step realizes. */
-  private commitPortalSkill(candidate: Candidate, epoch: number, enterCell: Vec3Json, dimension: string): string {
-    const commitmentId = this.portalCommitmentId(candidate, epoch)
-    const targetIdentity = this.portalTargetIdentity(enterCell, dimension)
-    this.logger.info(
-      'agent',
-      formatSkillCommit({
-        skill: PORTAL_ENTER_SKILL,
-        commitmentId,
-        optionInstanceId: readMetaString(candidate, 'optionInstanceId') ?? 'active-option',
-        decisionId: readMetaString(candidate, 'decisionId') ?? candidate.id,
-        candidateId: candidate.id,
-        skillKind: candidate.kind,
-        targetIdentity,
-        postconditionHash: skillHash(PORTAL_ENTER_POSTCONDITION),
-        effectEnvelopeHash: skillHash(PORTAL_ENTER_EFFECT_ENVELOPE),
-      }),
-      { actionId: candidate.id, target: enterCell, dimension },
-    )
-    return commitmentId
-  }
-
   /**
    * One `SKILL_STEP` under the commitment. `authority` separates the three
    * deterministic layers issue #436 §17 requires: ordinary realization
@@ -6663,13 +6651,17 @@ export class Executor {
     // envelope may execute. Any OTHER genuinely available class - mining the
     // exact blocker, a vertical/place route that is still grounded - is a
     // different semantic recovery, so code must stop and surface it instead.
-    const otherRemedies = this.portalRemedyAlternatives(
+    // Every class that was grounded is named below, INCLUDING one that this
+    // commitment already spent (the vertical leg it ran before this fallback):
+    // dropping it from the evidence would hide a class a reviewer needs to see.
+    const remedyClasses = this.portalRemedyAlternatives(
       enterCell,
       interiors,
       blockers,
       verticalKind,
       verticalKind !== 'none',
-    ).filter((entry) => entry.includes('available:') || entry.includes('(grounded)'))
+    )
+    const otherRemedies = remedyClasses.filter((entry) => entry.includes('available:') || entry.includes('(grounded)'))
     const boundary = (reason: string, alternatives: readonly string[]): void => {
       this.logger.warn(
         'agent',
@@ -6687,7 +6679,7 @@ export class Executor {
         actionId: candidate.id,
         target: enterCell,
       })
-      boundary('no_in_envelope_remedy', otherRemedies)
+      boundary('no_in_envelope_remedy', remedyClasses)
       return { moved: false, cell: null, fromD, toD: fromD }
     }
     // U3 is a test over semantic REMEDY CLASSES, not over cells: every open face
@@ -6705,7 +6697,7 @@ export class Executor {
         blocker: blockerEvidence,
         alternatives: otherRemedies.join(';'),
       })
-      boundary('several_remedy_classes', [...faceNames, ...otherRemedies])
+      boundary('several_remedy_classes', [...faceNames, ...remedyClasses])
       return { moved: false, cell: null, fromD, toD: fromD }
     }
     // one class, several equivalent instances: refine by nearest reachable face,
@@ -6744,6 +6736,45 @@ export class Executor {
         // ways in, and that boundary is already emitted).
         const via = this.portalFaceStepOverVia(face)
         if (via !== null) {
+          const feetCell = {
+            x: Math.floor(this.bot.entity.position.x),
+            y: Math.floor(this.bot.entity.position.y),
+            z: Math.floor(this.bot.entity.position.z),
+          }
+          // §17: the prerequisite states the exact geometry it proved unique (the
+          // hole floor and the face it climbs to, WITH their y), the exact blocker
+          // (U2), that it never left the declared envelope (U4) and that it had
+          // not changed the world yet (worldDelta - the bounded walk below is what
+          // moves the body, and the face is re-observed before progress is
+          // claimed, U6). The `REFLEX ... reason=unique_binding_prerequisite`
+          // line above is the same fact in the pre-rewrite vocabulary, and the
+          // shared `commitmentId` ties this step to the one Jev decision.
+          this.logger.info(
+            'agent',
+            formatReflex({
+              ownerSkill: PORTAL_ENTER_SKILL,
+              action: 'step_over',
+              evidence:
+                `the only standable open face (${face.x},${face.y},${face.z}) is not walk reachable from ` +
+                `(${feetCell.x},${feetCell.y},${feetCell.z}) at this stage; the bounded continuation is the ` +
+                `verified hole floor (${via.x},${via.y},${via.z}) and then one step up onto the ledge (d=${round2(fromD)})`,
+            }),
+            { actionId: candidate.id, cell: via, target: face },
+          )
+          this.logger.info(
+            'agent',
+            formatSkillStep(
+              PORTAL_ENTER_SKILL,
+              'step_over',
+              formatSkillStepAuthority(
+                'MANDATORY_PREREQUISITE',
+                `via=${via.x},${via.y},${via.z} to=${face.x},${face.y},${face.z} blocker=${blockerEvidence} ` +
+                  `from_feet=${feetCell.x},${feetCell.y},${feetCell.z} envelope=${PORTAL_ENTER_EFFECT_ENVELOPE}`,
+                'none',
+              ) + ` commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
+            ),
+            { actionId: candidate.id, cell: via, target: face },
+          )
           const dropped = await this.walkToPortalFace(candidate, epoch, signal, via)
           if (dropped) reached = await this.walkToPortalFace(candidate, epoch, signal, face)
         }
@@ -6779,7 +6810,7 @@ export class Executor {
       target: enterCell,
       faces: faces.length,
     })
-    boundary('face_unreachable', [...faceNames, ...otherRemedies])
+    boundary('face_unreachable', [...faceNames, ...remedyClasses])
     return { moved: false, cell: null, fromD, toD: fromD }
   }
 

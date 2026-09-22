@@ -354,7 +354,27 @@ interface WalkModel {
  */
 function installWalkModel(
   fixture: FixtureBot,
-  options: { transfer: boolean; blocked?: boolean; vanishFace?: boolean },
+  options: {
+    transfer: boolean
+    blocked?: boolean
+    vanishFace?: boolean
+    /**
+     * The measured PATH-stage failure (`PATH_CALLBACK phase=failed
+     * outcome=noPath`): the pathfinder cannot own this cell, so the leg falls
+     * back to the direct control walk - exactly the shape the step-over
+     * continuation exists for.
+     */
+    noPath?: boolean
+    /**
+     * The measured straight-push failure: while the body still stands at
+     * `stance`, a push aimed at `face` makes NO approach progress (the live body
+     * slid along the frame column corner and the leg reported `unreachable` for
+     * a face the mechanical continuation reaches). Every other push - including
+     * the one into the verified hole floor - moves normally through the same
+     * collision model.
+     */
+    stepOver?: { stance: Vec3Json; face: Vec3Json }
+  },
 ): WalkModel {
   const bot = fixture.bot as unknown as { game: { dimension: string } }
   const controls: string[] = []
@@ -362,6 +382,7 @@ function installWalkModel(
   let moved = 0
   let jumped = false
   let vanished = false
+  const stanceKey = options.stepOver === undefined ? null : key(options.stepOver.stance)
   // the real actuator faces its target with `lookAt` and then pushes forward, so
   // the model walks the body along the LAST faced direction (one step per push)
   let heading = { x: 0, z: 0 }
@@ -388,6 +409,7 @@ function installWalkModel(
       getPathTo: (movements: unknown, goal: { x: number; y: number; z: number }) => { status: string; path: Vec3Json[] }
     }
   }).pathfinder.getPathTo = (_movements, goal) => {
+    if (options.noPath === true) return { status: 'noPath', path: [] }
     if (goal.x === ENTER_CELL.x && goal.y === ENTER_CELL.y && goal.z === ENTER_CELL.z) {
       return { status: 'noPath', path: [] }
     }
@@ -423,6 +445,19 @@ function installWalkModel(
       return
     }
     if (control !== 'forward') return
+    if (
+      stanceKey !== null &&
+      options.stepOver !== undefined &&
+      bodyCell() === stanceKey &&
+      Math.floor(lookTarget.x) === options.stepOver.face.x &&
+      Math.floor(lookTarget.z) === options.stepOver.face.z
+    ) {
+      // The measured straight push: no approach progress at all toward the face
+      // from the original stance. The bounded continuation has to drop into the
+      // verified hole floor first, and only then does the same face become
+      // mechanically reachable (below).
+      return
+    }
     if (options.blocked === true) {
       // a wall: the push slides the body along it (no approach progress)
       fixture.position.x += 0.15
@@ -1556,6 +1591,45 @@ function lowerCorridorFixture(): FixtureBot {
 
 const LOWER_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
 
+// ---------------------------------------------------------------------------
+// (m-b) THE MEASURED STEP-OVER SHAPE: the unique standable open face of the gate
+// is at the interior's own level (26,67,10) while the stance column in front of
+// the body is a 1-block hole whose VERIFIED floor is (25,66,10) - so the
+// mechanical continuation is: drop onto that floor, then climb the ledge onto
+// the face. The path stage cannot own the cell (`noPath`, the measured
+// PATH_CALLBACK outcome) and the straight push from the stance makes no approach
+// progress (the measured `unreachable` from the naive bearing walk) - which is
+// exactly the precondition #436 §7 U1..U6 requires before code may finish it.
+// ---------------------------------------------------------------------------
+function stepOverFixture(): FixtureBot {
+  const grid = gateGrid()
+  // the stance column (24,z=10): floor y=66, the body stands at feet y=67
+  grid.set('24,66,10', cell('stone'))
+  grid.set('24,67,10', cell('air'))
+  grid.set('24,68,10', cell('air'))
+  // the hole in front (25,z=10): open at 67/68, NO support at 66, floor at 65 -
+  // the ONE verified hole floor the step-over may drop onto
+  grid.set('25,65,10', cell('stone'))
+  grid.set('25,66,10', cell('air'))
+  grid.set('25,67,10', cell('air'))
+  grid.set('25,68,10', cell('air'))
+  // the open face (26,z=10): floor y=66, standable at feet y=67 (one block up
+  // from the hole floor), beside the lit interior cell (26,67,9)
+  grid.set('26,66,10', cell('stone'))
+  grid.set('26,67,10', cell('air'))
+  grid.set('26,68,10', cell('air'))
+  // disqualify the stance's other three neighbours: the hole must be UNIQUE or
+  // the skill has several ways in and must state the policy boundary instead
+  grid.set('23,67,10', cell('stone'))
+  grid.set('24,67,11', cell('stone'))
+  grid.set('24,67,9', cell('stone'))
+  return makeBot({ x: 24.2, y: 67, z: 10.2 }, grid, true)
+}
+
+const STEP_OVER_STAND: Vec3Json = { x: 24.2, y: 67, z: 10.2 }
+const STEP_OVER_VIA: Vec3Json = { x: 25, y: 66, z: 10 }
+const STEP_OVER_FACE: Vec3Json = { x: 26, y: 67, z: 10 }
+
 {
   // (m-a) the measured shape: the leg names the ONE-LOWER face and the walk then
   // steps UP into the interior and transfers
@@ -1714,6 +1788,132 @@ const LOWER_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
       result.messages.every((line) => !line.includes('MINE')) &&
       result.status === 'failed',
     `status=${result.status} digs=${fixture.digs.length} controls=[${model.controls.join(',')}]`,
+  )
+}
+
+{
+  // (m-b) U1..U6 for the STEP-OVER continuation: one verified hole floor, the
+  // measured stage failures, the prerequisite named with its exact geometry and
+  // blocker, and the SAME commitment resumed by the leg that follows.
+  const fixture = stepOverFixture()
+  const candidate = measuredCandidate(fixture, STEP_OVER_STAND)
+  const model = installWalkModel(fixture, {
+    transfer: true,
+    noPath: true,
+    stepOver: { stance: { x: 24, y: 67, z: 10 }, face: STEP_OVER_FACE },
+  })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const step = result.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('step=step_over')) ?? ''
+  const reflex = result.messages.find((line) => line.startsWith(REFLEX) && line.includes('action=step_over')) ?? ''
+  const leg = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_LEG)) ?? ''
+  const start = result.messages.find((line) => line.startsWith(SKILL_START)) ?? ''
+  const startCommitment = /commitmentId=([^\s]+)/.exec(start)?.[1] ?? null
+  const stepCommitment = /commitmentId=([^\s]+)/.exec(step)?.[1] ?? null
+  const forwards = model.controls.filter((control) => control === 'forward').length
+  check(
+    '(m-b) the measured step-over: ONE verified hole floor is executed as a MANDATORY_PREREQUISITE and the leg completes with the step up',
+    result.status === 'done' &&
+      step.includes('authority=MANDATORY_PREREQUISITE') &&
+      step.includes('via=25,66,10') &&
+      step.includes('to=26,67,10') &&
+      step.includes('envelope=movement-only(no_dig,no_place)') &&
+      step.includes('worldDelta=none') &&
+      step.includes('blocker=') &&
+      reflex.includes('reason=unique_binding_prerequisite') &&
+      leg.includes('cell=26,67,10') &&
+      leg.includes(`target=${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}`) &&
+      startCommitment !== null &&
+      stepCommitment === startCommitment &&
+      fixture.movedToFace &&
+      fixture.digs.length === 0,
+    `status=${result.status} face=${fixture.movedToFace} digs=${fixture.digs.length} start=[${startCommitment}] step=[${step}] leg=[${leg}]`,
+  )
+  check(
+    '(m-b) the step-over is BOUNDED (one named prerequisite, a finite number of pushes, no oscillation)',
+    result.messages.filter((line) => line.includes('step=step_over')).length === 1 &&
+      forwards > 0 &&
+      forwards <= 24,
+    `stepOverLines=${result.messages.filter((line) => line.includes('step=step_over')).length} forwards=${forwards} controls=[${model.controls.join(',')}]`,
+  )
+}
+
+{
+  // (m-b2) U6 on the step-over path: the prerequisite RUNS, the body arrives, and
+  // the face is re-observed as gone - so the skill claims NO progress. A failed
+  // prerequisite is never assumed to have worked.
+  const fixture = stepOverFixture()
+  const candidate = measuredCandidate(fixture, STEP_OVER_STAND)
+  const model = installWalkModel(fixture, {
+    transfer: true,
+    noPath: true,
+    vanishFace: true,
+    stepOver: { stance: { x: 24, y: 67, z: 10 }, face: STEP_OVER_FACE },
+  })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const boundary = result.messages.find((line) => line.startsWith(SKILL_POLICY_BOUNDARY)) ?? ''
+  check(
+    '(m-b2) U6: a step-over whose face vanished under the body is re-observed, claims no progress, and fails honestly',
+    result.status === 'failed' &&
+      result.messages.some((line) => line.startsWith(SKILL_STEP) && line.includes('step=step_over')) &&
+      boundary.includes('reason=face_unverified') &&
+      !result.messages.some((line) => line.startsWith(PORTAL_APPROACH_LEG)) &&
+      !result.messages.some((line) => line.startsWith(SKILL_END) && line.includes('execution=progress')),
+    `status=${result.status} controls=[${model.controls.join(',')}] boundary=[${boundary}]`,
+  )
+}
+
+{
+  // (m-h) BYTE IDENTITY for a same-level face: the level-tolerance change must not
+  // alter one byte of the same-level path's evidence. The expected lines are the
+  // exact strings the pre-change code produced for this shape (k-2's fixture).
+  const fixture = occludedFixture()
+  const candidate = measuredCandidate(fixture, OCCLUDED_STAND)
+  const model = installWalkModel(fixture, { transfer: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const step = result.messages.find((line) => line.startsWith(SKILL_STEP) && line.includes('step=approach_leg')) ?? ''
+  const leg = result.messages.find((line) => line.startsWith(PORTAL_APPROACH_LEG)) ?? ''
+  const stepOver = result.messages.filter((line) => line.includes('step=step_over')).length
+  check(
+    '(m-h) a same-level face is byte-identical: the same SKILL_STEP and PORTAL_APPROACH_LEG strings, no step-over',
+    step ===
+      'SKILL_STEP skill=ENTER_PORTAL(portalSite) step=approach_leg authority=MANDATORY_PREREQUISITE ' +
+        'evidence=blocker=obsidian@25,67,9+obsidian@25,68,9 class=DETOUR faces=[walk_face@26,67,10] ' +
+        'refined_by=nearest_reachable chosen=26,67,10 worldDelta=none commitmentId=ENTER:26,67,9#1' &&
+      leg === 'PORTAL_APPROACH_LEG cell=26,67,10 target=26,67,9 from_d=1.81 to_d=1.02' &&
+      stepOver === 0 &&
+      fixture.movedToFace &&
+      result.status === 'done',
+    `step=[${step}] leg=[${leg}] stepOver=${stepOver} controls=[${model.controls.join(',')}]`,
+  )
+}
+
+{
+  // (m-e2) U3 over THREE classes: with the detour (walk around the frame), a
+  // hand-harvestable wall (mine) AND a grounded vertical route (pillar) all
+  // present, the skill executes NONE of them and surfaces every class it
+  // grounded - including the vertical route this commitment already spent.
+  const fixture = occludedFixture()
+  fixture.grid.set('25,67,9', cell('dirt'))
+  fixture.grid.set('25,68,9', cell('dirt'))
+  fixture.grid.set('25,66,9', cell('dirt'))
+  const base = measuredCandidate(fixture, OCCLUDED_STAND)
+  // a grounded vertical route (the same meta a MOVE candidate carries). It was
+  // attempted before this fallback, so its class is named as spent, never hidden.
+  const candidate: Candidate = { ...base, meta: { ...base.meta, vertical: 'staircase-up', upDigY: 68 } }
+  const model = installWalkModel(fixture, { transfer: true })
+  const result = await runEntry(fixture, candidate, false, true, stubStuckPath(fixture))
+  const boundary = result.messages.find((line) => line.startsWith(SKILL_POLICY_BOUNDARY)) ?? ''
+  check(
+    '(m-e2) U3: detour + mine + pillar all grounded -> code picks none and names every class (the spent one included)',
+    result.status === 'failed' &&
+      boundary.includes('reason=several_remedy_classes') &&
+      boundary.includes('walk_face@26,67,10') &&
+      boundary.includes('dig@25,67,9(dirt,available:') &&
+      boundary.includes('vertical:staircase-up(spent)') &&
+      !result.messages.some((line) => line.startsWith(PORTAL_APPROACH_LEG)) &&
+      model.controls.length === 0 &&
+      fixture.digs.length === 0,
+    `status=${result.status} controls=[${model.controls.join(',')}] digs=${fixture.digs.length} boundary=[${boundary}]`,
   )
 }
 
