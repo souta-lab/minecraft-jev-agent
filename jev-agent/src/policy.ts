@@ -16,6 +16,7 @@ import type { Vec3Json, WorldState } from './state.ts'
 import { bodyIsOutOfAir, bodyStarving, bodySubmersion, distance, MAX_AIR, placementSpotKey } from './state.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import { ENV_LAVA_PROXIMITY, envHazardProximityDenied } from './envHazard.ts'
+import { isVerifiedWallEntry } from './wallEntry.ts'
 import { fuelCountFor, smeltInventorySufficient } from './gameData.ts'
 
 export type GuardPhase = 'decision' | 'dig'
@@ -882,14 +883,37 @@ function guardDescend(candidate: Candidate, state: WorldState, context: GuardCon
   if (step === undefined) {
     return deny(candidate.id, 'TARGET_GONE', `no descent step digging (${target.x},${target.y},${target.z}) in the current state`)
   }
-  if (!step.safe) {
+  // WALL ENTRY (`wallEntry.ts`): the sensor's `safe` verdict is a 3x3x3 PROXIMITY
+  // union, so a step whose pocket is provably dry is refused `hazard` exactly like a
+  // step the lava would pour through. The candidate declares the entry, and the guard
+  // re-verifies it against the SAME sensor tick's own wall probe (`state.wallProbes`)
+  // with the SAME predicate the offer used - it never trusts candidate meta. Only a
+  // `hazard` refusal is superseded (the one proximity verdict the per-cell rule can
+  // prove wrong); every other refused step is denied exactly as before, and when no
+  // verified probe matches, the deny is unchanged.
+  const entryProbe =
+    candidate.meta.digRouteEntry === true && step.refusal === 'hazard'
+      ? (state.wallProbes ?? []).find(
+          (probe) => probe.dir === dir && probe.mode === mode && samePosition(probe.landing, target),
+        )
+      : undefined
+  const verifiedEntry = entryProbe !== undefined && isVerifiedWallEntry(entryProbe)
+  if (!step.safe && !verifiedEntry) {
     return deny(candidate.id, 'NO_SUPPORT', `the descent step is not safe: ${step.reason}`)
   }
   if (candidate.requiresTool && !hasTool(state, candidate.toolName)) {
     return deny(candidate.id, 'EMPTY_HAND', `needs ${candidate.toolName ?? 'a tool'} but the inventory has none`)
   }
   const hazard = nearestHazardTo(state, target)
-  if (hazard !== null) {
+  // A VERIFIED wall entry is exempt from the proximity hazard deny for the same
+  // reason it is exempt from the proximity `safe` verdict: `nearestHazardTo` is a
+  // 1.5-block radius (`ENV_LAVA_PROXIMITY`) around the mined cell, and a hazard that
+  // radius catches but that shares no FACE with the pocket cannot reach the body
+  // (fluids spread face-adjacently, and a diagonal neighbour does not intersect the
+  // body's 0.6-wide box). A hazard that IS face-adjacent to the pocket is exactly what
+  // `isVerifiedWallEntry` already refused, so this cannot let a hazardous entry
+  // through: the per-cell rule is strictly stronger here than the radius.
+  if (hazard !== null && !verifiedEntry) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the descent block`)
   }
   if (context.phase === 'dig' && distance(target, state.self.eyePosition) > context.reach) {

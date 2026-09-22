@@ -52,6 +52,8 @@ import { buildEnvHazardState, envHazardKindOfBlock } from './envHazard.ts'
 import type { EnvHazardCell, EnvHazardState } from './envHazard.ts'
 import { BRIDGE_DIRS, BRIDGE_PROBE_DEPTH, bridgeDirOffset, isBridgeUnsafeBlockName } from './bridgeRoute.ts'
 import type { BridgeDir, BridgeProbe, BridgeProbeCell } from './bridgeRoute.ts'
+import { WALL_DIRS, floodEvidence, isTunnelFloodBlockName } from './wallEntry.ts'
+import type { WallBlockLike, WallCell, WallProbe } from './wallEntry.ts'
 
 export type Vec3Json = {
   x: number
@@ -845,6 +847,16 @@ export type WorldState = {
   knownResourceEvidence?: KnownResourceEvidence[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
+  /**
+   * The cardinal WALL ENTRY probes: the adjacent 1x2 profile the body could mine
+   * open (`wallEntry.ts`), with the pre-existing floor it would stand on and the
+   * six-neighbourhood that decides whether the dig could be flooded. Populated only
+   * while a sensed step is refused by `hazard`/`no_support` - i.e. only where a walk
+   * step is genuinely refused - so ordinary terrain carries no probe and the offer is
+   * byte-identical there. Absent in old replay fixtures means "no probe", which
+   * grounds no entry (never a false capability).
+   */
+  wallProbes?: WallProbe[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
   stepCuts?: StepCut[]
   /** ceiling blocks above the bot that block a jump (canopy pocket) */
@@ -3477,6 +3489,104 @@ function buildBridgeProbes(bot: Bot, self: SelfState): BridgeProbe[] {
 }
 
 /**
+ * The cardinal WALL ENTRY probes: what the body could mine open beside itself, and
+ * whether the pocket it would open could be flooded.
+ *
+ * WHY THIS IS A SEPARATE FACT FROM `descent` (measured, live, the operator's flooded
+ * Nether arrival): `buildDescent`'s `safe` verdict is a 3x3x3 PROXIMITY rule, so a
+ * body standing beside a lava band has every step refused `hazard` even where the
+ * cell to be mined is dry solid rock whose new pocket no fluid can reach. The step
+ * vocabulary cannot express "this dig is safe because of WHICH cell is mined and what
+ * touches it"; this probe does, per cell, from the same live blocks:
+ *
+ *   * each probe carries the sensor's OWN `DescentOption` for that direction and mode
+ *     (`level` and `down`), so the profile, the primary cell, the dig plan, the route
+ *     identity and the executor are all reused, never recomputed;
+ *   * `pocket` is the 1x2 profile the body will occupy: `[landing, landing + 1]` -
+ *     for `level` those are the sensor's `wall`/`head`, for `down` its `floor`/`wall`;
+ *   * `floor` is `landing.y - 1` and is NEVER mined: the tunnel's floor is pre-existing
+ *     rock, which is why this step is safe where a walk step over lava is not;
+ *   * `flood` is `wallEntry.ts#floodEvidence`: a fluid FACE-ADJACENT to a pocket cell
+ *     would pour in, and a fluid two cells away (with the solid cell between them
+ *     still solid) cannot.
+ *
+ * Reads are direct chunk lookups and bounded (4 directions x 2 modes x [2 profile
+ * cells + 1 floor + the pocket's six-neighbourhood]), and the caller only builds the
+ * probe while a walk step is actually refused, so ordinary terrain reads nothing extra.
+ *
+ * Exported for the same reason `probeBridgeDirection` is: the facts it classifies are
+ * the input of a load-bearing safety rule (`wallEntry.ts#groundWallEntries`), so a
+ * fixture must be able to drive the REAL classification from a modelled world instead
+ * of re-implementing it.
+ */
+export function buildWallProbes(
+  bot: Bot,
+  self: SelfState,
+  descent: readonly DescentOption[],
+): WallProbe[] {
+  const scratch = bot.entity.position.clone()
+  const read = (cell: Vec3Json): WallBlockLike | null => {
+    const block = bot.blockAt(scratch.set(cell.x, cell.y, cell.z))
+    return block === null
+      ? null
+      : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
+  }
+  const classify = (cell: Vec3Json): WallCell => {
+    const block = read(cell)
+    const open = block !== null && block.boundingBox === 'empty'
+    const solid = block !== null && block.boundingBox !== 'empty'
+    return {
+      cell,
+      name: block?.name ?? null,
+      open,
+      solid,
+      breakable: solid && block?.diggable === true && !isTunnelFloodBlockName(block.name),
+      observed: block !== null,
+    }
+  }
+  const probes: WallProbe[] = []
+  for (const dir of WALL_DIRS) {
+    for (const mode of ['level', 'down'] as const) {
+      const step = descent.find((option) => option.dir === dir && option.mode === mode)
+      if (step === undefined) continue
+      const landing = step.step
+      const head = { x: landing.x, y: landing.y + 1, z: landing.z }
+      const floor = { x: landing.x, y: landing.y - 1, z: landing.z }
+      // The pocket the dig makes open: the body's own 1x2 profile at the landing, and
+      // a fluid face-adjacent to either cell can pour into it.
+      const flood = floodEvidence([landing, head], read)
+      probes.push({
+        dir,
+        mode,
+        dx: step.dx,
+        dz: step.dz,
+        landing,
+        pocket: [classify(landing), classify(head)],
+        floor: classify(floor),
+        flood: flood !== null,
+        floodCell: flood?.cell ?? null,
+        floodBlock: flood?.block ?? null,
+        step,
+      })
+    }
+  }
+  return probes
+}
+
+/**
+ * Should this tick sense the wall-entry probes at all?
+ *
+ * ONLY when a sensed step is refused by `hazard` or `no_support` - the two refusals
+ * whose cause is the body's own local geology rather than its tools, its goal or a
+ * protected block. That is the exact precondition `wallEntry.ts` answers, and it keeps
+ * the sensor (and therefore the offer) byte-identical on ordinary terrain: there every
+ * cardinal step is either `safe` or refused for a reason no dig could change.
+ */
+function shouldProbeWallEntry(descent: readonly DescentOption[]): boolean {
+  return descent.some((option) => option.refusal === 'hazard' || option.refusal === 'no_support')
+}
+
+/**
  * SAFE: keep-distance destinations for an active threat.
  *
  * The measured retreat failure is a SENSING failure as much as a policy one:
@@ -3587,6 +3697,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   const placementSpots = buildPlacementSpots(bot, options, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
+  const descent = buildDescent(bot, options, self)
   return {
     schemaVersion: 1,
     tick: input.tick,
@@ -3618,7 +3729,10 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       underConstructionMembers(portalFrameSites, input.goalQueue?.current ?? null),
     ),
     knownResourceEvidence,
-    descent: buildDescent(bot, options, self),
+    descent,
+    // The wall-entry probes exist only where a step is refused by the body's own
+    // local geology: on ordinary terrain this adds nothing at all.
+    ...(shouldProbeWallEntry(descent) ? { wallProbes: buildWallProbes(bot, self, descent) } : {}),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),
     goal: input.goal,
