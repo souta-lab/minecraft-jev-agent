@@ -28,10 +28,11 @@
 //
 // Run: bun test-zero-progress-route.mts
 import { readFileSync } from 'node:fs'
-import { defaultCandidateOptions, descendPrimaryCell, generateCandidates, generateGroundedCandidates } from './src/candidates.ts'
+import { defaultCandidateOptions, generateCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { emptyGoalQueueState } from './src/goalQueue.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
+import { descentPrimaryCell } from './src/state.ts'
 import type { AgentSignals, DescentOption, GoalState, InventoryState, KnownResource, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import {
   cellKey,
@@ -442,7 +443,7 @@ addCase('(d) with no zero-progress memory the descend offer is byte-identical to
   const south = downStep('S', 0, 1, feet)
   const state = worldState({ position: feet, descent: [east, south], signals: signals() })
   const offered = generateCandidates(state)
-  const primary = descendPrimaryCell(east)
+  const primary = descentPrimaryCell(east)
   const first = offered.find((candidate) => candidate.id.startsWith('DESCEND:'))
   return {
     pass:
