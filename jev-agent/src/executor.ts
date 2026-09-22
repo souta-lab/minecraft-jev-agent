@@ -23,6 +23,12 @@ import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
 import { bodySubmersion, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, resolveBlockHarvest, toVec3 } from './state.ts'
 import type { BodySubmersion } from './state.ts'
+import {
+  classifyStepLanding,
+  formatMoveLegStopped,
+  STEP_SUPPORT_UNKNOWN,
+} from './stepLanding.ts'
+import type { StepLandingBlock, StepLandingReads } from './stepLanding.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
@@ -162,6 +168,15 @@ export type FailureCode =
   | 'place_refused'
   /** SAFE: the body is out of breath, so the mechanical action stops */
   | 'submerged'
+  /**
+   * The per-step landing guard stopped the locomotion leg BEFORE the step: the
+   * step's landing cell is a hazard (`hazard_between`) or has no real support
+   * within the movement policy's own drop bound (`unsafe_landing`). Both are
+   * typed refusals of the LEG, never a re-planned route: the body keeps standing
+   * where it is and the decision returns to the policy (`stepLanding.ts`).
+   */
+  | 'hazard_between'
+  | 'unsafe_landing'
   | 'cancelled'
   | 'unknown_event'
 
@@ -456,6 +471,23 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
 
 /** How far ahead the terrain-contact probe reads the facing column (blocks). */
 const FACE_PROBE_DIST = 0.8
+
+/**
+ * How far ahead one locomotion STEP looks for its landing cell (blocks): one
+ * cell along the travel heading, so the guard reads the column the body is about
+ * to enter and never the one it already stands in.
+ */
+const MOVE_STEP_PROBE_DISTANCE = 1
+/**
+ * The bounded window the per-step landing guard reads UNDER the landing cell.
+ * The live bound is the movement policy's own `maxDropDown` (8, pinned in
+ * `ensureMovements`), so the guard can never refuse a drop the `canDig=false`
+ * planner itself would have planned; these are only the fallback/clamp used when
+ * the plugin's movements are unreadable, so a hostile value cannot turn one step
+ * into a world scan.
+ */
+const MOVE_STEP_LANDING_WINDOW_DEFAULT = 8
+const MOVE_STEP_LANDING_WINDOW_MAX = 16
 
 export type ClimbManeuver = 'pre-contact-jump' | 'vertical-hop' | 'continue'
 
@@ -3477,6 +3509,84 @@ export class Executor {
   }
 
   /**
+   * The bounded landing window: the movement policy's OWN `maxDropDown`, so this
+   * guard refuses exactly the steps the `canDig=false` planner would never have
+   * planned and leaves every legal drop untouched.
+   */
+  private moveStepLandingWindow(): number {
+    const movements = (
+      this.bot.pathfinder as unknown as { movements?: { maxDropDown?: number } } | undefined
+    )?.movements
+    const configured = movements?.maxDropDown
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1) {
+      return Math.min(Math.floor(configured), MOVE_STEP_LANDING_WINDOW_MAX)
+    }
+    return MOVE_STEP_LANDING_WINDOW_DEFAULT
+  }
+
+  /** Read the landing cell, its head cell and the bounded column under it. */
+  private readStepLanding(landing: Vec3Json): StepLandingReads {
+    const at = (y: number): StepLandingBlock | null => {
+      const block = this.currentBlockAt({ x: landing.x, y, z: landing.z })
+      return block === null ? null : { name: block.name, boundingBox: block.boundingBox }
+    }
+    const below: Array<StepLandingBlock | null> = []
+    for (let depth = 1; depth <= this.moveStepLandingWindow(); depth += 1) below.push(at(landing.y - depth))
+    return { landing: at(landing.y), head: at(landing.y + 1), below }
+  }
+
+  /**
+   * THE PER-STEP LANDING GUARD (measured defect run-mucdemk5-1kg6b).
+   *
+   * Asked once per step, BEFORE the body is actuated: does the step's landing
+   * column hold real ground within the movement policy's own drop bound, and is
+   * the landing cell itself free of a hazard? Reads only already-sensed cells
+   * (`bot.blockAt`), runs no A*, and never re-plans: a refusal logs the typed
+   * `MOVE_LEG_STOPPED` line, throws the same typed `ExecutorError`, and leaves
+   * the body standing exactly where it is, so the decision returns to the policy
+   * layer that owns WHICH destination/action comes next (#436).
+   */
+  private guardStepLanding(target: Vec3Json, landing: Vec3Json): void {
+    const feet = this.bot.entity.position
+    const from = {
+      x: Math.floor(feet.x),
+      y: Math.floor(feet.y + 0.1),
+      z: Math.floor(feet.z),
+    }
+    // A probe that resolves to the body's own column is not a step (a near-zero
+    // or backward heading): the body's own support is not this guard's question.
+    if (from.x === landing.x && from.z === landing.z && from.y === landing.y) return
+    const verdict = classifyStepLanding(this.readStepLanding(landing))
+    if (verdict.reason === null) return
+    const detail = {
+      actionId: this.action?.id ?? 'unknown',
+      target,
+      reason: verdict.reason,
+      from,
+      to: landing,
+      block: verdict.block ?? STEP_SUPPORT_UNKNOWN,
+      support: verdict.support,
+    }
+    this.logger.warn(
+      'executor',
+      formatMoveLegStopped({
+        reason: verdict.reason,
+        from,
+        to: landing,
+        block: verdict.block,
+        support: verdict.support,
+      }),
+      detail,
+    )
+    throw new ExecutorError(
+      verdict.reason,
+      `${verdict.reason} before the step to (${landing.x},${landing.y},${landing.z}): block=${
+        verdict.block ?? STEP_SUPPORT_UNKNOWN
+      } support=${verdict.support}`,
+    )
+  }
+
+  /**
    * Control-state actuator: the pathfinder plans (`getPathTo`, canDig=false) and
    * Mineflayer physics actuates. This ports the proven vertical-movement recipe
    * from `mcbot/movement-test/vertical.mjs#navigateTo`:
@@ -3606,6 +3716,22 @@ export class Executor {
         const uz = dz / (horizontal || 1)
         if (horizontal > 0.05) {
           await this.bot.lookAt(this.bot.entity.position.offset(dx, 0, dz), true).catch(() => undefined)
+          // PER-WAYPOINT PRE-STEP GUARD (measured defect run-mucecx3h-1ljqz /
+          // run-mucdemk5-1kg6b): the committed leg's own next step is validated
+          // BEFORE any control state is set. `noPath` from the canDig=false
+          // pathfinder routinely hands the leg to this control walker, which then
+          // held `forward` with physics on and walked the body off a fortress
+          // walkway into the lava lake below; `policy.guardMove` had only
+          // validated the FINAL target cell and this walker only headroom. A
+          // refusal stops the leg where the body stands (the `finally` below
+          // releases every control state) and returns the typed reason to the
+          // policy - the guard never re-plans a route, pillars or digs (that is
+          // Jev's WHICH).
+          this.guardStepLanding(target, {
+            x: Math.floor(position.x + ux * MOVE_STEP_PROBE_DISTANCE),
+            y: Math.floor(position.y + 0.1),
+            z: Math.floor(position.z + uz * MOVE_STEP_PROBE_DISTANCE),
+          })
         }
 
         const step = this.scanAhead(position, ux, uz)
@@ -7180,6 +7306,17 @@ export class Executor {
 
         const next = this.chooseStep(position, target)
         if (next === null) return false
+        // The same per-step landing guard the control walker uses. `chooseStep`
+        // already proves SOLID support for its own step levels, so this cannot
+        // refuse ordinary packet terrain; what it adds is the HAZARD landing cell
+        // the stepper was blind to (a fire block over netherrack is passable over
+        // solid support, so it was a legal packet step). A refusal stops the leg
+        // here, before the pose is written.
+        this.guardStepLanding(target, {
+          x: Math.floor(next.x),
+          y: Math.floor(next.y + 0.1),
+          z: Math.floor(next.z),
+        })
         const moveX = next.x - position.x
         const moveZ = next.z - position.z
         const yaw = Math.atan2(-moveX, moveZ)
