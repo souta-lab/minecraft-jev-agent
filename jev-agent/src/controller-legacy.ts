@@ -1341,6 +1341,17 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // told apart from "no leg was ever grounded".
   'PORTAL_APPROACH_LEG',
   'PORTAL_APPROACH_REFUSED',
+  // The COMPOSED entry climb: an interior above the body beyond the walk-in
+  // tolerance is reached by the candidate's own grounded vertical contract, and
+  // the live run needs both halves of its evidence. Without `PORTAL_ENTRY_CLIMB`
+  // the live sink DROPS the line naming which climb ran, its own bound and its
+  // outcome - and `SKILL_POLICY_BOUNDARY ... alternatives=[vertical:reuse(spent)]`
+  // (run.jsonl 2026-09-22T15:47:37Z) cannot be told apart from a climb that was
+  // really attempted. Without `PORTAL_ENTRY_CLIMB_REFUSED` the run shows only the
+  // bare `not_level` walk-in refusal and hides the interior's height and the
+  // climb that was (or was not) available.
+  'PORTAL_ENTRY_CLIMB',
+  'PORTAL_ENTRY_CLIMB_REFUSED',
   // Issue #436: the Skill boundary and the reflex proof must both be live-visible,
   // or a reviewer cannot tell "Jev chose the target" from "code finished it".
   'SKILL_START',

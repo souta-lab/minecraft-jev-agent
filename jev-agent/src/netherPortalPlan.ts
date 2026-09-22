@@ -1172,14 +1172,124 @@ export interface PortalEntryRouteBlockedInput {
   readonly fromY: number
   readonly toY: number
   readonly detail?: string
+  /**
+   * The composed CLIMB half of the same refusal (optional, additive): what the
+   * route's vertical legs were and why they could not close the height. Omitted
+   * entirely when the interior was never above the body beyond the walk-in
+   * tolerance, so a level entry's line stays byte-identical.
+   */
+  readonly climb?: string
 }
 
 /** The exact `PORTAL_ENTRY_ROUTE_BLOCKED` line: the obstruction, named. */
 export function formatPortalEntryRouteBlocked(input: PortalEntryRouteBlockedInput): string {
   const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
+  const climb = input.climb === undefined || input.climb.length === 0 ? '' : ` climb=${input.climb}`
   return (
     `PORTAL_ENTRY_ROUTE_BLOCKED reason=${input.reason}` +
-    ` entry=${formatPos(input.entryCell)} from_y=${input.fromY} to_y=${input.toY}${detail}`
+    ` entry=${formatPos(input.entryCell)} from_y=${input.fromY} to_y=${input.toY}${detail}${climb}`
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The COMPOSED entry approach's vertical half.
+//
+// Measured live (run.jsonl 2026-09-22T15:47:37.705Z, the operator's trial): the
+// portal interior (27,67,9) floated 5 blocks above a body at y=62, and the entry
+// could not climb. The candidate DID carry a grounded climb - the entry's own
+// `vertical`/`fallbackVertical` contract, the SAME `planVerticalApproachDetailed`
+// plan every MOVE/ASCEND leg runs - but the executor ran ONLY the primary leg,
+// which was a `reuse` plan pointing at a remembered tunnel 34 blocks west
+// (`REUSE_TUNNEL at=-7,66,9`). That leg stalled rather than refusing typed, so the
+// grounded pillar fallback was never reached; `walkIntoPortalEntry` then refused
+// `not_level` (dy=+5 > PORTAL_WALK_IN_LEVEL_TOLERANCE) and the only remaining leg
+// was the HORIZONTAL step-aside, which cannot change Y at all. The action died
+// with `PORTAL_ENTRY_ROUTE_BLOCKED ... detail=unsafe_landing` and the code named
+// its own dead end: `SKILL_POLICY_BOUNDARY ... alternatives=[vertical:reuse(spent)]`.
+//
+// These two lines are the missing composition's evidence: one per vertical leg the
+// entry actually runs (so a reviewer sees WHICH climb, its own bound, and its
+// outcome), and one typed refusal when no grounded climb exists at all - never a
+// silent no-op and never an unverified claim.
+// ---------------------------------------------------------------------------
+
+/** The composed entry climb: one line per vertical leg the entry runs. */
+export const PORTAL_ENTRY_CLIMB = 'PORTAL_ENTRY_CLIMB'
+/**
+ * The composed entry climb had no grounded route at all: the interior's height,
+ * the climb that was available and the fact that failed are all named.
+ */
+export const PORTAL_ENTRY_CLIMB_REFUSED = 'PORTAL_ENTRY_CLIMB_REFUSED'
+
+/**
+ * Which half of the entry's grounded vertical contract a leg is:
+ *   `primary`  the plan the candidate was offered with (`meta.vertical`);
+ *   `fallback` the second grounded plan of the SAME contract
+ *              (`meta.fallbackVertical`, e.g. the own-column pillar behind a
+ *              remembered-tunnel `reuse` plan).
+ */
+export type PortalEntryClimbLeg = 'primary' | 'fallback'
+
+/** How a composed climb leg ended: a durable rise, no rise, or a typed failure. */
+export type PortalEntryClimbOutcome = 'climbed' | 'no_rise' | 'failed'
+
+export interface PortalEntryClimbInput {
+  readonly cell: PortalBlockPosition
+  readonly fromY: number
+  readonly toY: number
+  readonly leg: PortalEntryClimbLeg
+  /** the vertical kind this leg ran (`pillar` / `staircase-up` / `reuse` / `none`) */
+  readonly climb: string
+  /** the plan's OWN bound, in its own vocabulary (never a claim about the world) */
+  readonly plan: string
+  readonly outcome: PortalEntryClimbOutcome
+  readonly detail?: string
+}
+
+/** The exact `PORTAL_ENTRY_CLIMB` line: one composed vertical leg, named. */
+export function formatPortalEntryClimb(input: PortalEntryClimbInput): string {
+  const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
+  return (
+    `${PORTAL_ENTRY_CLIMB} cell=${formatPos(input.cell)}` +
+    ` from_y=${input.fromY} to_y=${input.toY} dy=${input.toY - input.fromY}` +
+    ` leg=${input.leg} climb=${input.climb} plan=${input.plan} outcome=${input.outcome}${detail}`
+  )
+}
+
+export interface PortalEntryClimbRefusedInput {
+  readonly cell: PortalBlockPosition
+  readonly fromY: number
+  readonly toY: number
+  /** the primary grounded climb the candidate carried; `none` when it carried none */
+  readonly climb: string
+  /** the second grounded climb of the same contract; `none` when there is none */
+  readonly fallback: string
+  /** the typed fact that stopped the composition */
+  readonly reason: PortalEntryClimbRefusalReason
+  readonly detail?: string
+}
+
+/**
+ * Why the composed climb could not be grounded, typed and stable:
+ *   `no_grounded_climb`  the candidate carried no vertical plan at all for this
+ *                        height (the offering layer named its own reason in
+ *                        `entryRouteRefusal`, e.g. `no_placeable`/`unsafe_column`);
+ *   `climb_no_rise`      grounded plans existed and ran, and none durably raised
+ *                        the body (`detail` carries the executed leg's cause).
+ */
+export type PortalEntryClimbRefusalReason = 'no_grounded_climb' | 'climb_no_rise'
+
+/**
+ * The exact `PORTAL_ENTRY_CLIMB_REFUSED` line: the interior's height, the climb
+ * that was available, and what failed - the three facts a reviewer needs to tell
+ * "no route exists" from "a route exists and was not run".
+ */
+export function formatPortalEntryClimbRefused(input: PortalEntryClimbRefusedInput): string {
+  const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
+  return (
+    `${PORTAL_ENTRY_CLIMB_REFUSED} cell=${formatPos(input.cell)}` +
+    ` from_y=${input.fromY} to_y=${input.toY} dy=${input.toY - input.fromY}` +
+    ` climb=${input.climb} fallback=${input.fallback} reason=${input.reason}${detail}`
   )
 }
 
@@ -1499,6 +1609,16 @@ export function portalOpenFaceCells(
 
 /** A face may be one block below/above the interior; further is a climb. */
 export const PORTAL_OPEN_FACE_LEVEL_TOLERANCE = 1
+
+/**
+ * How far the portal interior's level may be from the body's feet for the
+ * bounded DIRECT walk-in (`executor.ts#walkIntoPortalEntry`) to own the entry:
+ * one whole block is the frame threshold the body steps onto. Any further rise
+ * is a CLIMB the entry must ground with the shared vertical planner - the
+ * candidate layer gates its composed fallback on this same number, so both
+ * layers name one fact instead of two drifting copies.
+ */
+export const PORTAL_WALK_IN_LEVEL_TOLERANCE = 1
 
 /** The exact `PORTAL_ENTRY_UNVERIFIED` line: a remembered-site route, no lit claim. */
 export function formatPortalEntryUnverified(
