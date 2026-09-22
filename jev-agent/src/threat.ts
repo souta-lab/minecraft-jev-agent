@@ -140,6 +140,216 @@ export const THREAT_NO_ESCAPE = 'THREAT_NO_ESCAPE'
 export const THREAT_OCCLUDED = 'THREAT_OCCLUDED'
 export const THREAT_CLEAR = 'THREAT_CLEAR'
 
+/**
+ * The measured DAMAGE RACE: a hostile is on the body, health is dropping, and the
+ * candidate layer is offering escapes. This marker answers the one question the
+ * existing threat vocabulary cannot: what the candidate layer can PROVE about the
+ * escapes it offers while damage lands - how many grounded keep-distance
+ * destinations exist, how much separation the best one buys, whether any leaves the
+ * threat's reach at decision time, and which KIND of source is landing the damage.
+ *
+ * Measured live (`buddy.log` 2026-09-22T10:49:53-59, the closest fortress approach
+ * of the run): `THREAT_NEARBY threat=magma_cube distance=2.98 contact=true
+ * weapon=stone_pickaxe health=16.704` -> `8.316` -> `DEATH` in ~4 s, while every
+ * tick offered three `RETREAT` cells and `SURVIVAL_REGROUND
+ * reason=same_threat_keep_distance` re-grounded the chosen retreat onto a cell at
+ * the SAME or a shorter distance (2.98 m -> 2.06 m). Nothing in the record said
+ * "the escape did not buy separation", so the death read as an unavoidable hit.
+ *
+ * It deliberately does NOT predict that the body will get away (see
+ * `assessSurvivalRace`): a mob that closes between ticks follows a destination that
+ * was outside its reach when the tick was decided, which is exactly what the
+ * measured magma_cube did. Code owns the observation; the verdict is the record's.
+ */
+export const SURVIVAL_DAMAGE_RACE = 'SURVIVAL_DAMAGE_RACE'
+
+/**
+ * The typed capability gap when the body is in contact with a hostile and the
+ * candidate layer grounds NO escape destination at all. Distinct from
+ * `THREAT_NO_ESCAPE` (which is about the whole restricted offer collapsing to an
+ * escalation): this one is specifically "there is no landable keep-distance cell",
+ * and it is what makes "it could not have escaped" an observation instead of an
+ * assumption. `outcome=CAPABILITY_LOST` is carried in the line, matching the
+ * re-ground vocabulary.
+ */
+export const SURVIVAL_ESCAPE_NONE = 'SURVIVAL_ESCAPE_NONE'
+
+/**
+ * WHICH KIND of thing is landing the damage. `mob` and `player` are decided from
+ * the SENSED entity the attribution names (`EntityState.username` is non-null only
+ * for a player entity; `hostile` is the sensor's own classification), never from a
+ * name shape. `environment` is the repo's existing convention for damage with no
+ * attributed attacker (`criticalDamage.ts`), and `unattributed` is the measured
+ * operator-bow shape: a named source the sensor never witnessed.
+ */
+export type DamageSourceKind = 'mob' | 'player' | 'environment' | 'unattributed'
+
+export interface DamageSourceFacts {
+  source: DamageSourceKind
+  /** the attributed attacker's name, or null when there is none */
+  name: string | null
+  /** the attributed attacker's entity id, or null when there is none */
+  id: number | null
+  /** how the classification was reached (greppable, never guessed) */
+  evidence: 'sensed_player' | 'sensed_hostile' | 'sensed_entity' | 'unattributed' | 'none'
+}
+
+/**
+ * Classify the most recent damage attribution against the SENSED entity snapshot.
+ *
+ * A player entity is one the sensor saw with a `username` (Mineflayer exposes that
+ * field only for players); a mob is a sensed entity the sensor classified hostile;
+ * any other sensed entity is still a mob-class source (`sensed_entity`) because it
+ * is a real world entity, not the environment. A named source that is NOT in the
+ * snapshot is `unattributed` - the measured case where the operator shoots from
+ * outside the sensor radius, and the one shape that must not be silently folded
+ * into "environment".
+ */
+export function classifyDamageSource(
+  lastDamage: Pick<LastDamageEvidence, 'sourceId' | 'sourceName'> | null | undefined,
+  entities: readonly Pick<EntityState, 'id' | 'name' | 'username' | 'hostile'>[],
+): DamageSourceFacts {
+  if (lastDamage === null || lastDamage === undefined) {
+    return { source: 'environment', name: null, id: null, evidence: 'none' }
+  }
+  const id = lastDamage.sourceId ?? null
+  const name = lastDamage.sourceName ?? null
+  const sensed =
+    (id === null ? undefined : entities.find((entity) => entity.id === id)) ??
+    (name === null ? undefined : entities.find((entity) => entity.name === name))
+  if (sensed === undefined) {
+    if (name === null) return { source: 'environment', name: null, id: null, evidence: 'none' }
+    return { source: 'unattributed', name, id, evidence: 'unattributed' }
+  }
+  if (sensed.username !== null && sensed.username !== undefined) {
+    return { source: 'player', name: sensed.name, id: sensed.id, evidence: 'sensed_player' }
+  }
+  if (sensed.hostile === true) {
+    return { source: 'mob', name: sensed.name, id: sensed.id, evidence: 'sensed_hostile' }
+  }
+  return { source: 'mob', name: sensed.name, id: sensed.id, evidence: 'sensed_entity' }
+}
+
+/** The minimum a RETREAT candidate must expose for the race assessment. */
+export interface EscapeCandidateFacts {
+  /** extra separation (metres) this destination buys over standing still */
+  separationGain: number
+  /** the destination is outside the threat's own reach */
+  outsideReach: boolean
+}
+
+export interface SurvivalRaceFacts {
+  threatName: string | null
+  threatId: number | null
+  distance: number | null
+  contact: boolean
+  body: BodySurvivalFacts
+  weapon: WeaponFacts
+  damage: DamageSourceFacts
+  /**
+   * How long ago the last landed hit was observed (`null` when none was recorded).
+   * This is the observed half of "health is dropping": a value inside the threat
+   * memory window means damage is landing NOW, and it is a measurement rather than
+   * an inference from proximity.
+   */
+  damageAgoMs: number | null
+  /** grounded keep-distance destinations on offer right now */
+  escapeCount: number
+  /** how many of them leave the threat's reach */
+  escapesOutsideReach: number
+  /**
+   * The best separation any grounded escape buys (rounded), or null when none
+   * exists. Reported because it is the quantity the measured `SURVIVAL_REGROUND
+   * reason=same_threat_keep_distance` loop silently lost: the body re-chose cells
+   * at the SAME or a shorter distance (2.98 m -> 2.06 m).
+   */
+  bestSeparationGain: number | null
+  /**
+   * What the CANDIDATE LAYER can prove about escaping, and nothing more:
+   *
+   *   `outside_reach` - a grounded destination sits outside the threat's reach
+   *   `inside_reach`  - escapes exist but every one of them is inside the reach
+   *   `none`          - no grounded keep-distance destination exists at all
+   *
+   * This is deliberately NOT a verdict that the body will get away: a mob that
+   * closes between ticks can follow a destination that was outside its reach when
+   * the tick was decided (that is exactly what the measured magma_cube did), and
+   * predicting the next position is not something this layer can observe. The
+   * marker therefore states the destination fact and the honest `reason`, and
+   * `SURVIVAL_ESCAPE_NONE` states the only case that is decidable.
+   */
+  escape: 'outside_reach' | 'inside_reach' | 'none'
+  reason: 'escape_leaves_threat_reach' | 'escape_stays_in_contact' | 'no_grounded_escape'
+}
+
+/**
+ * Assess what the candidate layer can prove about escaping the damage it is
+ * taking. Pure: every input is a code-owned observation, and the result names the
+ * fact that decided it.
+ */
+export function assessSurvivalRace(input: {
+  evidence: Pick<ThreatStateEvidence, 'threatName' | 'threatId' | 'threatDistance' | 'inContact'> | null
+  body: BodySurvivalFacts
+  weapon: WeaponFacts
+  damage: DamageSourceFacts
+  escapes: readonly EscapeCandidateFacts[]
+  /** ms since the last landed hit, or null when none is recorded */
+  damageAgoMs?: number | null
+}): SurvivalRaceFacts {
+  const { evidence } = input
+  const distance = evidence?.threatDistance ?? null
+  const outsideReach = input.escapes.filter((escape) => escape.outsideReach).length
+  const gains = input.escapes.map((escape) => escape.separationGain).filter((gain) => Number.isFinite(gain))
+  const best = gains.length === 0 ? null : Math.max(...gains)
+  const base = {
+    threatName: evidence?.threatName ?? null,
+    threatId: evidence?.threatId ?? null,
+    distance,
+    contact: evidence?.inContact === true,
+    body: input.body,
+    weapon: input.weapon,
+    damage: input.damage,
+    damageAgoMs: input.damageAgoMs ?? null,
+    escapeCount: input.escapes.length,
+    escapesOutsideReach: outsideReach,
+    bestSeparationGain: best === null ? null : Math.round(best * 100) / 100,
+  }
+  if (input.escapes.length === 0) {
+    return { ...base, escape: 'none', reason: 'no_grounded_escape' }
+  }
+  if (outsideReach > 0) {
+    return { ...base, escape: 'outside_reach', reason: 'escape_leaves_threat_reach' }
+  }
+  return { ...base, escape: 'inside_reach', reason: 'escape_stays_in_contact' }
+}
+
+/** `SURVIVAL_DAMAGE_RACE ...` - the grounded escape-versus-damage fact. */
+export function formatSurvivalDamageRace(facts: SurvivalRaceFacts): string {
+  const distance = facts.distance === null ? 'unknown' : `${round2(facts.distance)}m`
+  const gain = facts.bestSeparationGain === null ? 'unknown' : `+${facts.bestSeparationGain}m`
+  const damageAgo = facts.damageAgoMs === null ? 'none' : `${Math.round(facts.damageAgoMs)}ms`
+  return (
+    `${SURVIVAL_DAMAGE_RACE} threat=${facts.threatName ?? 'unknown'} threatId=${facts.threatId ?? 'none'} ` +
+    `distance=${distance} contact=${facts.contact} damageAgo=${damageAgo} source=${facts.damage.source} ` +
+    `sourceName=${facts.damage.name ?? 'none'} sourceEvidence=${facts.damage.evidence} health=${round2(facts.body.health)} ` +
+    `food=${facts.body.food} regenerating=${facts.body.regenerating} weapon=${facts.weapon.name ?? 'fists'} ` +
+    `swingDamage=${facts.weapon.damage ?? FIST_DAMAGE} escapes=${facts.escapeCount} ` +
+    `escapesOutsideReach=${facts.escapesOutsideReach} bestSeparationGain=${gain} ` +
+    `escape=${facts.escape} reason=${facts.reason}`
+  )
+}
+
+/** `SURVIVAL_ESCAPE_NONE ... outcome=CAPABILITY_LOST` - no landable escape exists. */
+export function formatSurvivalEscapeNone(facts: SurvivalRaceFacts): string {
+  const distance = facts.distance === null ? 'unknown' : `${round2(facts.distance)}m`
+  return (
+    `${SURVIVAL_ESCAPE_NONE} threat=${facts.threatName ?? 'unknown'} threatId=${facts.threatId ?? 'none'} ` +
+    `distance=${distance} contact=${facts.contact} source=${facts.damage.source} health=${round2(facts.body.health)} ` +
+    `food=${facts.body.food} weapon=${facts.weapon.name ?? 'fists'} reason=${facts.reason} ` +
+    `outcome=CAPABILITY_LOST -> no grounded keep-distance cell exists; the missing affordance is named, not re-offered`
+  )
+}
+
 /** Vanilla 1.21 unarmed player attack damage. */
 export const FIST_DAMAGE = 1
 
@@ -1060,6 +1270,21 @@ export interface SurvivalControlFallbackInput {
   threatInContact: boolean
   /** the RESTRICTED fresh offer the re-ground ran against */
   freshCandidates: readonly { id: string; kind: string }[]
+  /**
+   * The code-owned ESCALATE the CALLER can still execute. Measured live
+   * (`controller-legacy.ts`, documented in-tree): a chosen survival action that
+   * cannot be re-grounded at contact left the tick with nothing, because the
+   * contact envelope had already filtered WAIT/ESCALATE out - while a reachable
+   * ATTACK sat in the offer and the body was killed in the same second.
+   *
+   * `ESCALATE` mutates nothing, picks no fight/flight answer, no target and no
+   * destination (it only hands the decision back to the semantic layer), so a tick
+   * ending actionless with a hostile in contact is strictly worse than executing
+   * it. This is NOT a substituted action: it is the same control action the
+   * generator itself synthesizes when the contact filter grounds no combat option
+   * at all (`candidates.ts` `restrictCandidatesDuringImmediateThreat`).
+   */
+  codeOwnedEscalate?: { id: string; kind: string } | null
 }
 
 export interface SurvivalControlFallback {
@@ -1068,6 +1293,7 @@ export interface SurvivalControlFallback {
   reason:
     | 'regrounded'
     | 'control_action_escalate'
+    | 'control_action_escalate_code_owned'
     | 'control_action_wait'
     | 'not_a_survival_action'
     | 'threat_not_in_contact'
@@ -1086,6 +1312,12 @@ export function survivalControlFallback(input: SurvivalControlFallbackInput): Su
   if (escalate !== undefined) return { candidateId: escalate.id, reason: 'control_action_escalate' }
   const wait = input.freshCandidates.find((candidate) => candidate.kind === 'WAIT')
   if (wait !== undefined) return { candidateId: wait.id, reason: 'control_action_wait' }
+  // The contact envelope filtered both control kinds out. The code-owned ESCALATE
+  // is still executable (see the input contract): an actionless tick with a
+  // hostile in contact is the measured death shape.
+  if (input.codeOwnedEscalate !== null && input.codeOwnedEscalate !== undefined) {
+    return { candidateId: input.codeOwnedEscalate.id, reason: 'control_action_escalate_code_owned' }
+  }
   return { candidateId: null, reason: 'no_control_action_offered' }
 }
 

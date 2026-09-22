@@ -61,7 +61,7 @@ function addCase(name: string, run: Case['run']): void {
 
 const FEET: Vec3Json = { x: 0.5, y: 64, z: 0.5 }
 
-function self(position: Vec3Json, armor?: ArmorWorn): SelfState {
+function self(position: Vec3Json, armor?: ArmorWorn, held?: string | null): SelfState {
   return {
     username: 'AI_EQUIP',
     position,
@@ -74,7 +74,7 @@ function self(position: Vec3Json, armor?: ArmorWorn): SelfState {
     gameMode: 'survival',
     dimension: 'overworld',
     isDay: true,
-    heldItem: null,
+    heldItem: held === undefined || held === null ? null : { name: held, count: 1, slot: 0 },
     ...(armor === undefined ? {} : { armor: armor as SelfState['armor'] }),
   }
 }
@@ -137,6 +137,8 @@ interface WorldInput {
   entities?: EntityState[]
   standable?: Vec3Json[]
   focusItem?: string
+  /** the item in the main hand (the arm affordance reads it) */
+  held?: string | null
 }
 
 function worldState(input: WorldInput = {}): WorldState {
@@ -145,7 +147,7 @@ function worldState(input: WorldInput = {}): WorldState {
     schemaVersion: 1,
     tick: 7,
     timestampMs: 1_700_000_000_000,
-    self: self(FEET, input.armor),
+    self: self(FEET, input.armor, input.held),
     inventory: inventory(input.counts ?? {}),
     entities: input.entities ?? [],
     blocks: input.blocks ?? [],
@@ -544,6 +546,72 @@ addCase('(a) an equip that does not stick fails verify_failed with no EQUIP_ARMO
 // ---------------------------------------------------------------------------
 // (b) only equal/worse armor -> no candidate, explicit refusal
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// (a2) the ARM affordance: arming the best carried weapon is its OWN action
+//
+// Measured live (`buddy.log` 2026-09-22T10:49:5x): the hand held a `stone_pickaxe`
+// with a `diamond_sword` in the inventory, `ATTACK:e45891` was reachable and
+// offered, Jev chose RETREAT twice, and no ATTACK lease ever started - so the only
+// code that could arm the body never ran and the damage race was lost disarmed.
+// The arm must therefore be a candidate Jev can choose on any tick, executed
+// through the same equip path (effect envelope + lease + live post-condition).
+// ---------------------------------------------------------------------------
+
+addCase('(a2) a fight on the table offers EQUIP:hand:<best weapon> while a tool is held', () => {
+  const state = worldState({ counts: { diamond_sword: 1, iron_pickaxe: 1 }, entities: [hostile(19, 1.5)], held: 'iron_pickaxe' })
+  const candidate = candidateById(generateGroundedCandidates(state).candidates, 'EQUIP:hand:diamond_sword')
+  const pass =
+    candidate.kind === 'EQUIP' &&
+    candidate.itemName === 'diamond_sword' &&
+    candidate.meta.slot === 'hand' &&
+    candidate.meta.weaponArm === true &&
+    candidate.meta.weaponDamage === 7 &&
+    candidate.meta.replaced === 'iron_pickaxe'
+  return { pass, detail: `${candidate.id} slot=${String(candidate.meta.slot)} damage=${String(candidate.meta.weaponDamage)} replaced=${String(candidate.meta.replaced)}` }
+})
+
+addCase('(a2) executing the arm candidate equips the NAMED weapon and verifies the live main hand', async () => {
+  const state = worldState({ counts: { diamond_sword: 1, iron_pickaxe: 1 }, entities: [hostile(19, 1.5)], held: 'iron_pickaxe' })
+  const candidate = candidateById(generateGroundedCandidates(state).candidates, 'EQUIP:hand:diamond_sword')
+  const fixture = makeFixture({ counts: { diamond_sword: 1, iron_pickaxe: 1 }, held: 'iron_pickaxe' })
+  const { result, messages } = await runAction(fixture, candidate)
+  const marker = messages.find((message) => message.startsWith('EQUIP_WEAPON '))
+  const pass =
+    result.status === 'done' &&
+    result.verified === true &&
+    result.kind === 'EQUIP' &&
+    fixture.equipCalls.length === 1 &&
+    fixture.equipCalls[0]?.name === 'diamond_sword' &&
+    fixture.equipCalls[0]?.destination === 'hand' &&
+    fixture.heldName() === 'diamond_sword' &&
+    marker === 'EQUIP_WEAPON item=diamond_sword replaced=iron_pickaxe reason=combat'
+  return {
+    pass,
+    detail: `status=${result.status} verified=${result.verified} calls=${JSON.stringify(fixture.equipCalls)} held=${fixture.heldName()} marker=${marker ?? 'none'}`,
+  }
+})
+
+addCase('(a2) an arm candidate whose weapon left the inventory is a typed loss, never a substitute', async () => {
+  const state = worldState({ counts: { diamond_sword: 1, iron_pickaxe: 1 }, entities: [hostile(19, 1.5)], held: 'iron_pickaxe' })
+  const candidate = candidateById(generateGroundedCandidates(state).candidates, 'EQUIP:hand:diamond_sword')
+  const fixture = makeFixture({ counts: { stone_sword: 1, iron_pickaxe: 1 }, held: 'iron_pickaxe' })
+  const { result, messages } = await runAction(fixture, candidate)
+  const pass =
+    result.status === 'failed' &&
+    result.failure === 'item_unavailable' &&
+    fixture.equipCalls.length === 0 &&
+    fixture.heldName() === 'iron_pickaxe' &&
+    !messages.some((message) => message.startsWith('EQUIP_WEAPON '))
+  return { pass, detail: `status=${result.status} failure=${result.failure} calls=${fixture.equipCalls.length} held=${fixture.heldName()}` }
+})
+
+addCase('(a2) the arm candidate is not offered when the hand already holds the best carried weapon', () => {
+  const state = worldState({ counts: { diamond_sword: 1, stone_sword: 1 }, entities: [hostile(19, 1.5)], held: 'diamond_sword' })
+  const ids = generateGroundedCandidates(state).candidates.map((candidate) => candidate.id)
+  const pass = ids.includes('ATTACK:e19') && !ids.some((id) => id.startsWith('EQUIP:hand:'))
+  return { pass, detail: JSON.stringify(ids) }
+})
 
 addCase('(b) carried armor that is not better than what is worn offers no candidate (no churn)', () => {
   const armor = { head: null, torso: { name: 'diamond_chestplate' }, legs: null, feet: null }
