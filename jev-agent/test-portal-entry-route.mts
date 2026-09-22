@@ -50,6 +50,7 @@ import {
 import type { PortalEntryPlan, PortalFrameSite } from './src/netherPortalPlan.ts'
 import { defaultCandidateOptions, entryCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
+import { cellKey, observeZeroProgressRoute, routeSignature } from './src/zeroProgressRoute.ts'
 import { Executor, ExecutorError, defaultExecutorOptions } from './src/executor.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import type { AgentSignals, DescentOption, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
@@ -783,6 +784,90 @@ const STONE_STEP: StepCut = {
       descended.includes('target_y=67') &&
       !result.messages.some((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED')),
     `status=${result.status} verified=${result.verified} marker=[${descended ?? 'none'}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (i) THE MEASURED FREEZE (run-muc620xb-1d312, gen-muc8zwpv-ddlzrh): the body
+// stood at 10,54,25, the lit gate at 26,67,9, and `ENTER:26,67,9` was offered
+// and re-issued 669 times while every attempt settled
+// `PATH_CALLBACK phase=failed outcome=noPath|stuck`. The route memory DID record
+// the route (`ACTION_ZERO_PROGRESS ... kind=ENTER_PORTAL retry=1..20`), but
+// nothing consumed it for the entry arm, and there was no bounded escalation.
+//
+// After the fix:
+//   (i-1) a spent ENTER route is NOT re-offered: the arm offers the grounded
+//         approach leg that changes the stand cell instead;
+//   (i-2) a body that actually walked the approach leg is offered the entry
+//         again (no premature permanent suppression);
+//   (i-3) when no closer standable cell exists, the entry is withheld and the
+//         goal reports the typed `ROUTE_ESCALATE ... reason=all_routes_spent`
+//         refusal (bounded: one spent route is enough - there is nothing left
+//         to ground), never `(failing route, WAIT)`.
+// ---------------------------------------------------------------------------
+{
+  const CLOSER: Vec3Json = { x: 26, y: 66, z: 8 }
+  const withRoutes = (state: WorldState, routes: ReturnType<typeof observeZeroProgressRoute>['routes']): WorldState => ({
+    ...state,
+    signals: { ...state.signals, zeroProgressRoutes: routes },
+  })
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, gateGrid(), true)
+  const options: CandidateOptions = { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) }
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
+    { x: 27, y: 65, z: 8 },
+    CLOSER,
+  ])
+  const fresh = entryCandidates(state, options)
+  const entry = fresh.candidates.find((candidate) => candidate.kind === 'ENTER_PORTAL')
+  const routeSig =
+    entry === undefined ? 'none' : routeSignature({ kind: 'ENTER_PORTAL', id: entry.id, meta: entry.meta })
+  // The controller's own recording path for a settled path-stage failure.
+  const routes = observeZeroProgressRoute(undefined, {
+    kind: 'ENTER_PORTAL',
+    targetKey: cellKey(entry?.target ?? ENTER_CELL),
+    standKey: cellKey(state.self.position),
+    routeSig,
+    reason: 'path_no_path',
+    nowMs: state.timestampMs,
+  }).routes
+  const afterSpent = entryCandidates(withRoutes(state, routes), options)
+  const leg = afterSpent.candidates.find((candidate) => candidate.meta.approachLeg === 'route_spent')
+  check(
+    '(i-1) a spent ENTER route is replaced by a grounded approach leg (never re-offered unchanged)',
+    entry !== undefined &&
+      fresh.candidates.filter((candidate) => candidate.kind === 'ENTER_PORTAL').length === 1 &&
+      afterSpent.candidates.every((candidate) => candidate.kind !== 'ENTER_PORTAL') &&
+      leg !== undefined &&
+      leg.kind === 'MOVE' &&
+      leg.target?.x === CLOSER.x &&
+      leg.target?.y === CLOSER.y &&
+      leg.target?.z === CLOSER.z &&
+      afterSpent.refusal === null,
+    `fresh=[${fresh.candidates.map((candidate) => candidate.id).join(',')}] afterSpent=[${afterSpent.candidates.map((candidate) => candidate.id).join(',')}] refusal=${afterSpent.refusal?.line ?? 'none'}`,
+  )
+
+  const movedState = worldState(CLOSER, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
+    CLOSER,
+    { x: 27, y: 65, z: 8 },
+  ])
+  const reoffered = entryCandidates(withRoutes(movedState, routes), options)
+  check(
+    '(i-2) after the approach leg the entry is offered again from the new stand cell',
+    reoffered.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL') && reoffered.refusal === null,
+    `offered=[${reoffered.candidates.map((candidate) => candidate.id).join(',')}] refusal=${reoffered.refusal?.line ?? 'none'}`,
+  )
+
+  const boxed = worldState({ x: 27.5, y: 65, z: 8.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 }, [], [
+    { x: 27, y: 65, z: 8 },
+  ])
+  const boxedAfter = entryCandidates(withRoutes(boxed, routes), options)
+  check(
+    '(i-3) with no grounded alternative the entry is withheld and the goal says ROUTE_ESCALATE reason=all_routes_spent',
+    boxedAfter.candidates.length === 0 &&
+      boxedAfter.refusal?.reason === 'all_routes_spent' &&
+      boxedAfter.refusal.line ===
+        'ROUTE_ESCALATE goal=g-portal-entered reason=all_routes_spent routes=1',
+    `offered=[${boxedAfter.candidates.map((candidate) => candidate.id).join(',')}] refusal=${boxedAfter.refusal?.line ?? 'none'}`,
   )
 }
 
