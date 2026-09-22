@@ -62,6 +62,14 @@ export const FIREWALL_PATTERNS: readonly FirewallPattern[] = [
     rationale: 'gateway-specific response shape: only the adapter may read it; the harness decodes confidence centrally',
     migrationPhase: 'D',
   },
+  {
+    id: 'jev-provider-client',
+    label: 'JevProviderClient',
+    regex: /\bJevProviderClient\b/,
+    rationale:
+      'a raw Jev model client outside the harness: repo code must use JevHarness, never a provider client (#438 section 1)',
+    migrationPhase: 'F',
+  },
 ]
 
 export interface FirewallFinding {
