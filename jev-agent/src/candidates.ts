@@ -695,15 +695,21 @@ export interface UnseenAttackerOffer {
  * one changes the body's block cell when it executes, so choosing it is a real
  * body displacement rather than a stance.
  *
- * `DESCEND` is here because its realization is a physical dig-and-step: the body
- * ends up in a different cell. `MINE`/`CRAFT`/`PLACE`/`SMELT`/`IGNITE` are not:
- * they change the WORLD while the body keeps taking hits from the same spot,
- * which is the measured "digs while it dies" shape. `ENTER_PORTAL` is not either
- * (and `keep-distance realization may never cross a dimension`, candidates.ts
- * `crosses_dimension`); whether to disengage is Jev's semantic choice, not a
- * mechanical break-contact leg.
+ * Deliberately NOT the same set as `MECHANICAL_LOCOMOTION_KINDS` below, which
+ * answers a different question ("may this leg be realized as a dimension
+ * transfer?") and therefore includes `RETRIEVE`. A retrieve physically walks the
+ * body, but toward the goal's own target - it is the work that was happening
+ * while the measured body died, not an answer to the attacker. `DESCEND` and
+ * `STEP` are here for the same reason `MOVE` is: their realization ends with the
+ * body in a different cell, dug or stepped.
+ *
+ * `MINE`/`CRAFT`/`PLACE`/`SMELT`/`IGNITE` are not here: they change the WORLD
+ * while the body keeps taking hits from the same spot, which is the measured
+ * "digs while it dies" shape. `ENTER_PORTAL` is not either (and a keep-distance
+ * realization may never cross a dimension, `crosses_dimension`); whether to
+ * disengage is Jev's semantic choice, not a mechanical break-contact leg.
  */
-const LOCOMOTION_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+const BREAK_CONTACT_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'MOVE',
   'RETREAT',
   'STEP',
@@ -712,8 +718,13 @@ const LOCOMOTION_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
 
 /**
  * The kinds that hold the body where it is while the attacker keeps firing: the
- * explicit no-ops and every work action. Removed while an unsensed attacker is
- * landing hits and a grounded way to move exists.
+ * explicit no-ops, the work actions, and `RETRIEVE` (body motion toward the
+ * goal's target). Removed while an unsensed attacker is landing hits and a
+ * grounded break-contact route exists.
+ *
+ * The two sets partition `CandidateKind` exactly, so a kind added later is
+ * covered by one of them by construction and can never silently escape this
+ * restriction by being in neither.
  */
 const STATIONARY_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
   'WAIT',
@@ -746,7 +757,7 @@ function groundedEscapeIds(state: Pick<WorldState, 'terrain'>, candidates: reado
   return candidates
     .filter(
       (candidate) =>
-        LOCOMOTION_KINDS.has(candidate.kind) &&
+        BREAK_CONTACT_KINDS.has(candidate.kind) &&
         candidate.target !== null &&
         cells.has(`${candidate.target.x},${candidate.target.y},${candidate.target.z}`),
     )
@@ -768,7 +779,7 @@ export function unseenAttackerOffer(
   // claim the body can answer when all it can do is keep working.
   const escapeIds = groundedEscapeIds(state, candidates)
   const moveIds = candidates
-    .filter((candidate) => LOCOMOTION_KINDS.has(candidate.kind))
+    .filter((candidate) => BREAK_CONTACT_KINDS.has(candidate.kind))
     .map((candidate) => candidate.id)
   const response = unsensedThreatResponse({
     attacker,
