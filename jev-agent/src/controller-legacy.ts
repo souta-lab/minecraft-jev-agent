@@ -3382,6 +3382,13 @@ export class JevController {
         } else {
           this.guardRejections += 1
           if (reground.kind !== null) {
+            // issue #436 section 9/14 + #437 section 6: the premise of the Jev
+            // answer was destroyed (the exact entity it answered is gone, or no
+            // grounded response of that kind survives). This is never a silent
+            // empty tick: the typed outcome is recorded AND the next decision is
+            // forced to be a real policy re-entry, so a cached decision cannot be
+            // replayed onto a survival action that no longer exists.
+            this.skillOutcomeBoundary = true
             this.logger.warn(
               'guard',
               formatSurvivalNoGroundedAction(vanishedChoice?.id ?? chosenId, reground, freshCandidates.length, threatEvidence, body),
@@ -3389,6 +3396,7 @@ export class JevController {
                 chosenId,
                 kind: reground.kind,
                 reason: reground.reason,
+                outcome: reground.outcome,
                 freshOffer: freshCandidates.length,
                 threat: threatEvidence?.threatName ?? null,
                 distance: threatEvidence?.threatDistance ?? null,

@@ -585,6 +585,26 @@ export type SurvivalRegroundReason =
   | 'any_threat_keep_distance'
   | 'no_grounded_equivalent'
 
+/**
+ * issue #436 section 9/14 + #437 section 2: the TYPED terminal outcome of a
+ * survival choice whose candidate vanished between the Jev answer and execution.
+ *
+ * A reground must never be silent: either the SAME causal identity (or the same
+ * volatile escape kind) was restored, or the choice ended for a typed reason that
+ * policy can act on. `TARGET_LOST` says the exact entity the response was
+ * answering is gone - it is emphatically NOT a kill and NOT a licence to swing at
+ * whatever mob is nearest.
+ */
+export type SurvivalVanishedOutcome =
+  /** the same survival action was restored from the fresh offer */
+  | 'REGROUNDED'
+  /** the exact entity the chosen ATTACK answered is no longer offered */
+  | 'TARGET_LOST'
+  /** no grounded response of the chosen kind exists at all any more */
+  | 'CAPABILITY_LOST'
+  /** the vanished choice was not a survival action */
+  | 'NOT_A_SURVIVAL_ACTION'
+
 export interface SurvivalRegroundResult {
   /** the fresh candidate that carries the same survival action, or null */
   candidateId: string | null
@@ -593,6 +613,8 @@ export interface SurvivalRegroundResult {
   reason: SurvivalRegroundReason
   /** the entity the vanished choice was answering, when it carried one */
   entityId: number | null
+  /** the typed terminal outcome of this re-ground (never "nothing happened") */
+  outcome: SurvivalVanishedOutcome
 }
 
 function numericMeta(meta: Readonly<Record<string, unknown>> | undefined, key: string): number | null {
@@ -627,9 +649,11 @@ export function regroundVanishedSurvivalChoice(
   chosen: SurvivalChoiceLike | null,
   fresh: readonly SurvivalChoiceLike[],
 ): SurvivalRegroundResult {
-  if (chosen === null) return { candidateId: null, kind: null, reason: 'not_a_survival_action', entityId: null }
+  if (chosen === null) {
+    return { candidateId: null, kind: null, reason: 'not_a_survival_action', entityId: null, outcome: 'NOT_A_SURVIVAL_ACTION' }
+  }
   if (!SURVIVAL_REGROUNDABLE_KINDS.has(chosen.kind)) {
-    return { candidateId: null, kind: null, reason: 'not_a_survival_action', entityId: null }
+    return { candidateId: null, kind: null, reason: 'not_a_survival_action', entityId: null, outcome: 'NOT_A_SURVIVAL_ACTION' }
   }
 
   if (chosen.kind === 'ATTACK') {
@@ -638,11 +662,13 @@ export function regroundVanishedSurvivalChoice(
       (candidate) => candidate.kind === 'ATTACK' && entityId !== null && attackEntityId(candidate) === entityId,
     )
     if (same !== undefined) {
-      return { candidateId: same.id, kind: 'ATTACK', reason: 'same_target_attack', entityId }
+      return { candidateId: same.id, kind: 'ATTACK', reason: 'same_target_attack', entityId, outcome: 'REGROUNDED' }
     }
-    // The target itself is gone (killed / left the sensor). Retargeting another
-    // mob would be a new WHICH decision, so nothing is re-grounded here.
-    return { candidateId: null, kind: 'ATTACK', reason: 'no_grounded_equivalent', entityId }
+    // The exact entity the response answered is gone (killed / left the sensor).
+    // Retargeting another mob would be a new WHICH decision, so nothing is
+    // re-grounded - and the typed outcome says so instead of leaving the tick
+    // silent: TARGET_LOST, never a kill and never a substitute target.
+    return { candidateId: null, kind: 'ATTACK', reason: 'no_grounded_equivalent', entityId, outcome: 'TARGET_LOST' }
   }
 
   const retreats = fresh.filter((candidate) => candidate.kind === 'RETREAT')
@@ -657,6 +683,7 @@ export function regroundVanishedSurvivalChoice(
         kind: 'RETREAT',
         reason: 'same_threat_keep_distance',
         entityId: threatEntityId,
+        outcome: 'REGROUNDED',
       }
     }
   }
@@ -667,9 +694,13 @@ export function regroundVanishedSurvivalChoice(
       kind: 'RETREAT',
       reason: 'any_threat_keep_distance',
       entityId: threatEntityId ?? numericMeta(first.meta, 'threatEntityId'),
+      outcome: 'REGROUNDED',
     }
   }
-  return { candidateId: null, kind: 'RETREAT', reason: 'no_grounded_equivalent', entityId: threatEntityId }
+  // No grounded keep-distance action exists at all: the CAPABILITY the chosen
+  // response required is gone, which is a typed return to policy - not a silent
+  // empty tick while a hostile is on the body.
+  return { candidateId: null, kind: 'RETREAT', reason: 'no_grounded_equivalent', entityId: threatEntityId, outcome: 'CAPABILITY_LOST' }
 }
 
 /** `SURVIVAL_REGROUND from=... to=... kind=... reason=... offer=... threat=...`. */
@@ -686,7 +717,7 @@ export function formatSurvivalReground(
     : `${round2(evidence.threatDistance)}m`
   return (
     `${SURVIVAL_REGROUND} from=${from} to=${result.candidateId ?? 'none'} kind=${result.kind ?? 'none'} ` +
-    `reason=${result.reason} offer=${freshOfferSize} threat=${threat} threatId=${evidence?.threatId ?? 'none'} ` +
+    `reason=${result.reason} outcome=${result.outcome} offer=${freshOfferSize} threat=${threat} threatId=${evidence?.threatId ?? 'none'} ` +
     `distance=${distance} contact=${evidence?.inContact ?? false} health=${round2(body.health)} food=${body.food}`
   )
 }
@@ -708,7 +739,7 @@ export function formatSurvivalNoGroundedAction(
     ? 'unknown'
     : `${round2(evidence.threatDistance)}m`
   return (
-    `${SURVIVAL_NO_GROUNDED_ACTION} chosen=${from} kind=${result.kind ?? 'none'} reason=${result.reason} ` +
+    `${SURVIVAL_NO_GROUNDED_ACTION} chosen=${from} kind=${result.kind ?? 'none'} reason=${result.reason} outcome=${result.outcome} ` +
     `offer=${freshOfferSize} threat=${threat} threatId=${evidence?.threatId ?? 'none'} distance=${distance} ` +
     `contact=${evidence?.inContact ?? false} health=${round2(body.health)} food=${body.food} ` +
     `-> no grounded attack/keep-distance action for this tick`

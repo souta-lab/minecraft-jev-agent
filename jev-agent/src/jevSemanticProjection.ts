@@ -220,7 +220,16 @@ export function terminalReasonFor(input: {
     case 'target_gone':
     case 'target_entity_gone':
     case 'entity_gone':
+    // #436 section 9: a vanished/invalid entity is TARGET_LOST, and a bounded
+    // combat lease that expired or was preempted maps onto the §2 buckets rather
+    // than the generic `blocked` fallback.
+    case 'target_despawned':
+    case 'target_invalidated':
       return 'target_lost'
+    case 'combat_interrupted':
+      return 'safety_interrupted'
+    case 'combat_timeout':
+      return 'budget_exhausted'
     case 'submerged':
     case 'combat_unsafe':
     case 'critical_health':

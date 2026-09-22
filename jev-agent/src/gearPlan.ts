@@ -243,6 +243,101 @@ export function formatWeaponRefusal(heldItemName: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
+// issue #436 section 11: which carried weapon to hold is a POLICY question when
+// the alternatives are strategically distinct.
+// ---------------------------------------------------------------------------
+//
+// `bestWeaponOffer` ranks every carried sword/axe by damage. That ranking is a
+// mechanical refinement only while the alternatives share one WEAPON CLASS.
+// A sword and an axe are different semantics (the axe is also the wood/log tool,
+// and the two differ in what the body is equipped to do next), so section 11 /
+// section 18 ("choose iron sword vs axe -> Jev pi when strategically distinct")
+// keeps that choice policy-visible.
+//
+// There is no item-durability or repair economy in this codebase, so two items of
+// the SAME class differ only in base damage - choosing the higher one is a
+// mechanical total order, not a resource decision:
+//
+//   exactly ONE weapon class carried -> equip the best instance of that class
+//                                      (mechanical; unchanged behaviour)
+//   TWO OR MORE classes carried      -> SKILL_POLICY_BOUNDARY with the grounded
+//                                      HOLD_ITEM alternatives; code does not pick
+//   the hand ALREADY holds a carried weapon -> change nothing (the no-op is not a
+//                                      choice, and Jev's HOLD_ITEM already decided)
+
+/**
+ * The semantic class of a weapon: `sword` or `axe`. Same class = mechanically
+ * ordered by damage; different class = strategically distinct.
+ */
+export function weaponClass(itemName: string): 'sword' | 'axe' | null {
+  if (weaponDamage(itemName) === null) return null
+  if (itemName.endsWith('_sword')) return 'sword'
+  if (itemName.endsWith('_axe')) return 'axe'
+  return null
+}
+
+/** The carried weapon classes, sorted (deterministic). */
+export function carriedWeaponClasses(counts: Readonly<Record<string, number>>): ('sword' | 'axe')[] {
+  const classes = new Set<'sword' | 'axe'>()
+  for (const name of Object.keys(counts)) {
+    if ((counts[name] ?? 0) <= 0) continue
+    const klass = weaponClass(name)
+    if (klass !== null) classes.add(klass)
+  }
+  return [...classes].sort()
+}
+
+/**
+ * The mechanical weapon offer INSIDE one class: the strictly-better instance of
+ * that class, or null when the hand already holds an equal-or-better one.
+ */
+export function bestWeaponOfferInClass(
+  heldItemName: string | null,
+  counts: Readonly<Record<string, number>>,
+  klass: 'sword' | 'axe',
+): WeaponEquipOffer | null {
+  const heldDamage = heldItemName === null ? 0 : weaponDamage(heldItemName) ?? 0
+  let best: { name: string; damage: number } | null = null
+  for (const name of Object.keys(counts).sort()) {
+    if ((counts[name] ?? 0) <= 0) continue
+    if (weaponClass(name) !== klass) continue
+    const damage = weaponDamage(name) as number
+    if (best === null || damage > best.damage) best = { name, damage }
+  }
+  if (best === null || best.damage <= heldDamage) return null
+  return { itemName: best.name, damage: best.damage, replaced: heldItemName, heldDamage }
+}
+
+/** True when the hand already holds a carried instance of a known weapon. */
+export function holdsCarriedWeapon(
+  heldItemName: string | null,
+  counts: Readonly<Record<string, number>>,
+): boolean {
+  if (heldItemName === null || weaponClass(heldItemName) === null) return false
+  return (counts[heldItemName] ?? 0) > 0
+}
+
+/**
+ * The grounded `HOLD_ITEM` alternatives for a policy boundary: the best carried
+ * instance of EACH carried weapon class, ordered by class name (discovery order,
+ * never a preference). One per class, so the alternatives are semantically
+ * distinct rather than damage variants of the same choice.
+ */
+export function weaponHoldAlternatives(counts: Readonly<Record<string, number>>): string[] {
+  const alternatives: string[] = []
+  for (const klass of carriedWeaponClasses(counts)) {
+    const offer = bestWeaponOfferInClass(null, counts, klass)
+    if (offer !== null) alternatives.push(`HOLD_ITEM:${offer.itemName}`)
+  }
+  return alternatives
+}
+
+/** The typed `WEAPON_CHOICE_REQUIRED` line: code must not rank distinct classes. */
+export function formatWeaponChoiceRequired(alternatives: readonly string[]): string {
+  return `WEAPON_CHOICE_REQUIRED reason=strategically_distinct_weapon_classes alternatives=[${alternatives.join(',')}]`
+}
+
+// ---------------------------------------------------------------------------
 // COMBAT_KIT_GAP: a goal-directed kill the body's kit cannot win.
 // ---------------------------------------------------------------------------
 //
