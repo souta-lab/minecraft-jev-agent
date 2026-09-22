@@ -11,7 +11,7 @@
 // The negative direction is the point: evidence combined across two runs, or any
 // missing fact, must be UNKNOWN and can NEVER be PASS.
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scanRunLines } from './m2-gate.mjs'
@@ -20,6 +20,7 @@ import {
   M3_RUN_RESULT,
   evaluateEnderEyes,
   evaluateM3AuthorityEvidence,
+  evaluateM3Gate,
   requestedM3RunId,
   runM3Gate,
 } from './m3-gate.mjs'
@@ -377,6 +378,107 @@ ok('evaluateEnderEyes requires 12 eyes and detects complete crafting inputs')
   assert.match(out.text(), new RegExp(`M3_LIVE_GATE current=${CURRENT_M3} runId=${RUN}`), out.text())
   assert.match(out.text(), new RegExp(`M3_LIVE_RESULT status=PASS reason=twelve_eyes_of_ender_verified runId=${RUN}`), out.text())
   ok('live gate delegates the run-scoped M3 verdict')
+}
+
+// ---------------------------------------------------------------------------
+// 10. FIRST-CLASS predicate evidence: true can upgrade, false/UNKNOWN cannot
+// ---------------------------------------------------------------------------
+{
+  const shortRun = [boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, blaze_powder: 0, ender_eye: 0 })]
+  const evidence = evidenceFrom(shortRun)
+  const policy = evaluateM3AuthorityEvidence({ expectedRunId: RUN, ...VERIFIED_POLICY })
+  const base = evaluateM3Gate({ expectedRunId: RUN, evidence, policy })
+  assert.equal(base.status, 'UNKNOWN')
+  assert.equal(base.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.equal(base.conditions.nether_reached, 'UNKNOWN')
+  // The gate always carries a first-class predicate section, derived from its own
+  // run-scoped evidence when the caller did not supply one.
+  assert.ok(base.facts.milestonePredicates !== null)
+  assert.equal(base.facts.milestonePredicates.predicates.length, 7)
+  assert.equal(base.facts.milestonePredicates.predicates.find((p) => p.id === 'ender_eyes').satisfied, false)
+  assert.equal(base.facts.milestonePredicates.predicates.find((p) => p.id === 'nether_reached').satisfied, null)
+  ok('with no observation the gate derives a full predicate section and stays UNKNOWN')
+
+  const section = {
+    runId: RUN,
+    sourceSha: null,
+    observationSources: ['host-observe'],
+    missing: [],
+    mismatches: [],
+    predicates: [
+      { id: 'ender_eyes', satisfied: true, observedAtMs: 1, observedAt: new Date(1).toISOString(), source: 'host-observe:rung:ender_eyes', evidence: {} },
+      { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
+    ],
+  }
+  const upgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: section })
+  assert.equal(upgraded.status, 'PASS', 'a truly observed predicate is sufficient proof')
+  assert.equal(upgraded.conditions.ender_eye_ready, 'PASS')
+  assert.equal(upgraded.conditions.nether_reached, 'PASS')
+  ok('a truly observed predicate upgrades the condition to PASS')
+
+  const falseSection = {
+    ...section,
+    predicates: [
+      { id: 'ender_eyes', satisfied: false, observedAtMs: 1, observedAt: new Date(1).toISOString(), source: 'host-observe:rung:ender_eyes', evidence: {} },
+      { id: 'nether_reached', satisfied: null, observedAtMs: null, observedAt: null, source: null, evidence: {} },
+    ],
+  }
+  const notUpgraded = evaluateM3Gate({ expectedRunId: RUN, evidence, policy, milestonePredicates: falseSection })
+  assert.notEqual(notUpgraded.status, 'PASS')
+  assert.equal(notUpgraded.conditions.ender_eye_ready, 'UNKNOWN')
+  assert.equal(notUpgraded.conditions.nether_reached, 'UNKNOWN')
+  ok('false / UNKNOWN predicate evidence can never manufacture a PASS')
+}
+
+// ---------------------------------------------------------------------------
+// 11. The resident observation file is read by runId and reported in the output
+// ---------------------------------------------------------------------------
+{
+  const dir = mkdtempSync(join(tmpdir(), 'm3-predicates-'))
+  try {
+    writeFileSync(
+      join(dir, `milestone-predicates-${RUN}.json`),
+      JSON.stringify({
+        record: 'milestone-predicates',
+        schemaVersion: 1,
+        runId: RUN,
+        sourceSha: null,
+        generationId: 'gen-1',
+        observationCount: 7,
+        updatedAt: new Date(7).toISOString(),
+        predicates: [
+          { id: 'ender_eyes', satisfied: true, observedAtMs: 1, observedAt: new Date(1).toISOString(), source: 'host-observe:rung:ender_eyes', evidence: {} },
+          { id: 'nether_reached', satisfied: true, observedAtMs: 2, observedAt: new Date(2).toISOString(), source: 'host-observe:rung:enter_nether', evidence: {} },
+        ],
+      }),
+    )
+    const out = capture()
+    const code = await runM3Gate({
+      expectedRunId: RUN,
+      readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
+      policyEvidence: VERIFIED_POLICY,
+      snapshotDir: dir,
+      write: out.write,
+    })
+    assert.equal(code, 0, out.text())
+    assert.match(out.text(), /m3_predicates: runId=run-m3-a .*observed=4\/7 missing=portal_built,portal_lit,portal_verified/, out.text())
+    assert.match(out.text(), /m3_predicate ender_eyes: PASS at=.* source=host-observe:rung:ender_eyes/, out.text())
+
+    // A foreign run's observation file must not be attributed to R.
+    const foreign = capture()
+    const foreignCode = await runM3Gate({
+      expectedRunId: RUN,
+      readEvidence: async () => evidenceFrom([boot(RUN), inv({ ender_pearl: 0, blaze_rod: 0, ender_eye: 0 })]),
+      policyEvidence: VERIFIED_POLICY,
+      snapshotDir: join(dir, 'absent'),
+      write: foreign.write,
+    })
+    assert.notEqual(foreignCode, 0)
+    assert.doesNotMatch(foreign.text(), /status=PASS/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  ok('the gate reads the run-scoped resident predicate file and reports it; a missing file keeps UNKNOWN')
 }
 
 console.log(`m3-gate-test ${checks}/${checks} PASS`)

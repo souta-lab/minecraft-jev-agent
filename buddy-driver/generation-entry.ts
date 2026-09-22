@@ -25,6 +25,7 @@ import { Advisor, resolveAdvisorMode } from './advisor.ts'
 import { canonicalDimensionId, createDimensionObserver, normalizeDimensionId } from './dimension-observer.ts'
 import { HUMAN_INTENT_MAX_COUNT, parseHumanIntentCommand, parseQuantityReply } from './human-intent.ts'
 import { M2SnapshotRecorder } from './m2-snapshot.ts'
+import { evaluateMilestonePredicates } from './milestone-predicate-eval.ts'
 import { OptionCompilingSystem2, optionSnapshotFromBot } from './option-brain.ts'
 import {
   MERCURY_ALLOWED_GOALS,
@@ -2556,6 +2557,10 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
       currentAction:
         current === null ? null : { id: current.id, kind: current.kind, phase: current.phase, startedAt: current.startedAt },
       truth,
+      // Live milestone predicate observations for the HOST observe loop to persist
+      // run-scoped. Computed from THIS generation's live inventory + durable world
+      // memory with the ladder's own predicates; the HOST owns the durable write.
+      milestonePredicates: evaluateMilestonePredicates(truth.inventory, world, Date.now()),
       plannedGoals: ladder.goals.length,
       rungIndex: frontier.rungIndex,
       rungId: frontier.rungId,

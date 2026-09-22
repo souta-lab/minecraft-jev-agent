@@ -240,6 +240,87 @@ assert.equal(passArtifact.acceptance.record.runId, RUN_PASS)
 }
 ok('PASS-shaped fixture: exit 0, missingEvidence [], both gate verdicts embedded')
 
+// First-class milestone predicate evidence: every M2/M3 predicate is present,
+// names its own evidence source, and the section is run-scoped.
+{
+  const section = passArtifact.milestonePredicates
+  assert.equal(section.record, 'milestone-predicates')
+  assert.equal(section.runId, RUN_PASS)
+  assert.equal(section.sourceSha, SOURCE_SHA)
+  assert.deepEqual(section.missing, [])
+  assert.deepEqual(section.mismatches, [])
+  const byId = (id) => section.predicates.find((predicate) => predicate.id === id)
+  assert.deepEqual(
+    section.predicates.map((predicate) => predicate.id),
+    ['portal_built', 'portal_lit', 'portal_verified', 'nether_reached', 'blaze_rods', 'ender_pearls', 'ender_eyes'],
+  )
+  for (const predicate of section.predicates) {
+    assert.equal(predicate.satisfied, true, `${predicate.id} must be proven by the PASS fixture`)
+    assert.equal(typeof predicate.source, 'string')
+    assert.equal(typeof predicate.observedAtMs, 'number')
+  }
+  assert.equal(byId('portal_built').source, 'log:PORTAL_FRAME_READY')
+  assert.equal(byId('nether_reached').source, 'log:dimension')
+  assert.equal(byId('ender_eyes').source, 'log:INVENTORY')
+}
+ok('PASS fixture carries a first-class, run-scoped milestone predicate section')
+
+// A host observation for this run must be merged into the artifact section and
+// upgrade the delegated M3 verdict only because it is truly observed.
+{
+  const runId = 'run-fixture-host'
+  const hostRoot = makeRoot('host')
+  writeFixture(hostRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }) })
+  writeFileSync(
+    join(hostRoot, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
+    JSON.stringify({
+      record: 'milestone-predicates',
+      schemaVersion: 1,
+      runId,
+      sourceSha: SOURCE_SHA,
+      generationId: 'gen-host-1',
+      observationCount: 3,
+      updatedAt: at(45),
+      predicates: [
+        { id: 'ender_eyes', satisfied: true, observedAtMs: T0 + 45000, observedAt: at(45), source: 'host-observe:rung:ender_eyes', evidence: { rungId: 'ender_eyes' } },
+      ],
+    }),
+  )
+  const hosted = cli(['--run', runId, '--root', hostRoot, '--json', '--no-control-socket'])
+  assert.equal(hosted.code, 0, `hosted fixture exit=${hosted.code} stderr=${hosted.stderr}`)
+  const hostedArtifact = hosted.json()
+  const eyes = hostedArtifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'ender_eyes')
+  assert.equal(eyes.satisfied, true, 'the resident observation proves the predicate')
+  assert.equal(eyes.source, 'host-observe:rung:ender_eyes')
+  assert.equal(hostedArtifact.milestonePredicates.hostObservation.present, true)
+  assert.ok(hostedArtifact.milestonePredicates.observationSources.includes('host-observe'))
+  assert.equal(hostedArtifact.verdicts.M3.status, 'PASS', 'a truly observed predicate can satisfy the terminal condition')
+  assert.deepEqual(hostedArtifact.missingEvidence, [])
+
+  // The SAME host file with a DIFFERENT source SHA must be rejected, the derived
+  // log fact kept, and the top-level integrity gap surfaced.
+  const mismatchRoot = makeRoot('host-mismatch')
+  writeFixture(mismatchRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }) })
+  writeFileSync(
+    join(mismatchRoot, 'buddy-driver', 'data', 'resident', `milestone-predicates-${runId}.json`),
+    JSON.stringify({
+      record: 'milestone-predicates',
+      schemaVersion: 1,
+      runId,
+      sourceSha: 'f'.repeat(40),
+      predicates: [{ id: 'ender_eyes', satisfied: true, observedAtMs: T0 + 45000, observedAt: at(45), source: 'host-observe:rung:ender_eyes', evidence: {} }],
+    }),
+  )
+  const mismatched = cli(['--run', runId, '--root', mismatchRoot, '--json', '--no-control-socket'])
+  const mismatchedArtifact = mismatched.json()
+  assert.equal(mismatchedArtifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'ender_eyes').satisfied, false)
+  assert.equal(mismatchedArtifact.milestonePredicates.mismatches.length, 1)
+  assert.ok(mismatchedArtifact.missingEvidence.includes('milestonePredicate:source_mismatch'))
+  assert.notEqual(mismatchedArtifact.verdicts.M3.status, 'PASS')
+}
+ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is rejected and surfaced')
+
+
 // ---------------------------------------------------------------------------
 // B. FAIL-shaped run (materials complete, eyes short)
 // ---------------------------------------------------------------------------
@@ -393,6 +474,103 @@ ok('--help exits 0; --out writes a parseable complete artifact')
   assert.equal(coercePropertyValue('world'), 'world')
 }
 ok('server.properties reader whitelists facts and never echoes credentials')
+
+// ---------------------------------------------------------------------------
+// I. no Nether transition: the predicate is UNKNOWN, never PASS
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-nonether'
+  const root = makeRoot('nonether')
+  const lines = fullLog(runId, { terminalEye: 12 }).filter((entry) => !entry.includes('dimension=minecraft:the_nether'))
+  writeFixture(root, runId, { logLines: lines })
+  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const artifact = result.json()
+  const nether = artifact.milestonePredicates.predicates.find((predicate) => predicate.id === 'nether_reached')
+  assert.equal(nether.satisfied, null, 'a run with no transition observation must not claim the predicate')
+  assert.equal(nether.source, null)
+  assert.equal(nether.evidence.lastDimension, 'minecraft:overworld')
+  assert.ok(artifact.milestonePredicates.missing.includes('nether_reached'))
+  assert.equal(artifact.verdicts.M3.conditions.nether_reached, 'UNKNOWN')
+  assert.equal(artifact.verdicts.M3.conditions.ender_eye_ready, 'PASS', 'the eyes are still proven')
+  assert.notEqual(artifact.status, 'PASS')
+  assert.notEqual(result.code, 0)
+}
+ok('a run with 12 eyes but no Nether transition: nether_reached UNKNOWN, artifact not PASS')
+
+// ---------------------------------------------------------------------------
+// J. operator decision: annotated when corroborated, never a silent gate flip
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-inherited'
+  const root = makeRoot('inherited')
+  // A run that INHERITED a verified portal: the runtime verifier reports
+  // PORTAL_VERIFIED=true with no build chain of its own.
+  const inheritedLog = [
+    boot(0, runId),
+    spawnLine(1),
+    environmentLine(2),
+    line(10, 'INVENTORY items={"diamond":3,"diamond_pickaxe":1,"obsidian":10,"ender_pearl":12,"blaze_rod":8,"ender_eye":0} pos=0.5,64.0,0.5'),
+    line(11, 'PORTAL_VERIFIED=true'),
+    line(19, 'HEARTBEAT pos=0.5,64.0,0.5 health=20 dimension=minecraft:the_nether'),
+  ]
+  writeFixture(root, runId, { logLines: inheritedLog })
+
+  const base = cli(['--run', runId, '--root', root, '--json', '--no-control-socket', '--no-operator-decisions'])
+  const baseArtifact = base.json()
+  assert.equal(baseArtifact.verdicts.M2.status, 'UNKNOWN')
+  assert.equal(baseArtifact.verdicts.M2.reason, 'inherited_portal')
+  assert.ok(baseArtifact.verdicts.M2.lines.some((entry) => /^m2_inherited_portal: true/.test(entry)))
+  assert.equal(baseArtifact.verdicts.M2.operatorDecision, null)
+  assert.equal(baseArtifact.operatorDecisions.present, false)
+
+  const decisionsPath = join(root, 'operator-decisions.json')
+  writeFileSync(
+    decisionsPath,
+    JSON.stringify({
+      record: 'operator-decisions',
+      schemaVersion: 1,
+      decisions: [
+        {
+          record: 'operator-decision',
+          milestone: 'M2',
+          status: 'PASS',
+          authority: 'operator',
+          runId,
+          basis: 'inherited_portal',
+          ruling: 'fixture: M2 passes on standing evidence',
+          recordedAt: at(50),
+        },
+      ],
+    }),
+  )
+  const applied = cli(['--run', runId, '--root', root, '--json', '--no-control-socket', '--operator-decisions', decisionsPath])
+  const appliedArtifact = applied.json()
+  // The delegated verdict is UNCHANGED; only an annotation is added.
+  assert.equal(appliedArtifact.verdicts.M2.status, 'UNKNOWN')
+  assert.equal(appliedArtifact.verdicts.M2.reason, 'inherited_portal')
+  assert.equal(appliedArtifact.verdicts.M2.operatorDecision.status, 'PASS')
+  assert.equal(appliedArtifact.verdicts.M2.operatorDecision.gateStatus, 'UNKNOWN')
+  assert.equal(appliedArtifact.verdicts.M2.operatorDecision.basis, 'inherited_portal')
+  assert.equal(appliedArtifact.verdicts.M2.operatorDecision.ruling, 'fixture: M2 passes on standing evidence')
+  assert.ok(appliedArtifact.verdicts.M2.operatorDecision.evidence.inheritedPortalLines.length >= 1)
+  assert.deepEqual(appliedArtifact.operatorDecisions.applied, [{ milestone: 'M2', status: 'PASS' }])
+  // An operator annotation must not manufacture a PASS artifact either.
+  assert.notEqual(appliedArtifact.status, 'PASS')
+
+  // NOT corroborated: the same decision against a run that built its own chain.
+  const builtRoot = makeRoot('inherited-not-corroborated')
+  writeFixture(builtRoot, runId, { logLines: fullLog(runId, { terminalEye: 12 }) })
+  const notCorroborated = cli(['--run', runId, '--root', builtRoot, '--json', '--no-control-socket', '--operator-decisions', decisionsPath])
+  const notCorroboratedArtifact = notCorroborated.json()
+  assert.equal(notCorroboratedArtifact.verdicts.M2.operatorDecision.status, 'NOT_APPLIED')
+  assert.match(notCorroboratedArtifact.verdicts.M2.operatorDecision.reason, /^basis_not_corroborated:inherited_portal$/)
+  assert.deepEqual(notCorroboratedArtifact.operatorDecisions.applied, [])
+
+  // A decision for ANOTHER run never applies to this one.
+  const other = cli(['--run', 'run-fixture-unrelated', '--root', root, '--json', '--no-control-socket', '--operator-decisions', decisionsPath])
+  assert.equal(other.json().verdicts.M2.operatorDecision, null)
+}
+ok('operator decisions are corroborated, annotated without rewriting the gate, and run-scoped')
 
 // ---------------------------------------------------------------------------
 // cleanup

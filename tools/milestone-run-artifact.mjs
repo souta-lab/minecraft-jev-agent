@@ -5,13 +5,19 @@
 // This tool is a READER/ASSEMBLER, never a judge of its own:
 //   1. it reads the existing run-scoped evidence (BOOT line, inventory markers,
 //      dimension / spawn / environment observations, the run-scoped
-//      `m2-snapshot-<runId>.json`, the run-scoped `acceptance-<runId>.json` and,
-//      only when explicitly asked, the resident's server.properties);
+//      `m2-snapshot-<runId>.json`, the run-scoped `acceptance-<runId>.json`, the
+//      resident's `milestone-predicates-<runId>.json` observations and, only when
+//      explicitly asked, the resident's server.properties);
 //   2. it obtains the milestone verdicts by delegating to the EXISTING gates
 //      (tools/m2-gate.mjs `runM2Gate`, tools/m3-gate.mjs `runM3Gate`) with the
 //      SAME run-scoped evidence paths, and embeds their exact verdict lines.
 //      It never re-implements a gate predicate and never turns UNKNOWN into PASS;
-//   3. every fact it could not obtain is named in `missingEvidence`, and a
+//   3. it emits a FIRST-CLASS `milestonePredicates` section (derived from the
+//      resident observation file + the same log/snapshot facts, with each
+//      predicate's `{id, satisfied, observedAtMs, source, evidence}`) and attaches
+//      any explicit operator decision to `verdicts.<M>.operatorDecision` WITHOUT
+//      rewriting the delegated gate verdict;
+//   4. every fact it could not obtain is named in `missingEvidence`, and a
 //      missing fact is always an UNKNOWN/exit-2 outcome, never a quiet absence.
 //
 // Run isolation
@@ -44,17 +50,21 @@ import {
   RUN_ID_RE,
   asCounts,
   parseInventoryMarker,
+  parsePortalMarker,
   readM2Snapshot,
   readPolicySocketBinding,
   runM2Gate,
   scanRunLines,
 } from './m2-gate.mjs'
 import { runM3Gate } from './m3-gate.mjs'
+import { deriveMilestonePredicates, readMilestonePredicateEvidence } from './milestone-predicates.mjs'
 import { loadPolicyEvidence } from './m2-policy-evidence.mjs'
 
 export const RECORD = 'milestone-run-artifact'
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
+/** Repo-level operator decision file; run-scoped by each entry's own runId. */
+export const OPERATOR_DECISION_RECORD = 'operator-decision'
 
 /** The M3-relevant inventory subset, in a stable order. */
 export const MILESTONE_ITEMS = Object.freeze(['ender_pearl', 'blaze_rod', 'blaze_powder', 'ender_eye'])
@@ -237,6 +247,7 @@ function emptyAttribution(reason) {
     bootLines: [],
     inventorySamples: [],
     dimensionObservations: [],
+    portalEvents: [],
     environmentObservations: [],
     serverObservations: [],
     foreignRuns: [],
@@ -254,6 +265,7 @@ export function attributeRunLines(runId, lines) {
   const bootLines = []
   const inventorySamples = []
   const dimensionObservations = []
+  const portalEvents = []
   const environmentObservations = []
   const serverObservations = []
   const foreignRuns = new Set()
@@ -281,6 +293,8 @@ export function attributeRunLines(runId, lines) {
     if (counts !== null) inventorySamples.push({ index, ts, counts })
     const dimension = DIMENSION_RE.exec(line)
     if (dimension !== null) dimensionObservations.push({ index, ts, dimension: dimension[1] })
+    const portal = parsePortalMarker(line)
+    if (portal !== null) portalEvents.push({ index, ts, source: 'log', ...portal })
     const environment = parseEnvironmentLine(line)
     if (environment !== null) environmentObservations.push({ index, ts, ...environment })
     const server = parseServerObservation(line)
@@ -295,6 +309,7 @@ export function attributeRunLines(runId, lines) {
     bootLines,
     inventorySamples,
     dimensionObservations,
+    portalEvents,
     environmentObservations,
     serverObservations,
     foreignRuns: [...foreignRuns],
@@ -307,6 +322,9 @@ export function attributeRunLines(runId, lines) {
 
 export function derivePaths(root, overrides = {}) {
   const acceptanceDir = overrides.acceptanceDir ?? join(root, 'buddy-driver', 'data', 'resident')
+  // Operator decisions are a REPO-level product record, not resident data, so the
+  // default is repo-relative; each entry is still scoped to its own runId.
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url))
   return {
     logPath: overrides.logPath ?? join(root, 'buddy-driver', 'buddy.log'),
     snapshotDir: overrides.snapshotDir ?? acceptanceDir,
@@ -324,6 +342,10 @@ export function derivePaths(root, overrides = {}) {
         ? null
         : overrides.controlSocketPath ?? join(root, 'buddy-driver', 'data', 'resident', 'control.sock'),
     acceptanceDir,
+    operatorDecisions:
+      overrides.operatorDecisions === null
+        ? null
+        : overrides.operatorDecisions ?? join(repoRoot, 'OPERATOR-DECISIONS.json'),
     serverProperties: overrides.serverProperties ?? null,
     environment: overrides.environment ?? null,
   }
@@ -389,6 +411,105 @@ export function readServerProperties(path) {
   const values = {}
   for (const key of SERVER_PROPERTY_KEYS) if (all[key] !== undefined) values[key] = all[key]
   return { path, mtime, runScoped: false, values }
+}
+
+// ---------------------------------------------------------------------------
+// operator decisions (an explicit product decision, never a gate verdict)
+// ---------------------------------------------------------------------------
+//
+// Some milestones are passed by an operator ruling over STANDING/durable
+// evidence that a single run did not itself produce (the live case: M2 inherited
+// a previously verified lit portal, so `tools/m2-gate.mjs` correctly reports
+// UNKNOWN `inherited_portal`). The operator's ruling must be visible in the
+// artifact WITHOUT silently rewriting the delegated gate verdict:
+//
+//   * `verdicts.<M>.status` stays exactly what the gate emitted;
+//   * `verdicts.<M>.operatorDecision` records the ruling, its authority, its
+//     run scope and the gate facts that CORROBORATE its `basis`;
+//   * a decision whose basis the gate does not corroborate is recorded as
+//     NOT_APPLIED, never applied.
+//
+// The decision file is run-scoped by each entry's own `runId` / `runIds`; an
+// entry with neither does NOT apply (a standing ruling must say so explicitly
+// with `standing: true`).
+
+export function readOperatorDecisions(path) {
+  if (typeof path !== 'string' || path === '' || !existsSync(path)) {
+    return { present: false, path: path ?? null, reason: 'operator_decisions_missing', decisions: [] }
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return { present: false, path, reason: 'operator_decisions_unreadable', decisions: [] }
+  }
+  const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.decisions) ? parsed.decisions : null
+  if (list === null) return { present: false, path, reason: 'operator_decisions_shape_mismatch', decisions: [] }
+  const decisions = list.filter(
+    (entry) =>
+      isPlainObject(entry) &&
+      (entry.record === undefined || entry.record === OPERATOR_DECISION_RECORD) &&
+      typeof entry.milestone === 'string' &&
+      (entry.status === 'PASS' || entry.status === 'FAIL'),
+  )
+  return { present: true, path, reason: null, decisions }
+}
+
+function decisionAppliesToRun(entry, runId) {
+  if (typeof entry.runId === 'string' && entry.runId.length > 0) return entry.runId === runId
+  if (Array.isArray(entry.runIds)) return entry.runIds.includes(runId)
+  return entry.standing === true
+}
+
+/** The gate facts that must corroborate a decision's `basis` before it is applied. */
+export function corroborateOperatorDecision(entry, gateVerdict) {
+  const basis = typeof entry?.basis === 'string' ? entry.basis : null
+  const lines = Array.isArray(gateVerdict?.lines) ? gateVerdict.lines : []
+  if (basis === 'inherited_portal') {
+    const inherited = lines.filter((line) => /^m2_inherited_portal: true\b/.test(String(line)))
+    return { corroborated: inherited.length > 0, evidence: { basis, inheritedPortalLines: inherited, gateStatus: gateVerdict?.status ?? null } }
+  }
+  return { corroborated: false, evidence: { basis, reason: 'unknown_basis', gateStatus: gateVerdict?.status ?? null } }
+}
+
+/**
+ * Select and corroborate the operator decision for ONE milestone. The delegated
+ * gate verdict is NEVER modified; the caller attaches the returned annotation.
+ */
+export function selectOperatorDecision(decisions, { milestone, runId, gateVerdict } = {}) {
+  const list = Array.isArray(decisions) ? decisions : []
+  const matching = list.filter((entry) => entry.milestone === milestone && decisionAppliesToRun(entry, runId))
+  if (matching.length === 0) return { applied: false, reason: 'no_matching_operator_decision', entry: null, evidence: null }
+  for (const entry of matching) {
+    const corroboration = corroborateOperatorDecision(entry, gateVerdict)
+    if (corroboration.corroborated) return { applied: true, reason: null, entry, evidence: corroboration.evidence }
+  }
+  const first = matching[0]
+  return {
+    applied: false,
+    reason: `basis_not_corroborated:${first.basis ?? 'none'}`,
+    entry: first,
+    evidence: corroborateOperatorDecision(first, gateVerdict).evidence,
+  }
+}
+
+function operatorDecisionAnnotation({ selection, decisionsPath, gateVerdict }) {
+  if (selection.entry === null) return null
+  const entry = selection.entry
+  return {
+    decision: 'operator',
+    status: selection.applied ? entry.status : 'NOT_APPLIED',
+    authority: typeof entry.authority === 'string' ? entry.authority : 'operator',
+    ruling: typeof entry.ruling === 'string' ? entry.ruling : null,
+    recordedAt: typeof entry.recordedAt === 'string' ? entry.recordedAt : null,
+    basis: typeof entry.basis === 'string' ? entry.basis : null,
+    reason: selection.reason,
+    source: decisionsPath,
+    runScope: typeof entry.runId === 'string' ? entry.runId : Array.isArray(entry.runIds) ? [...entry.runIds] : 'standing',
+    gateStatus: gateVerdict?.status ?? null,
+    evidence: selection.evidence,
+    note: 'records an explicit operator product decision over standing evidence; the delegated gate verdict above is UNCHANGED',
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +785,7 @@ export function parseConditions(lines) {
   return out
 }
 
-async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvidence, policySocket }) {
+async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvidence, policySocket, sourceSha = null }) {
   const lines = []
   let code = 2
   let error = null
@@ -678,6 +799,9 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
       controlSocketPath: paths.controlSocketPath ?? undefined,
       policyEvidence,
       policySocket,
+      // The run's BOOT source SHA, so the delegated gate independently rejects a
+      // run-scoped resident observation written by a DIFFERENT build.
+      sourceSha,
       json: false,
       write: (line) => lines.push(String(line)),
     })
@@ -736,6 +860,8 @@ function unscopedArtifact({ root, now, reason }) {
       M2: { id: 'M2', gate: 'tools/m2-gate.mjs', runId: null, status: 'UNKNOWN', reason, conditions: {}, lines: [] },
       M3: { id: 'M3', gate: 'tools/m3-gate.mjs', runId: null, status: 'UNKNOWN', reason, conditions: {}, lines: [] },
     },
+    milestonePredicates: null,
+    operatorDecisions: { present: false, path: null, reason: 'run_scope_required', applied: [] },
     missingEvidence: ['runId'],
   }
 }
@@ -848,6 +974,69 @@ export async function buildRunArtifact({
   if (authority.deterministicFallbackEnabled === null) missing.push('authority.deterministicFallbackEnabled')
   if (authority.system2.provider === null || authority.system2.model === null) missing.push('authority.system2')
 
+  // ---- milestone predicate evidence (first-class, run-scoped)
+  //
+  // The resident's own run-scoped observation file is preferred when it exists
+  // (live, written by the HOST observe loop). When it does not, the predicates are
+  // derived from the SAME run-scoped log + snapshot facts the gates read, and each
+  // predicate names its evidence source and observation time. An unobserved
+  // predicate is `satisfied: null` (UNKNOWN) and is listed in `missing`, never
+  // silently absent and never a PASS.
+  const hostObservation = readMilestonePredicateEvidence(runId, { dir: paths.snapshotDir })
+  // The run-scoped snapshot is the resident's own marker-time evidence. Its portal
+  // markers and full inventories are FIRST-CLASS predicate evidence (the M2 gate
+  // reads the same markers), so they are included alongside the log: an inherited
+  // portal observed by `durable-site-recheck` must not be invisible here just
+  // because the current log line stream did not repeat it.
+  const snapshotMarkers = Array.isArray(snapshot.record?.markers) ? snapshot.record.markers : []
+  const snapshotPortalEvents = snapshotMarkers
+    .filter((marker) => typeof marker?.name === 'string' && marker.name.startsWith('PORTAL_'))
+    .map((marker) => ({
+      name: marker.name,
+      verified: marker.verified,
+      shape: marker.shape,
+      blocks: marker.blocks,
+      dimension: marker.dimension,
+      atMs: marker.atMs,
+      source: 'snapshot',
+    }))
+  const snapshotSamples = []
+  {
+    const initial = asCounts(snapshot.record?.initialInventory)
+    if (initial !== null) snapshotSamples.push({ counts: initial, source: 'snapshot' })
+    for (const marker of snapshotMarkers) {
+      const counts = asCounts(marker?.inventory)
+      if (counts !== null) snapshotSamples.push({ counts, ts: marker.at, atMs: marker.atMs, source: 'snapshot' })
+    }
+    const latest = asCounts(snapshot.record?.inventory)
+    if (latest !== null) snapshotSamples.push({ counts: latest, atMs: snapshot.record?.atMs, source: 'snapshot' })
+    const terminal = asCounts(snapshot.record?.terminal?.inventory)
+    if (terminal !== null) snapshotSamples.push({ counts: terminal, atMs: snapshot.record?.terminal?.atMs, source: 'snapshot' })
+  }
+  const milestonePredicates = deriveMilestonePredicates({
+    runId,
+    runSourceSha: boot?.sourceSha ?? null,
+    inventorySamples: [
+      ...attribution.inventorySamples.map((sample) => ({ counts: sample.counts, ts: sample.ts, source: 'log' })),
+      ...snapshotSamples,
+    ],
+    dimensionObservations: attribution.dimensionObservations.map((observation) => ({
+      dimension: observation.dimension,
+      ts: observation.ts,
+      source: 'log',
+    })),
+    portalEvents: [...attribution.portalEvents, ...snapshotPortalEvents],
+    hostObservation,
+    now,
+  })
+  // Unobserved predicates stay visible in `milestonePredicates.missing` with their
+  // `satisfied: null` + evidence, but they do NOT by themselves make the artifact
+  // "incomplete": an M3 run legitimately inherits its M2 portal, so `portal_built`
+  // / `portal_lit` may be unobserved in-run while the terminal M3 conditions are
+  // the ones the delegated verdicts already gate. A rejected/duplicate observation
+  // (source mismatch) IS an integrity gap and is surfaced at the top level.
+  if (milestonePredicates.mismatches.length > 0) missing.push('milestonePredicate:source_mismatch')
+
   // ---- delegated verdicts
   const m2 = await runDelegatedGate({
     id: 'M2',
@@ -866,8 +1055,24 @@ export async function buildRunArtifact({
     paths,
     policyEvidence: policy,
     policySocket: socketBinding,
+    sourceSha: boot?.sourceSha ?? null,
   })
   missing.push(...m2.missing, ...m3.missing)
+
+  // ---- explicit operator decisions (annotate; never rewrite a gate verdict)
+  const operatorDecisions = readOperatorDecisions(paths.operatorDecisions)
+  const m2Decision = operatorDecisionAnnotation({
+    selection: selectOperatorDecision(operatorDecisions.decisions, { milestone: 'M2', runId, gateVerdict: m2.verdict }),
+    decisionsPath: paths.operatorDecisions,
+    gateVerdict: m2.verdict,
+  })
+  const m3Decision = operatorDecisionAnnotation({
+    selection: selectOperatorDecision(operatorDecisions.decisions, { milestone: 'M3', runId, gateVerdict: m3.verdict }),
+    decisionsPath: paths.operatorDecisions,
+    gateVerdict: m3.verdict,
+  })
+  m2.verdict.operatorDecision = m2Decision
+  m3.verdict.operatorDecision = m3Decision
 
   const verdicts = { M2: m2.verdict, M3: m3.verdict }
   const statuses = [verdicts.M2.status, verdicts.M3.status]
@@ -901,11 +1106,22 @@ export async function buildRunArtifact({
       runnerOutPath: paths.runnerOutPath,
       controlSocketPath: paths.controlSocketPath,
       acceptanceDir: paths.acceptanceDir,
+      operatorDecisions: paths.operatorDecisions,
       serverProperties: paths.serverProperties,
     },
     inventory,
     environment,
     authority,
+    milestonePredicates,
+    operatorDecisions: {
+      present: operatorDecisions.present,
+      path: operatorDecisions.path,
+      reason: operatorDecisions.reason,
+      applied: [
+        ...(m2Decision !== null && m2Decision.status !== 'NOT_APPLIED' ? [{ milestone: 'M2', status: m2Decision.status }] : []),
+        ...(m3Decision !== null && m3Decision.status !== 'NOT_APPLIED' ? [{ milestone: 'M3', status: m3Decision.status }] : []),
+      ],
+    },
     acceptance: {
       present: acceptance.present,
       path: acceptance.path,
@@ -951,6 +1167,8 @@ export function parseArgs(argv) {
     else if (arg === '--control-socket') out.overrides.controlSocketPath = argv[++i] ?? null
     else if (arg === '--no-control-socket') out.overrides.controlSocketPath = null
     else if (arg === '--acceptance-dir') out.overrides.acceptanceDir = argv[++i] ?? null
+    else if (arg === '--operator-decisions') out.overrides.operatorDecisions = argv[++i] ?? null
+    else if (arg === '--no-operator-decisions') out.overrides.operatorDecisions = null
     else if (arg === '--server-properties') out.overrides.serverProperties = argv[++i] ?? null
     else if (arg === '--environment') out.overrides.environment = argv[++i] ?? null
     else throw new Error(`unknown argument: ${arg}`)
@@ -981,6 +1199,8 @@ export function usage() {
     '  --control-socket <path>  override <root>/buddy-driver/data/resident/control.sock (read-only report query)',
     '  --no-control-socket      never query the resident control socket',
     '  --acceptance-dir <path>  override the acceptance-<runId>.json directory',
+    '  --operator-decisions <p>  read explicit operator milestone decisions (default <repo>/OPERATOR-DECISIONS.json)',
+    '  --no-operator-decisions   never read an operator decision file',
     '  --server-properties <p>  read difficulty/spawn-monsters from a server.properties (labelled NOT run-scoped)',
     '  --environment <p>        read operator-recorded environment facts (difficulty/gamerules JSON, labelled NOT run-scoped)',
     '',

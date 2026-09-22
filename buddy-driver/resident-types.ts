@@ -17,6 +17,7 @@
 import type { Bot } from 'mineflayer'
 import type { GoalQueueSnapshot, GoalQueueState, LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 import type { MoveFailEntry } from '../jev-agent/src/moveFailMemory.ts'
+import type { MilestonePredicateObservation } from './milestone-predicates.ts'
 
 /** Bump when the host/generation interface changes incompatibly. */
 export const CONTRACT_VERSION = 3
@@ -902,6 +903,14 @@ export interface GenerationStatus {
   currentAction: { id: string; kind: string; phase: string; startedAt: number } | null
   /** SERVER TRUTH, DTO only */
   truth: ServerTruth
+  /**
+   * RUN-SCOPED milestone predicate observations evaluated from the live
+   * inventory + durable world memory, reusing the ladder's own `satisfied`
+   * predicates. The HOST persists these in the observe loop so the run-scoped
+   * artifact carries first-class predicate evidence instead of a post-hoc
+   * derivation. Optional for contract compatibility with older generations.
+   */
+  milestonePredicates?: MilestonePredicateObservation[]
   /** number of goals this generation's planner will seed on start() (may be 0) */
   plannedGoals: number
   /** index of the first unsatisfied ladder rung (progress frontier) */
