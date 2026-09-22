@@ -136,6 +136,7 @@ import {
   formatRowDeferredNotExecutableHere,
   formatRowNotExecutableHere,
   GoalQueue,
+  evaluateStarvedHeadBound,
   notExecutableReplanRequest,
   planReplanRequest,
   toGoalQueueStateLog,
@@ -1587,6 +1588,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   ROW_DEFERRED_NOT_EXECUTABLE_HERE,
   'NO_PRODUCTIVE_HEAD_BOUND',
   'NO_PRODUCTIVE_HEAD_WINDOW',
+  'ROW_NOT_EXECUTABLE_HERE_REPEATS',
 ])
 
 /**
@@ -2061,13 +2063,12 @@ export class JevController {
   private noProductiveKey: string | null = null
   private noProductiveThisTick = false
   /**
-   * #plan-reconciliation: decisions that presented no productive candidate for
-   * the SAME queue row, counted regardless of body motion. `noProductiveRepeats`
-   * resets whenever the rounded position changes, so a body that paces or climbs
-   * while producing nothing never reaches its own bound.
+   * #plan-reconciliation: dedupe for the ROW_NOT_EXECUTABLE_HERE line. The
+   * measured run emitted it 227 times for one unchanged fact; the repeat count
+   * rides the next emitted line instead.
    */
-  private noProductiveHeadKey: string | null = null
-  private noProductiveHeadCount = 0
+  private notExecutableKey: string | null = null
+  private notExecutableRepeats = 0
   /** Latest grounded blocker context, forwarded to System 2 on exception-driven replans. */
   private starvationContext: { blockedBy: string; missing: string[] } | null = null
   private wedgeReason: string | null = null
@@ -3448,45 +3449,45 @@ export class JevController {
       // SAME queue head with zero semantic progress, which body motion cannot
       // reset. It is code-owned evidence about the local CAN envelope - it never
       // chooses the replacement WHAT, it wakes the layer that does.
+      // Measured live (`run-mucqgrdo-21plr`): the row alternated MOVE/WAIT, so a
+      // NON-starved tick arrived between every starved one, and the previous
+      // controller-scoped counter was reset by those ticks (and by every resident
+      // reload) - `NO_PRODUCTIVE_HEAD_WINDOW count=1 limit=3` on all seven
+      // occurrences and the bound never fired. The count now lives on the durable
+      // ROW and is only closed by semantic progress, an explicit reset after it
+      // fires, or the head changing (a different row has its own count).
       if (noProductive) {
-        const headKey = `${this.queue.current?.id ?? 'none'}|${this.currentGoalKey()}`
-        if (headKey === this.noProductiveHeadKey) this.noProductiveHeadCount += 1
-        else {
-          this.noProductiveHeadKey = headKey
-          this.noProductiveHeadCount = 1
-        }
-        if (this.noProductiveHeadCount >= this.options.waitLimit) {
-          this.noProductiveHeadCount = 0
+        const count = this.queue.noteStarvedHead()
+        const bound = evaluateStarvedHeadBound({ count, limit: this.options.waitLimit })
+        if (bound.action === 'wake') {
+          this.queue.resetStarvedHead()
           this.logger.warn(
             'agent',
-            `NO_PRODUCTIVE_HEAD_BOUND count=${this.options.waitLimit}/${this.options.waitLimit} goal="${this.currentGoalKey()}" blocker=${this.starvationContext?.blockedBy ?? 'unknown'}${(this.starvationContext?.missing.length ?? 0) > 0 ? ` missing=${JSON.stringify(this.starvationContext?.missing ?? [])}` : ''} -> wake System2`,
+            `NO_PRODUCTIVE_HEAD_BOUND count=${bound.count}/${bound.limit} goal="${this.currentGoalKey()}" blocker=${this.starvationContext?.blockedBy ?? 'unknown'}${(this.starvationContext?.missing.length ?? 0) > 0 ? ` missing=${JSON.stringify(this.starvationContext?.missing ?? [])}` : ''} -> wake System2`,
             {
               goal: this.currentGoalKey(),
               goalId: this.queue.current?.id ?? null,
               blocker: this.starvationContext?.blockedBy ?? null,
               missing: this.starvationContext?.missing ?? [],
-              limit: this.options.waitLimit,
+              limit: bound.limit,
               boundary: 'semantic_boundary',
             },
             this.tickCounter,
           )
           this.escalate(
             'all_candidates_invalid',
-            `NO_PRODUCTIVE_HEAD_BOUND: ${this.options.waitLimit} decisions presented no productive candidate for the same queue head "${this.currentGoalKey()}" with zero semantic progress; blocker=${this.starvationContext?.blockedBy ?? 'unknown'}`,
+            `NO_PRODUCTIVE_HEAD_BOUND: ${bound.count} starved decisions (no productive candidate, no semantic progress) on the same queue head "${this.currentGoalKey()}"; blocker=${this.starvationContext?.blockedBy ?? 'unknown'}${(this.starvationContext?.missing.length ?? 0) > 0 ? ` missing=${JSON.stringify(this.starvationContext?.missing ?? [])}` : ''}`,
           )
           return
         }
-        if (this.noProductiveHeadCount === 1) {
+        if (bound.action === 'window') {
           this.logger.info(
             'agent',
-            `NO_PRODUCTIVE_HEAD_WINDOW goal="${this.currentGoalKey()}" limit=${this.options.waitLimit}`,
-            { goal: this.currentGoalKey(), count: this.noProductiveHeadCount, limit: this.options.waitLimit },
+            `NO_PRODUCTIVE_HEAD_WINDOW goal="${this.currentGoalKey()}" count=${bound.count} limit=${bound.limit}`,
+            { goal: this.currentGoalKey(), count: bound.count, limit: bound.limit },
             this.tickCounter,
           )
         }
-      } else {
-        this.noProductiveHeadKey = null
-        this.noProductiveHeadCount = 0
       }
       this.breakFailureDeadlock(candidates)
 
@@ -4187,6 +4188,7 @@ export class JevController {
     const result = this.queue.reconcileNotExecutableHead({ liveDimension: live })
     if (result.action === 'hold') return
     if (result.action === 'defer') {
+      this.resetNotExecutableDedupe()
       this.logger.warn(
         'agent',
         formatRowDeferredNotExecutableHere(result),
@@ -4203,23 +4205,52 @@ export class JevController {
       )
       return
     }
-    this.logger.warn(
-      'agent',
-      `${formatRowNotExecutableHere(result)} -> wake System2`,
-      {
-        goalId: result.goalId,
-        goalKey: result.goalKey,
-        declaredDimension: result.declaredDimension,
-        liveDimension: result.liveDimension,
-        reason: result.reason,
-        defers: result.defers,
-        limit: result.limit,
-      },
-      this.tickCounter,
-    )
+    // The measured run emitted the same unchanged fact 227 times, which buries
+    // the rest of buddy.log without adding information. The line is emitted when
+    // the fact changes, and the suppressed repeats ride the next emitted line.
+    const key = `${result.goalId ?? 'none'}|${result.reason}|${result.declaredDimension ?? 'none'}|${result.liveDimension ?? 'unknown'}`
+    if (key === this.notExecutableKey) {
+      this.notExecutableRepeats += 1
+    } else {
+      this.notExecutableKey = key
+      this.notExecutableRepeats = 0
+      this.logger.warn(
+        'agent',
+        `${formatRowNotExecutableHere(result)} -> wake System2`,
+        {
+          goalId: result.goalId,
+          goalKey: result.goalKey,
+          declaredDimension: result.declaredDimension,
+          liveDimension: result.liveDimension,
+          reason: result.reason,
+          defers: result.defers,
+          limit: result.limit,
+        },
+        this.tickCounter,
+      )
+    }
     const request = notExecutableReplanRequest(result)
     if (request === null) return
+    // The request path has its own bounded throttling (the replan throttle and the
+    // escalation cooldown); only the human-readable line is deduped here.
     this.summonLlm(request.reason, request.detail)
+  }
+
+  /**
+   * The dedupe counter for ROW_NOT_EXECUTABLE_HERE is carried on the ONE line the
+   * next changed fact emits, so suppressing the repeats never loses the count.
+   */
+  private resetNotExecutableDedupe(): void {
+    if (this.notExecutableRepeats > 0 && this.notExecutableKey !== null) {
+      this.logger.info(
+        'agent',
+        `ROW_NOT_EXECUTABLE_HERE_REPEATS suppressed=${this.notExecutableRepeats} key=${this.notExecutableKey}`,
+        { suppressed: this.notExecutableRepeats, key: this.notExecutableKey },
+        this.tickCounter,
+      )
+    }
+    this.notExecutableKey = null
+    this.notExecutableRepeats = 0
   }
 
   /**
@@ -4229,7 +4260,8 @@ export class JevController {
    * the goal key for the typed marker - and never selects WHAT runs next: the
    * plan's own order does, and System2 still owns the repair.
    */
-  private reconcileNonProgressingOptionalHead(): void {    if (this.queue.isEmpty) return
+  private reconcileNonProgressingOptionalHead(): void {
+    if (this.queue.isEmpty) return
     const critical = bodyStarving({
       food: typeof this.bot.food === 'number' ? this.bot.food : Number.NaN,
       health: this.bot.health,
@@ -5810,18 +5842,15 @@ export class JevController {
     // #nonprogress-yield: a settled decision that showed `goal`/`search` progress
     // clears the optional-head bound. `body`/`none` deliberately do not.
     this.queue.noteSemanticProgress(taxonomy.progressKinds)
-    // #plan-reconciliation: the same settled semantic progress clears the
-    // no-productive-head bound, so only a head that genuinely never advances is
-    // escalated.
-    if (taxonomy.progressKinds.some((kind) => kind === 'goal' || kind === 'search')) {
-      this.noProductiveHeadKey = null
-      this.noProductiveHeadCount = 0
-    }
+    // #plan-reconciliation: the same settled semantic progress clears the durable
+    // no-productive-head bound (`noteSemanticProgress` above resets it on the row),
+    // so only a head that genuinely never advances is escalated.
     // #oscillation-boundary: the BODY's own durable motion record. It is separate
-    // from every counter above on purpose: those key on the queue head, the
-    // rounded position, the action id or the chosen WAIT, so an unchanged loop in
-    // a small set of cells resets each of them. This one keys on the cell
-    // envelope alone and survives a generation change.
+    // from the queue-head bound above on purpose: that one is about the QUEUE's
+    // head and is cleared by any tick that offers a productive candidate, while
+    // this one is about the BODY's cell envelope and is cleared only by a real
+    // change in the situation. It therefore also observes the ticks that the head
+    // bound deliberately resets on.
     this.observeLocalMotion(result, candidate, taxonomy)
 
     writeOutcome(this.jevWriter, {
