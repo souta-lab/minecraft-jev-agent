@@ -86,7 +86,7 @@ import { ACTION_REJECTED, formatActionRejected, formatMoveUnreachable, MOVE_VERT
 import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
-import { BODY_SUBMERGED, bodyStarving, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
+import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
 import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
@@ -173,6 +173,8 @@ import {
   ZERO_PROGRESS_STAND_ROUTE_LIMIT,
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
+import { formatDigRouteProgress, formatDigRouteRefused } from './digRoute.ts'
+import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
 import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
@@ -1139,6 +1141,16 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'RETRIEVE_RETIRED',
   'RETRIEVE_ROUTE_BLOCKED',
   'APPROACH_LEG',
+  // The dig-route family: the target a travel/enter/retrieve goal could not walk
+  // to, the bounded terrain route the offer grounded toward it, the typed cause
+  // when even that could not be grounded, and the measured distance gain of a
+  // settled dig step. A body sealed in its own shaft produced none of these
+  // before (measured run-muc9k936-1f3vb: `presented=['WAIT','ESCALATE']` for
+  // minutes while the known gate sat 21 blocks away), so the whole route family
+  // must be observable run-scoped.
+  'DIG_ROUTE',
+  'DIG_ROUTE_REFUSED',
+  'DIG_ROUTE_PROGRESS',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -1771,6 +1783,10 @@ export class JevController {
   private exploreRouteBlockedThisTick: ExploreRouteBlocked | null = null
   /** last logged COLUMN_DESCENT_REFUSED signature, so one stalled column is one line. */
   private lastColumnDescentRefusalKey: string | null = null
+  /** last logged DIG_ROUTE_REFUSED signature, so one blocked terrain route is one line. */
+  private lastDigRouteRefusalKey: string | null = null
+  /** the current tick's typed dig-route refusals, fed into the starvation `missing` evidence. */
+  private digRouteRefusalsThisTick: DigRouteRefusal[] = []
   /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
   private columnDescentRefusalThisTick: ColumnDescentRefusal | null = null
   /** last logged PROSPECT_REFUSED signature, so one blocked en-route exposure is one line. */
@@ -2601,6 +2617,7 @@ export class JevController {
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
+      this.logDigRouteRefusals(grounded.digRefusals)
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
@@ -2757,6 +2774,18 @@ export class JevController {
         if (this.prospectRefusalThisTick !== null) {
           const prospectToken = `prospect:${this.prospectRefusalThisTick.reason}`
           if (!missing.includes(prospectToken)) missing.push(prospectToken)
+        }
+        // A travel/enter/retrieve target with no walkable route whose TERRAIN
+        // route was refused too is the same kind of capability gap: name the
+        // mechanical cause (hazard/unbreakable/no_support/open_floor/protected/
+        // no_tool/no_step/spent) in the starvation evidence, so a body sealed in
+        // its own shaft can never report `no_productive_action` with no terrain
+        // fact (measured run-muc9k936-1f3vb: `presented=2 productive=0
+        // missing=["MOVE:...:open_path", ...]` for minutes while the known gate
+        // sat 21 blocks away behind ordinary stone).
+        for (const refusal of this.digRouteRefusalsThisTick) {
+          const digToken = `dig_route:${refusal.reason}`
+          if (!missing.includes(digToken)) missing.push(digToken)
         }
         // The typed no-source fact rides the same starvation/escalation evidence
         // so a starvation line never says only `no_productive_action` when the
@@ -3082,6 +3111,7 @@ export class JevController {
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
+      if (guarded.candidate.meta.digRoute === true) this.logDigRoute(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -4395,6 +4425,10 @@ export class JevController {
         }
       }
       if (result.kind === 'DESCEND') this.onDescendComplete(result, candidate)
+      // The dig route's own progress assertion: the step CLAIMED it lands closer
+      // to the goal's target, so a settled step re-measures the distance. Only a
+      // real decrease is reported.
+      if (candidate.meta.digRoute === true) this.logDigRouteProgress(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
         // Only a COMPLETED retrieval - the target actually arrived or the item
@@ -4720,6 +4754,107 @@ export class JevController {
       },
       this.tickCounter,
     )
+  }
+
+  /**
+   * The selected DIG route: the travel/enter/retrieve target had no walkable
+   * route, so the offer grounded a bounded dig step toward it. Logged when Jev
+   * actually selects it, so the marker means "this body is now digging the route",
+   * not "a route was enumerated". The `from_d`/`to_d` pair is the mechanical
+   * claim the route makes (the step lands strictly closer to the target), and the
+   * settled action re-measures it in `DIG_ROUTE_PROGRESS`.
+   */
+  private logDigRoute(candidate: Candidate): void {
+    const line = typeof candidate.meta.digRouteLine === 'string' ? candidate.meta.digRouteLine : null
+    this.logger.info(
+      'agent',
+      line ?? `DIG_ROUTE reason=${String(candidate.meta.digRouteReason ?? 'no_walkable_route')} actionId=${candidate.id}`,
+      {
+        actionId: candidate.id,
+        target: typeof candidate.meta.digRouteTarget === 'string' ? candidate.meta.digRouteTarget : null,
+        bearing: typeof candidate.meta.digRouteBearing === 'string' ? candidate.meta.digRouteBearing : null,
+        cell: typeof candidate.meta.digRouteCell === 'string' ? candidate.meta.digRouteCell : null,
+        block: typeof candidate.meta.digRouteBlock === 'string' ? candidate.meta.digRouteBlock : null,
+        kind: typeof candidate.meta.digRouteKind === 'string' ? candidate.meta.digRouteKind : null,
+        fromD: typeof candidate.meta.digRouteFrom === 'number' ? candidate.meta.digRouteFrom : null,
+        toD: typeof candidate.meta.digRouteTo === 'number' ? candidate.meta.digRouteTo : null,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The settled dig route measured against the world: `from_d` is what the route
+   * claimed when it was offered and `to_d` the live distance now. Emitted only
+   * when the distance actually shrank, so "the distance strictly decreases as the
+   * body advances" is a measured fact per action instead of an assumption.
+   */
+  private logDigRouteProgress(result: ExecutionResult, candidate: Candidate): void {
+    const fromD = typeof candidate.meta.digRouteFrom === 'number' ? candidate.meta.digRouteFrom : null
+    const targetText = typeof candidate.meta.digRouteTarget === 'string' ? candidate.meta.digRouteTarget : null
+    if (fromD === null || targetText === null) return
+    const parts = targetText.split(',').map((value) => Number(value))
+    const [x, y, z] = parts
+    if (x === undefined || y === undefined || z === undefined) return
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return
+    const target = { x, y, z }
+    // Measured on the SAME basis the offer used (the floored feet cell), so a
+    // body that dug and did not change its cell can never be reported as having
+    // advanced: a fractional position 0.5 blocks into the old cell must not read
+    // as a distance gain.
+    const feet = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    }
+    const toD = Math.round(distance(feet, target) * 100) / 100
+    if (!(toD < fromD)) return
+    this.logger.info(
+      'agent',
+      formatDigRouteProgress(fromD, toD, target, feet),
+      {
+        actionId: result.actionId,
+        kind: result.kind,
+        status: result.status,
+        fromD,
+        toD,
+        target,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The typed `DIG_ROUTE_REFUSED` facts for this tick's travel/enter/retrieve
+   * targets that could be neither walked to nor dug toward. Deduped like the
+   * column-descent refusal (one line per distinct cause), so the dead end is
+   * stated (hazard / unbreakable / no support / open floor / protected / no tool /
+   * no step / spent) instead of the offer silently collapsing to WAIT + ESCALATE.
+   */
+  private logDigRouteRefusals(refusals: readonly DigRouteRefusal[]): void {
+    this.digRouteRefusalsThisTick = refusals.map((refusal) => ({ ...refusal }))
+    const lines = refusals.map((refusal) => formatDigRouteRefused(refusal))
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastDigRouteRefusalKey) return
+    this.lastDigRouteRefusalKey = key
+    if (key === null) return
+    for (let index = 0; index < refusals.length; index += 1) {
+      const refusal = refusals[index]
+      if (refusal === undefined) continue
+      this.logger.warn(
+        'agent',
+        lines[index] ?? formatDigRouteRefused(refusal),
+        {
+          reason: refusal.reason,
+          target: refusal.target,
+          bearing: refusal.bearing,
+          cell: refusal.cell,
+          block: refusal.block,
+          detail: refusal.detail,
+        },
+        this.tickCounter,
+      )
+    }
   }
 
   private logDescendPlan(candidate: Candidate): void {
