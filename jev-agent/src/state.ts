@@ -3517,6 +3517,14 @@ export function probeBridgeDirection(
 ): BridgeProbe {
   const scratch = bot.entity.position.clone()
   const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  // The block slice `wallEntry.ts#floodEvidence` reads, from the same live blocks
+  // (`null` = unloaded, which the flood rule never turns into a hazard).
+  const readCell = (cell: Vec3Json): WallBlockLike | null => {
+    const block = at(cell.x, cell.y, cell.z)
+    return block === null
+      ? null
+      : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
+  }
   const { dx, dz } = bridgeDirOffset(dir)
   const cells: BridgeProbeCell[] = []
   for (let step = 1; step <= Math.max(1, Math.floor(depth)); step += 1) {
@@ -3532,6 +3540,15 @@ export function probeBridgeDirection(
     const hazard = [feetBlock, headBlock, floorBlock, belowFloorBlock].some(
       (block) => block !== null && isBridgeUnsafeBlockName(block.name),
     )
+    // THE SELF-LANDING SCAFFOLD's own world truth: the 1x2 pocket this column
+    // would make the body occupy, judged for face-adjacent fluids by the SAME
+    // reader the wall entry uses (`wallEntry.ts#floodEvidence`, imported once).
+    // A body that lays the floor of the cell it steps into has no pre-existing
+    // floor to check, so the flood verdict IS its safety fact - and it is read
+    // only for the FIRST cell (a self-landing span is one cell by construction),
+    // so the probe stays bounded: one extra six-neighbourhood while the body
+    // already holds a placeable block and a step is refused.
+    const flood = step === 1 ? floodEvidence([cell, { x: cell.x, y: cell.y + 1, z: cell.z }], readCell) : null
     cells.push({
       cell,
       floor,
@@ -3543,6 +3560,14 @@ export function probeBridgeDirection(
       hazard,
       cellName: feetBlock?.name ?? null,
       floorName: floorBlock?.name ?? null,
+      headName: headBlock?.name ?? null,
+      ...(step === 1
+        ? {
+            flood: flood !== null,
+            floodCell: flood?.cell ?? null,
+            floodBlock: flood?.block ?? null,
+          }
+        : {}),
     })
   }
   return {

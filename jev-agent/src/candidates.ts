@@ -64,7 +64,9 @@ import {
   BRIDGE_MAY_PLACE_META,
   BRIDGE_META,
   BRIDGE_PLACE_META,
+  BRIDGE_POCKET_EVIDENCE_META,
   BRIDGE_REFUSED_META,
+  BRIDGE_SELF_LANDING_META,
   BRIDGE_SPAN_META,
   BRIDGE_TARGET_META,
   formatBridgeRefused,
@@ -8940,7 +8942,7 @@ function formatBridgeReflex(skill: string, plan: BridgePlan): string {
     action: 'bridge',
     evidence:
       `gap@${cellText(plan.landing)}:no_support;place@${cellText(plan.place)}:${plan.block};` +
-      `far@${cellText(plan.far)}:standable;dir=${plan.dir};span=${plan.span};` +
+      `far@${cellText(plan.far)}:${plan.selfLanding === true ? 'placed' : 'standable'};dir=${plan.dir};span=${plan.span};` +
       `d=${round2Number(plan.from)}->${round2Number(plan.to)}`,
   })
 }
@@ -8968,16 +8970,21 @@ function bridgeLegCandidate(
   reflex: string | null,
   boundary: string | null,
 ): Candidate {
+  const selfLanding = plan.selfLanding === true
   return {
     id: `BRIDGE:${plan.dir}:${blockId('p', plan.landing)}`,
     kind: 'MOVE',
-    label:
-      `bridge the gap ${plan.dir}: place ${plan.block} at (${cellText(plan.place)}) against the footing and step onto ` +
-      `(${cellText(plan.landing)}), continuing to the verified stand at (${cellText(plan.far)}), toward (${cellText(spec.target)})`,
+    label: selfLanding
+      ? `scaffold ${plan.dir}: place ${plan.block} at (${cellText(plan.place)}) against the footing and step onto the floor it makes at ` +
+        `(${cellText(plan.landing)}), toward (${cellText(spec.target)})`
+      : `bridge the gap ${plan.dir}: place ${plan.block} at (${cellText(plan.place)}) against the footing and step onto ` +
+        `(${cellText(plan.landing)}), continuing to the verified stand at (${cellText(plan.far)}), toward (${cellText(spec.target)})`,
     targetName: spec.targetName,
     // The postcondition cell is the VERIFIED FAR SIDE: the body only claims this
     // MOVE when it stands there (`executor.runBridge`), never when it merely
-    // placed a block somewhere.
+    // placed a block somewhere. For a self-landing scaffold the far side IS the
+    // landing, so the same postcondition says "the body stands on the floor this
+    // leg placed" - which is exactly what a scaffold claims.
     target: plan.far,
     targetEntityId: null,
     // The effect lives in meta (`mayPlaceBlocks` + the consumed block), never in
@@ -9010,6 +9017,17 @@ function bridgeLegCandidate(
       bridgeFrom: round2Number(plan.from),
       bridgeTo: round2Number(plan.to),
       bridgeRemaining: plan.remaining,
+      // The SELF-LANDING SCAFFOLD says so in machine-readable form: this leg's far
+      // side is the cell it floors, so `span` is 1 by construction and the bounded
+      // continuation is the next offer from the new stand cell. `pocket` carries the
+      // shared per-cell verdict the step was grounded on (the SAME
+      // `wallEntry.ts#wallPocketRefusal` family the wall entry and level scan read).
+      ...(selfLanding
+        ? {
+            [BRIDGE_SELF_LANDING_META]: true,
+            [BRIDGE_POCKET_EVIDENCE_META]: plan.pocketEvidence ?? 'none',
+          }
+        : {}),
       [BRIDGE_AUTHORITY_META]: authority,
       // The skill that owns this leg, in the SAME meta key the hole
       // step-over/step-up continuation uses, so the controller's `SKILL_STEP`
