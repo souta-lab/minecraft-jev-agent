@@ -41,7 +41,7 @@
 import type { GoalKind, GoalQueueState, GoalStrategy, PlannedGoal, QueuedGoal } from './goalQueue.ts'
 import { ORE_SOURCES } from './state.ts'
 import type { Vec3Json } from './state.ts'
-import { findInventoryFuel, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
+import { findInventoryFuel, isResourceClass, matchesResourceClass, resourceMatches, sourceUnitsForClass } from './resourceClass.ts'
 import type { ResourceClass } from './resourceClass.ts'
 import {
   PICKAXE_TIER_ORDER,
@@ -770,6 +770,64 @@ function craftVariantProducible(recipe: RecipeView, inventory: Readonly<Record<s
   return craftIngredientNeeds(recipe.ingredients).every((need) => needProducible(need, 0, new Set<string>()))
 }
 
+/** The only part of a recipe variant the plank-interchangeability test reads. */
+interface RecipeIngredientShape {
+  ingredients: readonly RecipeIngredient[]
+}
+
+/**
+ * True when `need` is one of several INTERCHANGEABLE plank requirements of the
+ * same result item: another recipe variant demands a different plank species in
+ * that slot, for the same count.
+ *
+ * `recipesFor('crafting_table')` returns one variant per plank species (12 in
+ * 1.21), none of which is privileged - the recipe data itself says any planks
+ * work. A species-specific recipe (`oak_boat`, `oak_door`, ...) has exactly one
+ * variant, so no other species is ever interchangeable there and its concrete
+ * plank is preserved.
+ */
+function interchangeablePlankNeed(need: CraftIngredientNeed, variants: readonly RecipeIngredientShape[]): boolean {
+  if (need.cls !== null || !matchesResourceClass(need.item, 'planks')) return false
+  return variants.some((variant) =>
+    variant.ingredients.some(
+      (ingredient) =>
+        ingredient.item !== need.item &&
+        ingredient.count === need.count &&
+        matchesResourceClass(ingredient.item, 'planks'),
+    ),
+  )
+}
+
+/**
+ * #plank-species: express an UNGROUNDED interchangeable plank requirement as the
+ * `planks` class instead of one arbitrary species.
+ *
+ * The deterministic ranking below tie-breaks on the recipe signature, so a
+ * generic need with nothing held names the alphabetically first species
+ * (`acacia_planks` for a crafting table) even though the body may hold only oak
+ * and birch logs. That row can never be produced, and because the dependency
+ * edge collapses a `*_log` requirement to the `log` class, its collect step gets
+ * satisfied by a species that cannot make the demanded planks - body motion with
+ * no semantic progress (measured live: `run-mubobiq6-12onv`, active
+ * `craft:acacia_planks 0/4` with 42 oak + 24 birch logs and no acacia).
+ *
+ * The class is the honest requirement exactly when the slot is interchangeable
+ * AND the body holds none of the named species. A species the body already holds
+ * keeps its own name (collect-then-craft is unchanged), and a species-specific
+ * recipe is never touched at all.
+ */
+function classAwareCraftNeeds(
+  needs: readonly CraftIngredientNeed[],
+  variants: readonly RecipeIngredientShape[],
+  inventory: Readonly<Record<string, number>>,
+): CraftIngredientNeed[] {
+  return needs.map((need): CraftIngredientNeed => {
+    if (!interchangeablePlankNeed(need, variants)) return need
+    if (needCount(need, inventory) > 0) return need
+    return { item: 'planks', count: need.count, cls: 'planks' }
+  })
+}
+
 /**
  * Deterministic variant choice for a craft goal (#craft-ingredient-prereq).
  * `recipesFor` returns every substitute recipe (12 plank types for a wooden
@@ -777,6 +835,11 @@ function craftVariantProducible(recipe: RecipeView, inventory: Readonly<Record<s
  * Ordered by: satisfied requirements, partial credit, missing units, yield,
  * fewest ingredients, signature. Live shape: 2 birch planks + 2 sticks selects
  * the birch variant and reports the single missing `birch_planks`.
+ *
+ * #plank-species: the selected variant's plank needs are then folded to the
+ * `planks` class when the requirement is interchangeable and ungrounded (see
+ * `classAwareCraftNeeds`), so a generic need never commits to a species the body
+ * cannot supply.
  */
 export function selectCraftIngredients<T extends { ingredients: readonly RecipeIngredient[]; signature: string; resultCount: number }>(
   variants: readonly T[],
@@ -815,7 +878,10 @@ export function selectCraftIngredients<T extends { ingredients: readonly RecipeI
     return a.variant.signature.localeCompare(b.variant.signature)
   })
   const best = scored[0]
-  return best === undefined ? null : { variant: best.variant, needs: best.needs, missing: best.missing }
+  if (best === undefined) return null
+  const needs = classAwareCraftNeeds(best.needs, variants, inventory)
+  const missing = needs.filter((need) => needCount(need, inventory) < need.count)
+  return { variant: best.variant, needs, missing }
 }
 
 function needPredicate(need: CraftIngredientNeed): Predicate {
@@ -1370,7 +1436,10 @@ const SMELT_ITEMS = new Set(['charcoal', 'iron_ingot', 'gold_ingot', 'copper_ing
 
 const CLASS_DEPENDENCY_ITEM: Readonly<Record<ResourceClass, string | null>> = {
   log: 'log',
-  planks: 'planks',
+  // The plank class has no collectable item of its own: its raw world source is
+  // the `log` class, exactly like `fuel` -> `log`. `sourceUnitsForClass` applies
+  // the recipe yield (one log -> four planks) when this becomes a goal count.
+  planks: 'log',
   stone: 'cobblestone',
   fuel: 'log',
   food: 'food',
@@ -1431,7 +1500,10 @@ export function dependencyGoalForPredicate(
       const item = CLASS_DEPENDENCY_ITEM[predicate.cls]
       if (item === null) return null
       const missing = Math.max(1, predicate.count - inventoryClassCount(snapshot.inventory, predicate.cls))
-      return dependencyGoalForItem(item, missing)
+      // A class is held in class units but its producer goal counts RAW SOURCE
+      // units: "4 planks" is one log, not four. Identity for every directly
+      // collectable class; `planks` converts through the recipe yield.
+      return dependencyGoalForItem(item, sourceUnitsForClass(predicate.cls, missing))
     }
     case 'pickaxeRankAtLeast': {
       const item = PICKAXE_BY_RANK[predicate.rank]

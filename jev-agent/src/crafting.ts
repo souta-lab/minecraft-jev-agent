@@ -39,6 +39,13 @@ export interface RecipeIndex {
   hasItem(name: string): boolean
   /** every recipe variant that produces `itemName` */
   recipesFor(itemName: string): RecipeVariant[]
+  /**
+   * Every item this index can produce, in a stable order. Optional so a fixture
+   * double may implement only what it needs: a caller that enumerates results
+   * (the survival `food` cook route) then finds no recipe rather than an invented
+   * one. The live index always provides it.
+   */
+  resultItems?(): readonly string[]
 }
 
 /** One executable step toward a craft goal. `place` is a station setup step. */
@@ -134,6 +141,7 @@ export function createRecipeIndex(registry: unknown): RecipeIndex {
   }
 
   const variantsById = new Map<number, RecipeVariant[]>()
+  const resultNames = new Set<string>()
   for (const [key, list] of Object.entries(reg.recipes ?? {})) {
     const resultId = Number(key)
     if (!Number.isFinite(resultId)) continue
@@ -144,7 +152,10 @@ export function createRecipeIndex(registry: unknown): RecipeIndex {
       const variant = toVariant(raw as RawRecipe, resultName, nameById)
       if (variant !== null) variants.push(variant)
     }
-    if (variants.length > 0) variantsById.set(resultId, variants)
+    if (variants.length > 0) {
+      variantsById.set(resultId, variants)
+      resultNames.add(resultName)
+    }
   }
 
   return {
@@ -157,6 +168,9 @@ export function createRecipeIndex(registry: unknown): RecipeIndex {
       if (id === undefined) return []
       return variantsById.get(id) ?? []
     },
+    // Sorted so a caller that enumerates every producible item gets a
+    // deterministic order across registries and runs.
+    resultItems: () => [...resultNames].sort(),
   }
 }
 

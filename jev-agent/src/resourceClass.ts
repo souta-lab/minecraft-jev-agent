@@ -3,7 +3,7 @@
 // The planner must not be assumed to know world-specific item ids. It asks for a
 // class ("log", "stone", ...) and the resolver maps it to the concrete items that
 // exist in the world / inventory.
-import { isFuelItem } from './gameData.ts'
+import { isFuelItem, loadGameData, recipesFor } from './gameData.ts'
 
 export type ResourceClass = 'log' | 'planks' | 'stone' | 'fuel' | 'food' | 'pickaxe'
 
@@ -51,6 +51,23 @@ const FOOD_ITEMS = new Set([
   'carrot',
   'melon_slice',
   'sweet_berries',
+  // Edible vanilla items the survival table was missing. These are the outputs
+  // and forage drops of the grounded food routes (`foodSources.ts`): without
+  // them a recipe could be planned to completion and the eat mechanic would
+  // still refuse the result, which is a dead-end route rather than a food truth.
+  // The boundary is deliberate: items that are edible but carry a harmful
+  // effect (rotten_flesh, spider_eye, poisonous_potato, pufferfish, ...) are NOT
+  // survival food, and a table that cannot distinguish them would offer a
+  // starving body a route that kills it.
+  'beetroot',
+  'beetroot_soup',
+  'cookie',
+  'dried_kelp',
+  'glow_berries',
+  'honey_bottle',
+  'kelp',
+  'mushroom_stew',
+  'pumpkin_pie',
 ])
 
 const PICKAXE_SUFFIX = '_pickaxe'
@@ -132,4 +149,59 @@ export function resolveResourceClass(cls: ResourceClass, availableItems: readonl
 export function resolveToAvailable(spec: string, availableItems: readonly string[]): string {
   if (!isResourceClass(spec)) return spec
   return resolveResourceClass(spec, availableItems)[0] ?? spec
+}
+
+let cachedPlanksPerLog: number | null | undefined
+
+/**
+ * Planks yielded by one unit of their raw wood source, straight from the
+ * log-sourced plank recipes in minecraft-data (one log -> four planks in 1.21).
+ * Data-derived: no species is named and no ratio is hard-coded. The LOWEST yield
+ * across those recipes is kept so a converted count can never under-collect, and
+ * null means the data carries no log-sourced plank recipe at all.
+ */
+export function planksPerLog(): number | null {
+  if (cachedPlanksPerLog !== undefined) return cachedPlanksPerLog
+  const reg = loadGameData()
+  let lowest: number | null = null
+  for (const name of Object.keys(reg.itemsByName ?? {})) {
+    if (!matchesResourceClass(name, 'planks')) continue
+    for (const variant of recipesFor(name)) {
+      if (variant.ingredients.length !== 1 || variant.resultCount <= 0) continue
+      const source = variant.ingredients[0]
+      if (source === undefined || source.count <= 0 || !matchesResourceClass(source.item, 'log')) continue
+      const perLog = variant.resultCount / source.count
+      if (lowest === null || perLog < lowest) lowest = perLog
+    }
+  }
+  cachedPlanksPerLog = lowest
+  return lowest
+}
+
+/** Reset the memoized plank yield (tests only). */
+export function resetPlanksPerLogCache(): void {
+  cachedPlanksPerLog = undefined
+}
+
+/**
+ * Log-class units needed to obtain `count` planks of ANY species. The plank class
+ * has no collectable item of its own - its raw world source is the `log` class -
+ * so a class requirement must be converted through the recipe's own yield before
+ * it can become a collect goal. Null when the recipe data has no plank yield.
+ */
+export function logsForPlanks(count: number): number | null {
+  const perLog = planksPerLog()
+  if (perLog === null || perLog <= 0) return null
+  return Math.max(1, Math.ceil(Math.max(0, count) / perLog))
+}
+
+/**
+ * Units of a class's RAW SOURCE needed to obtain `count` units of the class.
+ * Identity for every class that is directly collectable (`log`, `stone`, `fuel`);
+ * `planks` converts through the recipe yield, so "any 4 planks" asks for one log
+ * instead of four logs.
+ */
+export function sourceUnitsForClass(cls: ResourceClass, count: number): number {
+  if (cls === 'planks') return logsForPlanks(count) ?? count
+  return count
 }
