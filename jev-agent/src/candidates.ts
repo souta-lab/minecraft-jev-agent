@@ -11657,7 +11657,6 @@ interface AttackStandVerdict {
 function attackStandVerdict(
   candidate: Candidate,
   context: ReachabilityGateContext,
-  distanceToTarget: number,
 ): AttackStandVerdict | null {
   const probe = context.options.reachability?.attackStandProbe ?? null
   if (probe === null) return null
@@ -11763,7 +11762,7 @@ function evaluateOrdinaryAttackCandidate(
   // `out_of_reach` on repeat. A stance that is standable, hazard-free, inside the
   // melee envelope and has line of sight to the entity is required, and when the
   // body is not already on one the stance must be walkable.
-  const stance = attackStandVerdict(candidate, context, distanceToTarget)
+  const stance = attackStandVerdict(candidate, context)
   if (stance !== null) {
     return stance.reachable
       ? reachabilityRecord(candidate, targetFact, world, stance.result, context, stance.evidence)
@@ -11875,7 +11874,7 @@ function evaluateHuntAttackCandidate(
   // so the existing `attackPathProbe` / `hunt_approach_budget` contract stays in
   // charge there and nothing is refused before it is walked toward.
   if (distanceToTarget <= HUNT_APPROACH_BUDGET) {
-    const stance = attackStandVerdict(candidate, context, distanceToTarget)
+    const stance = attackStandVerdict(candidate, context)
     if (stance !== null && !stance.reachable) {
       return reachabilityRecord(
         candidate,
