@@ -75,7 +75,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, formatPortalFrameSiteRejected, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -1009,6 +1009,13 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'LOCAL_CLEAR',
   'ASCEND_STEP',
   'ASCENT_PROGRESS',
+  // The descent half of the vertical vocabulary: a refused local descent names
+  // its missing precondition, and a durable descent chunk is run evidence
+  // (a `descend_plan` refusal that was never named is what left the M3 body
+  // standing above its own lit gate).
+  'DESCENT_REFUSED',
+  'DESCENT_CHUNK',
+  'PORTAL_ENTRY_UNVERIFIED',
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'PILLAR_FAIL',
@@ -1686,6 +1693,7 @@ export class JevController {
   private lastIgnitionRefusalKey: string | null = null
   /** last logged PORTAL_ENTER_REFUSED signature, so one transfer dead end is one line. */
   private lastEntryRefusalKey: string | null = null
+  private lastEntryUnverifiedKey: string | null = null
   /** last logged EQUIP_ARMOR_REFUSED signature set, so "nothing better is held" is one line. */
   private lastArmorRefusalKey: string | null = null
   /** last logged RESOURCE_SOURCE_EXCLUDED signature set, so one protected structure is one line. */
@@ -2510,6 +2518,7 @@ export class JevController {
       this.logPlacementRefusal(grounded.placeRefusal)
       this.logIgnitionRefusal(grounded.ignitionRefusal)
       this.logEntryRefusal(grounded.entryRefusal)
+      this.logEntryUnverified(portalEntry)
       this.logArmorRefusal(grounded.armorRefusals)
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
@@ -5140,10 +5149,29 @@ export class JevController {
       refusal ?? {
         ok: false,
         refused: true,
-        reason: 'portal_not_lit',
-        line: `${PRECONDITION_MISSING} portal=lit`,
+        reason: 'no_known_site',
+        // With ZERO sites examined there is no observation at all, so claiming
+        // `portal_not_lit` would be a fabricated world fact (live
+        // run-muc3qbug-18vg3 emitted exactly that while the run's own durable
+        // record said the gate was lit and verified). Name what is missing.
+        line: formatPortalEntryNoKnownSite(),
       }
     )
+  }
+
+  /**
+   * The remembered-site approach marker: the entry route targets a portal whose
+   * lit interior could not be observed from here, so the walk is offered and the
+   * executor re-verifies the `nether_portal` interior at arrival. Distinct from
+   * `logEntryRefusal` (which owns the refusals) and deduped by line so a stable
+   * unverified route is one run-scoped fact, not a per-tick flood.
+   */
+  private logEntryUnverified(plan: PortalEntryPlan | null): void {
+    const line = plan !== null && plan.ok && plan.candidate.unverified === true ? plan.candidate.line : null
+    if (line === this.lastEntryUnverifiedKey) return
+    this.lastEntryUnverifiedKey = line
+    if (line === null) return
+    this.logger.info('agent', line, { reason: 'site_not_observed', enter: line }, this.tickCounter)
   }
 
   /**

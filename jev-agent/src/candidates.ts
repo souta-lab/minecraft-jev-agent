@@ -1272,6 +1272,10 @@ export function entryCandidates(
           enterZ: entry.enterCell.z,
           dimension: entry.dimension,
           portalCells: serializePortalCells(entry.portalCells),
+          // A remembered-site route (interior unobservable from here) is offered
+          // with the fact named: the executor re-verifies the lit interior at
+          // arrival, so this can never transfer through an unlit frame.
+          ...(entry.unverified === true ? { entryUnverified: true } : {}),
           ...verticalMeta,
           ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
           ...(route.plan === null && route.ascentRefusal !== null
@@ -2926,6 +2930,13 @@ function mineCandidates(
   const descent = descendCandidates(state, options, focusItem, tunnelTargets, descendTargetY)
   if (candidates.length === 0) {
     candidates.push(...descent)
+    // A descend goal whose direct column offers NO safe step must not leave an
+    // escalate-only offer on an active row (live: y=55 idle, `kinds=['ESCALATE']`
+    // with the target 109 blocks below). Retarget a fresh standable column; the
+    // next observation re-derives the descent there.
+    if (candidates.length === 0 && descendTargetY !== null) {
+      candidates.push(...descentRetargetCandidates(state, options))
+    }
   } else if (
     mineActions.length === 0 &&
     (moveActions.length > 0 || accessActions.length > 0) &&
@@ -3430,6 +3441,24 @@ function descendCandidates(
     best = pickBestDescendStep(pool, scoreInput)
   }
   if (best === null) return []
+
+  // A DESCEND lowers the body. A LEVEL step is still a grounded body change (the
+  // documented lateral-reposition vocabulary every fixture relies on), but it is
+  // NOT altitude loss: for an explicit `descend_to:Y=<n>` predicate a level step
+  // can never satisfy the goal, and charging it to the descent budget produced
+  // the measured live stall
+  //   DESCEND_PROGRESS actionSuccess=true resourceDelta=0 streak=2
+  //   DESCEND:level:N:b10_64_22  (target y=-54, 117 blocks BELOW)
+  // so a spent failure budget on a safe DOWN step must never hand the single
+  // DESCEND slot to a level move. Retry the down step instead; the controller's
+  // DESCEND_STALLED / DESCEND_LIMIT assertions bound a genuinely impossible
+  // descent and escalate, which is exactly "retarget or escalate".
+  if (descendTargetY !== null) {
+    const downNotFailed = notFailed.filter((step) => step.mode === 'down')
+    const downPool = pool.filter((step) => step.mode === 'down')
+    const downPick = pickBestDescendStep(downNotFailed, scoreInput) ?? pickBestDescendStep(downPool, scoreInput)
+    if (downPick !== null) best = downPick
+  }
 
   // A DESCEND is a ROUTE only when the world grounds it: a sensed/tunnel target,
   // an explicit predicate, a remembered stone level below (for an underground
@@ -7130,6 +7159,11 @@ function reachabilityWorldFor(
       state.blocks.some((block) => block.kind === 'hazard' && distance(block.position, position) <= HAZARD_PROXIMITY),
     footingSolid: column.footingSolid,
     headroomClear: column.headroomClear,
+    // A body with a walkable frontier can TRAVEL to a far target below and
+    // re-derive the descent where the terrain provides one; only a body confined
+    // to its own column must already hold the local descent step. This is the
+    // general "approach a target that requires descending" fact.
+    canTravel: !strandedOnColumn(state),
   }
 }
 
@@ -7140,7 +7174,7 @@ export function deriveReachabilityAbilities(
 ): ReachabilityAbilities {
   const counts = state.inventory.counts
   const dy = Math.round(target.y - state.self.position.y)
-  const plan = planVerticalApproach({
+  const route = planVerticalApproachDetailed({
     selfFeetY: state.self.position.y,
     selfPosition: state.self.position,
     target,
@@ -7151,6 +7185,7 @@ export function deriveReachabilityAbilities(
     columnSafe: column.columnSafe,
     inventory: counts,
   })
+  const plan = route.plan
 
   // The ascent column is a FACT, not a plan: an adjacent/forward cell whose
   // 2-block body column one level up is clear (walkable step) or clearable
@@ -7217,7 +7252,23 @@ export function deriveReachabilityAbilities(
   const descendMissing: Capability[] = []
   if (dy < -DESCEND_GAP_LIMIT) {
     if (plan === null) {
-      descendMissing.push({ kind: 'descend_plan' })
+      // Name WHICH mechanical precondition of a controlled descent is absent
+      // (unsafe landing, lava, bedrock floor, protected station) and the cell it
+      // belongs to. A bare `descend_plan` token is only kept when the sensor pool
+      // carried no down step at all to judge.
+      const refusal = route.descentRefusal
+      descendMissing.push(
+        refusal === null
+          ? { kind: 'descend_plan' }
+          : {
+              kind: 'descend_plan',
+              reason: refusal.reason,
+              cell: refusal.cell,
+              block: refusal.block,
+              tool: null,
+              tier: null,
+            },
+      )
     } else if (plan.kind === 'staircase' && typeof plan.harvestTool === 'string') {
       const tier = plan.harvestTier ?? 0
       if (bestToolTier(counts, plan.harvestTool) < tier) {
@@ -7238,6 +7289,115 @@ export function deriveReachabilityAbilities(
  * retirement set, so a small fixed bound terminates and cannot loop.
  */
 export const MAX_ACQUISITION_RETIRE_PASSES = 3
+
+/**
+ * The grounded travel leg toward a descent destination: the standable frontier
+ * cell that most reduces the distance to the withheld target.
+ *
+ * When a locomotion target is below and the body's OWN cell has no safe descent
+ * step, the body is not standing at the descent cell yet. The mechanically valid
+ * forward change is therefore to TRAVEL toward that destination and re-derive the
+ * descent from fresh state (the SAME `planVerticalApproachDetailed` the candidate
+ * carries), which is exactly the "walk there, then descend" route. Emits at most
+ * one candidate, requires strict progress (>= 1 block closer), and is a plain
+ * MOVE: no DESCEND is invented (the pool has no safe step by construction), no
+ * drop is taken, and nothing is ranked.
+ */
+function descentApproachCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  destination: Vec3Json | null,
+): Candidate[] {
+  if (destination === null) return []
+  const selfDistance = distance(state.self.position, destination)
+  const advances = state.terrain.standable
+    .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
+    .filter((spot) => distance(spot, state.self.position) > 1)
+    .filter((spot) => distance(spot, destination) <= selfDistance - 1)
+  if (advances.length === 0) return []
+  const toward = advances.reduce((best, spot) => {
+    const da = distance(spot, destination)
+    const db = distance(best, destination)
+    if (da !== db) return da < db ? spot : best
+    const sa = distance(spot, state.self.position)
+    const sb = distance(best, state.self.position)
+    if (sa !== sb) return sa < sb ? spot : best
+    if (spot.y !== best.y) return spot.y < best.y ? spot : best
+    if (spot.x !== best.x) return spot.x < best.x ? spot : best
+    return spot.z < best.z ? spot : best
+  })
+  const candidate = exploreMoveCandidate(
+    state,
+    options,
+    toward,
+    moveLabel(toward, 'travel toward the descent cell', state.self.position),
+    null,
+  )
+  return [
+    {
+      ...candidate,
+      meta: { ...candidate.meta, verticalRecovery: 'descend_approach' },
+    },
+  ]
+}
+
+/**
+ * The grounded retarget for a `descend_to:Y=<n>` goal whose own column offers NO
+ * safe descent step at all (every cardinal cell and the own column refused by
+ * hazard / no support / unbreakable floor).
+ *
+ * The live shape (run-muc3qbug-18vg3, main 35dfd29): after descending to y=47 the
+ * body climbed back to y=55 and the descend row went IDLE with
+ * `candidates n=1 kinds=['ESCALATE']` - no grounded body change at all, on an
+ * active row. A column with no safe step is not evidence that no descent exists;
+ * it is evidence that THIS column is blocked. The mechanically valid forward
+ * change is to a DIFFERENT standable column: walk to a standable cell that keeps
+ * or lowers altitude, where the sensor gets a fresh descent pool and the normal
+ * staircase/dig route re-derives.
+ *
+ * Bounded and grounded: only sensed standable cells, at most `maxMoveCandidates`,
+ * ordered lowest-first then nearest-first (deterministic), never a drop, never a
+ * dig, no ranking of any other family, and the reachability gate still evaluates
+ * every cell. Empty only when perception grounds no standable cell at all - the
+ * typed bounded case the caller escalates with.
+ */
+function descentRetargetCandidates(state: WorldState, options: CandidateOptions): Candidate[] {
+  const limit = Math.max(1, options.maxMoveCandidates ?? DEFAULT_MAX_MOVE_CANDIDATES)
+  const feetY = Math.floor(state.self.position.y)
+  const standable = state.terrain.standable
+    .filter((spot) => !isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot))
+    .filter((spot) => distance(spot, state.self.position) > 1)
+  if (standable.length === 0) return []
+  const lower = standable.filter((spot) => Math.floor(spot.y) <= feetY)
+  const pool = lower.length > 0 ? lower : standable
+  const ordered = [...pool].sort((a, b) => {
+    if (a.y !== b.y) return a.y - b.y
+    const da = distance(a, state.self.position)
+    const db = distance(b, state.self.position)
+    if (da !== db) return da - db
+    if (a.x !== b.x) return a.x - b.x
+    return a.z - b.z
+  })
+  return ordered.slice(0, limit).map((spot) => {
+    const candidate = exploreMoveCandidate(
+      state,
+      options,
+      spot,
+      moveLabel(spot, 'retarget a fresh descent column (this column has no safe step)', state.self.position),
+      null,
+    )
+    return {
+      ...candidate,
+      meta: {
+        ...candidate.meta,
+        explore: false,
+        verticalRecovery: 'descent_retarget',
+        descendRetarget: true,
+        columnBlocked: true,
+      },
+    }
+  })
+}
 
 /** `options` with `retired` merged into its explicit unreachable-station set. */
 function optionsWithRetiredStations(
@@ -7364,7 +7524,7 @@ function capabilityAcquisitionCandidates(
         // descent step, so expose that level move as the prerequisite action;
         // the next observation can then derive the next down plan.  Do not
         // invent a drop or an arbitrary exploration target here.
-        source = (state.descent ?? [])
+        const levelSteps = (state.descent ?? [])
           .filter((step) => step.mode === 'level' && step.safe && step.floorSolid && (step.dx !== 0 || step.dz !== 0))
           .map((step) => {
             const target = step.step
@@ -7383,6 +7543,14 @@ function capabilityAcquisitionCandidates(
               },
             }
           })
+        // The retained target is where the descent must happen. When the body is
+        // not standing there yet, travelling toward it is the other grounded
+        // prerequisite: the descent is re-derived from fresh state on arrival,
+        // so a far/higher body gets a real forward leg instead of a local-only
+        // pool that never advances (live run-muc3qbug-18vg3: ENTER withheld for
+        // `descend_plan` while every offered MOVE/MINE stayed around the body).
+        const approach = descentApproachCandidates(state, options, entry.candidate.target)
+        source = [...levelSteps, ...approach]
       }
       for (const candidate of source) {
         if (seen.has(candidate.id)) continue

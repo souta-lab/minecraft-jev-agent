@@ -51,6 +51,13 @@ export const PORTAL_ENTERED = 'PORTAL_ENTERED'
 /** Entry was refused before any movement (no lit portal / no safe approach). */
 export const PORTAL_ENTER_REFUSED = 'PORTAL_ENTER_REFUSED'
 /**
+ * The entry route targets a REMEMBERED portal site whose interior could not be
+ * observed from here. The route is offered (the walk is a real capability), and
+ * the lit fact stays a precondition the executor re-verifies at arrival - so the
+ * marker is evidence of an unverified approach, never of a lit portal.
+ */
+export const PORTAL_ENTRY_UNVERIFIED = 'PORTAL_ENTRY_UNVERIFIED'
+/**
  * A multi-cell frame build finished its batch but the complete 10-edge shape is
  * still not present. This is a typed terminal cause: the batch was real work,
  * yet the frame is not verifiable, so the endless `verify_failed` retry that
@@ -1023,13 +1030,28 @@ export function formatPortalLit(position: PortalBlockPosition, dimension: string
 /**
  * Why entry was refused. Each is a mechanical fact read from the live world,
  * never a preference:
- *   - `portal_not_lit`      no interior cell currently holds `nether_portal`;
- *   - `no_safe_approach`    no passable, supported, in-reach stand beside the
- *                           portal exists, so walking in is not mechanically
- *                           feasible;
- *   - `already_in_dimension` the bot is already in the target dimension.
+ *   - `portal_not_lit`      every interior cell was OBSERVED and at least one is
+ *                           not `nether_portal`;
+ *   - `no_safe_approach`    the interior was observed, but no passable,
+ *                           supported, in-reach stand beside the portal exists,
+ *                           so walking in is not mechanically feasible;
+ *   - `already_in_dimension` the bot is already in the target dimension;
+ *   - `site_not_observed`   the interior could not be observed from here (chunks
+ *                           unloaded) AND no remembered frame geometry exists to
+ *                           route to, so no approach can be grounded;
+ *   - `no_known_site`       no portal site is sensed or remembered at all.
+ *
+ * `site_not_observed`/`no_known_site` exist because reporting `portal_not_lit`
+ * with nothing examined was a FABRICATED world claim (live run-muc3qbug-18vg3:
+ * the body 96 blocks from its own verified gate, the entry option active, and the
+ * offer left with no portal route and a fresh `PRECONDITION_MISSING portal=lit`).
  */
-export type PortalEntryRefusalReason = 'portal_not_lit' | 'no_safe_approach' | 'already_in_dimension'
+export type PortalEntryRefusalReason =
+  | 'portal_not_lit'
+  | 'no_safe_approach'
+  | 'already_in_dimension'
+  | 'site_not_observed'
+  | 'no_known_site'
 
 /**
  * A grounded entry: the interior cell the body must occupy. There is deliberately
@@ -1045,6 +1067,14 @@ export interface PortalEntryCandidate {
   readonly enterCell: PortalBlockPosition
   readonly dimension: string
   readonly line: string
+  /**
+   * true when the interior could NOT be observed from the offering position
+   * (chunks unloaded) and the route targets REMEMBERED frame geometry instead.
+   * The walk is still the ordinary locomotion move; the lit fact is re-verified
+   * by the executor at arrival (its entry precondition), so an unverified route
+   * can never transfer through an unlit frame - it fails typed instead.
+   */
+  readonly unverified?: boolean
 }
 
 export type PortalEntryPlan =
@@ -1070,6 +1100,15 @@ export interface PortalEntryInput {
 export function formatPortalEnterRefused(reason: PortalEntryRefusalReason, detail: string = ''): string {
   const suffix = detail.length === 0 ? '' : ` ${detail}`
   return `${PORTAL_ENTER_REFUSED} reason=${reason}${suffix}`
+}
+
+/**
+ * The truthful refusal when NO portal site is sensed or remembered. Reporting
+ * `PRECONDITION_MISSING portal=lit` with zero sites examined asserts a world
+ * fact nobody checked; this names the actual missing affordance instead.
+ */
+export function formatPortalEntryNoKnownSite(): string {
+  return `${PRECONDITION_MISSING} portal=site reason=no_known_site`
 }
 
 /**
@@ -1110,6 +1149,15 @@ export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: s
   return `${PORTAL_ENTERED} pos=${formatPos(enterCell)} dimension=${dimension}`
 }
 
+/** The exact `PORTAL_ENTRY_UNVERIFIED` line: a remembered-site route, no lit claim. */
+export function formatPortalEntryUnverified(
+  site: PortalBlockPosition,
+  enterCell: PortalBlockPosition,
+  dimension: string = NETHER,
+): string {
+  return `${PORTAL_ENTRY_UNVERIFIED} reason=site_not_observed site=${formatPos(site)} enter=${formatPos(enterCell)} dimension=${dimension}`
+}
+
 /**
  * Decide whether the lit portal at `site` may be entered RIGHT NOW. Every
  * precondition is a live-world fact and every failure is a typed refusal:
@@ -1127,6 +1175,14 @@ export function formatPortalEntered(enterCell: PortalBlockPosition, dimension: s
  * never chooses WHEN to enter, never ranks one portal against another, and never
  * plans the walk (the executor uses the ordinary generic locomotion move to
  * `enterCell`; standing in a portal block is the world mechanic that transfers).
+ *
+ * When the interior blocks cannot be READ (a remembered durable site whose chunks
+ * are unloaded) the function must not claim `portal_not_lit` - that is a world
+ * fact nobody checked. If the site carries remembered frame geometry it emits the
+ * same entry candidate marked `unverified`, so "walk back to your remembered gate"
+ * is a real route and the executor's arrival precondition owns the lit check. With
+ * no observed interior and no remembered geometry the refusal is
+ * `site_not_observed`; with no site at all the caller reports `no_known_site`.
  */
 export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
   const dimension = input.dimension ?? NETHER
@@ -1141,7 +1197,40 @@ export function planPortalEntry(input: PortalEntryInput): PortalEntryPlan {
   }
   const layout = portalFrameLayout(input.site.origin, input.site.widthAxis)
   const portalCells = layout.interior
-  const lit = portalCells.every((cell) => input.blockAt(cell) === NETHER_PORTAL)
+  const observed = portalCells.map((cell) => input.blockAt(cell))
+  if (observed.some((name) => name === null)) {
+    // Unobserved interior: do not assert lit-ness either way.
+    if ((input.site.existingFrame?.length ?? 0) === 0) {
+      return {
+        ok: false,
+        refused: true,
+        reason: 'site_not_observed',
+        line: formatPortalEnterRefused('site_not_observed', `site=${formatPos(input.site.origin)}`),
+      }
+    }
+    const rows = [...portalCells].sort((a, b) => a.y - b.y || entryDistance(a, input.self) - entryDistance(b, input.self))
+    const enterCell = rows[0]
+    if (enterCell === undefined) {
+      return {
+        ok: false,
+        refused: true,
+        reason: 'site_not_observed',
+        line: formatPortalEnterRefused('site_not_observed', `site=${formatPos(input.site.origin)}`),
+      }
+    }
+    return {
+      ok: true,
+      candidate: {
+        id: `ENTER:${formatPos(enterCell)}`,
+        portalCells: [...portalCells],
+        enterCell,
+        dimension,
+        unverified: true,
+        line: `${formatPortalEntryUnverified(input.site.origin, enterCell, dimension)} expected=${portalCells.length}`,
+      },
+    }
+  }
+  const lit = observed.every((name) => name === NETHER_PORTAL)
   if (!lit) {
     return {
       ok: false,

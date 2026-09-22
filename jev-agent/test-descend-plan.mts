@@ -130,6 +130,7 @@ function worldState(overrides: {
   goalQueue: GoalQueueState
   signals?: AgentSignals
   descent?: DescentOption[]
+  standable?: Vec3Json[]
 }): WorldState {
   return {
     schemaVersion: 1,
@@ -139,7 +140,7 @@ function worldState(overrides: {
     inventory: inventory({ stone_pickaxe: 1 }),
     entities: [],
     blocks: [],
-    terrain: { standable: [overrides.position] },
+    terrain: { standable: overrides.standable ?? [overrides.position] },
     craftingTables: [],
     furnaces: [],
     placementSpots: [],
@@ -312,6 +313,78 @@ addCase('the straight-down candidate records the exact predicate target in its m
       target.y === 54 &&
       target.z === 0,
     detail: descend === undefined ? 'no DESCEND' : `target=${JSON.stringify(descend.target)}`,
+  }
+})
+
+// (12) LIVE SHAPE (run-muc3qbug-18vg3, main 35dfd29): a `descend_to:Y=<n>` goal
+// whose own column offers NO safe step at all. The sensor refuses every cardinal
+// step and the own column (hazard / no support / unbreakable floor), so the
+// descent family yields nothing and the offer collapsed to `kinds=['ESCALATE']`
+// while the row stayed active and the body idled at y=55 with the target 109
+// blocks below. A blocked column is not a blocked descent: the offer must carry a
+// grounded retarget to a DIFFERENT standable column.
+addCase('(12) a descend goal with no safe step in its own column retargets a fresh column', () => {
+  const feet: Vec3Json = { x: 11.5, y: 55, z: 21.7 }
+  const unsafe = (dir: DescentOption['dir'], dx: number, dz: number): DescentOption => ({
+    ...downStep(dir, dx, dz, feet),
+    safe: false,
+    reason: 'no solid support at (12,53,22)',
+    refusal: 'no_support',
+  })
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({ targetItem: null as unknown as string, targetY: -54 })),
+    descent: [unsafe('E', 1, 0), unsafe('W', -1, 0), unsafe('N', 0, -1), unsafe('S', 0, 1)],
+    standable: [feet, { x: 9, y: 54, z: 22 }, { x: 13, y: 56, z: 21 }],
+  })
+  const candidates = generateCandidates(state, defaultCandidateOptions)
+  const retarget = candidates.find((candidate: Candidate) => candidate.meta.descendRetarget === true)
+  const escalateOnly = candidates.length > 0 && candidates.every((candidate: Candidate) => candidate.kind === 'ESCALATE')
+  return {
+    pass:
+      !escalateOnly &&
+      retarget !== undefined &&
+      retarget.kind === 'MOVE' &&
+      retarget.target?.x === 9 &&
+      retarget.target?.y === 54 &&
+      retarget.meta.verticalRecovery === 'descent_retarget',
+    detail: `candidates=[${candidates.map((candidate: Candidate) => candidate.id).join(',')}] retarget=${retarget?.id ?? 'none'}`,
+  }
+})
+
+// (13) A spent failure budget on a safe DOWN step must never hand the single
+// DESCEND slot to a LEVEL move: a level step does not lower Y, so a
+// `descend_to:Y=<n>` predicate can never be satisfied by it and the descent
+// budget charged it no-progress forever (live
+// `DESCEND:level:N:b10_64_22 noProgress=2`, target y=-54).
+addCase('(13) a predicate descend retries a spent down step instead of offering a level step', () => {
+  const feet: Vec3Json = { x: 10, y: 64, z: 22 }
+  const down = downStep('N', 0, -1, feet)
+  const level: DescentOption = {
+    ...down,
+    mode: 'level',
+    step: { x: 10, y: 64, z: 21 },
+    floor: { x: 10, y: 63, z: 21 },
+    diggable: false,
+  }
+  const spent = {
+    [`DESCEND:down:N:b${down.floor.x}_${down.floor.y}_${down.floor.z}`]: 99,
+  }
+  const state = worldState({
+    position: feet,
+    goalQueue: queueWith(queuedGoal({ targetY: -54 })),
+    signals: signals({ failedCandidates: spent }),
+    descent: [level, down],
+  })
+  const descend = generateCandidates(state, defaultCandidateOptions).find(
+    (candidate: Candidate) => candidate.kind === 'DESCEND',
+  )
+  return {
+    pass:
+      descend !== undefined &&
+      descend.meta.mode === 'down' &&
+      descend.id.startsWith('DESCEND:down:'),
+    detail: `descend=${descend?.id ?? 'none'} mode=${String(descend?.meta.mode ?? '-')}`,
   }
 })
 

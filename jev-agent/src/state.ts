@@ -458,6 +458,24 @@ export type BlockState = {
 export type DescentMode = 'down' | 'level'
 
 /**
+ * Why a pre-computed descent step is NOT safe, as a TYPED mechanical fact (the
+ * live `reason` string stays human-readable). `buildDescent` is the only place
+ * with live block access, so it is the only place that can name which
+ * precondition of a controlled descent is absent:
+ *
+ *   `unbreakable` the binding cell cannot be broken at all (bedrock/barrier);
+ *   `no_support`  the landing cell has no solid support (falling into void);
+ *   `open_floor`  the floor is already open, so the step is an uncontrolled fall;
+ *   `hazard`      lava/water touches the step column;
+ *   `protected`   the step would break a protected station block.
+ *
+ * A caller that must refuse a descent names this instead of a bare
+ * `descend_plan` token, so the refusal is actionable (build a floor, pick
+ * another direction, acquire a tool) rather than a retry loop.
+ */
+export type DescentRefusalReason = 'unbreakable' | 'no_support' | 'open_floor' | 'hazard' | 'protected'
+
+/**
  * A single stair-cut that turns an unclimbable 2-block vertical face directly in
  * front of the bot into a 1-block step. `cut` is the upper block of the face (the
  * cell the bot will stand in afterwards), so `cut === step`.
@@ -509,6 +527,11 @@ export type DescentOption = {
   /** true when every dig in this step is safe (no lava/water/void, solid landing) */
   safe: boolean
   reason: string
+  /**
+   * Typed cause when `safe === false`; absent on legacy/hand-built fixtures.
+   * `reason` remains the concrete human-readable fact (block name, cell).
+   */
+  refusal?: DescentRefusalReason
   /** concrete name of the primary cell this step digs (down=floor else wall/head) */
   digName?: string | null
   /** harvest family of the primary cell, resolved from the live block */
@@ -1963,16 +1986,32 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     const headOk = ownColumn || clear(head.x, head.y, head.z) || diggableSolid(head.x, head.y, head.z)
     const floorOk = mode === 'level' || clear(floor.x, floor.y, floor.z) || diggableSolid(floor.x, floor.y, floor.z)
     let reason = 'safe'
+    let refusal: DescentRefusalReason | undefined
     const protectedDig = [wall, head, floor]
       .map((cell) => at(cell.x, cell.y, cell.z))
       .find((block) => block !== null && isProtectedStationBlock(block.name))
-    if (protectedDig !== undefined && protectedDig !== null) reason = `${protectedDig.name} is a protected station`
-    else if (!wallOk) reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
-    else if (!headOk) reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
-    else if (!floorOk) reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
-    else if (!supportSolid) reason = `no solid support at (${support.x},${support.y},${support.z})`
-    else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) reason = 'floor already open (uncontrolled fall)'
-    else if (hazardsAround(hazardous, wall, head, floor, step, support)) reason = 'lava/water in the step column'
+    if (protectedDig !== undefined && protectedDig !== null) {
+      reason = `${protectedDig.name} is a protected station`
+      refusal = 'protected'
+    } else if (!wallOk) {
+      reason = `${at(wall.x, wall.y, wall.z)?.name ?? 'unknown'} wall is not breakable`
+      refusal = 'unbreakable'
+    } else if (!headOk) {
+      reason = `${at(head.x, head.y, head.z)?.name ?? 'unknown'} head-cell is not breakable`
+      refusal = 'unbreakable'
+    } else if (!floorOk) {
+      reason = `${at(floor.x, floor.y, floor.z)?.name ?? 'unknown'} floor is not breakable`
+      refusal = 'unbreakable'
+    } else if (!supportSolid) {
+      reason = `no solid support at (${support.x},${support.y},${support.z})`
+      refusal = 'no_support'
+    } else if (mode === 'down' && clear(floor.x, floor.y, floor.z)) {
+      reason = 'floor already open (uncontrolled fall)'
+      refusal = 'open_floor'
+    } else if (hazardsAround(hazardous, wall, head, floor, step, support)) {
+      reason = 'lava/water in the step column'
+      refusal = 'hazard'
+    }
     const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
     const primaryBlock = at(primary.x, primary.y, primary.z)
     const primaryHarvest =
@@ -1993,6 +2032,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       floorSolid,
       safe: reason === 'safe',
       reason,
+      ...(refusal === undefined ? {} : { refusal }),
       digName: primaryBlock?.name ?? null,
       digHarvestTool: primaryHarvest.harvestTool,
       digHarvestTier: primaryHarvest.harvestTier,

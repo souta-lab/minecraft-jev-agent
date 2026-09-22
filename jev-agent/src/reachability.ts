@@ -41,6 +41,34 @@ export const DESCEND_GAP_LIMIT = 4
 export const HAZARD_PROXIMITY = 1.5
 
 /**
+ * Horizontal range (blocks) within which a vertical gap is a LOCAL affordance
+ * question: the body is at (or beside) the destination column, so "can I get up
+ * or down from HERE" is the binding mechanical fact.
+ *
+ * Beyond it the vertical leg is a TRAVEL leg. `state.descent` is computed from
+ * the body's own four cardinal cells, so it says nothing about the terrain 90
+ * blocks away; refusing a far target because the body's current cell has no safe
+ * dig-down step is exactly the "the body is not standing on the spot yet"
+ * refusal the reachability layer must never make. This is the same range the
+ * far-leg `no_path` relaxation uses (candidates.ts FAR_LEG_PROBE_RADIUS): a
+ * probe of the body's neighbourhood is not evidence about a far destination.
+ *
+ * The relaxation is DELIBERATELY one-sided. An ascent needs a specific structure
+ * (a placeable block plus a safe column, or a clearable step) and arriving closer
+ * does not create it, so a far upward gap stays a typed `needs_ascend` refusal -
+ * that is the measured run-mu5qd4ah-3xdh defect this gate exists for. A descent
+ * needs only lower ground, which the ordinary walk (and the same vertical plan
+ * re-derived from fresh state on arrival) can take, so a far downward gap is a
+ * route to travel, not a capability the body must already hold.
+ */
+export const LOCAL_VERTICAL_LEG_RADIUS = 24
+
+/** Horizontal (XZ) distance between two cells; the vertical leg's own range fact. */
+export function horizontalDistance(a: Vec3Json, b: Vec3Json): number {
+  return Math.hypot(a.x - b.x, a.z - b.z)
+}
+
+/**
  * Eye→block-AABB distance from an explicit eye position (the reach test). The
  * #244 interaction-stand geometry, shared here so the station approach
  * (executor) and the dig-access search (candidates) use ONE implementation.
@@ -85,9 +113,39 @@ export type Capability =
       tier: number | null
     }
   | { kind: 'ascend_plan' }
-  | { kind: 'descend_plan' }
+  | {
+      kind: 'descend_plan'
+      /**
+       * The typed mechanical fact that refused every safe descent step, when the
+       * sensor pool could name one (`no_support`, `hazard`, `unbreakable`,
+       * `open_floor`, `protected`). Null/absent for the bare "no plan" token, so
+       * a legacy caller keeps the historical `descend_plan` key.
+       */
+      reason?: DescendPlanRefusalReason | null
+      /** the refused step's landing cell, when the refusal has one */
+      cell?: Vec3Json | null
+      /** the concrete block that refused the step (`bedrock`, `lava`, ...) */
+      block?: string | null
+      /** required tool family when the refused dig needs one the body lacks */
+      tool?: HarvestTool | null
+      /** minimum tool rank when `tool === 'pickaxe'` */
+      tier?: number | null
+    }
   | { kind: 'open_path' }
   | { kind: 'standable_approach' }
+
+/**
+ * Why no grounded descent plan exists, as a typed fact. `no_safe_step` means the
+ * sensor pool carried no down step at all to judge; the rest are the mechanical
+ * preconditions of a controlled descent that were absent.
+ */
+export type DescendPlanRefusalReason =
+  | 'no_safe_step'
+  | 'no_support'
+  | 'open_floor'
+  | 'hazard'
+  | 'unbreakable'
+  | 'protected'
 
 /**
  * Why a `safe_column` is missing, named so the marker is actionable: the
@@ -126,6 +184,15 @@ export interface ReachabilityWorld {
   footingSolid: boolean
   /** the bot's own column has jump headroom */
   headroomClear: boolean
+  /**
+   * fact: the body has at least one standable cell beyond its own column, so a
+   * travel leg exists at all (`!strandedOnColumn`). Absent means "assume the
+   * body can walk" - refusing on an absent fact would silently re-create the
+   * "not standing on the spot yet" suppression. When false the body is confined
+   * to its own column, so the local descent pool IS the binding affordance even
+   * for a far target.
+   */
+  canTravel?: boolean
 }
 
 export interface AscendAbility {
@@ -266,6 +333,13 @@ function descendCapabilities(ability: DescendAbility): Capability[] {
 /**
  * The mechanic decision. Precedence is deterministic and fact-ordered:
  * hazard > missing tool for a mandatory break > vertical gap > path > approach.
+ *
+ * The vertical gap is applied at the range where it is a LOCAL affordance: a
+ * gap above is always local (an ascent needs structure the body must already
+ * hold); a gap below is local while the body is at the destination column or
+ * cannot travel at all, and a travel leg otherwise (see
+ * `LOCAL_VERTICAL_LEG_RADIUS`). A far target below is therefore offered, and the
+ * descent is re-derived from fresh state where the terrain actually provides it.
  */
 export function evaluateReachability(
   target: ReachabilityTarget,
@@ -286,7 +360,11 @@ export function evaluateReachability(
       return unreachable('needs_ascend', ascendCapabilities(abilities.ascend))
     }
   } else if (dy < -DESCEND_GAP_LIMIT && !abilities.descend.available) {
-    return unreachable('needs_descend', descendCapabilities(abilities.descend))
+    const localDescent =
+      world.canTravel === false || horizontalDistance(world.self, target.position) <= LOCAL_VERTICAL_LEG_RADIUS
+    if (localDescent) {
+      return unreachable('needs_descend', descendCapabilities(abilities.descend))
+    }
   }
 
   if (pathProbe === 'no_path') {
@@ -325,8 +403,24 @@ export function capabilityKey(capability: Capability): string {
     }
     case 'ascend_plan':
       return 'ascend_plan'
-    case 'descend_plan':
-      return 'descend_plan'
+    case 'descend_plan': {
+      // A bare `descend_plan` means "no grounded descent plan" and nothing more;
+      // the typed suffix is added only when the sensor pool named the binding
+      // mechanical fact, so the refusal is actionable (`descend_plan:no_support@x,y,z`)
+      // instead of a token that can only be retried.
+      const reason = capability.reason ?? null
+      if (reason === null || reason === 'no_safe_step') return 'descend_plan'
+      const at =
+        capability.cell === undefined || capability.cell === null
+          ? ''
+          : `@${capability.cell.x},${capability.cell.y},${capability.cell.z}`
+      const block = capability.block === undefined || capability.block === null ? '' : `:${capability.block}`
+      const tool =
+        capability.tool === undefined || capability.tool === null
+          ? ''
+          : `:${capability.tool}@${capability.tier ?? 0}`
+      return `descend_plan:${reason}${at}${block}${tool}`
+    }
     case 'open_path':
       return 'open_path'
     case 'standable_approach':
