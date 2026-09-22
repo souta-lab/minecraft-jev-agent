@@ -6,7 +6,7 @@
 //   bun run candidate-policy-test
 import { blockId, CRITICAL_COMBAT_HEALTH, defaultCandidateOptions, generateCandidates, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringImmediateThreat } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
-import type { AgentSignals, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, BlockState, GoalState, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
 interface Case {
@@ -312,6 +312,27 @@ addCase('a hungry foodless resident is offered a nearby food animal as a grounde
     detail:
       `hunt=${hunt?.id ?? 'none'} foodAnimal=${hunt?.meta?.foodAnimal ?? 'none'} ` +
       `fedHunt=${fedHunt?.id ?? 'none'} fedFoodAnimal=${fedHunt?.meta?.foodAnimal ?? 'none'} eat=${eatOffered}`,
+  }
+})
+
+addCase('a first-class explore Option exposes only generic frontier work', () => {
+  const state = exploreState(0)
+  const current: QueuedGoal = {
+    ...queuedGoal(), id: 'g1:explore', kind: 'explore', description: 'explore surface terrain', targetItem: null,
+  }
+  state.goalQueue = { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] }
+  const unrelated: BlockState = {
+    kind: 'log', name: 'oak_log', position: { x: 1, y: 10, z: 0 }, distance: 1, diggable: true,
+    inReach: true, hasAdjacentStandable: true, adjacentStandable: SELF, yield: 'oak_log',
+    harvestTool: 'axe', harvestTier: null, visible: true,
+  }
+  state.blocks = [unrelated]
+  const candidates = generateCandidates(state)
+  const search = candidates.filter((candidate) => candidate.kind === 'MOVE' && candidate.meta.explore === true)
+  const leaked = candidates.filter((candidate) => candidate.kind === 'MINE' || candidate.kind === 'RETRIEVE')
+  return {
+    pass: search.some((candidate) => candidate.id === `MOVE:${blockId('p', EXPLORE_SPOT)}`) && leaked.length === 0,
+    detail: `search=[${search.map((c) => c.id).join(',')}] leaked=[${leaked.map((c) => c.id).join(',')}]`,
   }
 })
 

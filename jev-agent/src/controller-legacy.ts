@@ -5792,6 +5792,8 @@ export class JevController {
     const moveArrived =
       (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
     const surfaceSearchArrived = result.kind === 'RETRIEVE' && this.surfaceSearchArrived(candidate)
+    const exploreSearchArrived = result.kind === 'MOVE' && candidate.meta.explore === true && moveArrived
+    const searchArrived = surfaceSearchArrived || exploreSearchArrived
     const retrieveArrived = result.kind === 'RETRIEVE' && !surfaceSearchArrived && this.retrievalArrived(candidate)
     const retrieveDistanceClosed = result.kind === 'RETRIEVE' && !surfaceSearchArrived && result.distanceClosed
     const truth = truthfulActionOutcome({
@@ -5805,7 +5807,7 @@ export class JevController {
       damageObserved: result.damageObserved,
       arrived: moveArrived || retrieveArrived,
       distanceClosed: retrieveDistanceClosed,
-      searchArrived: surfaceSearchArrived,
+      searchArrived,
       requiresPickup: candidate.meta.requiresPickup === true,
     })
     const semanticProgress =
@@ -5820,9 +5822,9 @@ export class JevController {
       progressed: result.progressed,
       entityDefeated: result.entityDefeated,
       damageObserved: result.damageObserved,
-      arrived: moveArrived || retrieveArrived || surfaceSearchArrived,
+      arrived: moveArrived || retrieveArrived || searchArrived,
       distanceClosed: retrieveDistanceClosed,
-      searchArrived: surfaceSearchArrived,
+      searchArrived,
       semanticProgress,
       failureCode: result.failure,
     })
@@ -6896,6 +6898,11 @@ export class JevController {
     }
     const current = this.queue.current
     if (current === null) return
+    if (current.kind === 'explore') {
+      // Search Options are intentionally open-ended: code owns grounded frontier
+      // enumeration and search progress, while beta/System2 own semantic termination.
+      return
+    }
     if (current.kind === 'goto') {
       const target = current.targetPosition ?? null
       if (target === null) {

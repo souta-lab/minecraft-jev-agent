@@ -200,14 +200,16 @@ addCase('descend_to compiles to the DESCEND predicate with targetY', () => {
   }
 })
 
-addCase('explore cave maps to descend; explore surface maps to a collect body change', () => {
+addCase('explore remains a first-class search Option instead of becoming an M2 resource goal', () => {
   const cave = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'explore', mode: 'cave' }], reason: 'x' })
   const surface = validateMercuryPlan({ op: 'patch', goals: [{ kind: 'explore', mode: 'surface' }], reason: 'x' })
   const caveGoal = cave.ok ? plannedGoalsFromMercury(cave.plan)[0] : null
   const surfaceGoal = surface.ok ? plannedGoalsFromMercury(surface.plan)[0] : null
   return {
-    pass: caveGoal?.kind === 'descend' && surfaceGoal?.kind === 'collect' && surfaceGoal.targetItem === 'log',
-    detail: `cave=${caveGoal?.kind}:${caveGoal?.targetY} surface=${surfaceGoal?.kind}:${surfaceGoal?.targetItem}`,
+    pass:
+      caveGoal?.kind === 'explore' && caveGoal.targetItem === null && caveGoal.dimension === undefined &&
+      surfaceGoal?.kind === 'explore' && surfaceGoal.targetItem === null && surfaceGoal.dimension === undefined,
+    detail: `cave=${caveGoal?.kind}:${caveGoal?.targetItem ?? 'none'} surface=${surfaceGoal?.kind}:${surfaceGoal?.targetItem ?? 'none'}`,
   }
 })
 

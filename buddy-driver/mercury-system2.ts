@@ -73,7 +73,6 @@ import type {
   MercuryWaitLimitBackoffState,
 } from '../jev-agent/src/system2Escalation.ts'
 import { ORE_SOURCES } from '../jev-agent/src/state.ts'
-import { ORE_CANONICAL_Y } from '../jev-agent/src/predicateGoal.ts'
 import {
   NETHER,
   NETHER_PORTAL,
@@ -557,8 +556,7 @@ export function buildCorrectivePrompt(basePrompt: string, validationError: strin
  *   place/craft/collect/smelt -> matching PlannedGoal kind (PLACE / CRAFT / ...)
  *   goto / goto_resource      -> `collect` of the resource (known-resource RETRIEVE)
  *   descend_to                -> `descend` predicate goal (targetY)
- *   explore cave             -> `descend` predicate (existing cave/ore descent)
- *   explore surface          -> `collect log` (existing surface body-change plan)
+ *   explore                  -> first-class bounded search Option; current-world grounding stays in code
  */
 function compileMercuryGoalRaw(
   goal: MercuryPlanGoalJson,
@@ -629,23 +627,12 @@ function compileMercuryGoalRaw(
         detail: 'mercury descend_to',
       }
     case 'explore':
-      if (goal.mode === 'surface') {
-        return {
-          kind: 'collect',
-          description: 'explore surface for wood',
-          targetItem: 'log',
-          requiredCount: 1,
-          detail: 'mercury explore:surface',
-        }
-      }
       return {
-        kind: 'descend',
-        description: `explore cave (descend_to:Y=${ORE_CANONICAL_Y['raw_iron'] ?? 32})`,
-        targetItem: 'raw_iron',
+        kind: 'explore',
+        description: `explore ${goal.mode ?? 'unknown'} terrain`,
+        targetItem: null,
         requiredCount: 1,
-        targetY: ORE_CANONICAL_Y['raw_iron'] ?? 32,
-        dimension: 'minecraft:overworld',
-        detail: 'mercury explore:cave',
+        detail: `mercury explore:${goal.mode ?? 'unknown'}`,
       }
     case 'build_portal_frame':
       return {
