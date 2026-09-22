@@ -1083,10 +1083,10 @@ function levelsUnobserved(state: WorldState): boolean {
   const offered = entryCandidates(state, options, refusals).candidates
   const built = offered.filter((candidate) => candidate.meta.levelScan === true)[0]
   check(
+    'the level-scan candidate declares digRoute (its own dig is inside the envelope)',
     built !== undefined &&
       built.meta.digRoute === true &&
       built.meta.levelScan === true,
-    'the level-scan candidate declares digRoute (its own dig is inside the envelope)',
     built === undefined
       ? 'no candidate built'
       : `digRoute=${String(built.meta.digRoute)} levelScan=${String(built.meta.levelScan)} kind=${built.kind}`,

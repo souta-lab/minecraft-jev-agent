@@ -693,5 +693,40 @@ const retiredMarkers = (markers: readonly string[]): string[] =>
   )
 }
 
+
+// ---------------------------------------------------------------------------
+// The durable half may not overrule a live read. With TWO recorded sites - one
+// readable whose interior is NOT lit, one merely unreadable - the readable one has
+// spoken and the goal must be `unsatisfied`. Before the fix the unreadable site's
+// durable record retired the goal that the readable site had just disproved, while
+// evaluatePlacementCells already returned `unsatisfied` in the same situation.
+// ---------------------------------------------------------------------------
+
+{
+  const SHIFT = 48
+  const shifted = (cell: GoalSuccessCell): GoalSuccessCell => ({ x: cell.x + SHIFT, y: cell.y, z: cell.z })
+  const siteA = portalResource(OVERWORLD) // readable: its interior reads `air` below
+  const siteB = {
+    ...portalResource(OVERWORLD),
+    position: { ...siteA.position, x: siteA.position.x + SHIFT },
+    frameCells: siteA.frameCells.map(shifted),
+  }
+  const world = probe({
+    // no portal blocks anywhere: site A's interior is readable and positively unlit
+    blocks: new Map<string, string>(),
+    // site B is unobservable: every interior cell fails to read
+    unreadable: LAYOUT.interior.map(shifted),
+    resources: [siteA, siteB],
+  })
+  const evidence = evaluateGoalSuccess(lightRow(), world)
+  check(
+    'a live read that disproves one site is not overruled by another site durable record',
+    evidence !== null && evidence.status === 'unsatisfied',
+    evidence === null
+      ? 'no evidence returned'
+      : `status=${evidence.status} source=${evidence.source} detail=${String(evidence.detail).slice(0, 90)}`,
+  )
+}
+
 process.stdout.write(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}\n`)
 if (failures > 0) process.exit(1)
