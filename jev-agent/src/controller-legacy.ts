@@ -1226,10 +1226,13 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // Issue #436: the Skill boundary and the reflex proof must both be live-visible,
   // or a reviewer cannot tell "Jev chose the target" from "code finished it".
   'SKILL_START',
+  'SKILL_COMMIT',
   'SKILL_STEP',
   'SKILL_INTERRUPT',
+  'SKILL_POLICY_BOUNDARY',
   'SKILL_END',
   'REFLEX',
+  'PORTAL_WALK_IN_BLOCKED',
   SKILL_POLICY_BOUNDARY,
   'PILLAR_UP',
   'PILLAR_UP_STEP',
