@@ -5,7 +5,7 @@
 import { emptyWorldMemory } from './resident-types.ts'
 import { GoalQueue } from '../jev-agent/src/goalQueue.ts'
 import type { GoalKind, GoalQueueSnapshot, GoalStatus, QueuedGoal } from '../jev-agent/src/goalQueue.ts'
-import { evaluateLedgerRestoreBasis, ledgerIsConsistent, selectLedgerSnapshot } from './generation-entry.ts'
+import { evaluateLedgerRestoreBasis, ledgerBasisForLiveFrontier, ledgerIsConsistent, selectLedgerSnapshot } from './generation-entry.ts'
 import type { LedgerBasis } from '../jev-agent/src/goalQueue.ts'
 
 interface Case {
@@ -176,6 +176,27 @@ const cases: Case[] = [
         frontierRungIndex: 12,
       },
     ).accept,
+  },
+
+  {
+    name: 'restore basis follows the current ladder frontier, not inventory resume',
+    expected: true,
+    observed: (() => {
+      const snapshotBasis: LedgerBasis = {
+        worldKey: '127.0.0.1:25565|minecraft:overworld|1',
+        frontierRungId: 'nether_portal',
+        frontierRungIndex: 13,
+      }
+      const liveBasis = ledgerBasisForLiveFrontier('127.0.0.1:25565|minecraft:overworld|1', {
+        rungId: 'enter_nether',
+        rungIndex: 14,
+      })
+      return (
+        liveBasis.frontierRungId === 'enter_nether' &&
+        liveBasis.frontierRungIndex === 14 &&
+        !evaluateLedgerRestoreBasis({ ...snapshot('collect', 'obsidian'), basis: snapshotBasis }, liveBasis).accept
+      )
+    })(),
   },
   {
     name: 'active craft:furnace is stale when raw iron and two known furnaces are present',
