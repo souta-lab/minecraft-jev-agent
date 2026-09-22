@@ -129,6 +129,13 @@ export type DigRouteRefusalReason =
    */
   | 'no_wall'
   /**
+   * WALL ENTRY / LEVEL SCAN: the profile the dig would end in is a DIMENSION TRANSFER
+   * block (a lit portal plane). Standing there does not realize a locomotion step, it
+   * teleports the body, so no mechanical dig route may end there - the same refusal the
+   * reachability gate states for a leg (`crosses_dimension`), in the dig vocabulary.
+   */
+  | 'portal_plane'
+  /**
    * WALL ENTRY: no adjacent wall can be opened at all - every neighbour is open
    * air/fluid, unobserved, unbreakable, floorless, spent, protected, undiggable or
    * not measurably closer to the target. `detail` carries the per-direction ledger.
@@ -360,7 +367,17 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
     // cardinal steps), so the rule stays bearing-agnostic and a detour is chosen
     // on the geometry alone.
     if (!(toDistance <= fromDistance - minAdvance)) continue
-    const status: DigRouteSkip | null = !step.safe
+    const status: DigRouteSkip | null = step.transfersDimension === true
+      ? {
+          dir: step.dir,
+          mode: step.mode,
+          reason: 'portal_plane',
+          block: step.digName ?? null,
+          detail:
+            `standing at (${cell(step.step)}) realizes a DIMENSION TRANSFER (the profile holds a lit portal plane): ` +
+            `a mechanical tunnel never crosses a dimension`,
+        }
+      : !step.safe
       ? { dir: step.dir, mode: step.mode, reason: refusedStepReason(step), block: step.digName ?? null, detail: step.reason }
       : (input.stepRefusal?.(step) ??
         (input.isSpent?.(step) === true

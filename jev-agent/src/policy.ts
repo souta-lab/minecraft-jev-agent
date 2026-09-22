@@ -32,6 +32,14 @@ export type GuardCode =
   | 'NO_PATH'
   | 'LAVA_RISK'
   /**
+   * SAFE: the step the candidate would realize puts the body inside a DIMENSION TRANSFER
+   * block (a lit portal plane), i.e. the mechanical action would change dimension. The
+   * measured Nether arrival stands beside exactly such a plane; the explicit
+   * `ENTER_PORTAL` candidate is the one route that may cross, so this code is the guard's
+   * last boundary against a locomotion/dig realization that crosses instead.
+   */
+  | 'CROSSES_DIMENSION'
+  /**
    * SAFE: the body is out of breath (or the placement would have to be made
    * from a submerged body position while a dry alternative exists). Code owns
    * this refusal - the measured drowning was an `ATTACK` lease that kept
@@ -365,6 +373,11 @@ export function guardRejectionChargesOption(code: GuardCode): boolean {
     case 'NO_SUPPORT':
     case 'LAVA_RISK':
       return true
+    // A dimension-crossing step is a hard invalidity of THIS realization (the world
+    // mechanic would teleport the body): the option is not unproductive, the step is
+    // illegal, so it is not charged to the option's streak.
+    case 'CROSSES_DIMENSION':
+      return false
     case 'OUT_OF_REACH':
     case 'TARGET_GONE':
     case 'EMPTY_HAND':
@@ -883,6 +896,17 @@ function guardDescend(candidate: Candidate, state: WorldState, context: GuardCon
   if (step === undefined) {
     return deny(candidate.id, 'TARGET_GONE', `no descent step digging (${target.x},${target.y},${target.z}) in the current state`)
   }
+  // A step whose landing profile holds a lit portal plane is not a dig at all: it is a
+  // dimension change. The sensor owns the fact (`DescentOption.transfersDimension`), the
+  // planner already refuses to make it a route, and this is the last boundary: the
+  // explicit ENTER_PORTAL candidate is the only route that may cross a dimension.
+  if (step.transfersDimension === true) {
+    return deny(
+      candidate.id,
+      'CROSSES_DIMENSION',
+      `standing at (${step.step.x},${step.step.y},${step.step.z}) realizes a dimension transfer (lit portal plane in the landing profile)`,
+    )
+  }
   // WALL ENTRY (`wallEntry.ts`): the sensor's `safe` verdict is a 3x3x3 PROXIMITY
   // union, so a step whose pocket is provably dry is refused `hazard` exactly like a
   // step the lava would pour through. The candidate declares the entry, and the guard
@@ -898,22 +922,41 @@ function guardDescend(candidate: Candidate, state: WorldState, context: GuardCon
         )
       : undefined
   const verifiedEntry = entryProbe !== undefined && isVerifiedWallEntry(entryProbe)
-  if (!step.safe && !verifiedEntry) {
+  // BOUNDED LEVEL SCAN (`levelScan.ts`): the same situation one level down. The offered step
+  // is the body's own-column descent, whose `hazard` verdict is again the 3x3x3 PROXIMITY
+  // union; the per-cell shaft probe of the SAME sensor tick proves whether the shaft the dig
+  // opens can be flooded. The guard re-reads that probe with the SAME predicate the offer
+  // used (`isVerifiedWallEntry` over the shared `wallEntry.ts#wallPocketRefusal`), and only a
+  // `hazard` refusal is superseded - an `open_floor` (uncontrolled fall), `no_support`,
+  // `unbreakable` or `protected` verdict is denied exactly as before. When no verified shaft
+  // probe matches, the deny is unchanged.
+  const shaftProbe =
+    candidate.meta.levelScan === true && step.refusal === 'hazard'
+      ? (state.levelScan ?? []).find(
+          (probe) =>
+            probe.depth >= 1 &&
+            probe.shaft.pocket[0].cell.x === target.x &&
+            probe.shaft.pocket[0].cell.y === target.y &&
+            probe.shaft.pocket[0].cell.z === target.z,
+        )
+      : undefined
+  const verifiedShaft = shaftProbe !== undefined && isVerifiedWallEntry(shaftProbe.shaft)
+  if (!step.safe && !verifiedEntry && !verifiedShaft) {
     return deny(candidate.id, 'NO_SUPPORT', `the descent step is not safe: ${step.reason}`)
   }
   if (candidate.requiresTool && !hasTool(state, candidate.toolName)) {
     return deny(candidate.id, 'EMPTY_HAND', `needs ${candidate.toolName ?? 'a tool'} but the inventory has none`)
   }
   const hazard = nearestHazardTo(state, target)
-  // A VERIFIED wall entry is exempt from the proximity hazard deny for the same
-  // reason it is exempt from the proximity `safe` verdict: `nearestHazardTo` is a
-  // 1.5-block radius (`ENV_LAVA_PROXIMITY`) around the mined cell, and a hazard that
-  // radius catches but that shares no FACE with the pocket cannot reach the body
-  // (fluids spread face-adjacently, and a diagonal neighbour does not intersect the
-  // body's 0.6-wide box). A hazard that IS face-adjacent to the pocket is exactly what
-  // `isVerifiedWallEntry` already refused, so this cannot let a hazardous entry
+  // A VERIFIED wall entry (or the verified own-column shaft of a LEVEL SCAN) is exempt from
+  // the proximity hazard deny for the same reason it is exempt from the proximity `safe`
+  // verdict: `nearestHazardTo` is a 1.5-block radius (`ENV_LAVA_PROXIMITY`) around the mined
+  // cell, and a hazard that radius catches but that shares no FACE with the pocket cannot
+  // reach the body (fluids spread face-adjacently, and a diagonal neighbour does not
+  // intersect the body's 0.6-wide box). A hazard that IS face-adjacent to the pocket is
+  // exactly what the verified probe already refused, so this cannot let a hazardous step
   // through: the per-cell rule is strictly stronger here than the radius.
-  if (hazard !== null && !verifiedEntry) {
+  if (hazard !== null && !verifiedEntry && !verifiedShaft) {
     return deny(candidate.id, 'LAVA_RISK', `${hazard.name} is adjacent to the descent block`)
   }
   if (context.phase === 'dig' && distance(target, state.self.eyePosition) > context.reach) {

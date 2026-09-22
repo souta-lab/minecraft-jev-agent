@@ -89,6 +89,12 @@
 // the same executor (`runDescend`) as every other dig step.
 //
 // Pure: no bot, no clock, no model. Same facts in -> same routes (or refusal) out.
+//
+// ONE RULE, TWO FACT PRODUCERS: the per-cell verdict is `wallPocketRefusal` below. It is
+// exported and is the SAME function the bounded LEVEL SCAN reads (`levelScan.ts`), so the
+// body's own adjacent probes and the deeper same-column probes cannot disagree about what
+// "this pocket may be opened" means.
+import { DIMENSION_TRANSFER_BLOCKS } from './netherPortalPlan.ts'
 import type { DescentMode, DescentOption, Vec3Json } from './state.ts'
 
 /**
@@ -197,6 +203,15 @@ export type WallEntryRefusalReason =
   | 'unbreakable'
   /** the profile is a protected station block or a live structure's member */
   | 'protected'
+  /**
+   * the profile is a DIMENSION TRANSFER block (a lit portal plane): the body would not
+   * stand in the pocket it opened, it would be teleported. A mechanical locomotion
+   * realization never crosses a dimension (`candidates.ts#crosses_dimension` owns the
+   * same refusal for a leg); the explicit `ENTER_PORTAL` candidate is the only route
+   * that may cross. `DIMENSION_TRANSFER_BLOCKS` is the ONE definition
+   * (`netherPortalPlan.ts`), so this rule cannot drift from the sensor's transfer cells.
+   */
+  | 'portal_plane'
   /** the profile is breakable but the held tools cannot finish the dig */
   | 'no_tool'
   /** nothing to open here: the profile is already open passage (the walk owns it) */
@@ -333,23 +348,51 @@ export function formatFloodCause(probe: WallProbe): string {
   )
 }
 
+/** The block names a mechanical locomotion realization must never step into. */
+export function isDimensionTransferBlockName(name: string | null | undefined): boolean {
+  return typeof name === 'string' && DIMENSION_TRANSFER_BLOCKS.has(name)
+}
+
 /**
- * The one per-probe verdict. Everything is read from already-sensed facts; the order
- * is the order of the questions a player answers: may I break into here at all, will
- * it stand me on real ground, will it stay dry, can I finish the dig.
+ * The facts the ONE per-cell verdict reads. `WallProbe` satisfies this structurally, so
+ * the body's adjacent wall probes and the level scan's deeper probes are judged by the
+ * same function with no adapter and no second implementation.
  */
-function probeRefusal(
-  probe: WallProbe,
+export interface WallPocketFacts {
+  /** the feet cell the body stands in after the dig (`pocket[0].cell`) */
+  landing: Vec3Json
+  /** the 1x2 profile the dig opens: the feet cell, then the head cell above it */
+  pocket: readonly [WallCell, WallCell]
+  /** the pre-existing block under the pocket's feet cell (`landing.y - 1`), never mined */
+  floor: WallCell
+  /** a fluid is FACE-ADJACENT to a pocket cell: the dig would pour it into the tunnel */
+  flood: boolean
+  floodCell: Vec3Json | null
+  floodBlock: string | null
+}
+
+/**
+ * The ONE per-cell verdict: everything is read from already-sensed facts; the order is the
+ * order of the questions a player answers: may I break into here at all, will it stand me
+ * on real ground, will it stay dry, can I finish the dig.
+ *
+ * Exported and shared (see the module header): the wall entry and the level scan differ
+ * only in WHICH pockets they propose, never in how a pocket is judged.
+ */
+export function wallPocketRefusal(
+  facts: WallPocketFacts,
   isProtected: (cell: Vec3Json, name: string | null) => boolean,
+  describe: string = 'the',
 ): WallEntryRefusal | null {
+  const probe = facts as WallProbe
   const mined = probe.pocket.filter((cell) => !cell.open)
-  if (isProtected(probe.landing, probe.pocket[0].name) || isProtected(probe.pocket[1].cell, probe.pocket[1].name)) {
+  if (isProtected(probe.pocket[0].cell, probe.pocket[0].name) || isProtected(probe.pocket[1].cell, probe.pocket[1].name)) {
     return {
       reason: 'protected',
-      target: probe.landing,
-      cell: probe.landing,
+      target: probe.pocket[0].cell,
+      cell: probe.pocket[0].cell,
       block: probe.pocket[0].name ?? probe.pocket[1].name ?? null,
-      detail: `the ${probe.dir}/${probe.mode} profile at (${cellText(probe.landing)}) is a protected resource`,
+      detail: `${describe} profile at (${cellText(probe.pocket[0].cell)}) is a protected resource`,
     }
   }
   for (const cell of probe.pocket) {
@@ -381,13 +424,30 @@ function probeRefusal(
       }
     }
   }
+  // A transfer cell is checked AFTER "unobserved" (unknown is never satisfied) and after
+  // the fluid rule (standing in lava is the more immediate fact), but BEFORE "nothing to
+  // mine": a pocket whose open cell is a lit portal plane is not "already open passage the
+  // walk owns" - standing there transfers the body, so no mechanical dig route may end
+  // there. A pocket cell that would have to be MINED never is: a portal block is not
+  // breakable and the `breakable` check above already refused it.
+  for (const cell of probe.pocket) {
+    if (cell.open && isDimensionTransferBlockName(cell.name)) {
+      return {
+        reason: 'portal_plane',
+        target: cell.cell,
+        cell: cell.cell,
+        block: cell.name,
+        detail: `(${cellText(cell.cell)}) is ${cell.name ?? 'a transfer block'}: standing there transfers the body to another dimension`,
+      }
+    }
+  }
   if (mined.length === 0) {
     return {
       reason: 'no_wall',
-      target: probe.landing,
-      cell: probe.landing,
+      target: probe.pocket[0].cell,
+      cell: probe.pocket[0].cell,
       block: null,
-      detail: `the ${probe.dir}/${probe.mode} profile at (${cellText(probe.landing)}) is already open passage`,
+      detail: `${describe} profile at (${cellText(probe.pocket[0].cell)}) is already open passage`,
     }
   }
   if (!probe.floor.observed || !probe.floor.solid || isTunnelFloodBlockName(probe.floor.name)) {
@@ -397,7 +457,7 @@ function probeRefusal(
       cell: probe.floor.cell,
       block: probe.floor.name,
       detail:
-        `no solid non-fluid floor under (${cellText(probe.landing)}): ` +
+        `no solid non-fluid floor under (${cellText(probe.pocket[0].cell)}): ` +
         `(${cellText(probe.floor.cell)}) is ${probe.floor.observed ? (probe.floor.name ?? 'open') : 'unloaded'}`,
     }
   }
@@ -405,7 +465,7 @@ function probeRefusal(
     return {
       reason: 'would_flood',
       target: probe.floor.cell,
-      cell: probe.floodCell ?? probe.landing,
+      cell: probe.floodCell ?? probe.pocket[0].cell,
       block: probe.floodBlock,
       detail: formatFloodCause(probe),
     }
@@ -414,16 +474,30 @@ function probeRefusal(
 }
 
 /**
- * Is this probe a STRUCTURALLY verified tunnel entry, from its own sensed facts?
+ * The one per-probe verdict of a cardinal wall probe: `wallPocketRefusal` (with the
+ * direction/mode named in the detail, so the ledger stays readable per direction).
+ */
+function probeRefusal(
+  probe: WallProbe,
+  isProtected: (cell: Vec3Json, name: string | null) => boolean,
+): WallEntryRefusal | null {
+  return wallPocketRefusal(probe, isProtected, `the ${probe.dir}/${probe.mode}`)
+}
+
+/**
+ * Is this pocket a STRUCTURALLY verified tunnel entry, from its own sensed facts?
  *
  * This is the exact predicate the offer uses (`groundWallEntries` refuses a probe
  * unless this holds, plus protection / tool / spend / distance), exported so the
  * policy guard can re-verify the SAME facts on the SAME sensor tick instead of
- * trusting candidate meta. It is defined as "`probeRefusal` finds nothing to refuse
- * except protection" so the offer and the guard cannot drift apart.
+ * trusting candidate meta. It is defined as "the shared per-cell rule finds nothing to
+ * refuse" so the offer and the guard cannot drift apart.
+ *
+ * It takes the FACTS, not a `WallProbe`, so the level scan's own-column shaft facts
+ * (`levelScan.ts#LevelShaftFacts`) are verified by the very same call.
  */
-export function isVerifiedWallEntry(probe: WallProbe): boolean {
-  return probeRefusal(probe, () => false) === null
+export function isVerifiedWallEntry(facts: WallPocketFacts, describe: string = 'the'): boolean {
+  return wallPocketRefusal(facts, () => false, describe) === null
 }
 
 /**
