@@ -41,6 +41,7 @@
 //   (v)   ordinary walking with no threat -> unchanged offer, no new facts.
 //
 //   bun jev-agent/test-threat-response-grounding.mts
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import {
@@ -59,12 +60,21 @@ import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 import {
   MELEE_THREAT_REACH,
   MIN_KEEP_DISTANCE_GAIN,
+  MOB_IDENTITY_CHURN,
+  IDENTITY_CHURN_RADIUS,
+  IDENTITY_CHURN_WINDOW_MS,
+  formatMobIdentityChurn,
+  formatSurvivalReground,
+  identityChurnCandidate,
+  regroundVanishedSurvivalChoice,
+  survivalControlFallback,
   selectKeepDistanceSpots,
   THREAT_CLEAR_MS,
   THREAT_DANGER_RADIUS,
   THREAT_RESPONSE_RANGE,
   ThreatTracker,
 } from './src/threat.ts'
+import { MIRRORED_MARKERS } from './src/controller.ts'
 
 const require = createRequire(import.meta.url)
 
@@ -727,6 +737,378 @@ addCase('(v3) the new terrain facts stay absent while nothing grounds them', () 
   return {
     pass,
     detail: `portalWalkInCells=${state.terrain.portalWalkInCells === undefined ? 'absent' : 'present'} cover=${state.terrain.threatCoverCells === undefined ? 'absent' : 'present'}`,
+  }
+})
+
+// ===========================================================================
+// MOB IDENTITY CHURN: a hostile whose entity id churns by design stays
+// attackable, and nothing else is ever adopted.
+//
+// Measured live (m3-live, the Nether magma-cube fights): `THREAT_NEARBY
+// threat=magma_cube threatId=49561 distance=2.32 contact=true` ->
+// `JEV_HEADS action=ATTACK:e49561` -> `SURVIVAL_NO_GROUNDED_ACTION
+// chosenId=ATTACK:e49561 kind=ATTACK reason=no_grounded_equivalent
+// outcome=TARGET_LOST`. A magma cube/slime is REPLACED when its size state
+// changes (the parent is removed, the smaller cubes are new entities with new
+// ids), so "the chosen entity id vanished" is the NORMAL case for this mob while
+// the CAUSAL threat is still standing on the body. What survives the churn:
+// the mob name, the entity kind, the position - never the id.
+// ===========================================================================
+
+/** A grounded ATTACK candidate over a sensed hostile, as candidates.ts builds it. */
+function hostileAttack(
+  entityId: number,
+  name: string,
+  position: Vec3Json,
+  meta: Record<string, unknown> = {},
+): {
+  id: string
+  kind: string
+  targetEntityId: number
+  targetName: string
+  target: Vec3Json
+  meta: Record<string, unknown>
+} {
+  return {
+    id: `ATTACK:e${entityId}`,
+    kind: 'ATTACK',
+    targetEntityId: entityId,
+    targetName: name,
+    target: position,
+    meta: { entityId, targetHostile: true, targetKind: 'Hostile mobs', attackable: true, hostile: true, ...meta },
+  }
+}
+
+/** The position the vanished candidate recorded for the measured magma cube. */
+const CUBE_AT: Vec3Json = { x: 5, y: 59, z: 2.32 }
+const CUBE_CHURN_NOW = NOW + 760
+
+addCase('(i) the measured shape: a hostile in contact whose entity id churns while kind+position match is STILL fought', () => {
+  const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
+  const fresh = [
+    hostileAttack(50001, 'zombie', { x: 5, y: 59, z: 2.4 }),
+    hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 }),
+  ]
+  const context = {
+    previousEntityTracked: false,
+    knownEntityIds: new Set([49561, 50001]),
+    chosenAtMs: NOW,
+    nowMs: CUBE_CHURN_NOW,
+  }
+  const result = regroundVanishedSurvivalChoice(chosen, fresh, context)
+  const churn = result.identityChurn
+  const fallback = survivalControlFallback({
+    reground: result,
+    threatInContact: true,
+    freshCandidates: fresh,
+  })
+  const evidence = {
+    threatId: 49572,
+    threatName: 'magma_cube',
+    threatDistance: 2.2,
+    inContact: true,
+  } as never
+  const line = churn === null ? '' : formatMobIdentityChurn(chosen.id, churn, evidence, { health: 8, food: 17 } as never)
+  const pass =
+    result.candidateId === 'ATTACK:e49572' &&
+    result.reason === 'same_kind_near_last_position_attack' &&
+    result.outcome === 'REGROUNDED_IDENTITY_CHURN' &&
+    churn !== null &&
+    churn.fromEntityId === 49561 &&
+    churn.toEntityId === 49572 &&
+    churn.name === 'magma_cube' &&
+    churn.kind === 'Hostile mobs' &&
+    Math.abs(churn.distance - 0.4) < 0.001 &&
+    churn.elapsedMs === 760 &&
+    churn.rule === 'same_kind_near_last_position' &&
+    churn.goneEvidence === 'not_in_client_tracked_set' &&
+    churn.newEntity === 'absent_from_decision_snapshot' &&
+    // the survival path keeps FIGHTING that threat instead of escalating
+    fallback.candidateId === null &&
+    fallback.reason === 'regrounded' &&
+    line.includes('MOB_IDENTITY_CHURN from=ATTACK:e49561 to=ATTACK:e49572 mob=magma_cube') &&
+    line.includes('kind=Hostile mobs') &&
+    line.includes('moved=0.4m') &&
+    line.includes('elapsedMs=760') &&
+    line.includes('rule=same_kind_near_last_position') &&
+    line.includes('gone=not_in_client_tracked_set') &&
+    line.includes('new=absent_from_decision_snapshot') &&
+    // and the proof rides the mirrored live path
+    MIRRORED_MARKERS.has(MOB_IDENTITY_CHURN) &&
+    IDENTITY_CHURN_WINDOW_MS === 3000 &&
+    IDENTITY_CHURN_RADIUS === 3
+  return {
+    pass,
+    detail: `to=${result.candidateId} reason=${result.reason} outcome=${result.outcome} churn=${churn === null ? 'none' : `${churn.fromEntityId}->${churn.toEntityId} ${churn.name} ${churn.distance}m ${churn.elapsedMs}ms`} fallback=${fallback.reason} mirrored=${MIRRORED_MARKERS.has(MOB_IDENTITY_CHURN)}`,
+  }
+})
+
+addCase('(ii) a DIFFERENT mob kind at that position is never adopted (typed TARGET_LOST)', () => {
+  const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
+  const context = {
+    previousEntityTracked: false,
+    knownEntityIds: new Set([49561]),
+    chosenAtMs: NOW,
+    nowMs: CUBE_CHURN_NOW,
+  }
+  // (a) a different NAME, (b) a different name AND kind, (c) same category only.
+  const otherName = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'zombie', CUBE_AT)],
+    context,
+  )
+  const otherKind = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'blaze', CUBE_AT, { targetKind: 'Hostile mobs' })],
+    context,
+  )
+  const otherCategory = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'skeleton', { x: 5, y: 59, z: 2.4 }, { targetKind: 'Hostile mobs' })],
+    context,
+  )
+  const pass =
+    otherName.candidateId === null &&
+    otherName.outcome === 'TARGET_LOST' &&
+    otherName.identityChurn === null &&
+    otherKind.candidateId === null &&
+    otherKind.outcome === 'TARGET_LOST' &&
+    otherCategory.candidateId === null &&
+    otherCategory.outcome === 'TARGET_LOST'
+  return {
+    pass,
+    detail: `zombie=${otherName.candidateId}/${otherName.outcome} blaze=${otherKind.candidateId}/${otherKind.outcome} skeleton=${otherCategory.candidateId}/${otherCategory.outcome}`,
+  }
+})
+
+addCase('(iii) the old entity still alive (or UNKNOWN) is never adopted', () => {
+  const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
+  const fresh = [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 })]
+  const base = { knownEntityIds: new Set([49561]), chosenAtMs: NOW, nowMs: CUBE_CHURN_NOW }
+  // the committed id is still in the client's tracked set: it is alive somewhere,
+  // so the replacement is a DIFFERENT mob and must not be adopted.
+  const alive = regroundVanishedSurvivalChoice(chosen, fresh, { ...base, previousEntityTracked: true })
+  // UNKNOWN tracked state (no live probe) must refuse too: fail closed.
+  const unknown = regroundVanishedSurvivalChoice(chosen, fresh, { ...base, previousEntityTracked: null })
+  const missing = regroundVanishedSurvivalChoice(chosen, fresh, base)
+  // the SAME inputs with the old entity PROVEN gone adopt, so the test measures
+  // the tracked-set fact and nothing else.
+  const gone = regroundVanishedSurvivalChoice(chosen, fresh, { ...base, previousEntityTracked: false })
+  const pass =
+    alive.candidateId === null &&
+    alive.outcome === 'TARGET_LOST' &&
+    unknown.candidateId === null &&
+    unknown.outcome === 'TARGET_LOST' &&
+    missing.candidateId === null &&
+    missing.outcome === 'TARGET_LOST' &&
+    gone.candidateId === 'ATTACK:e49572' &&
+    gone.outcome === 'REGROUNDED_IDENTITY_CHURN'
+  return {
+    pass,
+    detail: `alive=${alive.candidateId}/${alive.outcome} unknown=${unknown.candidateId}/${unknown.outcome} absent=${missing.candidateId}/${missing.outcome} gone=${gone.candidateId}/${gone.outcome}`,
+  }
+})
+
+addCase('(iv) an unrelated same-kind mob (wrong place, or already there at decision time) is never adopted', () => {
+  const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
+  const context = {
+    previousEntityTracked: false,
+    knownEntityIds: new Set([49561]),
+    chosenAtMs: NOW,
+    nowMs: CUBE_CHURN_NOW,
+  }
+  // same kind, 6 m away: a different mob.
+  const farAway = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 8.4 })],
+    context,
+  )
+  // same kind, just OUTSIDE the declared radius (3 m): still refused.
+  const justOutside = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 5.4 })],
+    context,
+  )
+  // same kind, inside the radius, but it was ALREADY sensed at decision time: a
+  // pre-existing bystander, not a churn replacement (the measured HUNT_RETARGET
+  // shape must stay impossible).
+  const bystander = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 })],
+    { ...context, knownEntityIds: new Set([49561, 49572]) },
+  )
+  // same kind, inside the radius, NEW - but no position was recorded on the
+  // vanished candidate: UNKNOWN refuses rather than guesses.
+  const noPosition = regroundVanishedSurvivalChoice(
+    { id: 'ATTACK:e49561', kind: 'ATTACK', targetEntityId: 49561, targetName: 'magma_cube', meta: { entityId: 49561, targetHostile: true } },
+    [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 })],
+    context,
+  )
+  // outside the bounded window: refused.
+  const tooLate = regroundVanishedSurvivalChoice(
+    chosen,
+    [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 })],
+    { ...context, nowMs: NOW + IDENTITY_CHURN_WINDOW_MS + 1 },
+  )
+  const pass =
+    farAway.candidateId === null &&
+    farAway.outcome === 'TARGET_LOST' &&
+    justOutside.candidateId === null &&
+    justOutside.outcome === 'TARGET_LOST' &&
+    bystander.candidateId === null &&
+    bystander.outcome === 'TARGET_LOST' &&
+    noPosition.candidateId === null &&
+    noPosition.outcome === 'TARGET_LOST' &&
+    tooLate.candidateId === null &&
+    tooLate.outcome === 'TARGET_LOST' &&
+    identityChurnCandidate(chosen, [hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 })], context) !== null
+  return {
+    pass,
+    detail: `far=${farAway.candidateId}/${farAway.outcome} edge=${justOutside.candidateId}/${justOutside.outcome} bystander=${bystander.candidateId}/${bystander.outcome} noPos=${noPosition.candidateId}/${noPosition.outcome} late=${tooLate.candidateId}/${tooLate.outcome}`,
+  }
+})
+
+addCase('(v) ordinary one-id combat is byte-identical (same id, same markers, producer hunts untouched)', () => {
+  const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
+  const sameId = hostileAttack(49561, 'magma_cube', { x: 5, y: 59, z: 2.4 })
+  // a churn context that WOULD adopt a replacement if the same id were missing:
+  // the exact-id path must win first and emit no churn evidence.
+  const context = {
+    previousEntityTracked: false,
+    knownEntityIds: new Set([49561]),
+    chosenAtMs: NOW,
+    nowMs: CUBE_CHURN_NOW,
+  }
+  const result = regroundVanishedSurvivalChoice(chosen, [sameId, hostileAttack(49572, 'magma_cube', { x: 5, y: 59, z: 2.72 })], context)
+  const line = formatSurvivalReground(
+    chosen.id,
+    result,
+    1,
+    { threatId: 49561, threatName: 'magma_cube', threatDistance: 2.4, inContact: true } as never,
+    { health: 8, food: 17 } as never,
+  )
+  const golden =
+    'SURVIVAL_REGROUND from=ATTACK:e49561 to=ATTACK:e49561 kind=ATTACK reason=same_target_attack outcome=REGROUNDED offer=1 ' +
+    'threat=magma_cube threatId=49561 distance=2.4m contact=true health=8 food=17'
+  // the RETREAT re-ground is untouched as well.
+  const retreat = regroundVanishedSurvivalChoice(
+    { id: 'RETREAT:p16_59_3', kind: 'RETREAT', targetEntityId: null, meta: { threatEntityId: 49202 } },
+    [{ id: 'RETREAT:p17_59_2', kind: 'RETREAT', targetEntityId: null, meta: { threatEntityId: 49202 } }],
+    context,
+  )
+  // a producer HUNT keeps its instance identity: a perfect same-kind churn match
+  // on a `goalDrop` attack is still TARGET_LOST (the measured HUNT_RETARGET must
+  // stay impossible).
+  const hunt = regroundVanishedSurvivalChoice(
+    hostileAttack(49561, 'blaze', CUBE_AT, { goalDrop: 'blaze_rod', producerRoute: 'mob_drop' }),
+    [hostileAttack(49572, 'blaze', { x: 5, y: 59, z: 2.72 }, { goalDrop: 'blaze_rod', producerRoute: 'mob_drop' })],
+    context,
+  )
+  const foodHunt = regroundVanishedSurvivalChoice(
+    hostileAttack(49561, 'cow', CUBE_AT, { foodAnimal: true, foodRoute: 'animal', foodTarget: 'cow' }),
+    [hostileAttack(49572, 'cow', { x: 5, y: 59, z: 2.72 }, { foodAnimal: true, foodRoute: 'animal', foodTarget: 'cow' })],
+    context,
+  )
+  const pass =
+    result.candidateId === 'ATTACK:e49561' &&
+    result.reason === 'same_target_attack' &&
+    result.outcome === 'REGROUNDED' &&
+    result.identityChurn === null &&
+    line === golden &&
+    retreat.candidateId === 'RETREAT:p17_59_2' &&
+    retreat.reason === 'same_threat_keep_distance' &&
+    retreat.outcome === 'REGROUNDED' &&
+    retreat.identityChurn === null &&
+    hunt.candidateId === null &&
+    hunt.outcome === 'TARGET_LOST' &&
+    foodHunt.candidateId === null &&
+    foodHunt.outcome === 'TARGET_LOST'
+  return {
+    pass,
+    detail: `sameId=${result.candidateId}/${result.reason} byteIdentical=${line === golden} retreat=${retreat.reason} hunt=${hunt.outcome} foodHunt=${foodHunt.outcome}`,
+  }
+})
+
+addCase('(vi) with no grounded response the survival path stays TYPED (never a silent no-action, never a fabricated target)', () => {
+  const chosen = hostileAttack(49561, 'magma_cube', CUBE_AT)
+  const context = {
+    previousEntityTracked: false,
+    knownEntityIds: new Set([49561]),
+    chosenAtMs: NOW,
+    nowMs: CUBE_CHURN_NOW,
+  }
+  // the fresh restricted offer carries NO attack at all: nothing is invented, the
+  // outcome stays typed and the control action is the grounded answer.
+  const noAttack = regroundVanishedSurvivalChoice(chosen, [{ id: 'WAIT', kind: 'WAIT' }], context)
+  const escalate = survivalControlFallback({
+    reground: noAttack,
+    threatInContact: true,
+    freshCandidates: [{ id: 'WAIT', kind: 'WAIT' }, { id: 'ESCALATE', kind: 'ESCALATE' }],
+  })
+  // ... and a vanished RETREAT with no grounded escape keeps its own typed gap.
+  const noRetreat = regroundVanishedSurvivalChoice(
+    { id: 'RETREAT:p-1_44_-1', kind: 'RETREAT', meta: { threatEntityId: 49561 } },
+    [],
+    context,
+  )
+  const noControl = survivalControlFallback({ reground: noRetreat, threatInContact: true, freshCandidates: [] })
+  // a churn candidate that is present but NOT grounded for the body (not in the
+  // fresh restricted offer) can never be reached: the rule only reads the offer.
+  const notOffered = regroundVanishedSurvivalChoice(chosen, [], context)
+  const pass =
+    noAttack.candidateId === null &&
+    noAttack.outcome === 'TARGET_LOST' &&
+    noAttack.kind === 'ATTACK' &&
+    escalate.candidateId === 'ESCALATE' &&
+    escalate.reason === 'control_action_escalate' &&
+    noRetreat.candidateId === null &&
+    noRetreat.outcome === 'CAPABILITY_LOST' &&
+    noControl.candidateId === null &&
+    noControl.reason === 'no_control_action_offered' &&
+    notOffered.candidateId === null &&
+    notOffered.outcome === 'TARGET_LOST'
+  return {
+    pass,
+    detail: `noAttack=${noAttack.candidateId}/${noAttack.outcome} control=${escalate.candidateId}/${escalate.reason} noRetreat=${noRetreat.outcome} noControl=${noControl.reason} empty=${notOffered.outcome}`,
+  }
+})
+
+addCase('(vii) the controller feeds the rule the TRACKED-set truth and mirrors the churn facts', () => {
+  // The rule is only as good as the facts the live controller hands it, and the
+  // evidence only exists if it rides the mirrored path (`buddy.log` lines are
+  // `marker` + the `detail` fields - the message body is NOT mirrored).
+  const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
+  const call = text.indexOf('regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates, identityContext)')
+  const helper = text.indexOf('private mobIdentityContext(')
+  const tracked = text.indexOf('const live = this.bot.entities[entityId]', helper)
+  const trackedValidity = text.indexOf('live.isValid !== false', tracked)
+  const known = text.indexOf('knownEntityIds: new Set(decisionState.entities.map((entity) => entity.id))', helper)
+  const snapshotTimes =
+    text.indexOf('chosenAtMs: decisionState.timestampMs', helper) > helper &&
+    text.indexOf('nowMs: freshState.timestampMs', helper) > helper
+  const churnMarker = text.indexOf('MOB_IDENTITY_CHURN,')
+  const mirrored = MIRRORED_MARKERS.has(MOB_IDENTITY_CHURN)
+  // the identity proof is in the DETAIL object (what the host mirrors), naming
+  // both ids, the shared kind, the movement, the elapsed window and the rule.
+  const detailFields = ['fromEntityId: churn.fromEntityId', 'toEntityId: churn.toEntityId', 'mob: churn.name', 'moved:', 'elapsedMs: Math.round(churn.elapsedMs)', 'rule: churn.rule', 'gone: churn.goneEvidence', 'new: churn.newEntity', 'outcome: reground.outcome']
+  const detailAt = text.indexOf('formatMobIdentityChurn(')
+  const inDetail = detailFields.every((field) => text.indexOf(field, detailAt) > detailAt)
+  return {
+    pass:
+      call > 0 &&
+      helper > 0 &&
+      tracked > helper &&
+      trackedValidity > tracked &&
+      known > helper &&
+      snapshotTimes &&
+      churnMarker > 0 &&
+      mirrored &&
+      detailAt > 0 &&
+      inDetail &&
+      // the tracked set is the CLIENT's, never the bounded sensor snapshot: the
+      // rule must not read "gone" from `decisionState.entities`/`freshState`.
+      !/previousEntityTracked: [^\n]*freshState\.entities/.test(text),
+    detail: `call=${call} helper=${helper} trackedAt=${tracked} validity=${trackedValidity} knownAt=${known} snapshotTimes=${snapshotTimes} mirrored=${mirrored} detailFields=${inDetail}`,
   }
 })
 
