@@ -8233,7 +8233,15 @@ export class JevController {
       isTrackedMoveKind(result.kind) && candidate.target !== null
         ? localOscillationCell(dimension, candidate.target)
         : null
-    const inventory = JSON.stringify(this.inventorySnapshot())
+    const inventory = ((): string => {
+      try {
+        return JSON.stringify(this.inventorySnapshot())
+      } catch {
+        // Inventory unreadable at a death/quit boundary: no delta evidence, and
+        // the record is deliberately NOT cleared (unknown is not progress).
+        return this.localOscillationInventory
+      }
+    })()
     const inventoryChanged = this.localOscillationInventory !== '' && this.localOscillationInventory !== inventory
     this.localOscillationInventory = inventory
 
