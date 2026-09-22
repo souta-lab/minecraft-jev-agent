@@ -24,8 +24,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
@@ -1744,6 +1744,10 @@ export class JevController {
   private lastColumnDescentRefusalKey: string | null = null
   /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
   private columnDescentRefusalThisTick: ColumnDescentRefusal | null = null
+  /** last logged PROSPECT_REFUSED signature, so one blocked en-route exposure is one line. */
+  private lastProspectRefusalKey: string | null = null
+  /** the current tick's typed blocked-exposure fact, fed into the starvation `missing` evidence. */
+  private prospectRefusalThisTick: ProspectRefusal | null = null
   /** Dedupe key for the last mirrored `RESOURCE_SOURCE_NONE` line. */
   private lastSourceGapKey: string | null = null
   /** Dedupe key for the last mirrored `FOOD_SOURCE_NONE` line. */
@@ -2566,6 +2570,7 @@ export class JevController {
       this.logSourceExclusions(grounded.sourceExclusions)
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
+      this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
       this.logMobDropSourceGap(grounded.mobDropGap)
@@ -2712,6 +2717,14 @@ export class JevController {
         if (this.columnDescentRefusalThisTick !== null) {
           const columnToken = `column_descent:${this.columnDescentRefusalThisTick.reason}`
           if (!missing.includes(columnToken)) missing.push(columnToken)
+        }
+        // A descending body whose exposure dig toward a sensed producer was
+        // refused by the world is the same kind of capability gap: the
+        // acquisition it is descending FOR has no en-route dig, and the typed
+        // cause must reach the starvation/escalation evidence.
+        if (this.prospectRefusalThisTick !== null) {
+          const prospectToken = `prospect:${this.prospectRefusalThisTick.reason}`
+          if (!missing.includes(prospectToken)) missing.push(prospectToken)
         }
         // The typed no-source fact rides the same starvation/escalation evidence
         // so a starvation line never says only `no_productive_action` when the
@@ -8101,6 +8114,29 @@ export class JevController {
     this.logger.warn(
       'agent',
       formatColumnDescentRefused(refusal),
+      { ...refusal, goal: this.currentGoalKey() },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The typed `PROSPECT_REFUSED` fact: the active descend/travel-to-acquire row
+   * passed a sensed producer of its focus and the exposure dig that would have
+   * offered it en route was refused by the world (hazard, unbreakable wall, no
+   * support, missing harvest tool). Deduped like the column-descent refusal so a
+   * blocked exposure is one line, and carried into the starvation `missing`
+   * evidence so the descend step can never be the only thing on offer without its
+   * stated mechanical cause.
+   */
+  private logProspectRefusal(refusal: ProspectRefusal | null): void {
+    this.prospectRefusalThisTick = refusal
+    const key = refusal === null ? null : formatProspectRefused(refusal)
+    if (key === this.lastProspectRefusalKey) return
+    this.lastProspectRefusalKey = key
+    if (refusal === null) return
+    this.logger.warn(
+      'agent',
+      formatProspectRefused(refusal),
       { ...refusal, goal: this.currentGoalKey() },
       this.tickCounter,
     )

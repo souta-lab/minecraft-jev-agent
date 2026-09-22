@@ -17,6 +17,7 @@
     "move-vertical-parity-test": "bun test ./test-move-vertical-parity.mts",
     "move-stuck-stale-test": "bun test ./test-move-stuck-stale.mts",
     "iron-ore-retire-test": "bun test ./test-iron-ore-retire.mts",
+    "prospect-descend-test": "bun test ./test-prospect-descend.mts",
     "smelt-priority-test": "bun test ./test-smelt-priority.mts",
     "m2-fuel-pickaxe-test": "bun test ./test-m2-fuel-and-pickaxe.mts",
     "furnace-prereq-gate-test": "bun test ./test-furnace-prereq-gate.mts",

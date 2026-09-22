@@ -73,6 +73,17 @@ export interface AdvisorState {
   waitStreak: number
   failedCandidates: Record<string, number>
   recentFailures: string[]
+  /**
+   * Durable world achievements the run's own world memory proves. These are FACTS, not
+   * WHAT: they exist so the model does not re-plan work the world has already completed.
+   * Measured: without them the model proposed "rebuild empty queue toward obsidian portal"
+   * while a lit+verified gate stood at (25,66,9) and the ladder floor was already at
+   * `enter_nether`.
+   */
+  durable?: {
+    verifiedPortal: { x: number; y: number; z: number } | null
+    knownPortalSites: number
+  }
 }
 
 export interface AdvisorDecision {

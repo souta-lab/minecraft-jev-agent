@@ -23,7 +23,7 @@
 // (eat/retreat/attack) are always offered regardless of subgoal.
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
-import type { BlockState, DescentDir, DescentOption, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
+import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
 import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
@@ -647,6 +647,15 @@ export interface GroundedCandidatesResult {
    * cause instead of being silent.
    */
   columnDescentRefusal: ColumnDescentRefusal | null
+  /**
+   * Typed `PROSPECT_REFUSED reason=hazard|unbreakable|no_support|open_floor|
+   * protected|no_tool|no_safe_step` when the active descend/travel-to-acquire row
+   * passed a sensed producer of its focus and the exposure dig toward it was
+   * grounded by geometry but refused by the world. Null while a probe is offered,
+   * and null when no producer was in probe range. Non-null means the missing
+   * en-route acquisition has a stated mechanical cause instead of silence.
+   */
+  prospectRefusal: ProspectRefusal | null
   /**
    * The typed "no available source for the active collect focus" fact, or null
    * when a grounded source route was offered (or the focus has no name-scanned
@@ -1617,6 +1626,7 @@ export function generateGroundedCandidates(
     raw.foodHabitatRefusal,
     raw.sourceExclusions,
     raw.columnDescentRefusal,
+    raw.prospectRefusal,
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
@@ -1989,6 +1999,7 @@ function generateRawCandidates(
   let placeRefusal: PlaceRefusal | null = null
   let ignitionRefusal: IgnitionRefusal | null = null
   let entryRefusal: PortalEntryRefusal | null = null
+  let prospect: ProspectResult = { candidates: [], refusal: null }
   const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
@@ -2045,6 +2056,13 @@ function generateRawCandidates(
     }
     default:
       candidates.push(...mineCandidates(state, options, focusItem, descendTargetY))
+      // The exposure dig the descend arm cannot offer by itself: a body carving a
+      // 1-wide staircase removes only its own path, so a producer sensed in the
+      // wall beside it has no stand, is not pickup-adjacent, and is never the
+      // block any offered step digs. Enumerated AFTER the mine/descend family and
+      // ALONGSIDE it - never replacing the step, never ranked above it.
+      prospect = prospectCandidates(state, options, focusItem, descendTargetY)
+      candidates.push(...prospect.candidates)
       break
   }
 
@@ -2450,6 +2468,7 @@ function generateRawCandidates(
     surfaceAscentRefusal: surfaceAscent.refusal,
     foodHabitatRefusal: foodHabitat.refusal,
     columnDescentRefusal: columnDescent.refusal,
+    prospectRefusal: prospect.refusal,
     sourceExclusions: resourceSourceExclusions(state),
   }
 }
@@ -3079,6 +3098,294 @@ function mineCandidates(
       mineDropAdvancesFocus(focusItem, mineCandidateDrop(state, candidate), options.recipes ?? null) ||
       mineSourceAdvancesFocus(focusItem, candidate),
   )
+}
+
+// ---------------------------------------------------------------------------
+// PROSPECT: the exposure dig a descend/travel-to-acquire row is missing
+// ---------------------------------------------------------------------------
+//
+// Measured (live run-muc3qbug-18vg3, main 4f4e0cb): a `descend_to:Y=-54` row for
+// `raw_iron` walked a 1-wide staircase from y=63 to y=8 over ~40 minutes. Every
+// one of the 1886 iron-ore-facing candidates in the run was offered by an arm
+// this file already has (the descend branch does call `mineCandidates(...,
+// descendTargetY)`), and the 110-decision descend window was
+// `{DESCEND} 100x, {RETRIEVE} 7x, {ESCALATE} 2x, {MINE} 1x`. The arm was not
+// starved: it legitimately had nothing to offer.
+//
+// The reason is the shape of "exposed" in this file. A sensed producer becomes an
+// offered MINE only when it is in reach AND pickup-adjacent
+// (`PICKUP_MINE_HORIZONTAL`/`PICKUP_MINE_VERTICAL`, below); a walk-up MOVE needs
+// an adjacent standable cell (the sensor samples 12 neighbours); everything else
+// is at most a tunnel TARGET that only steers the DESCEND scorer. A staircase
+// removes exactly the cells the body walks through and leaves solid rock on every
+// other side, so a vein one block behind a wall is sensed (`state.blocks` keeps
+// name-scanned ores out to radius 64) but has no stand, is not pickup-adjacent,
+// and is never the block any offered step digs.
+//
+// The missing capability is prospecting, and it is general for any
+// "travel/descend to acquire X" row: while such a row is active for an item with
+// block producers, enumerate - ALONGSIDE the descend step, never replacing it -
+// the bounded lateral dig that would expose a sensed producer of that item. The
+// claim is mechanical and built from real geometry: the producer is sensed, lies
+// in the cardinal probe corridor at the body's own depth band, the wall in front
+// of it is a real diggable wall with a pre-computed SAFE level step, and the body
+// holds the harvest tool for the producer (CAN). No fixed coordinates, no
+// per-item direction policy: Jev still chooses WHICH, and a producer the ordinary
+// MINE/MOVE arm can already reach is left to that arm.
+//
+// A probe is a DESCEND (`mode: 'level'`) from the sensor's own pre-computed
+// steps, so it reuses that step's typed refusal (`hazard`, `unbreakable`,
+// `no_support`, `open_floor`, `protected`), the `planDescend` guard and the
+// `runDescend` executor verbatim: this family adds enumeration, never mechanics.
+
+/**
+ * Candidate meta marking a lateral exposure probe. The candidate is a DESCEND
+ * (`mode: 'level'`) so it executes through exactly the same safe-step mechanics,
+ * guard and postcondition as the stair step it is offered beside; this marker is
+ * what makes it readable as a PROSPECT in the decision log instead of an
+ * unexplained level step.
+ */
+export const PROSPECT_META = 'prospect'
+
+/** How many blocks of bounded branch tunnel one probe may aim through. */
+export const PROSPECT_MAX_LATERAL = 3
+
+/** Why an exposure probe the geometry grounded could NOT be offered. */
+export type ProspectRefusalReason = DescentRefusalReason | 'no_tool' | 'no_safe_step'
+
+/** The sensed producer a probe aims at, and the cell where the probe would dig. */
+export interface ProspectRefusal {
+  reason: ProspectRefusalReason
+  /** cardinal probe direction (never `D`: a probe is lateral by definition) */
+  dir: DescentDir
+  producer: string
+  producerCell: Vec3Json
+  /** the solid wall cell the level step would remove */
+  digCell: Vec3Json
+}
+
+/** The exact `PROSPECT_REFUSED` observability line for one typed refusal. */
+export function formatProspectRefused(refusal: ProspectRefusal): string {
+  const producer = refusal.producerCell
+  const dig = refusal.digCell
+  return `PROSPECT_REFUSED reason=${refusal.reason} producer=${refusal.producer} dir=${refusal.dir} cell=${producer.x},${producer.y},${producer.z} dig=${dig.x},${dig.y},${dig.z}`
+}
+
+export interface ProspectResult {
+  candidates: Candidate[]
+  refusal: ProspectRefusal | null
+}
+
+/** Stable id of the exposure probe that digs `digCell` in direction `dir`. */
+export function prospectCandidateId(dir: DescentDir, digCell: Vec3Json): string {
+  return `PROSPECT:level:${dir}:${blockId('b', digCell)}`
+}
+
+const PROSPECT_CARDINALS: ReadonlyArray<{ dir: DescentDir; dx: number; dz: number }> = [
+  { dir: 'E', dx: 1, dz: 0 },
+  { dir: 'W', dx: -1, dz: 0 },
+  { dir: 'N', dx: 0, dz: -1 },
+  { dir: 'S', dx: 0, dz: 1 },
+]
+
+/** Manhattan-1 adjacency: a shared face, never a corner or an edge. */
+function faceAdjacent(a: Vec3Json, b: Vec3Json): boolean {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z) === 1
+}
+
+/**
+ * The active row is acquiring an item by going DOWN through rock: an explicit
+ * `descend` row, a target below the feet, or a sensed producer of the focus
+ * sitting below the body. This is the context the measured run was in; a purely
+ * local row that is not moving the body downward is not a prospecting context.
+ */
+function acquisitionTravelActive(state: WorldState, feetY: number, producerBelow: boolean): boolean {
+  const current = state.goalQueue?.current ?? null
+  if (current === null) return false
+  if (current.kind === 'descend') return true
+  const targetY = typeof current.targetY === 'number' && Number.isFinite(current.targetY) ? current.targetY : null
+  if (targetY !== null && targetY < feetY) return true
+  const target = current.targetPosition ?? null
+  if (target !== null && target.y < feetY) return true
+  return producerBelow
+}
+
+/**
+ * The bounded lateral exposure family for a descend/travel-to-acquire row.
+ *
+ * Enumerates at most one probe per cardinal direction: the level step the sensor
+ * already computed for that direction, offered when a sensed producer of the
+ * focus lies in its probe corridor. The corridor is the straight cardinal line
+ * at the body's own depth band (`along` 1..`PROSPECT_MAX_LATERAL`, `|perp| <= 1`,
+ * `dy === 0`) and the producer must not be one the ordinary MINE (pickup
+ * adjacent now) or MOVE (walk-up stand) arm can already reach. Removing the
+ * step's primary cell either exposes that producer directly (it shares a face
+ * with the cell the body will stand in) or advances a bounded branch toward it;
+ * the next observation re-derives the same rule, so the branch stops as soon as
+ * the producer becomes walk-up reachable or leaves the corridor. CAN enumeration
+ * only: nothing is suppressed, nothing is ranked, and the DESCEND step is offered
+ * beside every probe.
+ */
+export function prospectCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  focusItem: string | null,
+  descendTargetY: number | null = null,
+): ProspectResult {
+  const none: ProspectResult = { candidates: [], refusal: null }
+  if (focusItem === null) return none
+  // The focus item's declared name-scanned sources are its block producers.
+  // Stone-class focuses (`cobblestone`) declare none on purpose: every wall is
+  // stone, so there is nothing to prospect for.
+  const sourceNames = scannedBlockNames(focusItem)
+  if (sourceNames === undefined) return none
+  const self = state.self.position
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const vertical = (block: BlockState): number => Math.abs(block.position.y - self.y)
+  const horizontal = (block: BlockState): number =>
+    Math.hypot(block.position.x + 0.5 - self.x, block.position.z + 0.5 - self.z)
+  const pickupAdjacent = (block: BlockState): boolean =>
+    horizontal(block) <= PICKUP_MINE_HORIZONTAL && vertical(block) <= PICKUP_MINE_VERTICAL
+  // A producer the ordinary arm can already COMPLETE is not prospected for:
+  //   MOVE -> the sensor sampled a walk-up stand beside it;
+  //   MINE -> it shares a face with the body's own cell and is pickup-adjacent,
+  //           so there is no intervening wall for a probe to remove.
+  // Everything else is a producer the row is passing where the dig - if the arm
+  // offers one at all - would have to go through rock first, and a rock face
+  // between the eyes and the target is exactly what the server refuses to dig
+  // (`BlockState.visible`: "a close but occluded block must not be offered as
+  // MINE"). That producer is what this family exists for.
+  const buried = state.blocks.filter(
+    (block) =>
+      block.kind === 'ore' &&
+      sourceNames.includes(block.name) &&
+      block.diggable &&
+      !block.hasAdjacentStandable &&
+      !(
+        Math.abs(block.position.x - feet.x) +
+          Math.abs(block.position.y - feet.y) +
+          Math.abs(block.position.z - feet.z) ===
+          1 && pickupAdjacent(block)
+      ),
+  )
+  if (buried.length === 0) return none
+  const producerBelow = buried.some((block) => block.position.y < feet.y)
+  if (!acquisitionTravelActive(state, feet.y, producerBelow)) return none
+  const steps = state.descent ?? []
+  const candidates: Candidate[] = []
+  const refusals: ProspectRefusal[] = []
+  for (const { dir, dx, dz } of PROSPECT_CARDINALS) {
+    const step = steps.find(
+      (entry) => entry.mode === 'level' && entry.dir === dir && entry.dx === dx && entry.dz === dz,
+    )
+    if (step === undefined) continue
+    // A probe digs a WALL: an already-open level cell is a route, not an
+    // exposure. The cell whose removal exposes the producer is the step's own
+    // primary (`descentPrimaryCell`: wall first, else the head above it), so the
+    // exposure claim is exactly the cell `runDescend` digs last.
+    if (step.wallSolid !== true && step.headSolid !== true) continue
+    const digKind: 'wall' | 'head' = step.wallSolid === true ? 'wall' : 'head'
+    const digCell = descentPrimaryCell(step)
+    // Corridor membership from the body's cell: how far the producer sits along
+    // the probe direction and how far off-axis, at the body's OWN level. The
+    // level step clears the feet level, so a producer at any other level is not
+    // what this dig exposes.
+    const aimed = buried
+      .map((block) => {
+        const ox = block.position.x - feet.x
+        const oz = block.position.z - feet.z
+        return {
+          block,
+          along: ox * dx + oz * dz,
+          perp: dx === 0 ? Math.abs(ox) : Math.abs(oz),
+          dy: block.position.y - feet.y,
+        }
+      })
+      .filter(
+        (entry) =>
+          entry.along >= 1 && entry.along <= PROSPECT_MAX_LATERAL && entry.perp <= 1 && entry.dy === 0,
+      )
+      .sort((a, b) => a.along - b.along || a.perp - b.perp)
+    const aim = aimed[0]
+    if (aim === undefined) continue
+    const refusal = (reason: ProspectRefusalReason): void => {
+      refusals.push({
+        reason,
+        dir,
+        producer: aim.block.name,
+        producerCell: aim.block.position,
+        digCell,
+      })
+    }
+    if (step.safe !== true) {
+      // SAFE: the step's own pre-computed typed refusal is reused verbatim;
+      // nothing about hazard/support/breakability is re-derived here.
+      refusal(step.refusal ?? 'no_safe_step')
+      continue
+    }
+    // CAN: exposing a producer the body cannot harvest is not acquisition.
+    if (!hasTool(state, aim.block.harvestTool ?? null, aim.block.harvestTier ?? null)) {
+      refusal('no_tool')
+      continue
+    }
+    const id = prospectCandidateId(dir, digCell)
+    if (
+      failureCount(state.signals.failedCandidates, id) >=
+      (options.descendFailureLimit ?? DEFAULT_CANDIDATE_DESCEND_FAILURE_LIMIT)
+    ) {
+      continue
+    }
+    const built = descendCandidateFromStep(state, options, step, {
+      focusItem,
+      descendTargetY,
+      // Grounded: the world holds a sensed producer of the focus this dig
+      // exposes or advances a bounded branch toward (see the corridor above).
+      grounded: true,
+      staircase: false,
+      extraMeta: {
+        [PROSPECT_META]: true,
+        prospectProducer: aim.block.name,
+        prospectProducerX: aim.block.position.x,
+        prospectProducerY: aim.block.position.y,
+        prospectProducerZ: aim.block.position.z,
+        prospectProducerDistance: Math.round(distance(aim.block.position, self) * 100) / 100,
+        prospectDir: dir,
+        prospectAlong: aim.along,
+        prospectDeltaY: aim.dy,
+        prospectDigKind: digKind,
+        prospectDigX: digCell.x,
+        prospectDigY: digCell.y,
+        prospectDigZ: digCell.z,
+        // The dig exposes the producer NOW (it shares a face with the cell the
+        // body will stand in) or advances the bounded branch toward it.
+        prospectExposure: faceAdjacent(digCell, aim.block.position) ? 'exposed_by_this_dig' : 'branch_toward',
+      },
+    })
+    if (built === null) {
+      // The dig itself needs a harvest tool the body does not hold.
+      refusal('no_tool')
+      continue
+    }
+    // The step's own 1x2 dig plan and step phase are kept verbatim: the passage
+    // cells are dug first and the landing cell last, so the body can always enter
+    // the cell whose wall it just removed.
+    candidates.push({
+      ...built.candidate,
+      id,
+      label: `probe the ${dir} ${digKind} (${digCell.x},${digCell.y},${digCell.z}) to expose ${aim.block.name} at (${aim.block.position.x},${aim.block.position.y},${aim.block.position.z}), dig it then stand at (${step.step.x},${step.step.y},${step.step.z})`,
+    })
+  }
+  return {
+    candidates,
+    // Said only when the world grounded a probe and refused every one of them: a
+    // partial offer is not a dead end, and no refusal is invented for a tick with
+    // nothing to expose.
+    refusal: candidates.length === 0 ? (refusals[0] ?? null) : null,
+  }
 }
 
 /** The candidate family plus the typed refusal that answers a `surface` goal. */
@@ -4424,6 +4731,13 @@ interface RawCandidatesResult {
   foodHabitatRefusal: SurfaceAscentRefusal | null
   /** typed refusal when a stranded body has no safe descent off its own column */
   columnDescentRefusal: ColumnDescentRefusal | null
+  /**
+   * Typed `PROSPECT_REFUSED reason=...` when the descending body's geometry
+   * grounded an exposure probe toward a sensed producer of its focus and every
+   * such probe was refused (hazard, unbreakable, no support, missing tool). Null
+   * while a probe was offered, and null when there was nothing to expose at all.
+   */
+  prospectRefusal: ProspectRefusal | null
   /** live-structure member cells refused as sources for the active collect goal */
   sourceExclusions: ResourceSourceExclusion[]
 }
@@ -7091,6 +7405,7 @@ export function applyReachabilityGate(
   foodHabitatRefusal: SurfaceAscentRefusal | null = null,
   sourceExclusions: ResourceSourceExclusion[] | null = null,
   columnDescentRefusal: ColumnDescentRefusal | null = null,
+  prospectRefusal: ProspectRefusal | null = null,
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -7242,6 +7557,7 @@ export function applyReachabilityGate(
     surfaceAscentRefusal,
     foodHabitatRefusal,
     columnDescentRefusal,
+    prospectRefusal,
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),
