@@ -55,6 +55,7 @@ import type { AgentSignals, InventoryState, KnownResource, SelfState, Vec3Json, 
 import {
   containerReadyKnownResource,
   evictStaleKnownResources,
+  knownResourceFalsifiedRemovals,
   mergeKnownResources,
   portalSiteKnownResources,
   structureSiteKnownResources,
@@ -411,6 +412,34 @@ function offered(
     '(vi) an un-attributed row is kept (not probed, not evicted); a row naming another world is still re-anchored',
     evicted.length === 1 && unattributedSurvives && otherWorldEvicted,
     `evicted=${evicted.map((resource) => `${resource.name}@${resource.x}${resource.dimension === undefined ? ':(unattributed)' : ''}`).join(',') || 'none'} kept=${known.length}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (vii) the SENSOR-probe deletion path is fail-closed too: a `block_mined` proof
+//       read in one world can never delete a row that names another world (or
+//       none), because that coordinate is a different place there
+// ---------------------------------------------------------------------------
+{
+  const rows: KnownResourceJson[] = [
+    { name: 'jungle_log', kind: 'log', x: 8, y: 85, z: 6, dimension: OVERWORLD, worldEpoch: 1 },
+    { name: 'jungle_log', kind: 'log', x: 8, y: 85, z: 6, worldEpoch: 1 },
+  ]
+  const proofInNether = knownResourceFalsifiedRemovals(rows, { reason: 'block_mined', cell: MEASURED_CELL }, NETHER)
+  const proofInOverworld = knownResourceFalsifiedRemovals(rows, { reason: 'block_mined', cell: MEASURED_CELL }, OVERWORLD)
+  const unattributedOnly: KnownResourceJson[] = [rows[1]!]
+  const proofAgainstUnattributed = knownResourceFalsifiedRemovals(
+    unattributedOnly,
+    { reason: 'block_mined', cell: MEASURED_CELL },
+    OVERWORLD,
+  )
+  check(
+    '(vii) a block_mined proof deletes only the row attributable to the probed world; an un-attributed row is never deleted',
+    proofInNether.length === 0 &&
+      proofInOverworld.length === 1 &&
+      proofInOverworld[0]?.dimension === OVERWORLD &&
+      proofAgainstUnattributed.length === 0,
+    `netherProof=${proofInNether.length} overworldProof=${proofInOverworld.length} unattributed=${proofAgainstUnattributed.length}`,
   )
 }
 

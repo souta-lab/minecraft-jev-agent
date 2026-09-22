@@ -448,18 +448,27 @@ export function evictStaleKnownResources(
  * back in, and the fabric scan would re-mint the cell anyway - so those verdicts
  * withhold the route for the tick that observed them and are re-derived from live
  * truth every tick. Pure.
+ *
+ * `block_mined` is a proof about THE WORLD the probe read, so it can only
+ * invalidate a row that is ATTRIBUTABLE TO THAT SAME WORLD (#14, fail closed): a
+ * row naming another dimension, or one that records no dimension at all, is
+ * never removed. Probing such a row at this coordinate reads a different world's
+ * block and would delete durable memory on wrong-world evidence.
  */
 export function knownResourceFalsifiedRemovals(
   known: readonly KnownResourceJson[],
   detail: Record<string, unknown> | undefined,
+  liveDimension: string,
 ): KnownResourceJson[] {
   if (detail?.reason !== 'block_mined') return []
   const cell = asVec3Json(detail?.cell)
   if (cell === null) return []
   const rounded = `${Math.round(cell.x)},${Math.round(cell.y)},${Math.round(cell.z)}`
-  return known.filter(
-    (resource) => `${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}` === rounded,
-  )
+  return known.filter((resource) => {
+    if (`${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}` !== rounded) return false
+    if (resource.dimension === undefined || resource.dimension.length === 0) return false
+    return normalizeDimensionId(resource.dimension) === normalizeDimensionId(liveDimension)
+  })
 }
 
 /**
@@ -2180,7 +2189,9 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
    * (see `knownResourceFalsifiedRemovals`).
    */
   function handleKnownResourceFalsified(detail: Record<string, unknown> | undefined): void {
-    const removed = knownResourceFalsifiedRemovals(world.knownResources, detail)
+    // The live world the sensor probed: a `block_mined` proof can only invalidate
+    // a row attributable to it (see `knownResourceFalsifiedRemovals`).
+    const removed = knownResourceFalsifiedRemovals(world.knownResources, detail, ctx.worldKey.dimension)
     if (removed.length === 0) return
     const keys = new Set(
       removed.map((resource) => `${resource.name}@${Math.round(resource.x)},${Math.round(resource.y)},${Math.round(resource.z)}`),
