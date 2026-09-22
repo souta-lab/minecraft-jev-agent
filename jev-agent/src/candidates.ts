@@ -8137,6 +8137,16 @@ function levelScanCandidates(
     grounded: true,
     staircase: false,
     extraMeta: {
+      // The step DUGS its own column, so the commitment's EffectEnvelope must grant the dig:
+      // the envelope derives `mayDigGroundedRoute` from this flag (skillCommitment.ts,
+      // DESCEND/MOVE/STEP/RETRIEVE/RETREAT), and without it the step's own dig is refused
+      // `dig_cell_not_declared` and the route dies at its first move. Measured live before this
+      // line existed: DESCEND:level:E:b6_54_10 -> SKILL_ENVELOPE_VIOLATION effect=dig 6,55,10
+      // violation=dig_cell_not_declared:6,55,10, 40 times in ten minutes. The ordinary dig route
+      // declares exactly this (candidates.ts, digRouteCandidate), which is why it does not hit it.
+      digRoute: true,
+      digRouteReason: spec.reason,
+      digRouteKind: 'level_scan',
       levelScan: true,
       levelScanReason: spec.reason,
       levelScanTarget: cellText(spec.target),

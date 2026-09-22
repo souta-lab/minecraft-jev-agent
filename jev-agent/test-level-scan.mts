@@ -1064,5 +1064,34 @@ function levelsUnobserved(state: WorldState): boolean {
   )
 }
 
+
+// ---------------------------------------------------------------------------
+// The level-scan step DUGS, so it must declare the dig the envelope grants.
+// Measured live before this was pinned: 40 SKILL_ENVELOPE_VIOLATIONs in ten
+// minutes, every one `effect=dig ... violation=dig_cell_not_declared`, because
+// the candidate carried the levelScan* facts but not `digRoute: true` - the flag
+// the DESCEND/MOVE envelope derives `mayDigGroundedRoute` from. The ordinary dig
+// route declares exactly this, which is why it never hit it.
+// ---------------------------------------------------------------------------
+
+{
+  const TARGET: Vec3Json = { x: 12, y: 58, z: -2 }
+  const spec: WorldSpec = { feet: FEET, target: TARGET, map: islandMap(), frameLive: true }
+  const state = spentState(spec)
+  const options = optionsFor(spec)
+  const refusals: Parameters<typeof entryCandidates>[2] = []
+  const offered = entryCandidates(state, options, refusals).candidates
+  const built = offered.filter((candidate) => candidate.meta.levelScan === true)[0]
+  check(
+    built !== undefined &&
+      built.meta.digRoute === true &&
+      built.meta.levelScan === true,
+    'the level-scan candidate declares digRoute (its own dig is inside the envelope)',
+    built === undefined
+      ? 'no candidate built'
+      : `digRoute=${String(built.meta.digRoute)} levelScan=${String(built.meta.levelScan)} kind=${built.kind}`,
+  )
+}
+
 process.stdout.write(`\nlevel scan fixtures: ${failures === 0 ? 'ALL PASS' : `${failures} FAILED`}\n`)
 if (failures > 0) process.exit(1)
