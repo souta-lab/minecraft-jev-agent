@@ -34,6 +34,10 @@
 //   T. deferred=frozen is staged only; a successful RESUME alone commits it
 //   U. the control-socket generation hash is a READ-ONLY cross-check (agreement /
 //      disagreement recorded; a foreign runId or a missing socket changes nothing)
+//   V. a run superseded by a host restart still resolves its window from the
+//      append-only buddy.log (runner.out is truncated), with both attempts recorded
+//   W. a FROZEN host's socket hash names the STAGED candidate, never the executing
+//      source (the last committed reload stays effective)
 //
 // Usage: bun tools/test-milestone-run-artifact.mjs
 import assert from 'node:assert/strict'
@@ -1234,6 +1238,97 @@ ok('a deferred=frozen bundle is staged only, and a successful RESUME alone makes
   assert.equal(noSocket.artifact.run.source.crossCheck.agrees, null)
 }
 ok('the control-socket generation hash is a read-only cross-check: agreement/disagreement named, file facts untouched')
+
+// ---------------------------------------------------------------------------
+// V. the window survives a host restart in buddy.log (runner.out is truncated)
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-window-in-log'
+  const successor = 'run-fixture-window-successor'
+  const root = makeRoot('window-in-log')
+  // The live shape: the resident restarted, so runner.out carries ONLY the new run
+  // while the append-only buddy.log still holds the requested run's whole window.
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(successor, { offsetSec: 200, build: 'bootSuccessor1' }), 'utf8')
+  writeFileSync(
+    join(root, 'buddy-driver', 'buddy.log'),
+    `${fullLog(runId, { terminalEye: 12 }).join('\n')}\n` +
+      `${line(60, 'RELOAD ok=true trigger=source-changed ms=1240 hash=logOnly33333 id=gen-log generations=2')}\n` +
+      `${line(61, 'RELOAD ok=true trigger=source-changed deferred=frozen ms=900 hash=staged444444 contractVersion=3')}\n` +
+      `${boot(200, successor)}\n`,
+    'utf8',
+  )
+  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
+
+  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const artifact = result.json()
+  const source = artifact.run.source
+  assert.equal(source.window.status, 'valid', 'the window is found in the log stream')
+  assert.equal(source.window.path, join(root, 'buddy-driver', 'buddy.log'))
+  assert.deepEqual(
+    source.window.attempts,
+    [
+      { path: join(root, 'buddy-driver', 'runner.out'), status: 'unknown', reason: `run_boundary_missing runId=${runId}` },
+      { path: join(root, 'buddy-driver', 'buddy.log'), status: 'valid', reason: null },
+    ],
+    'both stream attempts are recorded, in order',
+  )
+  assert.equal(source.provenance, 'reload')
+  assert.equal(source.effectiveSourceSha, 'logOnly33333')
+  assert.equal(source.reloadCount, 2)
+  // The frozen candidate the restart never committed stays staged, never effective.
+  assert.equal(source.unmatchedDeferred.hash, 'staged444444')
+  assert.equal(source.latestSourceReload.hash, 'logOnly33333')
+  assert.equal(source.window.closedByRunId, successor)
+  assert.ok(!artifact.missingEvidence.includes('run.source:reload_window'))
+}
+ok('a superseded run resolves from the append-only log when runner.out no longer holds its BOOT window')
+
+// ---------------------------------------------------------------------------
+// W. a FROZEN host's socket hash names the STAGED candidate, not the running source
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-frozen-socket'
+  const root = makeRoot('frozen-socket')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: {
+      build: 'boot11112222',
+      reloads: [
+        { sec: 50, body: 'RELOAD ok=true trigger=source-changed ms=100 hash=liveabc12345 id=gen-live generations=2' },
+        { sec: 60, body: 'RELOAD ok=true trigger=source-changed deferred=frozen ms=1247 hash=staged999999 contractVersion=3' },
+      ],
+    },
+  })
+  const { artifact } = await buildRunArtifact({
+    runId,
+    root,
+    overrides: { controlSocketPath: '/fixture/control.sock' },
+    readSocket: async () => ({
+      runId,
+      policyKind: 'typesafe',
+      policyModel: 'typesafe-ai/jev',
+      generationHash: 'staged999999',
+      generationId: null,
+      frozen: true,
+    }),
+  })
+  const source = artifact.run.source
+  assert.equal(source.unmatchedDeferred.hash, 'staged999999')
+  assert.equal(source.crossCheck.frozen, true)
+  assert.equal(source.crossCheck.stagedCandidateHash, 'staged999999')
+  assert.equal(source.crossCheck.frozenExplainsSocket, true)
+  assert.match(source.crossCheck.note, /FROZEN/)
+  assert.match(source.crossCheck.note, /STAGED deferred candidate/)
+  // The disagreement is still recorded, but the EXECUTING source is the committed one.
+  assert.equal(source.crossCheck.agrees, false)
+  assert.equal(source.disagreements.length, 1)
+  assert.match(source.disagreements[0], /control_socket_generationHash=staged999999/)
+  assert.match(source.disagreements[0], /file_latest_source_reload_hash=liveabc12345/)
+  assert.equal(source.effectiveSourceSha, 'liveabc12345')
+  assert.equal(source.provenance, 'reload')
+}
+ok('a frozen host cannot make its staged candidate look like the executing source')
 
 // ---------------------------------------------------------------------------
 // cleanup

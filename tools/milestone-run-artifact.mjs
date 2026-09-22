@@ -458,7 +458,8 @@ export function attributeRunLines(runId, lines) {
 // Rules that keep this honest:
 //   * the window is the SAME `BOOT ... runId=R` boundary the gates use, and it is
 //     deliberately NOT narrowed to the policy window: the latest reload can be
-//     later than the last authority marker;
+//     later than the last authority marker. It is read from `runner.out` first and
+//     from the append-only `buddy.log` when a host restart truncated the former;
 //   * a RELOAD line carrying another runId is never attributed (a BOOT for another
 //     run closes the window, exactly as in attributeRunLines);
 //   * `skipped=unchanged` is RECORDED but is not a new source (the host rebuilt the
@@ -688,6 +689,12 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
     socketHash !== null && socketGenerationId !== null && stringOrNull(latestSourceReload?.generationId) !== null
       ? socketGenerationId !== latestSourceReload.generationId
       : null
+  const stagedCandidateHash = stringOrNull(window.unmatchedDeferred?.hash)
+  // A FROZEN host keeps the staged candidate in `generationHash` without swapping
+  // it in, so a socket hash equal to the staged candidate is NOT the executing
+  // source. Name that instead of leaving a bare disagreement for a reader to misread.
+  const frozenExplainsSocket =
+    socketForRun?.frozen === true && socketHash !== null && stagedCandidateHash !== null && socketHash === stagedCandidateHash
   const disagreements = []
   let agrees = null
   if (socketHash !== null && fileHash !== null) {
@@ -708,15 +715,19 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
     generationId: socketGenerationId,
     generationIdDiffers,
     frozen: socketForRun?.frozen ?? null,
+    stagedCandidateHash,
+    frozenExplainsSocket,
     fileEffectiveHash: reloadHash,
     fileBootBuildHash: stringOrNull(window.bootBuildHash),
     agrees,
     note:
       socketForRun === null
         ? 'no live control-socket report for this runId was available: the file evidence stands alone'
-        : generationIdDiffers === true && agrees === true
-          ? 'the live generation is a NEWER INSTANCE of the same bundle hash (a restart, not a source change); a read-only `report` reply never overrides the file facts, it only cross-checks them'
-          : 'a read-only `report` reply for this runId; it never overrides the file facts, only cross-checks them',
+        : frozenExplainsSocket
+          ? 'the host is FROZEN: generationHash names the STAGED deferred candidate, so the EXECUTING source is still the last committed reload recorded above, not the socket hash'
+          : generationIdDiffers === true && agrees === true
+            ? 'the live generation is a NEWER INSTANCE of the same bundle hash (a restart, not a source change); a read-only `report` reply never overrides the file facts, it only cross-checks them'
+            : 'a read-only `report` reply for this runId; it never overrides the file facts, only cross-checks them',
   }
 
   // A window with no source-changing reload can still be BLIND: another
@@ -756,6 +767,9 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
       closedByRunId: window.closedByRunId,
       scannedToEof: window.scannedToEof === true,
       bootBuildHash: crossCheck.fileBootBuildHash,
+      // Which stream was tried, in order: `runner.out` is TRUNCATED on restart while
+      // `buddy.log` is append-only, so a superseded run resolves from the log.
+      attempts: window.attempts ?? null,
     },
     unmatchedDeferred: window.unmatchedDeferred ?? null,
     windowBlind: { detected: blindSources.length > 0, reasons: blindSources },
@@ -763,6 +777,27 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
     disagreements,
     note: 'bootSourceSha is the run ORIGIN (BOOT line); effectiveSourceSha is what the run window proves executed at its end (latest source-changing RELOAD hash, else the BOOT SHA). With provenance=reload the value is the host generation BUNDLE hash, not a git commit.',
   }
+}
+
+/**
+ * The run window can live in EITHER stream. A detached resident writes
+ * `runner.out`, whose redirect TRUNCATES the file on restart, so a run superseded
+ * by a host restart keeps no window there; `buddy.log` is append-only and still
+ * holds that run's BOOT/RELOAD markers. Prefer the stream the caller named, fall
+ * back to the log only when it does not carry this run's BOOT boundary, and record
+ * both attempts so a reader sees which stream answered and why the other could not.
+ */
+async function scanRunSourceWindow(paths, runId) {
+  const attempts = []
+  const primary = await scanRunReloadWindow(paths.runnerOutPath, runId)
+  attempts.push({ path: paths.runnerOutPath ?? null, status: primary.status, reason: primary.reason ?? null })
+  let window = primary
+  if (primary.status !== 'valid' && typeof paths.logPath === 'string' && paths.logPath !== paths.runnerOutPath) {
+    const fallback = await scanRunReloadWindow(paths.logPath, runId)
+    attempts.push({ path: paths.logPath, status: fallback.status, reason: fallback.reason ?? null })
+    if (fallback.status === 'valid') window = fallback
+  }
+  return { ...window, attempts }
 }
 
 // ---------------------------------------------------------------------------
@@ -1727,7 +1762,7 @@ export async function buildRunArtifact({
   // guess) and that fact is named in missingEvidenceDetail as soon as it stops
   // being provable - either because the window could not be read at all, or
   // because another run-scoped source attests a bundle change the window missed.
-  const reloadWindow = await scanRunReloadWindow(paths.runnerOutPath, runId)
+  const reloadWindow = await scanRunSourceWindow(paths, runId)
   const runSource = composeRunSource({
     runId,
     boot,
@@ -1736,9 +1771,12 @@ export async function buildRunArtifact({
     socketBinding,
   })
   if (runSource.window.status !== 'valid') {
+    const tried = (runSource.window.attempts ?? [])
+      .map((attempt) => `${attempt.path ?? 'none'}=${attempt.status}${attempt.reason === null ? '' : ` (${attempt.reason})`}`)
+      .join(', ')
     missing.add(
       'run.source:reload_window',
-      `${runSource.window.reason}; no BUILD/RELOAD marker for this run could be read from ${paths.runnerOutPath}, so effectiveSourceSha can only repeat the BOOT SHA (provenance=${runSource.provenance}) and the source that produced the result is unattested`,
+      `${runSource.window.reason}; no BUILD/RELOAD marker for this run could be read from any stream (tried: ${tried || paths.runnerOutPath}), so effectiveSourceSha can only repeat the BOOT SHA (provenance=${runSource.provenance}) and the source that produced the result is unattested`,
     )
   } else if (runSource.windowBlind.detected) {
     missing.add(
