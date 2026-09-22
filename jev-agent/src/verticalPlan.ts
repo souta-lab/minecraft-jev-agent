@@ -14,7 +14,7 @@
 // It also carries the pure progress assertion used by the controller: while a
 // RETRIEVE is active, if the distance to the target does not decrease over N
 // ticks the caller logs `RETRIEVE_STALLED` and escalates instead of WAITing.
-import type { DescentOption, HarvestTool, StepCut, Vec3Json } from './state.ts'
+import type { DescentOption, DescentRefusalReason, HarvestTool, StepCut, Vec3Json } from './state.ts'
 import { distance } from './state.ts'
 import { resolveHarvest, loadGameData } from './gameData.ts'
 import { bestToolTier, HAZARD_PROXIMITY } from './reachability.ts'
@@ -887,6 +887,72 @@ export function formatAscentRefused(refusal: UpwardAscentRefusal): string {
   return `ASCENT_REFUSED reason=${refusal.reason} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
 }
 
+/**
+ * Why a downward gap > VERTICAL_GAP has no grounded descent plan. Symmetric to
+ * `UpwardAscentRefusal`: `plan: null` alone cannot distinguish "level/no plan
+ * needed" from "the descent is impossible right now", and a bare
+ * `needs_descend`/`descend_plan` pair let the live M3 run withhold the lit
+ * Nether gate forever without ever naming WHICH mechanical fact was missing.
+ *
+ *   `no_safe_step` the sensor pool carries no down step at all to judge;
+ *   the rest are the typed `DescentRefusalReason` of the binding refused step.
+ */
+export type DownwardDescentRefusalReason = DescentRefusalReason | 'no_safe_step'
+
+export interface DownwardDescentRefusal {
+  reason: DownwardDescentRefusalReason
+  fromY: number
+  toY: number
+  /** the refused step's landing cell; null when the pool has no down step */
+  cell: Vec3Json | null
+  /** the concrete block that refused the step (bedrock, lava, ...), when known */
+  block: string | null
+  /** the human-readable sensor fact, preserved for the marker detail */
+  detail: string
+}
+
+/**
+ * Classify why a downward approach has no plan. Pure: same pool in, same typed
+ * refusal out. The binding step is the first refused `down` option in the
+ * sensor's fixed order (E, W, N, S, own column), which is stable per tick and
+ * therefore safe to key a suppression fingerprint on.
+ */
+export function classifyDescentRefusal(
+  descent: readonly DescentOption[] | undefined,
+  fromY: number,
+  toY: number,
+): DownwardDescentRefusal {
+  const down = (descent ?? []).filter((step) => step.mode === 'down')
+  for (const step of down) {
+    if (step.safe) continue
+    return {
+      reason: step.refusal ?? 'no_safe_step',
+      fromY,
+      toY,
+      cell: step.step,
+      block: step.digName ?? null,
+      detail: step.reason,
+    }
+  }
+  return { reason: 'no_safe_step', fromY, toY, cell: null, block: null, detail: 'no down step in the sensor pool' }
+}
+
+/** The exact log line emitted when a downward gap has no grounded plan. */
+export function formatDescentRefused(refusal: DownwardDescentRefusal): string {
+  const cell = refusal.cell === null ? 'none' : `${refusal.cell.x},${refusal.cell.y},${refusal.cell.z}`
+  const block = refusal.block === null ? 'none' : refusal.block
+  return `DESCENT_REFUSED reason=${refusal.reason} from_y=${refusal.fromY} to_y=${refusal.toY} cell=${cell} block=${block}`
+}
+
+/**
+ * The exact log line emitted when the body durably descended one bounded chunk
+ * toward a target below it. The downward counterpart of `ASCENT_PROGRESS`, so a
+ * descent route is run-scoped evidence instead of being reported as a climb.
+ */
+export function formatDescentChunk(fromY: number, toY: number, targetY: number): string {
+  return `DESCENT_CHUNK from_y=${fromY} to_y=${toY} target_y=${targetY}`
+}
+
 export interface VerticalApproachDecision {
   plan: VerticalPlan | null
   /** set when a remembered tunnel was offered but its entry was not usable */
@@ -899,6 +965,14 @@ export interface VerticalApproachDecision {
    * the non-repeating failure the caller turns into a re-plan/abandon.
    */
   ascentRefusal: UpwardAscentRefusal | null
+  /**
+   * set when a DOWNWARD gap > VERTICAL_GAP has NO grounded plan. Symmetric to
+   * `ascentRefusal`: without it a body standing above a target got a bare
+   * `needs_descend`/`descend_plan` pair that named neither the missing
+   * affordance nor the cell, so the M3 run could not tell a canopy with no
+   * safe step from a gate that simply had not been walked to yet.
+   */
+  descentRefusal: DownwardDescentRefusal | null
 }
 
 type TunnelResolution =
@@ -965,36 +1039,39 @@ export function planVerticalApproachDetailed(input: VerticalInput): VerticalAppr
   const fromY = Math.floor(input.selfFeetY)
   const targetY = input.target.y
   const dy = targetY - fromY
-  if (dy === 0) return { plan: null, tunnelRefusal: null, ascentRefusal: null }
+  if (dy === 0) return { plan: null, tunnelRefusal: null, ascentRefusal: null, descentRefusal: null }
 
   const tunnel = input.tunnel ?? null
 
   if (dy > 0) {
     const resolution = tunnel !== null ? resolveTunnelEntry(input, tunnel, targetY, fromY, dy) : { kind: 'skip' as const }
     if (resolution.kind === 'reuse') {
-      return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null, ascentRefusal: null }
+      return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null, ascentRefusal: null, descentRefusal: null }
     }
     const upward = planUpward(input, fromY, targetY, dy)
     return {
       plan: upward.plan,
       tunnelRefusal: resolution.kind === 'refused' ? resolution.refusal : null,
       ascentRefusal: upward.refusal,
+      descentRefusal: null,
     }
   }
 
   // A one-block drop needs no vertical leg (the horizontal path steps down it).
-  if (Math.abs(dy) <= VERTICAL_GAP) return { plan: null, tunnelRefusal: null, ascentRefusal: null }
+  if (Math.abs(dy) <= VERTICAL_GAP) return { plan: null, tunnelRefusal: null, ascentRefusal: null, descentRefusal: null }
 
   const resolution = tunnel !== null ? resolveTunnelEntry(input, tunnel, targetY, fromY, dy) : { kind: 'skip' as const }
   if (resolution.kind === 'reuse') {
-    return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null, ascentRefusal: null }
+    return { plan: reusePlan(resolution.tunnel, resolution.clear, fromY, targetY), tunnelRefusal: null, ascentRefusal: null, descentRefusal: null }
   }
   const tunnelRefusal = resolution.kind === 'refused' ? resolution.refusal : null
 
   const steps = (input.descent ?? []).filter(
     (step) => step.mode === 'down' && step.safe && step.diggable === true,
   )
-  if (steps.length === 0) return { plan: null, tunnelRefusal, ascentRefusal: null }
+  if (steps.length === 0) {
+    return { plan: null, tunnelRefusal, ascentRefusal: null, descentRefusal: classifyDescentRefusal(input.descent, fromY, targetY) }
+  }
 
   const tdx = input.target.x - input.selfPosition.x
   const tdz = input.target.z - input.selfPosition.z
@@ -1013,7 +1090,9 @@ export function planVerticalApproachDetailed(input: VerticalInput): VerticalAppr
       best = step
     }
   }
-  if (best === null) return { plan: null, tunnelRefusal, ascentRefusal: null }
+  if (best === null) {
+    return { plan: null, tunnelRefusal, ascentRefusal: null, descentRefusal: classifyDescentRefusal(input.descent, fromY, targetY) }
+  }
 
   const dig = best.mode === 'down' ? (best.floorSolid ? best.floor : best.wall) : best.wall
   return {
@@ -1030,6 +1109,7 @@ export function planVerticalApproachDetailed(input: VerticalInput): VerticalAppr
     },
     tunnelRefusal,
     ascentRefusal: null,
+    descentRefusal: null,
   }
 }
 

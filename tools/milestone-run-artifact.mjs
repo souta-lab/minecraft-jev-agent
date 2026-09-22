@@ -61,10 +61,31 @@ import { deriveMilestonePredicates, readMilestonePredicateEvidence } from './mil
 import { loadPolicyEvidence } from './m2-policy-evidence.mjs'
 
 export const RECORD = 'milestone-run-artifact'
-export const SCHEMA_VERSION = 2
+// 3 = additive: `authority.jev`, the parsed `authority.system2.stack` + per-fact
+// attestation, `authority.fallback`, `environment.dimensions.sequence/transitions`,
+// `milestoneAcceptance` and `missingEvidenceDetail`. Every schema-2 field is kept.
+export const SCHEMA_VERSION = 3
 export const DEFAULT_ROOT = '/home/s0u7a/mc-ai-worktrees/m3-live'
 /** Repo-level operator decision file; run-scoped by each entry's own runId. */
 export const OPERATOR_DECISION_RECORD = 'operator-decision'
+
+/**
+ * The HOST writer of the run-scoped acceptance record the artifact reads. It is
+ * NOT a milestone verdict and it is NOT written at boot: `writeAcceptance()` runs
+ * on a successful generation reload commit, on `freeze` / `resume`, on the
+ * read-only `acceptance` control command and on shutdown. A run that has not hit
+ * one of those has no record yet, and the artifact must keep saying so instead of
+ * inventing one. The milestone question is answered independently by
+ * `milestoneAcceptance`, which is derived from the delegated gates.
+ */
+export const ACCEPTANCE_WRITER = Object.freeze({
+  source: 'buddy-driver/agent-runner.mts',
+  symbol: 'writeAcceptance()',
+  record: 'acceptance',
+  pathPattern: 'buddy-driver/data/resident/acceptance-<runId>.json',
+  firesOn: ['generation-reload-commit', 'control:freeze', 'control:resume', 'control:acceptance', 'shutdown'],
+  note: 'attests the run/HOST state (provenance, listeners, epoch); it never asserts a milestone PASS and is not written at boot',
+})
 
 /** The M3-relevant inventory subset, in a stable order. */
 export const MILESTONE_ITEMS = Object.freeze(['ender_pearl', 'blaze_rod', 'blaze_powder', 'ender_eye'])
@@ -234,6 +255,89 @@ export function parseServerProperties(text) {
     values[line.slice(0, eq).trim()] = line.slice(eq + 1).trim()
   }
   return values
+}
+
+// ---------------------------------------------------------------------------
+// resident authority identity (run-scoped markers, never inferred from a name)
+// ---------------------------------------------------------------------------
+//
+// The resident renders its own authority getters into the GENERATION_READY line:
+//
+//   policyProvider / policyModel            -> the Jev pi authority (WHICH action)
+//   system2AuthorityStack                   -> the CONFIGURED System2 stack
+//   system2LastAuthority                    -> the last provider that ANSWERED
+//   advisor / advisorSource                 -> the resolved long-horizon advisor
+//
+// `system2AuthorityStack` is `{ provider, model }` where `model` is the stack
+// string built by `buddy-driver/planner.ts` (`get authorityStack()`):
+//
+//   deterministic -> '<plannerModel>'                                  (single segment)
+//   single brain  -> '<plannerModel>'                                  (single segment)
+//   local-mercury -> 'deterministic|mercury:<model>'
+//   hybrid        -> 'typesafe-ai:<jevModel>|<advisorProvider>:<advisorModel>'
+//
+// i.e. `<left>|<right>`, each half `<provider>:<model>`. A half without both
+// sides is reported as unparsed with its raw text echoed; this reader never
+// guesses a provider, and a single segment means one brain owns both roles.
+export function parseAuthorityStack(stack) {
+  const absent = { present: false, raw: null, provider: null, segments: [], jev: null, system2: null, single: false, derived: null, reason: 'authority_stack_missing' }
+  if (!isPlainObject(stack) || typeof stack.model !== 'string' || stack.model.trim() === '') return absent
+  const raw = stack.model.trim()
+  const provider = stringOrNull(stack.provider)
+  const segments = raw
+    .split('|')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== '')
+  const parseSegment = (segment) => {
+    const index = segment.indexOf(':')
+    if (index <= 0 || index === segment.length - 1) return null
+    return { provider: segment.slice(0, index), model: segment.slice(index + 1) }
+  }
+  const parsed = segments.map(parseSegment)
+  if (segments.length === 0) return { ...absent, present: true, raw, provider, reason: 'authority_stack_empty' }
+  if (segments.length > 2) {
+    return { present: true, raw, provider, segments, jev: null, system2: null, single: false, derived: null, reason: `authority_stack_unparsed segments=${segments.length}` }
+  }
+  if (segments.length === 1) {
+    const only = parsed[0]
+    // A parsed single half names both roles; an unparsed one still names the
+    // System2 authority through the stack provider that the host emitted next to it.
+    const system2 = only ?? (provider === null ? null : { provider, model: segments[0] })
+    return {
+      present: true,
+      raw,
+      provider,
+      segments,
+      jev: only,
+      system2,
+      single: true,
+      derived: only === null && system2 !== null ? 'single_segment_stack_provider' : null,
+      reason: system2 === null ? 'authority_stack_unparsed' : null,
+    }
+  }
+  return {
+    present: true,
+    raw,
+    provider,
+    segments,
+    jev: parsed[0],
+    system2: parsed[1],
+    single: false,
+    derived: null,
+    reason: parsed[0] === null || parsed[1] === null ? 'authority_stack_partially_unparsed' : null,
+  }
+}
+
+/**
+ * The host's own `policyProvider` getter maps the policy kind to the provider
+ * (`jev-agent/src/controller-legacy.ts`: `kind === 'typesafe' ? 'typesafe-ai' :
+ * 'deterministic'`). Used ONLY when the explicit `policyProvider=` field is
+ * absent, and always labelled as the derivation it is.
+ */
+export function providerFromPolicyKind(policyKind) {
+  if (policyKind === 'typesafe') return 'typesafe-ai'
+  if (policyKind === 'deterministic') return 'deterministic'
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +727,21 @@ function composeEnvironment({ observations, dimensions, serverProperties, enviro
     return { value: coercePropertyValue(props[key]), source: serverProperties.path, runScoped: false, at: serverProperties.mtime }
   }
   const observedDimensions = [...new Set((dimensions ?? []).map((entry) => entry.dimension))]
+  // The ordered dimension history: `sequence` is every DISTINCT dimension in
+  // observation order (with the time it was first seen), `transitions` is the
+  // consecutive changes only. Both are derived from the run-scoped observations,
+  // so "the run went overworld -> the_nether at T" is answerable without
+  // re-reading the log.
+  const sequence = []
+  const transitions = []
+  for (const entry of Array.isArray(dimensions) ? dimensions : []) {
+    const previous = sequence.at(-1) ?? null
+    if (previous !== null && previous.dimension === entry.dimension) continue
+    sequence.push({ dimension: entry.dimension, firstAt: entry.ts ?? null, source: entry.source ?? 'log' })
+    if (previous !== null) {
+      transitions.push({ from: previous.dimension, to: entry.dimension, at: entry.ts ?? null })
+    }
+  }
   return {
     difficulty: fromLog('difficulty') ?? fromEnv('difficulty') ?? fromProps('difficulty'),
     mobSpawning: fromLog('mobSpawning') ?? fromEnv('mobSpawning') ?? fromProps('spawn-monsters'),
@@ -637,6 +756,8 @@ function composeEnvironment({ observations, dimensions, serverProperties, enviro
       observed: observedDimensions,
       first: dimensions?.length ? { ts: dimensions[0].ts, dimension: dimensions[0].dimension } : null,
       last: dimensions?.length ? { ts: dimensions.at(-1).ts, dimension: dimensions.at(-1).dimension } : null,
+      sequence,
+      transitions,
     },
     serverProperties: serverProperties === null ? null : { path: serverProperties.path, mtime: serverProperties.mtime, runScoped: false, values: serverProperties.values },
   }
@@ -649,12 +770,16 @@ function firstExistingPath(candidates) {
 
 /**
  * Second read of the run's runner-out for DESCRIPTIVE model fields that the
- * policy loader does not surface (policyProvider / plannerModel / system2 stack
- * and decision). Attribution uses the SAME BOOT-boundary rule as the log scan: a
- * `BOOT ... runId=R` opens R, a later BOOT for another run closes it. This is
- * reading, not judging: when the loader can bind a gate window we restrict to it,
- * otherwise the descriptive facts are still reported and the artifact records
- * that the GATE could not bind them (`authority.gateBound=false`).
+ * policy loader does not surface (policyProvider / plannerModel / the System2
+ * authority stack and the decisions that answered). Attribution uses the SAME
+ * BOOT-boundary rule as the log scan: a `BOOT ... runId=R` opens R, a later BOOT
+ * for another run closes it. This is reading, not judging: when the loader can
+ * bind a gate window we restrict to it, otherwise the descriptive facts are still
+ * reported and the artifact records that the GATE could not bind them
+ * (`authority.gateBound=false`).
+ *
+ * Every captured fact carries the line index it came from, so a reader can point
+ * at the exact run-scoped line instead of trusting a summary.
  */
 export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
   if (typeof runnerOutPath !== 'string' || !existsSync(runnerOutPath)) return null
@@ -664,9 +789,13 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
   let boundaryFound = false
   let bootTsMs = null
   let generation = null
+  let generationCount = 0
   let system2Decision = null
+  const system2Decisions = []
+  let lineIndex = -1
   const rl = createInterface({ input: createReadStream(runnerOutPath, { encoding: 'utf8' }), crlfDelay: Infinity })
   for await (const line of rl) {
+    lineIndex += 1
     if (BOOT_RE.test(line)) {
       const rid = RUN_ID_LINE_RE.exec(line)?.[1] ?? null
       if (rid !== null) {
@@ -686,38 +815,176 @@ export async function readAuthorityExtras(runnerOutPath, runId, policy = null) {
     if (policyEndMs !== null && tsMs !== null && tsMs > policyEndMs) break
     if (line.includes('GENERATION_READY')) {
       const kv = parseKeyValues(line)
+      generationCount += 1
       generation = {
         tsMs,
+        lineIndex,
+        generationId: stringOrNull(kv.id),
         policyKind: stringOrNull(kv.policy ?? kv.policyKind),
         policyProvider: stringOrNull(kv.policyProvider),
         policyModel: stringOrNull(kv.policyModel ?? kv.model),
         plannerMode: stringOrNull(kv.planner ?? kv.plannerMode),
         plannerModel: stringOrNull(kv.plannerModel),
         deterministicFallbackEnabled: booleanOrNull(kv.deterministicFallbackEnabled),
+        // The controller's LAST answerer, not the configured authority. The host
+        // initialises it to `none` until a model actually answers.
+        system2Provider: stringOrNull(kv.system2Provider),
+        system2Model: stringOrNull(kv.system2Model),
         system2AuthorityStack: isPlainObject(kv.system2AuthorityStack) ? kv.system2AuthorityStack : null,
         system2LastAuthority: isPlainObject(kv.system2LastAuthority) ? kv.system2LastAuthority : null,
+        advisor: stringOrNull(kv.advisor),
+        advisorSource: stringOrNull(kv.advisorSource),
+        optionCompiler: booleanOrNull(kv.optionCompiler),
       }
     } else if (line.includes('SYSTEM2_AUTHORITY_DECISION')) {
       const kv = parseKeyValues(line)
-      system2Decision = {
+      const decision = {
         tsMs,
+        lineIndex,
         provider: stringOrNull(kv.provider),
         model: stringOrNull(kv.model),
         chosen: stringOrNull(kv.chosen),
+        source: stringOrNull(kv.source),
+        trigger: stringOrNull(kv.trigger),
+        op: stringOrNull(kv.op),
+        strategy: stringOrNull(kv.strategy),
       }
+      system2Decisions.push(decision)
+      system2Decision = decision
     }
   }
   if (!boundaryFound) return null
-  return { boundaryFound, bootTsMs, generation, system2Decision }
+  return {
+    boundaryFound,
+    source: runnerOutPath,
+    bootTsMs,
+    window: policy?.window ?? null,
+    generation,
+    generationCount,
+    system2Decision,
+    system2Decisions,
+  }
 }
 
+/** How many of the (sparse) System2 decisions the artifact keeps verbatim. */
+export const SYSTEM2_DECISION_KEEP = 20
+
+/**
+ * Compose the authority section from run-scoped facts only.
+ *
+ * The EFFECTIVE System2 provider/model is the configured authority stack the
+ * in-window `GENERATION_READY` marker attests (`system2AuthorityStack`), falling
+ * back to the last in-window `SYSTEM2_AUTHORITY_DECISION` when no stack is
+ * parseable. The last answerer and every decision stay visible next to it, so a
+ * run whose stack is configured but whose last answer came from elsewhere is
+ * reported as a disagreement instead of being silently collapsed.
+ */
 async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
   const generation = policy?.generation ?? null
   const extra = extras?.generation ?? null
   const system2 = policy?.system2 ?? null
-  const system2Decisions = Array.isArray(system2?.decisions) ? system2.decisions : []
-  const latestDecision = system2Decisions.at(-1) ?? null
   const decisions = policy?.decisions ?? null
+  const policyDecisions = Array.isArray(system2?.decisions) ? system2.decisions : []
+  const extraDecisions = Array.isArray(extras?.system2Decisions) ? extras.system2Decisions : []
+  const decisionList = policyDecisions.length > 0 ? policyDecisions : extraDecisions
+  const latestDecision = decisionList.at(-1) ?? null
+  const stack = parseAuthorityStack(extra?.system2AuthorityStack)
+
+  // The Jev pi authority: the host's explicit `policyProvider=`/`policyModel=`
+  // fields first, the loader's generation bundle second, the host's own
+  // kind->provider getter only when the explicit field is absent (and labelled).
+  const explicitProvider = extra?.policyProvider ?? null
+  const policyProvider = explicitProvider ?? providerFromPolicyKind(generation?.policyKind ?? extra?.policyKind ?? null)
+  const policyModel = generation?.policyModel ?? extra?.policyModel ?? null
+  const jevSource =
+    explicitProvider !== null
+      ? 'log:GENERATION_READY:policyProvider'
+      : policyProvider !== null
+        ? 'derived:policyKind (jev-agent/src/controller-legacy.ts get policyProvider())'
+        : generation?.source ?? null
+  const jev = {
+    provider: policyProvider,
+    model: policyModel,
+    attested: policyProvider !== null && policyModel !== null,
+    source: jevSource,
+    tsMs: extra?.tsMs ?? generation?.tsMs ?? null,
+    lineIndex: extra?.lineIndex ?? null,
+    evidence: {
+      generationReadyPolicyProvider: explicitProvider,
+      generationReadyPolicyModel: extra?.policyModel ?? null,
+      loaderPolicyKind: generation?.policyKind ?? null,
+      loaderSource: generation?.source ?? null,
+      authorityStackLeftHalf: stack.jev,
+    },
+  }
+
+  let system2Resolution
+  if (stack.system2 !== null) {
+    system2Resolution = {
+      provider: stack.system2.provider,
+      model: stack.system2.model,
+      source: 'log:GENERATION_READY:system2AuthorityStack',
+      tsMs: extra?.tsMs ?? null,
+      lineIndex: extra?.lineIndex ?? null,
+      kind: 'configured_authority_stack',
+    }
+  } else if (latestDecision !== null && (latestDecision.provider !== null || latestDecision.model !== null)) {
+    system2Resolution = {
+      provider: latestDecision.provider ?? null,
+      model: latestDecision.model ?? null,
+      source: 'log:SYSTEM2_AUTHORITY_DECISION',
+      tsMs: latestDecision.tsMs ?? null,
+      lineIndex: latestDecision.lineIndex ?? null,
+      kind: 'last_authority_decision',
+    }
+  } else {
+    system2Resolution = { provider: null, model: null, source: null, tsMs: null, lineIndex: null, kind: null }
+  }
+
+  // A configured stack plus a DIFFERENT last answerer is not an error, but it
+  // must be visible: the two fields answer different questions.
+  const disagreements = []
+  if (
+    stack.system2 !== null &&
+    latestDecision !== null &&
+    typeof latestDecision.provider === 'string' &&
+    latestDecision.provider !== stack.system2.provider
+  ) {
+    disagreements.push(`last_answerer=${latestDecision.provider} vs configured_stack=${stack.system2.provider}`)
+  }
+  if (stack.jev !== null && policyProvider !== null && policyModel !== null && stack.jev.provider !== policyProvider) {
+    disagreements.push(`authority_stack_jev=${stack.jev.provider} vs policyProvider=${policyProvider}`)
+  }
+  if (stack.jev !== null && policyModel !== null && stack.jev.model !== policyModel) {
+    disagreements.push(`authority_stack_jev_model=${stack.jev.model} vs policyModel=${policyModel}`)
+  }
+
+  // "No hidden deterministic fallback" is answered by two independent host
+  // facts: the run-scoped flag and the run-window decision sources.
+  const fallbackEnabled = generation?.deterministicFallbackEnabled ?? extra?.deterministicFallbackEnabled ?? null
+  const countsKnown = decisions !== null && Number.isFinite(decisions.jevCount) && Number.isFinite(decisions.fallbackCount) && Number.isFinite(decisions.otherCount)
+  const fallbackDecisions = countsKnown ? decisions.fallbackCount : null
+  const otherDecisions = countsKnown ? decisions.otherCount : null
+  let hiddenFallback
+  let fallbackReason
+  if (fallbackEnabled === true || (fallbackDecisions !== null && fallbackDecisions > 0)) {
+    hiddenFallback = 'observed'
+    fallbackReason = fallbackEnabled === true ? 'deterministicFallbackEnabled=true' : `fallback_decisions=${fallbackDecisions}`
+  } else if (fallbackEnabled === false && countsKnown && fallbackDecisions === 0 && otherDecisions === 0) {
+    hiddenFallback = 'none_observed'
+    fallbackReason = 'deterministicFallbackEnabled=false and every in-window decision carries source=jev'
+  } else {
+    hiddenFallback = 'unknown'
+    fallbackReason =
+      fallbackEnabled === null
+        ? 'deterministicFallbackEnabled_unavailable'
+        : !countsKnown
+          ? 'decision_source_counts_unavailable'
+          : otherDecisions > 0
+            ? `decisions_with_other_source=${otherDecisions}`
+            : 'insufficient_fallback_evidence'
+  }
+
   return {
     present: generation !== null || extra !== null,
     // `gateBound` is true only when the policy loader produced the generation
@@ -729,19 +996,44 @@ async function composeAuthority({ runId, runnerOutPath, policy, extras }) {
     window: policy?.window ?? null,
     plannerMode: generation?.plannerMode ?? extra?.plannerMode ?? null,
     policyKind: generation?.policyKind ?? extra?.policyKind ?? null,
-    policyProvider: extra?.policyProvider ?? null,
-    policyModel: generation?.policyModel ?? extra?.policyModel ?? null,
+    policyProvider,
+    policyModel,
     plannerModel: extra?.plannerModel ?? null,
-    deterministicFallbackEnabled: generation?.deterministicFallbackEnabled ?? extra?.deterministicFallbackEnabled ?? null,
+    deterministicFallbackEnabled: fallbackEnabled,
+    jev,
     system2: {
-      provider: latestDecision?.provider ?? extras?.system2Decision?.provider ?? null,
-      model: latestDecision?.model ?? extras?.system2Decision?.model ?? null,
+      provider: system2Resolution.provider,
+      model: system2Resolution.model,
+      attested: system2Resolution.provider !== null && system2Resolution.model !== null,
+      attestation: {
+        kind: system2Resolution.kind,
+        source: system2Resolution.source,
+        tsMs: system2Resolution.tsMs,
+        lineIndex: system2Resolution.lineIndex,
+      },
       chosen: latestDecision?.chosen ?? extras?.system2Decision?.chosen ?? null,
-      count: Number.isFinite(system2?.count) ? system2.count : null,
+      count: Number.isFinite(system2?.count) ? system2.count : decisionList.length,
       modelCount: Number.isFinite(system2?.modelCount) ? system2.modelCount : null,
       portalPlanCount: Number.isFinite(system2?.portalPlanCount) ? system2.portalPlanCount : null,
       authorityStack: extra?.system2AuthorityStack ?? null,
+      stack,
       lastAuthority: extra?.system2LastAuthority ?? null,
+      lastDecision: latestDecision,
+      decisionCount: decisionList.length,
+      decisions: decisionList.slice(-SYSTEM2_DECISION_KEEP),
+      generationMarkerCount: extras?.generationCount ?? null,
+      disagreements,
+      note: 'provider/model are the CONFIGURED System2 authority stack attested by the run\'s own GENERATION_READY marker; lastAuthority/lastDecision are the last provider that actually answered',
+    },
+    fallback: {
+      deterministicFallbackEnabled: fallbackEnabled,
+      deterministicFallbackSource: generation !== null ? generation.source ?? 'generation' : extra !== null ? 'log:GENERATION_READY' : null,
+      decisionsSource: decisions?.source ?? null,
+      jevCount: countsKnown ? decisions.jevCount : null,
+      fallbackCount: fallbackDecisions,
+      otherCount: otherDecisions,
+      hiddenDeterministicFallback: hiddenFallback,
+      reason: fallbackReason,
     },
     decisions:
       decisions === null
@@ -816,14 +1108,17 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
   if (parsed === null) {
     // A gate that emits no machine status line has NOT produced a verdict.
     status = 'UNKNOWN'
-    missing.push(`verdict:${id}`)
+    missing.push({ field: `verdict:${id}`, reason: `the delegated gate emitted no ${id}_RUN_RESULT status line (exit code ${code})` })
   } else if (parsed.status !== codeStatus) {
     // Never reconcile a mismatch towards PASS; surface it as UNKNOWN.
     status = 'UNKNOWN'
-    missing.push(`verdict:${id}:status_mismatch code=${code} line=${parsed.status}`)
+    missing.push({
+      field: `verdict:${id}:status_mismatch`,
+      reason: `gate exit code ${code} implies ${codeStatus} but its status line says ${parsed.status} (reason=${parsed.reason}); a mismatch is never reconciled towards PASS`,
+    })
   } else {
     status = parsed.status
-    if (status === 'UNKNOWN') missing.push(`verdict:${id}`)
+    if (status === 'UNKNOWN') missing.push({ field: `verdict:${id}`, reason: `the gate reported UNKNOWN reason=${parsed.reason}` })
   }
   const factsLine = lines.find((line) => line.startsWith(`${id.toLowerCase()}_facts:`)) ?? null
   return {
@@ -846,6 +1141,25 @@ async function runDelegatedGate({ id, gate, gateRunner, runId, paths, policyEvid
 // artifact assembly
 // ---------------------------------------------------------------------------
 
+/**
+ * Every gap the artifact can report, with the reason it is a gap. `fields` keeps
+ * the historical `missingEvidence` string list (same order, same values) so
+ * existing readers keep working; `detail` is the one clear list an operator
+ * reads: field + why it is missing + which source would provide it.
+ */
+function missingCollector() {
+  const fields = []
+  const detail = []
+  return {
+    fields,
+    detail,
+    add(field, reason) {
+      fields.push(field)
+      detail.push({ field, reason })
+    },
+  }
+}
+
 function unscopedArtifact({ root, now, reason }) {
   return {
     record: RECORD,
@@ -861,8 +1175,43 @@ function unscopedArtifact({ root, now, reason }) {
       M3: { id: 'M3', gate: 'tools/m3-gate.mjs', runId: null, status: 'UNKNOWN', reason, conditions: {}, lines: [] },
     },
     milestonePredicates: null,
+    milestoneAcceptance: { status: 'UNKNOWN', reason, basis: 'delegated gate verdicts', milestones: {}, incompleteMilestones: ['M2', 'M3'] },
     operatorDecisions: { present: false, path: null, reason: 'run_scope_required', applied: [] },
     missingEvidence: ['runId'],
+    missingEvidenceDetail: [{ field: 'runId', reason }],
+  }
+}
+
+/**
+ * The milestone-acceptance question, answered INDEPENDENTLY of the host's
+ * acceptance record: an `acceptance-<runId>.json` attests run/HOST state and
+ * never asserts a milestone, so the milestone status is always derived from the
+ * delegated gate verdicts. A gate that could not prove a condition leaves the
+ * milestone INCOMPLETE here — never PASS.
+ */
+export function composeMilestoneAcceptance(verdicts) {
+  const milestones = {}
+  for (const id of ['M2', 'M3']) {
+    const verdict = verdicts?.[id] ?? null
+    const conditions = isPlainObject(verdict?.conditions) ? verdict.conditions : {}
+    const entries = Object.entries(conditions)
+    milestones[id] = {
+      status: verdict?.status ?? 'UNKNOWN',
+      reason: verdict?.reason ?? null,
+      satisfiedConditions: entries.filter(([, status]) => status === 'PASS').map(([condition]) => condition),
+      unmetConditions: entries.filter(([, status]) => status === 'FAIL').map(([condition]) => condition),
+      unknownConditions: entries.filter(([, status]) => status === 'UNKNOWN').map(([condition]) => condition),
+    }
+  }
+  const incompleteMilestones = Object.entries(milestones)
+    .filter(([, milestone]) => milestone.status !== 'PASS')
+    .map(([id]) => id)
+  return {
+    status: incompleteMilestones.length === 0 ? 'COMPLETE' : 'INCOMPLETE',
+    basis: 'the delegated gate verdicts embedded above (tools/m2-gate.mjs, tools/m3-gate.mjs)',
+    milestones,
+    incompleteMilestones,
+    note: 'a gate condition that is UNKNOWN is recorded as not-met; an acceptance-<runId>.json record never turns this into PASS',
   }
 }
 
@@ -883,7 +1232,7 @@ export async function buildRunArtifact({
   }
 
   const paths = derivePaths(root, overrides)
-  const missing = []
+  const missing = missingCollector()
 
   // ---- log: one read, then the canonical gate attribution + our timestamped one
   let lines = []
@@ -902,12 +1251,19 @@ export async function buildRunArtifact({
       gateScan = scanRunLines(runId, lines)
     }
   }
-  if (attribution.status !== 'valid') missing.push('boot')
+  if (attribution.status !== 'valid') {
+    missing.add('boot', `${attribution.reason}; no \`BOOT ... runId=${runId}\` line was found in ${paths.logPath}, so no log fact can be bound to this run`)
+  }
   const gateAttributionConsistent =
     attribution.status === gateScan.status &&
     attribution.inventorySamples.length === (Array.isArray(gateScan.inventorySamples) ? gateScan.inventorySamples.length : 0) &&
     attribution.dimensionObservations.length === (Array.isArray(gateScan.dimensionObservations) ? gateScan.dimensionObservations.length : 0)
-  if (!gateAttributionConsistent) missing.push('attribution:gate_cross_check')
+  if (!gateAttributionConsistent) {
+    missing.add(
+      'attribution:gate_cross_check',
+      `this reader and tools/m2-gate.mjs scanRunLines disagree (reader status=${attribution.status} inventory=${attribution.inventorySamples.length} dimensions=${attribution.dimensionObservations.length}; gate status=${gateScan.status} inventory=${Array.isArray(gateScan.inventorySamples) ? gateScan.inventorySamples.length : 'n/a'} dimensions=${Array.isArray(gateScan.dimensionObservations) ? gateScan.dimensionObservations.length : 'n/a'})`,
+    )
+  }
 
   // ---- boot identity
   const boot = attribution.bootLines.length > 0 ? parseBootLine(attribution.bootLines[0].line) : null
@@ -921,17 +1277,27 @@ export async function buildRunArtifact({
       ['worldEpoch', 'boot.worldEpoch'],
       ['worldKey', 'boot.worldKey'],
     ]) {
-      if (boot[field] === null || boot[field] === undefined) missing.push(label)
+      if (boot[field] === null || boot[field] === undefined) missing.add(label, `the run's BOOT line omits \`${field}\``)
     }
   }
 
   // ---- snapshot / inventory
   const snapshot = readSnapshotForRun(runId, paths.snapshotDir)
   const inventory = composeInventory({ attribution, snapshot })
-  if (inventory.observationCount === 0 && inventory.snapshot.present) missing.push('inventory:log')
-  if (inventory.boot === null) missing.push('inventory.boot')
-  if (inventory.latest === null) missing.push('inventory.latest')
-  for (const item of MILESTONE_ITEMS) if (!inventory.milestoneItems[item].observed) missing.push(`milestoneItem:${item}`)
+  if (inventory.observationCount === 0 && inventory.snapshot.present) {
+    missing.add('inventory:log', `the run-scoped snapshot exists but ${paths.logPath} holds no INVENTORY/MILESTONE sample bound to runId=${runId}`)
+  }
+  if (inventory.boot === null) {
+    missing.add('inventory.boot', 'no log inventory sample, no snapshot initialInventory and no snapshot latest inventory could be bound to this run')
+  }
+  if (inventory.latest === null) {
+    missing.add('inventory.latest', 'no log inventory sample, no snapshot inventory and no snapshot terminal inventory could be bound to this run')
+  }
+  for (const item of MILESTONE_ITEMS) {
+    if (!inventory.milestoneItems[item].observed) {
+      missing.add(`milestoneItem:${item}`, `no run-scoped inventory dump mentions \`${item}\`, so it is unobserved rather than 0`)
+    }
+  }
 
   // ---- environment
   const serverProperties = readServerProperties(paths.serverProperties)
@@ -941,17 +1307,25 @@ export async function buildRunArtifact({
     serverProperties,
     environmentFile: readEnvironmentFile(paths.environment),
   })
-  if (environment.difficulty === null) missing.push('environment.difficulty')
-  if (environment.mobSpawning === null) missing.push('environment.mobSpawning')
-  if (environment.gamerules === null) missing.push('environment.gamerules')
-  if (environment.dimensions.count === 0) missing.push('environment.dimension')
+  const environmentSources = `run-scoped ENVIRONMENT log marker, --environment <operator JSON>, --server-properties <file>`
+  if (environment.difficulty === null) missing.add('environment.difficulty', `no difficulty fact from any of: ${environmentSources}`)
+  if (environment.mobSpawning === null) missing.add('environment.mobSpawning', `no mob-spawning fact from any of: ${environmentSources}`)
+  if (environment.gamerules === null) missing.add('environment.gamerules', `no gamerule fact from a run-scoped ENVIRONMENT log marker or --environment <operator JSON>`)
+  if (environment.dimensions.count === 0) {
+    missing.add('environment.dimension', `no \`dimension=<id>\` observation bound to runId=${runId}, so dimension transitions cannot be reconstructed`)
+  }
   const serverVersion =
     attribution.serverObservations.find((observation) => observation.serverVersion !== null)?.serverVersion ?? null
-  if (serverVersion === null) missing.push('serverVersion')
+  if (serverVersion === null) missing.add('serverVersion', `no run-bound SPAWN/SERVER_VERSION marker carrying \`version=\` in ${paths.logPath}`)
 
-  // ---- acceptance artifact
+  // ---- acceptance artifact (HOST-written; NOT a milestone verdict)
   const acceptance = readAcceptanceArtifact(runId, paths.acceptanceDir)
-  if (!acceptance.present) missing.push('acceptance')
+  if (!acceptance.present) {
+    missing.add(
+      'acceptance',
+      `${acceptance.reason}: ${ACCEPTANCE_WRITER.pathPattern} is written by ${ACCEPTANCE_WRITER.source} ${ACCEPTANCE_WRITER.symbol} on ${ACCEPTANCE_WRITER.firesOn.join('/')} — a run that has not reached one of those has no record yet; the milestone question is answered by milestoneAcceptance instead`,
+    )
+  }
 
   // ---- authority (read once; the gates reuse this exact bundle)
   const socketBinding =
@@ -966,13 +1340,38 @@ export async function buildRunArtifact({
   })
   const extras = await readAuthorityExtras(paths.runnerOutPath, runId, policy)
   const authority = await composeAuthority({ runId, runnerOutPath: paths.runnerOutPath, policy, extras })
-  if (!authority.present) missing.push('authority')
-  if (!authority.gateBound) missing.push('authority.gateBinding')
-  if (authority.plannerMode === null) missing.push('authority.plannerMode')
-  if (authority.policyProvider === null) missing.push('authority.policyProvider')
-  if (authority.policyModel === null) missing.push('authority.policyModel')
-  if (authority.deterministicFallbackEnabled === null) missing.push('authority.deterministicFallbackEnabled')
-  if (authority.system2.provider === null || authority.system2.model === null) missing.push('authority.system2')
+  if (!authority.present) missing.add('authority', `no run-scoped authority fact in ${paths.runnerOutPath} or ${paths.decisionsPath}`)
+  if (!authority.gateBound) {
+    missing.add(
+      'authority.gateBinding',
+      `the policy loader could not bracket runId=${runId} inside ${paths.runnerOutPath} (reason=${policy?.reason ?? 'unknown'}) and no matching control-socket report was available; the descriptive authority facts below are still reported but the delegated gates judged nothing`,
+    )
+  }
+  if (authority.plannerMode === null) missing.add('authority.plannerMode', 'no `planner=` field in an in-window GENERATION_READY marker')
+  if (authority.policyProvider === null) {
+    missing.add('authority.policyProvider', 'no `policyProvider=` field in an in-window GENERATION_READY marker and no policyKind to derive it from')
+  }
+  if (authority.policyModel === null) {
+    missing.add('authority.policyModel', 'no `policyModel=`/`model=` field in an in-window GENERATION_READY marker and no bound generation report')
+  }
+  if (authority.deterministicFallbackEnabled === null) {
+    missing.add('authority.deterministicFallbackEnabled', 'no `deterministicFallbackEnabled=` field in an in-window GENERATION_READY marker')
+  }
+  if (authority.jev.provider === null || authority.jev.model === null) {
+    missing.add(
+      'authority.jev',
+      `the effective Jev pi authority could not be attested (provider=${authority.jev.provider ?? 'null'} model=${authority.jev.model ?? 'null'})`,
+    )
+  }
+  if (authority.system2.provider === null || authority.system2.model === null) {
+    missing.add(
+      'authority.system2',
+      `no parseable \`system2AuthorityStack\` in an in-window GENERATION_READY marker and no in-window SYSTEM2_AUTHORITY_DECISION to fall back to (raw stack=${JSON.stringify(authority.system2.authorityStack)})`,
+    )
+  }
+  if (authority.fallback.hiddenDeterministicFallback === 'unknown') {
+    missing.add('authority.fallback', `cannot rule out a hidden deterministic fallback: ${authority.fallback.reason}`)
+  }
 
   // ---- milestone predicate evidence (first-class, run-scoped)
   //
@@ -1035,7 +1434,12 @@ export async function buildRunArtifact({
   // / `portal_lit` may be unobserved in-run while the terminal M3 conditions are
   // the ones the delegated verdicts already gate. A rejected/duplicate observation
   // (source mismatch) IS an integrity gap and is surfaced at the top level.
-  if (milestonePredicates.mismatches.length > 0) missing.push('milestonePredicate:source_mismatch')
+  if (milestonePredicates.mismatches.length > 0) {
+    missing.add(
+      'milestonePredicate:source_mismatch',
+      `${milestonePredicates.mismatches.length} resident observation(s) were rejected (run/source mismatch); see milestonePredicates.mismatches`,
+    )
+  }
 
   // ---- delegated verdicts
   const m2 = await runDelegatedGate({
@@ -1057,7 +1461,9 @@ export async function buildRunArtifact({
     policySocket: socketBinding,
     sourceSha: boot?.sourceSha ?? null,
   })
-  missing.push(...m2.missing, ...m3.missing)
+  for (const gap of [...m2.missing, ...m3.missing]) {
+    missing.add(gap.field ?? gap, gap.reason ?? `the delegated gate could not produce this verdict fact (${String(gap)})`)
+  }
 
   // ---- explicit operator decisions (annotate; never rewrite a gate verdict)
   const operatorDecisions = readOperatorDecisions(paths.operatorDecisions)
@@ -1076,7 +1482,8 @@ export async function buildRunArtifact({
 
   const verdicts = { M2: m2.verdict, M3: m3.verdict }
   const statuses = [verdicts.M2.status, verdicts.M3.status]
-  const complete = missing.length === 0
+  const milestoneAcceptance = composeMilestoneAcceptance(verdicts)
+  const complete = missing.fields.length === 0
   const status = statuses.includes('FAIL') ? 'FAIL' : statuses.includes('UNKNOWN') || !complete ? 'UNKNOWN' : 'PASS'
   const exitCode = statuses.includes('FAIL') ? 1 : status === 'PASS' ? 0 : 2
 
@@ -1113,6 +1520,7 @@ export async function buildRunArtifact({
     environment,
     authority,
     milestonePredicates,
+    milestoneAcceptance,
     operatorDecisions: {
       present: operatorDecisions.present,
       path: operatorDecisions.path,
@@ -1126,6 +1534,7 @@ export async function buildRunArtifact({
       present: acceptance.present,
       path: acceptance.path,
       reason: acceptance.reason,
+      writer: ACCEPTANCE_WRITER,
       record: acceptance.record,
     },
     snapshot: {
@@ -1141,7 +1550,8 @@ export async function buildRunArtifact({
       markerCount: Array.isArray(snapshot.record?.markers) ? snapshot.record.markers.length : null,
     },
     verdicts,
-    missingEvidence: missing,
+    missingEvidence: missing.fields,
+    missingEvidenceDetail: missing.detail,
   }
   return { artifact, exitCode }
 }
@@ -1204,6 +1614,19 @@ export function usage() {
     '  --server-properties <p>  read difficulty/spawn-monsters from a server.properties (labelled NOT run-scoped)',
     '  --environment <p>        read operator-recorded environment facts (difficulty/gamerules JSON, labelled NOT run-scoped)',
     '',
+    'Artifact sections (per runId):',
+    '  run                      boot identity: exact source SHA, runtime, contract/schema, world epoch/key, MC server version',
+    '  inventory                boot (initial) and latest (final) inventory + the milestone item subset',
+    '  environment              difficulty / mob spawning / gamerules and the ordered dimension sequence + transitions',
+    '  authority.jev            effective Jev pi provider/model and the line it came from',
+    '  authority.system2        effective System2 authority (configured stack first, last answerer kept beside it)',
+    '  authority.fallback       deterministicFallbackEnabled + in-window decision sources => hidden fallback absence',
+    '  milestonePredicates      every M2/M3 predicate with satisfied/observedAt/source/evidence',
+    '  milestoneAcceptance      milestone completeness derived from the delegated verdicts (never from acceptance-*.json)',
+    '  acceptance               the HOST-written acceptance-<runId>.json (writer + triggers recorded; absent stays absent)',
+    '  missingEvidence          the historical string list of gaps',
+    '  missingEvidenceDetail    the same gaps as {field, reason} and printed to stderr as MILESTONE_RUN_ARTIFACT_MISSING lines',
+    '',
     'Exit codes: 0 complete + both gates PASS; 1 a gate FAILs; 2 UNKNOWN/missing evidence/usage error.',
     '',
   ].join('\n')
@@ -1239,6 +1662,13 @@ export async function runCli({
     }
   } else {
     write(`${text}\n`)
+  }
+  // The single human-readable gap list: field + why it is missing. It goes to
+  // stderr so the stdout JSON contract (`--json` / default) stays machine-parseable.
+  const gaps = Array.isArray(artifact?.missingEvidenceDetail) ? artifact.missingEvidenceDetail : []
+  if (gaps.length > 0) {
+    writeError(`MILESTONE_RUN_ARTIFACT_MISSING runId=${artifact?.runId ?? 'none'} count=${gaps.length}\n`)
+    for (const gap of gaps) writeError(`  - ${gap.field}: ${gap.reason}\n`)
   }
   return { exitCode, artifact }
 }

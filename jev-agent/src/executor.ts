@@ -51,6 +51,7 @@ import {
   evaluatePillarStep,
   evaluateTunnelEntry,
   formatAscentProgress,
+  formatDescentChunk,
   formatLocalClear,
   formatPillarRefused,
   formatPillarRelocate,
@@ -5500,6 +5501,19 @@ export class Executor {
   }
 
   /**
+   * The lit-interior precondition, with observation separated from truth.
+   * `true` = every expected cell is observed and is `nether_portal`; `false` =
+   * every cell observed and at least one is not (a real refusal); `null` = at
+   * least one cell could not be observed, so no claim is possible. The transfer
+   * postcondition (the dimension change) stays the authority either way.
+   */
+  private portalInteriorLit(expectedCells: readonly Vec3Json[]): boolean | null {
+    const names = expectedCells.map((cell) => this.currentBlockAt(cell)?.name ?? null)
+    if (names.some((name) => name === null)) return null
+    return isIgnitePostconditionMet(names)
+  }
+
+  /**
    * Dimension transfer: walk INTO the lit `nether_portal` and require the bot's
    * own dimension to become the target (`minecraft:the_nether`) before claiming
    * success. Body motion is not completion: if the dimension does not change
@@ -5529,7 +5543,13 @@ export class Executor {
     }
 
     // Hard world truth at entry time: the interior must still be nether_portal.
-    if (!isIgnitePostconditionMet(expectedCells.map((cell) => this.currentBlockAt(cell)?.name ?? null))) {
+    // An UNOBSERVED interior cell (chunks unloaded while the body is far from a
+    // remembered gate) is not evidence that the portal is unlit, so the route is
+    // attempted and the lit fact is re-verified on arrival - a fabricated
+    // `portal=lit` refusal here would make "walk back to your remembered gate"
+    // impossible. A cell that WAS observed and is not nether_portal still refuses
+    // before any movement.
+    if (this.portalInteriorLit(expectedCells) === false) {
       throw new ExecutorError('place_error', `${PRECONDITION_MISSING} portal=lit`)
     }
     if (this.dimensionMatches(dimension)) {
@@ -5626,23 +5646,30 @@ export class Executor {
       // The goal stays open and the next decision re-plans from the new Y.
       const climbedTo = Math.floor(this.bot.entity.position.y)
       const startFloorY = Math.floor(startY)
-      this.logger.info('agent', formatAscentProgress(startFloorY, climbedTo, enterCell.y), {
-        actionId: candidate.id,
-        target: enterCell,
-        vertical: activeVertical,
-      })
+      const descending = enterCell.y < startFloorY
+      this.logger.info(
+        'agent',
+        descending
+          ? formatDescentChunk(startFloorY, climbedTo, enterCell.y)
+          : formatAscentProgress(startFloorY, climbedTo, enterCell.y),
+        {
+          actionId: candidate.id,
+          target: enterCell,
+          vertical: activeVertical,
+        },
+      )
       return this.buildResult(
         candidate,
         epoch,
         startedAt,
         'done',
-        'climbed',
-        `climbed from y=${startFloorY} to y=${climbedTo} toward the portal entry at (${enterCell.x},${enterCell.y},${enterCell.z}) (bounded chunk; next decision re-plans)`,
+        descending ? 'descended' : 'climbed',
+        `${descending ? 'descended' : 'climbed'} from y=${startFloorY} to y=${climbedTo} toward the portal entry at (${enterCell.x},${enterCell.y},${enterCell.z}) (bounded chunk; next decision re-plans)`,
         null,
         {
           verified: false,
           blockRemoved: activeVertical === 'staircase' || activeVertical === 'staircase-up',
-          dropObserved: false,
+          dropObserved: descending,
           itemsGained: 0,
           goalItemCount: this.countGoalItem(),
           progressed: true,
@@ -5664,6 +5691,13 @@ export class Executor {
       throw new ExecutorError('path_no_path', blocked)
     }
     if (!this.dimensionMatches(dimension)) {
+      // Arrival re-verification of the lit precondition: the route may have
+      // targeted a REMEMBERED site whose interior was unobservable from the
+      // offering position, so the world truth is read again here, where the
+      // chunks are loaded. Observed-and-unlit fails typed, once.
+      if (this.portalInteriorLit(expectedCells) === false) {
+        throw new ExecutorError('place_error', `${PRECONDITION_MISSING} portal=lit`)
+      }
       // Standing in the lit portal block is the transfer trigger; wait out the
       // server-side portal delay under a bounded deadline.
       this.setPhase(candidate, epoch, 'entering')
@@ -5702,8 +5736,16 @@ export class Executor {
     }
     try {
       const { activeVertical, verticalStep } = await this.runVerticalContract(candidate, epoch, signal, enterCell, startY)
-      const climbed = Math.floor(this.bot.entity.position.y) > Math.floor(startY)
-      if (verticalStep && climbed) return { progressed: true, error: null, activeVertical, obstruction: null }
+      // A vertical leg is progress when it durably moved the body toward the
+      // entry cell's Y - DOWN when the entry is below (a gate under a ledge or in
+      // a cave), UP when it is above. The ascent-only test made a real descent
+      // chunk look like a failed route, so the entry then reported
+      // `PORTAL_ENTRY_ROUTE_BLOCKED reason=no_route` on a body that had just
+      // descended one block toward a reachable gate.
+      const fromY = Math.floor(startY)
+      const nowY = Math.floor(this.bot.entity.position.y)
+      const movedTowardTargetY = enterCell.y < fromY ? nowY < fromY : nowY > fromY
+      if (verticalStep && movedTowardTargetY) return { progressed: true, error: null, activeVertical, obstruction: null }
       return {
         progressed: false,
         error: null,

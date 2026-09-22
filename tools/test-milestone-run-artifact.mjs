@@ -65,24 +65,35 @@ const PORTAL_CHAIN = [
   'PORTAL_VERIFIED=true',
 ]
 
-/** The runner.out-shaped authority window for one run. */
-function runnerOut(runId) {
-  return (
-    [
-      boot(0, runId),
+/**
+ * The runner.out-shaped authority window for one run.
+ *
+ * `stack` is the resident's `system2AuthorityStack` marker (the CONFIGURED
+ * authority stack), `decisions` are the `SYSTEM2_AUTHORITY_DECISION` lines (the
+ * providers that actually answered) and `released` closes the window so the
+ * policy loader can bracket it without a control socket.
+ */
+function runnerOut(
+  runId,
+  { stack = '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"}', decisions = ['SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'], released = true, ready = true, offsetSec = 0 } = {},
+) {
+  const lines = [boot(offsetSec, runId)]
+  if (ready) {
+    lines.push(
       line(
-        1,
+        offsetSec + 1,
         'GENERATION_READY id=gen-test-1 rungIndex=13 rungId=nether_portal ' +
           'goals=["verify the lit nether_portal block in the overworld","enter the lit nether_portal"] ' +
           'policy=typesafe policyProvider=typesafe-ai model=typesafe-ai/jev policyModel=typesafe-ai/jev ' +
-          'system2AuthorityStack={"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev"} ' +
+          (stack === null ? '' : `system2AuthorityStack=${stack} `) +
           'system2LastAuthority={"provider":"none","model":"none"} deterministicFallbackEnabled=false ' +
           'planner=llm plannerModel=typesafe-ai/jev',
       ),
-      line(2, 'SYSTEM2_AUTHORITY_DECISION provider=typesafe-ai model=typesafe-ai/jev chosen=front_nether_portal'),
-      line(3, `HOST_LOCK released runId=${runId}`),
-    ].join('\n') + '\n'
-  )
+    )
+  }
+  for (const [index, decision] of decisions.entries()) lines.push(line(offsetSec + 2 + index * 0.1, decision))
+  if (released) lines.push(line(offsetSec + 3 + decisions.length * 0.1, `HOST_LOCK released runId=${runId}`))
+  return lines.join('\n') + '\n'
 }
 
 const DECISIONS = `${JSON.stringify({ record: 'decision', ts: at(2), source: 'jev', action: 'GOTO:nether_portal' })}\n`
@@ -112,9 +123,9 @@ function makeRoot(name) {
   return root
 }
 
-function writeFixture(root, runId, { logLines, acceptance = true }) {
+function writeFixture(root, runId, { logLines, acceptance = true, runner = {} }) {
   writeFileSync(join(root, 'buddy-driver', 'buddy.log'), `${logLines.join('\n')}\n`, 'utf8')
-  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId), 'utf8')
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerOut(runId, runner), 'utf8')
   writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), DECISIONS, 'utf8')
   if (acceptance) {
     writeFileSync(join(root, 'buddy-driver', 'data', 'resident', `acceptance-${runId}.json`), ACCEPTANCE(runId), 'utf8')
@@ -571,6 +582,207 @@ ok('a run with 12 eyes but no Nether transition: nether_reached UNKNOWN, artifac
   assert.equal(other.json().verdicts.M2.operatorDecision, null)
 }
 ok('operator decisions are corroborated, annotated without rewriting the gate, and run-scoped')
+
+// ---------------------------------------------------------------------------
+// K. authority attestation: the CONFIGURED stack attests provider/model even
+//    when no SYSTEM2_AUTHORITY_DECISION line exists yet (the live defect: the
+//    marker was captured but never fed into authority.system2).
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-authority'
+  const root = makeRoot('authority')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: {
+      stack: '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev|muse-spark:meta/muse-spark-1.3-contributor"}',
+      decisions: [],
+    },
+  })
+  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const artifact = result.json()
+  assert.equal(artifact.authority.system2.provider, 'muse-spark')
+  assert.equal(artifact.authority.system2.model, 'meta/muse-spark-1.3-contributor')
+  assert.equal(artifact.authority.system2.attested, true)
+  assert.equal(artifact.authority.system2.attestation.kind, 'configured_authority_stack')
+  assert.equal(artifact.authority.system2.attestation.source, 'log:GENERATION_READY:system2AuthorityStack')
+  assert.equal(artifact.authority.system2.decisionCount, 0, 'this run has no decision line at all')
+  assert.deepEqual(artifact.authority.system2.stack.jev, { provider: 'typesafe-ai', model: 'typesafe-ai/jev' })
+  assert.equal(artifact.authority.system2.lastAuthority.provider, 'none', 'the last answerer is still "none"')
+  assert.equal(artifact.authority.jev.provider, 'typesafe-ai')
+  assert.equal(artifact.authority.jev.model, 'typesafe-ai/jev')
+  assert.equal(artifact.authority.jev.attested, true)
+  assert.ok(!artifact.missingEvidence.includes('authority.system2'))
+  assert.ok(!artifact.missingEvidence.includes('authority.jev'))
+  // The delegated gates still need their own decision evidence: a configured
+  // stack alone must never manufacture a PASS.
+  assert.notEqual(artifact.verdicts.M2.status, 'PASS')
+  assert.notEqual(artifact.status, 'PASS')
+}
+ok('a configured authority stack attests System2/Jev provider+model with no decision line')
+
+// ---------------------------------------------------------------------------
+// L. no authority marker at all: the gap stays, with its reason (no invention)
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-no-authority'
+  const root = makeRoot('no-authority')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: { stack: null, decisions: [] },
+  })
+  const artifact = cli(['--run', runId, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(artifact.authority.system2.provider, null)
+  assert.equal(artifact.authority.system2.model, null)
+  assert.equal(artifact.authority.system2.authorityStack, null)
+  assert.ok(artifact.missingEvidence.includes('authority.system2'))
+  const gap = artifact.missingEvidenceDetail.find((entry) => entry.field === 'authority.system2')
+  assert.ok(gap, 'the missing authority fact must carry a reason')
+  assert.match(gap.reason, /system2AuthorityStack/)
+  // The Jev halves are separate markers and stay attested.
+  assert.equal(artifact.authority.jev.provider, 'typesafe-ai')
+  assert.ok(!artifact.missingEvidence.includes('authority.jev'))
+  // missingEvidence and missingEvidenceDetail are one list, not two truths.
+  assert.equal(artifact.missingEvidenceDetail.length, artifact.missingEvidence.length)
+  assert.deepEqual(
+    artifact.missingEvidenceDetail.map((entry) => entry.field),
+    artifact.missingEvidence,
+  )
+}
+ok('a run with no authority marker keeps authority.system2 missing with a reason (no invention)')
+
+// ---------------------------------------------------------------------------
+// M. markers from a DIFFERENT runId in the same file are never attributed
+// ---------------------------------------------------------------------------
+{
+  const foreign = 'run-fixture-foreign-authority'
+  const target = 'run-fixture-target-no-authority'
+  const root = makeRoot('foreign-authority')
+  const runnerText =
+    runnerOut(foreign, {
+      stack: '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev|muse-spark:meta/muse-spark-1.3-contributor"}',
+      decisions: [],
+    }).trimEnd() +
+    '\n' +
+    runnerOut(target, { stack: null, decisions: [], offsetSec: 100 }).trimEnd() +
+    '\n'
+  writeFileSync(join(root, 'buddy-driver', 'runner.out'), runnerText, 'utf8')
+  writeFileSync(
+    join(root, 'buddy-driver', 'buddy.log'),
+    `${[boot(100, target), line(101, 'HEARTBEAT pos=0,64,0 running=true')].join('\n')}\n`,
+    'utf8',
+  )
+  writeFileSync(join(root, 'buddy-driver', 'logs', 'jev', 'decisions.jsonl'), '', 'utf8')
+
+  const targetArtifact = cli(['--run', target, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(targetArtifact.authority.system2.provider, null, 'the FOREIGN stack must not be attributed')
+  assert.equal(targetArtifact.authority.system2.authorityStack, null)
+  assert.ok(targetArtifact.missingEvidence.includes('authority.system2'))
+
+  // The foreign run's OWN window still attests its own stack.
+  const foreignArtifact = cli(['--run', foreign, '--root', root, '--json', '--no-control-socket']).json()
+  assert.equal(foreignArtifact.authority.system2.provider, 'muse-spark')
+}
+ok('authority markers from a different runId in the same file are never used for this run')
+
+// ---------------------------------------------------------------------------
+// N. acceptance present + milestone incomplete -> INCOMPLETE, never PASS
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-incomplete-acceptance'
+  const root = makeRoot('incomplete-acceptance')
+  writeFixture(root, runId, { logLines: fullLog(runId, { terminalEye: 0 }) })
+  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  const artifact = result.json()
+  assert.equal(artifact.acceptance.present, true)
+  assert.equal(artifact.acceptance.record.runId, runId)
+  assert.equal(artifact.acceptance.writer.symbol, 'writeAcceptance()')
+  assert.match(artifact.acceptance.writer.pathPattern, /acceptance-<runId>\.json/)
+  assert.equal(artifact.milestoneAcceptance.status, 'INCOMPLETE')
+  assert.deepEqual(artifact.milestoneAcceptance.incompleteMilestones, ['M3'])
+  assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unmetConditions, ['ender_eye_ready'])
+  assert.notEqual(artifact.status, 'PASS')
+  assert.notEqual(result.code, 0)
+
+  // The same run with no record: still INCOMPLETE, and the gap names the writer.
+  const bareRoot = makeRoot('incomplete-acceptance-missing')
+  writeFixture(bareRoot, runId, { logLines: fullLog(runId, { terminalEye: 0 }), acceptance: false })
+  const bare = cli(['--run', runId, '--root', bareRoot, '--json', '--no-control-socket']).json()
+  assert.equal(bare.acceptance.present, false)
+  assert.equal(bare.milestoneAcceptance.status, 'INCOMPLETE')
+  assert.deepEqual(bare.milestoneAcceptance.milestones.M3.unmetConditions, ['ender_eye_ready'])
+  const gap = bare.missingEvidenceDetail.find((entry) => entry.field === 'acceptance')
+  assert.ok(gap, 'an absent acceptance record must stay a reasoned gap')
+  assert.match(gap.reason, /writeAcceptance\(\)/)
+  assert.match(gap.reason, /generation-reload-commit/)
+}
+ok('an acceptance record never turns an incomplete milestone into PASS; its absence keeps a reasoned gap')
+
+// ---------------------------------------------------------------------------
+// O. a synthetic COMPLETE run answers the whole operator field list
+// ---------------------------------------------------------------------------
+{
+  const runId = 'run-fixture-complete'
+  const root = makeRoot('complete')
+  writeFixture(root, runId, {
+    logLines: fullLog(runId, { terminalEye: 12 }),
+    runner: {
+      stack: '{"provider":"hybrid","model":"typesafe-ai:typesafe-ai/jev|muse-spark:meta/muse-spark-1.3-contributor"}',
+      decisions: ['SYSTEM2_AUTHORITY_DECISION provider=muse-spark model=meta/muse-spark-1.3-contributor chosen=front_nether_portal'],
+    },
+  })
+  const result = cli(['--run', runId, '--root', root, '--json', '--no-control-socket'])
+  assert.equal(result.code, 0, `complete fixture exit=${result.code} stderr=${result.stderr}`)
+  assert.equal(result.stderr, '', 'a complete artifact prints no missing-evidence summary')
+  const artifact = result.json()
+  assert.deepEqual(artifact.missingEvidence, [])
+  assert.deepEqual(artifact.missingEvidenceDetail, [])
+  assert.equal(artifact.status, 'PASS')
+  // exact source SHA
+  assert.equal(artifact.run.boot.sourceSha, SOURCE_SHA)
+  // MC version / difficulty / environment
+  assert.equal(artifact.run.serverVersion, '1.21.11')
+  assert.equal(artifact.environment.difficulty.value, 'normal')
+  assert.equal(artifact.environment.mobSpawning.value, true)
+  assert.equal(artifact.environment.gamerules.value.advanceTime, false)
+  // initial + final inventory
+  assert.equal(artifact.inventory.boot.counts.ender_eye, 0)
+  assert.equal(artifact.inventory.latest.counts.ender_eye, 12)
+  // dimension transitions
+  assert.deepEqual(
+    artifact.environment.dimensions.sequence.map((entry) => entry.dimension),
+    ['minecraft:overworld', 'minecraft:the_nether'],
+  )
+  assert.deepEqual(
+    artifact.environment.dimensions.transitions.map((entry) => `${entry.from}->${entry.to}`),
+    ['minecraft:overworld->minecraft:the_nether'],
+  )
+  // milestone predicate evidence
+  assert.equal(artifact.milestonePredicates.predicates.length, 7)
+  assert.ok(artifact.milestonePredicates.predicates.every((predicate) => predicate.satisfied === true))
+  // effective System2 + Jev authority, with no disagreement between the stack,
+  // the Jev policy fields and the last answerer.
+  assert.deepEqual(
+    [artifact.authority.system2.provider, artifact.authority.system2.model],
+    ['muse-spark', 'meta/muse-spark-1.3-contributor'],
+  )
+  assert.deepEqual(
+    [artifact.authority.jev.provider, artifact.authority.jev.model],
+    ['typesafe-ai', 'typesafe-ai/jev'],
+  )
+  assert.deepEqual(artifact.authority.system2.disagreements, [])
+  // no hidden deterministic fallback
+  assert.equal(artifact.authority.fallback.hiddenDeterministicFallback, 'none_observed')
+  assert.equal(artifact.authority.fallback.deterministicFallbackEnabled, false)
+  assert.equal(artifact.authority.fallback.fallbackCount, 0)
+  assert.equal(artifact.authority.fallback.otherCount, 0)
+  // acceptance record present and the milestone genuinely complete
+  assert.equal(artifact.acceptance.present, true)
+  assert.equal(artifact.milestoneAcceptance.status, 'COMPLETE')
+  assert.deepEqual(artifact.milestoneAcceptance.incompleteMilestones, [])
+  assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unmetConditions, [])
+  assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unknownConditions, [])
+}
+ok('a synthetic complete run answers source SHA, env, inventory, transitions, predicates, authority and fallback absence')
 
 // ---------------------------------------------------------------------------
 // cleanup
