@@ -94,6 +94,14 @@ export interface JevRequest {
   candidates: readonly Candidate[]
   /** CORE + trigger-specific set to send; defaults to the full set. */
   questionNames?: readonly QuestionName[]
+  /**
+   * Issue #437: the versioned, bounded semantic projection Jev consumes instead
+   * of the primitive trace, plus its hash. Optional so every legacy/offline
+   * caller and fixture keeps working unchanged; when present the authority
+   * kernel ships it as the model's semantic state.
+   */
+  semanticProjection?: unknown | null
+  projectionHash?: string | null
 }
 
 export interface JevPolicy {

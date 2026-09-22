@@ -25,7 +25,7 @@ import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
@@ -65,6 +65,43 @@ import { createRecipeIndex } from './crafting.ts'
 import type { RecipeIndex } from './crafting.ts'
 import { attachResult, makeDecisionRecord, stableStateHash } from './decisionlog.ts'
 import type { DecisionJevLog, DecisionLlmLog, DecisionLlmResummonLog, DecisionRecord, DecisionSubgoalLog } from './decisionlog.ts'
+// Issue #437: the Skill <-> Jev semantic boundary (projection, decision epochs,
+// stable candidate identity, typed SkillOutcomePacket). Raw mechanical telemetry
+// stays on the log plane; only these objects cross into policy.
+import {
+  buildJevSemanticProjection,
+  buildSkillOutcomePacket,
+  classifySemanticBoundary,
+  classifyProjectionChange,
+  commitmentRefFor,
+  dedupeSemanticCandidates,
+  diffSemanticProjections,
+  formatEpochEnd,
+  formatEpochStart,
+  formatJevCandidateSet,
+  formatJevStateProjection,
+  formatSkillOutcomePacket,
+  formatStaleResultDropped,
+  JevDecisionEpochs,
+  mandatoryPolicyBoundary,
+  semanticTargetRef,
+  foodBand,
+  threatBand,
+  airBand,
+  healthBand,
+  projectionHash as semanticProjectionHash,
+} from './jevSemanticProjection.ts'
+import type {
+  DecisionEpoch,
+  GroundedFact,
+  JevSemanticProjection,
+  PreviousDecisionFacts,
+  SemanticCandidateView,
+  SemanticDelta,
+  SemanticProgressFacts,
+  SkillOutcomePacket,
+  SkillTerminalReason,
+} from './jevSemanticProjection.ts'
 import { ActionCancelled, defaultExecutorOptions, Executor, interactionStandCandidates, MELEE_ATTACK_RANGE } from './executor.ts'
 import type { ActuationMode, ExecutionResult, ExecutorOptions, FailureCode } from './executor.ts'
 import type { ActuationPort } from './actuationPort.ts'
@@ -1123,6 +1160,18 @@ interface AbandonVerdict {
 }
 
 export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
+  // Issue #437: the two evidence planes must both be live-visible. Without these
+  // in the mirrored list the live sink DROPS them, and a reviewer cannot
+  // reconstruct what Jev knew (`JEV_STATE_PROJECTION`/`JEV_CANDIDATE_SET`), why
+  // it was asked again (`JEV_DECISION_EPOCH_*`), what semantics came back
+  // (`SKILL_OUTCOME_PACKET`), or that a late model result was rejected
+  // (`STALE_JEV_RESULT_DROPPED`).
+  'JEV_DECISION_EPOCH_START',
+  'JEV_STATE_PROJECTION',
+  'JEV_CANDIDATE_SET',
+  'JEV_DECISION_EPOCH_END',
+  'SKILL_OUTCOME_PACKET',
+  'STALE_JEV_RESULT_DROPPED',
   'JEV_HEADS',
   'BETA_SHADOW',
   'CAUSAL',
@@ -1745,6 +1794,31 @@ export class JevController {
   private policyEpoch = 0
   private issuedPolicyEpoch = 0
   private issuedCandidateHash = ''
+  /**
+   * Issue #437 §3: causal isolation for policy. Only the ACTIVE epoch may
+   * authorize a commitment; a late async model result from an older epoch is
+   * dropped (`STALE_JEV_RESULT_DROPPED`). Analogous to generation/lease
+   * isolation for actuation.
+   */
+  private readonly decisionEpochs = new JevDecisionEpochs()
+  /** Issue #437 §5/§9: the exact semantic projection Jev last saw. */
+  private lastSemanticProjection: JevSemanticProjection | null = null
+  private lastProjectionHash = ''
+  /** Issue #437 §2/§7: bounded previous semantic outcomes (never raw telemetry). */
+  private recentSkillOutcomes: SkillOutcomePacket[] = []
+  private lastSkillOutcome: SkillOutcomePacket | null = null
+  /** Issue #437 §6: the last packet ended at a policy boundary, so pi re-enters. */
+  private skillOutcomeBoundary = false
+  /** Issue #437 §3: a late/unauthorized model result was dropped this tick. */
+  private staleDecisionDropped = false
+  /**
+   * Issue #437 §3: which decision epoch authorized each executor action lease,
+   * so a settled action's packet names the epoch/commitment it closes.
+   */
+  private readonly actionEpochByLease = new Map<number, { epoch: number; commitmentId: string; identity: string }>()
+  /** Issue #437 §5/§9 evidence: raw mechanical observations compressed since the
+   *  last semantic outcome. Never model input; only the packet's count. */
+  private compressedSkillSteps = 0
   private criticalStateVersion = 0
 
   private planCalls = 0
@@ -2614,6 +2688,10 @@ export class JevController {
     this.tickLlmCalls = 0
     try {
       this.tickCounter += 1
+      // Issue #437 §5 evidence: an action still in flight means this tick consumed
+      // mechanical steps with no policy event. Counted only for the packet's
+      // `compressedSteps`; never model input.
+      if (this.executor.current !== null) this.compressedSkillSteps += 1
       this.triggerCounts[trigger] = (this.triggerCounts[trigger] ?? 0) + 1
       if (CRITICAL_TRIGGERS.has(trigger)) this.criticalStateVersion += 1
       this.signals.maxConcurrentActions = this.executor.maxConcurrentActions
@@ -3052,6 +3130,13 @@ export class JevController {
       const causalStamp = makeCausalStamp({ chainId: makeChainId(), goal: planGoal })
 
       const decision = await this.decide(state, candidates, trigger, causalStamp.chainId)
+      // §3: a model result whose decision epoch was invalidated while the call was
+      // in flight cannot authorize anything. The drop is already logged
+      // (`STALE_JEV_RESULT_DROPPED`); no commitment may be claimed from it.
+      if (this.staleDecisionDropped) {
+        this.staleDecisionDropped = false
+        return
+      }
       const semantic = this.semanticEscalation(decision)
       const needLlmAdopted = semantic.escalate
       if (needLlmAdopted) {
@@ -3073,10 +3158,16 @@ export class JevController {
       if (this.wedgeAborted) return
 
       if (this.criticalArrivedDuringFlight(trigger)) {
+        // §3: this is the live "late async model result" case in this
+        // architecture - a critical trigger arrived while pi was deciding, so the
+        // decision's epoch is invalidated and the result must not authorize.
+        const dropped = this.decisionEpochs.invalidate('superseded')
         this.logger.warn(
           'policy',
-          `discarding stale decision ${decision.callId}: an incompatible critical trigger arrived during the Jev flight`,
-          {},
+          dropped === null
+            ? `discarding stale decision ${decision.callId}: an incompatible critical trigger arrived during the Jev flight`
+            : formatStaleResultDropped(dropped.epoch, null, 'critical_trigger_during_flight'),
+          { callId: decision.callId, trigger },
           this.tickCounter,
         )
         return
@@ -3263,6 +3354,19 @@ export class JevController {
         return
       }
       this.pendingDecisions.set(claim.epoch, { record, healthAtDecision: this.bot.health })
+      // §3: bind the action lease to the decision epoch that authorized it, so
+      // the outcome packet names the epoch/commitment it closes instead of
+      // guessing after the fact. A lease claimed when no epoch is active (bootstrap
+      // / pre-#437 path) simply carries no binding.
+      const authorizing = this.decisionEpochs.active
+      if (authorizing !== null) {
+        const identity =
+          this.lastSemanticProjection?.candidates.find((view) => view.id === guarded.candidate.id)?.identity ??
+          guarded.candidate.id
+        const commitmentId = commitmentRefFor({ candidateId: guarded.candidate.id, epoch: claim.epoch })
+        this.decisionEpochs.authorize({ epoch: authorizing.epoch, commitmentId, selectedIdentity: identity })
+        this.actionEpochByLease.set(claim.epoch, { epoch: authorizing.epoch, commitmentId, identity })
+      }
       void claim.completion
         .then((result) => {
           this.onActionComplete(result, decision, guarded.candidate)
@@ -4149,28 +4253,100 @@ export class JevController {
     this.lastAbandonAdopted = false
     const now = Date.now()
     const stateHash = stableStateHash(state)
-    if (
-      this.lastDecision !== null &&
-      now - this.lastJevAt < this.options.minJevIntervalMs &&
-      stateHash === this.lastDecisionStateHash
-    ) {
-      this.logger.info(
-        'policy',
-        `rate limited (${now - this.lastJevAt}ms < ${this.options.minJevIntervalMs}ms, same state), reusing decision ${this.lastDecisionId}`,
-        { trigger },
-        this.tickCounter,
-      )
+    const identityContext = {
+      optionInstanceId: optionIdForGoal(state.goalQueue.current) ?? state.currentOption?.instanceId ?? null,
+      dimension: state.self.dimension,
+      worldEpoch: this.options.worldEpoch,
+    }
+    // §4/§8: the semantic offer - stable identities, mechanically-equivalent
+    // realizations collapsed. The controller keeps the FULL grounded set for
+    // guard/commitment/execution; only the model's choice set is deduped, and
+    // every representative id below is a real member of that full set.
+    const dedupe = dedupeSemanticCandidates(candidates, identityContext, (candidateId) =>
+      failureCount(state.signals.failedCandidates, candidateId),
+    )
+    const projection = this.buildSemanticProjection(state, candidates, dedupe.merged)
+    // The projection's own candidate views are the single source of truth for the
+    // hash, the log and the offer: one identity function, no drift.
+    const views = projection.candidates
+    const hash = semanticProjectionHash(projection)
+    const candidateIdentities = views.map((view) => view.identity)
+
+    // §3: a world/epoch change invalidates the ACTIVE epoch, so a result
+    // attributed to it can no longer authorize a commitment.
+    if (!this.decisionEpochs.matchesWorld({ dimension: state.self.dimension, worldEpoch: this.options.worldEpoch })) {
+      const invalidated = this.decisionEpochs.invalidate('world_changed')
+      if (invalidated !== null) {
+        this.logger.warn(
+          'policy',
+          formatStaleResultDropped(invalidated.epoch, null, 'world_or_epoch_changed'),
+          { projectionHash: invalidated.projectionHash, dimension: state.self.dimension },
+          this.tickCounter,
+        )
+      }
+    }
+
+    // §6/§9: re-query only at a semantic boundary. A settled mechanical step with
+    // an unchanged semantic projection is NOT a policy event, so the previous
+    // decision is replayed inside a NEW epoch: causal isolation is preserved (the
+    // replay is attributed to the current epoch, never to the stale one), and no
+    // model call is spent on an identical semantic state.
+    const boundary = classifySemanticBoundary({
+      active: this.decisionEpochs.active,
+      projectionHash: hash,
+      candidateIdentities,
+      worldKey: { dimension: state.self.dimension, worldEpoch: this.options.worldEpoch, leaseHeld: true },
+      optionKey: projection.option.instanceId,
+      safetyKey: JSON.stringify(projection.safety),
+      goalKey: projection.goal.key,
+      lastOutcomeRequiredDecision: this.skillOutcomeBoundary,
+    })
+    if (!boundary.requery && this.lastDecision !== null) {
+      const previousActive = this.decisionEpochs.active
+      const reusedFrom = previousActive?.epoch ?? null
+      const epoch = this.decisionEpochs.begin({
+        projectionHash: hash,
+        candidateIdentities,
+        dimension: state.self.dimension,
+        worldEpoch: this.options.worldEpoch,
+        nowMs: now,
+        cacheHit: true,
+        reusedFrom,
+      })
+      this.logEpochSuperseded(previousActive)
+      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger)
+      this.lastSemanticProjection = projection
+      this.lastProjectionHash = hash
+      this.skillOutcomeBoundary = false
       return this.lastDecision
     }
 
     try {
       this.policyEpoch += 1
       this.issuedPolicyEpoch = this.policyEpoch
-      this.issuedCandidateHash = candidates.map((candidate) => candidate.id).join('|')
+      this.issuedCandidateHash = candidateIdentities.join('|')
+      const previousActive = this.decisionEpochs.active
+      const epoch = this.decisionEpochs.begin({
+        projectionHash: hash,
+        candidateIdentities,
+        dimension: state.self.dimension,
+        worldEpoch: this.options.worldEpoch,
+        nowMs: now,
+      })
+      this.logEpochSuperseded(previousActive)
+      this.logBoundary(epoch, boundary.reason, projection, hash, views, trigger)
+      this.lastSemanticProjection = projection
+      this.lastProjectionHash = hash
+      this.skillOutcomeBoundary = false
       const result = await this.jev.decide({
         stage: `policy-tick-${this.tickCounter}-${trigger}`,
         state,
-        candidates,
+        // §8: Jev sees one representative per semantic identity. The controller's
+        // own `candidates` stays complete, so guard/commitment resolution and the
+        // executor are unchanged.
+        candidates: dedupe.offered,
+        semanticProjection: projection,
+        projectionHash: hash,
         questionNames: questionNamesFor(questionSetForTrigger(trigger)),
       })
       this.jevCalls += 1
@@ -4180,7 +4356,22 @@ export class JevController {
       this.lastDecisionId = decisionIdFrom(result)
       this.signals.lastPolicyConfidence = result.answers.action?.confidence ?? null
 
-      const chosen = candidates.find((candidate) => candidate.id === this.lastDecisionId)
+      // §3: only the ACTIVE epoch may authorize. A result whose epoch was
+      // invalidated while the model call was in flight is DROPPED here, before
+      // any commitment is claimed.
+      const acceptance = this.decisionEpochs.accept(epoch.epoch)
+      if (!acceptance.accepted) {
+        this.staleDecisionDropped = true
+        this.logger.warn(
+          'policy',
+          formatStaleResultDropped(epoch.epoch, this.decisionEpochs.active?.epoch ?? null, acceptance.reason),
+          { trigger, callId: result.callId, chosen: this.lastDecisionId },
+          this.tickCounter,
+        )
+        return result
+      }
+
+      const chosen = dedupe.offered.find((candidate) => candidate.id === this.lastDecisionId)
       this.logger.info(
         'policy',
         `trigger=${trigger} -> action=${this.lastDecisionId ?? 'none'} kind=${chosen?.kind ?? 'unknown'} | ${chosen?.label ?? 'no matching candidate'}`,
@@ -4191,6 +4382,8 @@ export class JevController {
           model: result.model,
           callId: result.callId,
           chainId,
+          projectionHash: hash,
+          decisionEpoch: epoch.epoch,
           latencyMs: result.latencyMs,
           inputTokens: result.usage?.inputTokens ?? null,
           actionConfidence: result.answers.action?.confidence ?? null,
@@ -4221,6 +4414,304 @@ export class JevController {
       const fatal = error instanceof FatalModelError ? error : new FatalModelError('jev-policy', 1, describeFailure(error))
       return failLoud(fatal, (event, detail) => this.logger.error('policy', event, { trigger, ...(detail ?? {}) }, this.tickCounter), this.options.terminateOnModelFailure)
     }
+  }
+
+  /**
+   * §12: emit the three Jev-plane records for one decision - the epoch that owns
+   * it, the projection hash/version Jev saw, and the stable candidate identities
+   * offered. One line each, so the boundary is reconstructible from the log.
+   */
+  private logBoundary(
+    epoch: ReturnType<JevDecisionEpochs['begin']>,
+    reason: string,
+    projection: JevSemanticProjection,
+    hash: string,
+    views: readonly SemanticCandidateView[],
+    trigger: DecisionTrigger,
+  ): void {
+    const change =
+      reason === 'semantic_state_changed' && this.lastSemanticProjection !== null
+        ? classifyProjectionChange(this.lastSemanticProjection, projection)
+        : null
+    this.logger.info(
+      'policy',
+      formatEpochStart(epoch, reason),
+      { trigger, projectionHash: hash, ...(change ?? {}) },
+      this.tickCounter,
+    )
+    this.logger.info('policy', formatJevStateProjection(projection, hash), { trigger }, this.tickCounter)
+    this.logger.info('policy', formatJevCandidateSet(views), { trigger, offered: views.length }, this.tickCounter)
+  }
+
+  /**
+   * §12: exactly one `JEV_DECISION_EPOCH_END` per epoch. An epoch that is
+   * superseded by the next decision (rather than closed by an outcome packet)
+   * still gets its end record, so `START`/`END` balance in the run log.
+   */
+  private logEpochSuperseded(previous: DecisionEpoch | null): void {
+    if (previous === null || !previous.closed) return
+    this.logger.info('policy', formatEpochEnd(previous), {}, this.tickCounter)
+  }
+
+  /**
+   * §7: the previous selection and how it ended, carried causally into the next
+   * projection. `identity` comes from the projection Jev last saw, so the
+   * semantic identity survives even when the mechanical realization id changed.
+   */
+  private previousDecisionFacts(): PreviousDecisionFacts | null {
+    const outcome = this.lastSkillOutcome
+    if (this.lastDecisionId === null && outcome === null) return null
+    const view =
+      this.lastDecisionId === null
+        ? undefined
+        : this.lastSemanticProjection?.candidates.find((candidate) => candidate.id === this.lastDecisionId)
+    return {
+      selectedCandidateId: this.lastDecisionId,
+      selectedIdentity: view?.identity ?? null,
+      skillKind: view?.kind ?? this.lastSkillOutcome?.skillKind ?? null,
+      targetKey: outcome === null ? null : `${outcome.targetIdentity.kind}:${outcome.targetIdentity.key}`,
+      commitmentId: outcome?.commitmentId ?? null,
+      terminalReason: outcome?.terminalReason ?? null,
+      failureCode: outcome?.failure?.code ?? null,
+      progressKind: outcome?.semanticProgress.kind ?? null,
+    }
+  }
+
+  /**
+   * §5: grounded world facts relevant to the current Option, keyed by semantic
+   * identity so a resource's cell never becomes a churn fact.
+   */
+  private semanticFacts(state: WorldState): GroundedFact[] {
+    const facts: GroundedFact[] = []
+    const resources = new Set<string>()
+    for (const resource of state.signals.knownResources ?? []) {
+      if (facts.length >= 8) break
+      if (resources.has(resource.name)) continue
+      resources.add(resource.name)
+      facts.push({ kind: 'resource', key: resource.name, detail: `${resource.name} is known to the world memory` })
+    }
+    const portalSites = state.portalFrameSites?.length ?? 0
+    if (portalSites > 0 || state.portalFrame != null) {
+      facts.push({
+        kind: 'structure',
+        key: 'portal_frame',
+        detail: state.portalFrame == null ? `${portalSites} portal site(s) grounded` : 'complete portal frame validated',
+      })
+    }
+    if (this.activeRetrieval !== null) {
+      facts.push({
+        kind: 'target',
+        key: `retrieval:${this.activeRetrieval.resource}`,
+        detail: `the active retrieval target is ${this.activeRetrieval.resource}`,
+      })
+    }
+    if (this.capabilityGapActive) {
+      facts.push({
+        kind: 'capability',
+        key: this.capabilityGapSignature ?? 'capability_gap',
+        detail: 'a capability gap is currently grounded',
+      })
+    }
+    if (this.starvationContext !== null) {
+      facts.push({
+        kind: 'blocked',
+        key: this.starvationContext.blockedBy,
+        detail: `local candidates are blocked by ${this.starvationContext.blockedBy}`,
+      })
+    }
+    const queue = state.goalQueue
+    if (queue.current !== null) {
+      facts.push({
+        kind: 'goal',
+        key: `${queue.current.id}:${queue.current.requiredCount ?? 0}`,
+        detail: `queue head is ${queue.current.description}`,
+      })
+    }
+    return facts
+  }
+
+  /**
+   * §5/§7/§9: build the bounded semantic projection Jev sees. Meaningful deltas
+   * only (no tick, no raw body position, no path nodes, no swing counts), with
+   * the previous selection + its terminal outcome carried causally.
+   */
+  private buildSemanticProjection(
+    state: WorldState,
+    candidates: readonly Candidate[],
+    mergedCandidates: number,
+  ): JevSemanticProjection {
+    const option = state.currentOption ?? null
+    const optionId = optionIdForGoal(state.goalQueue.current) ?? option?.instanceId ?? null
+    const threat = this.signals.threat ?? null
+    const critical = this.signals.criticalDamage ?? null
+    const lastDamage = this.signals.lastDamage ?? null
+    const stall = this.signals.strategicNonProgress ?? null
+    const progress: SemanticProgressFacts = {
+      consecutiveFailures: this.signals.consecutiveFailures,
+      lastFailureCode: this.signals.lastFailureCode ?? null,
+      escalationRecommended: this.signals.escalationRecommended === true,
+      oscillationsDetected: this.signals.oscillationsDetected ?? 0,
+      stallExhausted: stall === null ? null : stall.exhausted === true,
+      stallDistinctStates: stall === null ? null : stall.distinctStates ?? null,
+    }
+    const base = buildJevSemanticProjection({
+      goal: {
+        key: this.currentGoalKey(),
+        targetItem: this.goal.targetItem ?? null,
+        have: this.goal.haveCount,
+        required: this.goal.requiredCount,
+        complete: this.goal.complete === true,
+        progress: this.goal.progress,
+      },
+      option: {
+        instanceId: optionId,
+        templateId: option?.templateId ?? null,
+        skillKind: option?.kind ?? null,
+        targetKey: option === null ? null : JSON.stringify(option.target),
+      },
+      world: {
+        dimension: state.self.dimension,
+        worldEpoch: this.options.worldEpoch,
+        generationId: null,
+        leaseHeld: true,
+        alive: state.self.health > 0,
+      },
+      safety: {
+        healthBand: healthBand(state.self.health),
+        foodBand: foodBand(state.self.food),
+        airBand: airBand(state.self.air ?? null),
+        submerged:
+          state.self.feetInWater === undefined && state.self.eyesInWater === undefined
+            ? null
+            : state.self.feetInWater === true || state.self.eyesInWater === true,
+        threatKey:
+          threat === null
+            ? null
+            : `${threat.threatName ?? 'unknown'}:${threatBand(threat.threatDistance ?? null)}:${threat.inContact === true}`,
+        criticalDamageKey: critical === null ? null : `${critical.planKey}:${critical.consecutiveDamage}:${critical.sourceName ?? 'unattributed'}`,
+        lastDamageKey: lastDamage === null ? null : `${lastDamage.sourceId ?? 'unknown'}`,
+      },
+      progress,
+      sense: {
+        blockNames: state.blocks.map((block) => block.name),
+        threats: state.entities
+          .filter((entity) => entity.hostile === true)
+          .map((entity) => `${entity.name ?? 'unknown'}:${threatBand(entity.distance)}`),
+      },
+      inventory: state.inventory.counts,
+      events: state.recentEvents,
+      candidates,
+      identityContext: {
+        optionInstanceId: optionId,
+        dimension: state.self.dimension,
+        worldEpoch: this.options.worldEpoch,
+      },
+      failureCount: (candidateId) => failureCount(state.signals.failedCandidates, candidateId),
+      previous: this.previousDecisionFacts(),
+      recentOutcomes: this.recentSkillOutcomes,
+      facts: this.semanticFacts(state),
+      rawTelemetry: { skillSteps: this.compressedSkillSteps, events: state.recentEvents.length },
+    })
+    const delta = diffSemanticProjections(this.lastSemanticProjection, base).delta
+    return {
+      ...base,
+      meaningfulDelta: delta,
+      counts: { ...base.counts, candidatesMerged: mergedCandidates },
+    }
+  }
+
+  /**
+   * §2/§12: compress a settled Skill into ONE typed SkillOutcomePacket, store it
+   * as the bounded previous-outcome context, and close the decision epoch it
+   * belongs to. Pure evidence: it never chooses anything.
+   */
+  private emitSkillOutcomePacket(input: {
+    actionId: string
+    kind: CandidateKind
+    /** the executor action lease epoch, or null when no lease was ever claimed */
+    leaseEpoch: number | null
+    status: string
+    failure: string | null
+    verified: boolean
+    progressed: boolean
+    itemsGained: number
+    blockRemoved: boolean
+    entityDefeated: boolean
+    targetName: string | null
+    candidate: Candidate | null
+    verification: string
+  }): SkillOutcomePacket {
+    const binding = input.leaseEpoch === null ? null : this.actionEpochByLease.get(input.leaseEpoch) ?? null
+    if (input.leaseEpoch !== null) this.actionEpochByLease.delete(input.leaseEpoch)
+    const option = this.currentOptionContext()
+    const target =
+      input.candidate === null
+        ? { kind: 'none' as const, key: input.targetName ?? 'unknown', label: input.actionId }
+        : semanticTargetRef(input.candidate)
+    const deltas: SemanticDelta[] = []
+    if (input.blockRemoved) {
+      deltas.push({ fact: 'block.removed', from: null, to: input.targetName ?? input.actionId })
+    }
+    if (input.itemsGained > 0) deltas.push({ fact: 'inventory.gained', from: 0, to: input.itemsGained })
+    if (input.entityDefeated) {
+      deltas.push({ fact: 'target.entity', from: `e${input.candidate?.targetEntityId ?? -1}`, to: 'dead' })
+    }
+    const facts: GroundedFact[] = []
+    if (input.failure === 'target_gone') {
+      facts.push({
+        kind: 'target',
+        key: target.key,
+        detail: 'the selected target is no longer present (TARGET_LOST, not killed)',
+      })
+    }
+    const packet = buildSkillOutcomePacket({
+      decisionEpoch: binding?.epoch ?? this.decisionEpochs.active?.epoch ?? 0,
+      commitmentId:
+        binding?.commitmentId ??
+        (input.leaseEpoch === null
+          ? `g:${input.actionId}`
+          : commitmentRefFor({ candidateId: input.actionId, epoch: input.leaseEpoch })),
+      optionInstanceId: option?.instanceId ?? null,
+      selectedCandidateId: input.actionId,
+      skillKind: input.kind,
+      targetIdentity: target,
+      status: input.status,
+      failure: input.failure,
+      verified: input.verified,
+      postcondition: input.verification,
+      verificationDetail: input.verification,
+      progressDelta: input.verified ? Math.max(0, input.itemsGained + (input.blockRemoved ? 1 : 0)) : 0,
+      progressed: input.progressed,
+      meaningfulWorldDelta: deltas,
+      newFacts: facts,
+      optionComplete: this.goal.complete === true,
+      compressedSteps: this.compressedSkillSteps,
+    })
+    this.recentSkillOutcomes.push(packet)
+    if (this.recentSkillOutcomes.length > 3) this.recentSkillOutcomes.shift()
+    this.lastSkillOutcome = packet
+    // §6: target/capability/safety/world/lease outcomes destroy the premise of the
+    // previous decision, so policy must be re-asked. A repeated mechanical blocker
+    // is carried by the projection instead (no per-retry Jev call).
+    this.skillOutcomeBoundary = mandatoryPolicyBoundary(packet.terminalReason)
+    this.compressedSkillSteps = 0
+    this.logger.info(
+      'agent',
+      formatSkillOutcomePacket(packet),
+      {
+        actionId: input.actionId,
+        terminalReason: packet.terminalReason,
+        progress: packet.semanticProgress.kind,
+        delta: packet.meaningfulWorldDelta.length,
+        nextDecisionRequired: packet.nextDecisionRequired,
+      },
+      this.tickCounter,
+    )
+    const closed = this.decisionEpochs.close({ epoch: packet.decisionEpoch, reason: packet.terminalReason })
+    if (closed !== null) {
+      this.logger.info('policy', formatEpochEnd(closed), { actionId: input.actionId }, this.tickCounter)
+    }
+    return packet
   }
 
   private onGuardReject(
@@ -4284,6 +4775,23 @@ export class JevController {
     if (candidate !== undefined) this.logSmeltStationRetry(candidate)
     this.chargeGuardRejection(record, guarded.code)
     this.recordFailure(guarded.code, guarded.reason)
+    // §2: a deterministic guard refusal is a settled typed outcome of THIS
+    // selection, so it crosses the boundary as a packet (never as a silent drop).
+    this.emitSkillOutcomePacket({
+      actionId: guarded.candidateId,
+      kind: candidate?.kind ?? 'WAIT',
+      leaseEpoch: null,
+      status: 'guard-rejected',
+      failure: guarded.code,
+      verified: false,
+      progressed: false,
+      itemsGained: 0,
+      blockRemoved: false,
+      entityDefeated: false,
+      targetName: candidate?.targetName ?? null,
+      candidate: candidate ?? null,
+      verification: 'rejected_before_execution',
+    })
   }
 
   /**
@@ -4415,6 +4923,25 @@ export class JevController {
       failureCode: result.failure,
       goalProgress: result.goalItemCount,
       note: `${result.status}/${result.phase}: ${result.detail}`,
+    })
+
+    // §2: the ONE semantic result that crosses back into policy. The raw trace
+    // (every swing/path node/hotbar step) stays in the run log; this packet is
+    // what the next decision consumes as the previous outcome.
+    this.emitSkillOutcomePacket({
+      actionId: result.actionId,
+      kind: result.kind,
+      leaseEpoch: result.epoch,
+      status: result.status,
+      failure: result.failure,
+      verified: truth.verified,
+      progressed: result.progressed === true,
+      itemsGained: result.itemsGained,
+      blockRemoved: result.blockRemoved,
+      entityDefeated: result.entityDefeated === true,
+      targetName: result.targetName ?? candidate.targetName,
+      candidate,
+      verification: taxonomy.verification,
     })
 
     const pending = this.pendingDecisions.get(result.epoch)
