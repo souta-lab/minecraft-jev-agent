@@ -70,7 +70,7 @@ import {
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
-import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
+import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
 import type { CraftIngredientNeed } from './optionSpec.ts'
@@ -1087,6 +1087,15 @@ export interface ReachabilityGateOptions {
    * Absent = unknown and preserves pure/offline callers.
    */
   attackPathProbe?: ((position: Vec3Json) => PathProbeResult) | null
+  /**
+   * SAFE: does the body's own route to this destination stand it in a
+   * dimension-transfer cell (a lit portal block)? The destination-side half of
+   * the same fact lives in `WorldState.terrain.portalWalkInCells`; this half
+   * covers a route that only CROSSES the portal on its way somewhere else.
+   * `'unknown'` (no route planner) never invents a refusal, exactly like every
+   * other probe.
+   */
+  dimensionTransferProbe?: ((position: Vec3Json) => DimensionTransferRoute) | null
   /** proven-unreachable (candidateId -> fingerprint) suppression memory */
   memory?: StateFingerprintMemory | null
   /**
@@ -2826,18 +2835,35 @@ function generateRawCandidates(
     )
   }
 
-  // issue #436/#11 (operator directive: "even if a mob is not in the hostile
-  // list, Jev could simply decide to attack it"). WHICH entities are worth
-  // attacking is Jev's semantic choice; code owns only the entity TRUTH. So the
-  // gate MOVED FROM `entity.hostile && in range` (which made the hostile flag the
-  // reason an ATTACK existed at all) TO `isAttackableEntity(entity) && in range`,
-  // with `hostile` carried as a FACT on the candidate instead of filtering it.
-  // The bound is still the same combat range, so the offer cannot flood, and the
-  // non-mob families (items, xp orbs, projectiles, armor stands, item frames, the
-  // body itself) are excluded by `isAttackableEntity` - they are not things a
-  // melee swing can resolve into a kill.
-  const hostiles = state.entities.filter(
+  const localHostiles = state.entities.filter(
     (entity) => isAttackableEntity(entity) && entity.distance <= COMBAT_CANDIDATE_RANGE,
+  )
+  // P1 durability (measured `run-mucgir1z-1p7oh`): the 8 m danger bound is the
+  // MELEE reaction envelope, and using it as the ATTACK offer bound left an
+  // ENGAGED attacker unanswerable. A skeleton that had already put an arrow in
+  // the body at 8.93 m - inside its own firing band, outside melee and outside
+  // the danger radius - produced no ATTACK at all, so the only grounded response
+  // in the Nether portal room was "keep distance", and the only keep-distance
+  // cells were the portal itself (`the_nether -> overworld -> the_nether`).
+  //
+  // An entity that has ENGAGED the body (`isResponseWorthyThreat`: attributed
+  // attacker, or line of sight after damage) is therefore attackable anywhere
+  // inside the response envelope (`THREAT_RESPONSE_RANGE`) - the same envelope
+  // `activeThreats` and the bounded danger state already answer to. This is CAN,
+  // not a preference: the approach is grounded separately by the reachability
+  // gate's melee path probe (`evaluateOrdinaryAttackCandidate`), so an attacker
+  // the body cannot reach is withheld with a typed reason, and Jev still chooses
+  // ATTACK vs any keep-distance route vs ESCALATE.
+  //
+  // The engaged set is kept OUT of the ordinary `maxAttackCandidates` budget for
+  // the same reason the goalDrop producers are (see below): a distant attacker
+  // must not crowd a local food hunt or a reaction target out of Jev's candidate
+  // set. It is an additional grounded affordance, never a replacement.
+  const engagedHostiles = state.entities.filter(
+    (entity) =>
+      isAttackableEntity(entity) &&
+      entity.distance > COMBAT_CANDIDATE_RANGE &&
+      isResponseWorthyThreat(state, entity, state.timestampMs),
   )
   // Goal-directed mob drops: when the ACTIVE collect goal targets an item whose
   // only producer is a mob (`ender_pearl` <- enderman, `blaze_rod` <- blaze),
@@ -2870,7 +2896,7 @@ function generateRawCandidates(
   // independent prevents code from deciding WHICH by crowding either a safety
   // threat or a goal producer out of Jev's candidate set.
   const seenAttackIds = new Set<number>()
-  const attackTargets = [...hostiles, ...huntTargets]
+  const attackTargets = [...localHostiles, ...huntTargets]
     .filter((entity) => {
       if (seenAttackIds.has(entity.id)) return false
       seenAttackIds.add(entity.id)
@@ -2881,6 +2907,14 @@ function generateRawCandidates(
     if (seenAttackIds.has(producer.id)) continue
     seenAttackIds.add(producer.id)
     attackTargets.push(producer)
+  }
+  // Engaged attackers beyond the melee reaction envelope: the response the
+  // measured Nether skeleton had no candidate for at 8.93 m. Same treatment as
+  // the goalDrop producers - an independent grounded affordance.
+  for (const engaged of engagedHostiles) {
+    if (seenAttackIds.has(engaged.id)) continue
+    seenAttackIds.add(engaged.id)
+    attackTargets.push(engaged)
   }
   // The body's own capability facts for a fight. Code owns CAN: which item the
   // body is holding (fists are a weapon too), its vanilla damage when this
@@ -3050,7 +3084,7 @@ function generateRawCandidates(
           ? moveLabel(spot, 'retreat to safety', state.self.position)
           : `${moveLabel(spot, `keep distance from ${primaryThreat.name}`, state.self.position)} ` +
             `(+${Math.round(retreat.gain * 100) / 100}m separation, ${Math.round(retreat.separation * 100) / 100}m away` +
-            `${retreat.outsideReach ? ', outside its reach' : ''}${retreat.escape ? ', escape scan' : ''})`,
+            `${retreat.outsideReach ? ', outside its reach' : ''}${retreat.occluded ? ', out of its sight line' : ''}${retreat.escape ? ', escape scan' : ''})`,
       targetName: null,
       target: spot,
       targetEntityId: null,
@@ -3068,6 +3102,11 @@ function generateRawCandidates(
         separationGain: Math.round(retreat.gain * 100) / 100,
         outsideReach: retreat.outsideReach,
         ...(retreat.escape ? { escapeScan: true } : {}),
+        // Code-owned cover fact: this destination is NOT in the threat's sight
+        // line (real block truth). It is what makes a ranged attacker answerable
+        // when the room gives the body no separation to buy. Jev still chooses
+        // whether to take it.
+        ...(retreat.occluded ? { threatOccluded: true } : {}),
         ...(primaryThreat === null
           ? {}
           : {
@@ -8698,17 +8737,33 @@ function pickRetreats(
       threat: hostile.position,
       standable: standableUsable,
       escapeCells: (state.terrain.escapeCells ?? []).filter(usable),
+      // The two CAN facts the sensor owns for this threat (real block truth):
+      // the cells its sight line cannot reach (cover - the only thing that
+      // answers a ranged attacker in a room) and the cells where standing
+      // realizes a dimension transfer (never a keep-distance destination).
+      occludedCells: (state.terrain.threatCoverCells ?? []).filter(usable),
+      transferCells: state.terrain.portalWalkInCells ?? [],
       standoff: threatStandoffRange(hostile.name),
       max: MAX_RETREAT_CANDIDATES,
     })
   }
   // Hazard-only (or critical-health-with-no-sensed-hostile): unchanged semantics
-  // - the destination must clear the hazard radius.
+  // - the destination must clear the hazard radius. A dimension-transfer cell is
+  // still never a destination: a hazard escape must not leave the dimension.
+  const transfer = new Set((state.terrain.portalWalkInCells ?? []).map((cell) => blockId('p', cell)))
   const scored: KeepDistanceSpot[] = []
   for (const spot of standableUsable) {
+    if (transfer.has(blockId('p', spot))) continue
     const separation = distance(spot, threat)
     if (separation < HAZARD_DANGER_RADIUS) continue
-    scored.push({ spot, separation, gain: separation - distance(state.self.position, threat), outsideReach: true, escape: false })
+    scored.push({
+      spot,
+      separation,
+      gain: separation - distance(state.self.position, threat),
+      outsideReach: true,
+      escape: false,
+      occluded: false,
+    })
   }
   scored.sort((a, b) => b.separation - a.separation)
   return scored.slice(0, MAX_RETREAT_CANDIDATES)
@@ -9229,6 +9284,53 @@ export function applyReachabilityGate(
   }
 }
 
+/**
+ * SAFE/CAN: a mechanical locomotion leg must never be realized as a DIMENSION
+ * TRANSFER.
+ *
+ * Measured live (`run-mucgir1z-1p7oh`): a skeleton engaged the body at ~9 m in
+ * the Nether portal room, the grounded keep-distance cells were cells of the
+ * portal, and "move away from the threat" was realized as a dimension change -
+ * `the_nether -> overworld -> the_nether` 186 times, 30-90 s apart, each
+ * re-entry walking straight back to the same skeleton. Crossing a dimension is
+ * not a way to keep distance; it abandons the whole objective, and in this
+ * geometry it guarantees the loop.
+ *
+ * The fact is code-owned and two-sided, so it cannot be dodged by choosing a
+ * different route:
+ *   * DESTINATION: the cell the body would stand in is a live transfer cell
+ *     (`state.terrain.portalWalkInCells`, sampled from real block truth).
+ *   * ROUTE: the path the body would actually walk to the destination stands it
+ *     in one (`reachability.dimensionTransferProbe`; the controller answers it
+ *     from the same pathfinder plan `pathProbe` already computes).
+ *
+ * `ENTER_PORTAL` is deliberately exempt: it IS the explicit dimension-transfer
+ * decision (`Jev`/System2 owns WHICH), walks into a portal the goal names, and
+ * is the only candidate whose purpose is to cross. `MINE` and the remaining
+ * gated kinds are not body-locomotion realizations and keep their own contracts.
+ */
+const MECHANICAL_LOCOMOTION_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'RETRIEVE',
+  'RETREAT',
+])
+
+function dimensionTransferRefusal(
+  candidate: Candidate,
+  position: Vec3Json,
+  context: ReachabilityGateContext,
+): ReachabilityResult | null {
+  if (!MECHANICAL_LOCOMOTION_KINDS.has(candidate.kind)) return null
+  const key = blockId('p', position)
+  const onTransferCell = (context.state.terrain.portalWalkInCells ?? []).some((cell) => blockId('p', cell) === key)
+  if (onTransferCell) return { reachable: false, reason: 'crosses_dimension', missingCapabilities: [] }
+  const probe = context.options.reachability?.dimensionTransferProbe
+  if (typeof probe !== 'function') return null
+  return probe(position) === 'crosses'
+    ? { reachable: false, reason: 'crosses_dimension', missingCapabilities: [] }
+    : null
+}
+
 /** null when the candidate carries no capability precondition of its own. */
 function evaluateCandidate(
   candidate: Candidate,
@@ -9244,6 +9346,16 @@ function evaluateCandidate(
   // longer/re-acquisition executor contract and are intentionally unchanged.
   if (candidate.kind === 'ATTACK') return evaluateOrdinaryAttackCandidate(candidate, context)
   if (!REACHABILITY_GATED_KINDS.has(candidate.kind)) return null
+  // SAFE: a dimension transfer is not locomotion. Checked before every other
+  // mechanical verdict so the typed reason cannot be masked by a path/tool
+  // refusal: "this leg would leave the dimension" is the fact that matters, and
+  // it is the one the operator's portal loop was made of.
+  const transfer = dimensionTransferRefusal(candidate, position, context)
+  if (transfer !== null) {
+    const target = reachabilityTargetFor(context.state, candidate)
+    const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
+    return reachabilityRecord(candidate, target, world, transfer, context)
+  }
   if (candidate.kind === 'MINE') return evaluateMineCandidate(candidate, context)
   const accessRefusal = digAccessRefusalOf(candidate)
   if (accessRefusal !== null) {

@@ -35,7 +35,7 @@ import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
-import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
+import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
@@ -127,7 +127,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -10283,18 +10283,24 @@ export class JevController {
   /** Gate facts, shared by both candidate generations in one tick. */
   private reachabilityGateOptions(): ReachabilityGateOptions {
     if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
-    const pathCache = new Map<string, 'reachable' | 'no_path'>()
+    // One plan per destination, two facts out of it: whether the body can walk
+    // there at all, and whether the route it would walk stands it in a
+    // dimension-transfer cell. Computing the plan twice would double the
+    // pathfinder cost of the whole gate.
+    const pathCache = new Map<string, { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute }>()
     const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
+    const pathFacts = (position: Vec3Json) => {
+      const key = `${position.x},${position.y},${position.z}`
+      const cached = pathCache.get(key)
+      if (cached !== undefined) return cached
+      const result = this.computePathFacts(position)
+      pathCache.set(key, result)
+      return result
+    }
     this.gateOptions = {
       memory: this.reachabilityProofs,
-      pathProbe: (position) => {
-        const key = `${position.x},${position.y},${position.z}`
-        const cached = pathCache.get(key)
-        if (cached !== undefined) return cached
-        const result = this.canComputePath(position) ? 'reachable' : 'no_path'
-        pathCache.set(key, result)
-        return result
-      },
+      pathProbe: (position) => pathFacts(position).probe,
+      dimensionTransferProbe: (position) => pathFacts(position).transfer,
       attackPathProbe: (position) => {
         const key = `${position.x},${position.y},${position.z}`
         const cached = attackPathCache.get(key)
@@ -10308,6 +10314,49 @@ export class JevController {
     }
     this.gateOptionsTick = this.tickCounter
     return this.gateOptions
+  }
+
+  /**
+   * SAFE/CAN: the route facts for one destination, from ONE plan.
+   *
+   * `probe` keeps the exact semantics `canComputePath` had (a `timeout` is not a
+   * usable route fact, an exception is `no_path`), so no existing verdict moves.
+   * `transfer` is the route-side half of the dimension-transfer invariant: does
+   * the path the body would actually walk stand it in a lit portal block?
+   * `unknown` when no plan exists (nothing is refused on an unavailable probe).
+   */
+  private computePathFacts(position: Vec3Json): { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute } {
+    if (this.bot.pathfinder === undefined) return { probe: 'no_path', transfer: 'unknown' }
+    try {
+      const goal = new goals.GoalBlock(position.x, position.y, position.z)
+      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
+      if (plan.status !== 'success') return { probe: 'no_path', transfer: 'unknown' }
+      return { probe: 'reachable', transfer: this.routeCrossesDimensionTransfer(plan.path) }
+    } catch {
+      return { probe: 'no_path', transfer: 'unknown' }
+    }
+  }
+
+  /**
+   * Does this planned route stand the body in a dimension-transfer cell? Every
+   * path node is a cell the executor will occupy (feet), so the body's feet or
+   * head being portal material at any node is exactly the transfer condition the
+   * executor's own walk-in mechanic waits for.
+   */
+  private routeCrossesDimensionTransfer(path: readonly { x: number; y: number; z: number }[]): DimensionTransferRoute {
+    for (const node of path) {
+      if (this.botStandsInDimensionTransfer({ x: node.x, y: node.y, z: node.z })) return 'crosses'
+    }
+    return 'clear'
+  }
+
+  /** Live block truth: would standing with the feet at this cell transfer the body? */
+  private botStandsInDimensionTransfer(feet: Vec3Json): boolean {
+    const scratch = this.bot.entity.position.clone()
+    const feetBlock = this.bot.blockAt(scratch.set(feet.x, feet.y, feet.z))
+    if (isDimensionTransferBlock(feetBlock?.name)) return true
+    const headBlock = this.bot.blockAt(scratch.set(feet.x, feet.y + 1, feet.z))
+    return isDimensionTransferBlock(headBlock?.name)
   }
 
   /**

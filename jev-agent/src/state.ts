@@ -42,6 +42,7 @@ import {
   validatePortalFrame,
 } from './netherPortalPlan.ts'
 import type { PortalBlockPosition, PortalFrameSite, PortalFrameValidation, PortalWidthAxis } from './netherPortalPlan.ts'
+import { isDimensionTransferBlock } from './netherPortalPlan.ts'
 import { isProtectedStationBlock, liveStructureCellKey } from './blockSafety.ts'
 import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
@@ -788,6 +789,27 @@ export type WorldState = {
      * inside 0.8 m. Absent in old replay fixtures means "no threat escape scan".
      */
     escapeCells?: Vec3Json[]
+    /**
+     * SAFE/CAN: cells from the same wider scan whose sight line to the nearest
+     * dangerous hostile is BLOCKED by solid geometry (see
+     * `KeepDistanceInput.occludedCells`). This is the fact that makes a ranged
+     * attacker answerable: stepping out of an arrow's firing line is a genuine
+     * keep-distance destination even when the room gives the body no separation.
+     * Carried only while non-empty, so a body with no threat keeps exactly the
+     * state shape it had before this fact existed.
+     */
+    threatCoverCells?: Vec3Json[]
+    /**
+     * SAFE: cells where standing realizes a DIMENSION TRANSFER (a lit portal
+     * block; `netherPortalPlan.isDimensionTransferBlock`). Real block truth from
+     * the scans the sensor already runs. A mechanical locomotion realization
+     * (MOVE / RETRIEVE / RETREAT) must never stand the body in one - crossing a
+     * dimension is a semantic disengage, and in a portal room a "retreat" into
+     * the portal is the measured `the_nether -> overworld -> the_nether` loop.
+     * Only the explicit `ENTER_PORTAL` candidate may cross. Carried only while
+     * non-empty, so a body with no portal nearby keeps its previous state shape.
+     */
+    portalWalkInCells?: Vec3Json[]
   }
   /** placed crafting_table stations: sensed near-field first, then remembered */
   craftingTables: StationEntry[]
@@ -902,6 +924,14 @@ export interface SensorOptions {
   /** Upper bound on escape cells kept, so the offer cannot be crowded. */
   maxEscapeCells: number
   /**
+   * Upper bound on threat-cover rays per sensor tick. A cover cell is a
+   * keep-distance destination the attacker cannot see (`KeepDistanceInput.
+   * occludedCells`); proving it costs one sight-line ray from the threat's eye.
+   * The bound keeps the escape scan's cost proportional to the cells it would
+   * already consider, so a hostile cannot make a tick unbounded.
+   */
+  maxThreatCoverRays: number
+  /**
    * Exact world-mutation revision (see `DecisionScheduler.worldRevision`), or
    * absent/null when the caller cannot prove one. Only when it is a finite
    * number may `buildWorldState` reuse a `findBlocks` position list across
@@ -924,6 +954,7 @@ export const defaultSensorOptions: SensorOptions = {
   maxPlacementSpots: 6,
   escapeRadius: 6,
   maxEscapeCells: 12,
+  maxThreatCoverRays: 48,
 }
 
 export interface SensorInput {
@@ -3372,23 +3403,49 @@ export function liveStructureMembersForSites(sites: readonly PortalFrameSite[]):
   return members
 }
 
-function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
+/**
+ * The local terrain scan, plus the DIMENSION-TRANSFER cells it walked over.
+ *
+ * The transfer set is the same block truth the executor's walk-in mechanic
+ * reads (`isDimensionTransferBlock`): standing with the feet or the head in a lit
+ * portal block transfers the body. A cell is recorded when EITHER its feet or
+ * its head block is transfer material, so the recorded cell is exactly "feet
+ * here transfers". The candidate gate refuses to realize a mechanical locomotion
+ * leg into one, and the keep-distance solver refuses to offer one; the explicit
+ * `ENTER_PORTAL` candidate is the only route that may cross.
+ */
+function buildTerrain(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+): { standable: Vec3Json[]; portalWalkInCells: Vec3Json[] } {
   const found: Vec3Json[] = []
+  const transfer: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
+  const scratch = bot.entity.position.clone()
+  const at = (p: Vec3Json) => bot.blockAt(scratch.set(p.x, p.y, p.z))
   for (let dx = -2; dx <= 2; dx += 1) {
     for (let dz = -2; dz <= 2; dz += 1) {
       for (let dy = -1; dy <= 1; dy += 1) {
         const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
+        // The same three blocks `isUsableStand` reads, read once: the standable
+        // verdict below must stay byte-identical to it.
+        const feetBlock = at(feet)
+        const headBlock = at({ x: feet.x, y: feet.y + 1, z: feet.z })
+        const supportBlock = at({ x: feet.x, y: feet.y - 1, z: feet.z })
+        if (isDimensionTransferBlock(feetBlock?.name) || isDimensionTransferBlock(headBlock?.name)) {
+          transfer.push(feet)
+        }
         // A canopy top is collidable but is not a destination: terrain cells are
         // the standable set every MOVE/explore/retreat/placement solve picks
         // from, so a leaf-supported cell here became "walk onto the treetop".
-        if (!isUsableStand(bot, feet)) continue
+        if (!isUsableStandFromBlocks(feetBlock, headBlock, supportBlock)) continue
         found.push(feet)
       }
     }
   }
   found.sort((a, b) => distance(a, self.position) - distance(b, self.position))
-  return found.slice(0, options.maxTerrain)
+  return { standable: found.slice(0, options.maxTerrain), portalWalkInCells: transfer }
 }
 
 /**
@@ -3491,40 +3548,124 @@ function buildBridgeProbes(bot: Bot, self: SelfState): BridgeProbe[] {
  * destination), and keeps only cells that genuinely gain separation from the
  * nearest dangerous hostile. The result is a CAN fact; Jev still chooses
  * whether to take one.
+ *
+ * It also owns the two facts a keep-distance destination cannot be grounded
+ * without:
+ *   * `coverCells` - cells the threat's own sight line cannot reach (real block
+ *     truth from one bounded ray per candidate). This is what answers a RANGED
+ *     attacker: the body cannot outrun an arrow, but it can step out of the
+ *     firing line. A cell the ray cannot be computed for is simply absent;
+ *     unknown never counts as cover.
+ *   * `portalWalkInCells` - cells where standing realizes a DIMENSION TRANSFER.
+ *     They are sampled here as well as in `buildTerrain` because this wider scan
+ *     is where a "retreat" destination comes from, and a keep-distance leg must
+ *     never be realized as a dimension change.
  */
 function buildEscapeCells(
   bot: Bot,
   options: SensorOptions,
   self: SelfState,
   entities: readonly EntityState[],
-): Vec3Json[] {
+): { cells: Vec3Json[]; coverCells: Vec3Json[]; portalWalkInCells: Vec3Json[] } {
   const threat = nearestDangerousThreat(entities as readonly ThreatEntityLike[])
-  if (threat === null) return []
+  if (threat === null) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const radius = Math.max(0, Math.floor(options.escapeRadius))
-  if (radius === 0) return []
+  if (radius === 0) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const standoff = threatStandoffRange(threat.name)
   const current = distance(threat.position, self.position)
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
   const found: Vec3Json[] = []
+  const cover: Vec3Json[] = []
+  const transfer: Vec3Json[] = []
+  let coverRays = 0
+  const maxCoverRays = Math.max(0, Math.floor(options.maxThreatCoverRays ?? 0))
+  const scratch = bot.entity.position.clone()
+  const at = (p: Vec3Json) => bot.blockAt(scratch.set(p.x, p.y, p.z))
   for (let dx = -radius; dx <= radius; dx += 1) {
     for (let dz = -radius; dz <= radius; dz += 1) {
       for (let dy = -THREAT_ESCAPE_DY; dy <= THREAT_ESCAPE_DY; dy += 1) {
         const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
         const separation = distance(feet, threat.position)
         const gain = separation - current
-        // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
-        // standing outside the threat's reach without moving closer.
-        if (gain < MIN_KEEP_DISTANCE_GAIN && !(separation >= standoff && gain > 0)) continue
+        const feetBlock = at(feet)
+        const headBlock = at({ x: feet.x, y: feet.y + 1, z: feet.z })
+        if (isDimensionTransferBlock(feetBlock?.name) || isDimensionTransferBlock(headBlock?.name)) {
+          transfer.push(feet)
+          // A transfer cell is never a keep-distance destination, so it cannot
+          // become a covered one either: do not spend a ray proving cover for a
+          // cell the solver will refuse.
+          continue
+        }
+        // A keep-distance destination never moves CLOSER to the threat, so only
+        // the not-closer half of the sphere is worth a ray at all.
+        if (gain <= 0) continue
         // Destination rule, shared with `buildTerrain`: a canopy top is not a
         // place the body may be sent to keep distance from a mob.
-        if (!isUsableStand(bot, feet)) continue
-        found.push(feet)
+        if (!isUsableStandFromBlocks(feetBlock, headBlock, at({ x: feet.x, y: feet.y - 1, z: feet.z }))) continue
+        // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
+        // standing outside the threat's reach without moving closer.
+        if (gain >= MIN_KEEP_DISTANCE_GAIN || (separation >= standoff && gain > 0)) found.push(feet)
+        // Cover is the third way to genuinely keep distance from a RANGED
+        // attacker: a cell its sight line cannot reach. Bounded by
+        // `maxThreatCoverRays`, and only ever credited on positive block truth.
+        if (coverRays < maxCoverRays) {
+          coverRays += 1
+          if (threatSightLineBlocked(bot, threat.position, feet)) cover.push(feet)
+        }
       }
     }
   }
   found.sort((a, b) => distance(b, threat.position) - distance(a, threat.position))
   const cap = Math.max(0, Math.floor(options.maxEscapeCells ?? THREAT_ESCAPE_MAX_CELLS))
-  return found.slice(0, cap)
+  return { cells: found.slice(0, cap), coverCells: cover, portalWalkInCells: transfer }
+}
+
+/**
+ * SAFE/CAN: is the hostile at `from` (its feet) BLOCKED from seeing a body
+ * standing at `cell`? True means the cell is genuine cover.
+ *
+ * The threat's eye is its feet plus the same eye height the body's own
+ * `SelfState.eyePosition` uses, and the target is the body's chest. One ray, no
+ * guessing: `bot.world.raycast` is the synchronous world raycast mineflayer's
+ * own `canSeeBlock` uses, and it reports the first SOLID block on the segment
+ * (non-solid blocks such as the portal itself do not stop it).
+ *
+ * False unless there is positive evidence: a bot without a world raycast, a
+ * degenerate segment, or a throwing raycast all yield false, so "unknown" is
+ * never handed to the solver as a covered destination.
+ */
+function threatSightLineBlocked(bot: Bot, from: Vec3Json, cell: Vec3Json): boolean {
+  const world = bot.world as unknown as
+    | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
+    | undefined
+  if (world === undefined || typeof world.raycast !== 'function') return false
+  try {
+    const eye = bot.entity.position.clone().set(from.x, from.y + EYE_HEIGHT, from.z)
+    const target = bot.entity.position.clone().set(cell.x + 0.5, cell.y + 1, cell.z + 0.5)
+    const dx = target.x - eye.x
+    const dy = target.y - eye.y
+    const dz = target.z - eye.z
+    const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    if (!Number.isFinite(range) || range <= 0) return false
+    const direction = bot.entity.position.clone().set(dx / range, dy / range, dz / range)
+    const hit = world.raycast(eye, direction, range, null)
+    return hit !== null && hit !== undefined
+  } catch {
+    return false
+  }
+}
+
+/** Positional dedupe for the cell facts, preserving first-seen order. */
+function dedupeCells(cells: readonly Vec3Json[]): Vec3Json[] {
+  const seen = new Set<string>()
+  const out: Vec3Json[] = []
+  for (const cell of cells) {
+    const key = `${cell.x},${cell.y},${cell.z}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(cell)
+  }
+  return out
 }
 
 /**
@@ -3587,6 +3728,12 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   const placementSpots = buildPlacementSpots(bot, options, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
+  const terrain = buildTerrain(bot, options, self)
+  const escape = buildEscapeCells(bot, options, self, entities)
+  // Both transfer-cell sources are unioned: the local terrain window is where an
+  // ordinary MOVE destination can come from, the wider escape scan is where a
+  // keep-distance destination comes from, and the gate must see both.
+  const portalWalkInCells = dedupeCells([...terrain.portalWalkInCells, ...escape.portalWalkInCells])
   return {
     schemaVersion: 1,
     tick: input.tick,
@@ -3599,9 +3746,13 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // an inactive body's state keeps exactly the shape it had before this fact
     // existed, and the candidate layer reads "no cells" as "no hazard".
     ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
+    // Both new terrain facts follow the same rule: a body with no portal and no
+    // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {
-      standable: buildTerrain(bot, options, self),
-      escapeCells: buildEscapeCells(bot, options, self, entities),
+      standable: terrain.standable,
+      escapeCells: escape.cells,
+      ...(escape.coverCells.length === 0 ? {} : { threatCoverCells: dedupeCells(escape.coverCells) }),
+      ...(portalWalkInCells.length === 0 ? {} : { portalWalkInCells }),
     },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
