@@ -9070,12 +9070,38 @@ export class JevController {
    * `ENTER:26,67,9` was re-offered 669 times. The typed markers above make the
    * next measurement of this shape unambiguous.
    */
+  /**
+   * True when a MOVE candidate is a ROUTE (its own meta declares the mechanical
+   * work it does), as opposed to an ordinary walk. The route keys are the ones the
+   * candidate layer and the executor already use.
+   */
+  private static readonly ROUTE_MOVE_META_KEYS = [
+    'vertical',
+    'digRoute',
+    'digStep',
+    'bridgeBlock',
+    'bridge',
+    'levelScan',
+    'contactAscent',
+    'pillarPlaceName',
+  ] as const
+
+  private isRouteDeclaredMove(candidate: Candidate): boolean {
+    return JevController.ROUTE_MOVE_META_KEYS.some((key) => candidate.meta[key] !== undefined)
+  }
+
   private recordZeroProgressOutcome(
     result: ExecutionResult,
     candidate: Candidate,
     truthful: ReturnType<typeof truthfulActionOutcome>,
   ): void {
     if (!isZeroProgressRouteKind(result.kind)) return
+    // A plain WALK is not tracked here (its memory is `moveFailMemory` and the
+    // distance it closed is its progress). A MOVE that DECLARES a route is: its
+    // postcondition is a mechanical change (a pillar/dig/place/bridge/scan leg),
+    // and one that settles SUCCESS with nothing observable changed is spent -
+    // otherwise it re-offers forever from the same stand cell.
+    if (result.kind === 'MOVE' && !this.isRouteDeclaredMove(candidate)) return
     const stand = this.actionStart
     if (stand === null) return
     const standKey = cellKey(stand)
