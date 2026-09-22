@@ -29,7 +29,8 @@ import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability,
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -1454,6 +1455,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   THREAT_CLEAR,
   SURVIVAL_REGROUND,
   SURVIVAL_NO_GROUNDED_ACTION,
+  // The bounded identity-churn adoption (`threat.ts`): the one line that says a
+  // chosen ATTACK's entity id was replaced by the SAME mob kind at the SAME place
+  // while the body kept fighting it. Unmirrored, a reviewer sees only
+  // `SURVIVAL_REGROUND`/`TARGET_LOST` and cannot tell a churn fight from a threat
+  // that genuinely died, so the identity proof must ride the live sink.
+  MOB_IDENTITY_CHURN,
   GUARD_REJECTIONS,
   'COMBAT_KIT_GAP',
   THREAT_RANGED_UNANSWERED,
@@ -3420,7 +3427,13 @@ export class JevController {
         // only when nothing grounded survives; it is never correct to leave the
         // body standing in a fight.
         const vanishedChoice = candidates.find((candidate) => candidate.id === chosenId) ?? null
-        const reground = regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates)
+        // The bounded identity-churn facts (`threat.ts` `MobIdentityContext`):
+        // whether the previous entity id is still in the client's TRACKED set
+        // (`bot.entities` - the server's own destroy notification, NOT the 24 m
+        // sensor), which entity ids the DECISION-time snapshot carried, and the
+        // two snapshot times. All code-owned; any UNKNOWN refuses the adoption.
+        const identityContext = this.mobIdentityContext(vanishedChoice, state, freshState)
+        const reground = regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates, identityContext)
         // The bounded CONTROL action executed in place of an unservable survival
         // action (see the in-contact branch below). Never a mutation, never a
         // target choice - it re-enters the semantic decision immediately.
@@ -3447,6 +3460,37 @@ export class JevController {
             },
             this.tickCounter,
           )
+          // issue #436 / mob identity churn: the SAME causal threat came back under
+          // a new entity id. The typed proof is its own mirrored line, because the
+          // `SURVIVAL_REGROUND` line above cannot say WHY two different ids are one
+          // threat - and a post-mortem must be able to tell this apart from an
+          // ordinary same-id re-ground and from a threat that genuinely died.
+          if (reground.identityChurn !== null) {
+            const churn = reground.identityChurn
+            this.logger.warn(
+              'guard',
+              formatMobIdentityChurn(vanishedChoice?.id ?? chosenId, churn, threatEvidence, body),
+              {
+                from: vanishedChoice?.id ?? null,
+                to: chosenId,
+                fromEntityId: churn.fromEntityId,
+                toEntityId: churn.toEntityId,
+                mob: churn.name,
+                kind: churn.kind,
+                moved: Math.round(churn.distance * 100) / 100,
+                elapsedMs: Math.round(churn.elapsedMs),
+                rule: churn.rule,
+                gone: churn.goneEvidence,
+                new: churn.newEntity,
+                outcome: reground.outcome,
+                threat: threatEvidence?.threatName ?? null,
+                distance: threatEvidence?.threatDistance ?? null,
+                contact: threatEvidence?.inContact ?? false,
+                health: body.health,
+              },
+              this.tickCounter,
+            )
+          }
         } else {
           this.guardRejections += 1
           if (reground.kind !== null) {
@@ -7951,6 +7995,41 @@ export class JevController {
       },
       this.tickCounter,
     )
+  }
+
+  /**
+   * The code-owned identity facts the bounded mob-churn rule reads
+   * (`threat.ts` `MobIdentityContext`).
+   *
+   * `previousEntityTracked` is read from the CLIENT's tracked set (`bot.entities`),
+   * never from the sensor snapshot: the sensor is a bounded radius, so "gone from
+   * the snapshot" cannot be told apart from "walked 30 m away", while
+   * `bot.entities[id] === undefined` means the server destroyed that exact id
+   * (`entity_destroy`). An entity that is present but `isValid === false` counts as
+   * gone for the same reason; anything the controller cannot resolve (no candidate
+   * entity id) stays `null` = UNKNOWN, and the rule refuses.
+   *
+   * `knownEntityIds` is the DECISION-time snapshot, so the rule can require the
+   * replacement to be an entity that appeared during the churn window instead of a
+   * bystander of the same kind that was already standing there.
+   */
+  private mobIdentityContext(
+    chosen: Candidate | null,
+    decisionState: WorldState,
+    freshState: WorldState,
+  ): MobIdentityContext {
+    const entityId = chosen?.targetEntityId ?? null
+    let previousEntityTracked: boolean | null = null
+    if (entityId !== null) {
+      const live = this.bot.entities[entityId]
+      previousEntityTracked = live !== undefined && live.isValid !== false
+    }
+    return {
+      previousEntityTracked,
+      knownEntityIds: new Set(decisionState.entities.map((entity) => entity.id)),
+      chosenAtMs: decisionState.timestampMs,
+      nowMs: freshState.timestampMs,
+    }
   }
 
   /**
