@@ -41,6 +41,22 @@ for (let i = 0; i < lines.length; i += 1) {
 if (start === -1) { console.error(`SKILL_METRICS run_boundary_missing runId=${runId}`); process.exit(2) }
 const window = lines.slice(start, end).slice(-limit)
 
+/** #437 §9/§12: a bounded projection should repeat its hash when the semantic situation repeats. */
+function projectionStability(window) {
+  const hashes = []
+  for (const line of window) {
+    const m = /JEV_STATE_PROJECTION[^\n]*hash=([0-9a-f]{6,})/.exec(line)
+    if (m !== null) hashes.push(m[1])
+  }
+  if (hashes.length === 0) return { observations: 0, distinct: 'UNKNOWN', note: 'no JEV_STATE_PROJECTION marker yet' }
+  const distinct = new Set(hashes)
+  return {
+    observations: hashes.length,
+    distinct: distinct.size,
+    dominantShare: Number((Math.max(...[...distinct].map((h) => hashes.filter((x) => x === h).length)) / hashes.length).toFixed(3)),
+  }
+}
+
 const tally = (re, text) => (text.match(re) ?? []).length
 const actions = []
 const positions = []
@@ -86,6 +102,16 @@ const out = {
     mandatoryPrerequisite: tally(/authority=MANDATORY_PREREQUISITE/g, window.join('\n')),
     hardSafetyReflex: tally(/authority=HARD_SAFETY_REFLEX/g, window.join('\n')),
   },
+  // #437 acceptance additions: epoch isolation, projection stability, and the two MUST-be-zero counters.
+  epoch: {
+    starts: num('JEV_DECISION_EPOCH_START'),
+    ends: num('JEV_DECISION_EPOCH_END'),
+    projections: num('JEV_STATE_PROJECTION'),
+    candidateSets: num('JEV_CANDIDATE_SET'),
+    outcomePackets: num('SKILL_OUTCOME_PACKET'),
+    staleResultsDropped: num('STALE_JEV_RESULT_DROPPED'),
+  },
+  projectionStability: projectionStability(window),
   // MUST-be-zero counters (#436 §20): reported UNKNOWN until the lanes emit the markers, never as 0 by default.
   targetSwitchWithoutJev: num('TARGET_SWITCH_WITHOUT_JEV') === 0 && num('SKILL_POLICY_BOUNDARY') === 0 ? 'UNKNOWN' : num('TARGET_SWITCH_WITHOUT_JEV'),
   effectEnvelopeViolations: num('EFFECT_ENVELOPE_VIOLATION') === 0 && num('SKILL_COMMIT') === 0 ? 'UNKNOWN' : num('EFFECT_ENVELOPE_VIOLATION'),
