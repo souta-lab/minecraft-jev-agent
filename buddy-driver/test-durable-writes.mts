@@ -8,6 +8,7 @@ import type { AgentSnapshot, LedgerProposalEnvelope, ResidentWorldMemory } from 
 import { emptyWorldMemory } from './resident-types.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision } from './state-snapshot.ts'
+import { durableWriteLanded } from './host-durability.ts'
 import {
   DURABLE_WRITE_VIOLATION,
   commitPendingProposals,
@@ -170,6 +171,7 @@ addCase('#5(b): a stale ledger proposal is rejected and the file stays byte-iden
           saveCalls += 1
           bumpRevision(state)
           writeSnapshotAtomic(statePath, state)
+          return durableWriteLanded('reload-commit', state.revision)
         },
       },
       'reload-commit',
@@ -212,7 +214,10 @@ addCase('#48: a superseded generation proposal is rejected by lineage even at th
         state,
         guard: { revision: 12, committedGenerationId: 'gen-B', activeGenerationId: 'gen-B' },
         log: cap.log,
-        save: () => writeSnapshotAtomic(statePath, state),
+        save: () => {
+          writeSnapshotAtomic(statePath, state)
+          return durableWriteLanded('reload-commit', state.revision)
+        },
       },
       'reload-commit',
     )
@@ -271,6 +276,7 @@ addCase('#5(c): an accepted proposal commits exactly once (world memory + ledger
           saveCalls += 1
           bumpRevision(state)
           writeSnapshotAtomic(statePath, state)
+          return durableWriteLanded('generation-start', state.revision)
         },
         writeLedgerMirror: () => undefined,
       },

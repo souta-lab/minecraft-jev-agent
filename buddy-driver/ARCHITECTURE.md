@@ -85,9 +85,13 @@ generation restores its ledger from `ctx.ledgerSnapshot`, not from a cache/log.
 | `logs/jev/*.jsonl`, `buddy.log`, `logs/resident/freeze-*.json`, `acceptance-*.json` | D | append-only evidence; never read back |
 
 On load, class-B keys found in a hand-edited/legacy file are logged as
-`STATE_B_TRUTH_REJECTED` and stripped, never restored. An unknown/newer
-`schemaVersion` is logged as `STATE_REJECTED` and the default snapshot is used;
-known legacy versions (1/2) log `STATE_MIGRATED`. Cache writes stay best-effort
+`STATE_B_TRUTH_REJECTED` and stripped, never restored. An unparseable file or an
+unknown/newer `schemaVersion` is logged as `STATE_REJECTED` and the file is then
+QUARANTINED (`STATE_QUARANTINED`, moved aside as `state-quarantine-*.json`) before
+the default snapshot is used in memory; if it cannot be moved aside the HOST refuses
+to boot instead of replacing it (`STATE_QUARANTINE_FAILED`). Known legacy versions
+(1/2) log `STATE_MIGRATED` with no quarantine. The durable-write, quarantine, lock
+and fatal invariants are canonical in `RESIDENT-MODE.md` §4-F. Cache writes stay best-effort
 (try/catch) so a read-only or corrupt cache can never fail a generation.
 
 ## Control channel (§6)

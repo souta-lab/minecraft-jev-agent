@@ -34,6 +34,7 @@ import type {
   WorldKey,
 } from './resident-types.ts'
 import { mergeKnownResourcesInto, mergeKnownTraversalsInto } from './resident-types.ts'
+import type { DurableWriteOutcome } from './host-durability.ts'
 import { normalizeStation, stationKey } from './station-memory.ts'
 import { acceptsWorldMemoryProposal } from './world-epoch.ts'
 
@@ -439,8 +440,15 @@ export interface ApplyResult {
   ledgerApplied: boolean
   ledgerRejected: LedgerRejectionReason | null
   reconciliationRequested: boolean
-  /** host commit primitive invocations (always 1: proposals commit atomically) */
+  /**
+   * host commit primitive invocations that LANDED (1 when proposals committed
+   * atomically, 0 when no save was needed or the save REPORTED failure). #379: a
+   * failed write must not be countable as a write.
+   */
   writes: number
+  /** outcome of the host commit primitive when one was invoked. */
+  writeOk: boolean
+  writeError: string | null
 }
 
 export interface CommitPendingInput {
@@ -451,8 +459,12 @@ export interface CommitPendingInput {
   state: AgentSnapshot
   guard: LedgerGuardContext
   log: ProposalLog
-  /** HOST commit primitive: persist the whole snapshot atomically, exactly once. */
-  save: (event: string) => void
+  /**
+   * HOST commit primitive: persist the whole snapshot atomically, exactly once.
+   * #379: it returns a durable-write outcome (never void), so a failed write is
+   * representable and `writes`/`writeOk` reflect reality.
+   */
+  save: (event: string) => DurableWriteOutcome
   /** HOST-only archive of an inconsistent derived ledger (class-C mirror). */
   reconcileLedger?: (reason: string) => void
   /** HOST-only rewrite of the derived ledger mirror after a ledger commit. */
@@ -509,7 +521,7 @@ export function commitPendingProposals(input: CommitPendingInput, event: string)
   const hasProposals = hasPendingProposals(pending)
   const changed = worldMemoryDeltasApplied > 0 || ledgerApplied || reconciliationRequested
   const shouldSave = changed || !hasProposals
-  if (shouldSave) input.save(event)
+  const outcome = shouldSave ? input.save(event) : null
   pending.speculative = false
   pending.worldMemory = []
   pending.ledger = null
@@ -519,7 +531,11 @@ export function commitPendingProposals(input: CommitPendingInput, event: string)
     ledgerApplied,
     ledgerRejected,
     reconciliationRequested,
-    writes: shouldSave ? 1 : 0,
+    // #379: only a write that LANDED counts. A reported failure is surfaced as
+    // writes=0/writeOk=false instead of the old unconditional writes=1.
+    writes: outcome !== null && outcome.ok ? 1 : 0,
+    writeOk: outcome === null || outcome.ok,
+    writeError: outcome === null ? null : outcome.error,
   }
 }
 
