@@ -47,6 +47,7 @@ import {
   HUNT_CONTACT_UNREACHABLE,
 } from './src/combatClosure.ts'
 import type { ContactGeometryFacts } from './src/combatClosure.ts'
+import { mirroredEventToken } from './src/controller-legacy.ts'
 
 const require = createRequire(import.meta.url)
 const REGISTRY = require('minecraft-data')('1.21.11')
@@ -692,6 +693,51 @@ const FLAT = { x: 2.5, y: 60, z: 0.5 }
     pass,
     '(vi) a same-level producer the lease never walked to keeps the pinned out_of_range meaning, not an over-claimed unreachable',
     `status=${result.status} outcome=${String(result.combatOutcome)} swings=${stalled.attacks()}\n      | ${huntEndLine}`,
+  )
+}
+
+{
+  // MIRRORED, not merely emitted. A typed reason that only reaches the generation
+  // console is not run-scoped evidence: the measured route-family incident was a
+  // recorder line whose marker was absent from MIRRORED_MARKERS, so the resident
+  // log showed zero of them. Both halves of the new vocabulary must survive the
+  // mirror gate.
+  const unreachableLine = formatContactUnreachable({
+    actionId: 'ATTACK:e22623',
+    entityId: 22623,
+    targetName: 'blaze',
+    evidence: 'vertical_gap',
+    approach: 'no_grounded_remedy',
+    distance: 45.25,
+    gapY: 9,
+    horizontal: 44.12,
+    meleeReach: 3.1,
+    walkGap: 3.1,
+    ascentRefusal: 'no_placeable',
+    placeable: null,
+  })
+  const huntEndLine = formatHuntEnd({
+    actionId: 'ATTACK:e22623',
+    targetName: 'blaze',
+    goalDrop: 'blaze_rod',
+    reason: 'unreachable',
+    swings: 0,
+    hits: 0,
+    reacquired: 0,
+    lastKnown: { x: 54.5, y: 66, z: -50.5 },
+    ms: 0,
+  })
+  const pass =
+    mirroredEventToken(unreachableLine) === 'HUNT_CONTACT_UNREACHABLE' &&
+    mirroredEventToken(huntEndLine) === 'HUNT_END' &&
+    // the measured live line shape is reproduced: the 9 hunts that started at
+    // lease gapY >= 4 are exactly the ones this names.
+    unreachableLine.includes('distance=45.25 horizontal=44.12 gap_y=9') &&
+    unreachableLine.includes('evidence=vertical_gap')
+  report(
+    pass,
+    '(vii) both halves of the new vocabulary are MIRRORED run-scoped evidence, not console-only lines',
+    `unreachableToken=${String(mirroredEventToken(unreachableLine))} huntEndToken=${String(mirroredEventToken(huntEndLine))}\n      | ${unreachableLine}`,
   )
 }
 
