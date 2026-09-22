@@ -361,11 +361,13 @@ async function runEntry(
   candidate: Candidate,
   transfer: boolean,
   strictGate = false,
+  configure?: (executor: Executor) => void,
 ): Promise<{ status: string; failure: string | null; verified: boolean; messages: string[] }> {
   const dir = mkdtempSync(join(tmpdir(), 'portal-entry-route-'))
   const logger = new EventLogger(new JsonlWriter(join(dir, 'agent.jsonl')), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet', portalEnterTimeoutMs: 400 })
   installLocomotion(executor, fixture, transfer, strictGate)
+  configure?.(executor)
   const result = await executor.claim(candidate).completion
   const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
@@ -784,6 +786,36 @@ const STONE_STEP: StepCut = {
       descended.includes('target_y=67') &&
       !result.messages.some((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED')),
     `status=${result.status} verified=${result.verified} marker=[${descended ?? 'none'}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (h2) A path failure followed by a typed vertical-leg failure must preserve
+// the FINAL mechanical failure. Calling it `path_no_path` spends the wrong
+// route stage and hides the pillar/place root cause from #435.
+// ---------------------------------------------------------------------------
+{
+  const fixture = makeBot({ x: 11, y: 66, z: 24 }, gateGrid(), true)
+  const state = worldState({ x: 11.5, y: 66, z: 24.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  const base = enterCandidate(fixture, state)
+  const candidate: Candidate = {
+    ...base,
+    meta: { ...base.meta, vertical: 'pillar', verticalFromY: 66, verticalToY: 67, pillarPlaceName: 'cobblestone', pillarSteps: 1 },
+  }
+  const result = await runEntry(fixture, candidate, false, true, (executor) => {
+    ;(executor as unknown as {
+      runEntryRouteLeg: () => Promise<{ progressed: boolean; error: ExecutorError | null; activeVertical: string; obstruction: string | null }>
+    }).runEntryRouteLeg = async () => ({
+      progressed: false,
+      error: new ExecutorError('place_refused', 'server refused placement; block still air'),
+      activeVertical: 'pillar',
+      obstruction: 'refused',
+    })
+  })
+  check(
+    '(h2) a vertical place refusal survives ENTER failure attribution instead of becoming path_no_path',
+    result.status === 'failed' && result.failure === 'place_refused',
+    `status=${result.status} failure=${result.failure ?? 'none'} markers=[${result.messages.filter((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED')).join('|')}]`,
   )
 }
 

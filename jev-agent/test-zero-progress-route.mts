@@ -668,6 +668,11 @@ addCase("(a') a path-stage failure spends the ENTER route: the identical candida
   }
 })
 
+addCase("(a2') a pillar place refusal is a move-stage failure, never a path-stage failure", () => {
+  const stage = routeFailureStage('place_refused')
+  return { pass: stage === 'move', detail: `stage=${stage}` }
+})
+
 addCase("(a') the spent route travels as the goal-level budget: routes=n grows with each distinct stand/plan identity", () => {
   const first = observeZeroProgressRoute(undefined, {
     kind: 'ENTER_PORTAL',

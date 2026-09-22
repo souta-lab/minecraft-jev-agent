@@ -79,13 +79,13 @@ import {
 } from './pillarSearch.ts'
 import type { PillarColumnProbe } from './pillarSearch.ts'
 import {
+  decidePillarFailureRecovery,
   formatPillarFail,
   formatPillarRetire,
   isPillarRefusalUnsatisfiable,
   pillarArcComplete,
   pillarStepUp,
   requiredColumnClearance,
-  shouldRelocatePillarAfterFailure,
   takeoffObservedRise,
 } from './pillarApex.ts'
 import type { PillarRefusalEvidence } from './pillarApex.ts'
@@ -2735,6 +2735,10 @@ export class Executor {
       let climbed = 0
       let relocations = 0
       let attemptSequence = 0
+      // Per vertical step/column. A server-refused place that left the target
+      // cell empty gets one bounded retry inside this Skill; it never escapes as
+      // a fresh route decision unless that retry also fails.
+      let sameColumnPlaceRetries = 0
       const refusedColumns = new Set<string>()
       while (climbed < maxSteps) {
         this.ensureOwned(epoch, signal)
@@ -3042,6 +3046,13 @@ export class Executor {
             arcComplete: jumpTrace !== null && pillarArcComplete(jumpTrace),
             forcedRepositions,
           }
+          const blockPlaced = this.currentBlockAt(placeCell)?.boundingBox === 'block'
+          const recovery = decidePillarFailureRecovery(
+            climb.fail,
+            refusalEvidence,
+            blockPlaced,
+            sameColumnPlaceRetries,
+          )
           if (isPillarRefusalUnsatisfiable(climb.fail, refusalEvidence)) {
             this.logger.warn('executor', formatPillarRetire(feet, refusalEvidence), {
               actionId: candidate.id,
@@ -3051,7 +3062,23 @@ export class Executor {
               achievable: refusalEvidence.achievableRise,
             })
           }
-          if (shouldRelocatePillarAfterFailure(climb.fail, refusalEvidence)) {
+          if (recovery === 'retry_same_column') {
+            sameColumnPlaceRetries += 1
+            this.logger.info(
+              'agent',
+              `PILLAR_RETRY cell=${feet.x},${feet.y},${feet.z} reason=place_refused attempt=${sameColumnPlaceRetries}/1`,
+              { actionId: candidate.id, placeCell, blockPlaced },
+            )
+            // `pillarStepUp` returns immediately when the placement packet is
+            // refused, so the body can still be descending. Retry only after the
+            // same support cell is authoritatively grounded again.
+            if (await this.waitForPillarRetrySettle(feet, epoch, signal)) continue
+            this.logger.warn('executor', `PILLAR_RETRY refused: body did not settle back in (${feet.x},${feet.y},${feet.z})`, {
+              actionId: candidate.id,
+            })
+            break
+          }
+          if (recovery === 'relocate') {
             refusedColumns.add(pillarColumnKey(feet))
             const relocation = decidePillarRelocation({
               relocations,
@@ -3082,12 +3109,14 @@ export class Executor {
               }
               this.ensureOwned(epoch, signal)
               relocations += 1
+              sameColumnPlaceRetries = 0
               continue
             }
           }
           break
         }
         climbed += 1
+        sameColumnPlaceRetries = 0
         emitPillarTakeoff(climb.apexRise, null, null)
         this.logger.info(
           'agent',
@@ -3104,6 +3133,38 @@ export class Executor {
       this.bot.physicsEnabled = savedPhysics
       this.bot.setControlState('jump', false)
     }
+  }
+
+  /**
+   * After a side-effect-free server refusal, wait boundedly for the body to
+   * return to the same grounded feet cell before sending the one retry.
+   */
+  private async waitForPillarRetrySettle(
+    expectedFeet: Vec3Json,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const deadline = Date.now() + PILLAR_LANDING_BUDGET_MS
+    while (Date.now() < deadline) {
+      this.ensureOwned(epoch, signal)
+      const position = this.bot.entity.position
+      const feet = {
+        x: Math.floor(position.x),
+        y: Math.floor(position.y + 1e-4),
+        z: Math.floor(position.z),
+      }
+      if (
+        feet.x === expectedFeet.x &&
+        feet.y === expectedFeet.y &&
+        feet.z === expectedFeet.z &&
+        this.bot.entity.onGround &&
+        this.solidSupportAt(feet.x, feet.y - 1, feet.z)
+      ) {
+        return true
+      }
+      await delay(PILLAR_TAKEOFF_POLL_MS, signal)
+    }
+    return false
   }
 
   /**
@@ -5712,7 +5773,8 @@ export class Executor {
         fromY: Math.floor(this.bot.entity.position.y),
         toY: enterCell.y,
       })
-      throw new ExecutorError('path_no_path', blocked)
+      const finalCode: FailureCode = pathError instanceof ExecutorError ? pathError.code : 'path_no_path'
+      throw new ExecutorError(finalCode, blocked)
     }
     if (!this.dimensionMatches(dimension)) {
       // Arrival re-verification of the lit precondition: the route may have
@@ -5770,11 +5832,18 @@ export class Executor {
       const nowY = Math.floor(this.bot.entity.position.y)
       const movedTowardTargetY = enterCell.y < fromY ? nowY < fromY : nowY > fromY
       if (verticalStep && movedTowardTargetY) return { progressed: true, error: null, activeVertical, obstruction: null }
+      const obstruction = this.lastVerticalFailureReason ?? `${activeVertical}_no_step`
       return {
         progressed: false,
-        error: null,
+        // A path failure followed by an actual pillar placement refusal failed in
+        // HOW, not in pathfinding. Preserve that typed final cause so #435 does
+        // not spend the route as a fictitious path-stage failure.
+        error:
+          obstruction === 'refused'
+            ? new ExecutorError('place_refused', `entry pillar placement refused after path fallback`)
+            : null,
         activeVertical,
-        obstruction: this.lastVerticalFailureReason ?? `${activeVertical}_no_step`,
+        obstruction,
       }
     } catch (error) {
       if (error instanceof ActionCancelled) throw error
