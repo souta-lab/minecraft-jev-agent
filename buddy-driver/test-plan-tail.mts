@@ -352,6 +352,7 @@ addCase('#412/#414: the state hash keys on the body/queue/failure inputs the mod
     queue: { depth: 2, done: 1, current: 'enter_portal', hasImpossible: false },
     wakeReason: 'action_impossible',
     wakeDetail: 'all_routes_spent',
+    recentEvents: ['PATH_CALLBACK phase=failed actionId=ENTER:26,67,9'],
     recentOutcomes: ['ENTER:26,67,9:failed:path_stuck'],
     horizon: ['enter_nether', 'blaze_rods'],
   }
@@ -362,6 +363,7 @@ addCase('#412/#414: the state hash keys on the body/queue/failure inputs the mod
   const failed = h({ ...base, recentOutcomes: ['ENTER:26,67,9:failed:path_stuck', 'ENTER:26,67,9:failed:path_stuck'] })
   const queue = h({ ...base, queue: { ...base.queue, hasImpossible: true } })
   const horizon = h({ ...base, horizon: ['enter_nether'] })
+  const events = h({ ...base, recentEvents: ['ROUTE_SPENT kind=ENTER_PORTAL target=26,67,9'] })
   const noView = plannerStateHash({}, world, objective, identity)
   return {
     pass:
@@ -371,10 +373,11 @@ addCase('#412/#414: the state hash keys on the body/queue/failure inputs the mod
       failed !== stable &&
       queue !== stable &&
       horizon !== stable &&
+      events !== stable &&
       noView !== stable,
     detail:
       `stable=${stable} moved=${moved !== stable} hurt=${hurt !== stable} failed=${failed !== stable} ` +
-      `queue=${queue !== stable} horizon=${horizon !== stable} noViewDiffers=${noView !== stable}`,
+      `queue=${queue !== stable} horizon=${horizon !== stable} events=${events !== stable} noViewDiffers=${noView !== stable}`,
   }
 })
 

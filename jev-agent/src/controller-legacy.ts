@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
@@ -75,7 +75,7 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
@@ -87,7 +87,7 @@ import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, GoalState, KnownResource, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import type { AgentSignals, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -878,6 +878,108 @@ export function filterKnownResources(
   return resources.filter((resource) => !unreachable.has(resourceKey(resource)))
 }
 
+/**
+ * `KNOWN_RESOURCE_FALSIFIED item=<item> name=<name> cell=<x,y,z> reason=<reason>`.
+ *
+ * A remembered cell the loaded world PROVED wrong: `block_mined` (the block is
+ * gone/replaced), `mob_gone` (the landmark stands but no producer is inside the
+ * entity envelope) or `drop_absent` (the cell was remembered as the item itself
+ * and nothing holds it). Typed truth, never a preference.
+ */
+export function formatKnownResourceFalsified(
+  item: string,
+  name: string,
+  cell: Vec3Json,
+  reason: KnownResourceFalsifiedReason,
+): string {
+  return `KNOWN_RESOURCE_FALSIFIED item=${item} name=${name} cell=${cell.x},${cell.y},${cell.z} reason=${reason}`
+}
+
+/** `KNOWN_RESOURCE_RESIGHTED item=<item> name=<name> cell=<x,y,z> source=mob|drop`. */
+export function formatKnownResourceResighted(
+  item: string,
+  name: string,
+  cell: Vec3Json,
+  source: 'mob' | 'drop',
+): string {
+  return `KNOWN_RESOURCE_RESIGHTED item=${item} name=${name} cell=${cell.x},${cell.y},${cell.z} source=${source}`
+}
+
+/**
+ * `KNOWN_RESOURCE_RETIRED item=<item> cell=<x,y,z> attempts=<n>`.
+ *
+ * The bounded-retire boundary (`decideKnownRetrieve`) dropped a remembered cell
+ * as unreachable after `attempts` zero-progress retrieves. The cell was PRESENT
+ * but this body could not close it: retirement is per-cell and unrelated to the
+ * falsification reasons above (a merely unreachable resource is not disproved).
+ */
+export function formatKnownResourceRetired(item: string, cell: Vec3Json, attempts: number): string {
+  return `KNOWN_RESOURCE_RETIRED item=${item} cell=${cell.x},${cell.y},${cell.z} attempts=${attempts}`
+}
+
+/** Dedupe state for remembered-cell verdict lines (one per generation). */
+export interface KnownResourceVerdictLatch {
+  /** `<item>:<name>@<cell>:<reason>` already reported */
+  falsified: Set<string>
+  /** `<item>:<name>@<cell>` re-sight already reported */
+  resighted: Set<string>
+}
+
+export type KnownResourceVerdict =
+  | { kind: 'none' }
+  | { kind: 'falsified'; reason: KnownResourceFalsifiedReason }
+  | { kind: 'resighted'; source: 'mob' | 'drop' }
+
+/**
+ * The report rule for one remembered-cell verdict, mutating the dedupe latch.
+ *
+ *   - `falsified` is reported once per (item, name, cell, reason);
+ *   - a cell the world verifies again RE-ARMS that report, so a second
+ *     contradiction of the same cell is reported - and durably evicted - again
+ *     instead of being swallowed by the once-per-cell latch;
+ *   - only a producer/drop re-sight that actually followed a withhold gets its
+ *     own line: a block being present is the ordinary case and would spam.
+ *
+ * Pure apart from the latch. No goal, action or ranking is involved.
+ */
+export function nextKnownResourceVerdict(
+  latch: KnownResourceVerdictLatch,
+  evidence: Pick<KnownResourceEvidence, 'item' | 'name' | 'position' | 'status' | 'reason' | 'source'>,
+): KnownResourceVerdict {
+  const base = `${evidence.item}:${evidence.name}@${evidence.position.x},${evidence.position.y},${evidence.position.z}`
+  if (evidence.status === 'falsified') {
+    const reason: KnownResourceFalsifiedReason = evidence.reason ?? 'block_mined'
+    const key = `${base}:${reason}`
+    if (latch.falsified.has(key)) return { kind: 'none' }
+    latch.falsified.add(key)
+    latch.resighted.delete(base)
+    return { kind: 'falsified', reason }
+  }
+  if (evidence.status !== 'present' && evidence.status !== 'replaced') return { kind: 'none' }
+  const withheld = [...latch.falsified].some((key) => key.startsWith(`${base}:`))
+  for (const key of [...latch.falsified]) {
+    if (key.startsWith(`${base}:`)) latch.falsified.delete(key)
+  }
+  if (evidence.source === undefined || !withheld || latch.resighted.has(base)) return { kind: 'none' }
+  latch.resighted.add(base)
+  return { kind: 'resighted', source: evidence.source }
+}
+
+function knownResourceVerdictDetail(
+  evidence: KnownResourceEvidence,
+  reason: KnownResourceFalsifiedReason | null,
+): Record<string, unknown> {
+  return {
+    item: evidence.item,
+    name: evidence.name,
+    cell: evidence.position,
+    observed: evidence.observed,
+    claim: evidence.claim,
+    ...(reason === null ? {} : { reason }),
+    ...(evidence.source === undefined ? {} : { source: evidence.source }),
+  }
+}
+
 /** Item names whose VERIFIED placement registers a usable smelt station. */
 export const PLACED_STATION_ITEMS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
 
@@ -1087,6 +1189,11 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'LOCAL_MOVE_OSCILLATION',
   'LOCAL_WAIT_RECOVERY',
   'KNOWN_RESOURCE_STALE',
+  'KNOWN_RESOURCE_FALSIFIED',
+  'KNOWN_RESOURCE_RESIGHTED',
+  'KNOWN_RESOURCE_RETIRED',
+  SKILL_END,
+  SKILL_INTERRUPT,
   'EXPLORE',
   'REPLAN_THROTTLED',
   'REPLAN_REJECTED',
@@ -1726,6 +1833,11 @@ export class JevController {
   private readonly searchedSurfaceTargets = new Set<string>()
   private retrievalEscalationPending = false
   private readonly unreachableResources = new Set<string>()
+  /** Report latch for `KNOWN_RESOURCE_FALSIFIED`/`KNOWN_RESOURCE_RESIGHTED` lines. */
+  private readonly knownResourceVerdicts: KnownResourceVerdictLatch = {
+    falsified: new Set<string>(),
+    resighted: new Set<string>(),
+  }
   /**
    * Consecutive zero-progress retrieves per remembered resource (`name@x,y,z`).
    * Retires a present-but-unreachable resource after KNOWN_RETRIEVE_RETIRE_LIMIT.
@@ -2580,6 +2692,7 @@ export class JevController {
           currentOption: this.currentOptionContext(),
           recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
+          retrievalItems: this.retrievalProbeItems(),
           recentEvents: this.recentEvents,
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
@@ -2590,6 +2703,10 @@ export class JevController {
       this.syncTerrainSignals(state)
       this.sampleMovement(state.self.position)
       this.logStaleKnownResources(state)
+      // Section E: the state just contradicted the running skill's target claim,
+      // so stop it with a typed outcome BEFORE this tick's decision. Jev owns the
+      // replacement; code never substitutes one.
+      this.cancelContradictedSkillTarget(state)
       this.lastPlacedFurnaceCount = (state.furnaces ?? []).filter(isSensedStation).length
       this.lastStateFingerprint = this.stateFingerprint(state)
       // Retain the sensor facts the pure vertical-plan refusal needs (step cuts,
@@ -2991,6 +3108,7 @@ export class JevController {
           currentOption: this.currentOptionContext(),
           recentOutcomes: this.recentOutcomes,
           focusItem: currentFocusItem(this.goal, this.queue.state),
+          retrievalItems: this.retrievalProbeItems(),
           recentEvents: this.recentEvents,
           signals: this.signals,
           rememberedStations: this.knownResourcesForSensor(),
@@ -7178,6 +7296,19 @@ export class JevController {
     }
     this.knownRetrieveFailures.set(key, decision.attempts)
     if (decision.kind === 'charge') return
+    // The retire boundary is about reachability, not truth: the cell was never
+    // disproved, so it is dropped (bounded) rather than falsified. The typed
+    // marker keeps the two apart in the run log.
+    this.logger.warn(
+      'agent',
+      formatKnownResourceRetired(
+        typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
+        candidate.target,
+        decision.attempts,
+      ),
+      { item: candidate.meta.resource ?? knownName, cell: candidate.target, attempts: decision.attempts, limit: KNOWN_RETRIEVE_RETIRE_LIMIT },
+      this.tickCounter,
+    )
     this.dropUnreachableResource(
       {
         resource: typeof candidate.meta.resource === 'string' ? candidate.meta.resource : knownName,
@@ -7671,6 +7802,22 @@ export class JevController {
   }
 
   /**
+   * Every want item this tick's retrieval machinery can route to: the active
+   * focus plus the queued want the explicit descent proxy exposes. The sensor
+   * verifies remembered cells for all of them (`SensorInput.retrievalItems`),
+   * because `retrievalNeeds` offers the proxied row's `RETRIEVE:known` from the
+   * same memory - verifying only the focus left that cell unproven forever.
+   */
+  private retrievalProbeItems(): string[] {
+    const out: string[] = []
+    const focus = currentFocusItem(this.goal, this.queue.state)
+    if (focus !== null) out.push(focus)
+    const proxy = queuedRetrievalProxyItem(this.queue.state)
+    if (proxy !== null && !out.includes(proxy)) out.push(proxy)
+    return out
+  }
+
+  /**
    * M2 blocker: remembered stations whose grounded retrieve the move-failure
    * memory has blacklisted (`MOVE_TARGET_SKIPPED`) or the reachability gate has
    * withheld (`CANDIDATE_WITHHELD`) are handed to the pure prerequisite planner
@@ -7974,6 +8121,115 @@ export class JevController {
         this.tickCounter,
       )
     }
+    this.logKnownResourceVerdicts(state)
+  }
+
+  /**
+   * The typed VERDICT for every remembered cell the sensor proved or disproved
+   * this tick (`state.knownResourceEvidence`), so a stale memory is observable in
+   * the run log instead of only its silent withholding.
+   *
+   *   - `KNOWN_RESOURCE_FALSIFIED ... reason=block_mined|mob_gone|drop_absent`:
+   *     the loaded world contradicts the memory. Logged once per (cell, item,
+   *     reason); a cell that is re-sighted re-arms it, so a second absence is a
+   *     second marker;
+   *   - `KNOWN_RESOURCE_RESIGHTED ... source=mob|drop`: a producer/drop cell the
+   *     memory still asserts has live evidence again, which is exactly when its
+   *     `RETRIEVE:known` route is offered again.
+   *
+   * This is enumeration of world truth: no goal, action or ranking is decided.
+   */
+  private logKnownResourceVerdicts(state: WorldState): void {
+    for (const evidence of state.knownResourceEvidence ?? []) {
+      const verdict = nextKnownResourceVerdict(this.knownResourceVerdicts, evidence)
+      if (verdict.kind === 'falsified') {
+        this.logger.warn(
+          'agent',
+          formatKnownResourceFalsified(evidence.item, evidence.name, evidence.position, verdict.reason),
+          knownResourceVerdictDetail(evidence, verdict.reason),
+          this.tickCounter,
+        )
+        continue
+      }
+      if (verdict.kind === 'resighted') {
+        this.logger.info(
+          'agent',
+          formatKnownResourceResighted(evidence.item, evidence.name, evidence.position, verdict.source),
+          knownResourceVerdictDetail(evidence, null),
+          this.tickCounter,
+        )
+      }
+    }
+  }
+
+  /**
+   * #436 section E (deterministic cancellation / failure):
+   *
+   *   "observed world state contradicts the claimed postcondition -> never report
+   *    success"; "selected block changed into another block -> stop + re-observe";
+   *    "selected entity despawned / identity invalidated -> stop + typed
+   *    target-gone outcome"; "No deterministic failure branch may silently choose
+   *    a different semantic objective."
+   *
+   * The RUNNING known-resource skill is grounded on the remembered cell's claim
+   * (the block is there / a producer is there / the drop is there). When the state
+   * this tick PROVED that claim false, the skill is CANCELLED with a typed
+   * outcome - it is never silently re-pointed at another cell or another item.
+   * The tick then continues to Jev, which owns WHICH action comes next.
+   *
+   * The boundaries that keep this a truth rule and not a retry policy:
+   *   - only `falsified` (a real contradiction) cancels. `unknown` (unloaded
+   *     chunk / outside the entity envelope) is not a verdict and a merely
+   *     UNREACHABLE target keeps the existing bounded `decideKnownRetrieve`
+   *     retry/retire - a side-effect-free transient failure may be retried inside
+   *     its explicit bound;
+   *   - a cancelled skill is never restarted by code: the falsified cell is
+   *     withheld from `signals.knownResources`, so only a real re-sighting can
+   *     put it back in front of Jev;
+   *   - when the side-effect state is unknown, nothing here retries blindly.
+   */
+  private cancelContradictedSkillTarget(state: WorldState): void {
+    const active = this.activeRetrieval
+    if (active === null) return
+    const running = this.executor.current
+    if (running === null || running.id !== active.id) return
+    const contradiction = (state.knownResourceEvidence ?? []).find(
+      (evidence) =>
+        evidence.status === 'falsified' &&
+        evidence.position.x === active.target.x &&
+        evidence.position.y === active.target.y &&
+        evidence.position.z === active.target.z,
+    )
+    if (contradiction === undefined) return
+    const reason: 'contradicted' | 'target_gone' =
+      contradiction.reason === 'mob_gone' ? 'contradicted' : 'target_gone'
+    const failure = contradiction.reason ?? 'falsified'
+    const cancelled = this.executor.cancelCurrent(`contradicted target ${active.id} (${failure})`)
+    this.logger.warn(
+      'agent',
+      // The canonical #436 vocabulary (netherPortalPlan.ts): a Skill that ended
+      // because the world contradicted the state its postcondition was grounded
+      // on, with the typed failure code.
+      formatSkillEnd(KNOWN_RETRIEVE_SKILL, 'cancelled', 'failed', `${contradiction.claim}_present`, failure),
+      {
+        actionId: active.id,
+        item: active.resource,
+        name: active.knownName,
+        cell: active.target,
+        claim: contradiction.claim,
+        observed: contradiction.observed,
+        cancelled,
+      },
+      this.tickCounter,
+    )
+    this.logger.warn(
+      'agent',
+      formatSkillInterrupt(KNOWN_RETRIEVE_SKILL, reason),
+      { actionId: active.id, item: active.resource, cell: active.target, reason: failure },
+      this.tickCounter,
+    )
+    this.activeRetrieval = null
+    this.retrievalTrack = null
   }
 
   private abortWedge(reason: string): void {

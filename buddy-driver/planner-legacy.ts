@@ -2612,6 +2612,8 @@ export interface PlannerModelView {
   queue: { depth: number; done: number; current: string | null; hasImpossible: boolean }
   wakeReason: string
   wakeDetail: string
+  /** `compactState` sends the last five model-visible events as well; #412 lists them as an omitted input. */
+  recentEvents: string[]
   recentOutcomes: string[]
   horizon: string[]
 }
@@ -2620,7 +2622,7 @@ export interface PlannerModelView {
 export interface PlannerModelViewInput {
   counts: Counts
   world: ResidentWorldMemory
-  request: Pick<System2PlanRequest, 'objective' | 'reason' | 'detail' | 'recentOutcomes' | 'goalQueueState'>
+  request: Pick<System2PlanRequest, 'objective' | 'reason' | 'detail' | 'recentEvents' | 'recentOutcomes' | 'goalQueueState'>
   position: { x: number; y: number; z: number } | null
   health: number | null
   food: number | null
@@ -2646,6 +2648,7 @@ export function plannerModelView(input: PlannerModelViewInput): PlannerModelView
     },
     wakeReason: input.request.reason,
     wakeDetail: input.request.detail.slice(0, 200),
+    recentEvents: input.request.recentEvents.slice(-5).map((event: string) => event),
     recentOutcomes: input.request.recentOutcomes
       .slice(-5)
       .map((outcome) => `${outcome.actionId}:${outcome.status}${outcome.failure === null ? '' : `:${outcome.failure}`}`),

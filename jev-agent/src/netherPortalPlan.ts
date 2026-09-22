@@ -1299,8 +1299,12 @@ export function formatSkillEnd(
   execution: string,
   verification: string,
   postcondition: string,
+  failure: string | null = null,
 ): string {
-  return `${SKILL_END} skill=${skill} execution=${execution} verification=${verification} postcondition=${postcondition}`
+  return (
+    `${SKILL_END} skill=${skill} execution=${execution} verification=${verification} postcondition=${postcondition}` +
+    (failure === null || failure.length === 0 ? '' : ` failure=${failure}`)
+  )
 }
 
 export interface ReflexInput {

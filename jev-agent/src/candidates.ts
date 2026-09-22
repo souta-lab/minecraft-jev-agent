@@ -24,7 +24,7 @@
 import type { CraftOp, RecipeIndex } from './crafting.ts'
 import { describeCraftOp, planNextCraftStep } from './crafting.ts'
 import type { BlockState, DescentDir, DescentOption, DescentRefusalReason, EntityState, KnownResource, StationEntry, Vec3Json, WorldState } from './state.ts'
-import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
+import { DEFAULT_EAT_BELOW_FOOD, bodyIsOutOfAir, bodyStarving, CRAFT_STATIONS, DIRECT_BLOCK_SOURCES, FURNACE_STATIONS, MOB_DROP_PRODUCERS, NETHER_STRUCTURE_BLOCK_NAMES, PICKAXE_RANKS, isStructureFabricSource, placementSpotKey, STONE_YIELDS, descentDigPlan, descentPrimaryCell, distance, isSensedStation, scannedBlockNames } from './state.ts'
 import { findInventoryFuel, inventoryFuels, isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
 import type { InventoryFuel } from './resourceClass.ts'
 import { isEdibleFoodItem } from './foodSources.ts'
@@ -1796,17 +1796,6 @@ const FOOD_ANIMALS = new Set([
   'salmon',
   'tropical_fish',
 ])
-
-/**
- * Deterministic Minecraft producer truth for mob-drop collect goals. This table
- * answers CAN/TRUE only: when the active collect target is one of these items,
- * every currently sensed producer is exposed as a grounded ATTACK alternative.
- * Jev still owns WHICH producer/action to pursue.
- */
-const MOB_DROP_PRODUCERS: Readonly<Record<string, ReadonlySet<string>>> = {
-  ender_pearl: new Set(['enderman']),
-  blaze_rod: new Set(['blaze']),
-}
 
 const HAZARD_DANGER_RADIUS = 3
 
@@ -6738,13 +6727,11 @@ interface RetrievalWant {
  * kill/pickup machinery still owns the actual rod. It is never a claim that
  * `nether_bricks` yields `blaze_rod` (`resourceMatches` stays exact), so the
  * MINE arm keeps withholding the body blocks for a `blaze_rod` focus.
+ *
+ * `isStructureFabricSource` lives in `state.ts` because the SENSOR needs the same
+ * classification to verify the cell against the claim it makes (a producer
+ * landmark is not verified by its own block being present).
  */
-const STRUCTURE_FABRIC_NAMES: ReadonlySet<string> = new Set(NETHER_STRUCTURE_BLOCK_NAMES)
-
-function isStructureFabricSource(blockNames: readonly string[]): boolean {
-  return blockNames.length > 0 && blockNames.every((name) => STRUCTURE_FABRIC_NAMES.has(name))
-}
-
 function retrievalWant(focusItem: string | null): RetrievalWant | null {
   if (focusItem === null) return null
   const blocks = scannedBlockNames(focusItem)
@@ -6861,6 +6848,34 @@ function allowsQueuedRetrievalProxy(current: { kind?: string; targetItem?: strin
 }
 
 /**
+ * The queued row the CURRENT row's explicit descent proxy exposes, or null.
+ *
+ * One definition for both consumers: `retrievalNeeds` offers this row's
+ * `RETRIEVE:known` route, and the sensor must verify the same row's remembered
+ * cells (`SensorInput.retrievalItems`) - verifying only the active focus left a
+ * proxied want's stale cell unproven, so it was re-offered forever.
+ */
+function queuedRetrievalProxyRow<Row extends { id?: string; status?: string; targetItem?: string | null }>(
+  queue: { current: { id?: string; kind?: string; targetItem?: string | null; description?: string } | null; goals: readonly Row[] } | null | undefined,
+): Row | null {
+  const current = queue?.current ?? null
+  if (current === null || !allowsQueuedRetrievalProxy(current)) return null
+  const rows = queue?.goals ?? []
+  const currentIndex = rows.findIndex((queued) => queued.id === current.id)
+  if (currentIndex < 0) return null
+  return rows.slice(currentIndex + 1).find((queued) => queued.status !== 'done' && queued.status !== 'impossible') ?? null
+}
+
+/** The item name of the proxied queued want, for the sensor's verification scope. */
+export function queuedRetrievalProxyItem(
+  queue: Parameters<typeof queuedRetrievalProxyRow>[0],
+): string | null {
+  const row = queuedRetrievalProxyRow(queue)
+  const item = row?.targetItem
+  return typeof item === 'string' && item.length > 0 ? item : null
+}
+
+/**
  * Ordered retrieval needs for the ACTIVE execution row.  The active focus is
  * always first.  `state.goal.targetItem` is only a legacy fallback when there
  * is no queue current; while a queue row is active it is mission-level state
@@ -6900,15 +6915,11 @@ function retrievalNeeds(state: WorldState, focusItem: string | null, includeQueu
   push(focusItem, goalWantsFuel(current), current)
   if (current === null) {
     push(state.goal.targetItem, false, null)
-  } else if (current.kind !== 'smelt' && includeQueued && allowsQueuedRetrievalProxy(current)) {
-    const rows = state.goalQueue.goals
-    const currentIndex = rows.findIndex((queued) => queued.id === current.id)
-    if (currentIndex >= 0) {
-      const next = rows
-        .slice(currentIndex + 1)
-        .find((queued) => queued.status !== 'done' && queued.status !== 'impossible')
-      if (next !== undefined) push(next.targetItem, goalWantsFuel(next), next)
-    }
+  } else if (current.kind !== 'smelt' && includeQueued) {
+    // The proxy's OWN row decides what it exposes (`queuedRetrievalProxyRow`), so
+    // the offered route and the sensor's verification scope cannot diverge.
+    const next = queuedRetrievalProxyRow(state.goalQueue)
+    if (next !== null) push(next.targetItem, goalWantsFuel(next), next)
   }
   const wants: RetrievalWant[] = []
   for (const need of needs) {
@@ -6983,7 +6994,13 @@ function knownResourceFor(
     // site-anchor route does not depend on the entry's own kind. Dimension
     // re-anchoring above is what keeps an overworld sighting out (see (b) in
     // test-fortress-route.mts): a Nether site never routes from the overworld.
-    const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
+    // A cell remembered as the wanted item ITSELF (loot, a death drop) is a route
+    // by identity; the sensor verifies it against live dropped-item truth and
+    // withholds it (`drop_absent`) when nothing holds that item any more.
+    const matches =
+      want.kind === 'log'
+        ? resource.name.endsWith('_log')
+        : want.blockNames.includes(resource.name) || resource.name === want.item
     if (!matches) continue
     // A remembered cell inside a live structure is not a source: a retrieval
     // there would mine the structure the same way the sensed MINE would. Skip it
@@ -7001,6 +7018,13 @@ function knownResourceFor(
   }
   return best
 }
+
+/**
+ * The stable id of the executed `RETRIEVE:known` Skill, for the #436 Skill
+ * vocabulary (`SKILL_START`/`SKILL_INTERRUPT`/`SKILL_END`). One id for every
+ * remembered-cell trip, whatever item or claim it carries.
+ */
+export const KNOWN_RETRIEVE_SKILL = 'RETRIEVE(knownResource)'
 
 export const KNOWN_RESOURCE_PROOF_DISTANCE = 8
 
