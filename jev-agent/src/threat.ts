@@ -1,0 +1,555 @@
+// threat.ts - SAFE: the code-owned fact "a hostile mob is on top of the body".
+//
+// Measured live (m3-live, `run-mubobiq6-12onv`, source 220b9db, permanent night,
+// `difficulty=normal`, `spawn-monsters=true`): eight deaths in seven minutes,
+// every one of them `cause=damage` with no weapon and no armour. The executed
+// action trace in one of those windows is the whole failure:
+//
+//   22:19:36 trigger=damage_taken attacker=spider 1.52m
+//   22:19:39 generated ATTACK:e33467 (zombie 0.78m) + RETREAT x3 (1.4m..2.4m away)
+//   22:19:41 JEV_HEADS action=ATTACK:e33467 -> replan; ACTION_COMMIT held RETREAT
+//   22:19:44 DEATH pos=28.7,65.0,11.4 healthBefore=2.17
+//   22:20:35 RETREAT:p4_69_-9 (0.71m away) -> "arrival start=(4.5,69,-8.5) end=(4.5,69,-8.5) moved=0m"
+//   22:20:42 DEATH pos=4.5,69.0,-8.5
+//
+// Two independent defects made that shape possible:
+//
+//   1. The response was PER-TICK. `restrictCandidatesDuringImmediateThreat`
+//      (candidates.ts) only arms while a hostile is inside 3.2 m in the CURRENT
+//      snapshot. The moment the mob falls outside it the body goes back to
+//      digging/retrieving/crafting, the zombie follows, lands another hit, and
+//      health erodes 20 -> 18 -> 16 -> 2 -> death. Nothing owned "the body is in
+//      a fight", so there was no state to keep the body answering the threat.
+//   2. The offered "retreat" could not retreat. `pickRetreats` only ever sees
+//      `state.terrain.standable`, which the sensor samples in a 5x5x3 window
+//      around the body (state.ts `buildTerrain`), so every "retreat to safety"
+//      was 1.4-2.4 m away while the zombie was inside 0.8 m - a shuffle inside
+//      melee reach, executed as `moved=0m`.
+//
+// This module is the deterministic owner of the missing facts. It never picks
+// WHAT to do: it reports the threat (name, distance, contact/danger, weapon
+// needed to answer it), keeps a bounded danger STATE with a real exit condition
+// (hysteresis instead of a per-tick filter), grounds keep-distance destinations
+// that actually gain separation, and formats the typed markers.
+//
+// Design boundary, same as `criticalDamage.ts`:
+//   - code owns CAN/SAFE: is this entity a threat, is the body in contact, which
+//     destinations genuinely move it away, which weapon does the body hold;
+//   - Jev owns WHICH grounded survival action (ATTACK / RETREAT / ESCALATE);
+//   - System2 owns WHAT NEXT when the local layer proves it cannot end the
+//     situation (the `THREAT_NO_ESCAPE` capability gap).
+import type { EntityState, LastDamageEvidence, Vec3Json } from './state.ts'
+
+/**
+ * Hostile melee reach. A hostile inside this envelope is already hitting the
+ * body, so a work action is not a safe response (the pre-existing
+ * `IMMEDIATE_HOSTILE_RANGE`; kept as one number).
+ */
+export const MELEE_THREAT_REACH = 3.2
+
+/**
+ * The bounded danger radius. A walking hostile inside 8 m closes to melee in
+ * ~2 s, i.e. inside one policy decision, so the survival offer must contain a
+ * grounded answer here rather than only at contact range.
+ */
+export const THREAT_DANGER_RADIUS = 8
+
+/**
+ * A hostile that has actually engaged the body is response-worthy far beyond
+ * melee range: a skeleton opens fire at roughly 10-16 m. This is the response
+ * envelope (the pre-existing `THREAT_RESPONSE_RANGE`).
+ */
+export const THREAT_RESPONSE_RANGE = 24
+
+/** How long a damage observation keeps a hostile response-worthy. */
+export const THREAT_MEMORY_MS = 8000
+
+/**
+ * The sustained-clear interval a danger state needs before it may leave. This is
+ * the hysteresis: a single snapshot without the mob is NOT an exit (that is the
+ * measured per-tick failure), the whole envelope must stay clear for 8 s.
+ */
+export const THREAT_CLEAR_MS = 8000
+
+/**
+ * Distance at which a destination is outside a hostile's reach with margin. A
+ * retreat that does not reach this must at least gain `MIN_KEEP_DISTANCE_GAIN`.
+ */
+export const THREAT_STANDOFF_RANGE = 4
+
+/**
+ * A keep-distance destination must gain at least this much separation from the
+ * threat. The measured live "retreats" gained 0.25-1.6 m and left the body in
+ * melee reach; `+0.25 m` is not a retreat.
+ */
+export const MIN_KEEP_DISTANCE_GAIN = 2
+
+/** Sensor window (blocks) for threat escape cells. */
+export const THREAT_ESCAPE_RADIUS = 6
+
+/** Vertical half-window of the escape scan, matching `buildTerrain`. */
+export const THREAT_ESCAPE_DY = 1
+
+/** Upper bound on escape cells kept, so the offer cannot be crowded. */
+export const THREAT_ESCAPE_MAX_CELLS = 12
+
+/**
+ * Bounded "the goal is stalled" window used by the danger-state restriction.
+ * Identical to the controller's default `stallMs` (`LOCAL_PROGRESS_STALL`);
+ * injected as an option so the two can never drift.
+ */
+export const DEFAULT_THREAT_STALL_MS = 25000
+
+export const THREAT_NEARBY = 'THREAT_NEARBY'
+export const THREAT_NO_ESCAPE = 'THREAT_NO_ESCAPE'
+export const THREAT_CLEAR = 'THREAT_CLEAR'
+
+/** Vanilla 1.21 unarmed player attack damage. */
+export const FIST_DAMAGE = 1
+
+/**
+ * Vanilla natural health regeneration needs a full-enough hunger bar (food >= 18
+ * and a non-empty saturation buffer). Measured live: the resident held food 0-2
+ * for the whole attrition window, `EAT_REFUSED reason=no_food` fired 174 times,
+ * no `EAT` action ever executed, and health only ever returned to 20 on respawn.
+ * A body below this threshold therefore CANNOT heal between hits, which is the
+ * code-owned reason a "trade hits with the mob" plan is not survivable.
+ */
+export const REGEN_FOOD_THRESHOLD = 18
+
+/** The body's own survival facts at decision time; CAN only, never a choice. */
+export interface BodySurvivalFacts {
+  health: number
+  food: number
+  /** natural regeneration is possible right now (food >= `REGEN_FOOD_THRESHOLD`) */
+  regenerating: boolean
+}
+
+export function bodySurvivalFacts(self: { health: number; food: number }): BodySurvivalFacts {
+  const food = Number.isFinite(self.food) ? self.food : 0
+  return {
+    health: Number.isFinite(self.health) ? self.health : 0,
+    food,
+    regenerating: food >= REGEN_FOOD_THRESHOLD,
+  }
+}
+
+/**
+ * Vanilla 1.21 sword attack damage. Only the families this module can pin down
+ * are listed: an unknown held item reports `damage: null` instead of a guess.
+ */
+const SWORD_DAMAGE: Readonly<Record<string, number>> = {
+  wooden_sword: 4,
+  golden_sword: 4,
+  stone_sword: 5,
+  iron_sword: 6,
+  diamond_sword: 7,
+  netherite_sword: 8,
+}
+
+/** How the body's held item answers a hostile: a code-owned CAN fact. */
+export type WeaponKind = 'fists' | 'sword' | 'tool' | 'block' | 'item'
+
+export interface WeaponFacts {
+  /** held item name, or null for bare hands */
+  name: string | null
+  /** display label for the candidate line: 'fists' or the item name */
+  label: string
+  kind: WeaponKind
+  /** vanilla attack damage when this module can pin it, else null (never guessed) */
+  damage: number | null
+}
+
+const TOOL_SUFFIXES = ['_pickaxe', '_axe', '_shovel', '_hoe'] as const
+
+/**
+ * What the body can hit with right now. `held` is the live main-hand item
+ * (`SelfState.heldItem`), so this is inventory truth, not a preference: a body
+ * holding a stone sword is offered the same ATTACK as a body holding nothing,
+ * with the weapon named in the candidate facts.
+ */
+export function weaponFacts(held: string | null | undefined): WeaponFacts {
+  if (held === null || held === undefined || held.length === 0) {
+    return { name: null, label: 'fists', kind: 'fists', damage: FIST_DAMAGE }
+  }
+  if (held.endsWith('_sword')) {
+    return { name: held, label: held, kind: 'sword', damage: SWORD_DAMAGE[held] ?? null }
+  }
+  for (const suffix of TOOL_SUFFIXES) {
+    if (held.endsWith(suffix)) return { name: held, label: held, kind: 'tool', damage: null }
+  }
+  if (held.endsWith('_block') || held.endsWith('_planks') || held.endsWith('_log') || held.endsWith('cobblestone')) {
+    return { name: held, label: held, kind: 'block', damage: null }
+  }
+  return { name: held, label: held, kind: 'item', damage: null }
+}
+
+/**
+ * Bounded standoff range per hostile family. A creeper must be answered from
+ * further out than a zombie (blast vs melee), and a ranged attacker outranges
+ * any local walk, so its standoff is the bow envelope.
+ */
+export function threatStandoffRange(name: string): number {
+  const mob = name.toLowerCase()
+  if (mob === 'creeper') return 6
+  if (
+    mob === 'skeleton' ||
+    mob === 'stray' ||
+    mob === 'bogged' ||
+    mob === 'pillager' ||
+    mob === 'witch' ||
+    mob === 'blaze' ||
+    mob === 'ghast' ||
+    mob === 'phantom' ||
+    mob === 'llama' ||
+    mob === 'trader_llama'
+  ) {
+    return 12
+  }
+  return THREAT_STANDOFF_RANGE
+}
+
+/** The entity facts this module reads; a structural subset of `EntityState`. */
+export type ThreatEntityLike = Pick<
+  EntityState,
+  'id' | 'name' | 'hostile' | 'distance' | 'position' | 'attackedSelf' | 'lineOfSight' | 'heldItem'
+>
+
+export type ThreatEntryReason = 'contact' | 'danger' | 'engaged'
+export type ThreatExitReason = 'sustained_clear'
+
+/**
+ * Is this hostile a threat the body must be able to answer? Code owns only the
+ * grounded predicate; the choice of ATTACK/RETREAT stays with Jev.
+ *
+ *   immediate   - already inside melee reach
+ *   attributed  - the recorded damage source is this exact entity
+ *   engaged     - the body was damaged inside `THREAT_MEMORY_MS` and this
+ *                 hostile has line of sight (used when Mineflayer did not
+ *                 attribute the attacker; `lineOfSight === undefined` is
+ *                 UNKNOWN and does not invent a threat)
+ *
+ * `nowMs` is injectable so fixtures do not depend on wall clock.
+ */
+export function isResponseWorthyThreat(
+  state: Pick<{ entities: readonly ThreatEntityLike[]; signals: { lastDamage?: LastDamageEvidence | null } }, 'entities' | 'signals'>,
+  entity: Pick<ThreatEntityLike, 'id' | 'hostile' | 'distance' | 'attackedSelf' | 'lineOfSight'>,
+  nowMs = Date.now(),
+): boolean {
+  if (!entity.hostile) return false
+  if (!Number.isFinite(entity.distance) || entity.distance > THREAT_RESPONSE_RANGE) return false
+  if (entity.distance <= MELEE_THREAT_REACH) return true
+  if (entity.attackedSelf === true) return true
+  const last = state.signals.lastDamage ?? null
+  if (last === null || !Number.isFinite(last.atMs) || nowMs - last.atMs > THREAT_MEMORY_MS) return false
+  // Attribution unknown -> require positive sight evidence; never invent one.
+  return entity.lineOfSight === true
+}
+
+/** A hostile inside the bounded danger radius (an imminent threat, engaged or not). */
+export function isDangerousThreat(entity: Pick<ThreatEntityLike, 'hostile' | 'distance'>): boolean {
+  return entity.hostile && Number.isFinite(entity.distance) && entity.distance <= THREAT_DANGER_RADIUS
+}
+
+/** Hostiles inside the danger radius, nearest first. */
+export function dangerousThreats(
+  entities: readonly ThreatEntityLike[],
+): ThreatEntityLike[] {
+  return entities.filter(isDangerousThreat).sort((a, b) => a.distance - b.distance)
+}
+
+/** Nearest hostile inside the danger radius, or null. */
+export function nearestDangerousThreat(entities: readonly ThreatEntityLike[]): ThreatEntityLike | null {
+  return dangerousThreats(entities)[0] ?? null
+}
+
+/**
+ * Every threat the body must answer right now, nearest first: hostiles inside
+ * the bounded danger radius (engaged or not) plus response-worthy hostiles
+ * anywhere inside the response envelope. This is the union the candidate layer
+ * grounds keep-distance destinations from, so "a zombie is 6 m away and closing"
+ * is answerable before it lands the first hit.
+ */
+export function activeThreats(
+  entities: readonly ThreatEntityLike[],
+  lastDamage: LastDamageEvidence | null | undefined,
+  nowMs: number,
+): ThreatEntityLike[] {
+  const signals = { lastDamage: lastDamage ?? null }
+  const seen = new Set<number>()
+  const out: ThreatEntityLike[] = []
+  for (const entity of entities) {
+    if (seen.has(entity.id)) continue
+    if (!isDangerousThreat(entity) && !isResponseWorthyThreat({ entities, signals }, entity, nowMs)) continue
+    seen.add(entity.id)
+    out.push(entity)
+  }
+  return out.sort((a, b) => a.distance - b.distance)
+}
+
+/** The exact code-owned danger state handed to the candidate layer and logged. */
+export interface ThreatStateEvidence {
+  /** true while the body is in a fight the local layer must keep answering */
+  active: boolean
+  /** how long the state has been active, ms (0 when inactive) */
+  activeMs: number
+  /** nearest dangerous/engaged hostile: identity and distance, or null when clear */
+  threatId: number | null
+  threatName: string | null
+  threatDistance: number | null
+  /** that threat holds an item (a skeleton's bow, a zombie's sword), or null */
+  threatHeldItem: string | null
+  /** the threat hit the body (Mineflayer attribution), or has line of sight after damage */
+  threatEngaged: boolean
+  threatLineOfSight: boolean | null
+  /** the threat is inside melee reach right now */
+  inContact: boolean
+  /** the threat is inside the bounded danger radius right now */
+  inDanger: boolean
+  /** hostiles inside the danger radius right now */
+  hostileCount: number
+  /** the sustained-clear interval this state needs before it may leave */
+  clearMs: number
+  /** how long the envelope has been continuously clear (0 while a threat is present) */
+  clearForMs: number
+  /** why the state was entered (null when never entered / already exited) */
+  entryReason: ThreatEntryReason | null
+  /** why the state last left (null while it has never left) */
+  exitReason: ThreatExitReason | null
+  /** when the current/last active window started, ms epoch */
+  enteredAtMs: number | null
+}
+
+export interface ThreatObservation {
+  /** wall-clock ms of this decision tick */
+  atMs: number
+  entities: readonly ThreatEntityLike[]
+  lastDamage?: LastDamageEvidence | null
+}
+
+/**
+ * The bounded danger STATE.
+ *
+ * Enter when a hostile is inside `THREAT_DANGER_RADIUS`, or when a hostile is
+ * response-worthy (attributed attacker / line of sight after damage) anywhere
+ * inside `THREAT_RESPONSE_RANGE`. Stay active while that predicate holds. Leave
+ * only on a grounded exit: the whole envelope has been continuously clear for
+ * `THREAT_CLEAR_MS`.
+ *
+ * Why a state and not a per-tick predicate: the measured live failure was
+ * exactly per-tick. The body retreated once while a zombie was inside 3.2 m,
+ * then went straight back to digging the moment the mob stepped outside that
+ * snapshot, took the next hit, and died with health 2.17 after repeating this
+ * for a minute. A continued clear interval is the difference between "the mob
+ * is not in this frame" and "the fight is over".
+ *
+ * Pure and injectable: the caller supplies observations and reads `evidence()`;
+ * there is no clock and no bot.
+ */
+export class ThreatTracker {
+  private active = false
+  private enteredAtMs: number | null = null
+  private clearSinceMs: number | null = null
+  private entryReason: ThreatEntryReason | null = null
+  private exitReason: ThreatExitReason | null = null
+  private hostileCount = 0
+  private last: ThreatStateEvidence | null = null
+
+  constructor(private readonly clearMs: number = THREAT_CLEAR_MS) {}
+
+  note(observation: ThreatObservation): ThreatStateEvidence {
+    const atMs = Number.isFinite(observation.atMs) ? observation.atMs : 0
+    this.hostileCount = dangerousThreats(observation.entities).length
+    const threat = activeThreats(observation.entities, observation.lastDamage ?? null, atMs)[0] ?? null
+    if (threat !== null) {
+      if (!this.active) {
+        this.active = true
+        this.enteredAtMs = atMs
+        this.exitReason = null
+      }
+      this.entryReason = isDangerousThreat(threat)
+        ? threat.distance <= MELEE_THREAT_REACH
+          ? 'contact'
+          : 'danger'
+        : 'engaged'
+      this.clearSinceMs = null
+      this.last = this.build(atMs, threat)
+      return this.last
+    }
+
+    // No threat in this snapshot. The envelope must stay clear for the whole
+    // bounded interval: a single quiet frame is not an exit.
+    if (this.active) {
+      this.clearSinceMs ??= atMs
+      if (atMs - this.clearSinceMs >= this.clearMs) {
+        this.active = false
+        this.exitReason = 'sustained_clear'
+        this.enteredAtMs = null
+        this.entryReason = null
+        this.clearSinceMs = null
+      }
+    }
+    this.last = this.build(atMs, null)
+    return this.last
+  }
+
+  /** Current evidence without recording anything. Never mutates. */
+  evidence(): ThreatStateEvidence {
+    return this.last ?? this.build(0, null)
+  }
+
+  reset(): void {
+    this.active = false
+    this.enteredAtMs = null
+    this.clearSinceMs = null
+    this.entryReason = null
+    this.exitReason = null
+    this.hostileCount = 0
+    this.last = null
+  }
+
+  private build(atMs: number, threat: ThreatEntityLike | null): ThreatStateEvidence {
+    return {
+      active: this.active,
+      activeMs: this.active && this.enteredAtMs !== null ? Math.max(0, atMs - this.enteredAtMs) : 0,
+      threatId: threat?.id ?? null,
+      threatName: threat?.name ?? null,
+      threatDistance: threat?.distance ?? null,
+      threatHeldItem: threat?.heldItem ?? null,
+      threatEngaged: threat?.attackedSelf === true,
+      threatLineOfSight: typeof threat?.lineOfSight === 'boolean' ? threat.lineOfSight : null,
+      inContact: threat !== null && threat.distance <= MELEE_THREAT_REACH,
+      inDanger: threat !== null && isDangerousThreat(threat),
+      hostileCount: this.hostileCount,
+      clearMs: this.clearMs,
+      clearForMs: this.clearSinceMs === null ? 0 : Math.max(0, atMs - this.clearSinceMs),
+      entryReason: this.entryReason,
+      exitReason: this.exitReason,
+      enteredAtMs: this.enteredAtMs,
+    }
+  }
+}
+
+/** `THREAT_NEARBY threat=zombie distance=0.78m ...` - the honest proximity line. */
+export function formatThreatNearby(
+  goalKey: string,
+  evidence: ThreatStateEvidence,
+  weapon: WeaponFacts,
+  body: BodySurvivalFacts,
+): string {
+  const name = evidence.threatName ?? 'unknown'
+  const distance = evidence.threatDistance === null ? 'unknown' : `${round2(evidence.threatDistance)}m`
+  const held = evidence.threatHeldItem === null ? 'none' : evidence.threatHeldItem
+  const damage = weapon.damage === null ? 'unknown' : String(weapon.damage)
+  return (
+    `${THREAT_NEARBY} goal=${goalKey} threat=${name} id=${evidence.threatId ?? 'none'} distance=${distance} ` +
+    `contact=${evidence.inContact} danger=${evidence.inDanger} hostiles=${evidence.hostileCount} ` +
+    `engaged=${evidence.threatEngaged} los=${evidence.threatLineOfSight === null ? 'unknown' : evidence.threatLineOfSight} ` +
+    `threatHeld=${held} weapon=${weapon.label} weaponKind=${weapon.kind} weaponDamage=${damage} ` +
+    `health=${round2(body.health)} food=${body.food} regenerating=${body.regenerating} ` +
+    `activeMs=${evidence.activeMs} -> attack/keep-distance stay offered until the envelope is clear for ${evidence.clearMs}ms`
+  )
+}
+
+/** `THREAT_NO_ESCAPE ...` - the capability gap when no grounded answer exists. */
+export function formatThreatNoEscape(
+  goalKey: string,
+  evidence: ThreatStateEvidence,
+  weapon: WeaponFacts,
+  reason: string,
+): string {
+  const name = evidence.threatName ?? 'unknown'
+  const distance = evidence.threatDistance === null ? 'unknown' : `${round2(evidence.threatDistance)}m`
+  return (
+    `${THREAT_NO_ESCAPE} goal=${goalKey} threat=${name} distance=${distance} inContact=${evidence.inContact} ` +
+    `weapon=${weapon.label} reason=${reason} -> only a bounded ESCALATE is offered; code grounds no attack/keep-distance route`
+  )
+}
+
+/** `THREAT_CLEAR ...` - the bounded exit, so a post-mortem can see the fight end. */
+export function formatThreatClear(goalKey: string, evidence: ThreatStateEvidence): string {
+  return (
+    `${THREAT_CLEAR} goal=${goalKey} clearMs=${evidence.clearMs} clearForMs=${evidence.clearForMs} ` +
+    `-> the danger state left on a sustained-clear envelope`
+  )
+}
+
+export interface KeepDistanceInput {
+  /** body position (feet) */
+  self: Vec3Json
+  /** the threat to move away from, or null when only a hazard applies */
+  threat: Vec3Json | null
+  /** standable cells the sensor sampled (the local 5x5x3 window) */
+  standable: readonly Vec3Json[]
+  /** threat-escape cells: the wider scan, already filtered to genuine separation */
+  escapeCells?: readonly Vec3Json[]
+  /** separation gain required when a destination does not reach standoff */
+  minGain?: number
+  /** absolute separation that counts as "outside reach" for this threat */
+  standoff?: number
+  max?: number
+}
+
+export interface KeepDistanceSpot {
+  spot: Vec3Json
+  /** distance from the destination to the threat */
+  separation: number
+  /** separation gained over standing still */
+  gain: number
+  /** separation reaches the standoff range (outside the threat's reach) */
+  outsideReach: boolean
+  /** the destination came from the wider threat-escape scan */
+  escape: boolean
+}
+
+/**
+ * Ground the destinations that actually keep distance from a threat.
+ *
+ * A destination qualifies when EITHER it reaches the threat's standoff range
+ * while not moving closer, OR it gains a real amount of separation
+ * (`MIN_KEEP_DISTANCE_GAIN`). The pre-existing rule (`separation > current +
+ * 0.25`) admitted 1.4 m shuffles inside melee reach and labelled them
+ * "retreat to safety", which is the measured `moved=0m` death.
+ *
+ * Deterministic and bounded: the caller still owns WHICH destination is taken
+ * (Jev), and the returned list is capped so the offer cannot be crowded.
+ */
+export function selectKeepDistanceSpots(input: KeepDistanceInput): KeepDistanceSpot[] {
+  const threat = input.threat
+  if (threat === null) return []
+  const minGain = input.minGain ?? MIN_KEEP_DISTANCE_GAIN
+  const standoff = input.standoff ?? THREAT_STANDOFF_RANGE
+  const max = Math.max(0, input.max ?? 3)
+  if (max === 0) return []
+  const current = distance(input.self, threat)
+  const seen = new Set<string>()
+  const scored: KeepDistanceSpot[] = []
+  const consider = (spot: Vec3Json, escape: boolean): void => {
+    const key = `${spot.x},${spot.y},${spot.z}`
+    if (seen.has(key)) return
+    seen.add(key)
+    const separation = distance(spot, threat)
+    const gain = separation - current
+    const outsideReach = separation >= standoff
+    const qualifies = gain >= minGain || (outsideReach && gain > 0)
+    if (!qualifies) return
+    scored.push({ spot, separation, gain, outsideReach, escape })
+  }
+  for (const spot of input.escapeCells ?? []) consider(spot, true)
+  for (const spot of input.standable) consider(spot, false)
+  // Farthest from the threat first: this is a CAN narrowing (at most `max`
+  // destinations are handed to Jev), not a preference among action kinds.
+  scored.sort((a, b) => b.separation - a.separation)
+  return scored.slice(0, max)
+}
+
+function distance(a: Vec3Json, b: Vec3Json): number {
+  const dx = a.x - b.x
+  const dy = a.y - b.y
+  const dz = a.z - b.z
+  return Math.sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}

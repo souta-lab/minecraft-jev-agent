@@ -16,6 +16,14 @@ import type { System2Outcome } from './system2.ts'
 import type { StrategicStallEvidence } from './strategicStall.ts'
 import { CRITICAL_DAMAGE_HEALTH } from './criticalDamage.ts'
 import type { CriticalDamageEvidence } from './criticalDamage.ts'
+import {
+  MIN_KEEP_DISTANCE_GAIN,
+  nearestDangerousThreat,
+  THREAT_ESCAPE_DY,
+  THREAT_ESCAPE_MAX_CELLS,
+  threatStandoffRange,
+} from './threat.ts'
+import type { ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
 import { resourceMatches } from './resourceClass.ts'
 import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
@@ -574,6 +582,16 @@ export type AgentSignals = {
    * health number. Optional for pure fixtures.
    */
   lastDamage?: LastDamageEvidence | null
+  /**
+   * SAFE: code-owned "the body is in a fight" state with a bounded exit (see
+   * `threat.ts` `ThreatTracker`). It is a STATE, not a per-tick predicate: the
+   * measured death loop (`run-mubobiq6-12onv`) had the body retreat once while a
+   * zombie was inside 3.2 m and go straight back to digging the moment the mob
+   * left that snapshot, then take the next hit until it died. The candidate
+   * layer restricts work actions while this state is active; the choice among
+   * the grounded survival actions stays with Jev. Optional for fixtures.
+   */
+  threat?: ThreatStateEvidence | null
 }
 
 export type WorldState = {
@@ -584,7 +602,19 @@ export type WorldState = {
   inventory: InventoryState
   entities: EntityState[]
   blocks: BlockState[]
-  terrain: { standable: Vec3Json[] }
+  terrain: {
+    standable: Vec3Json[]
+    /**
+     * SAFE: standable cells from a wider scan that genuinely gain separation
+     * from the nearest dangerous hostile (see `threat.ts`
+     * `selectKeepDistanceSpots`). Populated only while a hostile is inside
+     * `THREAT_DANGER_RADIUS`, because the ordinary `standable` window (5x5x3,
+     * `buildTerrain`) can never contain a real retreat destination - that is why
+     * every measured "retreat to safety" was 1.4-2.4 m away while the zombie was
+     * inside 0.8 m. Absent in old replay fixtures means "no threat escape scan".
+     */
+    escapeCells?: Vec3Json[]
+  }
   /** placed crafting_table stations: sensed near-field first, then remembered */
   craftingTables: StationEntry[]
   /** placed furnace stations: sensed near-field first, then remembered (M2 smelting) */
@@ -651,6 +681,15 @@ export interface SensorOptions {
   maxStoneBlocks: number
   maxPlacementSpots: number
   /**
+   * Radius (blocks) of the threat escape scan: standable cells used only as
+   * keep-distance destinations while a hostile is inside `THREAT_DANGER_RADIUS`.
+   * Wider than the 5x5x3 `maxTerrain` window because a retreat destination that
+   * is inside that window cannot leave melee reach.
+   */
+  escapeRadius: number
+  /** Upper bound on escape cells kept, so the offer cannot be crowded. */
+  maxEscapeCells: number
+  /**
    * Exact world-mutation revision (see `DecisionScheduler.worldRevision`), or
    * absent/null when the caller cannot prove one. Only when it is a finite
    * number may `buildWorldState` reuse a `findBlocks` position list across
@@ -670,6 +709,8 @@ export const defaultSensorOptions: SensorOptions = {
   entityRadius: 24,
   maxStoneBlocks: 16,
   maxPlacementSpots: 6,
+  escapeRadius: 6,
+  maxEscapeCells: 12,
 }
 
 export interface SensorInput {
@@ -2506,6 +2547,57 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
 }
 
 /**
+ * SAFE: keep-distance destinations for an active threat.
+ *
+ * The measured retreat failure is a SENSING failure as much as a policy one:
+ * `buildTerrain` samples a 5x5x3 window, so `pickRetreats` could only ever
+ * choose a cell ~2 m away - while the zombie that killed the body was inside
+ * 0.8 m. `RETREAT:p4_69_-9` was "0.71m away" and executed as `moved=0m`.
+ *
+ * This scan runs only while a hostile is inside `THREAT_DANGER_RADIUS` (the
+ * bounded danger radius), uses the SAME DESTINATION predicate as `buildTerrain`
+ * (`isUsableStand`: standable, and its support is load-bearing ground rather
+ * than a leaf canopy - a treetop is locomotion truth, not a retreat
+ * destination), and keeps only cells that genuinely gain separation from the
+ * nearest dangerous hostile. The result is a CAN fact; Jev still chooses
+ * whether to take one.
+ */
+function buildEscapeCells(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  entities: readonly EntityState[],
+): Vec3Json[] {
+  const threat = nearestDangerousThreat(entities as readonly ThreatEntityLike[])
+  if (threat === null) return []
+  const radius = Math.max(0, Math.floor(options.escapeRadius))
+  if (radius === 0) return []
+  const standoff = threatStandoffRange(threat.name)
+  const current = distance(threat.position, self.position)
+  const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
+  const found: Vec3Json[] = []
+  for (let dx = -radius; dx <= radius; dx += 1) {
+    for (let dz = -radius; dz <= radius; dz += 1) {
+      for (let dy = -THREAT_ESCAPE_DY; dy <= THREAT_ESCAPE_DY; dy += 1) {
+        const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
+        const separation = distance(feet, threat.position)
+        const gain = separation - current
+        // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
+        // standing outside the threat's reach without moving closer.
+        if (gain < MIN_KEEP_DISTANCE_GAIN && !(separation >= standoff && gain > 0)) continue
+        // Destination rule, shared with `buildTerrain`: a canopy top is not a
+        // place the body may be sent to keep distance from a mob.
+        if (!isUsableStand(bot, feet)) continue
+        found.push(feet)
+      }
+    }
+  }
+  found.sort((a, b) => distance(b, threat.position) - distance(a, threat.position))
+  const cap = Math.max(0, Math.floor(options.maxEscapeCells ?? THREAT_ESCAPE_MAX_CELLS))
+  return found.slice(0, cap)
+}
+
+/**
  * The SENSOR entry point.
  *
  * Reads the bot once per policy tick and returns the JSON world state. Every
@@ -2559,15 +2651,19 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       })
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   const placementSpots = buildPlacementSpots(bot, options, self)
+  const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
   return {
     schemaVersion: 1,
     tick: input.tick,
     timestampMs: Date.now(),
     self,
     inventory,
-    entities: buildEntities(bot, options, self.position, input.signals.lastDamage),
+    entities,
     blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
-    terrain: { standable: buildTerrain(bot, options, self) },
+    terrain: {
+      standable: buildTerrain(bot, options, self),
+      escapeCells: buildEscapeCells(bot, options, self, entities),
+    },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
     placementSpots,
