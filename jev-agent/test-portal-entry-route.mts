@@ -41,16 +41,20 @@ import {
   NETHER_PORTAL,
   OVERWORLD,
   PORTAL_ENTERED_PREDICATE,
+  PORTAL_ENTRY_UNVERIFIED,
+  formatPortalEntryNoKnownSite,
   planPortalEntry,
   portalFrameLayout,
+  serializePortalCells,
 } from './src/netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite } from './src/netherPortalPlan.ts'
 import { defaultCandidateOptions, entryCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { Executor, ExecutorError, defaultExecutorOptions } from './src/executor.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
-import type { AgentSignals, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
+import type { AgentSignals, DescentOption, InventoryState, SelfState, StepCut, Vec3Json, WorldState } from './src/state.ts'
 import { isStandable } from './src/state.ts'
+import { StateFingerprintMemory } from './src/moveFailMemory.ts'
 import { EventLogger, JsonlWriter } from './src/jev.ts'
 
 const require = createRequire(import.meta.url)
@@ -194,11 +198,21 @@ function canWalkIntoGate(fixture: FixtureBot): boolean {
  * `pathTo(step)` (a route-cell the planner chose) is honored; `pathTo(enterCell)`
  * succeeds only when the body has actually reached the gate floor beside it.
  */
-function installLocomotion(executor: Executor, fixture: FixtureBot, transfer: boolean): void {
+function installLocomotion(
+  executor: Executor,
+  fixture: FixtureBot,
+  transfer: boolean,
+  strictGate = false,
+): void {
+  // `strictGate` models the real world: the interior cell is only walkable from
+  // the gate's OWN floor level. The default (loose) model is the historical
+  // fixture seam used by the ascent cases, where the body climbs to the gate
+  // floor through the route leg before the walk is retried.
+  const atGateLevel = (): boolean => !strictGate || Math.abs(fixture.position.y - ENTER_CELL.y) <= 1
   const pathTo = async (target: Vec3Json): Promise<void> => {
     fixture.pathCalls.push({ ...target })
     if (key(target) === key(ENTER_CELL)) {
-      if (!canWalkIntoGate(fixture)) {
+      if (!canWalkIntoGate(fixture) || !atGateLevel()) {
         throw new ExecutorError('path_no_path', 'pathfinder GoalBlock -> noPath')
       }
       fixture.position.set(ENTER_CELL.x + 0.5, ENTER_CELL.y, ENTER_CELL.z + 0.5)
@@ -278,7 +292,13 @@ function queueWith(current: QueuedGoal): GoalQueueState {
   return { depth: 1, current, empty: false, hasImpossible: false, done: 0, goals: [current] }
 }
 
-function worldState(bodyFeet: Vec3Json, stepCuts: StepCut[], counts: Record<string, number>): WorldState {
+function worldState(
+  bodyFeet: Vec3Json,
+  stepCuts: StepCut[],
+  counts: Record<string, number>,
+  descent: DescentOption[] = [],
+  standable: Vec3Json[] = [bodyFeet],
+): WorldState {
   const current = queuedPlace()
   return {
     schemaVersion: 1,
@@ -288,12 +308,12 @@ function worldState(bodyFeet: Vec3Json, stepCuts: StepCut[], counts: Record<stri
     inventory: inventory(counts),
     entities: [],
     blocks: [],
-    terrain: { standable: [bodyFeet] },
+    terrain: { standable },
     craftingTables: [],
     furnaces: [],
     placementSpots: [],
     portalFrameSites: [SITE],
-    descent: [],
+    descent,
     stepCuts,
     headroomCuts: [],
     goal: {
@@ -339,11 +359,12 @@ async function runEntry(
   fixture: FixtureBot,
   candidate: Candidate,
   transfer: boolean,
+  strictGate = false,
 ): Promise<{ status: string; failure: string | null; verified: boolean; messages: string[] }> {
   const dir = mkdtempSync(join(tmpdir(), 'portal-entry-route-'))
   const logger = new EventLogger(new JsonlWriter(join(dir, 'agent.jsonl')), false)
   const executor = new Executor(fixture.bot, logger, { ...defaultExecutorOptions, actuation: 'packet', portalEnterTimeoutMs: 400 })
-  installLocomotion(executor, fixture, transfer)
+  installLocomotion(executor, fixture, transfer, strictGate)
   const result = await executor.claim(candidate).completion
   const messages = (await Bun.file(join(dir, 'agent.jsonl')).text())
     .split('\n')
@@ -527,6 +548,241 @@ const STONE_STEP: StepCut = {
       hidden.result.reason === 'no_path' &&
       !blockedCandidates.candidates.some((candidate) => candidate.kind === 'ENTER_PORTAL'),
     `withRoute presented=${presented} withoutRoute withheld=${hidden !== undefined} reason=${hidden?.result.reason ?? 'none'}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (e) THE LIVE M3 SHAPE (run-muc3qbug-18vg3, main 35dfd29): the body stands on
+// the surface ~96 blocks from its own lit gate, 8+ blocks ABOVE it, while
+// `option=front_enter_nether` is active. `state.descent` is built from the
+// body's own cardinal cells, so the surface cell carries no safe dig-down step.
+// Pre-fix the gate withheld `ENTER:27,67,9` as `needs_descend`/`descend_plan`
+// and then suppressed it forever, and the offer held only local MINE/MOVE - the
+// body mined leaves under the enter-nether option.
+// The general rule: a far target below is a TRAVEL leg (walk there, descend
+// where the terrain allows), so its own grounded ENTER candidate stays offered.
+// ---------------------------------------------------------------------------
+{
+  const LIVE_BODY: Vec3Json = { x: 123.5, y: 78, z: -6.7 }
+  const LIVE_GATE: Vec3Json = { x: 27, y: 67, z: 9 }
+  const frontier: Vec3Json[] = [
+    LIVE_BODY,
+    { x: 122, y: 78, z: -7 },
+    { x: 118, y: 77, z: -8 },
+    { x: 110, y: 76, z: -9 },
+  ]
+  // Every cardinal down step is refused by the absent landing support (the
+  // canopy/ledge shape the live sensor reported).
+  const refusedDown: DescentOption = {
+    dir: 'W',
+    mode: 'down',
+    dx: -1,
+    dz: 0,
+    step: { x: 122, y: 77, z: -7 },
+    wall: { x: 122, y: 78, z: -7 },
+    head: { x: 122, y: 79, z: -7 },
+    floor: { x: 122, y: 77, z: -7 },
+    wallSolid: false,
+    headSolid: true,
+    floorSolid: true,
+    safe: false,
+    reason: 'no solid support at (122,76,-7)',
+    refusal: 'no_support',
+    digName: 'oak_leaves',
+    digHarvestTool: null,
+    digHarvestTier: null,
+    diggable: true,
+  }
+  const fixture = makeBot({ x: 26, y: 66, z: 8 }, gateGrid(), true)
+  const state = worldState(
+    LIVE_BODY,
+    [],
+    { diamond_pickaxe: 1, cobblestone: 32 },
+    [refusedDown],
+    frontier,
+  )
+  const options: CandidateOptions = {
+    ...defaultCandidateOptions,
+    portalEntry: entryPlan(fixture),
+    reachability: { memory: new StateFingerprintMemory({ maxEntries: 16 }), pathProbe: () => 'no_path' },
+  }
+  const grounded = generateGroundedCandidates(state, options)
+  const entry = grounded.candidates.find((candidate) => candidate.kind === 'ENTER_PORTAL')
+  const withheldEntry = grounded.withheld.find((entry) => entry.candidate.kind === 'ENTER_PORTAL')
+  check(
+    '(e) live shape: an enter candidate 8+ blocks below and ~96 blocks away is OFFERED, not withheld',
+    entry !== undefined &&
+      entry.id === `ENTER:${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}` &&
+      withheldEntry === undefined,
+    `offered=[${grounded.candidates.map((candidate) => candidate.id).join(',')}] withheld=[${grounded.withheld.map((w) => `${w.candidate.id}:${w.result.reason}`).join(',') || 'none'}]`,
+  )
+  check(
+    '(e) the offered entry is grounded in the gate geometry (never the bare portal item)',
+    entry !== undefined &&
+      entry.target?.x === ENTER_CELL.x &&
+      entry.target?.y === ENTER_CELL.y &&
+      entry.target?.z === ENTER_CELL.z &&
+      entry.meta.entryUnverified === undefined &&
+      entry.meta.portalCells === serializePortalCells(LAYOUT.interior) &&
+      entry.meta.dimension === NETHER,
+    entry === undefined ? 'no ENTER candidate' : `${entry.id} cells=${String(entry.meta.portalCells)}`,
+  )
+  check(
+    '(e) the live gate origin is the SITE the offered entry is planned from',
+    LIVE_GATE.x === ORIGIN.x + 2 && LIVE_GATE.y === ENTER_CELL.y && LIVE_GATE.z === ORIGIN.z,
+    `gate=(${LIVE_GATE.x},${LIVE_GATE.y},${LIVE_GATE.z}) site=(${ORIGIN.x},${ORIGIN.y},${ORIGIN.z}) enter=(${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z})`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (f) A REMEMBERED gate whose interior cannot be observed (the body is far
+// enough that the chunks are unloaded) must still ground a ROUTE, and the
+// refusal vocabulary must never assert a fact nobody checked: `portal_not_lit`
+// only when the interior WAS observed and is not `nether_portal`.
+// ---------------------------------------------------------------------------
+{
+  const unobserved = planPortalEntry({
+    site: SITE,
+    self: { x: 123, y: 78, z: -7 },
+    // far from the gate: the chunks are not loaded, so every probe is null
+    blockAt: () => null,
+    isStandable: () => false,
+    fromDimension: OVERWORLD,
+    dimension: NETHER,
+  })
+  check(
+    '(f) an unobserved remembered gate yields an UNVERIFIED route, never a fabricated portal_not_lit',
+    unobserved.ok &&
+      unobserved.candidate.unverified === true &&
+      unobserved.candidate.line.startsWith(PORTAL_ENTRY_UNVERIFIED) &&
+      unobserved.candidate.line.includes('reason=site_not_observed') &&
+      unobserved.candidate.enterCell.y === ENTER_CELL.y,
+    unobserved.ok ? unobserved.candidate.line : unobserved.line,
+  )
+
+  const noGeometry = planPortalEntry({
+    site: { origin: ORIGIN, widthAxis: 'x', safe: true, reachable: true },
+    self: { x: 123, y: 78, z: -7 },
+    blockAt: () => null,
+    isStandable: () => false,
+    fromDimension: OVERWORLD,
+    dimension: NETHER,
+  })
+  check(
+    '(f) an unobserved site with no remembered geometry refuses with site_not_observed',
+    !noGeometry.ok && noGeometry.reason === 'site_not_observed',
+    noGeometry.ok ? 'ok' : noGeometry.line,
+  )
+
+  const noSite = formatPortalEntryNoKnownSite()
+  check(
+    '(f) with no site at all the marker names the missing affordance instead of portal=lit',
+    noSite === 'PRECONDITION_MISSING portal=site reason=no_known_site' && !noSite.includes('portal=lit'),
+    noSite,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (g) DESCENT ENTRY: the body stands 5 blocks ABOVE the lit gate with a safe
+// dig-down step. The entry route must DESCEND (the same staircase mechanic, the
+// other direction), and a durable descent chunk is progress - pre-fix the
+// ascent-only progress test reported the descent as `no_route`.
+// ---------------------------------------------------------------------------
+{
+  const grid = gateGrid()
+  // the body's column: solid stone under the feet, and the step landing beside it
+  grid.set('28,68,8', cell('stone'))
+  grid.set('28,67,8', cell('stone'))
+  const fixture = makeBot({ x: 28, y: 69, z: 9 }, grid, true)
+  const down: DescentOption = {
+    dir: 'N',
+    mode: 'down',
+    dx: 0,
+    dz: -1,
+    step: { x: 28, y: 68, z: 8 },
+    wall: { x: 28, y: 69, z: 8 },
+    head: { x: 28, y: 70, z: 8 },
+    floor: { x: 28, y: 68, z: 8 },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: 'stone',
+    digHarvestTool: 'pickaxe',
+    digHarvestTier: 0,
+    diggable: true,
+  }
+  const state = worldState({ x: 28.5, y: 69, z: 9.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 }, [down], [
+    { x: 28, y: 69, z: 9 },
+    { x: 28, y: 68, z: 8 },
+  ])
+  const candidate = enterCandidate(fixture, state)
+  const vertical = typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : 'none'
+  check(
+    '(g) the entry candidate above the gate with a safe dig-down step carries the descending route',
+    vertical === 'staircase' && candidate.meta.stairToY === ENTER_CELL.y && candidate.meta.stairDigY === 68,
+    `vertical=${vertical} toY=${candidate.meta.stairToY ?? '-'} digY=${candidate.meta.stairDigY ?? '-'}`,
+  )
+  const result = await runEntry(fixture, candidate, true, true)
+  const descended = result.messages.find((line) => line.startsWith('DESCEND_CHUNK'))
+  check(
+    '(g) the executor descends the chunk and then enters (dimension postcondition reached)',
+    result.status === 'done' &&
+      result.verified === true &&
+      fixture.digs.includes('stone@28,68,8') &&
+      result.messages.some((line) => line.startsWith('PORTAL_ENTERED')) &&
+      !result.messages.some((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED')),
+    `status=${result.status} verified=${result.verified} failure=${result.failure ?? 'none'} digs=[${fixture.digs.join(',')}] descent=${descended ?? 'none'}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (h) A descent chunk that does NOT yet reach the gate is durable progress: the
+// action ends `done` with DESCEND_CHUNK and the next decision re-plans from the
+// new Y. It must NOT be reported as an impossible route.
+// ---------------------------------------------------------------------------
+{
+  const grid = gateGrid()
+  grid.set('29,71,9', cell('stone'))
+  grid.set('29,70,9', cell('stone'))
+  const fixture = makeBot({ x: 28, y: 72, z: 9 }, grid, true)
+  const down: DescentOption = {
+    dir: 'E',
+    mode: 'down',
+    dx: 1,
+    dz: 0,
+    step: { x: 29, y: 71, z: 9 },
+    wall: { x: 29, y: 72, z: 9 },
+    head: { x: 29, y: 73, z: 9 },
+    floor: { x: 29, y: 71, z: 9 },
+    wallSolid: false,
+    headSolid: false,
+    floorSolid: true,
+    safe: true,
+    reason: 'safe',
+    digName: 'stone',
+    digHarvestTool: 'pickaxe',
+    digHarvestTier: 0,
+    diggable: true,
+  }
+  const state = worldState({ x: 28.5, y: 72, z: 9.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 }, [down], [
+    { x: 28, y: 72, z: 9 },
+    { x: 29, y: 71, z: 9 },
+  ])
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, false, true)
+  const descended = result.messages.find((line) => line.includes('DESCENT_CHUNK'))
+  check(
+    '(h) a descent chunk that has not reached the gate is DONE progress, not a blocked route',
+    result.status === 'done' &&
+      result.verified === false &&
+      descended !== undefined &&
+      descended.includes('from_y=72') &&
+      descended.includes('to_y=71') &&
+      descended.includes('target_y=67') &&
+      !result.messages.some((line) => line.includes('PORTAL_ENTRY_ROUTE_BLOCKED')),
+    `status=${result.status} verified=${result.verified} marker=[${descended ?? 'none'}]`,
   )
 }
 
