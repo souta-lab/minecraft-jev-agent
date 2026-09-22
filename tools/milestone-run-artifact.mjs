@@ -1080,7 +1080,16 @@ export function readEnvironmentFile(path) {
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
     const values = parsed?.values ?? parsed
     if (!isPlainObject(values)) return null
-    return { path, mtime: statSync(path).mtime.toISOString(), values }
+    // `worldChanges` is not a config value: it is the record of an environment CHANGE
+    // (who changed what, why, how it was measured, what it did to the run), which the
+    // operator's M3 rules require in the artifact. Carry it through verbatim.
+    const worldChanges = Array.isArray(parsed?.worldChanges) ? parsed.worldChanges : null
+    return {
+      path,
+      mtime: statSync(path).mtime.toISOString(),
+      values,
+      ...(worldChanges === null ? {} : { worldChanges }),
+    }
   } catch {
     return null
   }
@@ -1133,6 +1142,16 @@ function composeEnvironment({ observations, dimensions, serverProperties, enviro
       environmentFile === null
         ? null
         : { path: environmentFile.path, mtime: environmentFile.mtime, runScoped: false, values: environmentFile.values },
+    // The operator's M3 rules require an environment CHANGE (not just its configuration)
+    // to be recorded with its reason and its effect on the run. A world edit is not a
+    // config value, so it is carried verbatim from the environment record: what changed,
+    // who changed it, why, how it was measured and what it did to the run. Empty when the
+    // environment was never modified - an absent field and an empty list mean the same
+    // thing here, and neither is evidence that nothing changed.
+    worldChanges:
+      Array.isArray(environmentFile?.worldChanges) && environmentFile.worldChanges.length > 0
+        ? { source: environmentFile.path, mtime: environmentFile.mtime, runScoped: false, count: environmentFile.worldChanges.length, changes: environmentFile.worldChanges }
+        : null,
     dimensions: {
       count: (dimensions ?? []).length,
       observed: observedDimensions,

@@ -117,3 +117,23 @@ jobs:
       - name: Jev import firewall (section 22 I1/I10)
         working-directory: .
         run: bun jev-harness/tools/firewall.ts
+
+  system2-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: system2-harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Bun workspace
+        working-directory: .
+        run: bun install --frozen-lockfile
+      - name: Verify movement patch
+        working-directory: .
+        run: bun run movement-patch:check
+      - name: Harness typecheck
+        run: bun run typecheck
+      - name: Harness invariants S1-S15, the 25 fixtures, and the real SDK transport
+        run: bun test --timeout=120000 --max-concurrency=1 ./bun-tests

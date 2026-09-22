@@ -281,7 +281,7 @@ addCase('a skeleton that shot the bot is visible to Jev with distance, sight, we
 // (ii) at least one grounded response candidate exists for the threat
 // ---------------------------------------------------------------------------
 
-addCase('a skeleton shooting from 10m (beyond melee, inside bow range) gets a grounded RETREAT toward cover', () => {
+addCase('a skeleton shooting from 10m (beyond melee, inside bow range) gets a grounded RETREAT and a grounded ATTACK on that entity', () => {
   const state = baseState([attackingSkeleton()], ATTACKED_DAMAGE, selfState(SELF, { health: 12 }))
   const generated = generateCandidates(state, defaultCandidateOptions)
   const retreats = generated.filter((candidate) => candidate.kind === 'RETREAT')
@@ -293,8 +293,14 @@ addCase('a skeleton shooting from 10m (beyond melee, inside bow range) gets a gr
     namedThreat &&
     retreats[0]?.meta.threatAttackedSelf === true &&
     retreats[0]?.meta.threatHeldItem === 'bow' &&
-    // 10m is outside the 8m melee-attack band, so RETREAT is the grounded option.
-    attacks.length === 0 &&
+    // 10m is outside the 8m melee-attack band but INSIDE the 24m response
+    // envelope, and this skeleton has ENGAGED the body (attackedSelf). An engaged
+    // attacker is answerable from anywhere inside that envelope, so BOTH grounded
+    // responses are offered: the keep-distance route and the approach leg that
+    // feeds the existing ATTACK skill on that same entity. Code ranks neither -
+    // WHICH one is taken stays Jev's choice.
+    attacks.length === 1 &&
+    attacks[0]?.targetEntityId === 42 &&
     SKELETON_DISTANCE > COMBAT_CANDIDATE_RANGE &&
     THREAT_RESPONSE_RANGE >= SKELETON_DISTANCE
   return {
