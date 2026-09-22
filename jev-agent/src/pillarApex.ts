@@ -185,6 +185,35 @@ export function shouldRelocatePillarAfterFailure(
   return evidence !== undefined && isPillarRefusalUnsatisfiable(fail, evidence)
 }
 
+/** One same-column retry for a server-refused placement that provably had no side effect. */
+export const PILLAR_PLACE_REFUSAL_RETRY_LIMIT = 1
+
+export type PillarFailureRecovery = 'retry_same_column' | 'relocate' | 'stop'
+
+/**
+ * Decide the bounded recovery after one pillar sub-step failure. A server-refused
+ * place is retryable only when the target cell is still empty, the column was
+ * not proven geometrically unsatisfiable, and the one retry budget remains.
+ * `not_landed` is intentionally excluded: a placement may already exist.
+ */
+export function decidePillarFailureRecovery(
+  fail: Pick<PillarFail, 'step' | 'reason'>,
+  evidence: PillarRefusalEvidence,
+  blockPlaced: boolean,
+  sameColumnRetries: number,
+): PillarFailureRecovery {
+  if (shouldRelocatePillarAfterFailure(fail, evidence)) return 'relocate'
+  if (
+    fail.step === 'place' &&
+    fail.reason === 'refused' &&
+    !blockPlaced &&
+    sameColumnRetries < PILLAR_PLACE_REFUSAL_RETRY_LIMIT
+  ) {
+    return 'retry_same_column'
+  }
+  return 'stop'
+}
+
 /** The exact live marker emitted when a PILLAR_UP sub-step fails. */
 export function formatPillarFail(fail: PillarFail): string {
   return `PILLAR_FAIL step=${fail.step} reason=${fail.reason} y=${round2(fail.y)} rise=${round2(fail.rise)} samples=${fail.samples}`

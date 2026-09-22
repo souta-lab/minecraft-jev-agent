@@ -18,6 +18,7 @@ import {
   formatPillarFail,
   formatPillarRetire,
   isPillarRefusalUnsatisfiable,
+  decidePillarFailureRecovery,
   pillarArcComplete,
   pillarStepUp,
   PILLAR_APEX_MIN_RISE,
@@ -522,6 +523,18 @@ addCase('a satisfiable column places and is never retired', async () => {
     pass,
     detail: `ok=${outcome.ok} placeCalls=${world.stats.placeCalls} placed=${world.blockPlacedAt(FEET_X, 10, FEET_Z)} wouldRetire=${wouldRetire} achievable=${evidence.achievableRise}`,
   }
+})
+
+addCase('a side-effect-free place refusal gets exactly one same-column retry', () => {
+  const incomplete: PillarJumpTrace = { truncated: false, samples: [jumpSample(0.42, 0.333)] }
+  const evidence = evidenceFor(incomplete, 66, 66)
+  const fail = { step: 'place' as const, reason: 'refused' }
+  const first = decidePillarFailureRecovery(fail, evidence, false, 0)
+  const second = decidePillarFailureRecovery(fail, evidence, false, 1)
+  const sideEffect = decidePillarFailureRecovery(fail, evidence, true, 0)
+  const uncertain = decidePillarFailureRecovery({ step: 'place', reason: 'not_landed' }, evidence, false, 0)
+  const pass = first === 'retry_same_column' && second === 'stop' && sideEffect === 'stop' && uncertain === 'stop'
+  return { pass, detail: `first=${first} second=${second} sideEffect=${sideEffect} uncertain=${uncertain}` }
 })
 
 addCase('a single unlucky refusal never retires a column without a trustworthy arc', () => {
