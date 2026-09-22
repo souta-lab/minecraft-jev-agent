@@ -235,14 +235,15 @@ damage source, and the executor's equip result is a verified post-condition or a
 
 ## 5. Fixtures
 
-New: `jev-agent/test-nether-survival-gear.mts` (20 cases) — (i1–i5) the measured damage race
+New: `jev-agent/test-nether-survival-gear.mts` (21 cases) — (i1–i5) the measured damage race
 (grounded response at contact, typed facts, `outside_reach` vs `inside_reach` vs `none`, the typed
 `CAPABILITY_LOST`, the mirroring), (ii1–ii3) the respawn case (arm + armour offered, Jev chooses;
 one offer per weapon class; sword-vs-axe never ranked), (iii1–iii3) healthy-body no-churn (no offer
 when the hand already holds the carried weapon, no offer with no fight on the table, and the ATTACK
 line states the swing the lease will run), (iv1–iv3) eat when hurt / typed `FOOD_SOURCE_NONE` when
 there is no food / no false EAT at a full hunger bar, (v1–v3) player vs mob vs environment vs
-unattributed damage separated, (vii1–vii2) the code-owned control action at contact.
+unattributed damage separated, (vii1–vii2) the code-owned control action at contact, and (ii4) the guard admits the `hand`
+destination while still refusing a foreign slot.
 
 Extended: `jev-agent/test-equip-affordance.mts` (+4 cases → 20/20) — the arm candidate is offered,
 executed through the real `Executor` (equips the **named** weapon, verifies the live main hand,
@@ -276,3 +277,42 @@ when the hand already holds the best carried weapon.
   item outside this lane's file ownership.
 * **No live acceptance run** was performed from this lane (resident control is H4): the evidence is
   the replayed measurement plus deterministic fixtures.
+
+---
+
+## 7. Verification (all on the committed tree unless noted)
+
+```text
+bun run typecheck                                    clean (jev-agent + buddy-driver)
+bun jev-agent/test-mob-survival.mts                   23/23
+bun jev-agent/test-nether-survival.mts                23/23
+bun jev-agent/test-nether-survival-gear.mts           21/21   (new)
+bun jev-agent/test-env-hazard.mts                     all passed
+bun jev-agent/test-waypoint-hazard-guard.mts          all passed
+bun jev-agent/test-threat-response.mts                9/9
+bun jev-agent/test-threat-response-grounding.mts      28/28
+bun jev-agent/test-combat-closure.mts                 26/26
+bun jev-agent/test-candidate-policy.mts               12/12
+bun jev-agent/test-equip-affordance.mts               20/20   (16 + 4 new)
+bun test ./bun-tests                                  136 pass / 0 fail
+bun run bun-residue-check                             PASS
+bun run contract-docs-check                           5/5
+```
+
+Whole-corpus sweep, every `jev-agent/test-*.mts` + `buddy-driver/test-*.mts` run as
+`bun <file>` in this worktree and in a pristine checkout of the same base (`b5325b3`):
+
+```text
+diff pristine-vs-worktree:
+  jev-agent/test-equip-affordance.mts   16/16  ->  20/20     (the 4 added cases)
+  jev-agent/test-nether-survival-gear.mts   absent -> 21/21  (new file)
+  (nothing else changed)
+known-red, IDENTICAL in pristine and worktree (pre-existing, no new regression):
+  jev-agent/test-audit.mts
+  jev-agent/test-pillar-takeoff-evidence.mts
+  buddy-driver/test-dimension-observer.mts
+```
+
+Base: `b5325b3` (latest `origin/main` at the time of the rebase). Branch
+`task/nether-survival`, commits `8d86862` (implementation + fixtures + report +
+corpus rows) and `1136173` (guard-admission fixture), pushed.
