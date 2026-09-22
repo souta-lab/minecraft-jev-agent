@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { parsePortalMarker } from './m2-gate.mjs'
 import {
   GATE_REQUIRED_MARKER_ORDER,
@@ -35,6 +35,8 @@ import {
   runRehearsal,
   runRealGate,
 } from './m2-chain-rehearsal.mjs'
+
+const REPO_ROOT = resolve(import.meta.dir, '..')
 
 let checks = 0
 function ok(label) {
@@ -210,7 +212,7 @@ async function gateOnLines(caseName, lines) {
     assert.equal(probe.ok, true, `emitter probe not found: ${probe.marker} ${probe.id} ${probe.file}`)
     assert.equal(probe.matches, 1, `emitter probe must match exactly once: ${probe.id} in ${probe.file}`)
     assert.ok(probe.line > 0, `emitter probe has no line: ${probe.id}`)
-    const lines = readFileSync(join('/home/s0u7a/mc-ai-worktrees/m2-chain', probe.file), 'utf8').split('\n')
+    const lines = readFileSync(join(REPO_ROOT, probe.file), 'utf8').split('\n')
     assert.ok(
       lines[probe.line - 1].includes(probe.text),
       `probe ${probe.id} claims ${probe.file}:${probe.line} but that line does not contain the emitter call`,
