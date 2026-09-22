@@ -41,6 +41,7 @@ import { readFileSync } from 'node:fs'
 import {
   defaultCandidateOptions,
   entryCandidates,
+  generateCandidates,
   generateGroundedCandidates,
 } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
@@ -89,6 +90,8 @@ interface ShaftSpec {
   /** harvest tool of the dug cell, default pickaxe tier 0 (stone) */
   harvestTool?: string | null
   harvestTier?: number
+  /** per-direction overrides (e.g. the gate's own obsidian column on `E`) */
+  dirSpec?: Record<string, { block?: string; harvestTool?: string | null; harvestTier?: number }>
 }
 
 /** One sensor option, shaped exactly like `state.ts#buildDescent` produces. */
@@ -137,8 +140,9 @@ function stepOption(feet: Vec3Json, dir: DescentDir, dx: number, dz: number, mod
 function shaftDescent(feet: Vec3Json, spec: ShaftSpec = {}): DescentOption[] {
   const out: DescentOption[] = []
   for (const { dir, dx, dz } of DIRS) {
-    out.push(stepOption(feet, dir, dx, dz, 'level', spec.faults?.[`${dir}:level`], spec))
-    out.push(stepOption(feet, dir, dx, dz, 'down', spec.faults?.[`${dir}:down`], spec))
+    const merged: ShaftSpec = { ...spec, ...(spec.dirSpec?.[dir] ?? {}) }
+    out.push(stepOption(feet, dir, dx, dz, 'level', spec.faults?.[`${dir}:level`], merged))
+    out.push(stepOption(feet, dir, dx, dz, 'down', spec.faults?.[`${dir}:down`], merged))
   }
   // The own column digs the block under the feet; in a sealed shaft the landing
   // below is open ground and the sensor refuses it (`open_floor`).
@@ -747,6 +751,197 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
 }
 
 // ---------------------------------------------------------------------------
+// (g) DETOUR: the step that closes the bearing best is refused, and the terrain
+// offers another SAFE step that still strictly reduces the distance. That step is
+// a valid route - a path may step aside first. The refusal of the best-closing
+// step is retained in the marker as the reason it was skipped.
+// ---------------------------------------------------------------------------
+{
+  const FEET: Vec3Json = { x: 11, y: 66, z: 24 }
+  // 13 east and 6 south: BOTH the east step (-> 13.42) and the south step
+  // (-> 13.93) strictly reduce the 14.32m distance; east closes the bearing best.
+  const TARGET: Vec3Json = { x: 24, y: 66, z: 30 }
+  const counts = { wooden_pickaxe: 1 }
+  const spec: ShaftSpec = { dirSpec: { E: { block: 'obsidian', harvestTier: 4 } } }
+  const descent = shaftDescent(FEET, spec)
+  // The planner is pure: the tool feasibility of a step arrives as the caller's
+  // probe (the same gate `digRouteCandidate` injects in production).
+  const probe = (
+    step: DescentOption,
+  ): { dir: DescentOption['dir']; mode: 'down' | 'level'; reason: 'no_tool'; block: string | null; detail: string } | null =>
+    step.digName === 'obsidian'
+      ? { dir: step.dir, mode: step.mode, reason: 'no_tool', block: step.digName, detail: 'obsidian needs pickaxe tier 4' }
+      : null
+  const decision = planDigRoute({ selfPosition: FEET, target: TARGET, descent, sealed: false, stepRefusal: probe })
+  const route = decision.kind === 'route' ? decision.route : null
+  const from = route?.fromDistance ?? Number.NaN
+  const to = route?.toDistance ?? Number.NaN
+  check(
+    '(g) a refused best-closing step yields the next-best strictly-reducing SAFE step as a detour',
+    route !== null &&
+      route.detour === true &&
+      route.skipped !== null &&
+      route.skipped.dir === 'E' &&
+      route.skipped.reason === 'no_tool' &&
+      route.dir === 'S' &&
+      route.mode === 'level' &&
+      to < from &&
+      formatDigRoute(route, 'no_walkable_route', TARGET).endsWith(' detour=true skipped=E:no_tool'),
+    route === null
+      ? `refused=${decision.kind === 'refuse' ? decision.refusal.reason : 'none'}`
+      : `dir=${route.dir} from=${round2(route.fromDistance)} to=${round2(route.toDistance)} skipped=${String(route.skipped?.dir)}:${String(route.skipped?.reason)} line=${formatDigRoute(route, 'no_walkable_route', TARGET)}`,
+  )
+  // The arm grounds it end to end, with the detour facts on the candidate meta.
+  const base = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    standable: [FEET, { x: 11, y: 66, z: 22 }],
+  })
+  const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
+  const spent = spendEntryRoute(base, options, TARGET)
+  const tick = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    standable: [FEET, { x: 11, y: 66, z: 22 }],
+    routes: spent,
+  })
+  const offered = entryCandidates(tick, options)
+  const dig = digCandidates(offered.candidates)[0]
+  const grounded = generateGroundedCandidates(tick, options)
+  check(
+    '(g) the arm offers the detour with its skipped primary on the candidate meta',
+    dig !== undefined &&
+      dig.meta.digRouteDetour === true &&
+      dig.meta.digRouteSkipped === 'E:no_tool' &&
+      dig.meta.dir === 'S' &&
+      dig.meta.digRouteKind === 'tunnel' &&
+      typeof dig.meta.digRouteFrom === 'number' &&
+      typeof dig.meta.digRouteTo === 'number' &&
+      (dig.meta.digRouteTo as number) < (dig.meta.digRouteFrom as number) &&
+      grounded.candidates.some((candidate) => candidate.meta.digRoute === true),
+    `offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}] detour=${String(dig?.meta.digRouteDetour)} skipped=${String(dig?.meta.digRouteSkipped)} line=${String(dig?.meta.digRouteLine)}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (h) THE MEASURED M3 POCKET (measured with tools/world-truth-plane.mjs, chunk
+// (1,0) y63-69): the body stands on cobblestone at (24,66,9) in a 1-deep pocket,
+// feet y=67; EAST is the gate's own obsidian column (25,67,9)+(25,68,9) and the
+// interior (26,67,9) is behind it; the only standable open face is SOUTH at
+// (26,67,10) over dirt; (24,67,10) has no floor at all (air at y=66).
+//
+// (h1) THE DIG DEAD END: the east step closes the bearing (2.0 -> 1.0) but needs
+// pickaxe tier 4 for the gate's obsidian, the south step is `no_support`, and the
+// north/west steps do not reduce the distance. NO safe step reduces it, so the
+// arm keeps today's typed refusal + escalation - that is the honest dead end.
+// ---------------------------------------------------------------------------
+{
+  const FEET: Vec3Json = { x: 24, y: 67, z: 9 }
+  const TARGET: Vec3Json = { x: 26, y: 67, z: 9 }
+  const counts = { wooden_pickaxe: 1 }
+  const spec: ShaftSpec = {
+    dirSpec: { E: { block: 'obsidian', harvestTier: 4 } },
+    faults: { 'S:level': { reason: 'no_support' } },
+  }
+  const descent = shaftDescent(FEET, spec)
+  const base = worldState({ feet: FEET, descent, counts, current: queuedPlace(TARGET), enterCell: TARGET })
+  const options = optionsFor({ feet: FEET, enterCell: TARGET } as WorldSpec)
+  const spent = spendEntryRoute(base, options, TARGET)
+  const tick = worldState({ feet: FEET, descent, counts, current: queuedPlace(TARGET), enterCell: TARGET, routes: spent })
+  const offered = entryCandidates(tick, options)
+  const grounded = generateGroundedCandidates(tick, options)
+  const refusal = grounded.digRefusals[0]
+  check(
+    '(h1) measured pocket, no reducing safe step: typed no_tool refusal naming the gate obsidian, and the existing escalation',
+    digCandidates(offered.candidates).length === 0 &&
+      refusal !== undefined &&
+      refusal.reason === 'no_tool' &&
+      refusal.block === 'obsidian' &&
+      refusal.cell !== null &&
+      key(refusal.cell) === '25,67,9' &&
+      offered.refusal?.reason === 'all_routes_spent',
+    `offer=[${offered.candidates.map((candidate) => candidate.id).join(',')}] refusal=${refusal === undefined ? 'none' : formatDigRouteRefused(refusal)}`,
+  )
+  check(
+    '(h1) the refusal line matches the live marker shape (target/bearing/cell/block/detail)',
+    refusal !== undefined &&
+      formatDigRouteRefused(refusal).startsWith(
+        'DIG_ROUTE_REFUSED reason=no_tool target=26,67,9 bearing=E cell=25,67,9 block=obsidian detail=obsidian needs pickaxe tier 4',
+      ),
+    refusal === undefined ? 'no refusal' : formatDigRouteRefused(refusal),
+  )
+
+  // (h2) THE APPROACH LEG: the interior cell is itself sensed standable (obsidian
+  // floor under the portal blocks), so before this fix the spent entry's approach
+  // leg was the interior ITSELF - the very cell whose route just failed (live
+  // `MOVE:p26_67_9 phase=pathing` fail). An approach leg must be a different cell.
+  const standable = [FEET, TARGET, { x: 25, y: 67, z: 10 }, { x: 26, y: 67, z: 10 }]
+  const walkable = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    standable,
+  })
+  const spentWalk = spendEntryRoute(walkable, options, TARGET)
+  const walkTick = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    standable,
+    routes: spentWalk,
+  })
+  const after = entryCandidates(walkTick, options)
+  const leg = after.candidates.find((candidate) => candidate.meta.approachLeg !== undefined)
+  check(
+    '(h2) the approach leg is the standable OPEN FACE, never the destination cell whose route just failed',
+    leg !== undefined &&
+      leg.kind === 'MOVE' &&
+      leg.id === 'MOVE:p26_67_10' &&
+      leg.target !== null &&
+      key(leg.target) === '26,67,10' &&
+      after.candidates.every((candidate) => candidate.id !== 'MOVE:p26_67_9'),
+    `offer=[${after.candidates.map((candidate) => candidate.id).join(',')}] leg=${leg === undefined ? 'none' : `${leg.id}->${leg.target === null ? 'none' : key(leg.target)}`}`,
+  )
+
+  // (h3) When the destination is the ONLY improving standable cell, the arm must
+  // NOT re-offer it as its own leg: it keeps the typed escalation instead.
+  const onlyTarget = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    standable: [FEET, TARGET],
+  })
+  const spentOnly = spendEntryRoute(onlyTarget, options, TARGET)
+  const onlyTick = worldState({
+    feet: FEET,
+    descent,
+    counts,
+    current: queuedPlace(TARGET),
+    enterCell: TARGET,
+    standable: [FEET, TARGET],
+    routes: spentOnly,
+  })
+  const onlyOffer = entryCandidates(onlyTick, options)
+  check(
+    '(h3) with the destination as the only improving cell the arm escalates instead of re-offering the same walk',
+    onlyOffer.candidates.length === 0 && onlyOffer.refusal?.reason === 'all_routes_spent',
+    `offer=[${onlyOffer.candidates.map((candidate) => candidate.id).join(',')}] refusal=${onlyOffer.refusal?.line ?? 'none'}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // the marker vocabulary itself is stable and typed (the resident log is the
 // evidence surface, so the exact line shape is part of the contract).
 // ---------------------------------------------------------------------------
@@ -782,6 +977,12 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
     ['dig route grounded beside the spent route', /const legs = travelApproachLegs\(/.test(candidatesSource)],
     ['dig route withheld once spent', /isZeroProgressRouteRepeat\(state\.signals\.zeroProgressRoutes, \{\s*\n\s*kind: 'DESCEND',/.test(candidatesSource)],
     ['dig route offered to a withheld locomotion target', /reason: 'route_withheld'/.test(candidatesSource)],
+    // The detour rule and the approach-leg exclusion are part of the contract.
+    ['tool gate feeds the planner as a step probe', /stepRefusal: \(step\) => \{/.test(candidatesSource)],
+    ['detour facts on the candidate meta', /digRouteDetour: true/.test(candidatesSource)],
+    ['skipped primary on the candidate meta', /digRouteSkipped: `\$\{route\.skipped\.dir\}:\$\{route\.skipped\.reason\}`/.test(candidatesSource)],
+    ['detour telemetry', /detour: candidate\.meta\.digRouteDetour === true/.test(source)],
+    ['an approach leg is never the destination', /if \(cellKey\(spot\) === targetKey\) continue/.test(candidatesSource)],
   ]
   const failed = checks.filter(([, ok]) => !ok).map(([name]) => name)
   check(

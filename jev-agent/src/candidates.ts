@@ -4185,6 +4185,50 @@ function descendStepRouteSignature(step: DescentOption): string {
 }
 
 /**
+ * The STRICT dig feasibility of one sensor step: its whole 1x2 profile folded into
+ * the strongest harvest requirement and resolved against the held tools. This is
+ * the single gate both the DESCEND candidate builder (`descendCandidateFromStep`,
+ * which may relax it for a stranded body's escape dig) and `planDigRoute`'s step
+ * probe (`digRouteCandidate`) use, so the step the dig route picks can never be a
+ * step the builder then refuses - that disagreement is exactly how a route arm
+ * ends up offering nothing while a legal detour step exists.
+ */
+function strictStepDigProfile(
+  state: WorldState,
+  step: DescentOption,
+): {
+  digPlan: ReturnType<typeof descentDigPlan>
+  primary: Vec3Json
+  requirement: ReturnType<typeof strongestDigRequirement> | null
+  choice: ReturnType<typeof selectDigTool>
+} {
+  const digPlan = descentDigPlan(step)
+  const primary = descentPrimaryCell(step)
+  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
+  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
+  // produced a dig that could not finish (measured live: every cardinal step dug
+  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
+  const requirement = strongestDigRequirement(
+    digPlan.map((item) => ({
+      name: item.name ?? '',
+      harvestTool: item.harvestTool ?? null,
+      harvestTier: item.harvestTier ?? null,
+      diggable: item.diggable,
+    })),
+  )
+  const choice = selectDigTool(
+    {
+      name: requirement.name ?? '',
+      harvestTool: requirement.harvestTool ?? null,
+      harvestTier: requirement.harvestTier ?? null,
+      diggable: requirement.diggable === true,
+    },
+    (tool, tier) => hasTool(state, tool, tier),
+  )
+  return { digPlan, primary, requirement, choice }
+}
+
+/**
  * One DESCEND candidate from an already-safe step. Shared by the goal-grounded
  * descent family (`descendCandidates`) and the stranded-column descent
  * (`columnDescentCandidates`), so a body descending toward a resource and a body
@@ -4215,8 +4259,9 @@ function descendCandidateFromStep(
     escape?: boolean
   },
 ): { candidate: Candidate; toolReason: string } | null {
-  const digPlan = descentDigPlan(best)
-  const primary = descentPrimaryCell(best)
+  const profile = strictStepDigProfile(state, best)
+  const digPlan = profile.digPlan
+  const primary = profile.primary
   // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
   // broken at all (obsidian), and the state carries no hardness/hand-break fact to tell the two apart -
   // so case (c2) (a step needing a pickaxe tier the body lacks) must keep refusing. Every other
@@ -4227,32 +4272,11 @@ function descendCandidateFromStep(
   const escapeBreakable =
     spec.escape === true &&
     digPlan.every((item) => item.diggable && (item.harvestTool ?? null) !== 'pickaxe')
-  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
-  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
-  // produced a dig that could not finish (measured live: every cardinal step dug
-  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
-  const requirement = escapeBreakable
-    ? null
-    : strongestDigRequirement(
-        digPlan.map((item) => ({
-          name: item.name ?? '',
-          harvestTool: item.harvestTool ?? null,
-          harvestTier: item.harvestTier ?? null,
-          diggable: item.diggable,
-        })),
-      )
+  const requirement = escapeBreakable ? null : profile.requirement
   const choice =
     requirement === null
       ? { ok: true as const, tool: null, tier: null, reason: 'escape_breakable_without_drop_tool' }
-      : selectDigTool(
-          {
-            name: requirement.name ?? '',
-            harvestTool: requirement.harvestTool ?? null,
-            harvestTier: requirement.harvestTier ?? null,
-            diggable: requirement.diggable === true,
-          },
-          (tool, tier) => hasTool(state, tool, tier),
-        )
+      : profile.choice
   if (!choice.ok) return null
   const toward =
     spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
@@ -7003,6 +7027,23 @@ function digRouteCandidate(
         routeSig: descendStepRouteSignature(step),
         nowMs: state.timestampMs,
       }),
+    // The tool gate the candidate builder applies, so a step the body cannot dig
+    // is never chosen as the route: the planner then offers the next-best step
+    // that still strictly reduces the distance (a detour) instead of refusing the
+    // whole arm - the measured pocket is exactly this shape (the best-closing east
+    // step is the gate's own obsidian column, needing pickaxe tier 4).
+    stepRefusal: (step) => {
+      const profile = strictStepDigProfile(state, step)
+      if (profile.choice.ok) return null
+      const requirement = profile.requirement
+      return {
+        dir: step.dir,
+        mode: step.mode,
+        reason: 'no_tool',
+        block: requirement?.name ?? step.digName ?? null,
+        detail: `${requirement?.name ?? 'the binding block'} needs ${requirement?.harvestTool ?? 'a tool'} tier ${requirement?.harvestTier ?? 0}`,
+      }
+    },
   })
   if (decision.kind === 'refuse') {
     refusals.push(decision.refusal)
@@ -7026,6 +7067,13 @@ function digRouteCandidate(
       digRouteFrom: round2Number(route.fromDistance),
       digRouteTo: round2Number(route.toDistance),
       digRouteBearing: route.dir,
+      ...(route.detour && route.skipped !== null
+        ? {
+            digRouteDetour: true,
+            digRouteSkipped: `${route.skipped.dir}:${route.skipped.reason}`,
+            digRouteSkippedBlock: route.skipped.block ?? 'unknown',
+          }
+        : {}),
       digRouteLine: formatDigRoute(route, spec.reason, spec.target),
       ...(spec.extraMeta ?? {}),
     },
@@ -7093,14 +7141,25 @@ function travelApproachLegs(
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const currentDistance = distance(state.self.position, spec.target)
   const standKey = cellKey(state.self.position)
+  const targetKey = cellKey(spec.target)
   let best: Vec3Json | null = null
   let bestScore = Number.POSITIVE_INFINITY
+  // A leg that IS the destination is not an approach. The destination's own route
+  // is the one that just failed, so re-offering the destination as its own approach
+  // waypoint is the same failing action under a different id. Measured live
+  // (run-mucaq28q-1ftq1, the M3 pocket): the body 2 blocks west of the portal
+  // interior with the frame's obsidian column between offered
+  // `MOVE:p26_67_9` - a walk INTO the portal interior, which failed
+  // `phase=pathing` - while the standable open face at (26,67,10), strictly closer
+  // than the body and reachable, was never offered. The destination cell is only
+  // excluded as a WAYPOINT; the destination's own candidate is untouched.
   for (const spot of state.terrain.standable) {
     // Only a DIFFERENT stand cell can change the mechanical situation: a "leg"
     // to the cell the body already occupies is not a route change, and the exact
     // float distance to a target can make the body's own floor cell look
     // "closer" than its centre.
     if (cellKey(spot) === standKey) continue
+    if (cellKey(spot) === targetKey) continue
     if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) continue
     const toTarget = distance(spot, spec.target)
     if (toTarget >= currentDistance) continue

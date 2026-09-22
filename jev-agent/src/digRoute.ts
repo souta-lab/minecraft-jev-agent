@@ -48,12 +48,22 @@
 // `state.descent`, and the zero-progress route ledger already spends it.
 //
 // AUTHORITY: code owns CAN/TRUE/SAFE here - which cells exist, which of them are
-// breakable with the held tools, which direction STRICTLY reduces the distance to
-// the target, and which of those the sensor proved safe. Jev still owns WHICH of
-// the grounded candidates to take (this module only grounds one more), and
-// System2 still owns WHAT the goal is. There is no portal/M3 branch and no
-// hard-coded coordinate or bearing: the only target is the goal's own target
-// cell, and the only direction is the sign of `target - feet`.
+// breakable with the held tools, which step STRICTLY reduces the distance to the
+// target, and which of those the sensor proved safe. Jev still owns WHICH of the
+// grounded candidates to take (this module only grounds one more), and System2
+// still owns WHAT the goal is. There is no portal/M3 branch and no hard-coded
+// coordinate or bearing: the only target is the goal's own target cell, and the
+// only direction is the sign of `target - feet`.
+//
+// A PATH MAY STEP ASIDE FIRST: when the best-closing step is refused, the
+// next-best step that still STRICTLY reduces the distance is the route (the
+// `detour`/`skipped` fields). Two-step convergence through a lateral cell is
+// ordinary navigation, and it is bounded by the same rule because the distance
+// taken away at each step is real. MEASURED LIVE (gen-mucb6gbb-wfobkj): the body
+// at (24,67,9) in the M3 pocket with the gate's obsidian column at (25,67,9) had
+// its best-closing east step refused (`no_tool`, obsidian needs pickaxe tier 4)
+// and the arm refused as a whole while the walkable open face of the gate sat one
+// cell aside.
 //
 // BOUNDED BY CONSTRUCTION (never an infinite loop): every step must STRICTLY
 // reduce the distance to the target, so the body either reaches the target's own
@@ -62,7 +72,8 @@
 // (`kind=DESCEND`, primary dig cell, stand cell, route signature), so a step that
 // already proved zero observable change from this stand cell is withheld, and a
 // body that cannot dig at all (bedrock, no tool, lava) gets a typed refusal and
-// the existing escalation instead of a substituted loop.
+// the existing escalation instead of a substituted loop. A detour is a DIFFERENT
+// step identity, so the budget still applies per step.
 //
 // Pure: no bot, no clock, no model. Same facts in -> same route (or refusal) out.
 
@@ -149,6 +160,25 @@ export interface DigRouteStep {
    * uses - one mechanic, one guard check, one route identity.
    */
   step: DescentOption
+  /**
+   * True when the reducing step that closes the bearing BEST could not be taken
+   * (its geology is refused, the held tools cannot finish its profile, or it
+   * already proved zero change here) and the route offered is the next-best
+   * step that still strictly reduces the distance. The detour is a DIFFERENT
+   * route identity, so the ordinary spend budget still applies to each step.
+   */
+  detour: boolean
+  /** Why the best-closing step was stepped around (null when it was taken). */
+  skipped: DigRouteSkip | null
+}
+
+export interface DigRouteSkip {
+  dir: DescentOption['dir']
+  mode: 'down' | 'level'
+  reason: DigRouteRefusalReason
+  block: string | null
+  /** the exact cause, for the typed refusal line (never a synthesized one) */
+  detail: string
 }
 
 export interface DigRouteRefusal {
@@ -187,6 +217,14 @@ export interface DigRouteInput {
    * re-grounded here; the body must move before it is offered again.
    */
   isSpent?: (step: DescentOption) => boolean
+  /**
+   * Live dig feasibility of one sensor step: the caller's tool/legality gate.
+   * Returns a typed refusal when the step's whole 1x2 dig profile cannot be
+   * executed (no harvest tool for a cell), or null when it can. A probed-refused
+   * step is treated exactly like a sensor-refused one: it is never the route and
+   * its reason becomes the `skipped` cause of the detour that replaces it.
+   */
+  stepRefusal?: (step: DescentOption) => DigRouteSkip | null
   minAdvance?: number
   arriveDistance?: number
 }
@@ -213,13 +251,21 @@ function stepKind(step: DescentOption, sealed: boolean): DigRouteKind {
 /**
  * Ground ONE bounded dig step that strictly reduces the distance to `target`.
  *
- * Deterministic order: every candidate is the sensor's own safe step; the winner
- * is the one that lands CLOSEST to the target (with a small tie-break on the
- * step's own travel and a mild preference for a level tunnel over dropping a
- * block when both close the same distance). Nothing here is a policy ranking of
- * semantic actions - these are all the same mechanical action pointed in
- * different directions, and the closest landing cell is simply the one that
+ * Deterministic order: every candidate is a sensor step that STRICTLY reduces the
+ * distance; the winner is the one that lands CLOSEST to the target (with a small
+ * tie-break on the step's own travel and a mild preference for a level tunnel over
+ * dropping a block when both close the same distance). Nothing here is a policy
+ * ranking of semantic actions - these are all the same mechanical action pointed
+ * in different directions, and the closest landing cell is simply the one that
  * advances the route.
+ *
+ * THE DETOUR RULE: when the best-closing step cannot be taken - the sensor refuses
+ * its geology, the held tools cannot finish its profile (`stepRefusal`), or it
+ * already proved zero observable change here - the next-best step that still
+ * strictly reduces the distance IS the route, and `detour`/`skipped` record what
+ * was stepped around. A route may step aside first; it may not step away (the
+ * strict-reduction rule is what bounds it). When NO safe, feasible, unspent step
+ * reduces the distance the typed refusal names the best-closing step's own cause.
  */
 export function planDigRoute(input: DigRouteInput): DigRouteDecision {
   const feet: Vec3Json = {
@@ -247,17 +293,23 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
     return refuse('arrived', feet, null, `body is ${round2(fromDistance)}m from the target (arrival distance ${arriveDistance})`)
   }
 
-  const sx = Math.sign(target.x - feet.x)
-  const sz = Math.sign(target.z - feet.z)
   const horizontal = Math.hypot(target.x - feet.x, target.z - feet.z)
 
-  // The best REFUSED step that was geometrically a route: it is what the typed
-  // refusal must name, so the cause is the cell that would have advanced the
-  // body rather than an arbitrary cardinal direction.
-  let bestRefused: DescentOption | null = null
-  let bestRefusedDistance = Number.POSITIVE_INFINITY
-  let spentStep: DescentOption | null = null
-  let bearingStepSeen = false
+  // The reducing step that closes the bearing BEST is the primary route. When it
+  // cannot be taken (the sensor refuses the geology, the held tools cannot finish
+  // it, or it already proved zero change here) the next-best SAFE, feasible,
+  // unspent step that still STRICTLY reduces the distance is the DETOUR route.
+  // `closest` records that best-closing step with the reason it was skipped, so
+  // the typed refusal (when nothing is left) names the real blocker and the
+  // marker (when a detour is taken) names what was stepped around.
+  //
+  // MEASURED LIVE (run-mucaq28q-1ftq1 / gen-mucb6gbb-wfobkj, the M3 pocket): the
+  // body at (24,67,9) with the gate's own obsidian column at (25,67,9) between it
+  // and the interior (26,67,9). The east step closes the bearing (2.0 -> 1.0) but
+  // needs pickaxe tier 4 (`DIG_ROUTE_REFUSED reason=no_tool ... block=obsidian`),
+  // and before this rule the arm refused as a whole even when the terrain offered
+  // another reducing step.
+  let closest: { step: DescentOption; toDistance: number; status: DigRouteSkip | null } | null = null
 
   let best: DescentOption | null = null
   let bestScore = Number.POSITIVE_INFINITY
@@ -268,25 +320,31 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
       // Straight down only advances a target in the body's own column below it.
       if (horizontal > DIG_ROUTE_SAME_COLUMN_TOLERANCE) continue
       if (target.y >= step.step.y) continue
-    } else {
-      // The direction must actually close the bearing. A step with no component
-      // toward the target cannot reduce the distance and is not a route.
-      if (step.dx * sx + step.dz * sz <= 0) continue
     }
-    bearingStepSeen = true
     const toDistance = distance(step.step, target)
+    // The single geometric rule: the step must STRICTLY reduce the distance to the
+    // goal's own target. That is what bounds the route (the distance is bounded
+    // below by zero and every taken step removes at least DIG_ROUTE_MIN_ADVANCE),
+    // and it is what makes a detour safe to take: a step that does not reduce the
+    // distance is never a route, whatever it does for the bearing. The bearing dot
+    // product is deliberately NOT a filter (the distance test subsumes it for
+    // cardinal steps), so the rule stays bearing-agnostic and a detour is chosen
+    // on the geometry alone.
     if (!(toDistance <= fromDistance - minAdvance)) continue
-    if (!step.safe) {
-      if (toDistance < bestRefusedDistance) {
-        bestRefusedDistance = toDistance
-        bestRefused = step
-      }
-      continue
-    }
-    if (input.isSpent?.(step) === true) {
-      if (spentStep === null || toDistance < distance(spentStep.step, target)) spentStep = step
-      continue
-    }
+    const status: DigRouteSkip | null = !step.safe
+      ? { dir: step.dir, mode: step.mode, reason: refusedStepReason(step), block: step.digName ?? null, detail: step.reason }
+      : (input.stepRefusal?.(step) ??
+        (input.isSpent?.(step) === true
+          ? {
+              dir: step.dir,
+              mode: step.mode,
+              reason: 'spent' as DigRouteRefusalReason,
+              block: step.digName ?? null,
+              detail: 'this step already proved zero observable change from this stand cell',
+            }
+          : null))
+    if (closest === null || toDistance < closest.toDistance) closest = { step, toDistance, status }
+    if (status !== null) continue
     const score = toDistance + distance(step.step, feet) * 0.05 + (step.mode === 'level' ? 0 : 0.2)
     if (score < bestScore) {
       bestScore = score
@@ -296,6 +354,7 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
 
   if (best !== null) {
     const primary = descentPrimaryCell(best)
+    const detour = closest !== null && closest.step !== best
     return {
       kind: 'route',
       route: {
@@ -310,29 +369,18 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
         digCells: descentDigPlan(best).map((entry) => entry.cell),
         fromDistance,
         toDistance: distance(best.step, target),
+        detour,
+        skipped: detour ? (closest?.status ?? null) : null,
         step: best,
       },
     }
   }
 
-  if (spentStep !== null) {
-    return refuse(
-      'spent',
-      spentStep.step,
-      spentStep.digName ?? null,
-      'every step toward the target from this stand cell already proved zero observable change',
-    )
+  if (closest !== null && closest.status !== null) {
+    const primary = descentPrimaryCell(closest.step)
+    return refuse(closest.status.reason, primary, closest.status.block, closest.status.detail)
   }
-  if (bestRefused !== null) {
-    const primary = descentPrimaryCell(bestRefused)
-    return refuse(
-      refusedStepReason(bestRefused),
-      primary,
-      bestRefused.digName ?? null,
-      bestRefused.reason,
-    )
-  }
-  if (!bearingStepSeen) {
+  if (closest === null) {
     return refuse(
       'no_step',
       null,
@@ -350,17 +398,23 @@ export function planDigRoute(input: DigRouteInput): DigRouteDecision {
 
 /**
  * `DIG_ROUTE reason=<reason> target=x,y,z bearing=<dir> cell=x,y,z block=<name>
- *  kind=<kind> mode=<mode> from_d=<n> to_d=<n>`
+ *  kind=<kind> mode=<mode> from_d=<n> to_d=<n>[ detour=true skipped=<dir>:<reason>]`
  *
  * The route the offer grounded: the exact cell the body will stand in, the block
  * being removed, and the distance to the target before/after - so "the distance
- * strictly decreases as it advances" is observable per action.
+ * strictly decreases as it advances" is observable per action. `detour`/`skipped`
+ * are appended only when the best-closing step could not be taken and the route
+ * offered is the next-best step that still strictly reduces the distance.
  */
 export function formatDigRoute(route: DigRouteStep, reason: string, target: Vec3Json): string {
+  const detour =
+    route.detour && route.skipped !== null
+      ? ` detour=true skipped=${route.skipped.dir}:${route.skipped.reason}`
+      : ''
   return (
     `DIG_ROUTE reason=${reason} target=${cell(target)} bearing=${route.dir} ` +
     `cell=${cell(route.cell)} block=${route.block ?? 'unknown'} kind=${route.kind} mode=${route.mode} ` +
-    `from_d=${round2(route.fromDistance)} to_d=${round2(route.toDistance)}`
+    `from_d=${round2(route.fromDistance)} to_d=${round2(route.toDistance)}${detour}`
   )
 }
 

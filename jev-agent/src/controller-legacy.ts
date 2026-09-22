@@ -4778,6 +4778,10 @@ export class JevController {
         kind: typeof candidate.meta.digRouteKind === 'string' ? candidate.meta.digRouteKind : null,
         fromD: typeof candidate.meta.digRouteFrom === 'number' ? candidate.meta.digRouteFrom : null,
         toD: typeof candidate.meta.digRouteTo === 'number' ? candidate.meta.digRouteTo : null,
+        detour: candidate.meta.digRouteDetour === true,
+        skipped: typeof candidate.meta.digRouteSkipped === 'string' ? candidate.meta.digRouteSkipped : null,
+        skippedBlock:
+          typeof candidate.meta.digRouteSkippedBlock === 'string' ? candidate.meta.digRouteSkippedBlock : null,
       },
       this.tickCounter,
     )
