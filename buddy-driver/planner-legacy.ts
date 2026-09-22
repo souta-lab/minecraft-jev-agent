@@ -2083,7 +2083,11 @@ export function buildPlanOptions(
   const foodLevel = opts?.foodLevel ?? null
   const foodRung = optionalUnsat.find((rung) => rung.id === 'food')
   if (foodRung !== undefined && foodLevel !== null && foodLevel <= eatBelowFood) {
-    const foodGoals = planGoals(foodRung)
+    // Survival is optional and self-contained. Keep its recovery row replaceable
+    // when a grounded no-frontier fact proves the hunt impossible; otherwise a
+    // semantic replace (for example portal obsidian) is forced behind a stale
+    // food row that the #55 core-goal merge correctly preserves.
+    const foodGoals = planGoals(foodRung).map((goal) => ({ ...goal, core: false }))
     // Live blocker (2026-09-21): health=1, `collect:food 0/3`, body underground
     // where passive animals do not spawn. A food goal with no sensed animal could
     // not progress, and the food Option carried no vertical leg. When world
