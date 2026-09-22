@@ -422,10 +422,20 @@ export function restrictCandidatesDuringImmediateThreat(
 
 /**
  * A critical-health response must not silently fall back to an attack that was
- * already in flight.  The retreat candidate is still generated from sensed
- * terrain and Jev retains the choice between the grounded escape and an
- * escalation.  If perception cannot ground either response, preserve the
- * original set so the missing affordance remains observable.
+ * already in flight - but it must not take the choice away from Jev either.
+ *
+ * The set this keeps is the SAME set its sibling (`restrictCandidatesDuringDangerousThreat`)
+ * documents as the survival/self-care actions it keeps and leaves WHICH to Jev:
+ * `ATTACK`, `RETREAT`, `ESCALATE`, `EAT`, `EQUIP`. Dropping `ATTACK` here made code, not
+ * Jev, choose "flee" - and the measured consequence is a body pinned at health 10 in the
+ * Nether with a magma cube in contact and no food: it could neither win by fleeing nor heal,
+ * and the offer was three RETREAT cells plus an ESCALATE for tick after tick
+ * (`RETREAT:p14_37_-7 / -8 / -9` at 0.59-2.43 m, health 10 unchanged, no death). An ATTACK
+ * that is grounded (the entity is sensed in reach and a weapon is held) is exactly the kind
+ * of second valid option the operator's authority split says must go to Jev rather than be
+ * ranked by code. The original purpose still holds: nothing here re-ranks, and a set with no
+ * grounded survival action at all is preserved unchanged so the missing affordance stays
+ * observable.
  */
 export function restrictCandidatesAtCriticalHealth(
   state: Pick<WorldState, 'entities' | 'self'>,
@@ -435,8 +445,15 @@ export function restrictCandidatesAtCriticalHealth(
     (entity) => entity.hostile && entity.distance <= IMMEDIATE_HOSTILE_RANGE,
   )
   if (!immediateHostile || state.self.health > CRITICAL_COMBAT_HEALTH) return [...candidates]
-  const escape = candidates.filter((candidate) => candidate.kind === 'RETREAT' || candidate.kind === 'ESCALATE')
-  return escape.length > 0 ? escape : [...candidates]
+  const survival = candidates.filter(
+    (candidate) =>
+      candidate.kind === 'ATTACK' ||
+      candidate.kind === 'RETREAT' ||
+      candidate.kind === 'ESCALATE' ||
+      candidate.kind === 'EAT' ||
+      candidate.kind === 'EQUIP',
+  )
+  return survival.length > 0 ? survival : [...candidates]
 }
 
 /**
