@@ -41,11 +41,19 @@ for (let i = 0; i < lines.length; i += 1) {
 if (start === -1) { console.error(`SKILL_METRICS run_boundary_missing runId=${runId}`); process.exit(2) }
 const window = lines.slice(start, end).slice(-limit)
 
-/** #437 §9/§12: a bounded projection should repeat its hash when the semantic situation repeats. */
+/**
+ * #437 §9/§12: a bounded projection should repeat its hash when the semantic
+ * situation repeats.
+ *
+ * The hash is VERSIONED (`jp1:<16 hex>`, see `projectionHash`), so the capture
+ * must accept the `jp<version>:` prefix. Matching bare hex here silently reported
+ * `observations: 0` on every real run - the metric looked implemented and was
+ * always empty. `tools/test-skill-closure-metrics.mjs` pins this.
+ */
 function projectionStability(window) {
   const hashes = []
   for (const line of window) {
-    const m = /JEV_STATE_PROJECTION[^\n]*hash=([0-9a-f]{6,})/.exec(line)
+    const m = /JEV_STATE_PROJECTION[^\n]*\bhash=(\S+)/.exec(line)
     if (m !== null) hashes.push(m[1])
   }
   if (hashes.length === 0) return { observations: 0, distinct: 'UNKNOWN', note: 'no JEV_STATE_PROJECTION marker yet' }
