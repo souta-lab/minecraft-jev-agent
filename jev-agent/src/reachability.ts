@@ -251,7 +251,7 @@ export type PathProbeResult = 'reachable' | 'no_path' | 'unknown'
  * ordinary locomotion cell: it is usable only from a real interaction stand, so
  * the approach facts below are collected per family.
  */
-export type StationKindName = 'furnace' | 'crafting_table'
+export type StationKindName = 'furnace' | 'crafting_table' | 'container'
 
 /**
  * The station-approach facts the sensor JSON cannot carry. The executor already

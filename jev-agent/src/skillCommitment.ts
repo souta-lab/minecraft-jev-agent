@@ -61,6 +61,7 @@ export type SkillKind =
   | 'place'
   | 'craft'
   | 'smelt'
+  | 'withdraw'
   | 'ignite'
   | 'enter_portal'
   | 'descend'
@@ -79,6 +80,7 @@ export const SKILL_KIND_BY_CANDIDATE: Readonly<Record<CandidateKind, SkillKind>>
   CRAFT: 'craft',
   PLACE: 'place',
   SMELT: 'smelt',
+  CONTAINER: 'withdraw',
   IGNITE: 'ignite',
   ENTER_PORTAL: 'enter_portal',
   DESCEND: 'descend',
@@ -154,6 +156,18 @@ export function targetIdentityOf(candidate: Candidate, ctx: TargetIdentityContex
       return {
         kind: 'portal_site',
         position: candidate.target ?? { x: 0, y: 0, z: 0 },
+        dimension: ctx.dimension,
+        worldEpoch: ctx.worldEpoch,
+      }
+    case 'CONTAINER':
+      // The identity of a container interaction is the BLOCK CELL and the block
+      // there, never the item taken out of it: the same chest may be opened
+      // again for a different stack, and moving to a DIFFERENT chest must show
+      // up as a different identity (`chest@x,y,z` at that cell).
+      return {
+        kind: 'block',
+        position: candidate.target ?? { x: 0, y: 0, z: 0 },
+        blockName: candidate.targetName,
         dimension: ctx.dimension,
         worldEpoch: ctx.worldEpoch,
       }
@@ -357,10 +371,19 @@ export function effectViolation(envelope: EffectEnvelope, effect: Effect): strin
     }
     case 'transfer': {
       const allowed = envelope.mayTransferInventory ?? []
-      const ok = allowed.some(
+      const match = allowed.find(
         (entry) => entry.itemName === effect.itemName && entry.container === effect.container,
       )
-      return ok ? null : `transfer_not_declared:${effect.itemName}->${effect.container}`
+      if (match === undefined) return `transfer_not_declared:${effect.itemName}->${effect.container}`
+      // A declared COUNT is an upper bound, never decoration: a container
+      // selection that observed 3 iron_ingot cannot move 64, and "withdraw
+      // everything in the container" is not something an envelope can silently
+      // authorize. A null count on either side keeps the historical
+      // any-count contract (the SMELT slot roles declare null).
+      if (match.count !== null && effect.count !== null && effect.count > match.count) {
+        return `transfer_count_exceeds_declared:${effect.itemName}->${effect.container}:${effect.count}>${match.count}`
+      }
+      return null
     }
   }
 }
@@ -495,6 +518,19 @@ export function envelopeForCandidate(
       return { ...base, mayMove: false, mayJump: false, maySprint: false, mayUseStations: [...(input.stations ?? [])] }
     case 'SMELT':
       return { ...base, mayUseStations: [...(input.stations ?? [])] }
+    case 'CONTAINER':
+      // A container interaction may walk to the container and open exactly the
+      // station(s) the selection named. Its TRANSFERS are only what the
+      // candidate's own observation declared (`mayTransferInventory`), so an
+      // OPEN/inspect selection carries NO transfer authority at all: any
+      // attempt to move an item out of it is a `transfer_not_declared`
+      // envelope violation and fails closed. Nothing here is derived from "the
+      // container could hold something useful".
+      return {
+        ...base,
+        mayUseStations: [...(input.stations ?? [])],
+        mayTransferInventory: [...(input.transfers ?? [])],
+      }
     case 'EQUIP':
     case 'EAT':
       // A local inventory/consumption action must not walk, dig, place, attack
@@ -990,6 +1026,11 @@ export function declaredPostconditions(candidate: Candidate): readonly string[] 
       return ['the selected recipe output count increased']
     case 'smelt':
       return ['the selected smelt output is present at the required count OR the furnace consumed the placed input+fuel']
+    case 'withdraw':
+      return [
+        'the container at the declared cell was opened and its live window contents observed' +
+          ' (an open/inspect verifies on the observation; a withdraw additionally requires the inventory count of the declared item to rise by the taken amount, and an observed-EMPTY container is a typed empty result)',
+      ]
     case 'ignite':
       return ['the nether_portal block exists at every expected portal cell']
     case 'enter_portal':

@@ -225,6 +225,8 @@ export function describeActionPostcondition(kind: string): string {
   switch (kind) {
     case 'SMELT':
       return 'target item count increased OR (furnace block at target AND input+fuel consumed)'
+    case 'CONTAINER':
+      return 'the container was OPENED and its live window contents observed (an inspect verifies on the observation itself; a withdraw additionally requires the inventory count of the selected item to rise by the taken amount, and a container observed EMPTY is a typed empty result, never a silent success)'
     case 'PLACE':
       return 'block exists at the target'
     case 'IGNITE':

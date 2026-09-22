@@ -90,6 +90,21 @@ import {
 import type { CombatOutcome } from './combatClosure.ts'
 import type { ArmorSlot } from './gearPlan.ts'
 import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
+import {
+  containerItemStacks,
+  containerRef,
+  containerWindowStacks,
+  findContainerStack,
+  formatContainerEmpty,
+  formatContainerOpen,
+  formatContainerReady,
+  formatContainerRefusal,
+  formatContainerTransfer,
+  isContainerBlockName,
+  parseContainerRef,
+  rollupContainerItems,
+} from './containerAccess.ts'
+import type { ContainerItemStack, ContainerObservation, ContainerRefusal, ContainerWindowStack } from './containerAccess.ts'
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
 import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome, classifyActionOutcome } from './actionPostcondition.ts'
@@ -287,6 +302,17 @@ export type FailureCode =
   | 'combat_interrupted'
   /** issue #436 section 9: the bounded combat lease expired with the target alive */
   | 'combat_timeout'
+  /**
+   * A container interaction failed on a measured fact: the cell no longer holds
+   * a container, the container is occluded, the server never opened a window
+   * inside the bound, the contents changed under us, or the destination
+   * inventory could not take the transfer. Each carries its own
+   * `CONTAINER_REFUSED reason=` marker, so the cause is never inferred from a
+   * generic error string.
+   */
+  | 'container_error'
+  | 'container_unreachable'
+  | 'container_occluded'
   | 'cancelled'
   | 'unknown_event'
 
@@ -465,6 +491,11 @@ export interface ExecutorOptions {
   digTimeoutMs: number
   verifyTimeoutMs: number
   smeltTimeoutMs: number
+  /**
+   * Bounded wait for a container window (see `CONTAINER_OPEN_TIMEOUT_MS`).
+   * Optional so a fixture can shorten it; the bound is never unbounded.
+   */
+  containerOpenTimeoutMs?: number
   goalItem: string
   /**
    * Bounded window for the dimension transfer: walk into the lit portal and
@@ -613,6 +644,36 @@ const PORTAL_WALK_IN_CELLS = new Set([NETHER_PORTAL, 'end_portal', 'end_gateway'
 /** A server/client inventory update can lag the equip transaction by a tick. */
 const PLACE_EQUIP_RETRIES = 4
 const PLACE_EQUIP_SETTLE_MS = 50
+
+/**
+ * The bounded wait for a container window. Mineflayer's `openBlock` is
+ * `activateBlock` + `once('windowOpen')` with NO validation at all
+ * (node_modules/mineflayer/lib/plugins/inventory.js:405-410): too far, occluded,
+ * no line of sight, block gone and no permission are ALL the same event - a
+ * window that never opens, surfacing 20 s later as
+ * `Event windowOpen did not fire within timeout of 20000ms`. A 20 s wedge per
+ * attempt is not a diagnostic; this bound names the fact
+ * (`CONTAINER_REFUSED reason=open_timeout`) and lets the policy re-target.
+ */
+const CONTAINER_OPEN_TIMEOUT_MS = 4000
+
+/** Upper bound on the per-stack transfer steps one withdraw may take. */
+const CONTAINER_TRANSFER_STACK_LIMIT = 64
+
+/**
+ * The container window a container interaction consumes, in the REAL
+ * mineflayer shape (`prismarine-windows` Window + `extendWindow`): the
+ * container's own slots plus the numeric-item-id `withdraw`. Narrow on purpose,
+ * like `SmeltFurnaceWindow`, so a fixture drives the real Executor with a
+ * structural double and never a live window.
+ */
+export interface ContainerWindowHandle {
+  /** the container's OWN slots right now (never the player-inventory half) */
+  containerItems(): readonly ContainerWindowStack[]
+  /** move up to `count` of `itemName` out of the container into the inventory */
+  withdraw(itemName: string, count: number): Promise<unknown>
+  close(): void
+}
 
 /** PILLAR_UP: jump-apex window in which the block is placed under the feet. */
 const PILLAR_APEX_BUDGET_MS = 700
@@ -1407,6 +1468,21 @@ export function placedStationReadyLine(itemName: string, placedName: string | nu
   return formatFurnaceReady('placed', at)
 }
 
+/**
+ * The `CONTAINER_READY source=placed` line a verified container placement must
+ * emit, or null when nothing was proven. Mirrors `placedStationReadyLine`: a
+ * shulker box (or chest/barrel) the body placed must be a durable world fact, so
+ * re-visiting the cell OPENS the container standing there instead of re-planning
+ * a placement of an item that is no longer in the inventory. Gated by the same
+ * strict placement post-condition, so an unverified/failed placement never
+ * records a container.
+ */
+export function placedContainerReadyLine(itemName: string, placedName: string | null, at: Vec3Json): string | null {
+  if (!isContainerBlockName(itemName)) return null
+  if (!isPlacePostconditionMet(placedName, itemName)) return null
+  return formatContainerReady(itemName, at)
+}
+
 /** The items whose verified per-cell placement is a nether-portal frame block. */
 export const FRAME_PLACE_ITEMS: ReadonlySet<string> = new Set([OBSIDIAN])
 
@@ -1798,6 +1874,16 @@ export class Executor {
    * instead of a generic path error. Cleared whenever a vertical contract runs.
    */
   private lastVerticalFailureReason: string | null = null
+  /**
+   * What an OPEN action OBSERVED inside a container, keyed by the truthful
+   * `name@x,y,z` reference. A container with no entry here is UNKNOWN, never
+   * EMPTY: the client cannot read a container before a window is open, so the
+   * absence of an observation is the absence of knowledge. Cleared with the
+   * Executor instance (a new generation re-observes; it never inherits a claim).
+   */
+  private readonly containerObservations = new Map<string, ContainerObservation>()
+  /** Dedupe for the mirrored typed container refusals (one line per distinct fact). */
+  private readonly containerRefusalLogged = new Set<string>()
 
   constructor(bot: Bot, logger: EventLogger, options: ExecutorOptions = defaultExecutorOptions) {
     this.bot = bot
@@ -1824,6 +1910,19 @@ export class Executor {
 
   get maxConcurrentActions(): number {
     return this.maxConcurrent
+  }
+
+  /**
+   * The contents this body has OBSERVED, for the controller to inject into the
+   * next sensor tick (`SensorInput.containerContents`). Containers nobody opened
+   * are absent - the candidate layer reads absence as UNKNOWN.
+   */
+  containerContents(): ContainerObservation[] {
+    return [...this.containerObservations.values()].map((entry) => ({
+      ...entry,
+      position: { ...entry.position },
+      items: entry.items.map((stack) => ({ ...stack })),
+    }))
   }
 
   get lastResult(): ExecutionResult | null {
@@ -2107,6 +2206,9 @@ export class Executor {
         return carried.filter((name) => WEAPON_ITEM_SUFFIXES.some((suffix) => name.endsWith(suffix)))
       case 'CRAFT':
       case 'SMELT':
+      // A container interaction equips nothing: the window transfer moves the
+      // items, the hand stays free (a held tool is irrelevant to opening a box).
+      case 'CONTAINER':
       case 'RETREAT':
       case 'WAIT':
       case 'ESCALATE':
@@ -2120,6 +2222,20 @@ export class Executor {
    * collection of its own output item (issue #436 section 12).
    */
   private groundedTransfers(candidate: Candidate): InventoryTransferSpec[] {
+    if (candidate.kind === 'CONTAINER') {
+      // A WITHDRAW declares exactly the item the candidate's OWN observation saw
+      // and no more than that observed count (the transfer effect's `container`
+      // is the truthful `name@x,y,z` here, so an envelope for one chest can
+      // never authorize a move out of another). An OPEN/inspect selection
+      // declares NOTHING: it may read the container and must fail closed on any
+      // attempt to move an item out of it.
+      if (readMetaString(candidate, 'containerAction') !== 'withdraw') return []
+      const item = readMetaString(candidate, 'containerItem')
+      const ref = readMetaString(candidate, 'containerRef')
+      if (item === null || ref === null) return []
+      const count = readMetaNumber(candidate, 'containerCount', 0)
+      return [{ itemName: item, count: Number.isFinite(count) && count > 0 ? Math.floor(count) : null, container: ref }]
+    }
     if (candidate.kind !== 'SMELT') return []
     const inputItem = readMetaString(candidate, 'inputItem')
     const fuelItem = readMetaString(candidate, 'fuelItem')
@@ -2139,6 +2255,13 @@ export class Executor {
         return ['crafting_table']
       case 'SMELT':
         return ['furnace', 'blast_furnace', 'smoker']
+      case 'CONTAINER': {
+        // Opening a container is a STATION use, so the envelope names the exact
+        // block the selection declared - and nothing else. The live block is
+        // re-read before the open, and a different container there is refused.
+        const block = readMetaString(candidate, 'containerBlock')
+        return block !== null && isContainerBlockName(block) ? [block] : []
+      }
       default:
         return []
     }
@@ -2159,6 +2282,8 @@ export class Executor {
         return this.options.pathTimeoutMs
       case 'SMELT':
         return this.options.smeltTimeoutMs
+      case 'CONTAINER':
+        return this.options.pathTimeoutMs + (this.options.containerOpenTimeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS)
       default:
         return null
     }
@@ -2480,6 +2605,8 @@ export class Executor {
           return await this.runCraft(candidate, epoch, signal, startedAt)
         case 'SMELT':
           return await this.runSmelt(candidate, epoch, signal, startedAt)
+        case 'CONTAINER':
+          return await this.runContainer(candidate, epoch, signal, startedAt)
         case 'DESCEND':
           return await this.runDescend(candidate, epoch, signal, startedAt)
         case 'STEP':
@@ -6472,6 +6599,406 @@ export class Executor {
     }
   }
 
+  /**
+   * The CONTAINER runner: approach the container through the EXISTING
+   * `approachPlacedBlock` station path, prove the block is still there and not
+   * occluded, open it with the geometric face the body actually stands on, and
+   * READ its live contents.
+   *
+   * Two actions share this runner (`meta.containerAction`):
+   *   * `open`     - the inspect/sense step. It moves NO item: the effect
+   *                  envelope for an open selection declares no transfer at all,
+   *                  so any attempt to take something is a fail-closed
+   *                  `transfer_not_declared` violation. Its evidence is the
+   *                  `CONTAINER_OPEN` observation (with the typed
+   *                  `CONTAINER_EMPTY` line when the container is empty).
+   *   * `withdraw` - take the ONE item the candidate declared, up to the count
+   *                  its own observation declared. Every move asserts
+   *                  `{type:'transfer', itemName, count, container: <ref>}`
+   *                  against the envelope before the side effect, and the
+   *                  verified amount is the INVENTORY DELTA - never the intent.
+   *                  `CONTAINER_TRANSFER` names what was taken and what remains.
+   *
+   * Contents are UNKNOWN before the window opens (the client has no other
+   * surface - see `containerAccess.ts`), so this is the only honest order:
+   * open, observe, then transfer what an observation grounded.
+   */
+  private async runContainer(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('container_error', 'CONTAINER candidate has no container position')
+    const ref = readMetaString(candidate, 'containerRef')
+    if (ref === null || parseContainerRef(ref) === null) {
+      throw new ExecutorError('container_error', 'CONTAINER candidate has no truthful container reference (name@x,y,z)')
+    }
+    const action = readMetaString(candidate, 'containerAction') ?? 'open'
+    if (action !== 'open' && action !== 'withdraw') {
+      throw new ExecutorError('container_error', `CONTAINER candidate has an unknown action "${action}"`)
+    }
+    this.setPhase(candidate, epoch, 'pathing-to-container')
+    // The EXISTING station approach (never a forked approach): a real
+    // interaction stand or a typed path_stuck, no blind interaction.
+    const stand = await this.approachPlacedBlock(target, 'container', epoch, signal)
+    this.ensureOwned(epoch, signal)
+    const block = this.currentBlockAt(target)
+    if (block === null || !isContainerBlockName(block.name)) {
+      this.logContainerRefusal({
+        reason: 'unreachable',
+        container: ref,
+        block: readMetaString(candidate, 'containerBlock') ?? 'container',
+        position: { x: target.x, y: target.y, z: target.z },
+        detail: block === null ? 'block_unloaded' : 'block_missing',
+      })
+      throw new ExecutorError('target_gone', `no container at (${target.x},${target.y},${target.z}) (found ${block?.name ?? 'unloaded'})`)
+    }
+    const liveRef = containerRef(block.name, target)
+    // Occlusion is a real geometric fact (`bot.canSeeBlock` casts the eye->block
+    // ray and requires this block to be the first hit), so an occluded container
+    // is refused with its own reason instead of surfacing as a generic timeout.
+    if (this.containerOccluded(block)) {
+      this.logContainerRefusal({
+        reason: 'occluded',
+        container: liveRef,
+        block: block.name,
+        position: { x: target.x, y: target.y, z: target.z },
+        detail: 'line_of_sight_blocked',
+      })
+      throw new ExecutorError('container_occluded', `line of sight to ${liveRef} is blocked`)
+    }
+    this.setPhase(candidate, epoch, 'opening')
+    const face = deriveInteractionFace(stand, target)
+    const handle = await this.openContainerWindow(block, face, candidate, epoch, signal)
+    let closed = false
+    const closeOnce = (): void => {
+      if (closed) return
+      closed = true
+      try {
+        handle.close()
+      } catch {
+        // the server already closed the window
+      }
+    }
+    try {
+      const stacks = handle.containerItems()
+      const observation = this.recordContainerObservation(liveRef, block.name, target, stacks)
+      const observed = observation.items
+      this.logger.info('agent', formatContainerOpen(liveRef, observed), {
+        actionId: candidate.id,
+        container: liveRef,
+        block: block.name,
+        at: `${target.x},${target.y},${target.z}`,
+        contents: observed.length === 0 ? 'empty' : 'known',
+        items: observed,
+        source: readMetaString(candidate, 'containerSource') ?? 'live',
+      })
+      if (action === 'open') {
+        if (observed.length === 0) {
+          // A typed EMPTY result, never a silent success: the container WAS
+          // opened and observed, and that observation is the evidence.
+          this.logger.info('agent', formatContainerEmpty(liveRef), {
+            actionId: candidate.id,
+            container: liveRef,
+            at: `${target.x},${target.y},${target.z}`,
+          })
+        }
+        return this.buildResult(candidate, epoch, startedAt, 'done', 'observed', `opened ${liveRef} (${observed.length} stacks)`, null, {
+          verified: true,
+          dropObserved: false,
+          blockRemoved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+        })
+      }
+      return await this.withdrawFromContainer(candidate, liveRef, block.name, target, handle, epoch, signal, startedAt)
+    } finally {
+      closeOnce()
+    }
+  }
+
+  /**
+   * The transfer half: take exactly the declared item, bounded by the count the
+   * candidate's own observation declared. The envelope is re-checked before
+   * EVERY move (`assertEffect`), so a container that grew under us cannot be
+   * emptied silently: the declared amount is the budget, and `remaining` is
+   * re-read and reported.
+   */
+  private async withdrawFromContainer(
+    candidate: Candidate,
+    liveRef: string,
+    blockName: string,
+    target: Vec3Json,
+    handle: ContainerWindowHandle,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const item = readMetaString(candidate, 'containerItem')
+    if (item === null) throw new ExecutorError('container_error', 'CONTAINER withdraw candidate has no item')
+    const declared = readMetaNumber(candidate, 'containerCount', 0)
+    const budget = Number.isFinite(declared) && declared > 0 ? Math.floor(declared) : null
+    const before = this.countItem(item)
+    let moved = 0
+    for (let step = 0; step < CONTAINER_TRANSFER_STACK_LIMIT; step += 1) {
+      const stack = findContainerStack(handle.containerItems(), item)
+      if (stack === null) break
+      const remainingBudget = budget === null ? stack.count : budget - moved
+      if (remainingBudget <= 0) break
+      const move = Math.max(1, Math.min(Math.floor(stack.count), Math.floor(remainingBudget)))
+      // Envelope BEFORE the side effect: the truthful container reference and
+      // the exact count being moved.
+      this.assertEffect({ type: 'transfer', itemName: item, count: move, container: liveRef })
+      this.ensureOwned(epoch, signal)
+      try {
+        await handle.withdraw(item, move)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.logContainerRefusal({
+          reason: /inventory is full|destination full/i.test(message) ? 'no_room' : 'contents_changed',
+          container: liveRef,
+          block: blockName,
+          position: { x: target.x, y: target.y, z: target.z },
+          item,
+          detail: 'withdraw_refused',
+        })
+        throw new ExecutorError('container_error', `withdraw ${item} from ${liveRef} failed: ${message}`)
+      }
+      moved += move
+      this.ensureOwned(epoch, signal)
+    }
+    const taken = Math.max(0, this.countItem(item) - before)
+    // Re-observing the LIVE window after the transfer is what makes the next
+    // tick honest: the ledger must show what actually REMAINS, or the candidate
+    // layer would re-offer a stack that is already in the inventory and the body
+    // would walk back to open an empty slot.
+    const after = this.recordContainerObservation(liveRef, blockName, target, handle.containerItems())
+    const remaining = after.items.filter((stack) => stack.name === item).reduce((sum, stack) => sum + Math.max(0, stack.count), 0)
+    if (taken === 0) {
+      this.logContainerRefusal({
+        reason: moved === 0 ? 'contents_changed' : 'no_room',
+        container: liveRef,
+        block: blockName,
+        position: { x: target.x, y: target.y, z: target.z },
+        item,
+        detail: moved === 0 ? 'item_not_in_container' : 'inventory_delta_zero',
+      })
+      throw new ExecutorError('container_error', `${item} was not transferred out of ${liveRef}`)
+    }
+    // The marker names what was TAKEN (the verified inventory delta) and what
+    // REMAINED (a live re-read), so a partial transfer can never be reported as
+    // a complete one.
+    this.logger.info('agent', formatContainerTransfer(liveRef, item, taken, remaining), {
+      actionId: candidate.id,
+      container: liveRef,
+      block: blockName,
+      at: `${target.x},${target.y},${target.z}`,
+      item,
+      taken,
+      remaining,
+    })
+    return this.buildResult(candidate, epoch, startedAt, 'done', 'withdrew', `took ${taken}x ${item} from ${liveRef} (${remaining} left)`, null, {
+      verified: true,
+      dropObserved: false,
+      blockRemoved: false,
+      itemsGained: taken,
+      goalItemCount: this.countGoalItem(),
+    })
+  }
+
+  /**
+   * Open the container with the geometric face the body stands on, bounded by
+   * `containerOpenTimeoutMs`. Mineflayer's own 20 s `once('windowOpen')` timeout
+   * is swallowed here: a late window is CLOSED rather than left open, because
+   * `clickWindow` silently retargets to the player inventory when
+   * `bot.currentWindow` is null (mineflayer inventory.js:581).
+   */
+  private async openContainerWindow(
+    block: Block,
+    face: Vec3Json,
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+  ): Promise<ContainerWindowHandle> {
+    const timeoutMs = this.options.containerOpenTimeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS
+    // A stale window from an earlier action would make the transfer clicks land
+    // in the wrong window; close it first (the container path owns its window).
+    await this.closeStaleWindow()
+    this.assertEffect({ type: 'station', station: block.name })
+    const port = this.options.actuationPort
+    const opening: Promise<unknown> =
+      port !== undefined
+        ? port.openContainer(block, toVec3(this.bot, face))
+        : this.bot.openContainer(block, toVec3(this.bot, face))
+    // The open is raced against a bounded wait; a rejected open is kept from
+    // becoming an unhandled rejection when the timeout wins.
+    let settled = false
+    const bounded = opening.then(
+      (window) => {
+        settled = true
+        return window
+      },
+      (error: unknown) => {
+        settled = true
+        throw error
+      },
+    )
+    bounded.catch(() => undefined)
+    const opened = await Promise.race([
+      bounded.then((window) => ({ kind: 'opened' as const, window })),
+      delay(timeoutMs, signal).then(() => ({ kind: 'timeout' as const })),
+    ]).catch((error: unknown) => {
+      if (error instanceof ActionCancelled) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      this.logContainerRefusal({
+        reason: 'open_timeout',
+        container: containerRef(block.name, { x: block.position.x, y: block.position.y, z: block.position.z }),
+        block: block.name,
+        position: { x: block.position.x, y: block.position.y, z: block.position.z },
+        detail: 'open_threw',
+      })
+      throw new ExecutorError('container_unreachable', `opening ${block.name} failed: ${message}`)
+    })
+    if (opened.kind === 'timeout') {
+      // A window that arrives after the bound must not leak: close it.
+      if (!settled) {
+        bounded.then((late) => this.closeWindowQuietly(late)).catch(() => undefined)
+      }
+      this.logContainerRefusal({
+        reason: 'open_timeout',
+        container: containerRef(block.name, { x: block.position.x, y: block.position.y, z: block.position.z }),
+        block: block.name,
+        position: { x: block.position.x, y: block.position.y, z: block.position.z },
+        detail: 'no_window_within_bound',
+      })
+      throw new ExecutorError(
+        'container_unreachable',
+        `no container window opened for ${block.name} at (${block.position.x},${block.position.y},${block.position.z}) within ${timeoutMs}ms`,
+      )
+    }
+    this.ensureOwned(epoch, signal)
+    return this.containerHandleFor(opened.window, block)
+  }
+
+  /**
+   * Adapt the live Mineflayer window to the narrow handle: the container's own
+   * slots (`itemsRange(0, inventoryStart)`) and a `withdraw` that resolves the
+   * NUMERIC item id from the observed stack itself (mineflayer's `withdraw`
+   * takes an item id, never a slot - inventory.js:275-305).
+   */
+  private containerHandleFor(raw: unknown, block: Block): ContainerWindowHandle {
+    const window = raw as
+      | {
+          inventoryStart?: number
+          itemsRange?: (start: number, end: number) => Array<{ name: string; type: number; count: number }>
+          containerItems?: () => Array<{ name: string; type: number; count: number }>
+          withdraw?: (itemType: number, metadata: number | null, count: number) => Promise<unknown>
+          close?: () => unknown
+        }
+      | null
+      | undefined
+    if (window === null || window === undefined || typeof window !== 'object') {
+      throw new ExecutorError('container_error', `opening ${block.name} returned no window`)
+    }
+    const containerItems = (): ContainerWindowStack[] => {
+      const raw =
+        typeof window.containerItems === 'function'
+          ? window.containerItems()
+          : typeof window.itemsRange === 'function' && typeof window.inventoryStart === 'number'
+            ? window.itemsRange(0, window.inventoryStart)
+            : null
+      if (raw === null) throw new ExecutorError('container_error', 'the container window exposes no container slots')
+      return raw.map((entry) => ({ name: entry.name, type: entry.type, count: entry.count }))
+    }
+    const withdraw = window.withdraw
+    if (typeof withdraw !== 'function') {
+      throw new ExecutorError('container_error', 'the container window exposes no withdraw')
+    }
+    return {
+      containerItems,
+      withdraw: async (itemName, count) => {
+        const stack = findContainerStack(containerItems(), itemName)
+        if (stack === null) throw new Error(`${itemName} is not in the container any more`)
+        return withdraw.call(window, stack.type, null, count)
+      },
+      close: () => {
+        try {
+          void window.close?.()
+        } catch {
+          // the server already closed the window
+        }
+      },
+    }
+  }
+
+  /** True when a real line-of-sight read says the container cell is blocked. */
+  private containerOccluded(block: Block): boolean {
+    const canSee = (this.bot as unknown as { canSeeBlock?: (block: unknown) => boolean }).canSeeBlock
+    if (typeof canSee !== 'function') return false
+    try {
+      return canSee.call(this.bot, block) === false
+    } catch {
+      // A structural double without a world raycast answers nothing; absence of
+      // the fact is not occlusion.
+      return false
+    }
+  }
+
+  /** Close any window left open by an earlier action, before opening our own. */
+  private async closeStaleWindow(): Promise<void> {
+    const current = (this.bot as unknown as { currentWindow?: unknown }).currentWindow
+    if (current === null || current === undefined) return
+    await this.closeWindowQuietly(current)
+  }
+
+  private async closeWindowQuietly(window: unknown): Promise<void> {
+    try {
+      const close = (window as { close?: () => unknown }).close
+      if (typeof close === 'function') {
+        await close.call(window)
+        return
+      }
+      await this.bot.closeWindow(window as never)
+    } catch {
+      // the server already closed it
+    }
+  }
+
+  /** Record what an open OBSERVED; absence of an entry is UNKNOWN, never empty. */
+  private recordContainerObservation(
+    ref: string,
+    blockName: string,
+    position: Vec3Json,
+    stacks: readonly ContainerWindowStack[],
+  ): ContainerObservation {
+    const observation: ContainerObservation = {
+      container: ref,
+      block: blockName,
+      position: { x: position.x, y: position.y, z: position.z },
+      items: rollupContainerItems(containerItemStacks(stacks)),
+      observedAt: Date.now(),
+    }
+    this.containerObservations.set(ref, observation)
+    return observation
+  }
+
+  /** The mirrored typed container refusal (deduped per distinct fact). */
+  private logContainerRefusal(refusal: ContainerRefusal): void {
+    const key = formatContainerRefusal(refusal)
+    if (this.containerRefusalLogged.has(key)) return
+    this.containerRefusalLogged.add(key)
+    this.logger.warn('agent', key, {
+      reason: refusal.reason,
+      container: refusal.container,
+      block: refusal.block,
+      at: `${refusal.position.x},${refusal.position.y},${refusal.position.z}`,
+      ...(refusal.item === undefined || refusal.item === null ? {} : { item: refusal.item }),
+      ...(refusal.detail === undefined || refusal.detail === null ? {} : { detail: refusal.detail }),
+    })
+  }
+
   private async runSmelt(
     candidate: Candidate,
     epoch: number,
@@ -6690,6 +7217,19 @@ export class Executor {
     if (readyLine !== null) {
       this.logger.info('agent', readyLine, {
         source: 'placed',
+        at: `${target.x},${target.y},${target.z}`,
+        target,
+        actionId: candidate.id,
+      })
+    }
+    // A verified container placement is a durable world fact (see
+    // `placedContainerReadyLine`): the host records the cell, so the body opens
+    // the box standing there instead of re-planning a placement.
+    const containerLine = placedContainerReadyLine(itemName, placedName, target)
+    if (containerLine !== null) {
+      this.logger.info('agent', containerLine, {
+        source: 'placed',
+        block: itemName,
         at: `${target.x},${target.y},${target.z}`,
         target,
         actionId: candidate.id,

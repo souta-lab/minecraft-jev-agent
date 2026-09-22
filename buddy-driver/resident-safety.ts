@@ -650,7 +650,13 @@ interface ActuationDelegate {
   activateBlock?: (block: unknown, face?: unknown) => Promise<void>
   equip?: (item: unknown, destination?: unknown) => Promise<void>
   craft?: (recipe: unknown, count?: number, craftingTable?: unknown) => Promise<void>
-  openBlock?: (block: unknown) => Promise<unknown>
+  openBlock?: (block: unknown, face?: unknown) => Promise<unknown>
+  registry?: { itemsByName?: Record<string, { id?: number }> }
+  currentWindow?: {
+    inventoryStart?: number
+    itemsRange?: (start: number, end: number) => Array<{ name: string; type: number; count: number }>
+    withdraw?: (itemType: number, metadata: number | null, count: number) => Promise<unknown>
+  } | null
 }
 
 /** Fail closed when an allowlisted actuator primitive is missing on the bot. */
@@ -723,9 +729,34 @@ export function createActuationPort(bot: Bot, lease: ActuationLease, id: string,
       assert('port.craft')
       return requiredMethod(delegate.craft, 'craft').call(delegate, recipe, count, craftingTable)
     },
-    openContainer: (block): Promise<unknown> => {
+    openContainer: (block, face): Promise<unknown> => {
       assert('port.openContainer')
-      return requiredMethod(delegate.openBlock, 'openBlock').call(delegate, block)
+      return requiredMethod(delegate.openBlock, 'openBlock').call(delegate, block, face)
+    },
+    withdrawFromContainer: (itemName, count): Promise<unknown> => {
+      // The lease is asserted at the TRANSFER, not only at the open: the window
+      // object's own `withdraw` reaches `bot._client.write` directly and is not
+      // covered by `MUTATING_BOT_METHODS`, which is exactly the #38 nested
+      // actuation bypass this port operation exists to close.
+      assert('port.withdrawFromContainer')
+      const window = delegate.currentWindow
+      if (window === null || window === undefined) {
+        throw new Error('ACTUATION_PORT_MISSING method=currentWindow (no container window is open)')
+      }
+      const withdraw = requiredMethod(window.withdraw, 'currentWindow.withdraw')
+      const slots =
+        typeof window.itemsRange === 'function' && typeof window.inventoryStart === 'number'
+          ? window.itemsRange(0, window.inventoryStart)
+          : []
+      // mineflayer's withdraw takes a NUMERIC item id (inventory.js:275-305). The
+      // open window's own container slots already carry it, so the id is read
+      // from the live stack and never guessed from a name.
+      const live = slots.find((stack) => stack.name === itemName && stack.count > 0)
+      const type = live?.type ?? delegate.registry?.itemsByName?.[itemName]?.id
+      if (typeof type !== 'number') {
+        throw new Error(`ACTUATION_PORT_UNKNOWN_ITEM item=${itemName}`)
+      }
+      return withdraw.call(window, type, null, count)
     },
     writeMovementPacket: (name: string, payload: Record<string, unknown>): void => {
       assert('port.writeMovementPacket')

@@ -61,6 +61,8 @@ import { WALL_DIRS, floodEvidence, isTunnelFloodBlockName } from './wallEntry.ts
 import type { WallBlockLike, WallCell, WallProbe } from './wallEntry.ts'
 import { LEVEL_SCAN_MAX_LEVELS } from './levelScan.ts'
 import type { LevelLateralFacts, LevelScanProbe } from './levelScan.ts'
+import { CONTAINER_BLOCK_NAMES, isContainerBlockName, normalizeBlockName } from './containerAccess.ts'
+import type { ContainerObservation } from './containerAccess.ts'
 
 export type Vec3Json = {
   x: number
@@ -88,8 +90,15 @@ function portalCellKey(pos: Vec3Json): string {
  */
 export type StationSource = 'sensed' | 'remembered'
 
-/** A perceived station: coordinates plus provenance (see `StationSource`). */
-export type StationEntry = Vec3Json & { source: StationSource }
+/**
+ * A perceived station: coordinates plus provenance (see `StationSource`).
+ *
+ * `name` is the station's own block name when the projection knows it (a sensed
+ * container resolves its live block; a remembered one keeps the host-validated
+ * name it was recorded with). It is optional so desktop/replay callers that
+ * build a `WorldState` by hand keep the previous entry shape.
+ */
+export type StationEntry = Vec3Json & { source: StationSource; name?: string }
 
 /**
  * True when the bot's own block scan saw this station this tick. In-place
@@ -858,6 +867,20 @@ export type WorldState = {
   craftingTables: StationEntry[]
   /** placed furnace stations: sensed near-field first, then remembered (M2 smelting) */
   furnaces?: StationEntry[]
+  /**
+   * Container blocks (chest / trapped_chest / barrel / ender_chest / shulker
+   * box + colour variants): sensed near-field first, then remembered. A
+   * container is a station-approach target, never a resource: it is in
+   * `PROTECTED_STATION_BLOCKS`, so no candidate family may mine it. Optional so
+   * old replay fixtures keep their previous state shape (absent = none sensed).
+   */
+  containers?: StationEntry[]
+  /**
+   * The contents an OPEN action OBSERVED, per container cell. Absent or missing
+   * an entry means UNKNOWN - never empty. `items: []` in an entry means the
+   * container was opened and seen empty (the typed empty result).
+   */
+  containerContents?: ContainerObservation[]
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
   /**
@@ -1050,6 +1073,14 @@ export interface SensorInput {
    * omitted.
    */
   rememberedStations?: readonly KnownResource[]
+  /**
+   * Contents an earlier OPEN action observed, injected by the controller from
+   * the executor's own observation ledger. A container cell with no entry here
+   * is UNKNOWN, not empty: the client cannot read container contents before a
+   * window is opened (see `containerAccess.ts`), so the absence of an entry is
+   * the absence of an observation, never a verdict of zero.
+   */
+  containerContents?: readonly ContainerObservation[]
 }
 
 const EYE_HEIGHT = 1.62
@@ -1073,6 +1104,17 @@ const STONE_LIKE = new Set([
  */
 export const CRAFT_STATIONS: ReadonlySet<string> = new Set(['crafting_table'])
 export const FURNACE_STATIONS: ReadonlySet<string> = new Set(['furnace', 'blast_furnace', 'smoker'])
+/**
+ * The container blocks the sensor projects into `WorldState.containers`
+ * (chest / trapped_chest / barrel / ender_chest / shulker_box + its 16 colour
+ * variants). The table itself lives in `containerAccess.ts` so the sensor, the
+ * candidate layer, the executor's open mechanics and the envelope all resolve
+ * a container by the SAME names - never a second list (see `CRAFT_STATIONS`).
+ * A container placed in the world by anyone (an operator, a loot chest, the
+ * body itself) is therefore a SENSED station-approach target, not invisible
+ * terrain.
+ */
+export const CONTAINER_STATIONS: ReadonlySet<string> = CONTAINER_BLOCK_NAMES
 export const STONE_YIELDS = new Set(['cobblestone', 'cobbled_deepslate'])
 
 /**
@@ -2915,6 +2957,46 @@ function buildFurnaces(
   return buildStations(bot, options, self, FURNACE_STATIONS, remembered)
 }
 
+/**
+ * The container projection: the SAME `buildStations` scan/merge the crafting
+ * table and furnace use, plus the container's own block NAME so a candidate can
+ * declare the truthful `name@x,y,z` reference it will open.
+ *
+ * A sensed entry resolves its name from the live block (bounded: at most
+ * `SENSED_STATION_CAP` reads). A remembered entry keeps the name the durable
+ * memory recorded, which the host re-validated against live world truth
+ * (`validateRememberedStations`) - so an unloaded remembered container still
+ * names itself, and the executor's own live read is what refuses it if the
+ * block is gone.
+ */
+function buildContainers(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+  remembered: readonly KnownResource[],
+): StationEntry[] {
+  const entries = buildStations(bot, options, self, CONTAINER_STATIONS, remembered)
+  return entries.map((entry) => {
+    if (entry.source === 'sensed') {
+      const live = bot.blockAt(new Vec3(entry.x, entry.y, entry.z))?.name ?? null
+      if (live !== null && isContainerBlockName(live)) return { ...entry, name: normalizeBlockName(live) }
+    }
+    const rememberedName = rememberedContainerName(remembered, entry)
+    return rememberedName === null ? { ...entry } : { ...entry, name: rememberedName }
+  })
+}
+
+/** The durable container name recorded for one remembered cell, or null. */
+function rememberedContainerName(remembered: readonly KnownResource[], entry: Vec3Json): string | null {
+  for (const resource of remembered) {
+    if (resource.kind !== 'station') continue
+    if (resource.position.x !== entry.x || resource.position.y !== entry.y || resource.position.z !== entry.z) continue
+    if (!isContainerBlockName(resource.name)) continue
+    return normalizeBlockName(resource.name)
+  }
+  return null
+}
+
 export const PROBE_HAZARDS = new Set(['lava', 'fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus'])
 export const PROBE_FLUIDS = new Set(['water', 'flowing_water', 'bubble_column'])
 
@@ -4478,6 +4560,14 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
+    // The SAME station scan/build path as the crafting table and the furnace -
+    // never a forked approach: a container placed in the world (by an operator,
+    // a structure, or the body itself) is sensed here and remembered durably
+    // through the identical `kind: 'station'` known-resource envelope.
+    containers: buildContainers(bot, options, self, rememberedStations),
+    ...(input.containerContents === undefined || input.containerContents.length === 0
+      ? {}
+      : { containerContents: input.containerContents.map((entry) => ({ ...entry, items: entry.items.map((stack) => ({ ...stack })) })) }),
     placementSpots,
     submergedPlacementSpots: submergedPlacementSpots(bot, placementSpots),
     // Sensing is gated on the material possibility (a bridge needs a block to
