@@ -2483,13 +2483,18 @@ const STEP_OVER_FACE: Vec3Json = { x: 26, y: 67, z: 10 }
 //       NO crossing (the crossing belongs to the level it happens at).
 // (s-2) the crossing half: a body AT the interior's level (the post-climb state)
 //       carries a real verified span south - place (26,66,7), land (26,67,7),
-//       far = the interior cell itself.
-// (s-3) EXECUTION: the leg really PLACES and the body really ADVANCES (the exact
-//       distinction the previous lane's fixture left unproven).
-// (s-4) the route finishes: the verified walk-in closes the last cell and the
-//       dimension postcondition is reached.
+//       far = the interior cell itself - and BOTH the reachability gate and the
+//       guard accept that crossing-only entry, so the selected leg really runs.
+// (s-3) THE WHOLE TRIAL through the live gate, one bounded chunk per decision
+//       (each decision re-sensed at the body's current cell): the climb lifts the
+//       body, the crossing really PLACES and the body really ADVANCES onto the
+//       floor it made, and the verified walk-in enters - the exact "advance, not
+//       just a placement" distinction the previous lane's fixture left unproven.
+// (s-4) ONE crossing decision is a bounded chunk: durable body progress,
+//       `verified=false`, never a claimed entry.
 // (s-5) the one-below shape (the interior one block above the far side): the offer
-//       is a SELF-LANDING scaffold and the walk-in's own audited hop closes it.
+//       is a SELF-LANDING scaffold, its execution floors (26,65,7) with the body
+//       standing on it, and the rest of the route still enters.
 // (s-6) a declared crossing that cannot execute is a TERMINAL typed refusal that
 //       names the failed leg, and the body is never pushed into the gap.
 // (s-7) the control shapes stay byte-identical: a level gate, a one-block step-up
