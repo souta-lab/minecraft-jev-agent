@@ -169,7 +169,7 @@ addCase('an immediate hostile threat removes work actions but leaves Jev ATTACK/
   return { pass, detail: `kept=[${ids.join(',')}]` }
 })
 
-addCase('critical health grounds a retreat from the sensed hostile and removes ATTACK by hard safety', () => {
+addCase('critical health keeps every grounded survival action and leaves WHICH to Jev', () => {
   const state = exploreState(0)
   state.self = { ...state.self, health: CRITICAL_COMBAT_HEALTH - 1 }
   state.entities = [
@@ -188,8 +188,25 @@ addCase('critical health grounds a retreat from the sensed hostile and removes A
   const safe = restrictCandidatesAtCriticalHealth(state, generated)
   const attacks = generated.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
   const retreats = safe.filter((candidate) => candidate.kind === 'RETREAT').map((candidate) => candidate.id)
-  const pass = attacks.length === 1 && retreats.length === 1 && safe.every((candidate) => candidate.kind !== 'ATTACK')
-  return { pass, detail: `health=${state.self.health} attacks=[${attacks.join(',')}] safeRetreats=[${retreats.join(',')}]` }
+  // The doctrine this now pins is the one the sibling restriction documents: keep every
+  // grounded survival/self-care action (ATTACK, RETREAT, ESCALATE, EAT, EQUIP) and leave
+  // WHICH one to Jev. Dropping ATTACK made code choose "flee", and the measured
+  // consequence was a body pinned at health 10 in the Nether with a magma cube in contact
+  // and no food - unable to win by fleeing and unable to heal - offering three RETREAT
+  // cells tick after tick. Both grounded options must survive the restriction; the WORK
+  // actions must not.
+  const keptAttacks = safe.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  const work = safe.filter((candidate) => candidate.kind === 'MINE' || candidate.kind === 'RETRIEVE')
+  const pass =
+    attacks.length === 1 &&
+    retreats.length === 1 &&
+    keptAttacks.length === 1 &&
+    keptAttacks[0] === attacks[0] &&
+    work.length === 0
+  return {
+    pass,
+    detail: `health=${state.self.health} attacks=[${attacks.join(',')}] keptAttacks=[${keptAttacks.join(',')}] safeRetreats=[${retreats.join(',')}] work=[${work.length}]`,
+  }
 })
 
 addCase('a remote hostile is observed but not offered as a purposeless combat route', () => {
