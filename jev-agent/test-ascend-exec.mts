@@ -32,6 +32,8 @@ import type { Bot } from 'mineflayer'
 import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate } from './src/candidates.ts'
 import { JevController, MIRRORED_MARKERS, mirroredEventToken } from './src/controller.ts'
+import { JevDecisionEpochs } from './src/jevSemanticProjection.ts'
+import type { SkillOutcomePacket } from './src/jevSemanticProjection.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import type { JsonlWriter } from './src/jev-legacy.ts'
 import { guardDecision } from './src/policy.ts'
@@ -413,6 +415,13 @@ interface GuardRejectRuntime {
   guardRejections: number
   recentEvents: string[]
   tickCounter: number
+  // Issue #437: state the guard-reject path now touches when it emits the packet.
+  actionEpochByLease: Map<number, { epoch: number; commitmentId: string; identity: string }>
+  decisionEpochs: JevDecisionEpochs
+  recentSkillOutcomes: SkillOutcomePacket[]
+  compressedSkillSteps: number
+  /** not under test: the packet's Option identity is irrelevant to the marker */
+  currentOptionContext: () => null
   noteCandidateFailure: (id: string) => void
   recordMoveFailure: (candidate: Candidate, reason: string) => void
   chargeGuardRejection: (record: DecisionRecord, code: GuardCode) => void
@@ -453,6 +462,13 @@ addCase('a guard-dropped selection emits ACTION_REJECTED with its code and reaso
   controller.guardRejections = 0
   controller.recentEvents = []
   controller.tickCounter = 1
+  // Issue #437: the guard-reject path also emits the typed SkillOutcomePacket, so
+  // this prototype stub must carry the epoch/packet state the real controller owns.
+  controller.actionEpochByLease = new Map()
+  controller.decisionEpochs = new JevDecisionEpochs()
+  controller.recentSkillOutcomes = []
+  controller.compressedSkillSteps = 0
+  controller.currentOptionContext = () => null
   // The rejection bookkeeping is not under test here; the marker is.
   controller.noteCandidateFailure = () => undefined
   controller.recordMoveFailure = () => undefined

@@ -12,6 +12,10 @@ import { experimental_evaluate as evaluate } from 'ai'
 import type { Experimental_EvaluationQuestion } from 'ai'
 import type { Candidate } from './candidates.ts'
 import { FatalModelError } from './modelFailure.ts'
+// §437 §1/§10: the model-visible half of the semantic projection (no raw telemetry,
+// and the exact top-level keys the projection hash covers).
+import { projectionModelView } from './jevSemanticProjection.ts'
+import type { JevSemanticProjection } from './jevSemanticProjection.ts'
 import type {
   JevAnswer,
   JevPolicy,
@@ -226,20 +230,48 @@ export function authorityDecisionMeta(request: JevRequest, answers: Readonly<Rec
  * The exact grounded state handed to the model for one evaluate() call. Exported
  * so the authority evidence a head actually sees (including the #360
  * `strategicNonProgress` block) is behaviourally testable, not only log-inspectable.
+ *
+ * Issue #437: when the caller supplies the versioned semantic projection, that
+ * projection IS the semantic state - the primitive churn (`tick`, the raw float
+ * body position, the per-tick `recentEvents` trace) is replaced by the bounded
+ * semantic plane. Every count-bounded evidence block the prompts refer to by
+ * name (`signals.strategicNonProgress`, `signals.threat`, `failedCandidates`,
+ * `nearestEntities`, ...) is preserved unchanged, because the beta contract
+ * reads them by name.
  */
 export function authorityState(request: JevRequest): Record<string, unknown> {
   const state = request.state
-  return {
-    tick: state.tick,
-    self: {
-      position: state.self.position,
-      health: state.self.health,
-      food: state.self.food,
-      // P1 durability: a falling health number is not enough to answer "am I
-      // being attacked, and by what?". The recorded damage event makes the
-      // threat explicit so Jev can choose fight/flee instead of WAIT.
-      lastDamage: state.signals.lastDamage ?? null,
-    },
+  const projection = request.semanticProjection ?? null
+  const self = {
+    position: state.self.position,
+    health: state.self.health,
+    food: state.self.food,
+    // P1 durability: a falling health number is not enough to answer "am I
+    // being attacked, and by what?". The recorded damage event makes the
+    // threat explicit so Jev can choose fight/flee instead of WAIT.
+    lastDamage: state.signals.lastDamage ?? null,
+  }
+  const signals = {
+    failedCandidates: state.signals.failedCandidates,
+    consecutiveFailures: state.signals.consecutiveFailures,
+    lastFailureCode: state.signals.lastFailureCode,
+    lastPathStatus: state.signals.lastPathStatus,
+    escalationRecommended: state.signals.escalationRecommended,
+    knownResources: (state.signals.knownResources ?? []).slice(0, 24),
+    // #360: without this block beta only ever saw verified body outcomes and an
+    // empty failure history, so a 48-minute state-recurring MOVE loop looked
+    // like a healthy agent (max beta 0.36 < 0.5 over 2148 votes).
+    strategicNonProgress: state.signals.strategicNonProgress ?? null,
+    oscillationsDetected: state.signals.oscillationsDetected ?? 0,
+    // SAFE: the bounded danger state (see `threat.ts`): whether the body is in
+    // a fight, how long it has been answering it, and how far the nearest
+    // hostile is. Candidate labels already carry the weapon and the separation
+    // each destination buys; this is the STATE those options belong to, so Jev
+    // can choose to keep answering the mob instead of resuming work between two
+    // hits (the measured per-tick failure).
+    threat: state.signals.threat ?? null,
+  }
+  const shared = {
     inventory: state.inventory.counts,
     goal: state.goal,
     goalQueue: {
@@ -259,27 +291,36 @@ export function authorityState(request: JevRequest): Record<string, unknown> {
     })),
     nearestBlocks: state.blocks.slice(0, 16),
     nearestEntities: state.entities.slice(0, 12),
-    signals: {
-      failedCandidates: state.signals.failedCandidates,
-      consecutiveFailures: state.signals.consecutiveFailures,
-      lastFailureCode: state.signals.lastFailureCode,
-      lastPathStatus: state.signals.lastPathStatus,
-      escalationRecommended: state.signals.escalationRecommended,
-      knownResources: (state.signals.knownResources ?? []).slice(0, 24),
-      // #360: without this block beta only ever saw verified body outcomes and an
-      // empty failure history, so a 48-minute state-recurring MOVE loop looked
-      // like a healthy agent (max beta 0.36 < 0.5 over 2148 votes).
-      strategicNonProgress: state.signals.strategicNonProgress ?? null,
-      oscillationsDetected: state.signals.oscillationsDetected ?? 0,
-      // SAFE: the bounded danger state (see `threat.ts`): whether the body is in
-      // a fight, how long it has been answering it, and how far the nearest
-      // hostile is. Candidate labels already carry the weapon and the separation
-      // each destination buys; this is the STATE those options belong to, so Jev
-      // can choose to keep answering the mob instead of resuming work between two
-      // hits (the measured per-tick failure).
-      threat: state.signals.threat ?? null,
+    signals,
+  }
+  if (projection === null || typeof projection !== 'object') {
+    return { tick: state.tick, self, ...shared, recentEvents: state.recentEvents.slice(-16) }
+  }
+  // §437: the semantic plane replaces the primitive trace. The body's exact float
+  // position is mechanical detail (candidate distance/reach facts carry what the
+  // decision needs), and the per-tick event trace is replaced by the projection's
+  // bounded meaningful event kinds plus its previous-decision/outcome block.
+  //
+  // §1/§10: `projectionModelView` is the projection minus its evidence-only
+  // `counts` block, so the payload's top-level keys are exactly the keys the
+  // projection hash covers. Shipping the raw object instead would put the
+  // compressed `rawSkillSteps`/`rawEvents` telemetry into policy input and let the
+  // payload drift from its own cache key.
+  const modelView = projectionModelView(projection as JevSemanticProjection)
+  return {
+    projectionVersion: modelView.version,
+    projectionHash: request.projectionHash ?? null,
+    semantic: modelView,
+    self: {
+      ...self,
+      position: {
+        x: Math.floor(state.self.position.x),
+        y: Math.floor(state.self.position.y),
+        z: Math.floor(state.self.position.z),
+      },
+      dimension: state.self.dimension,
     },
-    recentEvents: state.recentEvents.slice(-16),
+    ...shared,
   }
 }
 

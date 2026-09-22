@@ -1290,13 +1290,26 @@ export const SKILL_POLICY_BOUNDARY = 'SKILL_POLICY_BOUNDARY'
  */
 export type SkillStepAuthority = 'MECHANICAL_CONTINUATION' | 'MANDATORY_PREREQUISITE' | 'HARD_SAFETY_REFLEX'
 
-/** The `SKILL_STEP` detail half: `authority=<layer> evidence=<fact> worldDelta=<fact>`. */
+/**
+ * The `SKILL_STEP` detail half:
+ * `authority=<layer> evidence=<fact> worldDelta=<fact> [budget=<n>] [failure=<typed>]`.
+ *
+ * `budget` and `failure` are the bounded/verifiable half of the same evidence:
+ * a reflex or prerequisite declares how many steps its authority layer may spend
+ * and, when the step did NOT execute, the typed reason it did not. Both are
+ * optional so every existing call site stays byte-identical.
+ */
 export function formatSkillStepAuthority(
   authority: SkillStepAuthority,
   evidence: string,
   worldDelta: string = 'none',
+  options: { budget?: number; failure?: string } = {},
 ): string {
-  return `authority=${authority} evidence=${evidence} worldDelta=${worldDelta}`
+  return (
+    `authority=${authority} evidence=${evidence} worldDelta=${worldDelta}` +
+    (options.budget === undefined ? '' : ` budget=${options.budget}`) +
+    (options.failure === undefined || options.failure.length === 0 ? '' : ` failure=${options.failure}`)
+  )
 }
 
 /**
@@ -1313,6 +1326,20 @@ export function formatSkillPolicyBoundary(input: {
 }): string {
   return `${SKILL_POLICY_BOUNDARY} skill=${input.skill} reason=${input.reason} alternatives=[${input.alternatives.join(',')}]`
 }
+
+/**
+ * The typed reasons a safety boundary can carry (the formatter's parameter stays
+ * `string` so other lanes can name their own without touching this union):
+ *
+ *   hard_safety_interrupt      a hard-safety reflex preempted the in-flight
+ *                              Skill and the decision returns to the controller;
+ *   multiple_grounded_escapes  several grounded remedies exist: Jev's WHICH;
+ *   no_grounded_escape         no grounded remedy exists: the typed gap.
+ */
+export type SkillPolicyBoundaryReason =
+  | 'hard_safety_interrupt'
+  | 'multiple_grounded_escapes'
+  | 'no_grounded_escape'
 
 /** The entry Skill's stable id (the `skill` / `ownerSkill` field). */
 export const PORTAL_ENTER_SKILL = 'ENTER_PORTAL(portalSite)'
@@ -1350,20 +1377,25 @@ export function formatSkillEnd(
 }
 
 /**
- * Issue #436 §17: the COMMITMENT shape (`SKILL_COMMIT commitmentId=... skillKind=
- * ... effectEnvelopeHash=...`) is NOT declared here. It is a second, semantic-
- * identity vocabulary that lane task/skill-commitment-phase1 owns in
- * `skillCommitment.ts` (`SkillCommitment`, `EffectEnvelope`, `formatSkillCommit`,
- * `postconditionHash`, `effectEnvelopeHash`), and #436's §5 forbidden
- * "expand the envelope because execution got inconvenient" rule is enforced
- * there. This module keeps only the Phase-1 layer vocabulary that is already
- * live on main (`formatSkillStep` + `formatSkillStepAuthority`,
- * `formatSkillPolicyBoundary`, `formatSkillEnd`, `formatReflex`), and call sites
- * name WHICH commitment a step belongs to with the additive `commitmentId=` /
- * `targetIdentity=` fields. Migrating the portal call site onto
- * `formatSkillCommit(commitment)` is that lane's Phase 5 work, in one place, so
- * there is exactly one formatter for the marker.
+ * WHY code finished the already-selected action's mechanics. One vocabulary for
+ * every reflex (#436), so a reviewer never has to learn a second marker shape:
+ *
+ *   unique_binding_prerequisite - exactly one mechanically mandatory
+ *     continuation of the SELECTED target (section A: the portal entry);
+ *   hard_safety - a uniquely-determined escape from an immediate hazard, which
+ *     may interrupt the in-flight skill (section B: fire / lava / burning /
+ *     drowning; `envHazard.ts`).
+ *
+ * The COMMITMENT shape (`SKILL_COMMIT ... skillKind= ... effectEnvelopeHash=`) is
+ * deliberately NOT declared here: it is a semantic-identity vocabulary owned by
+ * the controller/Jev boundary (`formatSkillCommit` in `jevSemanticProjection.ts`)
+ * and by lane task/skill-commitment-phase1 (`SkillCommitment`, `EffectEnvelope`,
+ * which also enforces #436 §5's "the envelope MUST NOT expand dynamically").
+ * This module keeps only the per-Skill layer vocabulary, and call sites name
+ * WHICH commitment a step belongs to with the additive `commitmentId=` /
+ * `targetIdentity=` fields, so there is exactly one formatter per marker.
  */
+export type ReflexReason = 'unique_binding_prerequisite' | 'hard_safety'
 
 export interface ReflexInput {
   readonly ownerSkill: string
@@ -1371,12 +1403,14 @@ export interface ReflexInput {
   readonly action: string
   /** the block/geometry fact that proved the continuation was the only one */
   readonly evidence: string
+  /** why code was allowed to finish it; defaults to the section-A reason */
+  readonly reason?: ReflexReason
 }
 
-/** The exact `REFLEX` line: a uniquely-determined prerequisite, with its proof. */
+/** The exact `REFLEX` line: a uniquely-determined action, with its proof. */
 export function formatReflex(input: ReflexInput): string {
   return (
-    `${REFLEX} ownerSkill=${input.ownerSkill} reason=unique_binding_prerequisite` +
+    `${REFLEX} ownerSkill=${input.ownerSkill} reason=${input.reason ?? 'unique_binding_prerequisite'}` +
     ` action=${input.action} evidence=${input.evidence}`
   )
 }
