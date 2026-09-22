@@ -11518,8 +11518,10 @@ export class JevController {
     if (envHazardKindOfBlock(nameAt(x, y + 1, z)) !== null) return true
     if (envHazardKindOfBlock(nameAt(x, y - 1, z)) !== null) return true
     // A lava-class neighbour inside the shared margin: standing there means
-    // standing in it (`envHazardProximityDenied(false, name)` semantics).
-    const span = Math.ceil(ENV_LAVA_PROXIMITY)
+    // standing in it (`envHazardProximityDenied(false, name)` semantics). A cell
+    // whose offset has any component >= 2 is at least 2 away, so it can never be
+    // inside a 1.5 margin: `floor` is the exact bound, not a truncation.
+    const span = Math.floor(ENV_LAVA_PROXIMITY)
     for (let dx = -span; dx <= span; dx += 1) {
       for (let dy = -1; dy <= 1; dy += 1) {
         for (let dz = -span; dz <= span; dz += 1) {
