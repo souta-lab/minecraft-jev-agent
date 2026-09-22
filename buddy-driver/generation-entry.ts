@@ -1584,6 +1584,7 @@ export function buildMercurySummary(
     toolRank: bestPickaxeRank(counts),
     inventory,
     stations: { craftingTables: world.craftingTables.length, furnaces: world.furnaces.length },
+    portal: { verified: world.portalVerified === true, knownSites: world.knownPortalSites.length },
     knownOres: [...world.discoveredOres],
     recentFailures,
     consecutiveWait: wait,

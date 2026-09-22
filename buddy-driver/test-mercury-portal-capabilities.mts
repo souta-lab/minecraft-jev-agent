@@ -16,11 +16,14 @@ import {
   parseMercuryJsonText,
   plannedGoalsFromMercury,
   validateMercuryPlan,
+  validateMercuryPlanAgainstState,
 } from './mercury-system2.ts'
 import {
+  NETHER,
   NETHER_PORTAL,
   OBSIDIAN,
   OVERWORLD,
+  PORTAL_ENTERED_PREDICATE,
   PORTAL_LIT_PREDICATE,
   PORTAL_OBSIDIAN_REQUIRED,
   groundPortalFrame,
@@ -148,6 +151,46 @@ addCase('(3b) the light/verify synonyms compile to the same IGNITE goal on both 
   return {
     pass,
     detail: `light=${light.toolCall?.targetItem}@${light.toolCall?.targetPredicate} jsonText=${light.jsonText?.targetItem} verify=${verify.toolCall?.targetItem}@${verify.toolCall?.targetPredicate}`,
+  }
+})
+
+addCase('(3c) enter_portal is a model-visible WHAT that compiles to the existing dimension-transfer goal', () => {
+  const checked = validateMercuryPlan({
+    op: 'patch',
+    goals: [{ kind: 'enter_portal' }],
+    reason: 'the verified gate is already live',
+  })
+  const malformed = [
+    validateMercuryPlan({ op: 'patch', goals: [{ kind: 'enter_portal', item: NETHER_PORTAL }], reason: 'x' }),
+    validateMercuryPlan({ op: 'patch', goals: [{ kind: 'enter_portal', count: 1 }], reason: 'x' }),
+    validateMercuryPlan({ op: 'patch', goals: [{ kind: 'enter_portal', y: 64 }], reason: 'x' }),
+  ]
+  const goal = checked.ok ? compileMercuryGoal(checked.plan.goals[0] ?? { kind: undefined }) : null
+  const liveStateError = checked.ok
+    ? validateMercuryPlanAgainstState(checked.plan, {
+        dimension: OVERWORLD,
+        portal: { verified: true, knownSites: 1 },
+      })
+    : 'plan rejected'
+  const darkStateError = checked.ok
+    ? validateMercuryPlanAgainstState(checked.plan, {
+        dimension: OVERWORLD,
+        portal: { verified: false, knownSites: 1 },
+      })
+    : null
+  const pass =
+    checked.ok &&
+    goal?.kind === 'place' &&
+    goal.targetItem === NETHER_PORTAL &&
+    goal.targetPredicate === PORTAL_ENTERED_PREDICATE &&
+    goal.dimension === NETHER &&
+    liveStateError === null &&
+    typeof darkStateError === 'string' &&
+    darkStateError.includes('no live verified portal') &&
+    malformed.every((result) => !result.ok)
+  return {
+    pass,
+    detail: `goal=${goal?.kind}:${goal?.targetItem}@${goal?.targetPredicate}/${goal?.dimension} live=${liveStateError ?? 'ok'} dark=${darkStateError ?? 'unexpected-ok'} malformed=${malformed.map((r) => r.ok ? 'ACCEPTED' : 'rejected').join(',')}`,
   }
 })
 
