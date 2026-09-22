@@ -1358,17 +1358,27 @@ export interface PortalEntryCrossInput {
   readonly outcome: PortalEntryCrossOutcome
   /** placements the leg actually completed (never the offer's claim) */
   readonly placed: number
+  /**
+   * The leg's own distance claim to the interior, in `round2` precision:
+   * `from` when the leg started and `to` when it ended. The crossing's bound is
+   * the SAME strict reduction every verified span takes (`BRIDGE_MIN_ADVANCE`), so
+   * the entry route states it rather than asking a reviewer to infer it.
+   */
+  readonly from?: number
+  readonly to?: number
   readonly detail?: string
 }
 
 /** The exact `PORTAL_ENTRY_CROSS` line: one composed crossing leg, named. */
 export function formatPortalEntryCross(input: PortalEntryCrossInput): string {
   const detail = input.detail === undefined || input.detail.length === 0 ? '' : ` detail=${input.detail}`
+  const distance =
+    input.from === undefined || input.to === undefined ? '' : ` d=${round2(input.from)}->${round2(input.to)}`
   return (
     `${PORTAL_ENTRY_CROSS} cell=${formatPos(input.cell)}` +
     ` from_y=${input.fromY} to_y=${input.toY} dy=${input.toY - input.fromY}` +
     ` dir=${input.dir} block=${input.block} span=${input.span} place=${input.place} landing=${input.landing}` +
-    ` outcome=${input.outcome} placed=${input.placed}${detail}`
+    ` outcome=${input.outcome} placed=${input.placed}${distance}${detail}`
   )
 }
 

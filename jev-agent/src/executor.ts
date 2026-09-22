@@ -9804,7 +9804,12 @@ export class Executor {
     // Fail closed on a stale offer: a crossing grounded for the interior's own
     // level is not a crossing from anywhere else.
     if (Math.abs(enterCell.y - fromY) > PORTAL_WALK_IN_LEVEL_TOLERANCE) return idle
-    const record = (outcome: PortalEntryCrossOutcome, blocksPlaced: number, detail: string | undefined): string => {
+    const record = (
+      outcome: PortalEntryCrossOutcome,
+      blocksPlaced: number,
+      detail: string | undefined,
+      distance: { from: number; to: number },
+    ): string => {
       const line = formatPortalEntryCross({
         cell: enterCell,
         fromY,
@@ -9816,6 +9821,8 @@ export class Executor {
         landing,
         outcome,
         placed: blocksPlaced,
+        from: distance.from,
+        to: distance.to,
         ...(detail === undefined ? {} : { detail }),
       })
       this.logger[outcome === 'advanced' || outcome === 'gap_closed' ? 'info' : 'warn']('agent', line, {
@@ -9830,8 +9837,11 @@ export class Executor {
       // The terminal line's `cross=` carries the plan facts AND the outcome in the
       // entry route's own compact vocabulary, so a failed route says which leg
       // failed: `cross=dir=S,span=2,place=...,landing=...,outcome=...,placed=N,detail=...`.
-      return `dir=${dir},span=${span},place=${place},landing=${landing},outcome=${outcome},placed=${blocksPlaced}` +
+      return (
+        `dir=${dir},span=${span},place=${place},landing=${landing},outcome=${outcome},placed=${blocksPlaced}` +
+        `,d=${Math.round(distance.from * 100) / 100}->${Math.round(distance.to * 100) / 100}` +
         (detail === undefined ? '' : `,detail=${detail}`)
+      )
     }
     let placed = 0
     let blocksPlaced = 0
@@ -9842,8 +9852,12 @@ export class Executor {
     let legError: ExecutorError | null = null
     let outcome: PortalEntryCrossOutcome = 'failed'
     let detail: string | undefined
+    // The leg's own distance claim; `distanceToFeet` is read before the leg runs so
+    // a refusal cannot silently claim the movement it never made.
+    let distance = { from: this.distanceToFeet(enterCell), to: this.distanceToFeet(enterCell) }
     try {
       const leg = await this.runBridgeLeg(candidate, epoch, signal)
+      distance = { from: leg.from, to: leg.to }
       placed = leg.placed
       blocksPlaced = leg.blocksPlaced
       landings = leg.landings
@@ -9871,7 +9885,7 @@ export class Executor {
       outcome = 'failed'
       detail = legError.code
     }
-    const evidence = record(outcome, blocksPlaced, detail)
+    const evidence = record(outcome, blocksPlaced, detail, distance)
     return {
       attempted: true,
       placed,

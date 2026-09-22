@@ -2795,7 +2795,9 @@ async function runMeasuredEntryRoute(
     check(
       '(s-3) the measured trial crosses: the climb lifts the body, the crossing ADVANCES it onto the floor it places, the walk-in enters',
       climb.some((line) => line.includes('climb=pillar') && line.includes('outcome=climbed')) &&
-        cross.some((line) => line.includes('outcome=advanced')) &&
+        // the crossing's own STRICT REDUCTION (the bound every verified span takes):
+        // the leg started 2.55m from the interior and ended 0.71m from it.
+        cross.some((line) => line.includes('outcome=advanced') && line.includes('d=2.55->0.71')) &&
         steps.length === 2 &&
         steps[0] === 'BRIDGE_STEP from=26,67,6 to=26,67,7 block=cobblestone' &&
         steps[1] === 'BRIDGE_STEP from=26,67,7 to=26,67,8 block=cobblestone' &&
@@ -2829,7 +2831,10 @@ async function runMeasuredEntryRoute(
     })()
     check(
       '(s-4) one crossing decision is a bounded chunk: durable body progress, verified=false, no claimed entry',
-      chunk.status === 'done' && chunk.verified === false && chunk.cross.includes('outcome=advanced'),
+      chunk.status === 'done' &&
+        chunk.verified === false &&
+        chunk.cross.includes('outcome=advanced') &&
+        chunk.cross.includes('d=2.55->0.71'),
       `status=${chunk.status} verified=${chunk.verified} cross=[${chunk.cross}]`,
     )
   }
@@ -2930,9 +2935,11 @@ async function runMeasuredEntryRoute(
   check(
     '(s-6) a declared crossing that cannot execute is terminal and typed: cross= names the span, the place cell, the landing and the refusal',
     cross.includes('outcome=refused') &&
+      // a refusal claims NO movement: the leg's own distance is unchanged
+      cross.includes('d=2.55->2.55') &&
       cross.includes('detail=no_block verified=false') &&
       blocked.includes('reason=route_blocked') &&
-      blocked.includes('cross=dir=S,span=2,place=26,66,7,landing=26,67,7,outcome=refused,placed=0') &&
+      blocked.includes('cross=dir=S,span=2,place=26,66,7,landing=26,67,7,outcome=refused,placed=0,d=2.55->2.55') &&
       blocked.includes('detail=no_block') &&
       result.status === 'failed' &&
       fixture.grid.get('26,66,7')?.name === 'air' &&
