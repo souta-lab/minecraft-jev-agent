@@ -28,6 +28,7 @@
     "ledger-guard-test": "bun test ./test-ledger-guard.mts",
     "ledger-restore-test": "bun test ./test-ledger-restore.mts",
     "durable-writes-test": "bun test ./test-durable-writes.mts",
+    "host-durability-test": "bun test ./test-host-durability.mts",
     "skill-strategy-test": "bun test ./test-skill-strategy.mts",
     "observability-test": "bun test ./test-observability.mts",
     "planner-mode-test": "bun test ./test-planner-mode.mts",

@@ -40,6 +40,7 @@ import type {
 } from './resident-types.ts'
 import { emptyWorldMemory, normalizeWorldMemory, worldKeyString } from './resident-types.ts'
 import { emptyAgentSnapshot } from './state-snapshot.ts'
+import { durableWriteLanded } from './host-durability.ts'
 import {
   commitPendingProposals,
   mergeWorldMemoryDelta,
@@ -398,6 +399,7 @@ addCase('(5) staged path: commitPendingProposals persists knownStructureSites (t
       log: () => undefined,
       save: () => {
         saves += 1
+        return durableWriteLanded('generation-start', 6)
       },
       worldKey: NETHER,
     },

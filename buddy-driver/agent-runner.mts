@@ -13,7 +13,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdir
 import type { Dirent } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { createServer } from 'node:net'
-import type { Socket } from 'node:net'
+import type { Server, Socket } from 'node:net'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -67,9 +67,23 @@ import type { PendingProposals } from './proposal-staging.ts'
 import { ActuationLeaseManager, GenerationResourceRegistry, ReconnectLedger, type DisconnectReason } from './resident-safety.ts'
 import type { GoalQueueSnapshot } from '../jev-agent/src/goalQueue.ts'
 import { isHostileEntityName } from '../jev-agent/src/state.ts'
-import { AGENT_SNAPSHOT_SCHEMA_VERSION, bumpRevision, goalQueueSnapshotFromState, restoreAgentSnapshot } from './state-snapshot.ts'
+import { AGENT_SNAPSHOT_SCHEMA_VERSION, goalQueueSnapshotFromState } from './state-snapshot.ts'
 import { commitOwner, swapGeneration, type OwnershipPorts, type SwapGeneration, type SwapPorts } from './generation-swap.ts'
 import { commitLedgerProposal } from './ledger-guard.ts'
+import {
+  HostDurabilityLedger,
+  HostLock,
+  closeControlServer,
+  createFatalHandlers,
+  createStateWriter,
+  defaultPidAlive,
+  loadStateWithQuarantine,
+  openResidentBoot,
+  runShutdownSequence,
+  type DurableWriteOutcome,
+  type HostLockOutcome,
+  type HostLockReport,
+} from './host-durability.ts'
 import { ReloadArbiter } from './reload-arbiter.ts'
 import { acceptsWorldMemoryProposal, resetWorldEpoch } from './world-epoch.ts'
 import {
@@ -245,17 +259,28 @@ function defaultState(): AgentSnapshot {
   }
 }
 
+/**
+ * P0 durability evidence mirror (#379/#388/#378/#381). Every durability outcome is
+ * recorded here with the SAME marker that is logged, so `acceptance-<runId>.json`
+ * and the control `report` can show the run's write-failure / quarantine /
+ * lock-reclaim / lock-loss / fatal-shutdown markers (#63 evidence taxonomy).
+ */
+const durability = new HostDurabilityLedger()
+
+/**
+ * #388: an unparseable or newer-schema state file is QUARANTINED (moved aside with
+ * the reason recorded) instead of being replaced by defaults and then overwritten
+ * by the boot commit. A rejected file that cannot be moved aside refuses boot:
+ * committing defaults over the only copy of durable memory is not acceptable.
+ */
 function loadState(): AgentSnapshot {
   const base = defaultState()
-  if (!existsSync(STATE_PATH)) return base
-  let raw: unknown
-  try {
-    raw = JSON.parse(readFileSync(STATE_PATH, 'utf8'))
-  } catch (error) {
-    log('STATE_REJECTED', { reason: 'unparseable JSON', message: error instanceof Error ? error.message : String(error), action: 'default' })
-    return base
+  const outcome = loadStateWithQuarantine({ statePath: STATE_PATH, base, log, durability })
+  if (outcome.blocked) {
+    log('BOOT_REFUSED', { reason: 'state-unreadable-and-not-quarantinable', path: STATE_PATH, action: 'exit' })
+    process.exit(1)
   }
-  return restoreAgentSnapshot(raw, base, log)
+  return outcome.snapshot
 }
 
 let state = loadState()
@@ -271,17 +296,24 @@ let ledgerRevision = state.revision
  * Issue #40: the HOST is the only writer of class-A state. Every commit bumps the
  * revision and writes tmp -> rename atomically. A stale/foreign schema is coerced
  * (and logged) rather than silently accepted.
+ *
+ * #379: the commit returns a REPORTED outcome. The revision advances only when the
+ * bytes landed; a failed write rolls the in-memory commit marker back, removes the
+ * half-written tmp file and emits STATE_WRITE_FAILED, so no caller can report a
+ * durable commit that never happened.
  */
-function saveState(event = 'save'): void {
-  if (state.schemaVersion !== STATE_SCHEMA_VERSION) {
-    log('STATE_SCHEMA_MISMATCH', { event, schemaVersion: state.schemaVersion, expected: STATE_SCHEMA_VERSION, action: 'coerce-and-commit' })
-  }
-  const revision = bumpRevision(state)
-  try {
-    writeSnapshotAtomic(STATE_PATH, state, `.${process.pid}.tmp`)
-  } catch (error) {
-    log('ERROR', { where: 'saveState', event, revision, message: error instanceof Error ? error.message : String(error) })
-  }
+const stateWriter = createStateWriter({
+  path: STATE_PATH,
+  state: () => state,
+  log,
+  durability,
+  expectedSchemaVersion: STATE_SCHEMA_VERSION,
+  suffix: `.${process.pid}.tmp`,
+  write: (path, snapshot, suffix) => writeSnapshotAtomic(path, snapshot, suffix),
+})
+
+function saveState(event = 'save'): DurableWriteOutcome {
+  return stateWriter.save(event)
 }
 
 const pendingByGeneration = new Map<string, PendingProposals>()
@@ -319,17 +351,33 @@ function allowedGenerationId(): string | null {
  * Issue #48: a generation PROPOSES its authoritative ledger; the HOST validates
  * identity + lineage revision and is the only writer. A stale/foreign/future
  * proposal is rejected and logged; the store is left untouched.
+ *
+ * #379: the lineage revision advances ONLY when the ledger commit actually landed.
+ * A failed durable write keeps `ledgerRevision` where it was (fail closed: the next
+ * proposal is still validated against the last durable lineage).
  */
 function onGenerationLedgerProposal(proposal: unknown, source: string): void {
+  let persisted = true
   const decision = commitLedgerProposal(
     state,
     proposal,
     { revision: state.revision, ledgerRevision, generationId: allowedGenerationId() },
     log,
-    (event) => saveState(event),
+    (event) => {
+      persisted = saveState(event).ok
+    },
     source,
   )
-  if (decision.ok) ledgerRevision = state.revision
+  if (decision.ok && persisted) {
+    ledgerRevision = state.revision
+  } else if (decision.ok && !persisted) {
+    log('LEDGER_COMMIT_NOT_DURABLE', {
+      source,
+      revision: state.revision,
+      ledgerRevision,
+      action: 'ledger-revision-not-advanced',
+    })
+  }
 }
 
 /**
@@ -386,7 +434,7 @@ function commitStagedProposals(generationId: string, event: string): void {
     },
     event,
   )
-  if (result.ledgerApplied) ledgerRevision = state.revision
+  if (result.ledgerApplied && result.writeOk) ledgerRevision = state.revision
   log('PROPOSALS_COMMITTED', {
     generationId,
     event,
@@ -395,6 +443,8 @@ function commitStagedProposals(generationId: string, event: string): void {
     ledgerRejected: result.ledgerRejected,
     reconciliationRequested: result.reconciliationRequested,
     writes: result.writes,
+    writeOk: result.writeOk,
+    writeError: result.writeError,
   })
   pendingByGeneration.delete(generationId)
 }
@@ -480,7 +530,8 @@ let lastActionId: string | null = null
 let lastHeartbeatAt = 0
 const leaseManager = new ActuationLeaseManager()
 const reconnectLedger = new ReconnectLedger()
-let hostLockAcquired = false
+/** #384: the control socket server; closed (and awaited) before the lock is released. */
+let controlServer: Server | null = null
 let connectedSince = 0
 let reconnectScheduledAt: number | null = null
 let disconnectReasonSeen: DisconnectReason | null = null
@@ -559,78 +610,22 @@ function syncReconnectStats(): void {
   stats.reconnectReasons = report.reconnectReasons
 }
 
-function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
-function acquireHostLock(): boolean {
-  try {
-    if (existsSync(LOCK_PATH)) {
-      const raw = readFileSync(LOCK_PATH, 'utf8').trim()
-      const holder = Number.parseInt(raw, 10)
-      if (Number.isInteger(holder) && holder !== process.pid && pidAlive(holder)) {
-        log('HOST_LOCK held-by', { pid: holder, action: 'exit' })
-        return false
-      }
-      log('HOST_LOCK stale', { pid: Number.isInteger(holder) ? holder : null, action: 'reclaim' })
-    }
-    writeFileSync(LOCK_PATH, `${process.pid}\n`, { mode: 0o600 })
-    hostLockAcquired = true
-    log('HOST_LOCK acquired', { pid: process.pid, path: LOCK_PATH })
-    return true
-  } catch (error) {
-    log('ERROR', { where: 'acquireHostLock', message: error instanceof Error ? error.message : String(error) })
-    return false
-  }
-}
+/**
+ * #378: single-instance host lock. Claiming is an exclusive create (`wx`), so a
+ * check-then-write race between two residents cannot let both win; a stale lock is
+ * reclaimed race-safely (atomic take-away, verify the taken bytes, exclusive
+ * create, restore-with-hard-link when a fresh live claim was captured by mistake).
+ * Liveness uses the one conservative probe (`EPERM` = alive), so a pid that cannot
+ * be shown dead is never displaced.
+ */
+const hostLock = new HostLock({ path: LOCK_PATH, log, durability, isAlive: defaultPidAlive })
 
 function releaseHostLock(): void {
-  if (!hostLockAcquired) return
-  hostLockAcquired = false
-  try {
-    if (existsSync(LOCK_PATH)) {
-      const raw = readFileSync(LOCK_PATH, 'utf8').trim()
-      if (Number.parseInt(raw, 10) === process.pid) rmSync(LOCK_PATH, { force: true })
-    }
-  } catch {
-    void 0
-  }
-  log('HOST_LOCK released', { pid: process.pid })
+  hostLock.release()
 }
 
-function hostLockReport(): {
-  path: string
-  present: boolean
-  filePid: number | null
-  acquiredByThisProcess: boolean
-  pid: number
-  singleInstance: boolean
-} {
-  let present = false
-  let filePid: number | null = null
-  try {
-    if (existsSync(LOCK_PATH)) {
-      present = true
-      const parsed = Number.parseInt(readFileSync(LOCK_PATH, 'utf8').trim(), 10)
-      filePid = Number.isInteger(parsed) ? parsed : null
-    }
-  } catch {
-    present = false
-  }
-  return {
-    path: LOCK_PATH,
-    present,
-    filePid,
-    acquiredByThisProcess: hostLockAcquired,
-    pid: process.pid,
-    singleInstance: hostLockAcquired || filePid === process.pid,
-  }
+function hostLockReport(): HostLockReport {
+  return hostLock.report()
 }
 
 function listenerCounts(): Record<string, number> {
@@ -1752,6 +1747,9 @@ function writeAcceptance(): string {
     listenerCurrent: counts,
     listenerLeak: listenerLeak(),
     worldMemoryKeys: Object.keys(state.worldMemoryByKey),
+    // #379/#388/#378/#381: the run's durability markers (write-failure, quarantine,
+    // lock-reclaim/loss, fatal-shutdown) as counts plus the exact marker names.
+    durability: durability.acceptance(),
   }
   const path = join(DATA, `acceptance-${runId}.json`)
   const tmp = `${path}.tmp`
@@ -1978,6 +1976,8 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
       lease: leaseManager.snapshot(),
       reconnect: reconnectLedger.report(),
       hostLock: hostLockReport(),
+      // #379/#388/#378/#381: same run-scoped durability mirror as the acceptance record.
+      durability: durability.acceptance(),
       stats,
       worldMemory: {
         craftingTables: memory.craftingTables.length,
@@ -2213,7 +2213,7 @@ async function handleControl(request: ControlRequest, socket: Socket): Promise<v
   if (cmd === 'quit') {
     controlReply(socket, request, true, { quitting: true })
     log('QUIT', { reason: 'control' })
-    shutdown('control-quit')
+    await shutdown('control-quit')
     return
   }
   controlReply(socket, request, false, { error: `unknown command: ${cmd}` })
@@ -2258,53 +2258,104 @@ function startControlServer(): void {
     }
     log('CONTROL', { socket: SOCK })
   })
+  controlServer = server
 }
 
 // ---------------------------------------------------------------------------
 // shutdown
 // ---------------------------------------------------------------------------
-function shutdown(reason: string): void {
-  if (shuttingDown) return
-  shuttingDown = true
-  clearListenerBaselineTimer()
-  reloadArbiter?.stop()
-  log('SHUTDOWN', { reason })
-  let acceptance: string | null = null
-  try {
-    acceptance = writeAcceptance()
-  } catch {
-    // ignore
-  }
-  log('ACCEPTANCE', { path: acceptance, runId })
-  saveState('shutdown')
-  if (generation !== null) {
-    disposeGeneration(generation)
-    generation = null
-  }
-  try {
-    bot?.quit(reason)
-  } catch {
-    // ignore
-  }
-  releaseHostLock()
-  setTimeout(() => process.exit(0), 800)
+/**
+ * #384: the graceful order is fixed by `runShutdownSequence`: quiesce, evidence,
+ * persist, dispose, disconnect, CLOSE the control server (awaited, bounded), and
+ * only then release the host lock. A second resident can no longer boot into a
+ * host whose control socket is still accepting commands, and a throwing step never
+ * skips the close/release/exit tail.
+ */
+async function shutdown(reason: string): Promise<void> {
+  await runShutdownSequence({
+    log,
+    alreadyShuttingDown: () => shuttingDown,
+    markShuttingDown: () => {
+      shuttingDown = true
+    },
+    quiesce: () => {
+      clearListenerBaselineTimer()
+      reloadArbiter?.stop()
+      log('SHUTDOWN', { reason })
+    },
+    writeAcceptance: () => {
+      let acceptance: string | null = null
+      try {
+        acceptance = writeAcceptance()
+      } catch {
+        acceptance = null
+      }
+      log('ACCEPTANCE', { path: acceptance, runId })
+      return acceptance
+    },
+    persistState: () => saveState('shutdown'),
+    disposeGeneration: () => {
+      if (generation !== null) {
+        disposeGeneration(generation)
+        generation = null
+      }
+    },
+    disconnect: () => {
+      try {
+        bot?.quit(reason)
+      } catch {
+        // ignore
+      }
+    },
+    closeServer: () => closeControlServer(controlServer, { socketPath: SOCK }),
+    releaseLock: () => releaseHostLock(),
+    exit: (code) => process.exit(code),
+    exitCode: 0,
+    exitDelayMs: 800,
+  })
 }
 
-process.on('uncaughtException', (error: Error) => {
-  log('ERROR', { where: 'uncaughtException', message: error.message })
+// ---------------------------------------------------------------------------
+// fatal handlers (#381: log-only is not enough)
+// ---------------------------------------------------------------------------
+const fatalHandlers = createFatalHandlers({
+  log,
+  durability,
+  markShuttingDown: () => {
+    shuttingDown = true
+  },
+  revokeLease: (reason) => revokeLease(reason),
+  onFatal: () => {
+    // Evidence first: the acceptance record must show the fatal shutdown.
+    try {
+      writeAcceptance()
+    } catch {
+      // ignore
+    }
+  },
+  exit: (code) => process.exit(code),
 })
-process.on('unhandledRejection', (reason: unknown) => {
-  log('ERROR', { where: 'unhandledRejection', message: reason instanceof Error ? reason.message : String(reason) })
+process.on('uncaughtException', (error: Error) => fatalHandlers.uncaughtException(error))
+process.on('unhandledRejection', (reason: unknown) => fatalHandlers.unhandledRejection(reason))
+process.on('SIGINT', () => {
+  void shutdown('SIGINT')
 })
-process.on('SIGINT', () => shutdown('SIGINT'))
-process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM')
+})
 process.on('exit', () => releaseHostLock())
 
 // ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 state.firstSeenAt = state.firstSeenAt || Date.now()
-saveState('boot')
+// #380: the lock is acquired FIRST; only the owner commits the boot snapshot, so a
+// losing resident cannot overwrite the winner's durable state with its own base.
+const boot = openResidentBoot({ lock: hostLock, saveBootState: () => saveState('boot'), log })
+if (!boot.ok) {
+  log('BOOT_REFUSED', { reason: boot.reason, path: LOCK_PATH, holderPid: boot.lock.holderPid })
+  process.exit(1)
+}
 log('BOOT', {
   pid: process.pid,
   runId,
@@ -2322,10 +2373,6 @@ log('BOOT', {
   worldKey: currentWorldKey(),
   frozen,
 })
-if (!acquireHostLock()) {
-  log('BOOT_REFUSED', { reason: 'host-lock-held', path: LOCK_PATH })
-  process.exit(1)
-}
 startControlServer()
 void loadGenerationModule(false).then(() => {
   connect()
