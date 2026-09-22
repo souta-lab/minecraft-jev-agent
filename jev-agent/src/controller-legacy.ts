@@ -1395,6 +1395,17 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'BRIDGE_STEP',
   'BRIDGE_END',
   'BRIDGE_REFUSED',
+  // A locomotion route's OWN placement declaration (`routePlaceDeclaration.ts`).
+  // The measured defect (live: `PILLAR_UP actionId=MOVE:b35_60_-26 ... failed
+  // SKILL_ENVELOPE_VIOLATION violation=equip_item_not_declared:cobblestone`, and
+  // the sibling `RETRIEVE:known:blaze_rod:b35_60_-22`) is a route that places a
+  // block its commitment refused to let it equip. The fix authorizes exactly the
+  // block(s) the route DECLARED at candidate time, so which block that was, which
+  // meta key declared it, and whether it was actually carried must be readable
+  // run-scoped - otherwise a reviewer sees only a different
+  // `SKILL_COMMIT effectEnvelopeHash=` with no named cause. Unmirrored markers
+  // never reach `buddy.log`, so this one is registered next to its family.
+  'ROUTE_PLACE_DECLARED',
   // #436 reflex/continuation vocabulary: a bounded mechanical continuation that is
   // the UNIQUE binding prerequisite of the active leg (`REFLEX
   // reason=unique_binding_prerequisite`) and the mechanical step when it runs.
