@@ -581,22 +581,24 @@ export interface NotExecutableHereBinding {
 }
 
 /**
- * Kinds that cannot advance a row's own predicate: control hand-off and self-care.
- * Everything else (MINE/MOVE/CRAFT/PLACE/SMELT/CONTAINER/IGNITE/ENTER_PORTAL/
- * DESCEND/STEP/RETRIEVE) is work toward the row and is withheld while the proof
- * holds.
+ * The kinds this binding withholds: the ones that MOVE THE BODY or DIG THE WORLD
+ * toward the row's own (unreachable here) predicate.
+ *
+ * The first version of this withheld every work kind and deadlocked the body for
+ * an hour (main 06c5976: 1370 firings, the goal's own climb legs and even a needed
+ * pickaxe craft withheld, body frozen at 26.3,64.0,6.3 for the whole trial). A
+ * mis-dimensioned row is a reason to stop walking/digging toward its predicate,
+ * never a reason to stop working: CRAFT/SMELT/PLACE/CONTAINER/IGNITE/RETRIEVE/
+ * MINE/ENTER_PORTAL/ATTACK/EAT/EQUIP/RETREAT/WAIT/ESCALATE all stay on offer.
  */
-export const NOT_EXECUTABLE_HERE_KEEP_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
-  'WAIT',
-  'ESCALATE',
-  'RETREAT',
-  'EAT',
-  'ATTACK',
-  'EQUIP',
+export const NOT_EXECUTABLE_HERE_WITHHELD_KINDS: ReadonlySet<CandidateKind> = new Set<CandidateKind>([
+  'MOVE',
+  'STEP',
+  'DESCEND',
 ])
 
-export function isNotExecutableHereKeepKind(kind: CandidateKind): boolean {
-  return NOT_EXECUTABLE_HERE_KEEP_KINDS.has(kind)
+export function isNotExecutableHereWithheldKind(kind: CandidateKind): boolean {
+  return NOT_EXECUTABLE_HERE_WITHHELD_KINDS.has(kind)
 }
 
 export type NotExecutableHereOfferReason =
@@ -652,13 +654,14 @@ export function restrictCandidatesNotExecutableHere(
   if (safetyEnvelopeActive(state, rawCandidates)) {
     return { candidates: [...candidates], withheld: [], bound: false, reason: 'safety_envelope_active' }
   }
-  const kept = candidates.filter((candidate) => isNotExecutableHereKeepKind(candidate.kind))
+  const kept = candidates.filter((candidate) => !isNotExecutableHereWithheldKind(candidate.kind))
   if (kept.length === 0) {
-    // Never hand an empty offer to the decision layer: with no control/self-care
-    // candidate the pre-existing starvation/escalation machinery owns the tick.
+    // Never hand an empty offer to the decision layer: with nothing but withheld
+    // body-motion left, the pre-existing starvation/escalation machinery owns the
+    // tick (and the queue's own escalation is already running).
     return { candidates: [...candidates], withheld: [], bound: false, reason: 'no_kept_candidates' }
   }
-  const withheld = candidates.filter((candidate) => !isNotExecutableHereKeepKind(candidate.kind))
+  const withheld = candidates.filter((candidate) => isNotExecutableHereWithheldKind(candidate.kind))
   if (withheld.length === 0) {
     return { candidates: kept, withheld: [], bound: false, reason: 'not_narrowing' }
   }
