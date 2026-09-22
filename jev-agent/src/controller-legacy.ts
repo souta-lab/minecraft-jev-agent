@@ -1151,6 +1151,11 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DIG_ROUTE',
   'DIG_ROUTE_REFUSED',
   'DIG_ROUTE_PROGRESS',
+  // #436 reflex/continuation vocabulary: a bounded mechanical continuation that is
+  // the UNIQUE binding prerequisite of the active leg (`REFLEX
+  // reason=unique_binding_prerequisite`) and the mechanical step when it runs.
+  'REFLEX',
+  'SKILL_STEP',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -1785,6 +1790,8 @@ export class JevController {
   private lastColumnDescentRefusalKey: string | null = null
   /** last logged DIG_ROUTE_REFUSED signature, so one blocked terrain route is one line. */
   private lastDigRouteRefusalKey: string | null = null
+  /** last logged REFLEX signature, so one unique binding continuation is one line. */
+  private lastLegReflexKey: string | null = null
   /** the current tick's typed dig-route refusals, fed into the starvation `missing` evidence. */
   private digRouteRefusalsThisTick: DigRouteRefusal[] = []
   /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
@@ -2618,6 +2625,7 @@ export class JevController {
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logDigRouteRefusals(grounded.digRefusals)
+      this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
@@ -3112,6 +3120,7 @@ export class JevController {
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
       if (guarded.candidate.meta.digRoute === true) this.logDigRoute(guarded.candidate)
+      if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -4751,6 +4760,56 @@ export class JevController {
         actionId: candidate.id,
         target,
         resource: typeof candidate.meta.approachResource === 'string' ? candidate.meta.approachResource : null,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The #436 `REFLEX ownerSkill=<skill> reason=unique_binding_prerequisite
+   * action=<step_up|step_over> cell=... via=... ledge=... evidence=...` facts: the
+   * bounded mechanical continuation that is the UNIQUE way the active leg can
+   * reach its waypoint from here (see `candidates.ts#pocketContinuations`).
+   * Deduped like the other typed dead-end facts, and logged for the WITHHELD
+   * candidates too, so "the only way out is this step" is visible in the resident
+   * log even while Jev is still choosing (measured run-mucbyro1-1hqhm: the body
+   * was stuck on a stuck MOVE with an empty contract and no such fact at all).
+   */
+  private logLegReflexes(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta.legReflex
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastLegReflexKey) return
+    this.lastLegReflexKey = key
+    if (key === null) return
+    for (const line of lines) {
+      this.logger.info('agent', line, { line }, this.tickCounter)
+    }
+  }
+
+  /**
+   * The mechanical continuation Jev selected (`SKILL_STEP action=... cell=...
+   * via=... ledge=... vertical=staircase-up`). Logged when the action is taken, so
+   * the marker means "the body is now running this step", not "a step existed";
+   * the ordinary MOVE/PATH/VERIFIED markers then report its outcome unchanged.
+   */
+  private logSkillStep(candidate: Candidate): void {
+    const line = typeof candidate.meta.legContinuationLine === 'string' ? candidate.meta.legContinuationLine : null
+    this.logger.info(
+      'agent',
+      line ??
+        `SKILL_STEP action=${String(candidate.meta.legContinuationAction ?? 'step_up')} cell=${String(candidate.meta.legContinuationCell ?? 'unknown')} vertical=${String(candidate.meta.vertical ?? 'none')}`,
+      {
+        actionId: candidate.id,
+        skill: typeof candidate.meta.legContinuationSkill === 'string' ? candidate.meta.legContinuationSkill : null,
+        action: typeof candidate.meta.legContinuationAction === 'string' ? candidate.meta.legContinuationAction : null,
+        cell: typeof candidate.meta.legContinuationCell === 'string' ? candidate.meta.legContinuationCell : null,
+        via: typeof candidate.meta.legContinuationVia === 'string' ? candidate.meta.legContinuationVia : null,
+        ledge: typeof candidate.meta.legContinuationLedge === 'string' ? candidate.meta.legContinuationLedge : null,
+        vertical: typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : null,
       },
       this.tickCounter,
     )

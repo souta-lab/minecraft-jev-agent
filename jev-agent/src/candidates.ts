@@ -47,7 +47,7 @@ import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectFo
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
 import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
-import { digRouteBearing, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
+import { digRouteBearing, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
@@ -1517,6 +1517,7 @@ export function entryCandidates(
         target: entry.enterCell,
         targetName: NETHER_PORTAL,
         reason: 'route_spent',
+        skill: 'enter_portal',
         label: (best) =>
           `walk an approach leg toward the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}): the last route there failed, so stand at (${best.x},${best.y},${best.z}) first`,
         extraMeta: { entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}` },
@@ -7126,6 +7127,276 @@ function digRouteCandidate(
  * is grounded alongside the walk leg (`digRouteCandidate`). Both are offers; when
  * neither can be grounded the caller keeps its existing typed escalation.
  */
+/**
+ * One bounded, mechanically-determined continuation for a travel waypoint that no
+ * sensed standable cell can WALK to.
+ *
+ * MEASURED LIVE (run-mucbyro1-1hqhm, the M3 pocket, world truth read with
+ * `tools/world-truth-plane.mjs` on chunk (1,0) y63-69):
+ *
+ *   body (24,67,9) feet y=67 on cobblestone; E (25,67,9) = the gate's own
+ *   obsidian column; S (24,67,10) = air with (24,66,10) air and (24,65,10) grass
+ *   below; the waypoint (26,67,10) is standable over the dirt at (25,66,10).
+ *
+ *   `MOVE:p26_67_10` -> `PATH_CALLBACK phase=failed outcome=stuck` x8 ->
+ *   `MOVE_FAILMEM ... reason=stuck` with an EMPTY contract (no `vertical`, no dig
+ *   profile): `runMove` (executor.ts:1921) runs the vertical contract first, finds
+ *   nothing, and then `pathTo(target, 'GoalBlock')` cannot express the only
+ *   mechanical route, which a walk-only BFS over the same grid proves is 4 moves
+ *   and needs NO dig and NO placement:
+ *
+ *     (24,67,9) --1-block drop S--> (24,66,10) --1-block step UP E onto the
+ *     verified ledge (25,66,10)--> (25,67,10) --2 level walks--> (26,67,9)
+ *
+ * So the missing piece is not a dig (a dig cannot create a floor) and not a
+ * placement (none is required): it is the ordinary 1-block STEP-UP onto a sensed
+ * ledge, which the stock MOVE contract cannot express from a cell that is itself
+ * one block below the ledge's standing level.
+ *
+ * The continuation is derived ONLY from the sensor's own facts: the pre-computed
+ * descent options (`state.descent`, `state.ts#buildDescent`) carry the controlled
+ * 1-block drop (`open_floor` + `supportSolid` + no hazard + no wall in the way),
+ * and `terrain.standable` (the same `isUsableStand` rule every walk arm uses)
+ * verifies BOTH the hole floor the body drops into and the ledge top it steps
+ * onto. `ledge` is the landing's own support cell - the block the body climbs.
+ */
+interface PocketContinuation {
+  action: 'step_over' | 'step_up'
+  /** the verified standable cell the body drops into first (null for a direct step-up) */
+  via: Vec3Json | null
+  /** the verified standable cell the body ends on (the ledge top) */
+  landing: Vec3Json
+  /** the block the body climbs onto: the landing's support cell */
+  ledge: Vec3Json
+  /** the horizontal face the body steps up through (never the own column) */
+  dir: 'E' | 'W' | 'N' | 'S'
+  /** the continuation's own distance to the leg target (strictly closer than the body's) */
+  toTarget: number
+}
+
+/** At most this many alternative continuations are enumerated (Jev still chooses). */
+const POCKET_CONTINUATION_CAP = 2
+
+function pocketContinuations(
+  state: WorldState,
+  target: Vec3Json,
+): PocketContinuation[] {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const currentDistance = distance(feet, target)
+  const standable = new Set(state.terrain.standable.map((cell) => cellKey(cell)))
+  const out: PocketContinuation[] = []
+  const seen = new Set<string>()
+  const push = (entry: PocketContinuation): void => {
+    const landingKey = cellKey(entry.landing)
+    if (seen.has(landingKey)) return
+    seen.add(landingKey)
+    out.push(entry)
+  }
+  const descent = state.descent ?? []
+  for (const level of descent) {
+    if (level.dx === 0 && level.dz === 0) continue
+    // (a) A DIRECT 1-block step-up: the front cell at feet level is the ledge
+    //     block (`wallSolid`), nothing stands above it (`headSolid` false), and
+    //     the cell above the ledge is a verified stand.
+    const upCell = { x: feet.x + level.dx, y: feet.y + 1, z: feet.z + level.dz }
+    if (level.wallSolid === true && level.headSolid === false && standable.has(cellKey(upCell))) {
+      const d = distance(upCell, target)
+      if (d <= currentDistance - DIG_ROUTE_MIN_ADVANCE) {
+        push({
+          action: 'step_up',
+          via: null,
+          landing: upCell,
+          ledge: level.wall,
+          // A horizontal option's direction is one of the four faces (`dx`/`dz`
+          // are non-zero by the guard above), never the own column.
+          dir: level.dir as PocketContinuation['dir'],
+          toTarget: d,
+        })
+      }
+    }
+    // (b) A STEP OVER a verified 1-block drop: the sensor's own controlled-drop
+    //     geometry, the hole floor is a verified stand, and from it a cardinal
+    //     1-block step-up lands on a verified stand that closes the distance.
+    const down = descent.find((step) => step.dir === level.dir && step.mode === 'down')
+    if (down === undefined) continue
+    if (
+      down.refusal !== 'open_floor' ||
+      down.supportSolid !== true ||
+      down.hazardNearby === true ||
+      down.wallSolid !== false ||
+      down.headSolid !== false
+    ) {
+      continue
+    }
+    const via = down.step
+    if (!standable.has(cellKey(via))) continue
+    for (const step of PROSPECT_CARDINALS) {
+      const landing = { x: via.x + step.dx, y: via.y + 1, z: via.z + step.dz }
+      if (!standable.has(cellKey(landing))) continue
+      const d = distance(landing, target)
+      if (!(d <= currentDistance - DIG_ROUTE_MIN_ADVANCE)) continue
+      push({
+        action: 'step_over',
+        via,
+        landing,
+        ledge: { x: landing.x, y: landing.y - 1, z: landing.z },
+        // `PROSPECT_CARDINALS` are the four horizontal faces, never the own column.
+        dir: step.dir as PocketContinuation['dir'],
+        toTarget: d,
+      })
+      if (out.length >= POCKET_CONTINUATION_CAP) return out
+    }
+  }
+  return out
+}
+
+/**
+ * Is `goal` reachable from the body's own cell by ORDINARY LEVEL WALKS over the
+ * sensed standable set? A stand the body must DROP into (or climb onto) to reach
+ * is not a walk: the stock `GoalBlock` MOVE contract can only express level
+ * walking, which is exactly why the measured leg failed `outcome=stuck` with an
+ * empty contract. Bounded by the sensor's own `terrain.standable` window.
+ */
+function levelWalkReachable(state: WorldState, goal: Vec3Json): boolean {
+  const start = cellKey(state.self.position)
+  const goalKey = cellKey(goal)
+  const stands = new Set(state.terrain.standable.map((cell) => cellKey(cell)))
+  if (!stands.has(goalKey)) return false
+  const startCell = { x: Math.floor(state.self.position.x), y: Math.floor(state.self.position.y), z: Math.floor(state.self.position.z) }
+  const seen = new Set<string>([start])
+  const queue: Vec3Json[] = [startCell]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (current === undefined) break
+    if (cellKey(current) === goalKey) return true
+    for (const step of PROSPECT_CARDINALS) {
+      const next = { x: current.x + step.dx, y: current.y, z: current.z + step.dz }
+      const nextKey = cellKey(next)
+      if (seen.has(nextKey) || !stands.has(nextKey)) continue
+      seen.add(nextKey)
+      queue.push(next)
+    }
+  }
+  return false
+}
+
+/**
+ * The grounded MOVE candidate for one continuation.
+ *
+ * TWO mechanical shapes, because the executor's order is fixed
+ * (`executor.ts#runMove` runs the vertical contract BEFORE the walk):
+ *
+ *   - `step_up` (the ledge is face-adjacent and one level up): target = the
+ *     landing WITH the SAME `vertical=staircase-up` contract the ordinary
+ *     up-staircase uses. The dig cell is the empty cell above the ledge, so
+ *     `digRetrievalStaircase` skips the dig and drives
+ *     `pathTo(step, 'GoalGetToBlock')` - an ordinary adjacent 1-block jump, which
+ *     is exactly what the contract expresses.
+ *   - `step_over` (a verified hole lies between the body and the ledge): target =
+ *     the hole FLOOR, the cell the body must stand in before it can jump. A
+ *     vertical contract here would run BEFORE the walk that gets the body into the
+ *     hole and could only fail, so the step-up is grounded as the NEXT tick's
+ *     ordinary leg from that floor (it is then face-adjacent and one up). The
+ *     landing/ledge/direction are carried in the meta so the operator and the
+ *     next offer read the same mechanical plan.
+ *
+ * Nothing is invented in the executor, and no block has to be placed.
+ */
+function continuationCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; targetName: string | null; reason: string; extraMeta: Record<string, string | number | boolean>; skill: string },
+  cont: PocketContinuation,
+  reflex: string | null,
+): Candidate {
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const target = cont.action === 'step_over' ? (cont.via ?? cont.landing) : cont.landing
+  const via = cont.via === null ? 'none' : cellText(cont.via)
+  const contract =
+    cont.action === 'step_up'
+      ? verticalPlanMeta(
+          {
+            kind: 'staircase-up',
+            dir: cont.dir,
+            fromY: feet.y,
+            toY: cont.landing.y,
+            // The cell above the ledge is already open: the step-up IS the whole HOW.
+            dig: cont.landing,
+            step: cont.landing,
+            digName: null,
+          } satisfies VerticalPlan,
+          feet.y,
+          cont.landing.y,
+        )
+      : {}
+  const line =
+    `SKILL_STEP action=${cont.action} cell=${cellText(target)} via=${via} ` +
+    `landing=${cellText(cont.landing)} ledge=${cellText(cont.ledge)} ` +
+    `vertical=${cont.action === 'step_up' ? 'staircase-up' : 'none'}`
+  const label =
+    cont.action === 'step_over'
+      ? `step over the hole into (${cellText(target)}) first: from there the ledge at (${cellText(cont.ledge)}) is one step up to (${cellText(cont.landing)}), toward (${cellText(spec.target)})`
+      : `step up onto the ledge at (${cellText(cont.ledge)}) to stand at (${cellText(cont.landing)}), toward (${cellText(spec.target)})`
+  return {
+    id: `SKILL_STEP:${cont.action}:${blockId('p', target)}`,
+    kind: 'MOVE',
+    label,
+    targetName: spec.targetName,
+    target,
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(target, state.self.eyePosition) <= options.reach,
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: target.x,
+      y: target.y,
+      z: target.z,
+      approachLeg: spec.reason,
+      approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+      ...contract,
+      legContinuation: true,
+      legContinuationAction: cont.action,
+      legContinuationSkill: spec.skill,
+      legContinuationCell: cellText(target),
+      legContinuationVia: via,
+      legContinuationLanding: cellText(cont.landing),
+      legContinuationLedge: cellText(cont.ledge),
+      legContinuationDir: cont.dir,
+      legContinuationToD: round2Number(cont.toTarget),
+      legContinuationLine: line,
+      ...(reflex === null ? {} : { legReflex: reflex }),
+      ...spec.extraMeta,
+    },
+  }
+}
+
+/** `REFLEX ownerSkill=<skill> reason=unique_binding_prerequisite action=<a> cell=<c> via=<v> ledge=<l> evidence=<e>` */
+function formatLegReflex(input: {
+  skill: string
+  action: PocketContinuation['action']
+  cell: Vec3Json
+  via: Vec3Json | null
+  ledge: Vec3Json
+  evidence: string
+}): string {
+  return (
+    `REFLEX ownerSkill=${input.skill} reason=unique_binding_prerequisite action=${input.action} ` +
+    `cell=${cellText(input.cell)} via=${input.via === null ? 'none' : cellText(input.via)} ` +
+    `ledge=${cellText(input.ledge)} evidence=${input.evidence}`
+  )
+}
+
 function travelApproachLegs(
   state: WorldState,
   options: CandidateOptions,
@@ -7133,6 +7404,8 @@ function travelApproachLegs(
     target: Vec3Json
     targetName: string | null
     reason: string
+    /** the skill/option that owns this leg, for the `REFLEX ownerSkill=` fact */
+    skill: string
     label: (spot: Vec3Json) => string
     extraMeta: Record<string, string | number | boolean>
   },
@@ -7210,6 +7483,31 @@ function travelApproachLegs(
     refusals,
   )
   if (dig !== null) legs.push(dig)
+  // The last grounded route change: a bounded, sensor-derived continuation onto a
+  // verified ledge when no sensed standable cell can walk to the waypoint at all
+  // (see `pocketContinuations`). A continuation is a DIFFERENT stand cell, so the
+  // ordinary MOVE / reachability / failure-memory machinery still owns the
+  // execution and the spend budget; a stepping stone that proves zero change is
+  // spent like any other leg.
+  const continuations = best === null ? pocketContinuations(state, spec.target) : []
+  const uniqueContinuation = continuations.length === 1 && dig === null
+  for (const cont of continuations) {
+    const reflex = uniqueContinuation
+      ? formatLegReflex({
+          skill: spec.skill,
+          action: cont.action,
+          cell: cont.landing,
+          via: cont.via,
+          ledge: cont.ledge,
+          evidence:
+            (cont.via === null
+              ? `ledge@${cellText(cont.ledge)}:solid`
+              : `hole_floor@${cellText(cont.via)}:standable+support_solid;ledge@${cellText(cont.ledge)}:solid`) +
+            `;d=${round2Number(currentDistance)}->${round2Number(cont.toTarget)}`,
+        })
+      : null
+    legs.push(continuationCandidate(state, options, spec, cont, reflex))
+  }
   return legs
 }
 
@@ -7236,6 +7534,7 @@ function knownResourceApproachLegs(
       target: known.position,
       targetName: known.name,
       reason: 'target_not_observable',
+      skill: 'retrieve_known',
       label: (best) =>
         `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
       extraMeta: { approachResource: want.item, knownName: known.name },
