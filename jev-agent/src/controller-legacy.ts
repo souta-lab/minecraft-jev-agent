@@ -1369,6 +1369,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'PILLAR_FAIL',
   'PILLAR_TAKEOFF',
   'PILLAR_SEARCH',
+  // The typed PILLAR_UP step refusals (`verticalPlan.ts` `formatPillarRefused`).
+  // Without this in the mirrored list the run log keeps only the opaque action
+  // outcome and DROPS the line that names the cell, the obstacle and the cause -
+  // so "this column could never be climbed" cannot be told apart from "the climb
+  // was never attempted".
+  'PILLAR_REFUSED',
   'HOP_PLAN',
   'DESCEND_STALLED',
   'DESCEND_PROGRESS',

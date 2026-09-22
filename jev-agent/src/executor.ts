@@ -168,6 +168,7 @@ import {
   formatPillarRelocate,
   formatTunnelEntryRefused,
   headroomAcrossFootprint,
+  pillarPlaceCellFillable,
   planReuseLeg,
   resolvePillarStep,
   selectPlaceableBlock,
@@ -178,6 +179,7 @@ import type {
   ApproachBlockage,
   HeadroomClearOutcome,
   HeadroomObstacle,
+  PillarPlaceCellProbe,
   TunnelEntryBlockerProbe,
   TunnelEntryProbe,
 } from './verticalPlan.ts'
@@ -197,6 +199,8 @@ import {
   isPillarRefusalUnsatisfiable,
   pillarArcComplete,
   pillarStepUp,
+  PILLAR_PLACE_LOOK_HANDSHAKE_TICKS,
+  PILLAR_PLACE_SAME_TICK,
   requiredColumnClearance,
   takeoffObservedRise,
 } from './pillarApex.ts'
@@ -1909,6 +1913,16 @@ export class Executor {
    * instead of a generic path error. Cleared whenever a vertical contract runs.
    */
   private lastVerticalFailureReason: string | null = null
+  /**
+   * The last PILLAR_UP placement attempt's own observation - the body's feet Y,
+   * the cell and the declared actuator gap - captured in the same tick the
+   * `block_place` packet is written. It is mirrored into the PILLAR_FAIL /
+   * PILLAR_UP_STEP records because the record's `y`/`rise` are read AFTER the
+   * place settles, when the body may already be back on the ground: without this
+   * the live log cannot tell "the attempt happened too late" from "the server
+   * refused for another reason".
+   */
+  private lastPillarPlaceAttempt: { feetY: number; cell: Vec3Json; cellTop: number; handshakeTicks: number } | null = null
   /**
    * What an OPEN action OBSERVED inside a container, keyed by the truthful
    * `name@x,y,z` reference. A container with no entry here is UNKNOWN, never
@@ -4606,6 +4620,21 @@ export class Executor {
         // the body climbed a canopy it had no reason to be in), so the pillar
         // refuses with the typed `canopy_footing` instead of building there.
         const footing = this.currentBlockAt({ x: feet.x, y: pose.footingY, z: feet.z })
+        // The cell this step must FILL. It is the cell the body itself stands in
+        // (the body jumps, then fills the cell it left), so the live read is what
+        // decides whether the step is a placement at all: a cell that already
+        // holds something a placement cannot replace can never be filled, and the
+        // arc must not be spent discovering that from the server's refusal. The
+        // measured live class is a lit portal plane (29/410 refusals, the body
+        // column inside the portal); a full block is the other, and a replaceable
+        // cell (grass, litter, a fluid) is deliberately NOT refused - 20 measured
+        // `leaf_litter` refusals were occupancy-class, not cell-class.
+        const placeCellProbe = this.currentBlockAt({ x: feet.x, y: pose.placeY, z: feet.z })
+        const placeCellFillable = pillarPlaceCellFillable(
+          placeCellProbe === null
+            ? null
+            : ({ name: placeCellProbe.name, boundingBox: placeCellProbe.boundingBox, diggable: placeCellProbe.diggable === true } satisfies PillarPlaceCellProbe),
+        )
         const step = evaluatePillarStep({
           placeableCount: placeStack.count,
           columnSafe,
@@ -4613,6 +4642,7 @@ export class Executor {
           footingSolid: footing !== null && footing.boundingBox === 'block',
           footingUsable: footing !== null && isUsableGroundSupport(footing),
           headroomClear: headroom !== null && headroom.cleared,
+          placeCellFillable,
         })
         if (!step.ok) {
           const blocked = headroom !== null && !headroom.cleared ? headroom : null
@@ -4626,10 +4656,19 @@ export class Executor {
                 obstacle: blocked?.obstacle ?? null,
                 cause: blocked?.reason ?? null,
               }),
-              { actionId: candidate.id, ...feet, obstacle: blocked?.obstacle?.name ?? null },
+              {
+                actionId: candidate.id,
+                ...feet,
+                obstacle: blocked?.obstacle?.name ?? null,
+                placeCell: { x: feet.x, y: pose.placeY, z: feet.z },
+                placeCellName: placeCellProbe?.name ?? null,
+              },
             )
           }
-          if (step.reason === 'no_headroom') {
+          // A column whose target cell can never be filled is as unclimbable as
+          // one whose ceiling cannot be opened, so it takes the same bounded
+          // relocation instead of ending the action on the spot.
+          if (step.reason === 'no_headroom' || step.reason === 'occupied_place_cell') {
             refusedColumns.add(pillarColumnKey(feet))
             const relocation = decidePillarRelocation({
               relocations,
@@ -4689,6 +4728,38 @@ export class Executor {
           )
           break
         }
+        // The TARGET cell gets the same re-read discipline as the footing: the
+        // gate above answered from a read taken before one headroom dig and one
+        // equip, and a cell that stopped being fillable in between must never
+        // reach the actuator. The pre-equip gate owns the bounded relocation; this
+        // guard only refuses to send a placement that cannot succeed, and the next
+        // decision re-grounds the column from the fresh read.
+        const livePlaceCell = this.currentBlockAt({ x: feet.x, y: pose.placeY, z: feet.z })
+        const livePlaceCellFillable = pillarPlaceCellFillable(
+          livePlaceCell === null
+            ? null
+            : ({
+                name: livePlaceCell.name,
+                boundingBox: livePlaceCell.boundingBox,
+                diggable: livePlaceCell.diggable === true,
+              } satisfies PillarPlaceCellProbe),
+        )
+        if (!livePlaceCellFillable) {
+          this.lastVerticalFailureReason = 'occupied_place_cell'
+          this.logger.warn(
+            'executor',
+            formatPillarRefused({ reason: 'occupied_place_cell', cell: feet, obstacle: null }),
+            {
+              actionId: candidate.id,
+              ...feet,
+              placeCell: { x: feet.x, y: pose.placeY, z: feet.z },
+              placeCellName: livePlaceCell?.name ?? null,
+              stage: 'pre_place_reread',
+            },
+          )
+          refusedColumns.add(pillarColumnKey(feet))
+          break
+        }
         this.setPhase(candidate, epoch, 'pillaring')
         const beforeY = this.bot.entity.position.y
         const placeCell = { x: feet.x, y: pose.placeY, z: feet.z }
@@ -4729,6 +4800,9 @@ export class Executor {
         // takeoff's own correction handles the launch, and re-grounding the
         // airborne body would freeze the arc at the launch height.
         jumping = true
+        // Drop the previous step's attempt observation: an attempt record must
+        // never be inherited by a step that did not place.
+        this.lastPillarPlaceAttempt = null
         const climb = await pillarStepUp(
           this.bot,
           {
@@ -4738,12 +4812,28 @@ export class Executor {
             apexBudgetMs: PILLAR_APEX_BUDGET_MS,
             placeSettleMs: PLACE_VERIFY_SETTLE_MS,
             landingBudgetMs: PILLAR_LANDING_BUDGET_MS,
+            placeHandshakeTicks: this.pillarPlaceHandshakeTicks(),
             sleep: (ms) => delay(ms, signal),
             now: Date.now,
             ensureOwned: () => this.ensureOwned(epoch, signal),
             place: (face) => {
-              this.assertEffect({ type: 'place', position: face, itemName: placeName })
-              return this.bot.placeBlock(liveFooting, toVec3(this.bot, face))
+              const cell = { x: placeCell.x, y: placeCell.y, z: placeCell.z }
+              // The envelope declares the CELL that may be placed, not the face
+              // direction: recording the direction made a per-cell declaration
+              // unmatchable against its own effect.
+              this.assertEffect({ type: 'place', position: cell, itemName: placeName })
+              // The attempt-time observation. `pillarStepUp` re-reads the body in
+              // the tick it authorises, and this is the tick the packet is written
+              // in, so the two are the same instant. It is what the live record was
+              // missing: `y`/`rise` are read after the place settles, when the body
+              // may already be back on the ground.
+              this.lastPillarPlaceAttempt = {
+                feetY: this.bot.entity.position.y,
+                cell: { ...placeCell },
+                cellTop: placeCell.y + 1,
+                handshakeTicks: this.pillarPlaceHandshakeTicks(),
+              }
+              return this.placePillarBlock(liveFooting, toVec3(this.bot, face))
             },
             blockPlaced: () => this.currentBlockAt(placeCell)?.boundingBox === 'block',
           },
@@ -4806,6 +4896,13 @@ export class Executor {
             climb.fail.reason,
           )
           this.lastVerticalFailureReason = climb.fail.reason ?? climb.fail.step
+          // The attempt-time facts. `launchY` is LAUNCH bookkeeping and
+          // `endPosition` is read after the place settles, so neither can testify
+          // about the attempt; these can. `pillarStepUp` reports them itself for
+          // every step that reached the attempt, and the executor's own
+          // observation covers the refusal the actuator reported.
+          const attemptFeetY = climb.fail.attemptFeetY ?? this.pillarPlaceAttempt()?.feetY ?? null
+          const attemptCellTop = climb.fail.attemptCellTop ?? pose.placeY + 1
           this.logger.warn('executor', formatPillarFail(climb.fail), {
             actionId: candidate.id,
             ...feet,
@@ -4816,6 +4913,11 @@ export class Executor {
             supportY: pose.footingY,
             placeY: pose.placeY,
             landingY: pose.landingY,
+            attemptFeetY,
+            attemptCellTop,
+            attemptClearance: attemptFeetY === null ? null : round4(attemptFeetY - attemptCellTop),
+            attemptHandshakeTicks: climb.fail.attemptHandshakeTicks ?? this.pillarPlaceHandshakeTicks(),
+            placeCellName: this.currentBlockAt(placeCell)?.name ?? null,
             supportName: liveFooting.name,
             launchFeetBlock: launchFeetBlock?.name ?? null,
             launchHeadBlock: launchHeadBlock?.name ?? null,
@@ -4916,10 +5018,24 @@ export class Executor {
         climbed += 1
         sameColumnPlaceRetries = 0
         emitPillarTakeoff(climb.apexRise, null, null)
+        const successAttempt = this.pillarPlaceAttempt()
         this.logger.info(
           'agent',
           formatPillarUpStep(climbed, Math.floor(beforeY), Math.floor(this.bot.entity.position.y), placeName),
-          { actionId: candidate.id, x: feet.x, z: feet.z, apexRise: climb.apexRise, samples: climb.samples },
+          {
+            actionId: candidate.id,
+            x: feet.x,
+            z: feet.z,
+            apexRise: climb.apexRise,
+            samples: climb.samples,
+            // The successful half of the same evidence: the cell, the body's own
+            // Y in the tick the packet was written, and the declared actuator gap.
+            placeY: pose.placeY,
+            attemptFeetY: successAttempt?.feetY ?? null,
+            attemptCellTop: pose.placeY + 1,
+            attemptClearance: successAttempt === null ? null : round4(successAttempt.feetY - (pose.placeY + 1)),
+            attemptHandshakeTicks: this.pillarPlaceHandshakeTicks(),
+          },
         )
       }
       if (climbed === 0) {
@@ -4931,6 +5047,66 @@ export class Executor {
       this.bot.physicsEnabled = savedPhysics
       this.setControlState('jump', false)
     }
+  }
+
+  /**
+   * The bounded gap between the pillar's clearance sample and the `block_place`
+   * packet. `placePillarBlock` removes mineflayer's asynchronous look handshake
+   * from that gap, so the sample IS the position the server validates and the
+   * contract collapses to the exact occupancy predicate. When that entry point is
+   * unavailable the declared look-handshake bound is used instead, and the apex
+   * contract then refuses a one-block column as `apex_missed` rather than sending
+   * a placement it cannot keep.
+   */
+  private pillarPlaceHandshakeTicks(): number {
+    const client = this.bot as unknown as { _placeBlockWithOptions?: unknown }
+    return typeof client._placeBlockWithOptions === 'function'
+      ? PILLAR_PLACE_SAME_TICK
+      : PILLAR_PLACE_LOOK_HANDSHAKE_TICKS
+  }
+
+  /**
+   * Read the last placement attempt through a call, not a property access: the
+   * field is reset to `null` before each step, and TypeScript would otherwise
+   * keep that narrowing alive across the step's awaits.
+   */
+  private pillarPlaceAttempt(): { feetY: number; cell: Vec3Json; cellTop: number; handshakeTicks: number } | null {
+    return this.lastPillarPlaceAttempt
+  }
+
+  /**
+   * Write the pillar placement inside the caller's own tick.
+   *
+   * `bot.placeBlock` -> mineflayer `_genericPlace` awaits `bot.lookAt`
+   * (node_modules/mineflayer/lib/plugins/generic_place.js:37) -> `bot.look` awaits
+   * `lookingTask.promise` (lib/plugins/physics.js:386), which resolves only on the
+   * `move` event emitted inside `tickPhysics`; the continuation then runs after
+   * that frame's whole catch-up loop, so the packet carried a body position
+   * several ticks newer than the one the pillar gate verified - measured as
+   * `PILLAR_FAIL step=place reason=refused y=67 rise=0` with the body back on the
+   * ground in the very cell it was filling.
+   *
+   * `forceLook: 'ignore'` is mineflayer's own documented option to place WITHOUT
+   * a look handshake. The placement is defined by the reference block and the
+   * face in the packet (the look is not part of it), and a pillar step fills the
+   * cell directly under the feet, which the previous step already faced. This
+   * removes an actuator DELAY, not a guard: the effect envelope, the actuation
+   * lease, the live footing re-read, the headroom rules and the landing guard all
+   * wrap this call unchanged.
+   */
+  private async placePillarBlock(reference: Block, face: ReturnType<Bot['entity']['position']['clone']>): Promise<void> {
+    const client = this.bot as unknown as {
+      _placeBlockWithOptions?: (
+        block: Block,
+        face: ReturnType<Bot['entity']['position']['clone']>,
+        options: Record<string, unknown>,
+      ) => Promise<void>
+    }
+    if (typeof client._placeBlockWithOptions === 'function') {
+      await client._placeBlockWithOptions(reference, face, { forceLook: 'ignore', swingArm: 'right' })
+      return
+    }
+    await this.bot.placeBlock(reference, face)
   }
 
   /**
@@ -10987,4 +11163,9 @@ function pathFailure(outcome: PathOutcome): FailureCode {
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+/** The precision the pillar attempt-time feet Y is named with (1/10000 block). */
+function round4(value: number): number {
+  return Math.round(value * 10000) / 10000
 }

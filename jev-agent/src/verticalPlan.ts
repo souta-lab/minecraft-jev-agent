@@ -101,18 +101,70 @@ export type PillarStepRefusal =
   | 'no_footing'
   | 'canopy_footing'
   | 'no_headroom'
+  | 'occupied_place_cell'
+
+/**
+ * The live facts a place cell is judged by: the block the sensor reads there.
+ * Deliberately just the registry facts - no structure, mob or coordinate is ever
+ * named, so the predicate cannot special-case a feature.
+ */
+export interface PillarPlaceCellProbe {
+  name: string
+  /** the registry collision shape (`'empty'` for air, fluids, plants, portals) */
+  boundingBox: string
+  /** the registry `diggable` flag: false for air, bedrock and engine blocks */
+  diggable: boolean
+}
+
+/**
+ * Whether a full block can actually be placed into this cell.
+ *
+ * A placement only REPLACES what is already there, so the cell must hold
+ * something displaceable:
+ *   * a cell holding a colliding block is already full - nothing to place into;
+ *   * a cell holding a block with no collision shape but that cannot be removed
+ *     (the registry reports it undiggable and it is not air - a lit portal
+ *     plane is the measured example) is not replaced by any placement either;
+ *   * an air-like or removable cell (air, fluids, plants, snow) is fillable.
+ *
+ * This is a candidate-SELECTION fact, not a timing one: the live run measured
+ * the same shape twice - `the block is still nether_portal` and `the block is
+ * still leaf_lit` - and both were only discovered by asking the server. A cell
+ * that cannot be filled must be refused typed BEFORE the packet, so the column
+ * is relocated instead of the arc being burned.
+ *
+ * `null` (an unloaded or unreadable cell) is NOT fillable: the placement cannot
+ * be shown to be legal, so it is not attempted.
+ */
+export function pillarPlaceCellFillable(probe: PillarPlaceCellProbe | null): boolean {
+  if (probe === null) return false
+  if (probe.boundingBox === 'block') return false
+  return probe.diggable || isAirLikeBlockName(probe.name)
+}
+
+/** The three registry names of "nothing is here". */
+export function isAirLikeBlockName(name: string): boolean {
+  const normalized = name.includes(':') ? name.slice(name.lastIndexOf(':') + 1) : name
+  return normalized === 'air' || normalized === 'cave_air' || normalized === 'void_air'
+}
 
 /**
  * The deterministic gate for one PILLAR_UP step. The executor resolves the live
  * column and passes the observations here; every refusal path is pure, so the
  * safety rules (no placeable, hazard column, no solid footing, blocked
- * headroom) are unit-testable without a bot. `remaining` is the plan's bounded
- * step budget, so `reached` also ends the loop the moment the chunk is done.
+ * headroom, unfillable place cell) are unit-testable without a bot. `remaining`
+ * is the plan's bounded step budget, so `reached` also ends the loop the moment
+ * the chunk is done.
  *
  * `footingUsable` is the load-bearing half of the footing fact (`state.ts`
  * `isUsableGroundSupport`): the cell the new block rests on must be real ground,
  * not a leaf canopy. It is optional and defaults to true so pure callers that
  * have no live block read keep the old geometry-only behaviour.
+ *
+ * `placeCellFillable` is the live read of the cell the block must occupy
+ * (`pillarPlaceCellFillable(currentBlockAt(placeCell))`). It is optional for the
+ * same reason, but the runtime caller always supplies it - a step whose target
+ * cell cannot be filled is refused here rather than discovered by the server.
  */
 export function evaluatePillarStep(input: {
   placeableCount: number
@@ -121,12 +173,14 @@ export function evaluatePillarStep(input: {
   footingSolid: boolean
   footingUsable?: boolean
   headroomClear: boolean
+  placeCellFillable?: boolean
 }): { ok: true } | { ok: false; reason: PillarStepRefusal } {
   if (input.remaining < 1) return { ok: false, reason: 'reached' }
   if (input.placeableCount < 1) return { ok: false, reason: 'no_placeable' }
   if (!input.columnSafe) return { ok: false, reason: 'unsafe_column' }
   if (!input.footingSolid) return { ok: false, reason: 'no_footing' }
   if (input.footingUsable === false) return { ok: false, reason: 'canopy_footing' }
+  if (input.placeCellFillable === false) return { ok: false, reason: 'occupied_place_cell' }
   if (!input.headroomClear) return { ok: false, reason: 'no_headroom' }
   return { ok: true }
 }
