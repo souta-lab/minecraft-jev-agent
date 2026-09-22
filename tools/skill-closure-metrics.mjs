@@ -83,6 +83,27 @@ const distinctPositions = new Set(positions)
 const uniqueDecisions = options.size
 
 const num = (name) => markers.get(name) ?? 0
+// --- issue #437: the Skill <-> Jev boundary plane -----------------------------
+// `jevDecisions` above counts decision RECORDS (ticks that formed a choice), not
+// model calls. The boundary markers separate the two: an epoch start WITHOUT
+// cacheHit=true is a paid pi call, a cacheHit=true start is a semantic-state
+// replay, and the projection hash set shows how many genuinely different
+// semantic states the model was asked about.
+const epochStarts = window.filter((line) => /\]\s+JEV_DECISION_EPOCH_START\b/.test(line))
+const modelCalls = epochStarts.filter((line) => !/cacheHit=true/.test(line)).length
+const reusedDecisions = epochStarts.length - modelCalls
+const projectionHashes = new Set()
+const requeryReasons = new Map()
+const outcomeReasons = new Map()
+for (const line of window) {
+  const p = /\]\s+JEV_STATE_PROJECTION .*?\bhash=(\S+)/.exec(line)
+  if (p !== null) projectionHashes.add(p[1])
+  const s = /\]\s+JEV_DECISION_EPOCH_START .*?\breason=(\S+)/.exec(line)
+  if (s !== null) requeryReasons.set(s[1], (requeryReasons.get(s[1]) ?? 0) + 1)
+  const o = /\]\s+SKILL_OUTCOME_PACKET .*?\bterminalReason=(\S+)/.exec(line)
+  if (o !== null) outcomeReasons.set(o[1], (outcomeReasons.get(o[1]) ?? 0) + 1)
+}
+const ratio = (top, bottom) => (bottom === 0 ? null : Number((top / bottom).toFixed(2)))
 const out = {
   runId,
   windowLines: window.length,
@@ -96,6 +117,23 @@ const out = {
   heartbeatPositions: positions.length,
   distinctFlooredCells: distinctPositions.size,
   cellRevisitRatio: positions.length === 0 ? null : Number((1 - distinctPositions.size / positions.length).toFixed(3)),
+  // #437 §20: pi calls per action and per distinct semantic state, plus the
+  // boundary reasons that bought each call. `UNKNOWN` until the lane's markers
+  // are live, never a fabricated 0.
+  jevBoundary:
+    epochStarts.length === 0
+      ? 'UNKNOWN (JEV_DECISION_EPOCH_START not in this window)'
+      : {
+          epochStarts: epochStarts.length,
+          modelCalls,
+          reusedDecisions,
+          distinctProjectionHashes: projectionHashes.size,
+          actionsPerModelCall: ratio(actions.length, modelCalls),
+          modelCallsPerDistinctProjection: ratio(modelCalls, projectionHashes.size),
+          requeryReasons: Object.fromEntries([...requeryReasons.entries()].sort((a, b) => b[1] - a[1])),
+          outcomeReasons: Object.fromEntries([...outcomeReasons.entries()].sort((a, b) => b[1] - a[1])),
+          staleResultsDropped: num('STALE_JEV_RESULT_DROPPED'),
+        },
   skills: { commit: num('SKILL_COMMIT'), step: num('SKILL_STEP'), policyBoundary: num('SKILL_POLICY_BOUNDARY'), end: num('SKILL_END') },
   reflexLayers: {
     mechanicalContinuation: tally(/authority=MECHANICAL_CONTINUATION/g, window.join('\n')),
