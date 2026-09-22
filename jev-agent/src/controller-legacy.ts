@@ -1658,6 +1658,13 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED',
   'ROW_NOT_EXECUTABLE_HERE_INTERRUPT',
   'PLAN_HEAD_REPLACEMENT_APPLIED',
+  // The equip plane was emitted but never mirrored, so `buddy.log` showed ZERO equip lines while the run-scoped
+  // JSONL showed 124x EQUIP_WEAPON and 2x EQUIP_ARMOR. Measured consequence: a reader of the LIVE log concluded the
+  // body was unarmed when it had in fact re-armed, and the inverse case - "Jev never chose ATTACK, so the weapon was
+  // never drawn" - was invisible in the one log the runtime writes. The equip facts are how a survival question is
+  // settled, so they belong in the live record like every other lifecycle line.
+  'EQUIP_WEAPON',
+  'EQUIP_ARMOR',
 ])
 
 /**
