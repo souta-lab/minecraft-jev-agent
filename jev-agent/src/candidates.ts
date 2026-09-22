@@ -4938,6 +4938,17 @@ function descendCandidateFromStep(
       hasStandableAdjacent: true,
       meta: {
         tick: state.tick,
+        // Declared HERE, once, because this function only ever builds a DIG step
+        // ("dig (x,y,z) then stand at ..."). The commitment's EffectEnvelope derives
+        // `mayDigGroundedRoute` from a declared dig (skillCommitment.ts), so an arm that
+        // forgot to declare one had its own dig refused fail-closed (`dig_cell_not_declared`)
+        // and the route died at its first move. Measured before this line: 78 refusals in the
+        // live run, 20 of them AFTER the level-scan arm was fixed individually - three of the
+        // six arms (prospect, descend, column-descent) never declared it.
+        // A separate flag, not `digRoute`: that name identifies the dig-ROUTE candidate
+        // (the tunnel arm) and is read as such by the fixtures and the equip path.
+        digStep: true,
+        digStepReason: spec.focusItem === null ? 'focus:none' : `focus:${spec.focusItem}`,
         mode: best.mode,
         dir: best.dir,
         dx: best.dx,

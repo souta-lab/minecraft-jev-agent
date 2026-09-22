@@ -319,6 +319,9 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
   const readable = liveReadAllowed(expectedDimension, probe.dimension)
   const contradicted = new Set<RecordedPortalSite>()
   let contradictedLive = false
+  // Sites the live world could actually be asked about. A site whose interior held an
+  // unreadable cell is unobservable (not disproved), so it does not count here.
+  let readableSites = 0
   if (readable) {
     for (const site of sites) {
       const validation = validatePortalFrame({
@@ -329,6 +332,7 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
       const reads = validation.interior.map((cell) => probe.blockAt(cell))
       // One unreadable cell makes this site unobservable, not disproved.
       if (reads.some((name) => name === null)) continue
+      readableSites += 1
       if (isPortalIgnitionPostconditionMet(validation.interior, (cell) => probe.blockAt(cell), NETHER_PORTAL)) {
         return {
           status: 'satisfied',
@@ -345,9 +349,14 @@ function evaluatePortalLit(goal: GoalSuccessCandidate, probe: GoalSuccessWorldPr
       contradictedLive = true
     }
   }
-  // The run's own verified record is a positive proof of this row's outcome -
-  // but only for a record the live world did not just contradict.
-  const usable = sites.filter((site) => !contradicted.has(site))
+  // The run's own verified record is a positive proof of this row's outcome - but the
+  // durable half is a SUBSTITUTE for a live read, so it may only speak when no site could
+  // be read at all. If the world was readable and NONE of the readable sites held the
+  // ignition postcondition, the live world has spoken and the record may not override it:
+  // otherwise two recorded sites (one contradicted, one merely unreadable) would let the
+  // unreadable one retire a goal the readable one just disproved. `evaluatePlacementCells`
+  // already returns `unsatisfied` in that situation; this makes `portal_lit` agree with it.
+  const usable = readableSites > 0 ? [] : sites.filter((site) => !contradicted.has(site))
   const recorded = usable.find((site) => site.frame.length > 0) ?? usable[0]
   if (recorded !== undefined) {
     return {
