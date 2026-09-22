@@ -94,6 +94,7 @@
     "portal-entry-route-test": "bun test ./test-portal-entry-route.mts",
     "zero-progress-route-test": "bun ./test-zero-progress-route.mts",
     "dig-route-test": "bun ./test-dig-route.mts",
+    "level-scan-test": "bun ./test-level-scan.mts",
     "bridge-scaffold-test": "bun ./test-bridge-scaffold.mts",
     "step-pipeline-test": "bun test ./data/step-pipeline-test.mts",
     "step-cut-test": "bun test ./data/step-cut-test.mts",

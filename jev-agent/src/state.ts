@@ -55,6 +55,8 @@ import { BRIDGE_DIRS, BRIDGE_PROBE_DEPTH, bridgeDirOffset, isBridgeUnsafeBlockNa
 import type { BridgeDir, BridgeProbe, BridgeProbeCell } from './bridgeRoute.ts'
 import { WALL_DIRS, floodEvidence, isTunnelFloodBlockName } from './wallEntry.ts'
 import type { WallBlockLike, WallCell, WallProbe } from './wallEntry.ts'
+import { LEVEL_SCAN_MAX_LEVELS } from './levelScan.ts'
+import type { LevelLateralFacts, LevelScanProbe } from './levelScan.ts'
 
 export type Vec3Json = {
   x: number
@@ -570,6 +572,17 @@ export type DescentOption = {
   /** lava/water is inside the 3x3x3 neighbourhood of one of this step's cells */
   hazardNearby?: boolean
   /**
+   * SAFE: the cell the body would stand in after this step (or its head cell) is a
+   * DIMENSION TRANSFER block (a lit portal plane). A mechanical dig/locomotion
+   * realization never crosses a dimension - the measured Nether arrival stands beside
+   * exactly such a plane, and a body that "tunnelled" into it would be teleported back
+   * to the overworld. The sensor owns this block truth (the same
+   * `isDimensionTransferBlock` the transfer cells come from), the dig route refuses to
+   * make such a step its route, and `policy.ts#guardDescend` denies it as a last
+   * boundary; the explicit `ENTER_PORTAL` candidate is the one route that may cross.
+   */
+  transfersDimension?: boolean
+  /**
    * Every cell this step must remove for the landing cell to be ENTERABLE as a
    * 1x2 profile, with the per-cell harvest truth the tool gate needs.
    *
@@ -879,6 +892,16 @@ export type WorldState = {
    * grounds no entry (never a false capability).
    */
   wallProbes?: WallProbe[]
+  /**
+   * The bounded LEVEL SCAN probes (`levelScan.ts`): the own-column descent into each of the
+   * next `LEVEL_SCAN_MAX_LEVELS` levels below the body, plus the four same-level lateral
+   * continuations AT each of them, with their pre-existing floors and the per-cell flood
+   * verdict of every pocket. Populated under exactly the same gate as `wallProbes` (a sensed
+   * step refused by the body's own local geology), so ordinary terrain carries no probe and
+   * the offer is byte-identical there. Absent in old replay fixtures means "no scan", which
+   * grounds no route (never a false capability).
+   */
+  levelScan?: LevelScanProbe[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
   stepCuts?: StepCut[]
   /** ceiling blocks above the bot that block a jump (canopy pocket) */
@@ -2683,6 +2706,13 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     }
     const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
     const primaryBlock = at(primary.x, primary.y, primary.z)
+    // The body's 1x2 profile at the landing: the cell it stands in and the cell above it.
+    // A transfer block in either one means this step is not a locomotion step but a
+    // dimension change, whatever the tool gate says.
+    const landingHead = { x: step.x, y: step.y + 1, z: step.z }
+    const transfersDimension =
+      isDimensionTransferBlock(at(step.x, step.y, step.z)?.name) ||
+      isDimensionTransferBlock(at(landingHead.x, landingHead.y, landingHead.z)?.name)
     const primaryHarvest =
       primaryBlock === null
         ? { yield: null, harvestTool: null, harvestTier: null }
@@ -2724,6 +2754,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       floorSolid,
       supportSolid,
       hazardNearby,
+      ...(transfersDimension ? { transfersDimension: true } : {}),
       digs,
       safe: reason === 'safe',
       reason,
@@ -3644,6 +3675,134 @@ function shouldProbeWallEntry(descent: readonly DescentOption[]): boolean {
 }
 
 /**
+ * The BOUNDED LEVEL SCAN probes (`levelScan.ts`): the controlled own-column descent into
+ * each of the next `LEVEL_SCAN_MAX_LEVELS` levels below the body, plus the four same-level
+ * lateral continuations AT each of them.
+ *
+ * WHY IT IS A SEPARATE FACT: the measured Nether arrival (run-muchajde-1qhat, the operator's
+ * flooded-island case) has every step at the body's OWN level refused or useless (the portal
+ * plane is `portal_plane`, the frame is `protected`, the rest is already open air), while the
+ * rock BELOW is solid and a dry tunnel east exists two levels down. `buildDescent` only ever
+ * computes the body's own level, so nothing in the offer can name that level; this probe
+ * reads exactly the cells the composed route needs and hands them to the ONE rule
+ * (`levelScan.ts#groundLevelScan`), which judges each pocket with the SAME per-cell function
+ * the adjacent wall entry uses (`wallEntry.ts#wallPocketRefusal`).
+ *
+ * BOUNDED BY CONSTRUCTION: `LEVEL_SCAN_MAX_LEVELS` levels x (1 own-column shaft + 4 cardinal
+ * laterals) = `LEVEL_SCAN_MAX_PROBES` probes, each a 1x2 profile + its floor + the pocket's
+ * six-neighbourhood (direct chunk lookups only, no block scan, no pathfinder probe), i.e.
+ * <= ~225 cell reads while the gate is open. `maxLevels` is clamped to the declared constant
+ * so a caller cannot widen the window.
+ *
+ * The depth-1 shaft carries the SENSOR's own verdict for the body's own-column step
+ * (`state.descent`'s `D/down`), because that is the step the offer will execute and the guard
+ * will re-read: a verdict the per-cell rule cannot supersede (an open floor, no support)
+ * breaks the chain, so what is offered and what the guard accepts cannot disagree.
+ *
+ * Exported for the same reason `buildWallProbes` is: a fixture must be able to drive the REAL
+ * classification from a modelled world instead of re-implementing it.
+ */
+export function buildLevelScanProbes(
+  bot: Bot,
+  self: SelfState,
+  descent: readonly DescentOption[],
+  maxLevels: number = LEVEL_SCAN_MAX_LEVELS,
+): LevelScanProbe[] {
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const read = (cell: Vec3Json): WallBlockLike | null => {
+    const block = bot.blockAt(scratch.set(cell.x, cell.y, cell.z))
+    return block === null
+      ? null
+      : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
+  }
+  const classify = (cell: Vec3Json): WallCell => {
+    const block = read(cell)
+    const open = block !== null && block.boundingBox === 'empty'
+    const solid = block !== null && block.boundingBox !== 'empty'
+    return {
+      cell,
+      name: block?.name ?? null,
+      open,
+      solid,
+      breakable: solid && block?.diggable === true && !isTunnelFloodBlockName(block.name),
+      observed: block !== null,
+    }
+  }
+  const ownColumn = descent.find((option) => option.dir === 'D' && option.mode === 'down')
+  const window = Math.max(0, Math.min(LEVEL_SCAN_MAX_LEVELS, Math.floor(maxLevels)))
+  const probes: LevelScanProbe[] = []
+  for (let depth = 1; depth <= window; depth += 1) {
+    const y = feet.y - depth
+    // The own-column shaft: the body digs the floor cell (x,y,z) and stands in it, so its
+    // 1x2 profile is that cell plus the cell above, and the pre-existing floor is (x,y-1,z).
+    const shaftLanding = { x: feet.x, y, z: feet.z }
+    const shaftHead = { x: feet.x, y: y + 1, z: feet.z }
+    const shaftFloor = { x: feet.x, y: y - 1, z: feet.z }
+    const shaftFlood = floodEvidence([shaftLanding, shaftHead], read)
+    const laterals: LevelLateralFacts[] = []
+    for (const dir of WALL_DIRS) {
+      const dx = dir === 'E' ? 1 : dir === 'W' ? -1 : 0
+      const dz = dir === 'S' ? 1 : dir === 'N' ? -1 : 0
+      const cell = { x: feet.x + dx, y, z: feet.z + dz }
+      const head = { x: cell.x, y: y + 1, z: cell.z }
+      const floor = { x: cell.x, y: y - 1, z: cell.z }
+      const feetCell = classify(cell)
+      const headCell = classify(head)
+      const floorCell = classify(floor)
+      // A WALK continuation is an already-open, already-supported, dry 1x2 passage that does
+      // not transfer the body: nothing is mined, so there is no new pocket to flood and the
+      // ordinary MOVE/landing guards own the step. Everything else is judged as a DIG by the
+      // shared per-cell rule.
+      const transfers =
+        (feetCell.observed && isDimensionTransferBlock(feetCell.name)) ||
+        (headCell.observed && isDimensionTransferBlock(headCell.name))
+      const walk =
+        feetCell.open &&
+        headCell.open &&
+        floorCell.observed &&
+        floorCell.solid &&
+        !isTunnelFloodBlockName(floorCell.name) &&
+        !transfers
+      const flood = walk ? null : floodEvidence([cell, head], read)
+      laterals.push({
+        dir,
+        dx,
+        dz,
+        cell,
+        landing: cell,
+        pocket: [feetCell, headCell],
+        floor: floorCell,
+        flood: flood !== null,
+        floodCell: flood?.cell ?? null,
+        floodBlock: flood?.block ?? null,
+        walk,
+      })
+    }
+    probes.push({
+      y,
+      depth,
+      shaft: {
+        landing: shaftLanding,
+        pocket: [classify(shaftLanding), classify(shaftHead)],
+        floor: classify(shaftFloor),
+        flood: shaftFlood !== null,
+        floodCell: shaftFlood?.cell ?? null,
+        floodBlock: shaftFlood?.block ?? null,
+        // Only the body's own level has a sensor verdict: it is the step the guard re-reads.
+        ...(depth === 1 ? { sensorRefusal: ownColumn?.refusal ?? null } : {}),
+      },
+      laterals,
+    })
+  }
+  return probes
+}
+
+/**
  * SAFE: keep-distance destinations for an active threat.
  *
  * The measured retreat failure is a SENSING failure as much as a policy one:
@@ -3885,8 +4044,12 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     knownResourceEvidence,
     descent,
     // The wall-entry probes exist only where a step is refused by the body's own
-    // local geology: on ordinary terrain this adds nothing at all.
-    ...(shouldProbeWallEntry(descent) ? { wallProbes: buildWallProbes(bot, self, descent) } : {}),
+    // local geology: on ordinary terrain this adds nothing at all. The bounded LEVEL
+    // SCAN rides the same gate (the measured island is exactly this shape): a body
+    // whose own level offers nothing gets the levels below it read too.
+    ...(shouldProbeWallEntry(descent)
+      ? { wallProbes: buildWallProbes(bot, self, descent), levelScan: buildLevelScanProbes(bot, self, descent) }
+      : {}),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),
     goal: input.goal,

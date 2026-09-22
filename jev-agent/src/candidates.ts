@@ -51,6 +51,8 @@ import { digRouteBearing, DIG_ROUTE_ARRIVE_DISTANCE, DIG_ROUTE_MIN_ADVANCE, form
 import type { DigRouteRefusal, DigRouteRefusalReason, DigRouteStep } from './digRoute.ts'
 import { formatWallEntry, groundWallEntries } from './wallEntry.ts'
 import type { WallEntryRefusal, WallEntryRoute, WallProbe } from './wallEntry.ts'
+import { formatLevelScan, groundLevelScan } from './levelScan.ts'
+import type { LevelScanRefusalReason } from './levelScan.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import {
   BRIDGE_AUTHORITY_META,
@@ -8004,6 +8006,236 @@ function verticalRemedyCandidates(
   return { candidates: ascent.candidates, classes: ['ascent:vertical'] }
 }
 
+/**
+ * The BOUNDED LEVEL SCAN offer: the own-column descent that starts a composed route whose
+ * TERMINUS (a lateral dig or walk at a level below) strictly reduces the distance to the
+ * target.
+ *
+ * MEASURED (live, the operator's flooded Nether arrival, run-muchajde-1qhat): at
+ * (2.7,59,-2.5) every step at the body's OWN level is refused or useless - the portal plane
+ * east is `portal_plane`, the frame is `protected`, the rest is already open air - while the
+ * rock below is solid and a dry tunnel east exists two levels down. `digRoute.ts` correctly
+ * refuses (`DIG_ROUTE_REFUSED reason=no_grounded_route ... ledger: E=no_wall Ev=protected`)
+ * because a pure descent does not reduce the 3-D distance, and `wallEntryCandidates` judges
+ * only the body's own adjacent cells. This arm is the missing third case: a descent that is
+ * the FIRST STEP OF A ROUTE THAT ENDS CLOSER, never a descent on its own.
+ *
+ * The rule is `levelScan.ts#groundLevelScan` (the sensor's per-level probes through the SAME
+ * per-cell pocket rule the wall entry uses); this arm turns each grounded route into the ONE
+ * mechanical action it starts with - the own-column dig at the body's current level, built
+ * through the SAME `descendCandidateFromStep`, executed by the SAME `runDescend`, guarded by
+ * the SAME `guardDescend` - and carries the level, the continuation cell/material, the
+ * per-level flood verdict and the distance change as evidence.
+ *
+ * WHY ONE CANDIDATE AND NOT ONE PER ROUTE: every grounded route begins with the same
+ * mechanical step (dig the own-column floor), so offering N copies would put N identical
+ * actions in front of Jev and bias the choice - exactly the ranking/substitution the
+ * authority rules forbid. The alternatives are therefore ENUMERATED in the evidence
+ * (`levelScanAlternatives` + the section 7 U3 boundary when more than one grounded) and code
+ * chooses neither a level nor a direction; the direction becomes a real choice when the body
+ * reaches the level, where the ordinary dig route / wall entry enumerates it.
+ *
+ * IT IS AN OFFER, NEVER A SUBSTITUTION: enumerated only when the ordinary dig route AND the
+ * adjacent wall entry both refused, and only from a sensor probe that exists only while a
+ * step is refused by the body's own local geology.
+ */
+function levelScanCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; targetName: string | null; reason: string; skill: string | null; extraMeta?: Record<string, string | number | boolean> },
+  refusals: DigRouteRefusalSink,
+): { candidates: Candidate[]; classes: string[]; boundary: string | null } {
+  const probes = state.levelScan
+  if (probes === undefined || probes.length === 0) return { candidates: [], classes: [], boundary: null }
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  // The arrival rule the dig route and the wall entry use: inside the arrival radius the
+  // ordinary walk / vertical approach owns the last block.
+  if (distance(feet, spec.target) <= DIG_ROUTE_ARRIVE_DISTANCE) return { candidates: [], classes: [], boundary: null }
+  const standKey = cellKey(state.self.position)
+  const liveStructures = liveStructureIndexOf(state)
+  const decision = groundLevelScan({
+    selfPosition: state.self.position,
+    target: spec.target,
+    levels: probes,
+    minAdvance: DIG_ROUTE_MIN_ADVANCE,
+    isProtected: (cell, name) =>
+      (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell),
+  })
+  if (decision.kind === 'refuse') {
+    refusals.push({
+      reason: asDigRouteRefusalReason(decision.refusal.reason),
+      target: spec.target,
+      bearing: digRouteBearing(feet, spec.target),
+      cell: decision.refusal.cell,
+      block: decision.refusal.block,
+      detail: decision.refusal.detail,
+    })
+    return { candidates: [], classes: [], boundary: null }
+  }
+  // The descent is executed by the SENSOR's own own-column step, so the guard's re-read
+  // (`state.descent` + the depth-1 shaft probe) and this offer cannot disagree.
+  const shaft = (state.descent ?? []).find((step) => step.dir === 'D' && step.mode === 'down')
+  if (shaft === undefined) {
+    refusals.push({
+      reason: 'no_grounded_route',
+      target: spec.target,
+      bearing: digRouteBearing(feet, spec.target),
+      cell: null,
+      block: null,
+      detail: 'the sensor carries no own-column descent step, so the scanned descent cannot be executed',
+    })
+    return { candidates: [], classes: [], boundary: null }
+  }
+  // The SAME step gate the dig route and the wall entry use (#436 U5 protection + the strict
+  // tool gate): a shaft that would break a protected block or that the held tools cannot
+  // finish is refused with its own typed reason, never offered and then re-aimed forever.
+  const gate = stepGateRefusal(state, shaft)
+  if (gate !== null) {
+    refusals.push({
+      reason: gate.reason,
+      target: spec.target,
+      bearing: 'D',
+      cell: descentPrimaryCell(shaft),
+      block: gate.block,
+      detail: gate.detail,
+    })
+    return { candidates: [], classes: [], boundary: null }
+  }
+  // The ordinary zero-progress DESCEND identity: a descent that already proved zero
+  // observable change from this stand cell is withheld (the body must move first).
+  if (
+    isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+      kind: 'DESCEND',
+      targetKey: cellKey(descentPrimaryCell(shaft)),
+      standKey,
+      routeSig: descendStepRouteSignature(shaft),
+      nowMs: state.timestampMs,
+    })
+  ) {
+    refusals.push({
+      reason: 'spent',
+      target: spec.target,
+      bearing: 'D',
+      cell: descentPrimaryCell(shaft),
+      block: shaft.digName ?? null,
+      detail: 'this descent already proved zero observable change from this stand cell',
+    })
+    return { candidates: [], classes: [], boundary: null }
+  }
+  const alternatives = decision.routes.map((route) => `${route.level}:${route.dir}:${route.walk ? 'walk' : 'dig'}`)
+  const best = decision.routes[0]
+  if (best === undefined) return { candidates: [], classes: [], boundary: null }
+  const built = descendCandidateFromStep(state, options, shaft, {
+    focusItem: spec.targetName,
+    descendTargetY: null,
+    // The step is the sensor's own controlled own-column dig and the route it starts ends
+    // strictly closer to the goal's target: a grounded route, never a blind search step.
+    grounded: true,
+    staircase: false,
+    extraMeta: {
+      levelScan: true,
+      levelScanReason: spec.reason,
+      levelScanTarget: cellText(spec.target),
+      levelScanLevel: best.level,
+      levelScanDepth: best.depth,
+      levelScanLength: best.length,
+      levelScanDir: best.dir,
+      levelScanVia: best.walk ? 'walk' : 'dig',
+      levelScanCell: cellText(best.cell),
+      levelScanBlock: best.block ?? 'unknown',
+      levelScanFloor: cellText(best.floor),
+      levelScanFloorBlock: best.floorBlock ?? 'unknown',
+      levelScanFrom: round2Number(best.fromDistance),
+      levelScanTo: round2Number(best.toDistance),
+      levelScanLevelFrom: round2Number(best.levelFromDistance),
+      levelScanLevelTo: round2Number(best.levelToDistance),
+      levelScanAlternatives: alternatives.join(','),
+      levelScanEvidence: best.evidence,
+      levelScanLine: formatLevelScan({
+        route: best,
+        target: spec.target,
+        reason: spec.reason,
+        alternativeCount: alternatives.length,
+      }),
+      ...(spec.extraMeta ?? {}),
+    },
+    escape: false,
+  })
+  if (built === null) {
+    refusals.push({
+      reason: 'no_tool',
+      target: spec.target,
+      bearing: 'D',
+      cell: descentPrimaryCell(shaft),
+      block: shaft.digName ?? null,
+      detail: `${shaft.digName ?? 'the own-column floor'} cannot be finished with the held tools`,
+    })
+    return { candidates: [], classes: [], boundary: null }
+  }
+  // Its OWN id namespace (`LEVEL_SCAN:down:D:<cell>`): a reviewer can tell which arm produced
+  // the step, while the SPEND identity stays the ordinary DESCEND identity of the sensor step.
+  const candidate: Candidate = {
+    ...built.candidate,
+    id: `LEVEL_SCAN:down:D:${blockId('b', descentPrimaryCell(shaft))}`,
+  }
+  // §7 (U3): several grounded (level, direction) routes are several PLANS whose first
+  // mechanical step is the same action. Code chooses neither the level nor the direction, and
+  // the boundary says so with every alternative named.
+  const boundary =
+    alternatives.length > 1
+      ? formatSkillPolicyBoundary({
+          skill: spec.skill ?? 'LEVEL_SCAN',
+          reason: 'multiple_grounded_level_routes',
+          alternatives: alternatives.map((alternative) => `dig:level_scan:${alternative}`),
+        })
+      : null
+  if (boundary !== null) candidate.meta.legPolicyBoundary = boundary
+  // §7 layering for the descent: a UNIQUE grounded route (this is the only remedy and the only
+  // plan) is a prerequisite code may finish; several means the step only realizes the route the
+  // plans agree on, and the descent still belongs to Jev's choice of plan.
+  const unique = alternatives.length === 1
+  candidate.meta.levelScanAuthorityLine = formatSkillStep(
+    spec.skill ?? 'LEVEL_SCAN',
+    'level_scan',
+    formatSkillStepAuthority(
+      unique ? 'MANDATORY_PREREQUISITE' : 'MECHANICAL_CONTINUATION',
+      `target=${cellText(spec.target)} level=${best.level} depth=${best.depth} dir=${best.dir} ` +
+        `via=${best.walk ? 'walk' : 'dig'} cell=${cellText(best.cell)} block=${best.block ?? 'unknown'} ` +
+        `floor=${cellText(best.floor)}:${best.floorBlock ?? 'unknown'} ` +
+        `d=${round2Number(best.fromDistance)}->${round2Number(best.toDistance)} alternatives=${alternatives.length}`,
+      'dig_blocks=1',
+      { budget: 1 },
+    ),
+  )
+  if (unique) {
+    candidate.meta.legReflex = formatReflex({
+      ownerSkill: spec.skill ?? 'LEVEL_SCAN',
+      action: 'level_scan',
+      evidence:
+        `no_grounded_level_progress;level=${best.level};depth=${best.depth};` +
+        `shaft@${cellText(best.firstStep)}:${best.firstStepBlock ?? 'unknown'};` +
+        `cell@${cellText(best.cell)}:${best.block ?? 'unknown'};` +
+        `d=${round2Number(best.fromDistance)}->${round2Number(best.toDistance)}`,
+    })
+  }
+  return { candidates: [candidate], classes: ['dig:level_scan'], boundary }
+}
+
+/** The dig-route vocabulary a level-scan refusal maps into (the sink is shared). */
+function asDigRouteRefusalReason(reason: LevelScanRefusalReason): DigRouteRefusalReason {
+  switch (reason) {
+    case 'no_progress':
+    case 'chain_broken':
+      return 'no_grounded_route'
+    default:
+      return reason
+  }
+}
+
 /** The `DigRouteStep` an entry route is, for the shared `DIG_ROUTE` line. */
 function wallEntryStep(route: WallEntryRoute): DigRouteStep {
   return {
@@ -8451,6 +8683,27 @@ function travelApproachLegs(
         )
       : { candidates: [], classes: [] }
   for (const entry of entries.candidates) legs.push(entry)
+  // The third way the terrain can change when nothing at the body's own level can: the
+  // BOUNDED LEVEL SCAN (`levelScan.ts`). Enumerated only when BOTH the dig route and the
+  // adjacent wall entry grounded nothing - the measured island - and only from the sensor's
+  // own per-level probes, so the descent is the first step of a route that ends strictly
+  // closer to the target, never a descent for its own sake.
+  const levels =
+    dig === null && entries.candidates.length === 0
+      ? levelScanCandidates(
+          state,
+          options,
+          {
+            target: spec.target,
+            targetName: spec.targetName,
+            reason: 'no_walkable_route',
+            skill: spec.skill,
+            extraMeta: spec.extraMeta,
+          },
+          refusals,
+        )
+      : { candidates: [], classes: [], boundary: null }
+  for (const level of levels.candidates) legs.push(level)
   // The last grounded route change: a bounded, sensor-derived continuation onto a
   // verified ledge when no sensed standable cell can walk to the waypoint at all
   // (see `pocketContinuations`). A continuation is a DIFFERENT stand cell, so the
@@ -8493,6 +8746,7 @@ function travelApproachLegs(
     ...continuations.map((cont) => `movement:${cont.action}`),
     ...(dig !== null ? ['dig:route'] : []),
     ...entries.classes,
+    ...levels.classes,
     ...vertical.classes,
     ...(bridge.plan !== null ? ['place:bridge'] : []),
     ...(bridge.plan !== null && ascendAlternativeAvailable(state, spec.target) ? ['place:pillar'] : []),
@@ -8500,14 +8754,18 @@ function travelApproachLegs(
   // #436 section 7 U3 / section 19 (8, 28) / section 22: several grounded remedies are
   // several routes for Jev and code stops. When the alternatives are whole remedy
   // CLASSES the boundary names the classes; when the classes agree but several WALL
-  // ENTRY directions/modes grounded, it names those instead - either way the line
-  // says which alternatives code refused to rank.
+  // ENTRY directions/modes grounded, it names those instead; when the classes agree but
+  // several LEVEL SCAN routes grounded (several levels and/or directions below), it names
+  // those - either way the line says which alternatives code refused to rank.
   const entryAlternatives =
     entries.candidates.length > 1
       ? entries.candidates.map(
           (candidate) => `dig:wall_entry:${String(candidate.meta.digRouteBearing ?? '?')}:${String(candidate.meta.digRouteEntryMode ?? '?')}`,
         )
       : []
+  // The level-scan alternatives are the (level, direction, via) triples the rule grounded;
+  // when the scan grounded more than one, the arm's own boundary line already names them and
+  // is carried on the candidate (`levels.boundary` below).
   const boundary =
     remedyClasses.length > 1
       ? formatSkillPolicyBoundary({
@@ -8521,13 +8779,14 @@ function travelApproachLegs(
             reason: 'multiple_grounded_wall_entries',
             alternatives: entryAlternatives,
           })
-        : null
+        : levels.boundary
   const uniqueContinuation =
     continuations.length === 1 &&
     dig === null &&
     !walkable &&
     bridge.plan === null &&
     entries.classes.length === 0 &&
+    levels.classes.length === 0 &&
     vertical.classes.length === 0
   for (const cont of continuations) {
     const reflex = uniqueContinuation
@@ -10630,6 +10889,20 @@ function routeOpeningCandidates(
     )
     for (const entry of entries.candidates) {
       if (!out.some((candidate) => candidate.id === entry.id)) out.push(entry)
+    }
+    // The third case, on the same precondition: nothing at the body's own level can be
+    // walked OR opened, so the bounded LEVEL SCAN offers the own-column descent that starts a
+    // route ending strictly closer to the real destination (see `levelScanCandidates`).
+    if (entries.candidates.length === 0) {
+      const levels = levelScanCandidates(
+        state,
+        options,
+        { target: goalTarget, targetName: null, reason: 'route_withheld', skill: null },
+        digRefusals,
+      )
+      for (const level of levels.candidates) {
+        if (!out.some((candidate) => candidate.id === level.id)) out.push(level)
+      }
     }
   }
   // No enclosing Skill owns this recovery family, so the vertical remedy here is an

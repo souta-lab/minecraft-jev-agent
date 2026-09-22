@@ -226,6 +226,7 @@ import {
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { formatDigRouteProgress, formatDigRouteRefused } from './digRoute.ts'
+import { formatLevelScanStep } from './levelScan.ts'
 import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
@@ -1220,6 +1221,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // that no fluid could reach the pocket - and "the body mined the wall because the
   // pocket is provably dry" cannot be told apart from an ordinary tunnel step.
   'DIG_ROUTE_ENTRY',
+  // The BOUNDED LEVEL SCAN (`levelScan.ts`): the descent a body takes when NOTHING at its
+  // own level can ground a route and the rock below can. Without these in the mirrored
+  // list the live sink DROPS the two lines that say which level the body descended to, which
+  // lateral continuation and material the route ends at, the per-level flood verdict, and
+  // the distance change - and a descent that is the first step of a route that ends closer
+  // cannot be told apart from a blind search descent.
+  'LEVEL_SCAN',
+  'LEVEL_SCAN_STEP',
   'PORTAL_ENTRY_UNVERIFIED',
   // The bounded direct walk into a non-solid portal cell: the live run needs
   // both the measured motion (`PORTAL_WALK_IN ... transferred=`) and the typed
@@ -3621,6 +3630,9 @@ export class JevController {
         )
       }
       if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
+      // The BOUNDED LEVEL SCAN descent (`levelScan.ts`): its own mirrored `LEVEL_SCAN` line
+      // plus the §7 layer half, logged only once the guard has accepted the step.
+      if (guarded.candidate.meta.levelScan === true) this.logLevelScan(guarded.candidate)
       if (isBridgeMove(guarded.candidate)) this.logBridgeAuthority(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
@@ -5556,6 +5568,9 @@ export class JevController {
       // to the goal's target, so a settled step re-measures the distance. Only a
       // real decrease is reported.
       if (candidate.meta.digRoute === true) this.logDigRouteProgress(result, candidate)
+      // The level-scan descent's own measured half: the level actually reached and the
+      // distance to the target after the step. Only a real downward move is reported.
+      if (candidate.meta.levelScan === true) this.logLevelScanStep(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
         // Only a COMPLETED retrieval - the target actually arrived or the item
@@ -5996,6 +6011,86 @@ export class JevController {
         ledge: typeof candidate.meta.legContinuationLedge === 'string' ? candidate.meta.legContinuationLedge : null,
         vertical: typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : null,
       },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The selected LEVEL SCAN descent (`levelScan.ts`): nothing at the body's own level could
+   * ground a route toward the travel/enter/retrieve target, so the bounded level scan offered
+   * the own-column descent that STARTS a composed route ending strictly closer to the target.
+   *
+   * Logged when Jev actually selects it, so the marker means "this body is now descending
+   * toward the scanned level", not "a route was enumerated". The line names the level, the
+   * continuation cell and material, whether it is a dig or a walk, the pre-existing floor, the
+   * per-level flood verdict (`levels=`) and the distance change; the §7 layer half rides the
+   * same mirrored `SKILL_STEP` channel the wall entry uses.
+   */
+  private logLevelScan(candidate: Candidate): void {
+    const line = typeof candidate.meta.levelScanLine === 'string' ? candidate.meta.levelScanLine : null
+    if (line === null) return
+    this.logger.info(
+      'agent',
+      line,
+      {
+        actionId: candidate.id,
+        target: typeof candidate.meta.levelScanTarget === 'string' ? candidate.meta.levelScanTarget : null,
+        level: typeof candidate.meta.levelScanLevel === 'number' ? candidate.meta.levelScanLevel : null,
+        depth: typeof candidate.meta.levelScanDepth === 'number' ? candidate.meta.levelScanDepth : null,
+        dir: typeof candidate.meta.levelScanDir === 'string' ? candidate.meta.levelScanDir : null,
+        via: typeof candidate.meta.levelScanVia === 'string' ? candidate.meta.levelScanVia : null,
+        cell: typeof candidate.meta.levelScanCell === 'string' ? candidate.meta.levelScanCell : null,
+        block: typeof candidate.meta.levelScanBlock === 'string' ? candidate.meta.levelScanBlock : null,
+        fromD: typeof candidate.meta.levelScanFrom === 'number' ? candidate.meta.levelScanFrom : null,
+        toD: typeof candidate.meta.levelScanTo === 'number' ? candidate.meta.levelScanTo : null,
+        alternatives:
+          typeof candidate.meta.levelScanAlternatives === 'string' ? candidate.meta.levelScanAlternatives : null,
+        evidence: typeof candidate.meta.levelScanEvidence === 'string' ? candidate.meta.levelScanEvidence : null,
+      },
+      this.tickCounter,
+    )
+    const authorityLine =
+      typeof candidate.meta.levelScanAuthorityLine === 'string' ? candidate.meta.levelScanAuthorityLine : null
+    if (authorityLine !== null) {
+      this.logger.info('agent', authorityLine, { actionId: candidate.id, step: 'level_scan' }, this.tickCounter)
+    }
+  }
+
+  /**
+   * The settled level-scan descent measured against the world: the level the body actually
+   * reached, how many own-column steps still separate it from the continuation's level, and
+   * the distance to the target before/after. Emitted only when the descent measurably moved
+   * the body DOWN toward the scanned level, so "the scan descended toward a route" is a
+   * measured fact instead of an assumption, and a descent that did nothing is not reported.
+   */
+  private logLevelScanStep(result: ExecutionResult, candidate: Candidate): void {
+    if (candidate.meta.levelScan !== true) return
+    const targetText = typeof candidate.meta.levelScanTarget === 'string' ? candidate.meta.levelScanTarget : null
+    const targetLevel = typeof candidate.meta.levelScanLevel === 'number' ? candidate.meta.levelScanLevel : null
+    const fromD = typeof candidate.meta.levelScanFrom === 'number' ? candidate.meta.levelScanFrom : null
+    if (targetText === null || targetLevel === null || fromD === null) return
+    const parts = targetText.split(',').map((value) => Number(value))
+    const [x, y, z] = parts
+    if (x === undefined || y === undefined || z === undefined) return
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return
+    const feet = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    }
+    const started = {
+      x: typeof candidate.meta.wallX === 'number' ? candidate.meta.wallX : feet.x,
+      y: typeof candidate.meta.wallY === 'number' ? candidate.meta.wallY : feet.y + 1,
+      z: typeof candidate.meta.wallZ === 'number' ? candidate.meta.wallZ : feet.z,
+    }
+    // The measured claim: the body is one level LOWER than it was. A descent that did not
+    // change the level is not progress and emits nothing.
+    if (!(feet.y < started.y)) return
+    const toD = Math.round(distance(feet, { x, y, z }) * 100) / 100
+    this.logger.info(
+      'agent',
+      formatLevelScanStep({ from: started, to: feet, targetLevel, fromDistance: fromD, toDistance: toD }),
+      { actionId: result.actionId, kind: result.kind, status: result.status, level: feet.y, targetLevel, fromD, toD },
       this.tickCounter,
     )
   }
