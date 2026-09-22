@@ -40,17 +40,29 @@ export interface Vec3Json {
 
 /**
  * Candidate kinds whose own postcondition is a mechanical world/body change and
- * whose failure can therefore be repeated with identical preconditions. MOVE and
- * RETREAT are deliberately absent: their failure memory is `moveFailMemory` plus
- * the candidate-failure map, and a leg that closed distance is already progress.
+ * whose failure can therefore be repeated with identical preconditions.
+ *
+ * MOVE is included, but ONLY for a MOVE that carries a route declaration (a
+ * vertical/pillar ascent, a dig or place route, a bridge, a level scan, a contact
+ * ascent) - the caller applies that condition. A plain WALK stays out for the
+ * original reason: its failure memory is `moveFailMemory` plus the candidate-failure
+ * map, and a leg that closed distance is already progress.
+ *
+ * Why the addition is needed, measured live: a MOVE-family ascent can settle
+ * SUCCESS with `progressDelta=0` (nothing observable changed), so it is not a
+ * failure and `moveFailMemory` never records it - and while MOVE was excluded here,
+ * no other memory held it either, so the same ascent re-offered forever
+ * (`ASCEND:target:p24_102_-4 ... status=done progressDelta=0`, repeatedly, at the
+ * same stand cell). RETREAT is still deliberately absent.
  */
-export type ZeroProgressRouteKind = 'RETRIEVE' | 'DESCEND' | 'STEP' | 'ENTER_PORTAL'
+export type ZeroProgressRouteKind = 'RETRIEVE' | 'DESCEND' | 'STEP' | 'ENTER_PORTAL' | 'MOVE'
 
 const ZERO_PROGRESS_ROUTE_KINDS: ReadonlySet<string> = new Set<string>([
   'RETRIEVE',
   'DESCEND',
   'STEP',
   'ENTER_PORTAL',
+  'MOVE',
 ])
 
 export function isZeroProgressRouteKind(kind: string): kind is ZeroProgressRouteKind {
