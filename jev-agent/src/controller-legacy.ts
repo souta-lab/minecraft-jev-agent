@@ -24,12 +24,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatBreakContact, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_BREAK_CONTACT, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, unsensedAttackerFacts, unsensedThreatResponse, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -1446,6 +1446,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   GUARD_REJECTIONS,
   'COMBAT_KIT_GAP',
   THREAT_RANGED_UNANSWERED,
+  THREAT_BREAK_CONTACT,
   DEATH_CAUSE,
   'FOOD_LOW',
   'EAT_REFUSED',
@@ -2098,6 +2099,8 @@ export class JevController {
   private lastCombatKitGapLine: string | null = null
   /** Signature of the last `THREAT_RANGED_UNANSWERED` line (dedup, not a state). */
   private lastRangedThreatLine: string | null = null
+  /** Signature of the last `THREAT_BREAK_CONTACT` line (dedup, not a state). */
+  private lastBreakContactLine: string | null = null
   /** #8: the movement target currently owning the body, blacklisted on oscillation. */
   private lastMoveTarget: { dimension: string; position: Vec3Json } | null = null
   /** the previous tracked move target (for oscillation suppression) */
@@ -3013,6 +3016,20 @@ export class JevController {
       // offer). The controller-side half is `observeCriticalDamage`, which
       // proves exhaustion and wakes System2.
       candidates = restrictCandidatesDuringCriticalDamage(state, candidates)
+      // SAFE: the bounded answer to an attacker the sensor never placed. The
+      // measured end of the fortress-approach runs (`THREAT_RANGED_UNANSWERED
+      // threat=ender_dragon distance=null sensed=false` -> `CRITICAL_DAMAGE
+      // health=5 source=ender_dragon` -> `DEATH_CAUSE killer=ender_dragon`):
+      // every damage state above keys on a SENSED hostile, so an attributed
+      // attacker outside perception armed nothing and the offer could collapse
+      // to WAIT/ESCALATE - which the executor realizes as "stop and stand still"
+      // (`executor.ts` ESCALATE) or 300 ms of doing nothing (WAIT), and which the
+      // starvation boundary then turns into an actionless tick (`return` at
+      // `noProductiveRepeats >= waitLimit`). While a named attacker is landing
+      // hits, the body keeps moving whenever ANY grounded locomotion exists.
+      // WHICH route stays Jev's choice; the work actions that would hold it still
+      // are what this removes.
+      candidates = restrictCandidatesDuringUnseenAttacker(state, candidates)
       // SAFE: while the body stands in fire/lava/burning, work that keeps it
       // there is withheld and only the routes that can leave the hazard stay
       // offered (the grounded escapes, RETREAT/DESCEND, self-care, ESCALATE).
@@ -3386,11 +3403,14 @@ export class JevController {
       const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
       const freshCandidates = restrictCandidatesDuringEnvHazard(
         freshState,
-        restrictCandidatesDuringCriticalDamage(
+        restrictCandidatesDuringUnseenAttacker(
           freshState,
-          restrictCandidatesDuringSubmersion(
+          restrictCandidatesDuringCriticalDamage(
             freshState,
-            restrictCandidatesAtCriticalHealth(freshState, freshThreatOffer.candidates),
+            restrictCandidatesDuringSubmersion(
+              freshState,
+              restrictCandidatesAtCriticalHealth(freshState, freshThreatOffer.candidates),
+            ),
           ),
         ),
       )
@@ -7840,11 +7860,18 @@ export class JevController {
       const sourceId =
         typeof detail.attackerId === 'number' && Number.isFinite(detail.attackerId) ? detail.attackerId : null
       const sourceName = typeof detail.attackerName === 'string' && detail.attackerName.length > 0 ? detail.attackerName : null
+      const sourcePosition = damageOrigin(detail.attackerPosition)
       this.signals.lastDamage = {
         atMs: now,
         health: this.bot.health ?? 0,
         sourceId,
         sourceName,
+        // The server-stated damage ORIGIN (the scheduler reads it off the
+        // `damage_event` packet, which mineflayer's `entityHurt` drops). This is
+        // the fact that lets the body ground a direction to break contact with an
+        // attacker it cannot see. Absent means UNKNOWN - the field is left off
+        // rather than filled with a guess.
+        ...(sourcePosition === null ? {} : { sourcePosition }),
       }
       return
     }
@@ -7858,6 +7885,13 @@ export class JevController {
       health: typeof detail.health === 'number' ? detail.health : this.bot.health ?? 0,
       sourceId: sameBurst ? previous.sourceId : null,
       sourceName: sameBurst ? previous.sourceName : null,
+      // Attribution follows the same-burst rule as identity: a negative health
+      // step inside the same hit burst keeps the origin the damage event stated,
+      // and a step outside it keeps nothing (an origin without a source is not
+      // an attacker).
+      ...(sameBurst && previous?.sourcePosition !== undefined && previous.sourcePosition !== null
+        ? { sourcePosition: previous.sourcePosition }
+        : {}),
     }
   }
 
@@ -7978,25 +8012,36 @@ export class JevController {
     const unanswered = unansweredRangedThreats(state.entities)
     const threat = unanswered[0] ?? null
     const sourceName = state.signals.lastDamage?.sourceName ?? null
-    // The unsensed case: the recorded attacker is a hostile the sensor cannot
-    // place at all. Only a damage attribution may name it (never a guess).
-    const unsensed =
-      threat === null &&
-      sourceName !== null &&
-      state.signals.lastDamage !== null &&
-      state.signals.lastDamage !== undefined &&
-      state.timestampMs - (state.signals.lastDamage.atMs ?? 0) <= THREAT_MEMORY_MS &&
-      !state.entities.some((entity) => entity.id === (state.signals.lastDamage?.sourceId ?? -1))
+    // The unsensed case: the attacker is named by the damage attribution and is
+    // NOT in the sensor snapshot. `unsensedAttackerFacts` owns that predicate
+    // (identity + recency + absence), so the marker, the offer restriction and
+    // the death telemetry all read ONE fact instead of three near-copies.
+    const attacker = unsensedAttackerFacts(state)
+    const unsensed = threat === null && attacker !== null
     if (threat === null && !unsensed) {
       this.lastRangedThreatLine = null
       return
     }
+    // What the body can still DO: the sensor builds its escape/cover cells for
+    // the attributed origin too, so a non-empty escape set is a real grounded
+    // destination. No cells means no direction could be grounded - which the
+    // marker says explicitly instead of implying there is no threat.
+    const escapeCells = state.terrain.escapeCells ?? []
+    const coverCells = state.terrain.threatCoverCells ?? []
+    const response = unsensedThreatResponse({
+      attacker,
+      groundedDestinations: attacker?.position === null ? 0 : escapeCells.length + coverCells.length,
+      coverCells: coverCells.length,
+      availableMoves: escapeCells.length + coverCells.length,
+    })
     const line = formatThreatRangedUnanswered({
       goalKey: this.currentGoalKey(),
       threat,
-      sourceName: unsensed ? sourceName : null,
+      sourceName: unsensed ? (attacker?.name ?? sourceName) : null,
       body: bodySurvivalFacts(state.self),
       weapon: weaponFacts(state.self.heldItem?.name ?? null),
+      attacker,
+      response: attacker === null ? undefined : response,
     })
     if (line === this.lastRangedThreatLine) return
     this.lastRangedThreatLine = line
@@ -8004,13 +8049,50 @@ export class JevController {
       'agent',
       line,
       {
-        threat: threat?.name ?? sourceName,
+        threat: threat?.name ?? attacker?.name ?? sourceName,
         distance: threat?.distance ?? null,
         sensed: threat !== null,
-        standoff: threat?.standoff ?? null,
+        standoff: threat?.standoff ?? attacker?.standoff ?? null,
+        sourcePosition: attacker?.position ?? null,
+        response: attacker === null ? null : response.kind,
+        missing: response.missing,
         health: state.self.health,
         weapon: state.self.heldItem?.name ?? 'fists',
         source: sourceName,
+      },
+      this.tickCounter,
+    )
+    // The bounded break-contact evidence: no destination could be grounded from
+    // the damage attribution, so the body's only answer is to keep moving. This
+    // is the typed statement that the body is NOT idle, and exactly which facts
+    // were missing to do better.
+    if (attacker === null || response.grounded || response.kind !== 'break_contact') {
+      this.lastBreakContactLine = null
+      return
+    }
+    const moves = (state.terrain.escapeCells ?? []).map((cell) => `${cell.x},${cell.y},${cell.z}`)
+    const breakLine = formatThreatBreakContact({
+      goalKey: this.currentGoalKey(),
+      attacker,
+      response,
+      body: bodySurvivalFacts(state.self),
+      weapon: weaponFacts(state.self.heldItem?.name ?? null),
+      availableMoves: moves,
+    })
+    if (breakLine === this.lastBreakContactLine) return
+    this.lastBreakContactLine = breakLine
+    this.logger.warn(
+      'guard',
+      breakLine,
+      {
+        marker: THREAT_BREAK_CONTACT,
+        threat: attacker.name,
+        attackerId: attacker.id,
+        sourcePosition: attacker.position,
+        missing: response.missing,
+        response: response.kind,
+        health: state.self.health,
+        food: state.self.food,
       },
       this.tickCounter,
     )
@@ -11137,4 +11219,22 @@ function executorOptions(options: JevAgentOptions, scheduler: DecisionScheduler)
       },
     },
   }
+}
+
+/**
+ * The damage ORIGIN a scheduler trigger carries, validated, or null.
+ *
+ * The scheduler only ever sets `attackerPosition` from a finite server-stated
+ * coordinate (the `damage_event` packet's `sourcePosition`, or the resolved
+ * source entity's position), but this is the boundary where an untrusted
+ * payload could reach the durable signal: a non-finite or malformed value is
+ * dropped here so "unknown" stays unknown instead of poisoning a distance
+ * comparison downstream.
+ */
+function damageOrigin(value: unknown): Vec3Json | null {
+  if (typeof value !== 'object' || value === null) return null
+  const point = value as { x?: unknown; y?: unknown; z?: unknown }
+  if (typeof point.x !== 'number' || typeof point.y !== 'number' || typeof point.z !== 'number') return null
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) return null
+  return { x: point.x, y: point.y, z: point.z }
 }

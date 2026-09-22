@@ -22,7 +22,11 @@ import {
   nearestDangerousThreat,
   THREAT_ESCAPE_DY,
   THREAT_ESCAPE_MAX_CELLS,
+  THREAT_MEMORY_MS,
   threatStandoffRange,
+  UNSENSED_MIN_KEEP_DISTANCE_GAIN,
+  UNSENSED_THREAT_ANCHOR_RANGE,
+  unsensedAttackerFacts,
 } from './threat.ts'
 import type { ThreatEntityLike, ThreatStateEvidence } from './threat.ts'
 import { resourceMatches } from './resourceClass.ts'
@@ -433,6 +437,21 @@ export type LastDamageEvidence = {
   health: number
   sourceId: number | null
   sourceName: string | null
+  /**
+   * WHERE the damage came from, as the server stated it.
+   *
+   * `sourcePosition` is a field of the 1.20+ `damage_event` packet
+   * (`minecraft-data` 1.21.x: `entityId, sourceTypeId, sourceCauseId,
+   * sourceDirectId, sourcePosition`). Mineflayer's `entityHurt` drops it, so the
+   * scheduler reads it off the packet before the event fires; a resolved source
+   * entity's own position is the fallback when the server sent none.
+   *
+   * This is the ONE fact that lets the body ground a directional response to an
+   * attacker it cannot see: without it, "move away from the attacker" has no
+   * direction to be away FROM, and inventing one is forbidden. Absent/`null`
+   * means the body genuinely does not know where the damage came from.
+   */
+  sourcePosition?: Vec3Json | null
 }
 
 /**
@@ -3835,17 +3854,30 @@ function buildEscapeCells(
   options: SensorOptions,
   self: SelfState,
   entities: readonly EntityState[],
+  lastDamage?: LastDamageEvidence | null,
 ): { cells: Vec3Json[]; coverCells: Vec3Json[]; portalWalkInCells: Vec3Json[] } {
-  const threat = nearestDangerousThreat(entities as readonly ThreatEntityLike[])
+  const sensed = nearestDangerousThreat(entities as readonly ThreatEntityLike[])
+  // The UNSEEN attacker: the damage attribution names a position the sensor
+  // never witnessed. Same scan, same block truth, same solver - the only change
+  // is where "away from" and "out of sight of" are measured from. When the
+  // attribution carries no position this stays null and the scan does not run:
+  // an origin is never invented to make a destination look grounded.
+  const attributed = sensed === null ? attributedThreatAnchor(entities, lastDamage ?? null, self.position) : null
+  const threat = sensed ?? attributed
   if (threat === null) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const radius = Math.max(0, Math.floor(options.escapeRadius))
   if (radius === 0) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const standoff = threatStandoffRange(threat.name)
+  // A distant origin cannot be outrun: the local scan can only offer a lateral
+  // step, so the qualification threshold drops for it (cover remains the
+  // load-bearing fact). A SENSED threat keeps the measured threshold exactly.
+  const minGain = attributed === null ? MIN_KEEP_DISTANCE_GAIN : UNSENSED_MIN_KEEP_DISTANCE_GAIN
   const current = distance(threat.position, self.position)
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
   const found: Vec3Json[] = []
   const cover: Vec3Json[] = []
   const transfer: Vec3Json[] = []
+  const usable: Vec3Json[] = []
   let coverRays = 0
   const maxCoverRays = Math.max(0, Math.floor(options.maxThreatCoverRays ?? 0))
   const scratch = bot.entity.position.clone()
@@ -3865,28 +3897,106 @@ function buildEscapeCells(
           // cell the solver will refuse.
           continue
         }
-        // A keep-distance destination never moves CLOSER to the threat, so only
-        // the not-closer half of the sphere is worth a ray at all.
-        if (gain <= 0) continue
         // Destination rule, shared with `buildTerrain`: a canopy top is not a
         // place the body may be sent to keep distance from a mob.
         if (!isUsableStandFromBlocks(feetBlock, headBlock, at({ x: feet.x, y: feet.y - 1, z: feet.z }))) continue
+        usable.push(feet)
         // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
         // standing outside the threat's reach without moving closer.
-        if (gain >= MIN_KEEP_DISTANCE_GAIN || (separation >= standoff && gain > 0)) found.push(feet)
-        // Cover is the third way to genuinely keep distance from a RANGED
-        // attacker: a cell its sight line cannot reach. Bounded by
-        // `maxThreatCoverRays`, and only ever credited on positive block truth.
-        if (coverRays < maxCoverRays) {
-          coverRays += 1
-          if (threatSightLineBlocked(bot, threat.position, feet)) cover.push(feet)
-        }
+        if (gain >= minGain || (separation >= standoff && gain > 0)) found.push(feet)
       }
+    }
+  }
+  // Cover is the third way to genuinely keep distance from a RANGED attacker: a
+  // cell its sight line cannot reach. Unlike separation this does NOT require
+  // moving away, so it is probed for every usable destination - an unseen
+  // attacker's origin is far enough that no local cell gains meaningful radial
+  // separation, and a lateral step out of the firing line is the only answer the
+  // local scan can offer.
+  //
+  // The ray budget is BOUNDED, so it must be spent where cover can exist AND
+  // where the body could actually step. Cover requires moving perpendicular to
+  // the attacker->body axis, so cells on that axis are skipped entirely; the
+  // rest are probed nearest-to-the-body first, because a cover cell 6 m away is
+  // not a step the body can take before the next hit. Spending the budget in
+  // loop order instead wasted all rays on one corner of the scan and found no
+  // cover at all.
+  if (maxCoverRays > 0) {
+    const axis = normalize({ x: threat.position.x - self.position.x, y: 0, z: threat.position.z - self.position.z })
+    // Perpendicular offset from the attacker->body axis (the axis through the
+    // BODY, so "on the axis" means "still in the firing line").
+    const lateral = (cell: Vec3Json): number =>
+      axis === null
+        ? Math.hypot(cell.x - self.position.x, cell.z - self.position.z)
+        : Math.abs((cell.x - self.position.x) * axis.z - (cell.z - self.position.z) * axis.x)
+    const ordered = [...usable].sort((a, b) => {
+      const byCost =
+        rayPriority(distance(a, self.position), lateral(a)) - rayPriority(distance(b, self.position), lateral(b))
+      if (byCost !== 0) return byCost
+      return a.x - b.x || a.y - b.y || a.z - b.z
+    })
+    for (const feet of ordered) {
+      if (coverRays >= maxCoverRays) break
+      coverRays += 1
+      // Only ever credited on positive block truth: `threatSightLineBlocked`
+      // returns false when it cannot ray, so an unprovable cell is never cover.
+      if (threatSightLineBlocked(bot, threat.position, feet)) cover.push(feet)
     }
   }
   found.sort((a, b) => distance(b, threat.position) - distance(a, threat.position))
   const cap = Math.max(0, Math.floor(options.maxEscapeCells ?? THREAT_ESCAPE_MAX_CELLS))
   return { cells: found.slice(0, cap), coverCells: cover, portalWalkInCells: transfer }
+}
+
+/** Unit vector of a horizontal offset, or null when it is degenerate. */
+function normalize(offset: Vec3Json): { x: number; z: number } | null {
+  const length = Math.hypot(offset.x, offset.z)
+  if (!Number.isFinite(length) || length === 0) return null
+  return { x: offset.x / length, z: offset.z / length }
+}
+
+/**
+ * The lateral offset below which a cell is not worth a cover ray: it is still
+ * (nearly) on the attacker->body axis, so it cannot leave the firing line.
+ */
+const COVER_LATERAL_FLOOR = 0.75
+
+/**
+ * Lower is probed first. A cell with no usable lateral offset is never cover, so
+ * it sorts last; everything else is ordered by how close it is to the body - the
+ * step the body can actually take before the next hit.
+ */
+function rayPriority(approach: number, lateral: number): number {
+  if (lateral <= COVER_LATERAL_FLOOR) return Number.POSITIVE_INFINITY
+  return approach
+}
+
+/**
+ * SAFE: the damage attribution as a threat anchor, for an attacker the sensor
+ * never witnessed.
+ *
+ * This only reports what the server already said (`damage_event.sourcePosition`,
+ * captured by the scheduler) and only while the hit is inside
+ * `THREAT_MEMORY_MS`. It never reads a mob's attack range, the body's facing or
+ * any inferred direction. A missing/absurd position or an origin beyond
+ * `UNSENSED_THREAT_ANCHOR_RANGE` yields null, which the caller reads as "no
+ * anchor", never as "no threat".
+ */
+function attributedThreatAnchor(
+  entities: readonly EntityState[],
+  lastDamage: LastDamageEvidence | null,
+  selfPosition: Vec3Json,
+): { name: string; position: Vec3Json } | null {
+  const attacker = unsensedAttackerFacts({
+    entities: entities as readonly ThreatEntityLike[],
+    signals: { lastDamage },
+    timestampMs: Date.now(),
+  })
+  if (attacker === null || attacker.position === null) return null
+  if (attacker.ageMs !== null && attacker.ageMs > THREAT_MEMORY_MS) return null
+  return distance(attacker.position, selfPosition) <= UNSENSED_THREAT_ANCHOR_RANGE
+    ? { name: attacker.name, position: attacker.position }
+    : null
 }
 
 /**
@@ -3998,7 +4108,7 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
   const placementSpots = buildPlacementSpots(bot, options, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
   const terrain = buildTerrain(bot, options, self)
-  const escape = buildEscapeCells(bot, options, self, entities)
+  const escape = buildEscapeCells(bot, options, self, entities, input.signals.lastDamage ?? null)
   // Both transfer-cell sources are unioned: the local terrain window is where an
   // ordinary MOVE destination can come from, the wider escape scan is where a
   // keep-distance destination comes from, and the gate must see both.

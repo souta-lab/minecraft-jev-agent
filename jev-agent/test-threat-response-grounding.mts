@@ -29,6 +29,25 @@
 //      (Jev/System2, the explicit `ENTER_PORTAL` candidate), never a mechanical
 //      keep-distance leg.
 //
+// A THIRD shape is pinned further down (section vi): an attacker the sensor
+// NEVER places. Measured live (main `cd7b38b`, server log `/summon
+// minecraft:ender_dragon` twice, then `AI_Buddy was killed by Ender Dragon using
+// magic`):
+//
+//   THREAT_RANGED_UNANSWERED threat=ender_dragon distance=null sensed=false
+//   CRITICAL_DAMAGE health=5 food=20 source=ender_dragon damage=1 limit=3
+//   DEATH_CAUSE killer=ender_dragon killerEvidence=mineflayer killerId=39414 threat=null
+//
+// Every restriction above keys on a SENSED hostile, so an attributed attacker
+// outside perception armed nothing: `activeThreats` was empty, the danger state
+// never entered, and no keep-distance destination could be grounded because the
+// solver needs a threat POSITION. The offer could then collapse to
+// `WAIT`/`ESCALATE`, which the executor realizes as "stand still" - the body
+// stood in the open and absorbed the next hit. The server DOES state a damage
+// origin (`damage_event.sourcePosition`), which mineflayer's `entityHurt`
+// drops; section (vi) pins that the body uses it when present and names the
+// exact missing facts when it is not.
+//
 // What is pinned here, in fixture order:
 //   (i)   engaged attacker at ~9 m, reachable -> a grounded response EXISTS
 //         (approach + attack on that SAME entity, and/or a reposition), and no
@@ -38,7 +57,10 @@
 //   (iii) a hostile IN CONTACT -> unchanged (the survival envelope owns it);
 //   (iv)  a genuinely unanswerable threat -> the typed no-response path still
 //         exists and does not oscillate;
-//   (v)   ordinary walking with no threat -> unchanged offer, no new facts.
+//   (v)   ordinary walking with no threat -> unchanged offer, no new facts;
+//   (vi)  an UNSEEN attacker: a stated damage origin grounds a real response, an
+//         absent one yields typed evidence naming the missing facts and never
+//         lets the body stand still.
 //
 //   bun jev-agent/test-threat-response-grounding.mts
 import { createRequire } from 'node:module'
@@ -50,7 +72,9 @@ import {
   defaultCandidateOptions,
   generateCandidates,
   generateGroundedCandidates,
+  restrictCandidatesDuringUnseenAttacker,
   THREAT_SURVIVAL_KINDS,
+  unseenAttackerOffer,
 } from './src/candidates.ts'
 import type { Candidate, CandidateOptions, ReachabilityGateOptions } from './src/candidates.ts'
 import { buildWorldState, defaultSensorOptions } from './src/state.ts'
@@ -62,8 +86,11 @@ import {
   selectKeepDistanceSpots,
   THREAT_CLEAR_MS,
   THREAT_DANGER_RADIUS,
+  THREAT_MEMORY_MS,
   THREAT_RESPONSE_RANGE,
   ThreatTracker,
+  unsensedAttackerFacts,
+  unsensedThreatResponse,
 } from './src/threat.ts'
 
 const require = createRequire(import.meta.url)
@@ -727,6 +754,348 @@ addCase('(v3) the new terrain facts stay absent while nothing grounds them', () 
   return {
     pass,
     detail: `portalWalkInCells=${state.terrain.portalWalkInCells === undefined ? 'absent' : 'present'} cover=${state.terrain.threatCoverCells === undefined ? 'absent' : 'present'}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (vi) an attacker the sensor NEVER places
+//
+// Measured live (main `cd7b38b`): the operator summoned an ender dragon in the
+// Nether; the server log says `/summon minecraft:ender_dragon` and then
+// `AI_Buddy was killed by Ender Dragon using magic`. The generation's own log
+// says, in order: `THREAT_RANGED_UNANSWERED threat=ender_dragon distance=null
+// sensed=false`, `CRITICAL_DAMAGE health=5 food=20 source=ender_dragon
+// damage=1`, `DEATH_CAUSE killer=ender_dragon killerEvidence=mineflayer
+// killerId=39414 threat=null`.
+//
+// Nothing here is dragon-specific: the same shape is a ghast beyond the entity
+// radius, a mob behind a wall, or any plugin/summoned entity. The fixtures below
+// use the dragon only because that is the measured attacker.
+// ---------------------------------------------------------------------------
+
+/**
+ * The wall clock the unseen-attacker fixtures are anchored to. `buildWorldState`
+ * stamps `timestampMs` from `Date.now()` (production and fixture alike), so the
+ * attribution time is expressed the same way: "this hit landed just now",
+ * 500 ms inside the `THREAT_MEMORY_MS` window.
+ */
+const LIVE = Date.now()
+
+/**
+ * The solid geometry of the (vi) fixture: a rock column at x=6, z=0, y=59..60 -
+ * the block an unseen attacker's sight line to a cell beside the body hits.
+ */
+function solid(p: { x: number; y: number; z: number }): boolean {
+  return p.x === 6 && p.z === 0 && p.y >= 59 && p.y <= 60
+}
+
+/** The measured body: health 1.67, stone pickaxe, a blast-rod objective. */
+function unseenBody(overrides: Partial<WorldState> = {}): WorldState {
+  const inventory: InventoryState = { slots: [], counts: {}, totalItems: 0 }
+  return {
+    schemaVersion: 1,
+    tick: 91,
+    timestampMs: LIVE,
+    self: selfState(BODY, { health: 1.67, food: 20, heldItem: { name: 'stone_pickaxe', count: 1, slot: 0 } }),
+    inventory,
+    entities: [],
+    blocks: [],
+    terrain: { standable: [BODY, { x: 5, y: 59, z: -1 }, { x: 6, y: 59, z: 0 }] },
+    craftingTables: [],
+    furnaces: [],
+    placementSpots: [],
+    goal: goalState(),
+    goalQueue: queue(),
+    recentEvents: [],
+    signals: signals(),
+    ...overrides,
+  }
+}
+
+/**
+ * The measured attribution: a named attacker 12 m away that the sensor never
+ * saw. `atMs` is inside `THREAT_MEMORY_MS` of `timestampMs` on every fixture
+ * state, exactly as the live scheduler delivers it (`Date.now()` on both sides).
+ */
+function unseenAttackerDamage(position: Vec3Json | null, atMs = LIVE - 500): LastDamageEvidence {
+  return {
+    atMs,
+    health: 1.67,
+    sourceId: 39414,
+    sourceName: 'ender_dragon',
+    ...(position === null ? {} : { sourcePosition: position }),
+  }
+}
+
+/** Critical-damage evidence for the ACTIVE plan: the state the measured run had. */
+function criticalEvidence() {
+  return {
+    planKey: 'collect:blaze_rod|none',
+    health: 1.67,
+    criticalHealth: 6,
+    consecutiveDamage: 1,
+    limit: 3,
+    food: 20,
+    sourceName: 'ender_dragon',
+    active: true,
+    exhausted: false,
+    exhaustedRepeats: 0,
+  }
+}
+
+/** The offer the controller builds for this state, in its own order. */
+function unseenOffer(state: WorldState): string[] {
+  const grounded = generateGroundedCandidates(state, defaultCandidateOptions)
+  const threatOffer = applyGroundedThreatRestriction(state, grounded.candidates, grounded.withheld)
+  const restricted = restrictCandidatesDuringUnseenAttacker(state, threatOffer.candidates)
+  return ids(restricted)
+}
+
+addCase('(vi1) the damage attribution names an attacker the sensor did not place', () => {
+  const state = unseenBody({ signals: signals({ lastDamage: unseenAttackerDamage({ x: 5, y: 59, z: 12 }) }) })
+  const attacker = unsensedAttackerFacts(state)
+  const sensed = { ...state, entities: [entity(39414, 'ender_dragon', { x: 5, y: 59, z: 12 }, true)] }
+  return {
+    pass:
+      attacker?.id === 39414 &&
+      attacker.name === 'ender_dragon' &&
+      attacker.position?.z === 12 &&
+      attacker.positionMissingReason === null &&
+      // once the sensor DOES place it, this fact falls silent: the witnessed
+      // entity owns the response, so the sensed paths are untouched
+      unsensedAttackerFacts(sensed) === null,
+    detail: `attacker=${JSON.stringify(attacker)} sensedAttacker=${JSON.stringify(unsensedAttackerFacts(sensed))}`,
+  }
+})
+
+addCase('(vi2) a stated damage origin grounds a real keep-distance response, and the body is never idle', () => {
+  const origin: Vec3Json = { x: 5, y: 59, z: 12 }
+  const state = unseenBody({
+    signals: signals({ lastDamage: unseenAttackerDamage(origin), criticalDamage: criticalEvidence() }),
+    // the sensor's own scan for the attributed origin: two cells that gain
+    // separation, one of them out of the attacker's sight line (real block truth)
+    terrain: {
+      standable: [BODY, { x: 5, y: 59, z: -1 }, { x: 6, y: 59, z: 0 }],
+      escapeCells: [{ x: 5, y: 59, z: -1 }, { x: 6, y: 59, z: 0 }],
+      threatCoverCells: [{ x: 6, y: 59, z: 0 }],
+    },
+  })
+  const offer = unseenAttackerOffer(state, generateCandidates(state, defaultCandidateOptions))
+  const offered = unseenOffer(state)
+  const retreats = offered.filter((id) => id.startsWith('RETREAT:'))
+  const actionable = offered.filter((id) => !id.startsWith('WAIT') && !id.startsWith('ESCALATE'))
+  return {
+    pass:
+      // the code-owned answer fact: a destination was grounded from the origin
+      offer.response.kind === 'cover' &&
+      offer.response.grounded === true &&
+      offer.response.missing.length === 0 &&
+      offer.attacker?.name === 'ender_dragon' &&
+      // and the body has a real destination: no idle WAIT/ESCALATE-only tick
+      retreats.length >= 1 &&
+      actionable.length >= 1 &&
+      !offered.includes('WAIT'),
+    detail: `response=${JSON.stringify(offer.response)} offered=[${offered.join(',')}]`,
+  }
+})
+
+addCase('(vi3) the sensor grounds those cells from the attributed origin, not from a witnessed entity', () => {
+  const Vec3 = require('vec3')
+  const position = new Vec3(5.5, 59, -0.5)
+  // Solid rock at x=6, z=-1..0 only: the body's own cell stays open, so a ray
+  // from the dragon's eye to the cell at (6,59,0) is blocked by real geometry,
+  // while the ray to (5,59,-1) is clear.
+  const bot = {
+    username: 'AI_UNSEEN',
+    entity: { id: 1, position, yaw: 0, pitch: 0, onGround: true },
+    heldItem: { name: 'stone_pickaxe', count: 1 },
+    health: 1.67,
+    food: 20,
+    game: { gameMode: 'survival', dimension: NETHER, minY: 0, height: 256 },
+    time: { isDay: false },
+    registry: null,
+    entities: {},
+    inventory: { items: () => [] },
+    blockAt: (p: { x: number; y: number; z: number }) =>
+      solid(p) ? { name: 'netherrack', boundingBox: 'block' } : p.y < 59 ? { name: 'netherrack', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' },
+    // the world raycast the sensor's cover fact uses (`bot.world.raycast`, the
+    // same synchronous world raycast mineflayer's own `canSeeBlock` reads). Its
+    // result only has to be non-null: the sensor owns the "a solid block was hit"
+    // fact, not this double.
+    world: {
+      raycast: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }, range: number) => {
+        const steps = Math.ceil(range * 4)
+        for (let i = 1; i <= steps; i += 1) {
+          const t = (i / steps) * range
+          const p = { x: origin.x + direction.x * t, y: origin.y + direction.y * t, z: origin.z + direction.z * t }
+          if (solid({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) })) return { position: new Vec3(p.x, p.y, p.z) }
+        }
+        return null
+      },
+    },
+    canSeeBlock: () => false,
+    findBlocks: () => [],
+  } as never
+  const state = buildWorldState(
+    bot,
+    {
+      tick: 5,
+      goal: goalState(),
+      goalQueue: queue(),
+      recentEvents: [],
+      // `buildWorldState` stamps `timestampMs` from the wall clock, so the
+      // attribution is expressed relative to it - the same "a hit landed just
+      // now" fact the live scheduler delivers.
+      signals: signals({ lastDamage: unseenAttackerDamage({ x: 5, y: 59, z: 12 }, Date.now() - 50) }),
+    },
+    { ...defaultSensorOptions, maxTerrain: 32, maxEscapeCells: 32, maxThreatCoverRays: 64 },
+  )
+  const cover = state.terrain.threatCoverCells ?? []
+  const escape = state.terrain.escapeCells ?? []
+  const offered = unseenOffer(state)
+  // Independent of the sensor, re-derive the cover claim from the same block
+  // truth: every cell the sensor credited must have its sight line from the
+  // attributed origin blocked by a solid block (a cell that is merely far away
+  // is not cover, and unknown is never cover).
+  const blocked = (cell: Vec3Json): boolean => {
+    const origin = { x: 5, y: 59 + 1.62, z: 12 }
+    const target = { x: cell.x + 0.5, y: cell.y + 1, z: cell.z + 0.5 }
+    const dx = target.x - origin.x
+    const dy = target.y - origin.y
+    const dz = target.z - origin.z
+    const range = Math.hypot(dx, dy, dz)
+    const steps = Math.ceil(range * 4)
+    for (let i = 1; i <= steps; i += 1) {
+      const t = (i / steps) * range
+      if (solid({ x: Math.floor(origin.x + (dx / range) * t), y: Math.floor(origin.y + (dy / range) * t), z: Math.floor(origin.z + (dz / range) * t) })) {
+        return true
+      }
+    }
+    return false
+  }
+  return {
+    pass:
+      // no entity was sensed, yet the scan ran and produced real cells
+      state.entities.length === 0 &&
+      escape.length > 0 &&
+      cover.length > 0 &&
+      cover.every((cell) => blocked(cell)) &&
+      // and every cover cell became an offered destination: a real answer to an
+      // attacker the body cannot see
+      offered.includes(`RETREAT:p${cover[0]?.x}_${cover[0]?.y}_${cover[0]?.z}`),
+    detail: `escape=${escape.length} cover=[${cover.map((c) => `${c.x},${c.y},${c.z}`).join('|')}] offered=[${offered.join(',')}]`,
+  }
+})
+
+addCase('(vi4) an origin-less attribution grounds no direction: typed evidence names the missing facts', () => {
+  const state = unseenBody({
+    signals: signals({ lastDamage: unseenAttackerDamage(null), criticalDamage: criticalEvidence() }),
+    terrain: {
+      standable: [BODY, { x: 5, y: 59, z: -1 }, { x: 6, y: 59, z: 0 }],
+      escapeCells: [],
+    },
+  })
+  const attacker = unsensedAttackerFacts(state)
+  const offer = unseenAttackerOffer(state, generateCandidates(state, defaultCandidateOptions))
+  const response = unsensedThreatResponse({
+    attacker,
+    groundedDestinations: 0,
+    coverCells: 0,
+    availableMoves: 0,
+  })
+  return {
+    pass:
+      attacker?.position === null &&
+      attacker.positionMissingReason !== null &&
+      offer.response.kind === 'break_contact' &&
+      offer.response.grounded === false &&
+      // the absent facts, named rather than guessed at
+      offer.response.missing.includes('damage_source_position') &&
+      response.missing.includes('attack_direction') &&
+      // "unknown" is never rendered as "no threat": the attacker is still named
+      offer.attacker?.name === 'ender_dragon' &&
+      offer.attacker?.id === 39414,
+    detail: `positionMissing=${attacker?.positionMissingReason ?? 'none'} response=${JSON.stringify(offer.response)}`,
+  }
+})
+
+addCase('(vi5) while an unseen attacker lands hits, a grounded move is never replaced by standing still', () => {
+  // A body whose ONLY grounded action is a plain walk away from the goal. This
+  // is the shape the measured run died in: WAIT and ESCALATE are realized as
+  // "stand still" (executor `runWait` / `ESCALATE` -> cancelCurrent), and the
+  // candidate-starvation boundary then ends the tick with NO action at all.
+  const walkable = plainState({
+    self: selfState(BODY, { health: 5, food: 20, dimension: NETHER }),
+    terrain: { standable: [{ x: 5, y: 59, z: -3 }, { x: 5, y: 59, z: 3 }] },
+    signals: signals({
+      lastDamage: unseenAttackerDamage({ x: 5, y: 59, z: 12 }),
+      criticalDamage: criticalEvidence(),
+      escalationRecommended: true,
+    }),
+  })
+  const raw = ids(generateCandidates(walkable, defaultCandidateOptions))
+  const offered = ids(restrictCandidatesDuringUnseenAttacker(walkable, generateCandidates(walkable, defaultCandidateOptions)))
+  const actionable = offered.filter((id) => !id.startsWith('WAIT') && !id.startsWith('ESCALATE'))
+  // The control: the SAME body with NO unsensed attacker keeps everything.
+  const controlState = plainState({
+    self: selfState(BODY, { health: 5, food: 20, dimension: NETHER }),
+    terrain: { standable: [{ x: 5, y: 59, z: -3 }, { x: 5, y: 59, z: 3 }] },
+    signals: signals({ criticalDamage: criticalEvidence(), escalationRecommended: true }),
+  })
+  const control = ids(restrictCandidatesDuringUnseenAttacker(controlState, generateCandidates(controlState, defaultCandidateOptions)))
+  return {
+    pass:
+      raw.length > 0 &&
+      offered.length > 0 &&
+      actionable.length >= 1 &&
+      !offered.includes('WAIT') &&
+      !offered.includes('ESCALATE') &&
+      // no unsensed attacker -> byte-identical to the un-restricted offer
+      control.join(',') === ids(generateCandidates(controlState, defaultCandidateOptions)).join(','),
+    detail: `raw=[${raw.join(',')}] offered=[${offered.join(',')}] control=[${control.join(',')}]`,
+  }
+})
+
+addCase('(vi6) an attributed origin that grounds no cell keeps the truthful break-contact gap while the body still moves', () => {
+  // The origin is stated, but the body's local window gives no cell that gains
+  // separation from it (the only standable cell is the one the body occupies)
+  // and there is no cover cell: no destination can be grounded. The offer is
+  // NOT collapsed to a no-op - the plain walk the body does have is kept.
+  const state = plainState({
+    self: selfState(BODY, { health: 5, food: 20, dimension: NETHER }),
+    // the goal-directed walks the body does have, and NO escape cell for the
+    // attributed origin: the sensor grounded no destination away from it
+    terrain: { standable: [{ x: 1, y: 59, z: 0 }, { x: 9, y: 59, z: 0 }], escapeCells: [] },
+    signals: signals({ lastDamage: unseenAttackerDamage({ x: 5, y: 59, z: 12 }), criticalDamage: criticalEvidence() }),
+  })
+  const offer = unseenAttackerOffer(state, generateCandidates(state, defaultCandidateOptions))
+  const offered = ids(restrictCandidatesDuringUnseenAttacker(state, generateCandidates(state, defaultCandidateOptions)))
+  const actionable = offered.filter((id) => !id.startsWith('WAIT') && !id.startsWith('ESCALATE'))
+  return {
+    pass:
+      // a stated origin, but no qualifying cell for it: the typed gap is exact
+      offer.response.kind === 'no_destination' &&
+      offer.response.grounded === false &&
+      offer.response.missing.includes('keep_distance_destination') &&
+      // the movement the body DOES have is kept, and the no-ops are removed
+      actionable.length >= 1 &&
+      offered.every((id) => !id.startsWith('WAIT') && !id.startsWith('ESCALATE')),
+    detail: `response=${JSON.stringify(offer.response)} offered=[${offered.join(',')}]`,
+  }
+})
+
+addCase('(vi7) an unsensed attacker older than the memory window is not a threat, and nothing is restricted', () => {
+  const stale: LastDamageEvidence = { atMs: NOW - THREAT_MEMORY_MS - 1, health: 5, sourceId: 39414, sourceName: 'ender_dragon', sourcePosition: { x: 5, y: 59, z: 12 } }
+  const state = plainState({
+    self: selfState(BODY, { health: 5, food: 20, dimension: NETHER }),
+    terrain: { standable: [{ x: 5, y: 59, z: -3 }, { x: 5, y: 59, z: 3 }] },
+    signals: signals({ lastDamage: stale, escalationRecommended: true }),
+  })
+  const raw = ids(generateCandidates(state, defaultCandidateOptions))
+  const offered = ids(restrictCandidatesDuringUnseenAttacker(state, generateCandidates(state, defaultCandidateOptions)))
+  return {
+    pass: unsensedAttackerFacts(state) === null && offered.join(',') === raw.join(','),
+    detail: `attacker=none raw=[${raw.join(',')}] offered=[${offered.join(',')}]`,
   }
 })
 

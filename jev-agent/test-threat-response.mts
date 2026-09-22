@@ -378,6 +378,82 @@ addCase('the scheduler forwards the Mineflayer attacker with the damage trigger'
 })
 
 // ---------------------------------------------------------------------------
+// (iv) an UNSENSED attacker: the packet's own damage origin survives
+//
+// Measured live (main `cd7b38b`, server log `/summon minecraft:ender_dragon`):
+// `CRITICAL_DAMAGE health=5 source=ender_dragon` then `DEATH_CAUSE
+// killer=ender_dragon killerEvidence=mineflayer killerId=39414 threat=null`. The
+// attacker was never in the sensor, so the only thing that can ground a
+// direction away from it is the position the server states for the hit -
+// `damage_event.sourcePosition`, a field mineflayer's `entityHurt` does not
+// carry. This pins that the scheduler reads it, and that a hit WITHOUT one
+// reports no position instead of inventing one.
+// ---------------------------------------------------------------------------
+
+/** A bot double with a live `_client` packet emitter, i.e. one that can hurt. */
+function damageBot(): Bot & EventEmitter {
+  const bot = new EventEmitter() as unknown as Bot & EventEmitter
+  ;(bot as unknown as { entity: unknown }).entity = { id: 1, position: { x: 5.5, y: 59, z: -0.5 } }
+  ;(bot as unknown as { health: number }).health = 1.67
+  ;(bot as unknown as { food: number }).food = 20
+  ;(bot as unknown as { inventory: EventEmitter }).inventory = new EventEmitter()
+  ;(bot as unknown as { _client: EventEmitter })._client = new EventEmitter()
+  return bot
+}
+
+function damageTrigger(bot: Bot & EventEmitter): TriggerEvent | undefined {
+  const scheduler = new DecisionScheduler(bot, new EventLogger(null, false), { enabledTriggers: ['damage_taken'] })
+  const delivered: TriggerEvent[] = []
+  scheduler.onDecision((event) => delivered.push(event))
+  try {
+    scheduler.start()
+    // The server's packet arrives first, then mineflayer emits `entityHurt`
+    // (entities.js: `damage_event` -> `bot.emit('entityHurt', entity, source)`).
+    // `source` is undefined here on purpose: this is the measured case where the
+    // client never received the attacking entity at all.
+    ;(bot as unknown as { _client: EventEmitter })._client.emit('damage_event', {
+      entityId: 1,
+      sourceTypeId: 0,
+      sourceCauseId: 39415,
+      sourceDirectId: 0,
+      sourcePosition: { x: 5, y: 59, z: 12 },
+    })
+    bot.emit('entityHurt', { id: 1 }, undefined)
+  } finally {
+    scheduler.stop()
+  }
+  return delivered.find((event) => event.trigger === 'damage_taken')
+}
+
+addCase('the scheduler carries the packet damage origin, and an origin-less hit stays unknown', () => {
+  const withOrigin = damageTrigger(damageBot())
+  const bot = damageBot()
+  const scheduler = new DecisionScheduler(bot, new EventLogger(null, false), { enabledTriggers: ['damage_taken'] })
+  const delivered: TriggerEvent[] = []
+  scheduler.onDecision((event) => delivered.push(event))
+  try {
+    scheduler.start()
+    // No `damage_event` packet at all: a server that sent none, or an older
+    // protocol. The origin must be ABSENT, not defaulted to a coordinate.
+    bot.emit('entityHurt', { id: 1 }, undefined)
+  } finally {
+    scheduler.stop()
+  }
+  const withoutOrigin = delivered.find((event) => event.trigger === 'damage_taken')
+  const pass =
+    withOrigin !== undefined &&
+    (withOrigin.detail.attackerPosition as { x: number; y: number; z: number } | undefined)?.z === 12 &&
+    withoutOrigin !== undefined &&
+    withoutOrigin.detail.attackerPosition === undefined &&
+    // the packet listener is removed with the scheduler (issue #13: no leaks)
+    (bot as unknown as { _client: EventEmitter })._client.listenerCount('damage_event') === 0
+  return {
+    pass,
+    detail: `withOrigin=${JSON.stringify(withOrigin?.detail ?? null)} withoutOrigin=${JSON.stringify(withoutOrigin?.detail ?? null)}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
 // peaceful control: neither evidence nor a combat candidate
 // ---------------------------------------------------------------------------
 
