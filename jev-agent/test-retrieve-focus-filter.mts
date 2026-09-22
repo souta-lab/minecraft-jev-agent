@@ -194,7 +194,7 @@ addCase('(a) collect flint withholds the remembered obsidian RETRIEVE, keeps the
     current: queuedGoal('flint'),
     // Live shape: the active subgoal is flint while the mission target is obsidian.
     goalTarget: 'obsidian',
-    known: [{ name: 'obsidian', kind: 'ore', position: OBSIDIAN_CELL }],
+    known: [{ name: 'obsidian', kind: 'ore', dimension: 'minecraft:overworld', position: OBSIDIAN_CELL }],
     withDescent: true,
   })
   const all = offered(state)
@@ -211,7 +211,7 @@ addCase('(b) collect obsidian still offers the remembered obsidian RETRIEVE', ()
   const state = build({
     current: queuedGoal('obsidian'),
     goalTarget: 'obsidian',
-    known: [{ name: 'obsidian', kind: 'ore', position: OBSIDIAN_CELL }],
+    known: [{ name: 'obsidian', kind: 'ore', dimension: 'minecraft:overworld', position: OBSIDIAN_CELL }],
   })
   const route = offered(state).find((candidate) => candidate.id === retrievalId('obsidian', OBSIDIAN_CELL))
   return {
@@ -229,7 +229,7 @@ addCase('(c) recipe-related future work does not cross the active queue boundary
   const state = build({
     current,
     goalTarget: 'ender_eye',
-    known: [{ name: 'nether_bricks', kind: 'ore', position: { x: 90, y: 62, z: 40 } }],
+    known: [{ name: 'nether_bricks', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 90, y: 62, z: 40 } }],
     goals: [current, future],
   })
   const route = offered(state).find((candidate) => candidate.kind === 'RETRIEVE')
@@ -246,7 +246,7 @@ addCase('(d) resource-class focus does not admit a future obsidian RETRIEVE', ()
   const state = build({
     current: logGoal,
     goalTarget: 'log',
-    known: [{ name: 'obsidian', kind: 'ore', position: OBSIDIAN_CELL }],
+    known: [{ name: 'obsidian', kind: 'ore', dimension: 'minecraft:overworld', position: OBSIDIAN_CELL }],
     goals: [logGoal, future],
   })
   const route = offered(state).find((candidate) => candidate.id === retrievalId('obsidian', OBSIDIAN_CELL))

@@ -661,7 +661,7 @@ function oreWorld(opts: {
     descent: [],
     stepCuts: [],
     signals: signals({
-      knownResources: opts.known === null ? [] : [{ name: 'iron_ore', kind: 'ore', position: opts.known }],
+      knownResources: opts.known === null ? [] : [{ name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: opts.known }],
     }),
   }
 }

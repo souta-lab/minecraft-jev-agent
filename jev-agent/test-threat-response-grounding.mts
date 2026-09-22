@@ -700,7 +700,7 @@ function plainState(overrides: Partial<WorldState> = {}): WorldState {
     goal: plainGoal(),
     goalQueue: plainQueue(),
     recentEvents: [],
-    signals: signals({ stalledMs: 61_350, knownResources: [{ name: 'diamond_ore', kind: 'ore', position: REMEMBERED_DIAMOND }] }),
+    signals: signals({ stalledMs: 61_350, knownResources: [{ name: 'diamond_ore', kind: 'ore', dimension: 'minecraft:overworld', position: REMEMBERED_DIAMOND }] }),
     ...overrides,
   }
 }

@@ -45,8 +45,11 @@ import {
 import type { PortalEntryPlan, PortalFrameSite, PortalPostconditionSnapshot } from './src/netherPortalPlan.ts'
 import {
   defaultCandidateOptions,
+  formatResourceSourceExclusion,
   generateGroundedCandidates,
   resourceDimensionMatches,
+  resourceDimensionRefusals,
+  resourceDimensionVerdict,
   staleKnownResources,
 } from './src/candidates.ts'
 import type { CandidateOptions } from './src/candidates.ts'
@@ -541,7 +544,16 @@ async function runEnter(transfer: boolean) {
 {
   const overworldOre: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 12, y: 40, z: 5 }, dimension: OVERWORLD }
   const netherOre: KnownResource = { name: 'nether_quartz_ore', kind: 'ore', position: { x: 12, y: 40, z: 5 }, dimension: NETHER }
-  const legacy: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 1, y: 2, z: 3 } }
+  // #14 FAIL CLOSED (measured, run-mucqgrdo-21plr): a row that records no
+  // dimension is un-attributable, so it is NOT a match in ANY world. It used to
+  // be treated as matching everything, which is how an overworld tree cell
+  // (`jungle_log` at y=85) became a Nether locomotion target. The row is kept,
+  // never deleted, and reported typed by `resourceDimensionRefusals`.
+  //
+  // The measured shape verbatim: a `jungle_log` cell that a legacy mirror (or a
+  // writer that never stamped) left without a dimension. `log` is the focus the
+  // live `g2:collect:log` option carried when it offered `RETRIEVE:known:log`.
+  const legacy: KnownResource = { name: 'jungle_log', kind: 'log', position: { x: 8, y: 85, z: 6 } }
   const inOverworld = worldState({
     position: { x: 12, y: 40, z: 5 },
     dimension: OVERWORLD,
@@ -550,19 +562,29 @@ async function runEnter(transfer: boolean) {
     // The live block at the overworld ore cell is gone -> it is provably mined.
     blocks: [],
   })
+  const inNether = { ...inOverworld, self: self({ x: 12, y: 40, z: 5 }, NETHER) }
   const stale = staleKnownResources(inOverworld)
+  const refusals = resourceDimensionRefusals(inNether, 'log')
   const pass =
     resourceDimensionMatches(overworldOre, OVERWORLD) === true &&
     resourceDimensionMatches(overworldOre, NETHER) === false &&
-    resourceDimensionMatches(legacy, OVERWORLD) === true &&
+    resourceDimensionVerdict(legacy, OVERWORLD) === 'unattributed' &&
+    resourceDimensionMatches(legacy, OVERWORLD) === false &&
+    resourceDimensionMatches(legacy, NETHER) === false &&
     resourceDimensionMatches(netherOre, NETHER) === true &&
     stale.length === 1 &&
     stale[0]?.name === 'iron_ore' &&
-    stale.some((resource) => resource.dimension === NETHER) === false
+    stale.some((resource) => resource.dimension === NETHER) === false &&
+    // The un-attributable row is reported, not dropped: the line names the cell,
+    // the recorded dimension (absent) and the live dimension.
+    refusals.length === 1 &&
+    refusals[0]?.reason === 'dimension_unattributed' &&
+    formatResourceSourceExclusion(refusals[0]) ===
+      'RESOURCE_SOURCE_EXCLUDED item=log cell=8,85,6 reason=dimension_unattributed recorded_dimension=none live_dimension=minecraft:the_nether'
   check(
-    '(6) a remembered resource from another dimension is never a retrieval target',
+    '(6) a remembered resource from another dimension is never a retrieval target, and an un-attributed one is refused everywhere',
     pass,
-    `stale=${stale.map((resource) => `${resource.name}@${resource.dimension ?? 'legacy'}`).join(',') || 'none'}`,
+    `stale=${stale.map((resource) => `${resource.name}@${resource.dimension ?? 'legacy'}`).join(',') || 'none'} legacyOverworld=${resourceDimensionMatches(legacy, OVERWORLD)} refusals=${refusals.map(formatResourceSourceExclusion).join('|') || 'none'}`,
   )
 }
 

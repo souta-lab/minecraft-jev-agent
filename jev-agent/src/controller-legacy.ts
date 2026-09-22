@@ -1144,11 +1144,20 @@ export function registerPlacedStation(
   stations: KnownResource[],
   item: string,
   at: Vec3Json,
+  /**
+   * The world the placement was VERIFIED in. A placed station is a world fact
+   * like any remembered cell: without it the row is un-attributable and the
+   * fail-closed dimension gate (#14, `resourceDimensionMatches`) refuses it as a
+   * target in EVERY world. Optional only so a fixture can build the
+   * un-attributed shape deliberately.
+   */
+  dimension?: string,
 ): { added: boolean; station: KnownResource } {
   const station: KnownResource = {
     name: item,
     kind: 'station',
     position: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) },
+    ...(dimension === undefined ? {} : { dimension }),
   }
   const cellKey = (entry: { name: string; position: Vec3Json }): string =>
     `${entry.name}@${Math.round(entry.position.x)},${Math.round(entry.position.y)},${Math.round(entry.position.z)}`
@@ -6023,7 +6032,12 @@ export class JevController {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.noteVerified(candidate.itemName)
         if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
-          const registered = registerPlacedStation(this.placedStations, candidate.itemName, candidate.target)
+          const registered = registerPlacedStation(
+            this.placedStations,
+            candidate.itemName,
+            candidate.target,
+            this.currentDimension(),
+          )
           if (registered.added) {
             this.logger.info(
               'agent',

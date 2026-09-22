@@ -202,7 +202,12 @@ function queueWith(current: QueuedGoal): GoalQueueState {
 }
 
 function obsidianMemories(cells: Vec3Json[]): KnownResource[] {
-  return cells.map((position) => ({ name: 'obsidian', kind: 'ore', position }))
+  // #14 fail-closed attribution: a remembered coordinate is only a target in the
+  // world it was recorded in, and `fakeBot` reports `minecraft:overworld`. A row
+  // with no `dimension` is un-attributable and deliberately NOT offered
+  // (see `test-resource-dimension-attribution.mts`), so the fixtures that model a
+  // legitimate memory must name their world like a real write path does.
+  return cells.map((position) => ({ name: 'obsidian', kind: 'ore', position, dimension: 'minecraft:overworld' }))
 }
 
 function perceive(bot: Bot, known: KnownResource[] = []): WorldState {
