@@ -24,12 +24,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer, isNotExecutableHereKeepKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, threatEscalateCandidate, unseenAttackerOffer, isNotExecutableHereKeepKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
+import { assessSurvivalRace, bodySurvivalFacts, classifyDamageSource, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalDamageRace, formatSurvivalEscapeNone, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_DAMAGE_RACE, SURVIVAL_ESCAPE_NONE, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
@@ -1289,6 +1289,28 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'CAUSAL',
   'SHADOW_METRICS',
   'TOOL_CHOICE',
+  // The EQUIP plane (P0 evidence gap, measured 2026-09-22): these five markers
+  // were emitted only into the generation-local sink (`logs/jev/run.jsonl`), so
+  // `buddy.log` showed ZERO equip lines for a run that actually armed the body 124
+  // times (`EQUIP_WEAPON item=diamond_sword replaced=stone_pickaxe reason=combat`)
+  // and wore armour twice. A post-mortem reading only `buddy.log` therefore
+  // concluded "the body never equipped" - which is exactly the wrong conclusion,
+  // because the measured death shape is "the body was NOT armed at that moment",
+  // not "the equip path is dead". WHICH weapon/armour the body holds is a survival
+  // fact; both planes must carry it.
+  'EQUIP_WEAPON',
+  'EQUIP_WEAPON_REFUSED',
+  'EQUIP_ARMOR',
+  'EQUIP_ARMOR_REFUSED',
+  'WEAPON_CHOICE_REQUIRED',
+  // The damage-race plane: whether the body's grounded escape actually outruns the
+  // damage it is taking, and the typed statement when NO grounded escape exists.
+  // Without these in the live record the measured magma_cube death shape (health
+  // 16.704 -> 8.316 -> dead in ~4 s while three RETREAT cells were on offer and
+  // re-grounded onto cells that never broke contact) cannot be told apart from a
+  // body that simply had nowhere to go.
+  'SURVIVAL_DAMAGE_RACE',
+  'SURVIVAL_ESCAPE_NONE',
   'QUEUE_DEPTH',
   'PLACE_REFUSED',
   'DIG_PATH',
@@ -2438,6 +2460,12 @@ export class JevController {
   private lastThreatLine: string | null = null
   /** Signature of the last `THREAT_NO_ESCAPE` line, so the gap logs on a change. */
   private lastThreatGapLine: string | null = null
+  /**
+   * Signature of the last `SURVIVAL_DAMAGE_RACE` / `SURVIVAL_ESCAPE_NONE` line, so
+   * the escape-versus-damage fact logs on a change (the line carries health, so it
+   * re-logs per landed hit - the granularity a post-mortem needs).
+   */
+  private lastSurvivalRaceLine: string | null = null
   private lastThreatOccludedLine: string | null = null
   /** Whether the danger state was active last tick, so the exit logs once. */
   private threatWasActive = false
@@ -3256,6 +3284,12 @@ export class JevController {
       candidates = threatOffer.candidates
       this.logThreatOccluded(threatOffer)
       this.logThreatGap(state, threatOffer)
+      // The measured DAMAGE RACE, named: at contact, how many grounded keep-distance
+      // destinations exist, whether any of them actually leaves the threat's reach,
+      // which KIND of source is landing the damage, and the typed capability loss
+      // when no escape exists at all. Read from the restricted offer, so the fact is
+      // about the escapes the body could really choose this tick.
+      this.logSurvivalRace(state, threatOffer)
       candidates = restrictCandidatesAtCriticalHealth(state, candidates)
       // SAFE: while the body is out of breath the offer collapses to the routes
       // that can end the submersion. This is the candidate-side half of the
@@ -3913,13 +3947,30 @@ export class JevController {
             // (`ESCALATE`/`WAIT`) - it mutates nothing, chooses no fight/flight, and
             // hands the semantic decision up immediately. Code still does not pick
             // a target, a destination or a strategy.
+            // The contact envelope filters WAIT and ESCALATE out (they are not
+            // combat answers), which left this fallback with nothing to execute and
+            // the tick actionless while a reachable ATTACK sat in the offer. The
+            // code-owned ESCALATE is therefore still available to the caller: it
+            // mutates nothing and chooses no fight/flight, so executing it is
+            // strictly better than standing still inside the hit window.
+            const codeOwnedEscalate = freshCandidates.some((candidate) => candidate.kind === 'ESCALATE')
+              ? null
+              : threatEscalateCandidate('no_survival_action_in_contact', state.tick)
             const fallback = survivalControlFallback({
               reground,
               threatInContact: threatEvidence?.inContact === true,
               freshCandidates,
+              ...(codeOwnedEscalate === null ? {} : { codeOwnedEscalate }),
             })
             if (fallback.candidateId !== null) {
               controlId = fallback.candidateId
+              // Admit the code-owned control action into the revalidation offer
+              // BEFORE it is guarded and executed, so the guard sees the same offer
+              // the tick will run (it is a control action, not a Jev choice).
+              if (codeOwnedEscalate !== null && codeOwnedEscalate.id === fallback.candidateId) {
+                freshCandidates.push(codeOwnedEscalate)
+                freshIds.add(codeOwnedEscalate.id)
+              }
               {
                 const control = { id: fallback.candidateId }
                 this.logger.warn(
@@ -9052,6 +9103,72 @@ export class JevController {
         ids: offer.occluded.entityIds,
         distance: offer.threat.threatDistance,
         reason: offer.occluded.reason,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * Mirror the escape-versus-damage fact while a hostile is ON the body: the
+   * measured shape is a body whose every grounded `RETREAT` was re-grounded onto a
+   * cell that never broke contact (`buddy.log` 2026-09-22T10:49:5x: distance 2.98 m
+   * -> 2.06 m, health 16.704 -> 8.316 -> dead in ~4 s). Without this line the death
+   * is indistinguishable from a body that had nowhere to go, and the difference
+   * decides whether the fix is "ground a real escape" or "the race was lost".
+   *
+   * Emitted only while the threat is ACTIVE and in CONTACT: an ordinary danger-band
+   * tick is not a race, and the marker must not become per-tick noise. When the body
+   * has no landable escape at all the same facts are mirrored as
+   * `SURVIVAL_ESCAPE_NONE ... outcome=CAPABILITY_LOST`.
+   */
+  private logSurvivalRace(state: WorldState, offer: ThreatOffer): void {
+    const evidence = offer.threat
+    if (evidence === null || evidence.active !== true || !evidence.inContact) {
+      this.lastSurvivalRaceLine = null
+      return
+    }
+    const escapes = offer.candidates
+      .filter((candidate) => candidate.kind === 'RETREAT')
+      .map((candidate) => ({
+        separationGain:
+          typeof candidate.meta.separationGain === 'number' && Number.isFinite(candidate.meta.separationGain)
+            ? candidate.meta.separationGain
+            : 0,
+        outsideReach: candidate.meta.outsideReach === true,
+      }))
+    const lastDamage = state.signals.lastDamage ?? null
+    const facts = assessSurvivalRace({
+      evidence,
+      body: bodySurvivalFacts(state.self),
+      weapon: weaponFacts(state.self.heldItem?.name ?? null),
+      damage: classifyDamageSource(lastDamage, state.entities),
+      escapes,
+      damageAgoMs:
+        lastDamage === null || !Number.isFinite(lastDamage.atMs) ? null : Math.max(0, state.timestampMs - lastDamage.atMs),
+    })
+    const line = facts.escape === 'none' ? formatSurvivalEscapeNone(facts) : formatSurvivalDamageRace(facts)
+    if (line === this.lastSurvivalRaceLine) return
+    this.lastSurvivalRaceLine = line
+    this.logger.warn(
+      'agent',
+      line,
+      {
+        marker: facts.escape === 'none' ? SURVIVAL_ESCAPE_NONE : SURVIVAL_DAMAGE_RACE,
+        threat: facts.threatName,
+        threatId: facts.threatId,
+        distance: facts.distance,
+        contact: facts.contact,
+        source: facts.damage.source,
+        sourceName: facts.damage.name,
+        health: facts.body.health,
+        food: facts.body.food,
+        weapon: facts.weapon.name,
+        escapes: facts.escapeCount,
+        escapesOutsideReach: facts.escapesOutsideReach,
+        bestSeparationGain: facts.bestSeparationGain,
+        escape: facts.escape,
+        damageAgoMs: facts.damageAgoMs,
+        reason: facts.reason,
       },
       this.tickCounter,
     )

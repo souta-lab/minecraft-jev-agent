@@ -337,6 +337,91 @@ export function formatWeaponChoiceRequired(alternatives: readonly string[]): str
   return `WEAPON_CHOICE_REQUIRED reason=strategically_distinct_weapon_classes alternatives=[${alternatives.join(',')}]`
 }
 
+export interface WeaponArmOffer {
+  /** the carried weapon to move into the main hand */
+  itemName: string
+  damage: number
+  /** the item in hand right now, or null for an empty hand */
+  replaced: string | null
+  heldDamage: number
+  /** the semantic class of the offered weapon */
+  klass: 'sword' | 'axe'
+}
+
+/**
+ * The ARM affordance: every carried weapon that out-damages the item in hand,
+ * at most ONE per weapon CLASS, ordered by class name (discovery order, never a
+ * preference).
+ *
+ * Measured live (`buddy.log` 2026-09-22T10:49:5x, the closest fortress approach
+ * of the run): the hand held a `stone_pickaxe` while a `diamond_sword` sat in the
+ * inventory, `ATTACK:e45891` was reachable and offered, and Jev chose RETREAT
+ * twice. The only code that ever moved a weapon into the hand was
+ * `equipCombatWeapon` INSIDE the ATTACK lease (`executor.ts`), so "Jev did not
+ * attack this tick" meant "the body stayed disarmed" - the retreat was outrun by
+ * magma-cube contact damage and the death record shows `stone_pickaxe:1,
+ * diamond_sword:1`. Arming the best carried weapon is therefore a standing
+ * self-care affordance the body can choose on ANY tick, not a side effect of one
+ * kind of action.
+ *
+ * CAN enumeration, never ranking: the caller offers these as candidates and Jev
+ * chooses. Within one class the higher base damage is a mechanical total order
+ * (there is no durability/repair economy), which is why a single-class body gets
+ * exactly one offer; a sword and an axe are strategically distinct (#436 section
+ * 11 - the axe is also the wood/log tool), so BOTH are enumerated and code never
+ * picks between them.
+ *
+ * Empty when the hand already holds a carried weapon (that no-op is not a
+ * choice - Jev's earlier selection already decided it) or when nothing carried
+ * out-damages what is in hand, so an armed body never churns its held item.
+ */
+export function weaponArmOffers(
+  heldItemName: string | null,
+  counts: Readonly<Record<string, number>>,
+): WeaponArmOffer[] {
+  if (holdsCarriedWeapon(heldItemName, counts)) return []
+  const offers: WeaponArmOffer[] = []
+  for (const klass of carriedWeaponClasses(counts)) {
+    const offer = bestWeaponOfferInClass(heldItemName, counts, klass)
+    if (offer === null) continue
+    offers.push({ ...offer, klass })
+  }
+  return offers
+}
+
+/**
+ * The exact combat swing the ATTACK lease will use, mirroring `executor.ts`
+ * `equipCombatWeapon` decision for decision:
+ *
+ *   hand already holds a carried weapon -> that item (the lease changes nothing)
+ *   exactly ONE carried weapon class     -> the best instance of that class
+ *   TWO OR MORE carried classes          -> the lease REFUSES
+ *                                           (`weapon_choice_required` before any
+ *                                           swing), so the stated swing is the
+ *                                           item actually in hand and
+ *                                           `willArm` stays null
+ *   no weapon carried                    -> whatever is in hand (fists are legal)
+ *
+ * This exists so the ATTACK candidate's stated weapon and the damage the Skill
+ * will really deal cannot disagree - measured live the candidate said "with
+ * stone_pickaxe" while a `diamond_sword` was carried and the lease would have
+ * armed it.
+ */
+export function combatSwingFor(
+  heldItemName: string | null,
+  counts: Readonly<Record<string, number>>,
+): { itemName: string | null; damage: number; willArm: string | null } {
+  const heldDamage = heldItemName === null ? 0 : weaponDamage(heldItemName) ?? 0
+  if (holdsCarriedWeapon(heldItemName, counts)) {
+    return { itemName: heldItemName, damage: heldDamage, willArm: null }
+  }
+  const classes = carriedWeaponClasses(counts)
+  if (classes.length !== 1) return { itemName: heldItemName, damage: heldDamage, willArm: null }
+  const offer = bestWeaponOfferInClass(heldItemName, counts, classes[0] as 'sword' | 'axe')
+  if (offer === null) return { itemName: heldItemName, damage: heldDamage, willArm: null }
+  return { itemName: offer.itemName, damage: offer.damage, willArm: offer.itemName }
+}
+
 // ---------------------------------------------------------------------------
 // COMBAT_KIT_GAP: a goal-directed kill the body's kit cannot win.
 // ---------------------------------------------------------------------------
