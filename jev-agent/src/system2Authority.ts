@@ -68,3 +68,92 @@ export function evaluateSystem2Apply(
 export function formatSystem2Discard(request: System2RequestContext, reasons: readonly System2DiscardReason[]): string {
   return `SYSTEM2_PLAN_DISCARDED request=${request.requestId} reasons=${reasons.join(',') || 'unknown'}`
 }
+
+/** One applied queue row, reduced to the fields that carry its executable meaning. */
+export interface CompiledGoalRow {
+  id: string
+  kind: string
+  targetItem: string | null
+  targetY: number | null
+  dimension: string | null
+  description: string
+}
+
+/**
+ * #system2-compile: the compact, single-line form of the rows a System2 answer
+ * actually produced (`kind:target@dimension`), mirrored on the applied line.
+ *
+ * The measured M3 loop applied a row whose label said `explore` while its
+ * executable meaning was `descend raw_iron @minecraft:overworld`, and the applied
+ * line carried only the label. Naming kind/target/dimension makes the compiled
+ * meaning - not the model's wording - the visible fact. Pure, bounded and
+ * injection-safe so it can be asserted in a fixture.
+ */
+export function formatCompiledGoalRows(rows: readonly CompiledGoalRow[]): string {
+  if (rows.length === 0) return 'none'
+  return rows
+    .map((row) => {
+      const target = row.targetItem ?? (row.targetY === null ? '-' : `y${row.targetY}`)
+      const dimension = row.dimension === null ? '' : `@${row.dimension.replace(/^minecraft:/, '')}`
+      return `${sanitizeCompiledToken(row.kind)}:${sanitizeCompiledToken(target)}${sanitizeCompiledToken(dimension)}`
+    })
+    .join(',')
+}
+
+/** Bounded, separator-free token so one row can never forge another row or field. */
+function sanitizeCompiledToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9_:.~#-]/g, '_').slice(0, 48)
+}
+
+/** Everything the mirrored apply line reports about one System2 -> queue hand-off. */
+export interface System2AppliedLine {
+  requestId: string
+  op: string
+  /** rows the queue accepted */
+  applied: number
+  /** unfinished queue depth after the apply */
+  depth: number
+  intentSource: string
+  /** model goals the compile dropped, if any */
+  uncompiled: number
+  intent?: string | null
+  rows: readonly CompiledGoalRow[]
+}
+
+/**
+ * #system2-compile: the MIRRORED one-line record of what a System2 answer became.
+ *
+ * It names the model's own words (`intent`), the executable meaning of every row
+ * the queue took (`compiled=[kind:target@dimension]`) and the apply outcome, in a
+ * form that is a single marker line so both evidence planes can carry it. The
+ * measured M3 loop applied `explore`-labelled rows whose real meaning was an
+ * overworld raw_iron descent, and nothing on the applied line said so.
+ *
+ * Pure and bounded: the intent is collapsed to one line and the row tokens are
+ * sanitized, so model text can never forge a field or a second row.
+ */
+export function formatSystem2PlanApplied(line: System2AppliedLine): string {
+  return (
+    `${SYSTEM2_PLAN_APPLIED} op=${sanitizeCompiledToken(line.op)} requestId=${sanitizeCompiledToken(line.requestId)}` +
+    ` applied=${line.applied} depth=${line.depth} intentSource=${sanitizeCompiledToken(line.intentSource)}` +
+    ` uncompiled=${line.uncompiled} compiled=[${formatCompiledGoalRows(line.rows)}]` +
+    ` intent="${flattenProse(line.intent)}"`
+  )
+}
+
+/** The mirrored marker for an applied System2 plan (see `formatSystem2PlanApplied`). */
+export const SYSTEM2_PLAN_APPLIED = 'SYSTEM2_PLAN_APPLIED'
+
+/** The mirrored marker for a goal-carrying System2 answer that produced no row. */
+export const SYSTEM2_PLAN_NO_GOALS = 'SYSTEM2_PLAN_NO_GOALS'
+
+/** One line, no quotes/backslashes, bounded - so a model sentence cannot forge fields. */
+function flattenProse(text: string | null | undefined): string {
+  if (typeof text !== 'string') return ''
+  return text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/["\\]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200)
+}

@@ -117,12 +117,12 @@ function world(
   })
   const rememberedLog: KnownResource = {
     name: 'oak_log',
-    kind: 'log',
+    kind: 'log', dimension: 'minecraft:overworld',
     position: { x: 27, y: 65, z: 19 },
   }
   const rememberedTable: KnownResource = {
     name: 'crafting_table',
-    kind: 'station',
+    kind: 'station', dimension: 'minecraft:overworld',
     position: { x: 39, y: 3, z: 32 },
   }
   const blockingStone: BlockState = {

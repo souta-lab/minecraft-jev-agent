@@ -84,7 +84,32 @@ export class OptionCompilingSystem2 implements System2Brain {
     if (result.rejected.length > 0) {
       this.log('OPTION_COMPILE_REJECTED', { rejected: result.rejected })
     }
-    return { ...plan, goals: result.goals }
+    // #system2-compile: a goal the Option compiler REJECTED is a typed hand-off
+    // failure, not a smaller plan. This was the only live producer of "the planner
+    // had N goals and the queue got 0" (`OPTION_COMPILE_REJECTED`, 10 live lines),
+    // and its typed `{description, reason}` reached the host log only - the queue
+    // saw a normal plan with fewer rows. Carry the rejection on the plan so the
+    // controller's apply line names the vanished rows and why.
+    const provenance = plan.provenance ?? { intentSource: 'none' as const }
+    const uncompiled = [
+      ...(provenance.uncompiled ?? []),
+      ...result.rejected.map((entry, index) => ({
+        index,
+        kind: 'option_compile_rejected',
+        detail: `${entry.description}: ${entry.reason}`,
+      })),
+    ]
+    return {
+      ...plan,
+      goals: result.goals,
+      provenance: {
+        ...provenance,
+        ...(uncompiled.length > 0 ? { uncompiled } : {}),
+        ...(result.goals.length === 0 && plan.goals.length > 0
+          ? { noGoalsReason: 'option_compile_rejected' }
+          : {}),
+      },
+    }
   }
 }
 

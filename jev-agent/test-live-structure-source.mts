@@ -354,9 +354,14 @@ function rememberedFrameState(invalidate: boolean): WorldState {
       position: KNOWN_ORIGIN,
       widthAxis: 'x',
       frameCells: cells,
+      // #14 fail-closed attribution: this fixture's body is in the overworld, and
+      // an un-attributed row is refused as a target in EVERY world. The portal and
+      // obsidian rows therefore name the world they were recorded in, exactly like
+      // the durable write paths do.
+      dimension: 'minecraft:overworld',
     },
-    ...cells.map((position): KnownResource => ({ name: 'obsidian', kind: 'ore', position })),
-    { name: 'obsidian', kind: 'ore', position: KNOWN_OUTSIDE },
+    ...cells.map((position): KnownResource => ({ name: 'obsidian', kind: 'ore', position, dimension: 'minecraft:overworld' })),
+    { name: 'obsidian', kind: 'ore', position: KNOWN_OUTSIDE, dimension: 'minecraft:overworld' },
   ]
   // The remembered cells are LOADED world cells that the sensor's own scan does not
   // report (that is what makes them "remembered" rather than "sensed"). Model them

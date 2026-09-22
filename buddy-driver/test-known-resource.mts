@@ -276,7 +276,9 @@ addCase('an active smelt does not retrieve a future ore before its own prerequis
 })
 
 addCase('a direct dig route suppresses later retrieval, and visible matching ore suppresses it too', () => {
-  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 } }
+  // #14: the row names the world it was recorded in (the fixture body is in the
+  // overworld); an un-attributed row is refused in EVERY world by the fail-closed gate.
+  const known: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 59, z: -12 }, dimension: 'minecraft:overworld' }
   const proxy = worldState({
     position: { x: 0, y: 60, z: 0 },
     goal: goal({ id: 'collect:cobblestone', targetItem: 'cobblestone', description: 'collect 41 x cobblestone (descend toward ore levels)' }),
@@ -308,7 +310,7 @@ addCase('a remembered log beyond proof distance grounds a charcoal RETRIEVE', ()
     position: { x: 0, y: 60, z: 0 },
     goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal' }),
     goalQueue: queueWith(queuedGoal({ kind: 'smelt', targetItem: 'charcoal' })),
-    knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 6, y: 68, z: 0 } }],
+    knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 6, y: 68, z: 0 }, dimension: 'minecraft:overworld' }],
     // the 8-block climb needs a placeable block for the pillar plan, else the
     // affordance gate withholds the retrieval (needs_ascend).
     inventory: inventory({ stone_pickaxe: 1, cobblestone: 4 }),
@@ -334,9 +336,10 @@ addCase('resourceStillPresent classifies unknown / present / replaced / stale', 
 })
 
 addCase('staleKnownResources reports a near remembered ore absent from the sensor blocks', () => {
-  const nearGone: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 3, y: 60, z: 0 } }
-  const nearPresent: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 2, y: 59, z: 0 } }
-  const farGone: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 40, z: 0 } }
+  // #14: remembered cells name their world; the fixture body is in the overworld.
+  const nearGone: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 3, y: 60, z: 0 }, dimension: 'minecraft:overworld' }
+  const nearPresent: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 2, y: 59, z: 0 }, dimension: 'minecraft:overworld' }
+  const farGone: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 40, y: 40, z: 0 }, dimension: 'minecraft:overworld' }
   const state = worldState({
     position: { x: 0, y: 60, z: 0 },
     goalQueue: queueWith(queuedGoal({})),

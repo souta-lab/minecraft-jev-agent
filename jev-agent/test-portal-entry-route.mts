@@ -53,6 +53,9 @@ import {
   SKILL_STEP,
   PORTAL_WALK_IN,
   PORTAL_WALK_IN_REFUSED,
+  PORTAL_WALK_IN_LEVEL_TOLERANCE,
+  PORTAL_ENTRY_CLIMB,
+  PORTAL_ENTRY_CLIMB_REFUSED,
   formatPortalEntryNoKnownSite,
   planPortalEntry,
   portalFrameLayout,
@@ -62,6 +65,7 @@ import type { PortalEntryPlan, PortalFrameSite } from './src/netherPortalPlan.ts
 import { defaultCandidateOptions, entryCandidates, generateGroundedCandidates } from './src/candidates.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
 import { cellKey, observeZeroProgressRoute, routeSignature } from './src/zeroProgressRoute.ts'
+import { guardCandidate } from './src/policy.ts'
 import { Executor, ExecutorError, defaultExecutorOptions } from './src/executor.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
@@ -783,6 +787,465 @@ const STONE_STEP: StepCut = {
       blockedLine.includes('reason=route_blocked') &&
       blockedLine.includes('detail=dig_refused'),
     `status=${result.status} failure=${result.failure ?? 'none'} marker=[${blockedLine ?? 'none'}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (n) THE OPERATOR'S TRIAL - a floated gate the body cannot enter.
+//
+// LIVE WITNESS (run.jsonl 2026-09-22T15:47:37.705Z, generation gen-mucud8sw-i0mumn,
+// source sha 3002d847): the operator floated the Nether portal in the air, its
+// interior (27,67,9) five blocks above a body on the ground. The entry was offered
+// and CHOSEN, and the route it was offered with carried a grounded climb:
+//
+//   ROUTE_PLACE_DECLARED actionId=ENTER:27,67,9 skill=ENTER_PORTAL blocks=cobblestone
+//     source=fallbackPillarPlaceName carried=cobblestone
+//   phase=vertical -> REUSE_TUNNEL at=-7,66,9      <-- the primary leg: a tunnel 34 blocks west
+//   PATH_CALLBACK phase=failed target={"x":-7,"y":66,"z":9} outcome=stuck
+//   MOVE_LEG_STOPPED reason=unsafe_landing from=26,62,8 to=26,62,9 block=air support=none
+//   PORTAL_WALK_IN_REFUSED cell=27,67,9 from_d=0.93 reason=not_level     <-- dy = +5
+//   PORTAL_APPROACH_REFUSED target=27,67,9 from_d=0.93 reason=no_open_face
+//   SKILL_POLICY_BOUNDARY reason=no_in_envelope_remedy alternatives=[vertical:reuse(spent)]
+//   PORTAL_ENTRY_ROUTE_BLOCKED reason=route_blocked entry=27,67,9 from_y=62 to_y=67 detail=unsafe_landing
+//   ROUTE_SPENT ... routeSig=ENTER_PORTAL:reuse:unknown:62->67:dig=-7,66,9:step=none:pillar=0:fallback=pillar
+//
+// The pillar fallback EXISTED and was declared; it was never executed, because
+// `runVerticalContract` reaches `fallbackVertical` only on the reuse leg's typed
+// `refused` outcome and this leg STALLED instead. The walk-in then refused
+// `not_level` (more than one block from the feet) and the entry route's only
+// remaining leg was the HORIZONTAL step-aside, which cannot change Y at all.
+//
+// (n-1) proves the OFFER is byte-identical to that live route (same routeSig,
+//       same declared fallback block) and that the fallback climbs to the
+//       INTERIOR'S LEVEL, not merely one block up.
+// (n-2) proves the composed EXECUTION: the primary leg runs and stalls, the
+//       grounded fallback leg runs in the SAME commitment, the body reaches the
+//       interior's level, and the ordinary verified walk-in then transfers.
+// ---------------------------------------------------------------------------
+const TUNNEL: Vec3Json = { x: -7, y: 66, z: 9 }
+
+/** The operator's trial geometry: a pit under the gate, a remembered far tunnel. */
+function trialFixture(): { fixture: FixtureBot; state: WorldState } {
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('26,66,8', cell('stone'))
+  // the remembered tunnel entry is REAL (observably air + supported) - only its
+  // approach is gone, which is exactly what makes the reuse leg STALL (the live
+  // `PATH_CALLBACK ... outcome=stuck`) instead of refusing typed. `passableAt` is
+  // fail-closed on an unknown cell, so the tunnel's two body rows are written as
+  // explicit air.
+  grid.set('-7,65,9', cell('stone'))
+  grid.set('-7,66,9', cell('air'))
+  grid.set('-7,67,9', cell('air'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], { diamond_pickaxe: 1, cobblestone: 32 })
+  state.signals.lastTunnel = { ...TUNNEL }
+  return { fixture, state }
+}
+
+{
+  const { fixture, state } = trialFixture()
+  const candidate = enterCandidate(fixture, state)
+  const sig = routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta })
+  check(
+    '(n-1) the trial OFFER is byte-identical to the live route: reuse primary at the far tunnel, pillar fallback to the INTERIOR level',
+    candidate.meta.vertical === 'reuse' &&
+      candidate.meta.tunnelX === TUNNEL.x &&
+      candidate.meta.tunnelY === TUNNEL.y &&
+      candidate.meta.tunnelZ === TUNNEL.z &&
+      candidate.meta.fallbackVertical === 'staircase-up' &&
+      sig === 'ENTER_PORTAL:reuse:unknown:65->67:dig=-7,66,9:step=none:pillar=0:fallback=staircase-up',
+    `vertical=${String(candidate.meta.vertical)} tunnel=${String(candidate.meta.tunnelX)},${String(candidate.meta.tunnelY)},${String(candidate.meta.tunnelZ)} fallback=${String(candidate.meta.fallbackVertical)} routeSig=${sig}`,
+  )
+}
+
+{
+  // The same offer where the remembered tunnel has NO usable dig either: the
+  // fallback is the own-column PILLAR, grounded to the interior's level, and its
+  // declared place block is what the entry consumes (the live
+  // `source=fallbackPillarPlaceName` shape).
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('-7,65,9', cell('stone'))
+  grid.set('-7,66,9', cell('air'))
+  grid.set('-7,67,9', cell('air'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  state.signals.lastTunnel = { ...TUNNEL }
+  const candidate = enterCandidate(fixture, state)
+  const sig = routeSignature({ kind: candidate.kind, id: candidate.id, meta: candidate.meta })
+  check(
+    '(n-1) the live pillar fallback: grounded by the same planner to the interior level, with the block it consumes named',
+    candidate.meta.vertical === 'reuse' &&
+      candidate.meta.fallbackVertical === 'pillar' &&
+      candidate.meta.fallbackPillarToY === ENTER_CELL.y &&
+      candidate.meta.fallbackPillarSteps === 2 &&
+      candidate.meta.fallbackPillarPlaceName === 'cobblestone' &&
+      sig === 'ENTER_PORTAL:reuse:unknown:65->67:dig=-7,66,9:step=none:pillar=0:fallback=pillar',
+    `fallback=${String(candidate.meta.fallbackVertical)} toY=${String(candidate.meta.fallbackPillarToY)} steps=${String(candidate.meta.fallbackPillarSteps)} place=${String(candidate.meta.fallbackPillarPlaceName)} routeSig=${sig}`,
+  )
+}
+
+/** The trial's two live path facts: the far tunnel is unreachable, the interior is not a walk target. */
+function trialPathFacts(fixture: FixtureBot, executor: Executor, alsoBlockEntry: boolean): void {
+  const near = (executor as unknown as { pathToNear: (target: Vec3Json) => Promise<void> }).pathToNear
+  ;(executor as unknown as { pathToNear: (target: Vec3Json) => Promise<void> }).pathToNear = async (
+    target: Vec3Json,
+  ) => {
+    // The remembered tunnel is 33 blocks west: its approach path is GONE - the live
+    // `PATH_CALLBACK phase=failed target={"x":-7,"y":66,"z":9} outcome=stuck`.
+    if (key(target) === key(TUNNEL)) throw new ExecutorError('path_stuck', 'pathfinder -> stuck')
+    await near(target)
+  }
+  if (!alsoBlockEntry) return
+  // The interior cell is non-solid, so the stock actuator refuses its plan node
+  // outright (`path_stuck` with the body moved zero blocks, executor.ts:8228).
+  const toCell = (executor as unknown as { pathTo: (target: Vec3Json) => Promise<void> }).pathTo
+  ;(executor as unknown as { pathTo: (target: Vec3Json) => Promise<void> }).pathTo = async (
+    target: Vec3Json,
+  ) => {
+    if (key(target) === key(ENTER_CELL)) throw new ExecutorError('path_stuck', 'pathfinder GoalBlock -> stuck')
+    await toCell(target)
+  }
+}
+
+{
+  // (n-2a) the composed climb itself: the primary leg stalls, the grounded
+  // fallback leg runs IN THE SAME COMMITMENT, and the body reaches the interior's
+  // LEVEL. The result is a bounded climb chunk - never a claimed entry.
+  const { fixture, state } = trialFixture()
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true, false, (executor) =>
+    trialPathFacts(fixture, executor, true),
+  )
+  const legs = result.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CLIMB))
+  const primary = legs.find((line) => line.includes('leg=primary')) ?? ''
+  const fallback = legs.find((line) => line.includes('leg=fallback')) ?? ''
+  check(
+    '(n-2a) the composed route: the primary leg stalls, the grounded fallback climbs in the SAME commitment to the interior level',
+    primary.includes('climb=reuse') &&
+      primary.includes('outcome=failed') &&
+      primary.includes('detail=path_stuck') &&
+      fallback.includes('climb=staircase-up') &&
+      fallback.includes('plan=kind=staircase-up,to_y=67') &&
+      fallback.includes('outcome=climbed') &&
+      fixture.digs.includes('stone@26,66,8') &&
+      fixture.position.y > 65 &&
+      ENTER_CELL.y - Math.floor(fixture.position.y) <= PORTAL_WALK_IN_LEVEL_TOLERANCE &&
+      ENTER_CELL.y - Math.floor(fixture.position.y) > 0 &&
+      result.messages.every((line) => !line.startsWith(PORTAL_ENTRY_CLIMB_REFUSED)) &&
+      result.messages.every((line) => !line.startsWith('PORTAL_ENTERED')) &&
+      result.verified === false,
+    `legs=${legs.length} bodyY=${fixture.position.y} dyLeft=${ENTER_CELL.y - Math.floor(fixture.position.y)} digs=[${fixture.digs.join(',')}] status=${result.status} verified=${result.verified} primary=[${primary}] fallback=[${fallback}]`,
+  )
+}
+
+{
+  // (n-2b) with the climb done, the ordinary route owns the last block at the
+  // interior's level - the same generic mover every other MOVE uses - and the
+  // entry is VERIFIED by the dimension change, not by the body motion.
+  const { fixture, state } = trialFixture()
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true, false, (executor) =>
+    trialPathFacts(fixture, executor, false),
+  )
+  const legs = result.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CLIMB))
+  const entered = result.messages.find((line) => line.startsWith('PORTAL_ENTERED')) ?? ''
+  check(
+    '(n-2b) the composed route ends in the VERIFIED entry: dimension change observed at the interior cell',
+    result.status === 'done' &&
+      result.verified === true &&
+      result.failure === null &&
+      legs.length === 2 &&
+      entered.includes(`pos=${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}`) &&
+      Math.floor(fixture.position.y) === ENTER_CELL.y,
+    `status=${result.status} verified=${result.verified} legs=${legs.length} bodyY=${fixture.position.y} entered=[${entered}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (o) BYTE-IDENTICAL for a LEVEL gate and for a ONE-BLOCK step-up.
+//
+// Both are the cases the composition must not touch: a level gate needs no climb
+// at all, and a one-block rise is the frame threshold the bounded walk-in already
+// steps onto. The proof is that the candidate carries NO fallback key and that no
+// `PORTAL_ENTRY_CLIMB*` line and no `climb=` field is ever emitted.
+// ---------------------------------------------------------------------------
+{
+  const grid = gateGrid()
+  const fixture = makeBot({ x: 25, y: 67, z: 10 }, grid, true)
+  // a same-level open face beside the interior, and the stand cell
+  grid.set('25,66,10', cell('stone'))
+  const state = worldState({ x: 25.5, y: 67, z: 10.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true)
+  check(
+    '(o) a LEVEL gate is untouched: vertical=none, no fallback key, no climb marker, the walk-in transfers',
+    candidate.meta.vertical === 'none' &&
+      candidate.meta.fallbackVertical === undefined &&
+      result.status === 'done' &&
+      result.verified === true &&
+      !result.messages.some((line) => line.startsWith(PORTAL_ENTRY_CLIMB)) &&
+      !result.messages.some((line) => line.includes('climb=')),
+    `vertical=${String(candidate.meta.vertical)} fallback=${String(candidate.meta.fallbackVertical)} status=${result.status} verified=${result.verified}`,
+  )
+}
+
+{
+  // the existing one-block step-up shape (case (b)): the walk-in's own hop owns it
+  const grid = gateGrid()
+  grid.set('26,65,8', cell('stone'))
+  grid.set('26,66,8', cell('air'))
+  const fixture = makeBot({ x: 26, y: 66, z: 8 }, grid, true)
+  const state = worldState({ x: 26.5, y: 66, z: 8.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true)
+  check(
+    '(o) a ONE-BLOCK step-up is untouched: vertical=pillar steps=1 with NO fallback key, no climb marker, transfer',
+    candidate.meta.vertical === 'pillar' &&
+      candidate.meta.pillarSteps === 1 &&
+      candidate.meta.pillarToY === ENTER_CELL.y &&
+      candidate.meta.fallbackVertical === undefined &&
+      result.status === 'done' &&
+      result.verified === true &&
+      !result.messages.some((line) => line.startsWith(PORTAL_ENTRY_CLIMB)) &&
+      !result.messages.some((line) => line.includes('climb=')),
+    `vertical=${String(candidate.meta.vertical)} steps=${String(candidate.meta.pillarSteps)} fallback=${String(candidate.meta.fallbackVertical)} status=${result.status} verified=${result.verified}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (p) NO GROUNDED CLIMB: the typed refusal names the interior's height, the
+// climb that was available and the fact that failed - never a silent no-op.
+// ---------------------------------------------------------------------------
+{
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('26,66,8', cell('stone'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
+  // empty hands: no placeable, and the only step cut needs a pickaxe that is gone
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [STONE_STEP], {})
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true, false, stubStuckPath(fixture))
+  const refused = result.messages.find((line) => line.startsWith(PORTAL_ENTRY_CLIMB_REFUSED)) ?? ''
+  const blocked = result.messages.find((line) => line.startsWith('PORTAL_ENTRY_ROUTE_BLOCKED')) ?? ''
+  check(
+    '(p) no grounded climb: the typed refusal names dy, climb=none, fallback=none and the offering reason',
+    candidate.meta.vertical === 'none' &&
+      refused.includes(`cell=${ENTER_CELL.x},${ENTER_CELL.y},${ENTER_CELL.z}`) &&
+      refused.includes('from_y=65') &&
+      refused.includes('to_y=67') &&
+      refused.includes('dy=2') &&
+      refused.includes('climb=none') &&
+      refused.includes('fallback=none') &&
+      refused.includes('reason=no_grounded_climb') &&
+      refused.includes('detail=no_placeable') &&
+      result.status === 'failed' &&
+      blocked.includes('detail=no_placeable') &&
+      !result.messages.some((line) => line.startsWith(`${PORTAL_WALK_IN} `)),
+    `vertical=${String(candidate.meta.vertical)} status=${result.status} refused=[${refused}] blocked=[${blocked}]`,
+  )
+}
+
+{
+  // Grounded climbs EXIST and RAN and none raised the body: the refusal names the
+  // executed legs' own cause instead of a bare "no route".
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('26,66,8', cell('stone'))
+  grid.set('-7,65,9', cell('stone'))
+  grid.set('-7,66,9', cell('air'))
+  grid.set('-7,67,9', cell('air'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  state.signals.lastTunnel = { ...TUNNEL }
+  const candidate = enterCandidate(fixture, state)
+  // both legs fail: the tunnel approach is gone AND the pillar's block is gone
+  const result = await runEntry(fixture, candidate, true, false, (executor) => {
+    fixture.inventoryItems.length = 0
+    ;(executor as unknown as { pathToNear: (target: Vec3Json) => Promise<void> }).pathToNear = async (
+      target: Vec3Json,
+    ) => {
+      if (key(target) === key(TUNNEL)) throw new ExecutorError('path_stuck', 'pathfinder -> stuck')
+    }
+  })
+  const refused = result.messages.find((line) => line.startsWith(PORTAL_ENTRY_CLIMB_REFUSED)) ?? ''
+  const blocked = result.messages.find((line) => line.startsWith('PORTAL_ENTRY_ROUTE_BLOCKED')) ?? ''
+  check(
+    '(p) a climb that ran and did not rise is typed: climb_no_rise with the executed legs named in climb=',
+    refused.includes('climb=reuse') &&
+      refused.includes('fallback=pillar') &&
+      refused.includes('reason=climb_no_rise') &&
+      blocked.includes('climb=primary=reuse:failed:path_stuck,fallback=pillar:no_rise:no_place_item') &&
+      result.status === 'failed',
+    `status=${result.status} refused=[${refused}] blocked=[${blocked}]`,
+  )
+}
+
+{
+  // (p) THE PILLAR SAFETY RULE STILL APPLIES to the composed fallback: a fluid
+  // that could pour onto the body refuses the pillar leg in the executor
+  // (`pillarColumnUnsafe`), the body does not rise, and the entry reports the
+  // typed `unsafe_column` rather than a silent no-op. The sensor-side plan is
+  // still OFFERED (its `state.blocks` carry no hazard), which is exactly the live
+  // order: the offering layer grounds the climb, the executor owns the live veto.
+  const grid = gateGrid()
+  grid.set('26,64,8', cell('stone'))
+  grid.set('27,64,8', cell('stone'))
+  grid.set('26,65,8', cell('stone'))
+  grid.set('-7,65,9', cell('stone'))
+  grid.set('-7,66,9', cell('air'))
+  grid.set('-7,67,9', cell('air'))
+  // water in the body's own column, two above the feet (dy = +2)
+  grid.set('27,67,8', cell('water'))
+  const fixture = makeBot({ x: 27, y: 65, z: 8 }, grid, true)
+  // the body really HOLDS the pillar block (the live bot carried 205 cobblestone),
+  // so the refusal is the live-column veto and not a missing item
+  fixture.inventoryItems.push({
+    name: 'cobblestone',
+    type: registry.itemsByName.cobblestone.id as number,
+    count: 32,
+  })
+  const state = worldState({ x: 27.5, y: 65, z: 8.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  state.signals.lastTunnel = { ...TUNNEL }
+  const candidate = enterCandidate(fixture, state)
+  const startY = fixture.position.y
+  const result = await runEntry(fixture, candidate, true, false, (executor) =>
+    trialPathFacts(fixture, executor, true),
+  )
+  const refused = result.messages.find((line) => line.startsWith(PORTAL_ENTRY_CLIMB_REFUSED)) ?? ''
+  const fallback = result.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CLIMB)).find((line) => line.includes('leg=fallback')) ?? ''
+  check(
+    '(p) a fluid that could pour onto the body refuses the composed pillar leg typed (unsafe_column), with zero rise',
+    candidate.meta.fallbackVertical === 'pillar' &&
+      fallback.includes('climb=pillar') &&
+      fallback.includes('outcome=no_rise') &&
+      fallback.includes('detail=unsafe_column') &&
+      refused.includes('reason=climb_no_rise') &&
+      refused.includes('detail=unsafe_column') &&
+      result.status === 'failed' &&
+      fixture.position.y === startY &&
+      !result.messages.some((line) => line.startsWith('PORTAL_ENTERED')),
+    `status=${result.status} feetY=${fixture.position.y} fallback=[${fallback}] refused=[${refused}]`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (q) BOUNDS AND PROTECTION.
+//
+// (q-1) the portal PLANE is never mined: the composed climb's own-column fallback
+//       is a PLACE route (`pillar`), and no dig of a frame or interior cell ever
+//       appears - the frame is the protected structure the entry may not open.
+// (q-2) the cross-dimension refusal is unchanged: only the explicit ENTER_PORTAL
+//       candidate may cross, so the entry stays the one exempt semantic disengage
+//       and no mechanical realisation of this route gains that authority.
+// ---------------------------------------------------------------------------
+{
+  const { fixture, state } = trialFixture()
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true, false, (executor) => {
+    ;(executor as unknown as { pathToNear: (target: Vec3Json) => Promise<void> }).pathToNear = async (
+      target: Vec3Json,
+    ) => {
+      if (key(target) === key(TUNNEL)) throw new ExecutorError('path_stuck', 'pathfinder -> stuck')
+    }
+  })
+  const protectedCells = new Set([...LAYOUT.frame, ...LAYOUT.interior].map((c) => key(c)))
+  const mined = fixture.digs
+    .map((entry) => entry.slice(entry.indexOf('@') + 1))
+    .filter((cellKey) => protectedCells.has(cellKey))
+  check(
+    '(q-1) the portal plane is never mined: the composed climb digs the terrain step only, never a frame or interior cell',
+    result.status === 'done' &&
+      mined.length === 0 &&
+      fixture.digs.includes('stone@26,66,8') &&
+      !result.messages.some((line) => line.includes('protected:portal_structure') && line.startsWith('LOCAL_CLEAR')),
+    `digs=[${fixture.digs.join(',')}] minedPortalPlane=[${mined.join(',')}]`,
+  )
+}
+
+{
+  // The dimension-transfer guard is the policy layer's, and this lane does not
+  // touch it: a non-ENTER_PORTAL candidate at the SAME interior cell is denied.
+  const fixture = trialFixture().fixture
+  const likeEntry: Candidate = {
+    id: 'STEP:p26_67_9',
+    kind: 'STEP',
+    label: 'step into the portal interior as an ordinary locomotion step',
+    targetName: NETHER_PORTAL,
+    target: { x: ENTER_CELL.x, y: ENTER_CELL.y, z: ENTER_CELL.z },
+    targetEntityId: null,
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: true,
+    hasStandableAdjacent: true,
+    meta: { tick: 9 },
+  }
+  const state = worldState({ x: 26.5, y: 66, z: 9.5 }, [], { diamond_pickaxe: 1, cobblestone: 32 })
+  const verdict = guardCandidate(likeEntry, state, {
+    phase: 'decision',
+    candidateIds: new Set([likeEntry.id, 'ENTER:26,67,9']),
+    inFlight: null,
+    reach: 4.5,
+    maxCandidateAgeTicks: 200,
+    canComputePath: () => true,
+  })
+  check(
+    '(q-2) the cross-dimension refusal still covers every mechanical realisation: an ordinary STEP into the interior is denied',
+    verdict.ok === false && String(verdict.code).length > 0,
+    `ok=${verdict.ok} code=${verdict.ok ? 'none' : String(verdict.code)} reason=${verdict.ok ? 'none' : verdict.reason}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// (r) NO CODE RANKING: the composed route is OFFERED alongside the ordinary
+// alternatives in discovery order, and the executor runs the legs in the order
+// the candidate declared them - it never compares two climbs to pick one.
+// ---------------------------------------------------------------------------
+{
+  const { fixture, state } = trialFixture()
+  // a spent route from this stand cell makes the candidate layer enumerate the
+  // approach alternatives too; the ENTER candidate stays FIRST, unranked.
+  const options: CandidateOptions = { ...defaultCandidateOptions, portalEntry: entryPlan(fixture) }
+  const offered = entryCandidates(state, options)
+  const ids = offered.candidates.map((candidate) => candidate.id)
+  const grounded = generateGroundedCandidates(state, options)
+  check(
+    '(r) the entry is offered first, together with its alternatives, in discovery order',
+    ids[0] === 'ENTER:26,67,9' &&
+      grounded.candidates.some((candidate) => candidate.id === 'ENTER:26,67,9') &&
+      offered.candidates.filter((candidate) => candidate.kind === 'ENTER_PORTAL').length === 1,
+    `offered=[${ids.join(',')}] grounded=[${grounded.candidates.map((candidate) => candidate.id).join(',')}]`,
+  )
+}
+
+{
+  // The legs run in the DECLARED order (primary then the grounded fallback), and
+  // the order is the candidate's own, not a comparison of the two plans.
+  const { fixture, state } = trialFixture()
+  const candidate = enterCandidate(fixture, state)
+  const result = await runEntry(fixture, candidate, true, false, (executor) => {
+    ;(executor as unknown as { pathToNear: (target: Vec3Json) => Promise<void> }).pathToNear = async (
+      target: Vec3Json,
+    ) => {
+      if (key(target) === key(TUNNEL)) throw new ExecutorError('path_stuck', 'pathfinder -> stuck')
+    }
+  })
+  const climbLines = result.messages.filter((line) => line.startsWith(PORTAL_ENTRY_CLIMB))
+  const order = climbLines.map((line) => (/leg=(\w+)/.exec(line)?.[1] ?? '?'))
+  check(
+    '(r) the composed legs run in declared order (primary, then the grounded fallback) - no code ranking',
+    order.length === 2 && order[0] === 'primary' && order[1] === 'fallback',
+    `order=[${order.join(',')}] lines=${climbLines.length}`,
   )
 }
 
@@ -1515,9 +1978,22 @@ const OCCLUDED_STAND: Vec3Json = { x: 24.7, y: 67, z: 9.7 }
 
 {
   // (k-3) every new marker is a mirrored host event (live-visible)
-  const markers = [PORTAL_APPROACH_LEG, PORTAL_APPROACH_REFUSED, SKILL_START, SKILL_STEP, SKILL_INTERRUPT, SKILL_END, REFLEX]
+  const markers = [
+    PORTAL_APPROACH_LEG,
+    PORTAL_APPROACH_REFUSED,
+    // the composed entry climb: without these in the mirrored set the live sink
+    // DROPS the line naming which climb ran and why it could not close the height,
+    // and the operator's trial is indistinguishable from "no leg was ever grounded".
+    PORTAL_ENTRY_CLIMB,
+    PORTAL_ENTRY_CLIMB_REFUSED,
+    SKILL_START,
+    SKILL_STEP,
+    SKILL_INTERRUPT,
+    SKILL_END,
+    REFLEX,
+  ]
   check(
-    '(k-3) the step-aside and issue-#436 markers are mirrored host events (live-visible)',
+    '(k-3) the step-aside, composed-climb and issue-#436 markers are mirrored host events (live-visible)',
     markers.every((marker) => MIRRORED_MARKERS.has(marker)),
     markers.map((marker) => `${marker}=${MIRRORED_MARKERS.has(marker)}`).join(' '),
   )

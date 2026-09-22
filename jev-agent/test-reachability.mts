@@ -197,7 +197,7 @@ function worldState(overrides: {
 {
   const feet: Vec3Json = { x: 34.5, y: 31, z: 37.5 }
   const furnace: StationEntry = { x: 37, y: 30, z: 37, source: 'sensed' }
-  const ironOre: KnownResource = { name: 'iron_ore', kind: 'ore', position: { x: 45, y: 31, z: 37 } }
+  const ironOre: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 45, y: 31, z: 37 } }
   const smelt = queuedGoal({
     id: 'g-iron-input',
     kind: 'smelt',
@@ -250,7 +250,7 @@ function worldState(overrides: {
     inventory: inventory({ stone_pickaxe: 1, cobblestone: 32, coal: 3 }),
     furnaces: [{ x: 37, y: 30, z: 37, source: 'sensed' }],
     headroomCuts: [{ pos: { x: 34, y: 32, z: 37 }, name: 'dirt', safe: true, reason: 'test-ceiling' }],
-    signals: signals({ knownResources: [{ name: 'iron_ore', kind: 'ore', position: { x: 45, y: 31, z: 37 } }] }),
+    signals: signals({ knownResources: [{ name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: { x: 45, y: 31, z: 37 } }] }),
     goal: goal({ id: 'smelt:iron_ingot', description: 'smelt 3 x iron_ingot', targetItem: 'iron_ingot', requiredCount: 3 }),
     goalQueue: queueWith(smelt),
   })
@@ -266,7 +266,7 @@ function worldState(overrides: {
 
 const BOT: Vec3Json = { x: 0, y: 60, z: 0 }
 const FAR_ABOVE: Vec3Json = { x: 0, y: 110, z: 0 }
-const KNOWN_LOG: KnownResource = { name: 'oak_log', kind: 'log', position: FAR_ABOVE }
+const KNOWN_LOG: KnownResource = { name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: FAR_ABOVE }
 
 function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   return { ...defaultCandidateOptions, reachability: { memory } }
@@ -466,7 +466,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
   const state = worldState({
     position: BOT,
     signals: signals({
-      knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 0, y: 60, z: 12 } }],
+      knownResources: [{ name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 0, y: 60, z: 12 } }],
     }),
   })
   const grounded = generateGroundedCandidates(state, optionsWith(null))
@@ -651,7 +651,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       oak_planks: 1,
     }),
     signals: signals({
-      knownResources: [{ name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } }],
+      knownResources: [{ name: 'furnace', kind: 'station', dimension: 'minecraft:overworld', position: { x: 29, y: 61, z: 35 } }],
     }),
     headroomCuts: [{ pos: { x: 39, y: 10, z: 33 }, name: 'cobblestone', safe: true, reason: 'safe' }],
     blocks: [
@@ -838,8 +838,8 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     }
   }
 
-  const tableBelow: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 40, y: 29, z: 35 } }
-  const tableAbove: KnownResource = { name: 'crafting_table', kind: 'station', position: { x: 20, y: 65, z: 27 } }
+  const tableBelow: KnownResource = { name: 'crafting_table', kind: 'station', dimension: 'minecraft:overworld', position: { x: 40, y: 29, z: 35 } }
+  const tableAbove: KnownResource = { name: 'crafting_table', kind: 'station', dimension: 'minecraft:overworld', position: { x: 20, y: 65, z: 27 } }
   const feet = { x: Math.floor(bot.x), y: Math.floor(bot.y), z: Math.floor(bot.z) }
 
   // (a) planks + sticks held, and the ONLY remembered table is unreachable (below
@@ -937,7 +937,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       inventory: inventory({ birch_planks: 7, stick: 2, cobblestone: 42 }),
       goal: goal({ targetItem: 'wooden_pickaxe', description: 'craft 1 x wooden_pickaxe', requiredCount: 1 }),
       goalQueue: queueWith(craftGoal('wooden_pickaxe')),
-      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: { x: 32, y: 48, z: 37 } }] }),
+      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', dimension: 'minecraft:overworld', position: { x: 32, y: 48, z: 37 } }] }),
     })
     const grounded = generateGroundedCandidates(state, craftOptions)
     const retrieve = grounded.candidates.find((candidate) => candidate.id.includes('station:crafting_table'))
@@ -1011,7 +1011,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     const withSensedTable = worldState({
       position: feet,
       inventory: liveInventory,
-      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', position: table }] }),
+      signals: signals({ knownResources: [{ name: 'crafting_table', kind: 'station', dimension: 'minecraft:overworld', position: table }] }),
       descent: [downStep],
       goal: goal({ id: 'smelt:charcoal', targetItem: 'charcoal', description: 'smelt 1 x charcoal', requiredCount: 1 }),
       goalQueue: queueWith(smeltCharcoal),
@@ -1105,7 +1105,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       position: bot,
       inventory: inventory({ birch_planks: 7, stick: 2 }),
       signals: signals({
-        knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 30, y: 48, z: 50 } }],
+        knownResources: [{ name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 30, y: 48, z: 50 } }],
       }),
     })
     const grounded = generateGroundedCandidates(state, craftOptions)
@@ -1134,7 +1134,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
 // support + tool + no hazard), never a bare token.
 {
   const feet: Vec3Json = { x: 31, y: 34, z: 37 }
-  const furnaceOnly: KnownResource[] = [{ name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } }]
+  const furnaceOnly: KnownResource[] = [{ name: 'furnace', kind: 'station', dimension: 'minecraft:overworld', position: { x: 29, y: 61, z: 35 } }]
   const smelt = queuedGoal({
     id: 'g-charcoal',
     kind: 'smelt',
@@ -1281,8 +1281,8 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       standable: [{ x: 31, y: 35, z: 37 }],
       signals: signals({
         knownResources: [
-          { name: 'crafting_table', kind: 'station', position: { x: 31, y: 63, z: 37 } },
-          { name: 'furnace', kind: 'station', position: { x: 29, y: 61, z: 35 } },
+          { name: 'crafting_table', kind: 'station', dimension: 'minecraft:overworld', position: { x: 31, y: 63, z: 37 } },
+          { name: 'furnace', kind: 'station', dimension: 'minecraft:overworld', position: { x: 29, y: 61, z: 35 } },
         ],
       }),
       goal: charcoal,
@@ -1354,7 +1354,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       diggable: true,
     }
     const oreGoal = queuedGoal({ id: 'g-ore', kind: 'collect', description: 'collect 3 x raw_iron', targetItem: 'raw_iron', requiredCount: 3 })
-    const ore: KnownResource = { name: 'iron_ore', kind: 'ore', position: below }
+    const ore: KnownResource = { name: 'iron_ore', kind: 'ore', dimension: 'minecraft:overworld', position: below }
     const down = worldState({
       position: { x: 30, y: 48, z: 37 },
       inventory: inventory({ stone_pickaxe: 1 }),
@@ -1425,7 +1425,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       }),
       standable: [{ x: 39, y: 11, z: 32 }, { x: 40, y: 11, z: 32 }],
       stepCuts: [liveCut],
-      signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', position: { x: 27, y: 65, z: 19 } }] }),
+      signals: signals({ knownResources: [{ name: 'oak_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 27, y: 65, z: 19 } }] }),
       goal: goal({ id: 'collect:log', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1 }),
       goalQueue: queueWith(liveLogGoal),
     })
@@ -1619,7 +1619,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
     targetItem: 'wooden_pickaxe',
     requiredCount: 1,
   })
-  const rememberedLog: KnownResource = { name: 'birch_log', kind: 'log', position: { x: 31, y: 63, z: 37 } }
+  const rememberedLog: KnownResource = { name: 'birch_log', kind: 'log', dimension: 'minecraft:overworld', position: { x: 31, y: 63, z: 37 } }
   const remembered = worldState({
     position: liveFeet,
     inventory: liveInventory,
@@ -1715,7 +1715,7 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
 // rather than becoming an unrelated MOVE or an unsafe drop.
 {
   const feet: Vec3Json = { x: -15.5, y: 71, z: 3.47 }
-  const furnace: KnownResource = { name: 'furnace', kind: 'station', position: { x: 8, y: 65, z: 24 } }
+  const furnace: KnownResource = { name: 'furnace', kind: 'station', dimension: 'minecraft:overworld', position: { x: 8, y: 65, z: 24 } }
   const smelt = queuedGoal({
     id: 'g-descent-recovery',
     kind: 'smelt',
@@ -2049,6 +2049,87 @@ function optionsWith(memory: StateFingerprintMemory | null): CandidateOptions {
       `withheld=${withheld?.result.reason ?? 'none'} approach=${approach === undefined ? 'none' : `${approach.id}->${approach.target?.x},${approach.target?.y},${approach.target?.z}`}`,
     )
   }
+}
+
+// (18) THE OPERATOR'S FROZEN BODY: a withheld ascent must name WHICH concrete HOW
+// was rejected, never the bare `ascend_plan` token.
+//
+// Live (the floated gate; the body frozen for 2+ minutes at (22.7,66,4.5), 834
+// identical lines):
+//   REACHABILITY candidate=ASCEND:habitat:p29_68_8 kind=MOVE reachable=false
+//     reason=needs_ascend missing=["ascend_plan"]
+//     fingerprint=rv1|29,68,8|needs_ascend|missing=[ascend_plan]|gap=ascend_far|place=1|tools=[]|hazard=0|approach=1
+//
+// `place=1` (a pillar block IS held), `hazard=0`, no tool fact, clear headroom and
+// a safe column: the ONLY unnamed precondition left was the live FOOTING, so the
+// bare token was the whole evidence and the body could only retry it.
+{
+  const state = worldState({
+    position: { x: 22.7, y: 66, z: 4.5 },
+    inventory: inventory({ cobblestone: 177, dirt: 128, soul_soil: 222, oak_log: 81 }),
+    // the body's own column is not in the sensed stand set (the live ledge), but
+    // the sensor DOES see a walkable step one level up beside it - so the ascent
+    // column is `clear`, not `refuse`, and the only unnamed fact left is support
+    standable: [{ x: 23, y: 67, z: 4 }],
+  })
+  const target: Vec3Json = { x: 29, y: 71, z: 8 }
+  const column = {
+    placeable: { name: 'cobblestone', count: 177 },
+    columnSafe: true,
+    footingSolid: false,
+    headroomClear: true,
+    headroomCell: null,
+  }
+  const abilities = deriveReachabilityAbilities(state, target, column)
+  const keys = abilities.ascend.missing.map((capability) => capabilityKey(capability))
+  check(
+    '(18a) a grounded pillar with no proven footing names the fact instead of the bare ascend_plan token',
+    abilities.ascend.available === false &&
+      keys.includes('ascend_plan:pillar:no_footing@22,66,4') &&
+      !keys.includes('ascend_plan'),
+    `available=${abilities.ascend.available} missing=[${keys.join(',')}]`,
+  )
+  check(
+    '(18b) the typed key never drifts for a legacy bare token, so existing fingerprints are unchanged',
+    capabilityKey({ kind: 'ascend_plan' }) === 'ascend_plan' &&
+      capabilityKey({ kind: 'ascend_plan', plan: null, reason: null, cell: null }) === 'ascend_plan' &&
+      capabilityKey({ kind: 'ascend_plan', plan: 'staircase-up', reason: 'plan_unavailable', cell: { x: 22, y: 66, z: 4 } }) ===
+        'ascend_plan:staircase-up:plan_unavailable@22,66,4',
+    `bare=${capabilityKey({ kind: 'ascend_plan' })}`,
+  )
+}
+
+{
+  // A column that CAN support the climb is still available: the fix names the
+  // absent fact, it does not widen or narrow what is offered.
+  const state = worldState({
+    position: { x: 22.7, y: 66, z: 4.5 },
+    inventory: inventory({ cobblestone: 177 }),
+    standable: [{ x: 23, y: 67, z: 4 }],
+  })
+  const supported = deriveReachabilityAbilities(state, { x: 29, y: 71, z: 8 }, {
+    placeable: { name: 'cobblestone', count: 177 },
+    columnSafe: true,
+    footingSolid: true,
+    headroomClear: true,
+    headroomCell: null,
+  })
+  const blocked = deriveReachabilityAbilities(state, { x: 29, y: 71, z: 8 }, {
+    placeable: { name: 'cobblestone', count: 177 },
+    columnSafe: true,
+    footingSolid: true,
+    headroomClear: false,
+    headroomCell: { x: 22, y: 68, z: 4 },
+  })
+  const blockedKeys = blocked.ascend.missing.map((capability) => capabilityKey(capability))
+  check(
+    '(18c) availability is unchanged, and the fact this branch already named stays named',
+    supported.ascend.available === true &&
+      supported.ascend.missing.length === 0 &&
+      blockedKeys.includes('headroom@22,68,4') &&
+      !blockedKeys.includes('ascend_plan'),
+    `supported=${supported.ascend.available} blocked=[${blockedKeys.join(',')}]`,
+  )
 }
 
 process.stdout.write(`\n${failures === 0 ? 'OK' : 'FAILURES'}: ${failures} failing check(s)\n`)

@@ -78,6 +78,7 @@ import {
 import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
+import type { AscendPlanRefusalReason } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, DimensionTransferRoute, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe, StationKindName } from './reachability.ts'
 import { moveFailureKey, StateFingerprintMemory } from './moveFailMemory.ts'
 import { MAX_DEPENDENCY_DEPTH, collectItemForClass, selectCraftIngredients } from './optionSpec.ts'
@@ -90,6 +91,7 @@ import {
   PORTAL_LIT_PREDICATE,
   PORTAL_ENTER_SKILL,
   PORTAL_OPEN_FACE_MAX_DISTANCE,
+  PORTAL_WALK_IN_LEVEL_TOLERANCE,
   formatReflex,
   formatSkillPolicyBoundary,
   formatSkillStep,
@@ -124,8 +126,9 @@ import {
   contactGapY,
   formatContactUnreachable,
   HUNT_APPROACH_BUDGET,
+  MELEE_ATTACK_REACH,
 } from './combatClosure.ts'
-import type { ContactApproach } from './combatClosure.ts'
+import type { AttackStandEvidence, AttackStandFact, ContactApproach } from './combatClosure.ts'
 import {
   envHazardProximityDenied,
   MAX_ENV_HAZARD_ESCAPES,
@@ -187,6 +190,15 @@ export interface Candidate {
   placementCells?: Vec3Json[]
   /** plane axis of a placement sequence; 'x' spans x (normal z), 'z' spans z */
   placementAxis?: 'x' | 'z'
+  /**
+   * The typed stance refusal this candidate was withheld with (`no_attack_stand`),
+   * when the ATTACK gate could not ground a cell the body can stand on, legally,
+   * inside the melee envelope AND see the entity from. Typed rather than a `meta`
+   * scalar because a reviewer needs the whole geometry (entity, melee constant,
+   * nearest refused stance and the route verdict), and it is mirrored verbatim as
+   * `NO_ATTACK_STAND`. Absent on every other candidate, so nothing else changes.
+   */
+  attackStandRefusal?: AttackStandEvidence
   meta: Record<string, string | number | boolean>
 }
 
@@ -704,7 +716,13 @@ export function applyGroundedThreatRestriction(
       .filter(
         (entry) =>
           entry.candidate.kind === 'ATTACK' &&
-          entry.result.reason === 'no_path' &&
+          // `no_path` and `no_attack_stand` are the SAME fact for this set ("this
+          // hostile's melee approach is not groundable by CAN"), with the more
+          // precise name now that the stance geometry is checked: a mob behind
+          // sealed terrain has no path AND no stance that can hit it, so omitting
+          // the new reason would silently stop releasing work for exactly the
+          // occluded shape this bypass exists for.
+          (entry.result.reason === 'no_path' || entry.result.reason === 'no_attack_stand') &&
           entry.candidate.targetEntityId !== null,
       )
       .map((entry) => entry.candidate.targetEntityId as number),
@@ -1443,6 +1461,23 @@ export interface ReachabilityGateOptions {
    */
   attackPathProbe?: ((position: Vec3Json) => PathProbeResult) | null
   /**
+   * The live STANCE fact for an ATTACK: is there a cell the body can stand on,
+   * legally, from which the entity is inside the melee envelope AND visible?
+   * `combatClosure.selectAttackStand` is the pure search; the controller wires
+   * the world questions to live truth (the sensor's own standability rule, the
+   * `envHazard` classes, and the same `world.raycast` the threat-cover logic
+   * casts). This is the fact a path probe cannot answer: a path to a cell beside
+   * the target is not a position from which a swing lands (the operator's
+   * embedded magma cube; the measured 6.11 m enderman with zero swings).
+   *
+   * Absent, or `null` for this entity (the host could not read its geometry),
+   * means NO VERDICT and preserves the previous gate exactly - an unavailable
+   * probe never deletes the only productive action.
+   */
+  attackStandProbe?:
+    | ((query: { entityId: number; position: Vec3Json }) => AttackStandFact | null)
+    | null
+  /**
    * SAFE: does the body's own route to this destination stand it in a
    * dimension-transfer cell (a lit portal block)? The destination-side half of
    * the same fact lives in `WorldState.terrain.portalWalkInCells`; this half
@@ -1654,29 +1689,54 @@ export function formatPlaceRefusal(refusal: PlaceRefusal): string {
 
 /**
  * A cell that WOULD have been offered as a source for the active collect goal
- * but is a member of a live structure the resident depends on. This is the
- * explicit fact that replaces silently dismantling the asset: the cell stays
- * unavailable while the structure validates, and the plan must source the item
- * elsewhere (other sensed/remembered cells, or exploration).
+ * but is refused by a grounded world-truth gate. The marker is the explicit fact
+ * that replaces a silent refusal: the cell stays unavailable and the plan must
+ * source the item elsewhere (other sensed/remembered cells, or exploration).
  *
  * Generic by construction: the reason is a membership predicate, and the
  * diagnostic `structure` field is never matched on.
+ *
+ * Why a cell that matches the active want is NOT offered as a source:
+ *
+ *   live_structure         the cell is a member of a live structure (dismantling
+ *                          the asset is worse than sourcing elsewhere)
+ *   dimension_mismatch     the cell is remembered in ANOTHER dimension
+ *   dimension_unattributed the cell records no dimension at all, so it cannot be
+ *                          attributed to the live world (fail closed, #14)
+ *
+ * The two dimension reasons are the honest report side of
+ * `resourceDimensionVerdict`: the row is never deleted for them.
  */
-export type ResourceSourceExclusionReason = 'live_structure'
+export type ResourceSourceExclusionReason = 'live_structure' | 'dimension_mismatch' | 'dimension_unattributed'
 
 export interface ResourceSourceExclusion {
   /** the item the active collect goal wants */
   item: string
   cell: Vec3Json
   reason: ResourceSourceExclusionReason
-  /** diagnostic structure kind only (never matched on) */
-  structure: string
+  /** diagnostic structure kind only (never matched on); set iff reason is `live_structure` */
+  structure?: string
+  /**
+   * The dimension the row ITSELF records, or `null` when it records none. Never
+   * invented from the durable bucket: the durable key has been measured to hold
+   * wrong-world cells (see `resourceDimensionVerdict`).
+   */
+  recordedDimension?: string | null
+  /** the live dimension the cell was refused in */
+  liveDimension?: string
 }
 
 export const RESOURCE_SOURCE_EXCLUDED = 'RESOURCE_SOURCE_EXCLUDED'
 
+/**
+ * The `live_structure` spelling is unchanged (byte-identical); a dimension
+ * refusal additionally names the recorded dimension (or its absence) and the
+ * live dimension, so one line carries the whole fact.
+ */
 export function formatResourceSourceExclusion(exclusion: ResourceSourceExclusion): string {
-  return `${RESOURCE_SOURCE_EXCLUDED} item=${exclusion.item} cell=${exclusion.cell.x},${exclusion.cell.y},${exclusion.cell.z} reason=${exclusion.reason}`
+  const base = `${RESOURCE_SOURCE_EXCLUDED} item=${exclusion.item} cell=${exclusion.cell.x},${exclusion.cell.y},${exclusion.cell.z} reason=${exclusion.reason}`
+  if (exclusion.reason === 'live_structure') return base
+  return `${base} recorded_dimension=${exclusion.recordedDimension ?? 'none'} live_dimension=${exclusion.liveDimension ?? 'unknown'}`
 }
 
 /**
@@ -1699,6 +1759,8 @@ export type ResourceSourceGapReason =
   | 'remembered_falsified'
   /** the only matching cells are members of a live structure */
   | 'live_structure'
+  /** every matching remembered cell records another / no dimension (#14) */
+  | 'dimension_refused'
   /** matching cells exist, but every offered route was withheld (tool/reach/path) */
   | 'source_withheld'
 
@@ -1713,6 +1775,8 @@ export interface ResourceSourceGap {
   falsified: number
   /** matching cells withheld as live-structure members */
   excluded: number
+  /** matching remembered cells refused because they name another / no dimension */
+  dimensionRefused: number
   /** the grounded next step the mechanical layer can offer right now */
   next: 'explore' | 'escalate'
 }
@@ -1720,7 +1784,7 @@ export interface ResourceSourceGap {
 export const RESOURCE_SOURCE_NONE = 'RESOURCE_SOURCE_NONE'
 
 export function formatResourceSourceGap(gap: ResourceSourceGap): string {
-  return `${RESOURCE_SOURCE_NONE} item=${gap.item} reason=${gap.reason} sensed=${gap.sensed} remembered=${gap.remembered} falsified=${gap.falsified} excluded=${gap.excluded} next=${gap.next}`
+  return `${RESOURCE_SOURCE_NONE} item=${gap.item} reason=${gap.reason} sensed=${gap.sensed} remembered=${gap.remembered} falsified=${gap.falsified} excluded=${gap.excluded} dimension_refused=${gap.dimensionRefused} next=${gap.next}`
 }
 
 /** Remembered matching cells the loaded world proved are no longer the resource. */
@@ -1747,8 +1811,6 @@ function liveStructureIndexOf(state: WorldState): ReadonlyMap<string, string> {
  * with the offered set.
  */
 export function resourceSourceExclusions(state: WorldState): ResourceSourceExclusion[] {
-  const index = liveStructureIndexOf(state)
-  if (index.size === 0) return []
   const focusItem = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   if (focusItem === null) return []
   const out: ResourceSourceExclusion[] = []
@@ -1764,27 +1826,87 @@ export function resourceSourceExclusions(state: WorldState): ResourceSourceExclu
       structure,
     })
   }
-  // (1) Sensed cells the MINE/MOVE/DESCEND families would otherwise offer, using
-  // the SAME source matching as `mineCandidates` (drop match plus the declared
-  // scanned block name, so `flint -> gravel` is covered too).
-  const want = retrievalWant(focusItem)
-  const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
-  for (const block of state.blocks) {
-    if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
-    if (!resourceMatches(block.yield, focusItem) && !(sourceNames?.includes(block.name) ?? false)) continue
-    const structure = index.get(liveStructureCellKey(block.position))
-    if (structure !== undefined) record(block.position, structure)
-  }
-  // (2) Remembered cells the RETRIEVE:known family would otherwise offer, using
-  // the same want matching and dimension re-anchoring as `knownResourceFor`.
-  if (want !== null) {
-    for (const resource of state.signals.knownResources ?? []) {
-      if (!resourceDimensionMatches(resource, state.self.dimension)) continue
-      const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
-      if (!matches) continue
-      const structure = index.get(liveStructureCellKey(resource.position))
-      if (structure !== undefined) record(resource.position, structure)
+  const index = liveStructureIndexOf(state)
+  if (index.size > 0) {
+    // (1) Sensed cells the MINE/MOVE/DESCEND families would otherwise offer, using
+    // the SAME source matching as `mineCandidates` (drop match plus the declared
+    // scanned block name, so `flint -> gravel` is covered too).
+    const want = retrievalWant(focusItem)
+    const sourceNames = want !== null && want.kind === 'ore' ? want.blockNames : null
+    for (const block of state.blocks) {
+      if (block.kind !== 'log' && block.kind !== 'stone' && block.kind !== 'ore') continue
+      if (!resourceMatches(block.yield, focusItem) && !(sourceNames?.includes(block.name) ?? false)) continue
+      const structure = index.get(liveStructureCellKey(block.position))
+      if (structure !== undefined) record(block.position, structure)
     }
+    // (2) Remembered cells the RETRIEVE:known family would otherwise offer, using
+    // the same want matching and dimension re-anchoring as `knownResourceFor`.
+    if (want !== null) {
+      for (const resource of state.signals.knownResources ?? []) {
+        if (!resourceDimensionMatches(resource, state.self.dimension)) continue
+        const matches = want.kind === 'log' ? resource.name.endsWith('_log') : want.blockNames.includes(resource.name)
+        if (!matches) continue
+        const structure = index.get(liveStructureCellKey(resource.position))
+        if (structure !== undefined) record(resource.position, structure)
+      }
+    }
+  }
+  // (3) Remembered cells refused by the dimension gate. Independent of live
+  // structures: an un-attributable cell is withheld whether or not any structure
+  // stands nearby (see `resourceDimensionVerdict`).
+  for (const refusal of resourceDimensionRefusals(state, focusItem)) {
+    const key = liveStructureCellKey(refusal.cell)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(refusal)
+  }
+  return out
+}
+
+/**
+ * The typed `RESOURCE_SOURCE_EXCLUDED ... reason=dimension_mismatch|dimension_unattributed`
+ * facts for the active collect focus: every remembered cell that matches the want
+ * `knownResourceFor` would offer and is refused because it cannot be attributed to
+ * the live dimension.
+ *
+ * Enumeration only; the refusal itself is applied by `resourceDimensionMatches`
+ * at the source selectors, so this marker cannot disagree with the offered set.
+ * Each fact names the cell, the dimension the row records (or its absence) and the
+ * live dimension - the three values needed to tell "another world" apart from
+ * "nowhere recorded". Pure.
+ */
+export function resourceDimensionRefusals(
+  state: WorldState,
+  focusItem?: string | null,
+): ResourceSourceExclusion[] {
+  const item = focusItem ?? state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
+  if (item === null) return []
+  const want = retrievalWant(item)
+  if (want === null) return []
+  const live = state.self.dimension
+  const out: ResourceSourceExclusion[] = []
+  const seen = new Set<string>()
+  for (const resource of state.signals.knownResources ?? []) {
+    const verdict = resourceDimensionVerdict(resource, live)
+    if (verdict === 'same') continue
+    // The SAME want matching `knownResourceFor` uses: a logged cell matches by
+    // suffix, every other declared source name by membership (or by being the
+    // wanted item itself, which is how a remembered drop is routed).
+    const matches =
+      want.kind === 'log'
+        ? resource.name.endsWith('_log')
+        : want.blockNames.includes(resource.name) || resource.name === item
+    if (!matches) continue
+    const key = liveStructureCellKey(resource.position)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      item,
+      cell: { x: resource.position.x, y: resource.position.y, z: resource.position.z },
+      reason: verdict === 'unattributed' ? 'dimension_unattributed' : 'dimension_mismatch',
+      recordedDimension: resource.dimension ?? null,
+      liveDimension: live,
+    })
   }
   return out
 }
@@ -1838,7 +1960,14 @@ export function resourceSourceGapFor(
   const rememberedOpen = rememberedResources.filter(
     (resource) => !isLiveStructureMember(liveStructures, resource.position),
   ).length
-  const excluded = exclusions.filter((exclusion) => exclusion.item === want.item).length
+  const excluded = exclusions.filter(
+    (exclusion) => exclusion.item === want.item && exclusion.reason === 'live_structure',
+  ).length
+  // Kept separate from `excluded`: a dimension refusal is not a protected
+  // structure, and reporting it as one would name the wrong blocker.
+  const dimensionRefused = exclusions.filter(
+    (exclusion) => exclusion.item === want.item && exclusion.reason !== 'live_structure',
+  ).length
   const falsified = (state.knownResourceEvidence ?? []).filter((evidence) => evidence.status === 'falsified').length
   const reason: ResourceSourceGapReason =
     sensedOpen > 0 || rememberedOpen > 0
@@ -1847,7 +1976,9 @@ export function resourceSourceGapFor(
         ? 'remembered_falsified'
         : excluded > 0
           ? 'live_structure'
-          : 'no_source_sensed'
+          : dimensionRefused > 0
+            ? 'dimension_refused'
+            : 'no_source_sensed'
   const next: ResourceSourceGap['next'] = candidates.some((candidate) => candidate.meta.explore === true)
     ? 'explore'
     : 'escalate'
@@ -1858,6 +1989,7 @@ export function resourceSourceGapFor(
     remembered: rememberedResources.length,
     falsified,
     excluded,
+    dimensionRefused,
     next,
   }
 }
@@ -2595,12 +2727,48 @@ export function entryCandidates(
   // ONCE with the obstruction instead of re-arming the same unreachable walk.
   const route = planVerticalApproachDetailed(verticalInputFor(state, entry.enterCell))
   const verticalMeta = verticalPlanMeta(route.plan, Math.floor(state.self.position.y), entry.enterCell.y)
-  // The same reuse fallback a MOVE candidate carries, so a remembered tunnel
-  // entry that turns out to be unusable live still has a second grounded leg.
+  // The SECOND grounded plan of the SAME contract, so the entry's vertical leg
+  // has a composed fallback the executor can run when the first one cannot close
+  // the height. Two live shapes made this necessary (both the operator's floated
+  // gate, both ending in `PORTAL_WALK_IN_REFUSED ... refusal=not_level`):
+  //
+  //   * run.jsonl 2026-09-22T15:47:37Z `ENTER:27,67,9`, interior (27,67,9) five
+  //     above a body at y=62: the primary was a `reuse` plan whose remembered
+  //     tunnel sat at (-7,66,9), 34 blocks west. The leg STALLED rather than
+  //     refusing typed, and `runVerticalContract` consults `fallbackVertical`
+  //     only on the typed refusal - so the already-grounded own-column pillar
+  //     (`routeSig ...:pillar=0:fallback=pillar`) was never executed.
+  //   * run.jsonl 2026-09-22T15:56:03Z `ENTER:26,67,9`, seven above: the primary
+  //     was a `staircase-up` whose dig/step cell was (22,67,1) - a sensor step cut
+  //     four blocks west and eight north of the interior - and it carried
+  //     `fallback=none`, so there was nothing to fall back to at all.
+  //
+  // Both legs come from the ONE planner (`planVerticalApproachDetailed`): the
+  // primary is its answer with the body's remembered tunnel, the fallback is its
+  // answer with that tunnel and the sensor's step-cut pool removed - i.e. the
+  // own-column ascent (`pillar` / the up-staircase the body's own column can
+  // cut) that `ascentRouteTo` grounds for every other ascent. No second planner,
+  // no ranking: both plans realize the SAME climb to the interior's level and are
+  // executed in a fixed order, primary first. Gated to an interior ABOVE the body
+  // beyond the walk-in tolerance, so a level gate and a one-block step-up keep
+  // exactly the meta they had.
+  const climbInput = verticalInputFor(state, entry.enterCell)
+  const climbNeeded = entry.enterCell.y - Math.floor(state.self.position.y) > PORTAL_WALK_IN_LEVEL_TOLERANCE
   const tunnelFallback =
-    route.plan?.kind === 'reuse'
-      ? planVerticalApproach({ ...verticalInputFor(state, entry.enterCell), tunnel: null })
+    route.plan?.kind === 'reuse' ? planVerticalApproach({ ...climbInput, tunnel: null }) : null
+  // The portal plane is never mined: the own-column ascent is grounded WITHOUT
+  // the sensor's step cuts, so the fallback can never choose a dig that opens the
+  // frame (`candidates.ts` filters protected structure out of `stepCuts` too, but
+  // the entry must not depend on that filter alone).
+  const ownColumnFallback =
+    tunnelFallback === null && climbNeeded && route.plan !== null && route.plan.kind !== 'pillar'
+      ? planVerticalApproach({ ...climbInput, tunnel: null, stepCuts: null })
       : null
+  const fallbackPlan = tunnelFallback ?? ownColumnFallback
+  // EXACTLY the same condition as before for a `reuse` primary (byte-identical
+  // meta, including the `fallbackVertical: 'none'` a tunnel-less descent emits),
+  // plus the own-column ascent only where it is a genuinely different second leg.
+  const declaresFallback = route.plan?.kind === 'reuse' || ownColumnFallback !== null
   const meta: Record<string, string | number | boolean> = {
     tick: state.tick,
     enterX: entry.enterCell.x,
@@ -2613,7 +2781,7 @@ export function entryCandidates(
     // arrival, so this can never transfer through an unlit frame.
     ...(entry.unverified === true ? { entryUnverified: true } : {}),
     ...verticalMeta,
-    ...(route.plan?.kind === 'reuse' ? fallbackVerticalMeta(tunnelFallback) : {}),
+    ...(declaresFallback ? fallbackVerticalMeta(fallbackPlan) : {}),
     ...(route.plan === null && route.ascentRefusal !== null
       ? { entryRouteRefusal: route.ascentRefusal.reason }
       : {}),
@@ -3310,7 +3478,7 @@ function generateRawCandidates(
   let prospect: ProspectResult = { candidates: [], refusal: null }
   const armorRefusals = armorEquipRefusals(state.self.armor, state.inventory.counts)
   const current = state.goalQueue?.current ?? null
-  const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
+  const focusItem = current === null ? (state.goal.targetItem ?? null) : current.targetItem
   const goalKind = current?.kind ?? 'collect'
   const strategy = current?.strategy ?? null
   const descendTargetY = current?.kind === 'descend' ? (current.targetY ?? null) : null
@@ -3343,6 +3511,9 @@ function generateRawCandidates(
       }
       break
     }
+    case 'explore':
+      candidates.push(...exploreFallbackCandidates(state, options, null, goalKind))
+      break
     case 'craft': {
       const craft = craftCandidates(state, options, focusItem)
       candidates.push(...craft.candidates)
@@ -8703,16 +8874,56 @@ export function staleKnownResources(
 
 /**
  * Issue #14 dimension re-anchoring: a remembered coordinate is only meaningful
- * in the dimension it was scanned in. Entries written before the field existed
- * carry no dimension and remain valid (backwards compatible); an entry whose
+ * in the dimension it was scanned in.
+ *
+ * The three-way verdict, not a boolean, because "another world" and "no world
+ * recorded" are different facts and only the first is evidence:
+ *
+ *   same          the row names the live dimension: the cell is a target here
+ *   other         the row names a different dimension: the cell is a place in
+ *                 another world (a Nether fortress cell is not in the overworld)
+ *   unattributed  the row names NO dimension: we do not know where the cell is
+ *
+ * `unattributed` FAILS CLOSED (measured, run-mucqgrdo-21plr). Treating a missing
+ * dimension as "matches everything" is the repo's forbidden shape - unknown read
+ * as satisfied - one level down from the goal layer: it is exactly how an
+ * overworld tree cell (a `jungle_log` at y=85, impossible in the Nether) becomes
+ * a Nether locomotion target that the body then burns ticks pillar-climbing
+ * toward (`RETRIEVE:known:log:b8_85_6 ... reason=needs_ascend`). Not knowing
+ * where a cell is must never be a licence to walk to it.
+ *
+ * The row is never deleted for this (durable memory is not dropped on ignorance):
+ * it is kept, reported typed by the caller
+ * (`RESOURCE_SOURCE_EXCLUDED ... reason=dimension_unattributed recorded_dimension=none
+ * live_dimension=...`), and becomes usable again through the ordinary write paths,
+ * which stamp the world a cell was actually observed in - including the merge's
+ * re-observation refresh, which heals a row that never carried one.
+ */
+export type ResourceDimensionVerdict = 'same' | 'other' | 'unattributed'
+
+/** Prefix-insensitive dimension equality, the same form the durable key uses. */
+function normalizeDimensionId(value: string): string {
+  return value.replace(/^minecraft:/, '').toLowerCase()
+}
+
+/**
+ * Classify a remembered cell against the live dimension. Pure; no candidate and
+ * no durable row is changed here.
+ */
+export function resourceDimensionVerdict(resource: KnownResource, dimension: string): ResourceDimensionVerdict {
+  const recorded = typeof resource.dimension === 'string' ? resource.dimension.trim() : ''
+  if (recorded.length === 0) return 'unattributed'
+  return normalizeDimensionId(recorded) === normalizeDimensionId(dimension) ? 'same' : 'other'
+}
+
+/**
+ * True only when the cell is attributable to the live dimension. An entry whose
  * recorded dimension differs from the bot's current one is NEVER offered as a
- * retrieval target. This is a world-truth filter, not a preference: the cell is
- * a different place in a different dimension.
+ * retrieval target, and neither is an entry that records none. This is a
+ * world-truth filter, not a preference.
  */
 export function resourceDimensionMatches(resource: KnownResource, dimension: string): boolean {
-  if (resource.dimension === undefined || resource.dimension.length === 0) return true
-  const normalize = (value: string): string => value.replace(/^minecraft:/, '').toLowerCase()
-  return normalize(resource.dimension) === normalize(dimension)
+  return resourceDimensionVerdict(resource, dimension) === 'same'
 }
 
 /**
@@ -11462,6 +11673,102 @@ function evaluateCandidate(
   return reachabilityRecord(candidate, target, world, result, context)
 }
 
+/**
+ * THE STANCE FACT for one ATTACK: is there a cell the body can stand on,
+ * legally, from which this entity is inside the melee envelope AND visible?
+ *
+ * `null` means NO VERDICT - the host did not supply a stance probe, or could not
+ * read the entity's own geometry - and every existing rule then applies
+ * unchanged. That is deliberate: an unavailable probe must never delete the only
+ * productive action (the same rule every other probe in this gate follows), and
+ * it is what keeps every pre-existing fixture and offline caller byte-identical.
+ *
+ * A verdict of `stand === null` (no legal, visible cell inside the envelope) or
+ * a stance the body cannot walk to is a CAN refusal. The ATTACK is withheld with
+ * the typed `no_attack_stand` reason and the full evidence, never leased into a
+ * `out_of_reach` / `verify_failed` attempt that could not have swung.
+ */
+interface AttackStandVerdict {
+  reachable: boolean
+  result: ReachabilityResult
+  missingCapabilities: Capability[]
+  evidence: AttackStandEvidence | null
+}
+
+function attackStandVerdict(
+  candidate: Candidate,
+  context: ReachabilityGateContext,
+): AttackStandVerdict | null {
+  const probe = context.options.reachability?.attackStandProbe ?? null
+  if (probe === null) return null
+  const position = candidate.target
+  const entityId =
+    typeof candidate.meta.entityId === 'number' ? candidate.meta.entityId : candidate.targetEntityId
+  if (position === null || entityId === null) return null
+  const fact = probe({ entityId, position })
+  if (fact === null) return null
+  const base = {
+    actionId: candidate.id,
+    entityId,
+    targetName: candidate.targetName,
+    entityPosition: position,
+    reach: MELEE_ATTACK_REACH,
+  }
+  if (fact.stand === null) {
+    // No cell inside the melee envelope is a legal stance from which the entity
+    // is visible: the screenshot shape (embedded in geometry) and the shape of a
+    // target only reachable from cells that are solid, on fire, or occluded.
+    return {
+      reachable: false,
+      result: { reachable: false, reason: 'no_attack_stand', missingCapabilities: [] },
+      missingCapabilities: [{ kind: 'standable_approach' }],
+      evidence: {
+        ...base,
+        refusal: fact.refusal ?? 'no_standable_cell',
+        nearest: fact.nearest,
+        stand: null,
+        path: null,
+      },
+    }
+  }
+  if (fact.onBody) {
+    // The body already stands on a legal, visible cell inside the envelope, so a
+    // swing can land right now. This is the engaged-attacker response: a mob that
+    // walked up to the body stays attackable whatever any path probe says.
+    return {
+      reachable: true,
+      result: { reachable: true, reason: 'reachable', missingCapabilities: [] },
+      missingCapabilities: [],
+      evidence: null,
+    }
+  }
+  // The stance exists; the body must be able to WALK to it. Same probe (and same
+  // far-leg relaxation) every other locomotion leg in this gate uses, so a stance
+  // is not refused by a probe of the body's own neighbourhood.
+  const standFar = distance(context.state.self.position, fact.stand) > FAR_LEG_PROBE_RADIUS
+  const path = standFar ? 'unknown' : (context.options.reachability?.pathProbe?.(fact.stand) ?? 'unknown')
+  if (path === 'no_path') {
+    return {
+      reachable: false,
+      result: { reachable: false, reason: 'no_attack_stand', missingCapabilities: [] },
+      missingCapabilities: [{ kind: 'open_path' }],
+      evidence: {
+        ...base,
+        refusal: 'no_reachable_stand',
+        nearest: fact.nearest,
+        stand: fact.stand,
+        path,
+      },
+    }
+  }
+  return {
+    reachable: true,
+    result: { reachable: true, reason: 'reachable', missingCapabilities: [] },
+    missingCapabilities: [],
+    evidence: null,
+  }
+}
+
 function evaluateOrdinaryAttackCandidate(
   candidate: Candidate,
   context: ReachabilityGateContext,
@@ -11488,6 +11795,27 @@ function evaluateOrdinaryAttackCandidate(
   const targetFact = reachabilityTargetFor(context.state, candidate)
   const world = reachabilityWorldFor(context.state, candidate, context.options.reach, context.column)
   if (isHunt) return evaluateHuntAttackCandidate(candidate, context, distanceToTarget, targetFact, world)
+
+  // THE STANCE GATE. Contact is only executable from a position that can actually
+  // hit the target: `distanceToTarget <= MELEE_THREAT_REACH` used to be accepted
+  // unconditionally, which is how a magma cube embedded in the wall beside the
+  // body was leased into `MECHANICALLY_BLOCKED failure=verify_failed` /
+  // `out_of_reach` on repeat. A stance that is standable, hazard-free, inside the
+  // melee envelope and has line of sight to the entity is required, and when the
+  // body is not already on one the stance must be walkable.
+  const stance = attackStandVerdict(candidate, context)
+  if (stance !== null) {
+    return stance.reachable
+      ? reachabilityRecord(candidate, targetFact, world, stance.result, context, stance.evidence)
+      : reachabilityRecord(
+          candidate,
+          targetFact,
+          world,
+          { reachable: false, reason: 'no_attack_stand', missingCapabilities: stance.missingCapabilities },
+          context,
+          stance.evidence,
+        )
+  }
 
   // Contact is already executable: do not let a path probe erase a mob the body
   // can hit right now. WHICH response to take remains Jev's choice.
@@ -11577,6 +11905,31 @@ function evaluateHuntAttackCandidate(
       },
       context,
     )
+  }
+  // THE STANCE GATE for a kill, applied where the hunt's walking budget says the
+  // body is expected to be able to fight: inside `HUNT_APPROACH_BUDGET`. A target
+  // that far away still needs a stance it can reach and hit from - the measured
+  // enderman at 6.11 m was INSIDE this budget, so the budget branch below accepted
+  // it and the lease burned 47 s with zero swings. Beyond the budget the ordinary
+  // route candidates advance the body and the target is re-evaluated as it closes,
+  // so the existing `attackPathProbe` / `hunt_approach_budget` contract stays in
+  // charge there and nothing is refused before it is walked toward.
+  if (distanceToTarget <= HUNT_APPROACH_BUDGET) {
+    const stance = attackStandVerdict(candidate, context)
+    if (stance !== null && !stance.reachable) {
+      return reachabilityRecord(
+        candidate,
+        targetFact,
+        world,
+        {
+          reachable: false,
+          reason: 'no_attack_stand',
+          missingCapabilities: stance.missingCapabilities,
+        },
+        context,
+        stance.evidence,
+      )
+    }
   }
   if (distanceToTarget <= MELEE_THREAT_REACH || distanceToTarget <= HUNT_APPROACH_BUDGET) {
     return reachabilityRecord(
@@ -11690,9 +12043,18 @@ function reachabilityRecord(
   world: ReachabilityWorld,
   result: ReachabilityResult,
   context: ReachabilityGateContext,
+  /**
+   * Optional typed refusal evidence for this verdict, carried on the candidate's
+   * own `meta` (the same seam `digAccessRefusal` uses) so the controller can
+   * mirror the fact when it logs the withhold. Absent for every verdict that has
+   * nothing extra to say, which keeps every existing marker unchanged.
+   */
+  evidence: AttackStandEvidence | null = null,
 ): CandidateReachability {
+  const withEvidence: Candidate =
+    evidence === null ? candidate : { ...candidate, attackStandRefusal: evidence }
   return {
-    candidate: withAffordance(candidate, result),
+    candidate: withAffordance(withEvidence, result),
     result,
     fingerprint: reachabilityFingerprint({
       target,
@@ -11917,7 +12279,25 @@ export function deriveReachabilityAbilities(
         ascendMissing.push({ kind: 'tool', tool: requiredTool, tier: ascent.blocker?.requiredTier ?? 0 })
       }
     }
-    if (ascendMissing.length === 0) ascendMissing.push({ kind: 'ascend_plan' })
+    if (ascendMissing.length === 0) {
+      // Nothing else named a fact, and a bare `ascend_plan` would hide WHICH
+      // concrete HOW was rejected (the live trial: `place=1 hazard=0 tools=[]`
+      // with 834 identical bare-token withholdings while the body stood frozen).
+      // Name the plan the column carried and the precondition that stopped it -
+      // the same rule `descend_plan` already follows - so the refusal is
+      // actionable instead of retryable.
+      const feetCell = {
+        x: Math.floor(state.self.position.x),
+        y: Math.floor(state.self.position.y),
+        z: Math.floor(state.self.position.z),
+      }
+      // The ONLY fact this branch can be holding is the column's support: every
+      // other precondition (placeable block, headroom + tool, safe-column refusal)
+      // pushes its own capability above, and a plan is grounded unless one of them
+      // refused. `plan !== null && !footingSolid` is therefore the live shape.
+      const reason: AscendPlanRefusalReason = plan !== null && !column.footingSolid ? 'no_footing' : 'plan_unavailable'
+      ascendMissing.push({ kind: 'ascend_plan', plan: plan?.kind ?? null, reason, cell: feetCell })
+    }
   }
 
   const descendMissing: Capability[] = []

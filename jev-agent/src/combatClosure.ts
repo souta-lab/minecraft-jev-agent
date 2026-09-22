@@ -24,6 +24,12 @@
 //   safety/lease preempted the commitment           -> COMBAT_INTERRUPTED
 //   the bounded lease expired, target alive         -> COMBAT_TIMEOUT
 //   kill verified but the HUNT_DROP item is not in the inventory -> DROP_NOT_ACQUIRED
+//
+// It additionally owns the STANCE vocabulary (`AttackStandFact` and friends
+// below): the same "CAN this fight physically happen" question asked
+// horizontally, from a cell the body can legally stand on and see the target
+// from. Type-only import, so this stays a leaf module with no runtime deps.
+import type { Vec3Json } from './state.ts'
 
 /**
  * The hunt's APPROACH BUDGET in blocks: a committed producer inside this distance
@@ -38,6 +44,26 @@
  * ~37 blocks away offered as a kill that produced 0 swings.
  */
 export const HUNT_APPROACH_BUDGET = 24
+
+/**
+ * THE melee envelope: the distance from which `bot.attack` actually lands a blow.
+ *
+ * This is the executor's own swing bound - `executor.ts` publishes it as
+ * `MELEE_ATTACK_RANGE` and swings whenever the 3-D feet-to-feet distance is at or
+ * inside it (`runAttack`). It is defined HERE, next to `HUNT_APPROACH_BUDGET`,
+ * for the same reason: the CANDIDATE-side "can a swing land from here" gate and
+ * the executor's swing loop must answer with ONE number, or the gate admits a
+ * stance the executor refuses to swing from (the measured `out_of_reach`
+ * zero-swing lease) or refuses a stance the executor would have swung from
+ * (deleting a grounded attack). `executor.ts` aliases this constant; there is no
+ * second copy of the number.
+ *
+ * It is NOT `threat.ts MELEE_THREAT_REACH` (3.2): that is the danger/contact
+ * envelope the threat tracker and the keep-distance solver share, deliberately a
+ * little wider than the swing bound so a mob already on the body always produces
+ * a reaction. Contact and hittability are separate facts and stay separate.
+ */
+export const MELEE_ATTACK_REACH = 3.1
 
 /** The §9 outcome of one bounded combat commitment against ONE entity id. */
 export type CombatOutcome =
@@ -217,6 +243,259 @@ export function classifyContactApproach(facts: ContactGeometryFacts): ContactApp
 /** The vertical component of a contact gap, in whole blocks, from two feet Ys. */
 export function contactGapY(bodyFeetY: number, targetFeetY: number): number {
   return Math.floor(targetFeetY) - Math.floor(bodyFeetY)
+}
+
+// ---------------------------------------------------------------------------
+// THE STANCE: the horizontal half of the same question.
+//
+// `classifyContactApproach` above answers the VERTICAL component of a contact
+// gap (can a walk bring the melee envelope onto the target's LEVEL). It does not
+// answer whether any legal, walkable STANCE exists from which the target is
+// inside the envelope and actually visible - and "a path to some adjacent cell"
+// is not that fact.
+//
+// Measured live (operator screenshot + log, Nether tunnel): a magma cube
+// embedded in the wall beside the body. `distance <= MELEE_THREAT_REACH` made
+// the gate return `reachable` unconditionally, the body leased the ATTACK, and
+// every swing ended `MECHANICALLY_BLOCKED failure=verify_failed` /
+// `out_of_reach` - health and ticks spent from a position the target could not
+// be hit from. The same class on an enderman: the entity was sensed at 6.11 m,
+// `pathfinder goal WAS set 5x`, the distance froze for ~47 s and ZERO swings
+// landed, because no stance inside the melee envelope was reachable at all.
+//
+// So the OFFER is grounded on a stance, not on proximity:
+//
+//   standable + hazard-free + inside the melee envelope + line of sight
+//   + (the body is already there, or the body can walk to it)
+//
+// The search reuses the tree's existing machinery and adds no parallel
+// geometry: standability is the sensor's own `isStandable` rule, the hazard
+// classes are `envHazard.ts`'s, the ray is the SAME `world.raycast` the threat
+// cover logic casts, the reach measurement is the executor's own feet-to-feet
+// distance, and the route verdict is the gate's existing path probe.
+// ---------------------------------------------------------------------------
+
+/** Why no stance can produce a blow on the entity. Typed; never a silent drop. */
+export type AttackStandRefusal =
+  /** no cell inside the melee envelope is a legal stance at all */
+  | 'no_standable_cell'
+  /** stances exist, but the nearest one is a hazard column */
+  | 'hazardous_stand'
+  /** legal stances exist, but the entity is occluded from every one of them */
+  | 'no_line_of_sight'
+  /** a legal, visible stance exists but the body cannot walk to it */
+  | 'no_reachable_stand'
+
+/** The single stance fact a refusal is reported from. */
+export interface AttackStandRejection {
+  cell: Vec3Json
+  /** eye-to-aim-point distance from that stance, the way the executor measures it */
+  distance: number
+  reason: 'not_standable' | 'hazard' | 'occluded' | 'out_of_reach'
+}
+
+/** The stance verdict for one entity. `stand === null` means NO stance exists. */
+export interface AttackStandFact {
+  /** the nearest legal, hittable stance to the BODY, or null when none exists */
+  stand: Vec3Json | null
+  /** the melee distance from that stance to the entity's aim point */
+  standDistance: number | null
+  /** the body already stands on that stance, so a swing can land right now */
+  onBody: boolean
+  /** the nearest stance the search examined and refused, when it examined one */
+  nearest: AttackStandRejection | null
+  /** why no stance qualified; null exactly when `stand !== null` */
+  refusal: AttackStandRefusal | null
+}
+
+/**
+ * The world questions a stance search asks. The host wires these to live truth;
+ * a fixture injects its own. Exactly the shape `InteractionStandProbe` uses for
+ * block interaction stands (`executor.ts`), extended with the one fact a melee
+ * stance needs and a block stand does not: whether the target is visible from it.
+ */
+export interface AttackStandWorld {
+  /** THE standability rule (`state.ts isStandable`): feet+head passable over solid support */
+  standable(x: number, y: number, z: number): boolean
+  /** a hazard block occupies the stance's own column (fire / lava class) */
+  hazard(x: number, y: number, z: number): boolean
+  /** the same world raycast the cover logic uses: eyes at this stance -> the entity */
+  visible(x: number, y: number, z: number): boolean
+}
+
+export interface AttackStandInput {
+  /**
+   * The sensed entity: its feet position and its own height. The aim point is
+   * `position + height / 2` - the SAME point `runAttack` looks at before it
+   * swings, so the visibility test and the swing agree about what is aimed at.
+   */
+  entity: { position: Vec3Json; height: number }
+  /** the body's own feet position; the nearest stance to it is preferred */
+  feet: Vec3Json
+  /** the melee envelope (`MELEE_ATTACK_REACH`) */
+  reach: number
+  world: AttackStandWorld
+}
+
+/** The executor's own contact measurement, from a stance's block centre. */
+export function stanceMeleeDistance(stance: Vec3Json, entityPosition: Vec3Json): number {
+  return Math.hypot(
+    entityPosition.x - (stance.x + 0.5),
+    entityPosition.y - stance.y,
+    entityPosition.z - (stance.z + 0.5),
+  )
+}
+
+/**
+ * The executor's own contact measurement, VERBATIM (`runAttack`): both endpoints
+ * are feet positions. Used for the stance the body is already standing on, where
+ * the body's real float position is known - a cell centre is only the estimate
+ * for a cell the body would have to walk to, and using it for the body's own cell
+ * would refuse a swing the executor takes at its own boundary.
+ */
+export function bodyMeleeDistance(bodyFeet: Vec3Json, entityPosition: Vec3Json): number {
+  return Math.hypot(
+    entityPosition.x - bodyFeet.x,
+    entityPosition.y - bodyFeet.y,
+    entityPosition.z - bodyFeet.z,
+  )
+}
+
+/**
+ * Every stance inside the melee envelope of the entity, nearest to the BODY
+ * first, and the verdict for the nearest one that qualifies. Pure: the same
+ * inputs always give the same `AttackStandFact`, and no bot, clock or model is
+ * read here.
+ *
+ * The entity's OWN 1x2 column is not a stance - it is what the swing lands on -
+ * and is excluded before any world read, so a mob standing in an open cell can
+ * never offer its own cell as the position to hit it from.
+ */
+export function selectAttackStand(input: AttackStandInput): AttackStandFact {
+  const entityFeet = {
+    x: Math.floor(input.entity.position.x),
+    y: Math.floor(input.entity.position.y),
+    z: Math.floor(input.entity.position.z),
+  }
+  const bodyFeet = {
+    x: Math.floor(input.feet.x),
+    y: Math.floor(input.feet.y),
+    z: Math.floor(input.feet.z),
+  }
+  const span = Math.ceil(input.reach)
+  const stances: { cell: Vec3Json; distance: number; fromBody: number }[] = []
+  for (let dy = -span; dy <= span; dy += 1) {
+    for (let dx = -span; dx <= span; dx += 1) {
+      for (let dz = -span; dz <= span; dz += 1) {
+        const cell = { x: entityFeet.x + dx, y: entityFeet.y + dy, z: entityFeet.z + dz }
+        // The entity's own body column: the swing's target, not a place to stand.
+        if (dx === 0 && dz === 0 && (dy === 0 || dy === 1)) continue
+        const onBody = cell.x === bodyFeet.x && cell.y === bodyFeet.y && cell.z === bodyFeet.z
+        // The body's own stance is measured from where the body IS (the executor's
+        // own expression); a stance it would walk to is measured from the cell.
+        const distance = onBody
+          ? bodyMeleeDistance(input.feet, input.entity.position)
+          : stanceMeleeDistance(cell, input.entity.position)
+        if (distance > input.reach) continue
+        stances.push({
+          cell,
+          distance,
+          fromBody: Math.hypot(cell.x + 0.5 - input.feet.x, cell.z + 0.5 - input.feet.z),
+        })
+      }
+    }
+  }
+  stances.sort((a, b) => a.fromBody - b.fromBody || a.distance - b.distance || a.cell.y - b.cell.y)
+
+  let nearest: AttackStandRejection | null = null
+  for (const stance of stances) {
+    const onBody =
+      stance.cell.x === bodyFeet.x && stance.cell.y === bodyFeet.y && stance.cell.z === bodyFeet.z
+    // A stance the body is ALREADY in is still required to be standable and
+    // hazard-free: uniform rule, no special case. A body standing in fire has a
+    // grounded escape (RETREAT / the hazard-escape candidates), and trading hits
+    // while burning is not the only position it can swing from.
+    if (!input.world.standable(stance.cell.x, stance.cell.y, stance.cell.z)) {
+      nearest ??= { cell: stance.cell, distance: stance.distance, reason: 'not_standable' }
+      continue
+    }
+    if (input.world.hazard(stance.cell.x, stance.cell.y, stance.cell.z)) {
+      nearest ??= { cell: stance.cell, distance: stance.distance, reason: 'hazard' }
+      continue
+    }
+    if (!input.world.visible(stance.cell.x, stance.cell.y, stance.cell.z)) {
+      // The screenshot shape: an entity in contact but with solid geometry
+      // between the eyes and it. No swing from here can land.
+      nearest ??= { cell: stance.cell, distance: stance.distance, reason: 'occluded' }
+      continue
+    }
+    return { stand: stance.cell, standDistance: stance.distance, onBody, nearest, refusal: null }
+  }
+  return {
+    stand: null,
+    standDistance: null,
+    onBody: false,
+    nearest,
+    refusal:
+      nearest === null
+        ? 'no_standable_cell'
+        : nearest.reason === 'hazard'
+          ? 'hazardous_stand'
+          : nearest.reason === 'occluded'
+            ? 'no_line_of_sight'
+            : 'no_standable_cell',
+  }
+}
+
+/** `NO_ATTACK_STAND` - the typed line for an attack no stance can land. */
+export const NO_ATTACK_STAND = 'NO_ATTACK_STAND'
+
+/**
+ * The evidence one `no_attack_stand` withhold is mirrored with. Everything a
+ * reviewer needs to see WHY the ATTACK was withheld without re-deriving the
+ * geometry: the entity, the melee constant that decided it, the stance the
+ * search refused, and - for `no_reachable_stand` - the stance that WAS legal
+ * and visible together with the route verdict that refused it.
+ */
+export interface AttackStandEvidence {
+  actionId: string
+  entityId: number
+  targetName: string | null
+  entityPosition: Vec3Json
+  /** the melee envelope the verdict was reached with (`MELEE_ATTACK_REACH`) */
+  reach: number
+  refusal: AttackStandRefusal
+  nearest: AttackStandRejection | null
+  /** the legal, visible stance that was refused for lack of a route, if any */
+  stand: Vec3Json | null
+  /** the gate's own route verdict for that stance */
+  path: string | null
+}
+
+/**
+ * The observability line for an ATTACK withheld BY CAN because no stance both
+ * reaches the entity and can hit it. Mirrors `formatContactUnreachable`: it
+ * names the entity, the constant, the nearest stance the search examined and
+ * the fact that refused it, so a zero-swing lease is never the first evidence
+ * that the body could not hit the target.
+ */
+export function formatNoAttackStand(evidence: AttackStandEvidence): string {
+  const at = `${round2(evidence.entityPosition.x)},${round2(evidence.entityPosition.y)},${round2(evidence.entityPosition.z)}`
+  const nearest =
+    evidence.nearest === null
+      ? 'none'
+      : `${evidence.nearest.cell.x},${evidence.nearest.cell.y},${evidence.nearest.cell.z}`
+  const nearestDistance = evidence.nearest === null ? 'none' : String(round2(evidence.nearest.distance))
+  const nearestRefusal = evidence.nearest === null ? 'none' : evidence.nearest.reason
+  const stand =
+    evidence.stand === null ? 'none' : `${evidence.stand.x},${evidence.stand.y},${evidence.stand.z}`
+  return (
+    `${NO_ATTACK_STAND} actionId=${evidence.actionId} entity=e${evidence.entityId} ` +
+    `target=${evidence.targetName ?? 'unknown'} at=${at} reach=${evidence.reach} reason=${evidence.refusal} ` +
+    `nearest_stand=${nearest} nearest_distance=${nearestDistance} nearest_refusal=${nearestRefusal} ` +
+    `stand=${stand} path=${evidence.path ?? 'unknown'} ` +
+    `-> no stance within melee reach can land a swing on this entity; withheld by CAN, never leased as a 0-swing attempt`
+  )
 }
 
 /** `HUNT_CONTACT_UNREACHABLE` - the typed line for a target no remedy reaches. */

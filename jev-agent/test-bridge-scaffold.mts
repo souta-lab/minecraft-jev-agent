@@ -68,7 +68,7 @@ import {
 } from './src/bridgeRoute.ts'
 import type { BridgeProbe, BridgeProbeCell, BridgeDir } from './src/bridgeRoute.ts'
 import type { AgentSignals, DescentDir, DescentOption, DescentRefusalReason, InventoryState, SelfState, Vec3Json, WorldState } from './src/state.ts'
-import { distance } from './src/state.ts'
+import { distance, probeBridgeDirection } from './src/state.ts'
 import type { GoalQueueState, QueuedGoal } from './src/goalQueue.ts'
 
 let failures = 0
@@ -1156,6 +1156,70 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
       world.terrain.name({ x: 3, y: 63, z: 0 }) === 'cobblestone',
     `start="${start}" steps=${steps.length} [${steps.map((line) => line.message).join(' | ')}] end="${end}" body=${key(bodyCell)}`,
   )
+}
+
+// (vi-c) SELF-LANDING over a VOID: the offer grounds only as "this step CREATES its
+// own floor and steps onto it" (no far bank within the probe depth). The executor's
+// live re-probe must carry the SAME placement identity the offer used, or the rule
+// answers its historical `no_verified_landing` and the crossing can never place a
+// single block - which is exactly the unsupported span between a ledge and a
+// floated gate.
+{
+  // A single floor cell under the body and nothing else: every direction is a
+  // bottomless void, so no span can end on a verified far side within depth 4.
+  // The probe is the REAL sensor (`probeBridgeDirection`), because the self-landing
+  // branch is grounded on the pocket's own face-adjacency flood read, which only
+  // the sensor fills (`state.ts:4130-4148`).
+  const terrain = new Terrain()
+  terrain.set({ x: 0, y: 63, z: 0 }, 'stone')
+  const feet: Vec3Json = { x: 0, y: 64, z: 0 }
+  const target: Vec3Json = { x: 2, y: 64, z: 0 }
+  const placeable = { name: 'cobblestone', count: 8 }
+  const { bot, position } = makeBridgeBot(terrain, feet, { cobblestone: 8 })
+  const probes = (['E', 'W', 'N', 'S'] as BridgeDir[]).map((dir) =>
+    probeBridgeDirection(bot, feet, dir, BRIDGE_PROBE_DEPTH),
+  )
+  const offered = planBridgeRoute({ selfFeet: feet, target, probes, placeable })
+  check(
+    '(vi-c) over a void the offer grounds a SELF-LANDING span of one cell, naming the block that becomes the floor',
+    offered.plan !== null &&
+      offered.plan.selfLanding === true &&
+      offered.plan.span === 1 &&
+      offered.plan.dir === 'E' &&
+      offered.plan.line.includes('self_landing=true'),
+    offered.plan === null
+      ? `refusal=${offered.refusal.reason} detail=${offered.refusal.detail}`
+      : `span=${offered.plan.span} dir=${offered.plan.dir} selfLanding=${String(offered.plan.selfLanding)} line="${offered.plan.line}"`,
+  )
+  if (offered.plan !== null) {
+    const plan = offered.plan
+    const logs: CapturedLog[] = []
+    const executor = new Executor(bot, makeCapturingLogger(logs), {
+      ...defaultExecutorOptions,
+      actuation: 'pathfinder',
+      pathTimeoutMs: 60,
+      packetStepMs: 0,
+    })
+    executor.claim({
+      ...bridgeCandidateFor(plan),
+      meta: { ...bridgeCandidateFor(plan).meta, bridgeSelfLanding: true },
+    })
+    const done = await waitFor(() => logs.some((line) => line.message.startsWith('BRIDGE_END') || line.message.startsWith('BRIDGE_REFUSED')))
+    executor.cancelCurrent('bridge self-landing fixture complete')
+    const placed = logs.find((line) => line.message.includes('step=place'))?.message ?? 'none'
+    const refused = logs.find((line) => line.message.startsWith('BRIDGE_REFUSED'))?.message ?? 'none'
+    // The floor this step creates IS the crossing's safety fact, so the proof is
+    // the world: the block landed in the void cell the plan named, and the live
+    // re-probe did NOT answer its historical `no_verified_landing`.
+    check(
+      '(vi-c) the executor EXECUTES the self-landing scaffold: the void floor cell is filled, no no_verified_landing refusal',
+      done &&
+        refused === 'none' &&
+        placed.includes('place=1,63,0 item=cobblestone') &&
+        terrain.name({ x: 1, y: 63, z: 0 }) === 'cobblestone',
+      `refused="${refused}" placed=[${placed}] placedFloor=${terrain.name({ x: 1, y: 63, z: 0 })}`,
+    )
+  }
 }
 
 // (vi-b) a mid-bridge interruption (the lease is revoked while the SECOND block is

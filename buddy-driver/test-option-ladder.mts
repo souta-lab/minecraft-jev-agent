@@ -11,9 +11,11 @@ import type { ResidentWorldMemory } from './resident-types.ts'
 import type { PlannedGoal } from '../jev-agent/src/goalQueue.ts'
 import { readFileSync } from 'node:fs'
 
+import { OptionCompilingSystem2 } from './option-brain.ts'
+
 interface Case {
   name: string
-  run: () => { pass: boolean; detail: string }
+  run: () => { pass: boolean; detail: string } | Promise<{ pass: boolean; detail: string }>
 }
 
 const cases: Case[] = []
@@ -213,19 +215,39 @@ addCase('#136 recovery Option requires both upper access and the explicit log pr
   }
 })
 
-addCase('the host wrapper emits the blocked-Option log and never silently drops the block (#50)', () => {
+addCase('the host wrapper emits the blocked-Option log and never silently drops the block (#50)', async () => {
   const source = readFileSync(new URL('./option-brain.ts', import.meta.url), 'utf8')
   const emitsSharedMarker = source.includes('emitBlockedOptionLogs(result.blockedOptions, this.log)')
   const carriesStructured = source.includes('blockedOptions: result.blockedOptions')
-  const goalsFromCompiled = source.includes('return { ...plan, goals: result.goals }')
-  return { pass: emitsSharedMarker && carriesStructured && goalsFromCompiled, detail: `emit=${emitsSharedMarker} structured=${carriesStructured} goalsFromCompiled=${goalsFromCompiled}` }
+  // Behavioural half: the wrapper must hand back the COMPILED goals, never the
+  // incoming plan goals (passing those through is what "silently drops the block"
+  // meant). Pinned by RUNNING the wrapper: a compiled row carries the compiler's
+  // Option identity while the incoming goal does not. The previous assertion read
+  // the return statement's source text, which the system2-compile lane had to
+  // change when it added typed provenance to that same return; the invariant is
+  // what matters, not the literal.
+  const incoming: PlannedGoal = { kind: 'collect', description: 'collect 1 x log', targetItem: 'log', requiredCount: 1 }
+  const inner = { model: 'fixture-brain', plan: () => Promise.resolve({ op: 'patch' as const, goals: [incoming], note: 'fixture' }) }
+  const events: string[] = []
+  const wrapper = new OptionCompilingSystem2(inner, {
+    log: (event) => events.push(event),
+    snapshot: () => makeOptionSnapshot({ inventory: {}, dimension: 'minecraft:overworld', position: null }),
+    enabled: true,
+  })
+  const out = await wrapper.plan({ reason: 'queue_empty', detail: 'fixture', tick: 1 } as Parameters<typeof wrapper.plan>[0])
+  const goalsFromCompiled =
+    out.goals.length === 1 && out.goals[0]?.targetItem === 'log' && typeof out.goals[0]?.optionTemplateId === 'string'
+  return {
+    pass: emitsSharedMarker && carriesStructured && goalsFromCompiled,
+    detail: `emit=${emitsSharedMarker} structured=${carriesStructured} goalsFromCompiled=${goalsFromCompiled} compiled=${JSON.stringify(out.goals.map((goal) => goal.optionTemplateId ?? null))} logs=${events.join(',')}`,
+  }
 })
 
 let failures = 0
 process.stdout.write('compiled Options vs the deterministic ladder (#21 dry run)\n')
 process.stdout.write('-'.repeat(72) + '\n')
 for (const testCase of cases) {
-  const observed = testCase.run()
+  const observed = await testCase.run()
   if (!observed.pass) failures += 1
   process.stdout.write(`${observed.pass ? 'PASS' : 'FAIL'}  ${testCase.name}\n`)
   process.stdout.write(`      ${observed.detail}\n`)

@@ -701,7 +701,9 @@ function digCandidates(candidates: readonly Candidate[]): Candidate[] {
   const ORE: Vec3Json = { x: 24, y: 40, z: 24 }
   const counts = { diamond_pickaxe: 1 }
   const current = queuedCollect('raw_iron')
-  const known: AgentSignals['knownResources'] = [{ name: 'iron_ore', position: ORE, kind: 'ore' }]
+  // #14: remembered cells name the world they were recorded in; this fixture body
+  // is in the overworld (an un-attributed row is refused in every world).
+  const known: AgentSignals['knownResources'] = [{ name: 'iron_ore', position: ORE, kind: 'ore', dimension: 'minecraft:overworld' }]
   const base = worldState({
     feet: FEET,
     descent: shaftDescent(FEET),

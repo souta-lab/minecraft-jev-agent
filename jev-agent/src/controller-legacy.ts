@@ -26,13 +26,14 @@ import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
 import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatMobSpawnContext, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey, restrictCandidatesDuringUnseenAttacker, unseenAttackerOffer, isNotExecutableHereWithheldKind, restrictCandidatesNotExecutableHere, formatNotExecutableHereBinding, formatNotExecutableHereInterrupt } from './candidates.ts'
 import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, NotExecutableHereBinding, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer, ContactRefusal } from './candidates.ts'
-import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
+import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, ENV_LAVA_PROXIMITY, EnvHazardTracker, envHazardDamageSource, envHazardKindOfBlock, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence, isLavaClassBlock } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatMobIdentityChurn, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, MOB_IDENTITY_CHURN, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts, formatThreatBreakContact, THREAT_BREAK_CONTACT, unsensedAttackerFacts, unsensedThreatResponse } from './threat.ts'
 import type { MobIdentityContext } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
-import { formatContactUnreachable } from './combatClosure.ts'
+import { formatContactUnreachable, formatNoAttackStand, MELEE_ATTACK_REACH, NO_ATTACK_STAND, selectAttackStand } from './combatClosure.ts'
+import type { AttackStandFact, AttackStandRejection } from './combatClosure.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
@@ -160,7 +161,7 @@ import type { GuardCode, GuardResult, InFlightAction } from './policy.ts'
 import { DECISION_TRIGGERS, DecisionScheduler, LOW_AIR_PREEMPT, PREEMPTIVE_TRIGGERS, shouldInterruptAttackLease, TRIGGER_PRIORITY } from './scheduler.ts'
 import type { DecisionTrigger, TriggerEvent } from './scheduler.ts'
 import { BODY_SUBMERGED, bodyStarving, distance, formatBodyStarving, buildWorldState, defaultSensorOptions, explainNearestPortalFrameRejection, isSensedStation, isStandable, liveStructureMembersForSites, makeGoal, MAX_AIR, refreshGoalProgress, sensedPortalFrameSites } from './state.ts'
-import type { AgentSignals, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
+import type { AgentSignals, DimensionProvenance, GoalState, KnownResource, KnownResourceEvidence, KnownResourceFalsifiedReason, SensorOptions, Vec3Json, WorldState } from './state.ts'
 import { currentOptionContextForQueuedGoal } from './optionSpec.ts'
 import type { CurrentOptionContext } from './optionSpec.ts'
 import { isResourceClass, matchesResourceClass, resourceMatches } from './resourceClass.ts'
@@ -254,7 +255,13 @@ import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './brid
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
 import type { LlmSummonReason, System2Brain, System2Objective, System2Outcome, System2PlanRequest } from './system2.ts'
-import { evaluateSystem2Apply, formatSystem2Discard, system2BodyOwned } from './system2Authority.ts'
+import {
+  evaluateSystem2Apply,
+  formatCompiledGoalRows,
+  formatSystem2Discard,
+  formatSystem2PlanApplied,
+  system2BodyOwned,
+} from './system2Authority.ts'
 import type { System2ApplyState, System2RequestContext } from './system2Authority.ts'
 import {
   evaluateBetaTerminationBoundary,
@@ -514,6 +521,15 @@ export interface JevAgentOptions {
    * counts the same action failing the same way inside the executor.
    */
   actionFailureEscalateCycles: number
+  /**
+   * Read provenance for the bot's per-column world cache (see
+   * `DimensionProvenance` in `state.ts`). The resident supplies it so every world
+   * read the sensor performs is attributable to the dimension it came from; a cell
+   * whose column is not attributable is refused (typed) instead of becoming an
+   * offer. Absent in standalone runs and fixtures, which therefore keep the
+   * un-gated sensor path exactly.
+   */
+  dimensionProvenance?: DimensionProvenance | null
   /**
    * Issue #327 follow-up: consecutive chosen WAIT decisions while real
    * actionable candidates exist, after which the local recovery is declared
@@ -1129,11 +1145,20 @@ export function registerPlacedStation(
   stations: KnownResource[],
   item: string,
   at: Vec3Json,
+  /**
+   * The world the placement was VERIFIED in. A placed station is a world fact
+   * like any remembered cell: without it the row is un-attributable and the
+   * fail-closed dimension gate (#14, `resourceDimensionMatches`) refuses it as a
+   * target in EVERY world. Optional only so a fixture can build the
+   * un-attributed shape deliberately.
+   */
+  dimension?: string,
 ): { added: boolean; station: KnownResource } {
   const station: KnownResource = {
     name: item,
     kind: 'station',
     position: { x: Math.round(at.x), y: Math.round(at.y), z: Math.round(at.z) },
+    ...(dimension === undefined ? {} : { dimension }),
   }
   const cellKey = (entry: { name: string; position: Vec3Json }): string =>
     `${entry.name}@${Math.round(entry.position.x)},${Math.round(entry.position.y)},${Math.round(entry.position.z)}`
@@ -1289,6 +1314,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // that no fluid could reach the pocket - and "the body mined the wall because the
   // pocket is provably dry" cannot be told apart from an ordinary tunnel step.
   'DIG_ROUTE_ENTRY',
+  // #system2-compile: the queue-side half of the System2 hand-off must be visible
+  // in BOTH evidence planes. `LLM plan applied` (and therefore the compiled rows it
+  // names) exists only in the run log, so without this marker the one line that
+  // says WHY a model answer became no row - its typed reason - is dropped from the
+  // host log, and "the answer carried no goals" cannot be told apart from "the
+  // answer was never applied".
+  'SYSTEM2_PLAN_NO_GOALS',
+  // The applied half of the same record: what the answer BECAME.
+  'SYSTEM2_PLAN_APPLIED',
   // The BOUNDED LEVEL SCAN (`levelScan.ts`): the descent a body takes when NOTHING at its
   // own level can ground a route and the rock below can. Without these in the mirrored
   // list the live sink DROPS the two lines that say which level the body descended to, which
@@ -1308,6 +1342,17 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // told apart from "no leg was ever grounded".
   'PORTAL_APPROACH_LEG',
   'PORTAL_APPROACH_REFUSED',
+  // The COMPOSED entry climb: an interior above the body beyond the walk-in
+  // tolerance is reached by the candidate's own grounded vertical contract, and
+  // the live run needs both halves of its evidence. Without `PORTAL_ENTRY_CLIMB`
+  // the live sink DROPS the line naming which climb ran, its own bound and its
+  // outcome - and `SKILL_POLICY_BOUNDARY ... alternatives=[vertical:reuse(spent)]`
+  // (run.jsonl 2026-09-22T15:47:37Z) cannot be told apart from a climb that was
+  // really attempted. Without `PORTAL_ENTRY_CLIMB_REFUSED` the run shows only the
+  // bare `not_level` walk-in refusal and hides the interior's height and the
+  // climb that was (or was not) available.
+  'PORTAL_ENTRY_CLIMB',
+  'PORTAL_ENTRY_CLIMB_REFUSED',
   // Issue #436: the Skill boundary and the reflex proof must both be live-visible,
   // or a reviewer cannot tell "Jev chose the target" from "code finished it".
   'SKILL_START',
@@ -1515,6 +1560,15 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // geometry, the vertical planner's own refusal, and the carried block a pillar
   // would consume), so unreachable and merely-missed are distinct run evidence.
   'HUNT_CONTACT_UNREACHABLE',
+  // The HORIZONTAL/STANCE half of the same vocabulary, the one the operator's
+  // screenshot was made of: a hostile in contact but embedded in geometry (line of
+  // sight fails from every stance) or a hostile no stance within melee reach can be
+  // walked to (the measured enderman at 6.11 m, distance frozen ~47 s, ZERO
+  // swings). `NO_ATTACK_STAND` names the entity, the melee constant, the nearest
+  // stance the search examined and the fact that refused it, so the withhold is
+  // run evidence instead of a later 0-swing `out_of_reach` / `verify_failed` lease
+  // that only LOOKS like a failed attempt.
+  'NO_ATTACK_STAND',
   // The DROP half of the same vocabulary. A killed mob leaves an item ENTITY on
   // the ground, and the only thing that proves the kill produced anything is the
   // inventory delta after walking onto it. Without these two markers a run that
@@ -1604,6 +1658,13 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'ROW_NOT_EXECUTABLE_HERE_BINDING_SKIPPED',
   'ROW_NOT_EXECUTABLE_HERE_INTERRUPT',
   'PLAN_HEAD_REPLACEMENT_APPLIED',
+  // The equip plane was emitted but never mirrored, so `buddy.log` showed ZERO equip lines while the run-scoped
+  // JSONL showed 124x EQUIP_WEAPON and 2x EQUIP_ARMOR. Measured consequence: a reader of the LIVE log concluded the
+  // body was unarmed when it had in fact re-armed, and the inverse case - "Jev never chose ATTACK, so the weapon was
+  // never drawn" - was invisible in the one log the runtime writes. The equip facts are how a survival question is
+  // settled, so they belong in the live record like every other lifecycle line.
+  'EQUIP_WEAPON',
+  'EQUIP_ARMOR',
 ])
 
 /**
@@ -5901,6 +5962,8 @@ export class JevController {
     const moveArrived =
       (result.kind === 'MOVE' || result.kind === 'RETREAT') && classifyMoveOutcome(result.verified, moved) === 'arrived'
     const surfaceSearchArrived = result.kind === 'RETRIEVE' && this.surfaceSearchArrived(candidate)
+    const exploreSearchArrived = result.kind === 'MOVE' && candidate.meta.explore === true && moveArrived
+    const searchArrived = surfaceSearchArrived || exploreSearchArrived
     const retrieveArrived = result.kind === 'RETRIEVE' && !surfaceSearchArrived && this.retrievalArrived(candidate)
     const retrieveDistanceClosed = result.kind === 'RETRIEVE' && !surfaceSearchArrived && result.distanceClosed
     const truth = truthfulActionOutcome({
@@ -5914,7 +5977,7 @@ export class JevController {
       damageObserved: result.damageObserved,
       arrived: moveArrived || retrieveArrived,
       distanceClosed: retrieveDistanceClosed,
-      searchArrived: surfaceSearchArrived,
+      searchArrived,
       requiresPickup: candidate.meta.requiresPickup === true,
     })
     const semanticProgress =
@@ -5929,9 +5992,9 @@ export class JevController {
       progressed: result.progressed,
       entityDefeated: result.entityDefeated,
       damageObserved: result.damageObserved,
-      arrived: moveArrived || retrieveArrived || surfaceSearchArrived,
+      arrived: moveArrived || retrieveArrived || searchArrived,
       distanceClosed: retrieveDistanceClosed,
-      searchArrived: surfaceSearchArrived,
+      searchArrived,
       semanticProgress,
       failureCode: result.failure,
     })
@@ -6106,7 +6169,12 @@ export class JevController {
       if (result.kind === 'PLACE' && result.verified && candidate.itemName !== null) {
         this.placementRetries.noteVerified(candidate.itemName)
         if (candidate.target !== null && PLACED_STATION_ITEMS.has(candidate.itemName)) {
-          const registered = registerPlacedStation(this.placedStations, candidate.itemName, candidate.target)
+          const registered = registerPlacedStation(
+            this.placedStations,
+            candidate.itemName,
+            candidate.target,
+            this.currentDimension(),
+          )
           if (registered.added) {
             this.logger.info(
               'agent',
@@ -7005,6 +7073,11 @@ export class JevController {
     }
     const current = this.queue.current
     if (current === null) return
+    if (current.kind === 'explore') {
+      // Search Options are intentionally open-ended: code owns grounded frontier
+      // enumeration and search progress, while beta/System2 own semantic termination.
+      return
+    }
     if (current.kind === 'goto') {
       const target = current.targetPosition ?? null
       if (target === null) {
@@ -8123,9 +8196,82 @@ export class JevController {
         }
         this.llmNotes.push(plan.note)
         if (this.llmNotes.length > 12) this.llmNotes.shift()
+        // #system2-compile: the hand-off is typed and mirrored. The applied line
+        // names the INTENT (which words the model wrote), the COMPILED rows (the
+        // executable meaning: kind, target, dimension) and the apply outcome; an
+        // answer that produced no row is a typed rejection naming why, never a
+        // silent no-op. Code reports the model's WHAT here; it never picks one.
+        const provenance = plan.provenance ?? null
+        const compiledRows = added.map((goal) => ({
+          id: goal.id,
+          kind: goal.kind,
+          targetItem: goal.targetItem ?? null,
+          targetY: goal.targetY ?? null,
+          dimension: goal.dimension ?? null,
+          description: goal.description,
+        }))
+        const compiledSummary = formatCompiledGoalRows(compiledRows)
+        const intentSource = provenance?.intentSource ?? 'unrecorded'
+        // `abort`/`complete`/`continue` are lifecycle ops whose meaning IS the op,
+        // so an empty goal list is their correct shape; only a goal-carrying op can
+        // "carry no goals".
+        const planOp = plan.op ?? 'replace'
+        const goalsExpected = planOp === 'patch' || planOp === 'replace'
+        // The MIRRORED half of the hand-off: one marker line naming the model's own
+        // words, the executable meaning of every accepted row, and the outcome. It
+        // is emitted in BOTH evidence planes (MIRRORED_MARKERS), or the host log
+        // cannot tell "the answer produced no row" from "the answer never applied".
+        this.logger.warn(
+          'system2',
+          formatSystem2PlanApplied({
+            requestId: requestContext.requestId,
+            op: planOp,
+            applied: added.length,
+            depth: this.queue.state.depth,
+            intentSource,
+            uncompiled: provenance?.uncompiled?.length ?? 0,
+            intent: provenance?.intent ?? plan.note,
+            rows: compiledRows,
+          }),
+          {
+            requestId: requestContext.requestId,
+            reason,
+            op: planOp,
+            applied: added.length,
+            compiled: compiledRows,
+            uncompiled: provenance?.uncompiled ?? [],
+            intentSource,
+            intent: provenance?.intent ?? null,
+            noGoalsReason: plan.goals.length === 0 && goalsExpected ? (provenance?.noGoalsReason ?? 'answer_carried_no_goals') : null,
+            note: plan.note,
+          },
+          this.tickCounter,
+        )
+        if (plan.goals.length === 0 && goalsExpected) {
+          const noGoalsReason = provenance?.noGoalsReason ?? 'answer_carried_no_goals'
+          const intentText = (provenance?.intent ?? plan.note).slice(0, 200)
+          this.logger.warn(
+            'system2',
+            `SYSTEM2_PLAN_NO_GOALS op=${planOp} reason=${noGoalsReason} intentSource=${intentSource} requestId=${requestContext.requestId} intent="${intentText}"`,
+            {
+              requestId: requestContext.requestId,
+              reason,
+              op: planOp,
+              noGoalsReason,
+              intentSource,
+              intent: intentText,
+              uncompiled: provenance?.uncompiled ?? [],
+              note: plan.note,
+            },
+            this.tickCounter,
+          )
+          this.recentEvents.push(
+            `System2 answered with no compilable goal (${noGoalsReason}); ${this.currentGoalKey()} held`,
+          )
+        }
         this.logger.info(
           'system2',
-          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} :: ${plan.note}`,
+          `LLM plan applied provider=${this.system2Provider} model=${this.system2Model}: ${added.length} goal(s) depth=${this.queue.state.depth} intentSource=${intentSource} uncompiled=${provenance?.uncompiled?.length ?? 0} compiled=[${compiledSummary}] :: ${plan.note}`,
           {
             provider: this.system2Provider,
             model: this.system2Model,
@@ -8133,6 +8279,10 @@ export class JevController {
             requestContext,
             queueDepth: this.queue.state.depth,
             goals: added.map((goal) => goal.description),
+            compiled: compiledRows,
+            uncompiled: provenance?.uncompiled ?? [],
+            intentSource,
+            intent: provenance?.intent ?? null,
             note: plan.note,
           },
           this.tickCounter,
@@ -10945,6 +11095,27 @@ export class JevController {
       if (block !== null && (refusal === 'no_interaction_stand' || refusal === 'no_path_to_stand')) {
         this.logger.warn('agent', formatDigAccessRetired(block, refusal), detail, this.tickCounter)
       }
+      // THE STANCE REFUSAL, mirrored with the full geometry: the entity, the melee
+      // constant, the nearest stance the search examined and the fact that refused
+      // it. Without this the only evidence that the body could not hit the target
+      // would be a 0-swing `out_of_reach` / `verify_failed` lease later.
+      const stance = entry.candidate.attackStandRefusal
+      if (entry.result.reason === 'no_attack_stand' && stance !== undefined) {
+        this.logger.warn(
+          'agent',
+          formatNoAttackStand(stance),
+          {
+            ...detail,
+            marker: NO_ATTACK_STAND,
+            entityId: stance.entityId,
+            refusal: stance.refusal,
+            nearestStand: stance.nearest,
+            stand: stance.stand,
+            path: stance.path,
+          },
+          this.tickCounter,
+        )
+      }
     }
   }
 
@@ -11524,9 +11695,123 @@ export class JevController {
       },
       stationApproach: this.stationApproachProbe(),
       digApproach: this.digApproachProbe(),
+      attackStandProbe: this.attackStandProbe(),
     }
     this.gateOptionsTick = this.tickCounter
     return this.gateOptions
+  }
+
+  /**
+   * THE STANCE PROBE: the live world questions `combatClosure.selectAttackStand`
+   * asks, answered from real block truth - the sensor's own standability rule,
+   * the `envHazard` classes, and the SAME `bot.world.raycast` the threat-cover
+   * logic casts (`state.ts threatSightLineBlocked`). No parallel geometry: the
+   * only thing added here is the eye origin the cover logic already uses, moved
+   * to a stance the body is not standing in yet.
+   *
+   * This is the fact the melee path probe cannot answer. `GoalNear(entity, 2.9)`
+   * proves a route to WITHIN 2.9 m of the entity's feet; it says nothing about
+   * whether a cell there is a legal stance or whether the entity is visible from
+   * it. Measured live: a magma cube embedded in the wall beside the body (every
+   * stance occluded, every swing `verify_failed`) and an enderman at 6.11 m whose
+   * `GoalFollow` never closed while the distance froze for ~47 s with zero swings.
+   *
+   * Cached per entity per tick (the gate options themselves are tick-cached), and
+   * `null` when the live entity's own height cannot be read: no verdict, so the
+   * gate keeps its previous behaviour rather than refusing on a missing fact.
+   */
+  private attackStandProbe(): (query: { entityId: number; position: Vec3Json }) => AttackStandFact | null {
+    const cache = new Map<number, AttackStandFact | null>()
+    return (query) => {
+      const cached = cache.get(query.entityId)
+      if (cached !== undefined) return cached
+      const entity = this.bot.entities[query.entityId]
+      const height = entity === undefined ? Number.NaN : (entity as { height?: number }).height ?? Number.NaN
+      if (!Number.isFinite(height) || height <= 0) {
+        // The aim point is `position + height / 2` (the SAME point `runAttack`
+        // looks at). Without it there is no visibility question to answer, so the
+        // fact is UNKNOWN - never an invented stance.
+        cache.set(query.entityId, null)
+        return null
+      }
+      const fact = selectAttackStand({
+        entity: { position: query.position, height },
+        feet: { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z },
+        reach: MELEE_ATTACK_REACH,
+        world: {
+          standable: (x, y, z) => isStandable(this.bot, { x, y, z }),
+          hazard: (x, y, z) => this.botStandColumnHazardAt(x, y, z),
+          visible: (x, y, z) => this.botSeesEntityFrom(x, y, z, query.position, height),
+        },
+      })
+      cache.set(query.entityId, fact)
+      return fact
+    }
+  }
+
+  /**
+   * Is the 1x2 stance column at this cell a hazard? The same classification the
+   * `envHazard` layer owns (`envHazardKindOfBlock`) for the stance's own feet,
+   * head and support cells, plus the `envHazard` lava proximity margin for a
+   * lava-class neighbour - the same two rules `reachabilityWorldFor` applies to
+   * a locomotion destination (`HAZARD_PROXIMITY` IS `ENV_LAVA_PROXIMITY`).
+   */
+  private botStandColumnHazardAt(x: number, y: number, z: number): boolean {
+    const scratch = this.bot.entity.position.clone()
+    const nameAt = (cx: number, cy: number, cz: number): string | null => {
+      const block = this.bot.blockAt(scratch.set(cx, cy, cz))
+      return block === null || block === undefined ? null : (block.name ?? null)
+    }
+    // The stance's OWN body column: fire/lava the body would be inside.
+    if (envHazardKindOfBlock(nameAt(x, y, z)) !== null) return true
+    if (envHazardKindOfBlock(nameAt(x, y + 1, z)) !== null) return true
+    if (envHazardKindOfBlock(nameAt(x, y - 1, z)) !== null) return true
+    // A lava-class neighbour inside the shared margin: standing there means
+    // standing in it (`envHazardProximityDenied(false, name)` semantics). A cell
+    // whose offset has any component >= 2 is at least 2 away, so it can never be
+    // inside a 1.5 margin: `floor` is the exact bound, not a truncation.
+    const span = Math.floor(ENV_LAVA_PROXIMITY)
+    for (let dx = -span; dx <= span; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dz = -span; dz <= span; dz += 1) {
+          const cx = x + dx
+          const cy = y + dy
+          const cz = z + dz
+          if (!isLavaClassBlock(nameAt(cx, cy, cz))) continue
+          if (Math.hypot(cx - x, cy - y, cz - z) <= ENV_LAVA_PROXIMITY) return true
+        }
+      }
+    }
+    return false
+  }
+
+  /**
+   * Can a body standing on this stance see the entity? ONE ray, the same call the
+   * cover logic makes (`bot.world.raycast`), from the eyes at the stance to the
+   * entity's aim point - the point `runAttack` looks at before it swings. Absence
+   * of a raycast (a structural double) answers `true`: "not occluded" is the
+   * fail-open direction here, so a missing world never refutes a visible mob.
+   */
+  private botSeesEntityFrom(x: number, y: number, z: number, entityPosition: Vec3Json, height: number): boolean {
+    const world = this.bot.world as unknown as
+      | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
+      | undefined
+    if (world === undefined || typeof world.raycast !== 'function') return true
+    try {
+      const eyeHeight = (this.bot.entity as unknown as { eyeHeight?: number }).eyeHeight ?? 1.62
+      const eye = this.bot.entity.position.clone().set(x + 0.5, y + eyeHeight, z + 0.5)
+      const aim = this.bot.entity.position.clone().set(entityPosition.x, entityPosition.y + height / 2, entityPosition.z)
+      const dx = aim.x - eye.x
+      const dy = aim.y - eye.y
+      const dz = aim.z - eye.z
+      const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (!Number.isFinite(range) || range <= 0) return true
+      const direction = this.bot.entity.position.clone().set(dx / range, dy / range, dz / range)
+      const hit = world.raycast(eye, direction, range, null)
+      return hit === null || hit === undefined
+    } catch {
+      return true
+    }
   }
 
   /**
@@ -12052,7 +12337,16 @@ function pickResummon(
 }
 
 function sensorOptions(options: JevAgentOptions, worldRevision: number | null = null): SensorOptions {
-  return { ...defaultSensorOptions, scanRadius: options.scanRadius, reach: options.reach, worldRevision }
+  return {
+    ...defaultSensorOptions,
+    scanRadius: options.scanRadius,
+    reach: options.reach,
+    worldRevision,
+    // Only the decision-time build carries provenance: `sensorOptions(...)` is
+    // also used for standalone portal-frame projections outside `buildWorldState`,
+    // where the read gate is not armed and the reads are unchanged.
+    dimensionProvenance: options.dimensionProvenance ?? null,
+  }
 }
 
 function candidateOptions(
