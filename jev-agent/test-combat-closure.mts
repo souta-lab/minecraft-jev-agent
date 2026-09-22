@@ -30,7 +30,7 @@ import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import type { AgentLevel } from './src/jev-legacy.ts'
 import type { Candidate, CandidateOptions } from './src/candidates.ts'
-import { defaultCandidateOptions, generateGroundedCandidates } from './src/candidates.ts'
+import { defaultCandidateOptions, generateGroundedCandidates, isAttackableEntity, producerDropFor } from './src/candidates.ts'
 import type { WorldState } from './src/state.ts'
 import {
   MELEE_THREAT_REACH,
@@ -962,6 +962,159 @@ function optionsWithProbe(probe: 'reachable' | 'no_path' | null): CandidateOptio
     fixture.logger.matching('DIG_TOOL_LEGALITY').length === 0 && fixture.held() === 'diamond_sword',
     'CAN-c. a block with no harvest-tool contract is untouched (no invented tool requirement)',
     `markers=${fixture.logger.matching('DIG_TOOL_LEGALITY').length} held=${fixture.held()}`,
+  )
+}
+
+// ===========================================================================
+// ATTACK offer (operator directive): the hostile flag is a FACT, not the gate
+// ===========================================================================
+
+function worldWithEntities(
+  entities: Array<Record<string, unknown>>,
+  health = 20,
+  food = 20,
+  options: { collectGoal?: boolean } = {},
+): WorldState {
+  const world = worldWithProducer(4)
+  ;(world as unknown as { entities: unknown[] }).entities = entities
+  ;(world as unknown as { self: { health: number; food: number } }).self = {
+    ...(world as unknown as { self: Record<string, unknown> }).self,
+    health,
+    food,
+  }
+  if (options.collectGoal === false) {
+    // No collect goal: the same entity must then be a PLAIN grounded ATTACK, with
+    // no producer/drop contract invented for it.
+    const goal = {
+      id: 'g1:mine:cobblestone',
+      kind: 'mine',
+      description: 'mine cobblestone',
+      targetItem: 'cobblestone',
+      requiredCount: 8,
+      startCount: 0,
+      haveCount: 0,
+      status: 'active',
+      origin: 'llm',
+      createdAt: 0,
+      updatedAt: 0,
+      detail: null,
+    } as never
+    ;(world as unknown as { goal: unknown }).goal = { targetItem: 'cobblestone', requiredCount: 8, haveCount: 0 }
+    ;(world as unknown as { goalQueue: unknown }).goalQueue = {
+      depth: 1,
+      current: goal,
+      empty: false,
+      hasImpossible: false,
+      done: 0,
+      goals: [goal],
+    }
+  }
+  return world
+}
+
+{
+  // The zombie_villager shape: NOT flagged hostile, but it ENGAGED the body.
+  const engaged = {
+    id: 77,
+    name: 'zombie_villager',
+    kind: 'mob',
+    username: null,
+    position: { x: 2, y: 64, z: 0 },
+    distance: 2,
+    hostile: false,
+    attackedSelf: true,
+    lineOfSight: true,
+  }
+  const passive = {
+    id: 78,
+    name: 'cow',
+    kind: 'mob',
+    username: null,
+    position: { x: 3, y: 64, z: 0 },
+    distance: 3,
+    hostile: false,
+    lineOfSight: true,
+  }
+  const grounded = generateGroundedCandidates(worldWithEntities([engaged, passive]), optionsWithProbe('reachable'))
+  const engagedAttack = grounded.candidates.find((candidate) => candidate.targetEntityId === 77)
+  const passiveAttack = grounded.candidates.find((candidate) => candidate.targetEntityId === 78)
+  const pass =
+    // the offer no longer depends on the hostile flag to EXIST
+    engagedAttack?.id === 'ATTACK:e77' &&
+    engagedAttack.meta.hostile === false &&
+    engagedAttack.meta.attackedSelf === true &&
+    engagedAttack.meta.attackable === true &&
+    // a plain passive mob is offered too, with hostile=false as a FACT
+    passiveAttack?.id === 'ATTACK:e78' &&
+    passiveAttack.meta.hostile === false &&
+    passiveAttack.meta.targetHostile === undefined &&
+    passiveAttack.meta.attackedSelf === undefined &&
+    passiveAttack.meta.reachability === 'contact' &&
+    // and nothing ranked them: the ids are the entity ids, in sensor order
+    grounded.candidates.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id).join(',') ===
+      'ATTACK:e77,ATTACK:e78'
+  report(
+    pass,
+    'OFFER-a. the hostile flag is a FACT: an engaged non-hostile and a passive mob both get grounded ATTACK offers',
+    `engaged=${engagedAttack?.id ?? 'none'}/${JSON.stringify(engagedAttack?.meta?.hostile)} attackedSelf=${engagedAttack?.meta?.attackedSelf ?? 'none'} ` +
+      `passive=${passiveAttack?.id ?? 'none'}/${JSON.stringify(passiveAttack?.meta?.hostile)} reach=${passiveAttack?.meta?.reachability ?? 'none'} ` +
+      `order=${grounded.candidates.filter((c) => c.kind === 'ATTACK').map((c) => c.id).join(',')}`,
+  )
+}
+
+{
+  // Entity truth: non-mob families are not attackable, and the drop fact is
+  // carried when the entity is a known producer.
+  const item = { id: 90, name: 'item', kind: 'object', username: null, position: { x: 1, y: 64, z: 0 }, distance: 1, hostile: false }
+  const orb = { id: 91, name: 'experience_orb', kind: 'orb', username: null, position: { x: 1, y: 64, z: 0 }, distance: 1, hostile: false }
+  const frame = { id: 92, name: 'item_frame', kind: 'object', username: null, position: { x: 1, y: 64, z: 0 }, distance: 1, hostile: false }
+  const arrow = { id: 93, name: 'arrow', kind: 'projectile', username: null, position: { x: 1, y: 64, z: 0 }, distance: 1, hostile: false }
+  const blaze = { id: 94, name: 'blaze', kind: 'hostile', username: null, position: { x: 4, y: 64, z: 0 }, distance: 4, hostile: true }
+  const grounded = generateGroundedCandidates(worldWithEntities([item, orb, frame, arrow, blaze]), optionsWithProbe('reachable'))
+  const attackIds = grounded.candidates.filter((candidate) => candidate.kind === 'ATTACK').map((candidate) => candidate.id)
+  const blazeAttack = grounded.candidates.find((candidate) => candidate.targetEntityId === 94)
+  const pass =
+    attackIds.join(',') === 'ATTACK:e94' &&
+    isAttackableEntity({ name: 'item', kind: 'object' }) === false &&
+    isAttackableEntity({ name: 'experience_orb', kind: 'orb' }) === false &&
+    isAttackableEntity({ name: 'item_frame', kind: 'object' }) === false &&
+    isAttackableEntity({ name: 'arrow', kind: 'projectile' }) === false &&
+    isAttackableEntity({ name: 'armor_stand', kind: 'object' }) === false &&
+    isAttackableEntity({ name: 'zombie_villager', kind: 'mob' }) === true &&
+    // the drop fact is producer truth, not a preference
+    producerDropFor('blaze') === 'blaze_rod' &&
+    producerDropFor('enderman') === 'ender_pearl' &&
+    producerDropFor('cow') === null &&
+    blazeAttack?.meta.dropItem === 'blaze_rod'
+  report(
+    pass,
+    'OFFER-b. entity truth bounds the offer: items/orbs/frames/projectiles are not attackable, producers carry their drop',
+    `attacks=[${attackIds.join(',')}] drop=${String(blazeAttack?.meta?.dropItem ?? 'none')} item=${isAttackableEntity({ name: 'item', kind: 'object' })} ` +
+      `orb=${isAttackableEntity({ name: 'experience_orb', kind: 'orb' })} frame=${isAttackableEntity({ name: 'item_frame', kind: 'object' })} ` +
+      `arrow=${isAttackableEntity({ name: 'arrow', kind: 'projectile' })} zombieVillager=${isAttackableEntity({ name: 'zombie_villager', kind: 'mob' })}`,
+  )
+}
+
+{
+  // The goalDrop producer hunt is UNCHANGED: same id, same goalDrop contract.
+  const blaze = { id: 94, name: 'blaze', kind: 'hostile', username: null, position: { x: 4, y: 64, z: 0 }, distance: 4, hostile: true }
+  const grounded = generateGroundedCandidates(worldWithProducer(4), optionsWithProbe('reachable'))
+  const hunt = grounded.candidates.find((candidate) => candidate.kind === 'ATTACK')
+  const extra = generateGroundedCandidates(worldWithEntities([blaze], 20, 20, { collectGoal: false }), optionsWithProbe('reachable'))
+  const extraHunt = extra.candidates.find((candidate) => candidate.kind === 'ATTACK')
+  const pass =
+    hunt?.id === 'ATTACK:e16002' &&
+    hunt.meta.goalDrop === 'blaze_rod' &&
+    hunt.meta.producerMob === 'blaze' &&
+    hunt.meta.requiresKill === true &&
+    // the same entity as a plain offer (no collect goal) keeps the plain shape
+    extraHunt?.id === 'ATTACK:e94' &&
+    extraHunt.meta.goalDrop === undefined &&
+    extraHunt.meta.attackable === true
+  report(
+    pass,
+    'OFFER-c. the goalDrop producer hunt keeps its id/contract; the same entity without a collect goal is a plain ATTACK',
+    `hunt=${hunt?.id ?? 'none'} goalDrop=${String(hunt?.meta?.goalDrop ?? 'none')} plain=${extraHunt?.id ?? 'none'} plainGoalDrop=${String(extraHunt?.meta?.goalDrop ?? 'none')}`,
   )
 }
 

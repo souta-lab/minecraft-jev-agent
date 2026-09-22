@@ -194,6 +194,118 @@ export const IMMEDIATE_HOSTILE_RANGE = MELEE_THREAT_REACH
  * inside it closes to melee within one policy decision, so the survival offer
  * must be grounded here rather than only at contact range.
  */
+/**
+ * issue #436/#11 (operator directive: "even if a mob is not in the hostile list,
+ * Jev could simply decide to attack it").
+ *
+ * Code owns the entity TRUTH; code does NOT own "which entities are worth
+ * attacking". These sets are the non-mob FAMILIES a melee swing can never resolve
+ * into a kill - dropped items, xp orbs, projectiles and the decorative/technical
+ * entities. Excluding them is entity truth, not a preference: they are not
+ * living targets, so offering an ATTACK for them would be a lie about CAN.
+ */
+const NON_MOB_ENTITY_KINDS: ReadonlySet<string> = new Set([
+  'object',
+  'orb',
+  'projectile',
+  'arrow',
+  'item',
+  'xp_orb',
+  'experience_orb',
+  'area_effect_cloud',
+  'armor_stand',
+  'end_crystal',
+  'eye_of_ender',
+  'firework_rocket',
+  'falling_block',
+  'tnt',
+  'boat',
+  'chest_boat',
+  'minecart',
+  'painting',
+  'item_frame',
+  'glow_item_frame',
+  'leash_knot',
+  'lightning_bolt',
+  'evoker_fangs',
+  'fishing_bobber',
+  'egg',
+  'ender_pearl',
+  'snowball',
+  'potion',
+  'splash_potion',
+  'lingering_potion',
+  'trident',
+  'shulker_bullet',
+  'llama_spit',
+  'dragon_fireball',
+  'fireball',
+  'small_fireball',
+  'wither_skull',
+  'spectral_arrow',
+  'experience_bottle',
+])
+
+/** Names Mineflayer uses for non-living entities that carry no mob `kind`. */
+const NON_MOB_ENTITY_NAMES: ReadonlySet<string> = new Set([
+  'item',
+  'xp_orb',
+  'experience_orb',
+  'armor_stand',
+  'item_frame',
+  'glow_item_frame',
+  'painting',
+  'arrow',
+  'spectral_arrow',
+  'snowball',
+  'egg',
+  'ender_pearl',
+  'eye_of_ender',
+  'potion',
+  'splash_potion',
+  'lingering_potion',
+  'experience_bottle',
+  'firework_rocket',
+  'fishing_bobber',
+  'leash_knot',
+  'area_effect_cloud',
+  'evoker_fangs',
+  'lightning_bolt',
+  'falling_block',
+  'tnt',
+  'boat',
+  'chest_boat',
+  'minecart',
+  'trident',
+  'shulker_bullet',
+  'llama_spit',
+  'dragon_fireball',
+  'fireball',
+  'small_fireball',
+  'wither_skull',
+  'unknown',
+])
+
+/**
+ * True when a sensed entity is a LIVING mob a melee ATTACK could resolve. Pure and
+ * flag-independent: the hostile flag is a fact CARRIED on the candidate, never the
+ * reason the candidate exists. The body itself never reaches here (the sensor
+ * skips `bot.entity.id`).
+ */
+export function isAttackableEntity(entity: { name: string; kind: string }): boolean {
+  if (NON_MOB_ENTITY_KINDS.has(entity.kind)) return false
+  if (NON_MOB_ENTITY_NAMES.has(entity.name)) return false
+  return true
+}
+
+/** The item this mob is a known producer for, or null (producer truth only). */
+export function producerDropFor(entityName: string): string | null {
+  for (const [item, producers] of Object.entries(MOB_DROP_PRODUCERS)) {
+    if (producers.has(entityName)) return item
+  }
+  return null
+}
+
 export const COMBAT_CANDIDATE_RANGE = THREAT_DANGER_RADIUS
 
 /**
@@ -2714,8 +2826,18 @@ function generateRawCandidates(
     )
   }
 
+  // issue #436/#11 (operator directive: "even if a mob is not in the hostile
+  // list, Jev could simply decide to attack it"). WHICH entities are worth
+  // attacking is Jev's semantic choice; code owns only the entity TRUTH. So the
+  // gate MOVED FROM `entity.hostile && in range` (which made the hostile flag the
+  // reason an ATTACK existed at all) TO `isAttackableEntity(entity) && in range`,
+  // with `hostile` carried as a FACT on the candidate instead of filtering it.
+  // The bound is still the same combat range, so the offer cannot flood, and the
+  // non-mob families (items, xp orbs, projectiles, armor stands, item frames, the
+  // body itself) are excluded by `isAttackableEntity` - they are not things a
+  // melee swing can resolve into a kill.
   const hostiles = state.entities.filter(
-    (entity) => entity.hostile && entity.distance <= COMBAT_CANDIDATE_RANGE,
+    (entity) => isAttackableEntity(entity) && entity.distance <= COMBAT_CANDIDATE_RANGE,
   )
   // Goal-directed mob drops: when the ACTIVE collect goal targets an item whose
   // only producer is a mob (`ender_pearl` <- enderman, `blaze_rod` <- blaze),
@@ -2815,11 +2937,31 @@ function generateRawCandidates(
         // animal it targets. The marker reader/log must not infer it from the
         // entity name alone (a hostile and a food animal can share no name).
         ...(isFoodTarget ? { foodAnimal: true, foodRoute: 'animal', foodTarget: entity.name } : {}),
-        // Real capability facts of the FIGHT: a hostile returns damage from its
-        // own reach (a blaze and a ghast hit from 12 m, a skeleton from ~16 m),
-        // so the distance a mob can answer from is part of whether this ATTACK
-        // is survivable, not just what the body swings with.
+        // issue #436/#11 (operator directive): this candidate exists because the
+        // entity is ATTACKABLE and in range - not because a flag said so. The gate
+        // consults this fact, never the hostile flag.
+        attackable: true,
+        // the entity TRUTH Jev reasons with.
+        // `hostile` is a fact now, not the gate that created this candidate, and
+        // the hostile-only facts below are only meaningful when it is true. NOTHING
+        // in code ranks on these - no closest-first, no type preference, no
+        // `if hostile then prefer`.
+        hostile: entity.hostile,
         ...(entity.hostile ? { targetHostile: true, targetStandoff: threatStandoffRange(entity.name) } : {}),
+        // "this entity ENGAGED the body recently" is damage-attribution truth from
+        // the sensor (`attackedSelf`), which is what makes a provoked neutral mob
+        // (the zombie_villager shape) a legitimate target without a name list.
+        ...(entity.attackedSelf === true ? { attackedSelf: true } : {}),
+        ...(entity.heldItem === undefined || entity.heldItem === null ? {} : { targetHeldItem: entity.heldItem }),
+        ...(entity.health === undefined || entity.health === null ? {} : { targetHealth: entity.health }),
+        ...(entity.lineOfSight === undefined ? {} : { targetLineOfSight: entity.lineOfSight }),
+        ...(entity.kind === undefined ? {} : { targetKind: entity.kind }),
+        // the drop this entity is a producer for, when it is one (the same
+        // producer truth `MOB_DROP_PRODUCERS` already carries)
+        ...(producerDropFor(entity.name) === null ? {} : { dropItem: producerDropFor(entity.name) as string }),
+        // reachability as a FACT on this candidate (`inReach` above is the melee
+        // reach; this is the approach contract the gate already computed)
+        reachability: entity.distance <= MELEE_THREAT_REACH ? 'contact' : 'approach',
       },
     })
   }
@@ -9170,7 +9312,12 @@ function evaluateOrdinaryAttackCandidate(
   // swings=0, reason=no_reacquire). They are not exempt from CAN; they carry a
   // different budget, which `evaluateHuntAttackCandidate` applies.
   const isHunt = typeof candidate.meta.goalDrop === 'string' || candidate.meta.foodRoute === 'animal'
-  if (!isHunt && candidate.meta.targetHostile !== true) return null
+  // issue #436/#11 (operator directive): the ATTACK offer no longer depends on the
+  // hostile flag to exist, so the CAN gate keys on the candidate's own
+  // `attackable` fact (set for every grounded attackable entity, hostile or not)
+  // rather than on `targetHostile`. A hostile IN CONTACT stays unconditionally
+  // executable below, and the reachability rule is otherwise unchanged.
+  if (!isHunt && candidate.meta.attackable !== true) return null
 
   const distanceToTarget =
     typeof candidate.meta.distance === 'number'
