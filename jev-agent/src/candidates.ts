@@ -47,6 +47,8 @@ import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectFo
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
 import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
+import { digRouteBearing, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
+import type { DigRouteRefusal } from './digRoute.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
@@ -731,6 +733,16 @@ export interface GroundedCandidatesResult {
    */
   columnDescentRefusal: ColumnDescentRefusal | null
   /**
+   * Typed `DIG_ROUTE_REFUSED reason=...` facts for the travel/enter/retrieve
+   * targets this tick could not walk to AND could not dig toward: the target is
+   * named with the bearing, the refused cell/block and the sensor's own cause
+   * (`hazard`/`unbreakable`/`no_support`/`open_floor`/`protected`/`no_tool`/
+   * `no_step`/`spent`). Empty while a dig route is on offer, and empty when no
+   * travel target needed one. Non-empty means "the dead end is said" instead of
+   * the offer silently collapsing to WAIT/ESCALATE.
+   */
+  digRefusals: DigRouteRefusal[]
+  /**
    * Typed `PROSPECT_REFUSED reason=hazard|unbreakable|no_support|open_floor|
    * protected|no_tool|no_safe_step` when the active descend/travel-to-acquire row
    * passed a sensed producer of its focus and the exposure dig toward it was
@@ -1412,6 +1424,7 @@ export interface PortalEntryRefusal {
 export function entryCandidates(
   state: WorldState,
   options: CandidateOptions,
+  digRefusals: DigRouteRefusalSink = [],
 ): { candidates: Candidate[]; refusal: PortalEntryRefusal | null } {
   const current = state.goalQueue?.current ?? null
   const focusItem = current?.targetItem ?? state.goal.targetItem ?? null
@@ -1490,19 +1503,31 @@ export function entryCandidates(
       nowMs: state.timestampMs,
     })
   ) {
-    const leg = travelApproachLeg(state, options, {
-      target: entry.enterCell,
-      targetName: NETHER_PORTAL,
-      reason: 'route_spent',
-      label: (best) =>
-        `walk an approach leg toward the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}): the last route there failed, so stand at (${best.x},${best.y},${best.z}) first`,
-      extraMeta: { entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}` },
-    })
-    if (leg !== null) return { candidates: [leg], refusal: null }
-    // No grounded route and no grounded approach leg changes the stand cell:
-    // every route this goal can ground from here is spent. Say it typed and let
-    // the ordinary bounded escalation reach System2 - never re-offer the dead
-    // route and never leave the offer at (failing route, WAIT).
+    // Two grounded route changes, offered together: a walk leg that changes the
+    // STAND CELL, and the bounded DIG route that changes the TERRAIN toward the
+    // entry cell. A sealed body (the measured 1-wide shaft) senses no standable
+    // cell beyond its own, so only the dig route can act there; a body whose leg
+    // exists but whose path is refused keeps the dig route as the executable
+    // alternative. Neither is a replacement: Jev chooses, and the entry is
+    // re-offered from the new cell.
+    const legs = travelApproachLegs(
+      state,
+      options,
+      {
+        target: entry.enterCell,
+        targetName: NETHER_PORTAL,
+        reason: 'route_spent',
+        label: (best) =>
+          `walk an approach leg toward the lit nether portal at (${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}): the last route there failed, so stand at (${best.x},${best.y},${best.z}) first`,
+        extraMeta: { entryCell: `${entry.enterCell.x},${entry.enterCell.y},${entry.enterCell.z}` },
+      },
+      digRefusals,
+    )
+    if (legs.length > 0) return { candidates: legs, refusal: null }
+    // No grounded route, no grounded approach leg and no grounded dig route
+    // changes anything from here: every route this goal can ground is spent. Say
+    // it typed and let the ordinary bounded escalation reach System2 - never
+    // re-offer the dead route and never leave the offer at (failing route, WAIT).
     const routes = goalSpentRouteCount(state.signals.zeroProgressRoutes, {
       kind: 'ENTER_PORTAL',
       targetKey,
@@ -1725,7 +1750,11 @@ export function generateGroundedCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
 ): GroundedCandidatesResult {
-  const raw = generateRawCandidates(state, options)
+  // The dig-route refusals are collected across BOTH passes (the raw offer and
+  // the gate's own capability-acquisition pass), so the tick reports every travel
+  // target it could neither walk to nor dig toward.
+  const digRefusals: DigRouteRefusalSink = []
+  const raw = generateRawCandidates(state, options, digRefusals)
   const grounded = applyReachabilityGate(
     raw.candidates,
     state,
@@ -1739,6 +1768,7 @@ export function generateGroundedCandidates(
     raw.sourceExclusions,
     raw.columnDescentRefusal,
     raw.prospectRefusal,
+    digRefusals,
   )
   // The survival fact is computed from the OFFERED set, never from the raw one,
   // so "no food route" can never be reported while a route is actually on offer.
@@ -2052,6 +2082,7 @@ export function combatKitGap(
   const heldItem = state.self.heldItem?.name ?? null
   const assessment = assessCombatKit({
     heldItem,
+    carried: state.inventory.counts,
     worn: state.self.armor ?? {},
     health: state.self.health,
     food: state.self.food,
@@ -2106,6 +2137,7 @@ function armorEquipCandidates(state: WorldState): Candidate[] {
 function generateRawCandidates(
   state: WorldState,
   options: CandidateOptions = defaultCandidateOptions,
+  digRefusals: DigRouteRefusalSink = [],
 ): RawCandidatesResult {
   let candidates: Candidate[] = []
   let placeRefusal: PlaceRefusal | null = null
@@ -2161,7 +2193,7 @@ function generateRawCandidates(
       const ignition = ignitionCandidates(state, options)
       candidates.push(...ignition.candidates)
       ignitionRefusal = ignition.refusal
-      const entry = entryCandidates(state, options)
+      const entry = entryCandidates(state, options, digRefusals)
       candidates.push(...entry.candidates)
       entryRefusal = entry.refusal
       break
@@ -2343,6 +2375,7 @@ function generateRawCandidates(
   if (goalDropTargets.length > 0) {
     const kit = assessCombatKit({
       heldItem: state.self.heldItem?.name ?? null,
+      carried: state.inventory.counts,
       worn: state.self.armor ?? {},
       health: state.self.health,
       food: state.self.food,
@@ -2458,7 +2491,7 @@ function generateRawCandidates(
   // retrieval for a later queue row into this Option. That is a different
   // semantic action, not an alternative mechanical route for the active goal;
   // it was observed live as raw_iron -> unrelated future log retrieval.
-  candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0))
+  candidates.push(...retrievalCandidates(state, options, focusItem, candidates.length === 0, digRefusals))
 
   // Clearance MINEs are route-opening safety affordances, not semantic goal
   // actions. Once the active goal has another grounded route (for example a
@@ -2580,6 +2613,7 @@ function generateRawCandidates(
     surfaceAscentRefusal: surfaceAscent.refusal,
     foodHabitatRefusal: foodHabitat.refusal,
     columnDescentRefusal: columnDescent.refusal,
+    digRefusals: dedupeDigRouteRefusals(digRefusals),
     prospectRefusal: prospect.refusal,
     sourceExclusions: resourceSourceExclusions(state),
   }
@@ -4140,6 +4174,50 @@ function descendStepRouteSignature(step: DescentOption): string {
 }
 
 /**
+ * The STRICT dig feasibility of one sensor step: its whole 1x2 profile folded into
+ * the strongest harvest requirement and resolved against the held tools. This is
+ * the single gate both the DESCEND candidate builder (`descendCandidateFromStep`,
+ * which may relax it for a stranded body's escape dig) and `planDigRoute`'s step
+ * probe (`digRouteCandidate`) use, so the step the dig route picks can never be a
+ * step the builder then refuses - that disagreement is exactly how a route arm
+ * ends up offering nothing while a legal detour step exists.
+ */
+function strictStepDigProfile(
+  state: WorldState,
+  step: DescentOption,
+): {
+  digPlan: ReturnType<typeof descentDigPlan>
+  primary: Vec3Json
+  requirement: ReturnType<typeof strongestDigRequirement> | null
+  choice: ReturnType<typeof selectDigTool>
+} {
+  const digPlan = descentDigPlan(step)
+  const primary = descentPrimaryCell(step)
+  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
+  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
+  // produced a dig that could not finish (measured live: every cardinal step dug
+  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
+  const requirement = strongestDigRequirement(
+    digPlan.map((item) => ({
+      name: item.name ?? '',
+      harvestTool: item.harvestTool ?? null,
+      harvestTier: item.harvestTier ?? null,
+      diggable: item.diggable,
+    })),
+  )
+  const choice = selectDigTool(
+    {
+      name: requirement.name ?? '',
+      harvestTool: requirement.harvestTool ?? null,
+      harvestTier: requirement.harvestTier ?? null,
+      diggable: requirement.diggable === true,
+    },
+    (tool, tier) => hasTool(state, tool, tier),
+  )
+  return { digPlan, primary, requirement, choice }
+}
+
+/**
  * One DESCEND candidate from an already-safe step. Shared by the goal-grounded
  * descent family (`descendCandidates`) and the stranded-column descent
  * (`columnDescentCandidates`), so a body descending toward a resource and a body
@@ -4170,8 +4248,9 @@ function descendCandidateFromStep(
     escape?: boolean
   },
 ): { candidate: Candidate; toolReason: string } | null {
-  const digPlan = descentDigPlan(best)
-  const primary = descentPrimaryCell(best)
+  const profile = strictStepDigProfile(state, best)
+  const digPlan = profile.digPlan
+  const primary = profile.primary
   // A pickaxe-gated block is NOT relaxed: its tool requirement can be about whether the block can be
   // broken at all (obsidian), and the state carries no hardness/hand-break fact to tell the two apart -
   // so case (c2) (a step needing a pickaxe tier the body lacks) must keep refusing. Every other
@@ -4182,32 +4261,11 @@ function descendCandidateFromStep(
   const escapeBreakable =
     spec.escape === true &&
     digPlan.every((item) => item.diggable && (item.harvestTool ?? null) !== 'pickaxe')
-  // The gate is the STRONGEST cell of the 1x2 profile: a step with a stone front
-  // and a dirt floor is not diggable without a pickaxe, and offering it anyway
-  // produced a dig that could not finish (measured live: every cardinal step dug
-  // its floor, then `PATH_CALLBACK outcome=noPath|stuck`).
-  const requirement = escapeBreakable
-    ? null
-    : strongestDigRequirement(
-        digPlan.map((item) => ({
-          name: item.name ?? '',
-          harvestTool: item.harvestTool ?? null,
-          harvestTier: item.harvestTier ?? null,
-          diggable: item.diggable,
-        })),
-      )
+  const requirement = escapeBreakable ? null : profile.requirement
   const choice =
     requirement === null
       ? { ok: true as const, tool: null, tier: null, reason: 'escape_breakable_without_drop_tool' }
-      : selectDigTool(
-          {
-            name: requirement.name ?? '',
-            harvestTool: requirement.harvestTool ?? null,
-            harvestTier: requirement.harvestTier ?? null,
-            diggable: requirement.diggable === true,
-          },
-          (tool, tier) => hasTool(state, tool, tier),
-        )
+      : profile.choice
   if (!choice.ok) return null
   const toward =
     spec.focusItem ?? (spec.descendTargetY === null ? 'unknown' : `descend_to:Y=${spec.descendTargetY}`)
@@ -4871,6 +4929,11 @@ interface RawCandidatesResult {
   foodHabitatRefusal: SurfaceAscentRefusal | null
   /** typed refusal when a stranded body has no safe descent off its own column */
   columnDescentRefusal: ColumnDescentRefusal | null
+  /**
+   * Typed `DIG_ROUTE_REFUSED reason=...` facts collected while grounding this
+   * tick's offers (see `GroundedCandidatesResult.digRefusals`).
+   */
+  digRefusals: DigRouteRefusal[]
   /**
    * Typed `PROSPECT_REFUSED reason=...` when the descending body's geometry
    * grounded an exposure probe toward a sensed producer of its focus and every
@@ -6890,7 +6953,177 @@ export function resourceDimensionMatches(resource: KnownResource, dimension: str
 }
 
 /**
- * The grounded travel/approach leg for a locomotion target whose own route just
+ * The per-tick sink the offer fills with its typed `DIG_ROUTE_REFUSED` facts.
+ * Threaded explicitly through the arms so the generator stays a pure function of
+ * its inputs (no module-level state, no logger).
+ */
+type DigRouteRefusalSink = DigRouteRefusal[]
+
+/** Bound on retained refusals per tick: a dead end is stated once, not N times. */
+const DIG_ROUTE_REFUSAL_CAP = 8
+
+function dedupeDigRouteRefusals(refusals: readonly DigRouteRefusal[]): DigRouteRefusal[] {
+  const seen = new Set<string>()
+  const out: DigRouteRefusal[] = []
+  for (const refusal of refusals) {
+    const line = formatDigRouteRefused(refusal)
+    if (seen.has(line)) continue
+    seen.add(line)
+    out.push(refusal)
+    if (out.length >= DIG_ROUTE_REFUSAL_CAP) break
+  }
+  return out
+}
+
+function cellText(position: Vec3Json): string {
+  return `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`
+}
+
+/**
+ * The general "the target has no walkable route, so change the TERRAIN" route.
+ *
+ * MEASURED (run-muc9k936-1f3vb, main ebec6f2, m3-live): a body sealed inside the
+ * 1-wide shaft it had climbed sensed only its OWN feet cell as standable
+ * (`state.ts#buildTerrain` samples 5x5x3), so `travelApproachLeg` found no cell
+ * that changes the stand situation, `entryCandidates` reported
+ * `ROUTE_ESCALATE reason=all_routes_spent`, and the offer collapsed to
+ * `['WAIT','ESCALATE']` while the KNOWN gate sat 21 blocks away behind ordinary
+ * stone. Every bounded recovery family was starved for the same reason: they all
+ * move the BODY to a cell the sensor already believes is standable.
+ *
+ * The sensor knows more than the walk arms use: `state.descent` carries one
+ * pre-computed cardinal option per direction x {down, level} with the concrete
+ * dig cells, the block, its harvest requirement and the SAFE verdict including
+ * its typed refusal. A `level` option is exactly "tunnel one block forward", a
+ * `down` option is "staircase one block down/forward". Grounding the one that
+ * STRICTLY reduces the distance to the goal's own target is therefore the
+ * mechanical route a player would take, and it needs no new executor, guard or
+ * postcondition: the candidate is built through the SAME
+ * `descendCandidateFromStep` and runs through the SAME `runDescend` as every
+ * other bounded dig step.
+ *
+ * CAN/TRUE/SAFE stays with code (which cells exist, which are breakable with the
+ * held tools, which direction actually closes the bearing, which the sensor
+ * proved safe). Jev still owns WHICH grounded candidate to take, System2 still
+ * owns WHAT the goal is. No portal/M3 branch, no hard-coded coordinate: the only
+ * target is the goal's own target cell and the only direction is
+ * `sign(target - feet)`.
+ */
+function digRouteCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: {
+    target: Vec3Json
+    targetName: string | null
+    reason: string
+    extraMeta?: Record<string, string | number | boolean>
+  },
+  refusals: DigRouteRefusalSink,
+): Candidate | null {
+  const standKey = cellKey(state.self.position)
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const decision = planDigRoute({
+    selfPosition: state.self.position,
+    target: spec.target,
+    descent: state.descent,
+    // The body's own cell is the only standable cell the sensor knows: a lateral
+    // dig here is a shaft exit, which is the difference the marker reports.
+    sealed: strandedOnColumn(state),
+    // The dig route is a ROUTE like every other: a step whose exact identity
+    // already proved zero observable change from this stand cell is withheld (the
+    // body must move first), and the ordinary ledger spends it when it fails.
+    isSpent: (step) =>
+      isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'DESCEND',
+        targetKey: cellKey(descentPrimaryCell(step)),
+        standKey,
+        routeSig: descendStepRouteSignature(step),
+        nowMs: state.timestampMs,
+      }),
+    // The tool gate the candidate builder applies, so a step the body cannot dig
+    // is never chosen as the route: the planner then offers the next-best step
+    // that still strictly reduces the distance (a detour) instead of refusing the
+    // whole arm - the measured pocket is exactly this shape (the best-closing east
+    // step is the gate's own obsidian column, needing pickaxe tier 4).
+    stepRefusal: (step) => {
+      const profile = strictStepDigProfile(state, step)
+      if (profile.choice.ok) return null
+      const requirement = profile.requirement
+      return {
+        dir: step.dir,
+        mode: step.mode,
+        reason: 'no_tool',
+        block: requirement?.name ?? step.digName ?? null,
+        detail: `${requirement?.name ?? 'the binding block'} needs ${requirement?.harvestTool ?? 'a tool'} tier ${requirement?.harvestTier ?? 0}`,
+      }
+    },
+  })
+  if (decision.kind === 'refuse') {
+    refusals.push(decision.refusal)
+    return null
+  }
+  const route = decision.route
+  const built = descendCandidateFromStep(state, options, route.step, {
+    focusItem: spec.targetName,
+    descendTargetY: null,
+    // The step is the sensor's own safe option and it strictly reduces the
+    // distance to the goal's target: a grounded route, never a blind search step.
+    grounded: true,
+    staircase: route.mode === 'down',
+    extraMeta: {
+      digRoute: true,
+      digRouteReason: spec.reason,
+      digRouteKind: route.kind,
+      digRouteTarget: cellText(spec.target),
+      digRouteCell: cellText(route.cell),
+      digRouteBlock: route.block ?? 'unknown',
+      digRouteFrom: round2Number(route.fromDistance),
+      digRouteTo: round2Number(route.toDistance),
+      digRouteBearing: route.dir,
+      ...(route.detour && route.skipped !== null
+        ? {
+            digRouteDetour: true,
+            digRouteSkipped: `${route.skipped.dir}:${route.skipped.reason}`,
+            digRouteSkippedBlock: route.skipped.block ?? 'unknown',
+          }
+        : {}),
+      digRouteLine: formatDigRoute(route, spec.reason, spec.target),
+      ...(spec.extraMeta ?? {}),
+    },
+    // The STRICT tool gate (no escape relaxation): a tunnel the body cannot
+    // finish must be refused with `no_tool`, never offered and then re-aimed
+    // forever. A stranded-body escape dig is a different action with its own
+    // relaxation (`columnDescentCandidates`).
+    escape: false,
+  })
+  if (built === null) {
+    refusals.push({
+      reason: 'no_tool',
+      target: spec.target,
+      bearing: digRouteBearing(feet, spec.target),
+      cell: route.dig,
+      block: route.block,
+      detail: `${route.block ?? 'the bearing block'} needs ${route.harvestTool ?? 'a tool'} tier ${route.harvestTier ?? 0}`,
+    })
+    return null
+  }
+  // Its OWN id namespace: the collect descent arm can ground the same sensor step
+  // for a stone/ore focus, and two candidates with one id in the same offer would
+  // make the guard resolve a decision to the wrong meta. The route IDENTITY for
+  // the spend ledger is (kind, dig cell, stand cell, route signature) and is
+  // deliberately unchanged, so a step spent by either arm is spent for both.
+  return {
+    ...built.candidate,
+    id: `DIG_ROUTE:${route.mode}:${route.dir}:${blockId('b', route.dig)}`,
+  }
+}
+
+/**
+ * The grounded travel/approach legs for a locomotion target whose own route just
  * proved spent from this body cell.
  *
  * The postcondition proved the previous attempt changed nothing (or failed at
@@ -6902,8 +7135,15 @@ export function resourceDimensionMatches(resource: KnownResource, dimension: str
  * to the target - a real MOVE the ordinary guard and reachability gate still
  * own. It is an offer, never a replacement: Jev decides whether to walk it, and
  * the route is re-offered the moment the body stands somewhere new.
+ *
+ * When the sensor knows NO standable cell that improves the distance (the
+ * measured sealed shaft), or when the only such cell is itself unreachable, the
+ * body's own cell is the whole world the walk arms can see. The terrain is then
+ * the only thing that can change, so the bounded dig route toward the same target
+ * is grounded alongside the walk leg (`digRouteCandidate`). Both are offers; when
+ * neither can be grounded the caller keeps its existing typed escalation.
  */
-function travelApproachLeg(
+function travelApproachLegs(
   state: WorldState,
   options: CandidateOptions,
   spec: {
@@ -6913,18 +7153,30 @@ function travelApproachLeg(
     label: (spot: Vec3Json) => string
     extraMeta: Record<string, string | number | boolean>
   },
-): Candidate | null {
+  refusals: DigRouteRefusalSink,
+): Candidate[] {
   const moveFailureLimit = options.moveFailureLimit ?? DEFAULT_CANDIDATE_MOVE_FAILURE_LIMIT
   const currentDistance = distance(state.self.position, spec.target)
   const standKey = cellKey(state.self.position)
+  const targetKey = cellKey(spec.target)
   let best: Vec3Json | null = null
   let bestScore = Number.POSITIVE_INFINITY
+  // A leg that IS the destination is not an approach. The destination's own route
+  // is the one that just failed, so re-offering the destination as its own approach
+  // waypoint is the same failing action under a different id. Measured live
+  // (run-mucaq28q-1ftq1, the M3 pocket): the body 2 blocks west of the portal
+  // interior with the frame's obsidian column between offered
+  // `MOVE:p26_67_9` - a walk INTO the portal interior, which failed
+  // `phase=pathing` - while the standable open face at (26,67,10), strictly closer
+  // than the body and reachable, was never offered. The destination cell is only
+  // excluded as a WAYPOINT; the destination's own candidate is untouched.
   for (const spot of state.terrain.standable) {
     // Only a DIFFERENT stand cell can change the mechanical situation: a "leg"
     // to the cell the body already occupies is not a route change, and the exact
     // float distance to a target can make the body's own floor cell look
     // "closer" than its centre.
     if (cellKey(spot) === standKey) continue
+    if (cellKey(spot) === targetKey) continue
     if (isBlacklistedMoveTarget(state, options.blacklistedMoveTargets, spot)) continue
     const toTarget = distance(spot, spec.target)
     if (toTarget >= currentDistance) continue
@@ -6938,53 +7190,83 @@ function travelApproachLeg(
       best = spot
     }
   }
-  if (best === null) return null
-  return {
-    id: `MOVE:${blockId('p', best)}`,
-    kind: 'MOVE',
-    label: spec.label(best),
-    targetName: spec.targetName,
-    target: best,
-    targetEntityId: null,
-    itemName: null,
-    requiresTool: false,
-    toolName: null,
-    inReach: distance(best, state.self.position) <= options.reach,
-    hasStandableAdjacent: true,
-    meta: {
-      tick: state.tick,
-      x: best.x,
-      y: best.y,
-      z: best.z,
-      approachLeg: spec.reason,
-      approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
-      ...spec.extraMeta,
-    },
+  const legs: Candidate[] = []
+  if (best !== null) {
+    legs.push({
+      id: `MOVE:${blockId('p', best)}`,
+      kind: 'MOVE',
+      label: spec.label(best),
+      targetName: spec.targetName,
+      target: best,
+      targetEntityId: null,
+      itemName: null,
+      requiresTool: false,
+      toolName: null,
+      inReach: distance(best, state.self.position) <= options.reach,
+      hasStandableAdjacent: true,
+      meta: {
+        tick: state.tick,
+        x: best.x,
+        y: best.y,
+        z: best.z,
+        approachLeg: spec.reason,
+        approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+        ...spec.extraMeta,
+      },
+    })
   }
+  const dig = digRouteCandidate(
+    state,
+    options,
+    {
+      target: spec.target,
+      targetName: spec.targetName,
+      reason: 'no_walkable_route',
+      extraMeta: spec.extraMeta,
+    },
+    refusals,
+  )
+  if (dig !== null) legs.push(dig)
+  return legs
+}
+
+function round2Number(value: number): number {
+  return Math.round(value * 100) / 100
 }
 
 /**
- * The named-resource spelling of {@link travelApproachLeg}: the remembered
- * resource's own route proved zero observable change, so the leg names the
+ * The named-resource spelling of {@link travelApproachLegs}: the remembered
+ * resource's own route proved zero observable change, so the legs name the
  * resource and the item the trip is for.
  */
-function knownResourceApproachLeg(
+function knownResourceApproachLegs(
   state: WorldState,
   options: CandidateOptions,
   want: RetrievalWant,
   known: KnownResource,
-): Candidate | null {
-  return travelApproachLeg(state, options, {
-    target: known.position,
-    targetName: known.name,
-    reason: 'target_not_observable',
-    label: (best) =>
-      `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
-    extraMeta: { approachResource: want.item, knownName: known.name },
-  })
+  refusals: DigRouteRefusalSink,
+): Candidate[] {
+  return travelApproachLegs(
+    state,
+    options,
+    {
+      target: known.position,
+      targetName: known.name,
+      reason: 'target_not_observable',
+      label: (best) =>
+        `walk an approach leg toward the remembered ${known.name} at (${known.position.x},${known.position.y},${known.position.z}) for ${want.item}: the last route there changed nothing, so stand at (${best.x},${best.y},${best.z}) first`,
+      extraMeta: { approachResource: want.item, knownName: known.name },
+    },
+    refusals,
+  )
 }
 
-function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions, want: RetrievalWant): Candidate[] {
+function retrievalCandidatesForWant(
+  state: WorldState,
+  options: CandidateOptions,
+  want: RetrievalWant,
+  digRefusals: DigRouteRefusalSink = [],
+): Candidate[] {
   if (mineableBlockFor(state, want) !== null) return []
   const known = knownResourceFor(state, want, options.blacklistedMoveTargets)
   if (known !== null) {
@@ -7049,8 +7331,10 @@ function retrievalCandidatesForWant(state: WorldState, options: CandidateOptions
         nowMs: state.timestampMs,
       })
     ) {
-      const leg = knownResourceApproachLeg(state, options, want, known)
-      return leg === null ? [] : [leg]
+      // The grounded route changes for a spent retrieval: a walk leg that changes
+      // the stand cell, and/or the bounded dig route through the terrain toward
+      // the remembered cell when no standable cell improves the distance.
+      return knownResourceApproachLegs(state, options, want, known, digRefusals)
     }
     return [candidate]
   }
@@ -7130,6 +7414,7 @@ function retrievalCandidates(
   options: CandidateOptions,
   focusItem: string | null,
   includeQueued = true,
+  digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const recipes = options.recipes ?? null
   const queuedProxy = allowsQueuedRetrievalProxy(state.goalQueue?.current ?? null)
@@ -7138,7 +7423,7 @@ function retrievalCandidates(
     // prerequisite even though its item differs from the proxy's cobblestone
     // focus.  Every ordinary row remains focus-bounded.
     if (!queuedProxy && !retrievalWantAdvancesFocus(focusItem, want, recipes)) continue
-    const candidates = retrievalCandidatesForWant(state, options, want)
+    const candidates = retrievalCandidatesForWant(state, options, want, digRefusals)
     if (candidates.length > 0) return candidates
   }
   return []
@@ -7605,6 +7890,7 @@ export function applyReachabilityGate(
   sourceExclusions: ResourceSourceExclusion[] | null = null,
   columnDescentRefusal: ColumnDescentRefusal | null = null,
   prospectRefusal: ProspectRefusal | null = null,
+  digRefusals: DigRouteRefusalSink = [],
 ): GroundedCandidatesResult {
   // Direct callers (fixtures) may pass only raw candidates; derive the typed
   // exclusions from the world state so the marker can never be dropped.
@@ -7660,7 +7946,7 @@ export function applyReachabilityGate(
       ...presented.map((candidate) => candidate.id),
       ...withheld.map((entry) => entry.candidate.id),
     ])
-    run(capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen))
+    run(capabilityAcquisitionCandidates(state, acquisitionOptions, withheld, seen, digRefusals))
     const next = retiredStationsFromWithheld(withheld)
     if (next.size === retired.size) break
     retired = next
@@ -7757,6 +8043,7 @@ export function applyReachabilityGate(
     foodHabitatRefusal,
     columnDescentRefusal,
     prospectRefusal,
+    digRefusals: dedupeDigRouteRefusals(digRefusals),
     sourceExclusions: exclusions,
     exploreRouteBlocked: exploreRouteBlockedFact(state, candidates, withheld),
     sourceGap: resourceSourceGapFor(state, candidates, exclusions),
@@ -8393,6 +8680,7 @@ function capabilityAcquisitionCandidates(
   options: CandidateOptions,
   withheld: readonly CandidateReachability[],
   existingIds: ReadonlySet<string>,
+  digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const out: Candidate[] = []
   const seen = new Set<string>(existingIds)
@@ -8452,7 +8740,7 @@ function capabilityAcquisitionCandidates(
         // DESCEND remain available as mechanical route-opening facts because
         // they can change the topology even when their immediate landing cell
         // is not closer in Euclidean distance.
-        source = routeOpeningCandidates(state, options, entry.candidate.target)
+        source = routeOpeningCandidates(state, options, entry.candidate.target, digRefusals)
       } else if (capability.kind === 'descend_plan') {
         // A safe staircase can disappear after one bounded step when the bot
         // is standing on a canopy/ledge.  The sensor still proves a same-level
@@ -8535,6 +8823,7 @@ function routeOpeningCandidates(
   state: WorldState,
   options: CandidateOptions,
   blockedTarget: Vec3Json | null = null,
+  digRefusals: DigRouteRefusalSink = [],
 ): Candidate[] {
   const focus = state.goalQueue?.current?.targetItem ?? state.goal.targetItem ?? null
   const out: Candidate[] = [
@@ -8626,6 +8915,21 @@ function routeOpeningCandidates(
       ),
     )
   }
+  // A withheld locomotion target whose WALK cannot be re-grounded at all (a
+  // sealed body, or a refused path with no standable detour) still has one
+  // grounded route change left: the TERRAIN between the body and the destination.
+  // Ground the bounded dig step that strictly reduces the distance to the REAL
+  // destination (`goalTarget`, never the local obstacle), so the recovery family
+  // is not limited to walking to cells the body cannot reach. This is the same
+  // CAN enumeration as every other entry here: Jev still chooses, and a refusal
+  // is typed (`DIG_ROUTE_REFUSED`) instead of silent.
+  const dig = digRouteCandidate(
+    state,
+    options,
+    { target: goalTarget, targetName: null, reason: 'route_withheld' },
+    digRefusals,
+  )
+  if (dig !== null && !out.some((candidate) => candidate.id === dig.id)) out.push(dig)
   // REVERTED (da7d66e): returning the unfiltered family when the advancing set is
   // empty stopped the WAIT wedge but produced a pacing loop - the operator watched
   // the body walk east/west at the same spot (live `pos` cycled 195.5 <-> 199) for

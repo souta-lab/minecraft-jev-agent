@@ -280,6 +280,17 @@ const FIST_DAMAGE = 1
 export interface CombatKitFacts {
   /** the item in the main hand right now, or null for an empty hand */
   heldItem: string | null
+  /**
+   * Weapons the body CARRIES (name -> count). The executor equips the best one
+   * when the attack actually starts (`equipCombatWeapon` -> `bestWeaponOffer`),
+   * so a kit that carries a diamond sword is NOT weapon-less merely because the
+   * hand is holding a block. Measured live (run-mucaq28q-1ftq1): the marker read
+   * `COMBAT_KIT_GAP held=cobblestone swingDamage=1 ... missing=sword
+   * prerequisite=CRAFT:iron_sword` while a `diamond_sword` sat in the inventory -
+   * i.e. the body was told to craft a weapon it already had, in the one place
+   * (the Nether) where that time is the scarcest thing it owns.
+   */
+  carried?: Readonly<Record<string, number>>
   /** armour currently WORN per slot (carried pieces do not count) */
   worn: ArmorWorn
   health: number
@@ -313,7 +324,11 @@ export interface CombatKitAssessment {
  * arrival kit, and it is reported - never silently treated as a route.
  */
 export function assessCombatKit(facts: CombatKitFacts): CombatKitAssessment {
-  const swingDamage = facts.heldItem === null ? FIST_DAMAGE : weaponDamage(facts.heldItem) ?? FIST_DAMAGE
+  const heldDamage = facts.heldItem === null ? FIST_DAMAGE : weaponDamage(facts.heldItem) ?? FIST_DAMAGE
+  // The kit is what the body CAN swing with, not only what it happens to hold:
+  // the attack path equips the best carried weapon before the first swing.
+  const carriedBest = bestWeaponOffer(facts.heldItem, facts.carried ?? {})
+  const swingDamage = carriedBest === null ? heldDamage : Math.max(heldDamage, carriedBest.damage)
   const hasWeapon = swingDamage > FIST_DAMAGE
   const wornArmorCount = ARMOR_SLOTS.filter((slot) => {
     const piece = facts.worn[slot]
