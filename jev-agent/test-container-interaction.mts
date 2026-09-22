@@ -520,7 +520,7 @@ addCase('(A2) a goal with NO grounded source of its own is offered the OPEN prob
   return { pass, detail: `container=[${opens.map((entry) => entry.id).join(' ')}] advancing=${advancing.length}` }
 })
 
-addCase('(A3) the OPEN probe is WITHHELD while the goal already has a grounded route of its own', () => {
+addCase('(A3) an UNOPENED container is offered even while the goal has a route of its own (bounded inspection)', () => {
   const placeGoal: QueuedGoal = { ...queued('furnace'), kind: 'place', description: 'place furnace' }
   const state = worldState({
     containers: [SENSED_CHEST],
@@ -532,11 +532,13 @@ addCase('(A3) the OPEN probe is WITHHELD while the goal already has a grounded r
   const all = generateCandidates(state, defaultCandidateOptions)
   const place = all.filter((candidate) => candidate.kind === 'PLACE')
   const opens = all.filter((candidate) => candidate.kind === 'CONTAINER')
-  // The goal grounded a PLACE of its own, so an unknown-content probe is not
-  // offered: code never sends the body to a container "just in case" while the
-  // goal already has a route. The route itself must be present (otherwise this
-  // test would pass for the wrong reason).
-  const pass = place.length > 0 && opens.length === 0
+  // Rule change (operator: "use the relief supplies"): an UNOPENED container is a
+  // bounded, self-limiting INSPECTION - once opened, the observation is recorded and
+  // this arm stops offering it - so it is offered alongside the goal's own route
+  // rather than only when the goal has none. Both are present and Jev chooses; code
+  // ranks neither. The route itself must still be present, or this test would pass
+  // for the wrong reason.
+  const pass = place.length > 0 && opens.length === 1 && opens[0]?.kind === 'CONTAINER'
   return { pass, detail: `place=[${place.map((entry) => entry.id).join(' ')}] container=[${opens.map((entry) => entry.id).join(' ')}]` }
 })
 

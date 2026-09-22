@@ -3190,7 +3190,15 @@ function generateRawCandidates(
   // is CAN enumeration appended alongside every other family - never an
   // override, never a rank, and never a claim about what is inside.
   const goalHasGroundedRoute = focusItem !== null && candidates.some((candidate) => hasAdvancingGoalRoute(candidate))
-  const environment = containerCandidates(state, options, focusItem, focusItem === null || !goalHasGroundedRoute)
+  // An UNOPENED container is offered whenever it is reachable, not only when the
+  // current goal lacks a route of its own. Its contents are unknown, so opening it
+  // is a bounded, reversible INSPECTION rather than a commitment to a strategy -
+  // and it is self-limiting: once opened, the observation is recorded and this arm
+  // stops offering it (see `containerObservationAt`). The operator asked for the
+  // supplied container beside the Nether gate to be usable, and restricting the
+  // offer to "the goal has no route" made it invisible to a body that always has
+  // one. Jev still chooses; code ranks nothing.
+  const environment = containerCandidates(state, options, focusItem, true)
   candidates.push(...environment.candidates)
   containerRefusals = environment.refusals
 
@@ -4701,6 +4709,19 @@ export function formatFoodHabitatRefused(refusal: SurfaceAscentRefusal): string 
 export function foodHabitatAscent(state: WorldState, options: CandidateOptions): SurfaceAscentResult {
   const heldFood = pickFood(state)
   if (heldFood !== null || state.self.food > options.eatBelowFood) return { candidates: [], refusal: null }
+  // The premise this arm rests on is OVERWORLD spawn truth, and the arm itself
+  // says so ("passive animals need grass with sky access, and in the 1.18+
+  // overworld that surface does not exist below sea level"). No other dimension
+  // has that band: the Nether has no grass-surface passive spawn at all, so
+  // ascending toward sea level there is a route to nowhere. Measured live (fresh
+  // run on 3570c79): a hungry body IN THE NETHER climbed to y102 chasing this
+  // band while no passive animal can exist there - the futile half of the same
+  // class the level scan and contact-ascent work fixed for real targets. The food
+  // gap itself stays typed: `FOOD_SOURCE_NONE` still reports sensedAnimal=false.
+  const habitatDimension = (state.self.dimension ?? '').replace(/^minecraft:/, '')
+  if (habitatDimension.length > 0 && habitatDimension !== 'overworld') {
+    return { candidates: [], refusal: null }
+  }
   const foodHuntRange = options.foodHuntRange ?? DEFAULT_FOOD_HUNT_RANGE
   const animalSensed = state.entities.some(
     (entity) => !entity.hostile && FOOD_ANIMALS.has(entity.name) && entity.distance <= foodHuntRange,
@@ -6555,7 +6576,9 @@ function containerRefusal(
 }
 
 /**
- * `offerUnknown` is the "the goal has no grounded source of its own" fact,
+ * `offerUnknown` gates whether an UNOPENED container may be offered at all (the
+ * caller passes true: an unopened container is a bounded inspection, and the
+ * observation recorded on opening makes it self-limiting)," 
  * computed from the candidate set the goal already grounded. It is a WITHHOLDING
  * rule, never a rank: it decides whether an unknown-content probe is worth
  * offering, and it never reorders or replaces any other candidate.

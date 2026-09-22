@@ -24,6 +24,7 @@
 import { createRequire } from 'node:module'
 import {
   defaultCandidateOptions,
+  foodHabitatAscent,
   generateCandidates,
   generateGroundedCandidates,
 } from './src/candidates.ts'
@@ -72,7 +73,12 @@ function animal(name: string, distance: number, id = 42): Record<string, unknown
  * `entities` the sensed mobs. The real minecraft-data registry is attached so
  * hostile classification uses genuine entity kinds.
  */
-function fakeBot(counts: Record<string, number>, food: number, entities: Record<string, unknown>[]): Bot {
+function fakeBot(
+  counts: Record<string, number>,
+  food: number,
+  entities: Record<string, unknown>[],
+  dimension = 'minecraft:overworld',
+): Bot {
   const position = new Vec3(ORIGIN.x, ORIGIN.y, ORIGIN.z)
   const items = Object.entries(counts).map(([name, count], slot) => ({ name, count, slot }))
   const mobs = new Map<string, unknown>()
@@ -86,7 +92,7 @@ function fakeBot(counts: Record<string, number>, food: number, entities: Record<
     heldItem: null,
     health: 20,
     food,
-    game: { gameMode: 'survival', dimension: 'minecraft:overworld', minY: -64, height: 384 },
+    game: { gameMode: 'survival', dimension, minY: -64, height: 384 },
     time: { isDay: true },
     registry,
     entities: Object.fromEntries(mobs),
@@ -137,9 +143,10 @@ function perceive(
   counts: Record<string, number>,
   food: number,
   entities: Record<string, unknown>[] = [],
+  dimension = 'minecraft:overworld',
 ): WorldState {
   return buildWorldState(
-    fakeBot(counts, food, entities),
+    fakeBot(counts, food, entities, dimension),
     {
       tick: 1,
       goal: makeGoal('food', 3),
@@ -501,6 +508,23 @@ for (const testCase of cases) {
   process.stdout.write(`      ${observed.detail}\n`)
 }
 process.stdout.write('-'.repeat(72) + '\n')
+
+// ---------------------------------------------------------------------------
+// The habitat ascent's premise is OVERWORLD spawn truth (grass + sky). A hungry
+// body in another dimension must NOT climb toward a band that cannot hold its
+// prey: measured live on 3570c79, a hungry body IN THE NETHER climbed to y102
+// chasing this band while no passive animal can exist there.
+// ---------------------------------------------------------------------------
+
+addCase('(dimension) a hungry body in the Nether gets NO animal-habitat ascent', () => {
+  const state = perceive({}, 0, [], 'minecraft:the_nether')
+  const ascent = foodHabitatAscent(state, defaultCandidateOptions)
+  return {
+    pass: ascent.candidates.length === 0,
+    detail: `dimension=${state.self.dimension} candidates=[${ascent.candidates.map((c) => c.id).join(',')}]`,
+  }
+})
+
 process.stdout.write(`${cases.length - failures}/${cases.length} hunger-food cases passed\n`)
 
 if (failures > 0) {
