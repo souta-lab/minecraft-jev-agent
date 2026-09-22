@@ -5040,6 +5040,14 @@ function stepCutCandidates(state: WorldState, options: CandidateOptions): Candid
         stepY: cut.step.y,
         stepZ: cut.step.z,
         diggable: true,
+        // This arm builds the SAME kind of step cut as its sibling above (it removes
+        // the cell it cuts into), so it must declare the dig for the same reason: the
+        // commitment's EffectEnvelope derives mayDigGroundedRoute from a declared dig,
+        // and without it the step's own dig is refused fail-closed
+        // (`dig_cell_not_declared`, measured 94 times on STEP:* candidates after the
+        // sibling arm was fixed - this was the last arm still missing the declaration).
+        digStep: true,
+        digStepReason: `step_cut:${cut.dir}`,
       },
     }
   })
