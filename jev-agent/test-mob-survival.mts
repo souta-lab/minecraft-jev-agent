@@ -29,6 +29,7 @@
 import { createRequire } from 'node:module'
 import type { Bot } from 'mineflayer'
 import {
+  applyGroundedThreatRestriction,
   applyThreatRestriction,
   CONTACT_THREAT_KINDS,
   COMBAT_CANDIDATE_RANGE,
@@ -434,7 +435,8 @@ addCase('(c1e) live occluded skeleton: no LOS + no melee path does not erase gro
     hasStandableAdjacent: true,
     meta: { tick: state.tick, headroom: true },
   }
-  const offer = applyThreatRestriction(state, [work], { unreachableThreatEntityIds: new Set([53961]) })
+  const grounded = generateGroundedCandidates(state, { ...defaultCandidateOptions, reachability: { attackPathProbe: () => 'no_path' } })
+  const offer = applyGroundedThreatRestriction(state, [work], grounded.withheld)
   const line = offer.occluded === null || offer.threat === null
     ? ''
     : formatThreatOccluded('enter_portal:goal', offer.threat, offer.occluded.entityIds)

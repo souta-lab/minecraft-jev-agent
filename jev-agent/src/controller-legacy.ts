@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
 import type { Candidate, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
@@ -2605,17 +2605,7 @@ export class JevController {
       // names the capability gap when code grounds no attack and no
       // keep-distance route, which is mirrored as `THREAT_NO_ESCAPE` - the work
       // set is never silently handed back while a hostile is on the body.
-      const unreachableThreatEntityIds = new Set<number>(
-        grounded.withheld
-          .filter(
-            (entry) =>
-              entry.candidate.kind === 'ATTACK' &&
-              entry.result.reason === 'no_path' &&
-              entry.candidate.targetEntityId !== null,
-          )
-          .map((entry) => entry.candidate.targetEntityId as number),
-      )
-      const threatOffer = applyThreatRestriction(state, candidates, { unreachableThreatEntityIds })
+      const threatOffer = applyGroundedThreatRestriction(state, candidates, grounded.withheld)
       candidates = threatOffer.candidates
       this.logThreatOccluded(threatOffer)
       this.logThreatGap(state, threatOffer)
@@ -2928,34 +2918,27 @@ export class JevController {
       // decision-time offer (contact range + the published bounded danger
       // state), so a work action cannot slip back in between the Jev answer and
       // execution while a hostile is on the body.
+      const freshGrounded = generateGroundedCandidates(
+        freshState,
+        candidateOptions(
+          this.options,
+          this.recipeIndex,
+          this.unreachableStationKeys(freshState),
+          this.reachabilityGateOptions(),
+          this.blacklistedMoveTargets(freshState),
+          freshState.portalFrame,
+          this.searchedSurfaceTargets,
+          this.portalEntryPlan(freshState),
+          this.placementRetries.retiredItemSet(),
+        ),
+      )
+      const freshBeforeThreat = this.filterMoveCandidates(freshGrounded.candidates, freshState, false)
+      const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
       const freshCandidates = restrictCandidatesDuringCriticalDamage(
         freshState,
         restrictCandidatesDuringSubmersion(
           freshState,
-          restrictCandidatesAtCriticalHealth(
-            freshState,
-            applyThreatRestriction(
-              freshState,
-              this.filterMoveCandidates(
-                generateGroundedCandidates(
-                  freshState,
-                  candidateOptions(
-                    this.options,
-                  this.recipeIndex,
-                  this.unreachableStationKeys(freshState),
-                  this.reachabilityGateOptions(),
-                  this.blacklistedMoveTargets(freshState),
-                  freshState.portalFrame,
-                  this.searchedSurfaceTargets,
-                  this.portalEntryPlan(freshState),
-                  this.placementRetries.retiredItemSet(),
-                ),
-              ).candidates,
-              freshState,
-              false,
-            ),
-            ).candidates,
-          ),
+          restrictCandidatesAtCriticalHealth(freshState, freshThreatOffer.candidates),
         ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))

@@ -353,6 +353,30 @@ function occludedThreatBypass(
   return { reason: 'no_los_no_path', entityIds: nearby.map((entity) => entity.id).sort((a, b) => a - b) }
 }
 
+/**
+ * Project the reachability layer's CURRENT ordinary-hostile CAN facts into the
+ * threat restriction. Both decision-time offer generation and the pre-execution
+ * guard MUST call this adapter; otherwise the same state can expose goal work to
+ * Jev and then erase it during revalidation.
+ */
+export function applyGroundedThreatRestriction(
+  state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
+  candidates: readonly Candidate[],
+  withheld: readonly CandidateReachability[],
+): ThreatOffer {
+  const unreachableThreatEntityIds = new Set<number>(
+    withheld
+      .filter(
+        (entry) =>
+          entry.candidate.kind === 'ATTACK' &&
+          entry.result.reason === 'no_path' &&
+          entry.candidate.targetEntityId !== null,
+      )
+      .map((entry) => entry.candidate.targetEntityId as number),
+  )
+  return applyThreatRestriction(state, candidates, { unreachableThreatEntityIds })
+}
+
 export function applyThreatRestriction(
   state: Pick<WorldState, 'entities' | 'signals' | 'timestampMs'>,
   candidates: readonly Candidate[],
