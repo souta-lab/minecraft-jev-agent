@@ -3468,6 +3468,38 @@ export class JevController {
           }
         }
         this.logGuardRejections()
+        if (reground.candidateId === null) {
+          // A chosen SURVIVAL action that cannot be re-grounded must not end the
+          // tick with NO action while a hostile is on the body. Measured live
+          // (run-mucg2obc-v75cry): `SURVIVAL_NO_GROUNDED_ACTION chosenId=RETREAT:p23_57_-20
+          // reason=no_grounded_equivalent freshOffer=1 threat=wither_skeleton
+          // distance=0.57 contact=true health=4.36` - the fresh offer still held a
+          // reachable `ATTACK:e23324` on that same wither skeleton, but the
+          // vanished RETREAT could not be re-grounded, so the tick did nothing and
+          // the body was killed in the same second.
+          //
+          // Re-asking is the correct repair rather than substituting an action:
+          // fight-vs-flight is Jev's WHICH (section 8), so code must not pick the
+          // ATTACK itself. `requestDecision` only queues the fresh offer for the
+          // NEXT tick (the scheduler's own priority path), so this removes the
+          // idle tick without adding a model call inside this one and without
+          // choosing anything. A null threat means the situation is no longer a
+          // survival one and the ordinary flow owns it.
+          if (threatEvidence !== null) {
+            this.requestDecision('damage_taken', {
+              source: 'survival_reground_failed',
+              chosenId: vanishedChoice?.id ?? chosenId,
+              reason: reground.reason,
+              freshOffer: freshCandidates.length,
+            })
+          }
+        }
+        // issue #436 section 9, stronger than a requeue: when a hostile is IN
+        // CONTACT and the restricted offer already carries a grounded CONTROL
+        // action, EXECUTE it this tick (it mutates nothing and hands the semantic
+        // decision up immediately), so "no action while a hostile is on the body"
+        // is impossible rather than merely shorter. `survivalControlFallback` is
+        // pure and returns null when nothing is offered.
         if (reground.candidateId === null && controlId === null) return
         if (controlId !== null) {
           chosenId = controlId

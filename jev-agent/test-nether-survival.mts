@@ -324,19 +324,41 @@ addCase('(a5) a non-survival choice is still a hard guard rejection (no new reta
   }
 })
 
-addCase('(a6) the revalidation guard is wired to the re-grounding rule, not to a bare rejection', () => {
+addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable SURVIVAL choice asks again instead of ending the tick idle', () => {
+  // Intent unchanged: the guard tries the re-grounding rule before it rejects.
+  // Strengthened after a measured live death: the old code ended the tick with
+  // NO action when the re-ground failed (`if (reground.candidateId === null) return`)
+  // while a wither skeleton was in contact at 0.57 m with health 4.36, even though
+  // the fresh offer still held a reachable ATTACK on that same mob. Ending the tick
+  // idle is what killed the body, so the ungrounded branch must also queue the fresh
+  // offer for the next decision (`damage_taken`) - code still does not choose
+  // fight-vs-flight (section 8), it only declines to stand still.
   const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const guard = text.indexOf('const reground = regroundVanishedSurvivalChoice(')
   const reject = text.indexOf('this.guardRejections += 1', guard)
-  // issue #436 section 9 + the measured DEATH 32: a bare rejection is no longer
-  // enough. The tick returns only when the re-ground failed AND no grounded
-  // control action could be executed, and a hostile IN CONTACT must execute that
-  // control action instead of ending the tick actionless.
+  // The ungrounded branch must (a) requeue the decision so the tick is never the
+  // LAST thing that happens, and (b) when a hostile is in contact and a grounded
+  // CONTROL action is on offer, EXECUTE it (issue #436 section 9 / the measured
+  // DEATH 32) - a bare rejection or a bare requeue is not enough, and only a
+  // missing control action may let the tick end without one.
+  const ungrounded = text.indexOf('if (reground.candidateId === null) {', reject)
+  const requeue = text.indexOf("this.requestDecision('damage_taken'", ungrounded)
+  const tagged = text.indexOf("source: 'survival_reground_failed'", ungrounded)
   const returnsOnlyWhenUngrounded = text.includes('if (reground.candidateId === null && controlId === null) return')
   const hasControlFallback = text.includes('survivalControlFallback({')
   return {
-    pass: guard > 0 && reject > guard && returnsOnlyWhenUngrounded && hasControlFallback,
-    detail: `regroundCallAt=${guard} guardRejectAt=${reject} returnsOnlyWhenUngrounded=${returnsOnlyWhenUngrounded} controlFallback=${hasControlFallback}`,
+    pass:
+      guard > 0 &&
+      reject > guard &&
+      ungrounded > reject &&
+      requeue > ungrounded &&
+      tagged > ungrounded &&
+      returnsOnlyWhenUngrounded &&
+      hasControlFallback,
+    detail:
+      `regroundCallAt=${guard} guardRejectAt=${reject} ungroundedBlockAt=${ungrounded} ` +
+      `requeuesDecisionAt=${requeue} tagged=${tagged > ungrounded} ` +
+      `returnsOnlyWhenUngrounded=${returnsOnlyWhenUngrounded} controlFallback=${hasControlFallback}`,
   }
 })
 
