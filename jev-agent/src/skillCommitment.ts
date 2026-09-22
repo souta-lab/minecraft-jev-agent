@@ -43,6 +43,7 @@ import type { SkillStepAuthority } from './netherPortalPlan.ts'
 import type { SkillTerminalReason } from './jevSemanticProjection.ts'
 import type { Vec3Json } from './state.ts'
 import { BRIDGE_BLOCK_META, BRIDGE_META, BRIDGE_PLACE_META } from './bridgeRoute.ts'
+import { declaredRoutePlaceBlocks } from './routePlaceDeclaration.ts'
 
 /**
  * The committed Skill kind. This is the executor/candidate-level vocabulary
@@ -468,6 +469,17 @@ export function envelopeForCandidate(
       const bridge = candidate.meta[BRIDGE_META] === true
       const bridgeBlock = typeof candidate.meta[BRIDGE_BLOCK_META] === 'string' ? (candidate.meta[BRIDGE_BLOCK_META] as string) : null
       const firstPlaceCell = bridge ? metaCell(candidate.meta[BRIDGE_PLACE_META]) : null
+      // The block(s) this route's OWN placement step DECLARED at candidate time:
+      // `bridgeBlock` for a bridge, `pillarPlaceName` / `fallbackPillarPlaceName`
+      // for a vertical pillar route - the very keys the executor's own legs read
+      // before they equip (`runBridge` / `runVerticalLeg`). Measured live defect
+      // (main cd7b38b): a RETRIEVE's pillar route had its PLACE authorized by
+      // `mayPlaceGroundedRoute` while the EQUIP of the block it was about to place
+      // was refused `equip_item_not_declared:cobblestone`, so the route was spent
+      // and the body never climbed. The equip allowlist is therefore the declared
+      // set - never "any carried placeable block", and never a ranked pick: several
+      // declared blocks are ALL authorized (`routePlaceDeclaration.ts`).
+      const declaredPlaceBlocks = declaredRoutePlaceBlocks(candidate)
       return {
         ...base,
         mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.digStep === true || candidate.meta.vertical !== undefined,
@@ -476,10 +488,7 @@ export function envelopeForCandidate(
           bridge && firstPlaceCell !== null && bridgeBlock !== null
             ? [{ position: firstPlaceCell, itemName: bridgeBlock }]
             : [],
-        mayEquipItems:
-          bridge && bridgeBlock !== null
-            ? [...new Set([...(input.equipItems ?? []), bridgeBlock])]
-            : [...(input.equipItems ?? [])],
+        mayEquipItems: [...new Set([...(input.equipItems ?? []), ...declaredPlaceBlocks])],
       }
     }
     case 'CRAFT':

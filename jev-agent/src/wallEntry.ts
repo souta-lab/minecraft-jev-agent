@@ -372,20 +372,23 @@ export interface WallPocketFacts {
 }
 
 /**
- * The ONE per-cell verdict: everything is read from already-sensed facts; the order is the
- * order of the questions a player answers: may I break into here at all, will it stand me
- * on real ground, will it stay dry, can I finish the dig.
+ * The checks that answer "may the body OCCUPY this pocket at all", independent of
+ * how the pocket comes to exist: is it protected, was it actually sensed, is the
+ * body standing in a fluid, can it be opened, is it a dimension-transfer plane.
  *
- * Exported and shared (see the module header): the wall entry and the level scan differ
- * only in WHICH pockets they propose, never in how a pocket is judged.
+ * Extracted so the ONE per-cell rule has two consumers that cannot drift: the DIG
+ * (`wallPocketRefusal` below: mine the pocket open) and the SELF-LANDING SCAFFOLD
+ * (`bridgeRoute.ts#scaffoldPocketRefusal`: the pocket is already open and this step
+ * CREATES ITS FLOOR). Both read the same facts; only the two dig-only questions
+ * ("is there anything to mine", "is the pre-existing floor real ground") are the
+ * dig's own.
  */
-export function wallPocketRefusal(
+export function wallPocketOccupationRefusal(
   facts: WallPocketFacts,
   isProtected: (cell: Vec3Json, name: string | null) => boolean,
   describe: string = 'the',
 ): WallEntryRefusal | null {
   const probe = facts as WallProbe
-  const mined = probe.pocket.filter((cell) => !cell.open)
   if (isProtected(probe.pocket[0].cell, probe.pocket[0].name) || isProtected(probe.pocket[1].cell, probe.pocket[1].name)) {
     return {
       reason: 'protected',
@@ -441,6 +444,44 @@ export function wallPocketRefusal(
       }
     }
   }
+  return null
+}
+
+/**
+ * The flood verdict on its own: a fluid FACE-ADJACENT to a pocket cell would pour
+ * into the space the body occupies. Exported for the consumer that OCCUPIES a
+ * pocket without mining it (the self-landing scaffold), where a fluid pouring into
+ * the pocket is the whole hazard even though nothing is dug.
+ */
+export function wallPocketFloodRefusal(facts: WallPocketFacts, describe: string = 'the'): WallEntryRefusal | null {
+  const probe = facts as WallProbe
+  if (!probe.flood) return null
+  return {
+    reason: 'would_flood',
+    target: probe.floor.cell,
+    cell: probe.floodCell ?? probe.pocket[0].cell,
+    block: probe.floodBlock,
+    detail: formatFloodCause(probe),
+  }
+}
+
+/**
+ * The ONE per-cell verdict: everything is read from already-sensed facts; the order is the
+ * order of the questions a player answers: may I break into here at all, will it stand me
+ * on real ground, will it stay dry, can I finish the dig.
+ *
+ * Exported and shared (see the module header): the wall entry and the level scan differ
+ * only in WHICH pockets they propose, never in how a pocket is judged.
+ */
+export function wallPocketRefusal(
+  facts: WallPocketFacts,
+  isProtected: (cell: Vec3Json, name: string | null) => boolean,
+  describe: string = 'the',
+): WallEntryRefusal | null {
+  const probe = facts as WallProbe
+  const mined = probe.pocket.filter((cell) => !cell.open)
+  const occupation = wallPocketOccupationRefusal(facts, isProtected, describe)
+  if (occupation !== null) return occupation
   if (mined.length === 0) {
     return {
       reason: 'no_wall',
@@ -461,17 +502,9 @@ export function wallPocketRefusal(
         `(${cellText(probe.floor.cell)}) is ${probe.floor.observed ? (probe.floor.name ?? 'open') : 'unloaded'}`,
     }
   }
-  if (probe.flood) {
-    return {
-      reason: 'would_flood',
-      target: probe.floor.cell,
-      cell: probe.floodCell ?? probe.pocket[0].cell,
-      block: probe.floodBlock,
-      detail: formatFloodCause(probe),
-    }
-  }
-  return null
+  return wallPocketFloodRefusal(facts, describe)
 }
+
 
 /**
  * The one per-probe verdict of a cardinal wall probe: `wallPocketRefusal` (with the

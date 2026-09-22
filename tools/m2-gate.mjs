@@ -45,6 +45,19 @@ import { evaluateCurrentM2AuthorityEvidence, loadPolicyEvidence } from './m2-pol
 export const RUN_ID_RE = /^run-[A-Za-z0-9-]+$/
 export const M2_RUN_RESULT = 'M2_RUN_RESULT'
 export const M2_RUN_GATE = 'M2_RUN_GATE'
+/**
+ * The ordered per-source build->light->verify trace, one line per evidence
+ * source (`m2_chain: source=... built=... lit=... verified=...`). The four M2
+ * stage conditions above are unchanged by this line: it exists so the RUN-SCOPED
+ * artifact can carry WHICH evidence source proved each link of the chain, which
+ * the stage verdicts alone cannot express (a frame from the snapshot and a light
+ * from the log would otherwise be indistinguishable from one complete chain).
+ * tools/m2-chain-rehearsal.mjs asserts it, tools/milestone-run-artifact.mjs
+ * carries it as `verdicts.M2.chain`.
+ */
+export const M2_RUN_CHAIN = 'm2_chain'
+/** Link states for one evidence source. PASS/FAIL/UNKNOWN, mirroring the stage grammar. */
+export const CHAIN_LINK_STATES = Object.freeze(['PASS', 'FAIL', 'UNKNOWN'])
 
 /** The four contract stages, in dependency order. */
 export const M2_REQUIRED_STAGES = Object.freeze([
@@ -269,6 +282,12 @@ function normalizeDimension(dimension) {
  * The ordered portal chain inside one evidence source: at least one block placed,
  * then a validated frame (shape=ok, blocks >= 10), then the light, then a true
  * verification. `litDimension` is the dimension reported by the PORTAL_LIT line.
+ *
+ * `litObserved`/`verifiedObserved` split the links the stage conditions fold
+ * together (`litVerified` still means "lit AND verified", unchanged): they let
+ * the run-scoped artifact report built/lit/verified separately without touching
+ * any stage verdict. `frameBlocks`/`frameShape` are the qualifying frame event's
+ * own values, reported verbatim (never re-derived).
  */
 export function evaluatePortalChain(events) {
   const seq = Array.isArray(events) ? events : []
@@ -293,7 +312,103 @@ export function evaluatePortalChain(events) {
   }
   const litVerified = frameVerified && lit !== -1 && verified !== -1
   const litDimension = lit === -1 ? null : seq[lit].dimension ?? null
-  return { frameVerified, litVerified, litDimension, indices: { placed, frame, lit, verified } }
+  const frameEvent = frame === -1 ? null : seq[frame]
+  return {
+    frameVerified,
+    litVerified,
+    litObserved: frameVerified && lit !== -1,
+    verifiedObserved: frameVerified && lit !== -1 && verified !== -1,
+    litDimension,
+    frameBlocks: frameEvent !== null && Number.isFinite(frameEvent.blocks) ? frameEvent.blocks : null,
+    frameShape: frameEvent !== null && typeof frameEvent.shape === 'string' ? frameEvent.shape : null,
+    indices: { placed, frame, lit, verified },
+  }
+}
+
+/**
+ * Project ONE evidence source's chain onto the three links the M2 contract names
+ * (`portal_built` / `portal_lit` / `portal_verified`). Pure; the stage conditions
+ * are computed from the union across sources exactly as before, so this function
+ * can never widen or narrow a verdict - it only names the evidence.
+ */
+export function portalChainLink(source) {
+  const chain = source?.chain ?? null
+  const failure = source?.failure ?? null
+  const frameVerified = chain?.frameVerified === true
+  const litObserved = chain?.litObserved === true
+  const verifiedObserved = chain?.verifiedObserved === true
+  const built = frameVerified ? 'PASS' : failure === 'portal_frame_shape_bad' ? 'FAIL' : 'UNKNOWN'
+  const lit =
+    litObserved ? 'PASS' : failure === 'portal_light_refused' || failure === 'portal_verify_false' ? 'FAIL' : 'UNKNOWN'
+  const verified = verifiedObserved ? 'PASS' : failure === 'portal_verify_false' ? 'FAIL' : 'UNKNOWN'
+  const litDimension = chain?.litDimension ?? null
+  return {
+    source: typeof source?.name === 'string' ? source.name : 'none',
+    built,
+    lit,
+    verified,
+    ordered: frameVerified && litObserved && verifiedObserved,
+    // The gate's `portal_lit` stage additionally requires the overworld (a lit
+    // frame in the Nether is a different fact). Reported, never re-judged here.
+    overworld: litObserved ? normalizeDimension(litDimension) === normalizeDimension(OVERWORLD) : null,
+    blocks: chain?.frameBlocks ?? null,
+    shape: chain?.frameShape ?? null,
+    dimension: litDimension,
+    indices: chain?.indices ?? { placed: -1, frame: -1, lit: -1, verified: -1 },
+  }
+}
+
+/** Render one chain link as the single-line evidence record the artifact parses. */
+export function formatPortalChainLine(link) {
+  const indices = link?.indices ?? { placed: -1, frame: -1, lit: -1, verified: -1 }
+  const ordered = [indices.placed, indices.frame, indices.lit, indices.verified].map((index) =>
+    Number.isFinite(index) ? index : -1,
+  )
+  return (
+    `${M2_RUN_CHAIN}: source=${link?.source ?? 'none'} built=${link?.built ?? 'UNKNOWN'} ` +
+    `lit=${link?.lit ?? 'UNKNOWN'} verified=${link?.verified ?? 'UNKNOWN'} ordered=${link?.ordered === true} ` +
+    `overworld=${link?.overworld === true ? 'true' : link?.overworld === false ? 'false' : 'unknown'} ` +
+    `blocks=${Number.isFinite(link?.blocks) ? link.blocks : 'none'} shape=${typeof link?.shape === 'string' ? link.shape : 'none'} ` +
+    `dimension=${typeof link?.dimension === 'string' && link.dimension.length > 0 ? link.dimension : 'none'} ` +
+    `indices=${ordered.join(',')}`
+  )
+}
+
+/**
+ * Parse a `m2_chain:` line back into a link record. Returns null for any other
+ * line, so a reader can never mistake a different marker for chain evidence.
+ */
+export function parsePortalChainLine(line) {
+  if (typeof line !== 'string' || !line.startsWith(`${M2_RUN_CHAIN}:`)) return null
+  const field = (name) => new RegExp(`\\b${name}=(\\S+)`).exec(line)?.[1] ?? null
+  const state = (name) => {
+    const value = field(name)
+    return CHAIN_LINK_STATES.includes(value) ? value : null
+  }
+  const source = field('source')
+  const built = state('built')
+  const lit = state('lit')
+  const verified = state('verified')
+  if (source === null || built === null || lit === null || verified === null) return null
+  const rawIndices = (field('indices') ?? '').split(',').map((value) => Number(value))
+  const indices =
+    rawIndices.length === 4 && rawIndices.every((value) => Number.isFinite(value))
+      ? { placed: rawIndices[0], frame: rawIndices[1], lit: rawIndices[2], verified: rawIndices[3] }
+      : { placed: -1, frame: -1, lit: -1, verified: -1 }
+  const blocks = Number(field('blocks'))
+  const overworldToken = field('overworld')
+  return {
+    source,
+    built,
+    lit,
+    verified,
+    ordered: field('ordered') === 'true',
+    overworld: overworldToken === 'true' ? true : overworldToken === 'false' ? false : null,
+    blocks: Number.isFinite(blocks) ? blocks : null,
+    shape: field('shape') === 'none' ? null : field('shape'),
+    dimension: field('dimension') === 'none' ? null : field('dimension'),
+    indices,
+  }
 }
 
 /** A known terminal portal failure in this evidence, or null. */
@@ -425,6 +540,9 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
     portal_lit: litPass ? 'PASS' : litFail ? 'FAIL' : 'UNKNOWN',
   }
   const missing = M2_REQUIRED_STAGES.filter((stage) => conditions[stage] !== 'PASS')
+  // The ordered per-source chain trace. Purely additive reporting: every stage
+  // condition above is computed from the same per-source facts exactly as before.
+  const chain = perSource.map((source) => portalChainLink(source))
   const facts = {
     diamond,
     materials,
@@ -432,6 +550,7 @@ export function evaluateM2Gate({ expectedRunId = null, evidence = null, policy =
     litPass,
     missing,
     inheritedPortal: { detected: inheritedPortal, observations: inheritedObservations },
+    chain,
     policy: policy?.facts ?? null,
   }
   const allPass = Object.values(conditions).every((value) => value === 'PASS')
@@ -711,6 +830,12 @@ export async function runM2Gate({
   now = () => new Date(),
   write = (line) => process.stdout.write(`${line}\n`),
   json = false,
+  // ADDITIVE (schema-neutral): an assembler such as tools/milestone-run-artifact.mjs
+  // needs the STRUCTURED verdict (conditions + facts) the gate already computed, not
+  // a regex over its human lines. Returning it here never changes the verdict, the
+  // printed lines, or the exit code - `runM2Gate` still returns the numeric code so
+  // the CLI contract (`process.exitCode = await runM2Gate(...)`) is unchanged.
+  onResult = null,
 } = {}) {
   const stamp = now().toISOString()
   const resolveEvidence = readEvidence ?? ((runId) => readRunScopedM2Evidence(runId, { logPath, snapshotDir }))
@@ -747,6 +872,7 @@ export async function runM2Gate({
       })
     : null
   const result = evaluateM2Gate({ expectedRunId, evidence, policy })
+  if (typeof onResult === 'function') onResult(result)
 
   if (json) {
     write(
@@ -759,6 +885,7 @@ export async function runM2Gate({
         evidence: evidence === null ? null : { status: evidence.status, sources: (evidence.sources ?? []).map((s) => s.name) },
         policy: policy === null ? null : { status: policy.status, reason: policy.reason },
         inheritedPortal: result.facts?.inheritedPortal ?? null,
+        chain: result.facts?.chain ?? null,
         facts: result.facts ?? null,
       }),
     )
@@ -787,6 +914,13 @@ export async function runM2Gate({
     }
     write(`m2_missing: ${result.facts.missing.length > 0 ? result.facts.missing.join(',') : 'none'}`)
   }
+  // One typed, ordered built->lit->verified trace per evidence source. Printed on
+  // EVERY path (including unscoped/unavailable evidence) so a reader can always
+  // tell "no chain was looked for" (`source=none`) apart from "a chain was looked
+  // for and this source did not prove it".
+  const chain = Array.isArray(result.facts?.chain) ? result.facts.chain : []
+  if (chain.length === 0) write(formatPortalChainLine({ source: 'none' }))
+  for (const link of chain) write(formatPortalChainLine(link))
   write(
     `${M2_RUN_RESULT} status=${result.status} reason=${result.reason} runId=${expectedRunId ?? 'none'} ` +
       `diamond=${result.conditions.diamond_ready} materials=${result.conditions.portal_materials_ready} ` +

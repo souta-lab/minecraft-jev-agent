@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deriveStatus, main } from './current-status.mjs'
+import { FAIL, INFRA_UNKNOWN } from './ci-classify.mjs'
 
 let checks = 0
 const ok = (label) => {
@@ -120,6 +121,66 @@ const offlineResident = async () => null
   assert.doesNotMatch(markdown, /- P0: 0/)
   assert.doesNotMatch(markdown, /- P1: 0/)
   ok('failing gh degrades to UNKNOWN with no fabricated zero')
+
+  // The CI section must be present and must NOT claim a code verdict when the
+  // workflow run cannot be read at all (issue #299: no silent CI).
+  assert.match(markdown, /## CI gate \(repo-invariants\) — UNKNOWN/)
+  assert.match(markdown, /- verdict: INFRA_UNKNOWN/)
+  assert.match(markdown, /no GitHub Actions result was read, so this snapshot makes NO CI claim/)
+  assert.doesNotMatch(markdown, /- verdict: FAIL/)
+  ok('unreadable CI is an explicit INFRA_UNKNOWN section, never silent and never FAIL')
+}
+
+// 2b. THE regression fixture: the REAL billing run (5 jobs, steps=[], raw
+//     conclusion=failure) renders as INFRA_UNKNOWN, not FAIL.
+{
+  const realBilling = {
+    ok: true,
+    runId: '35719569221',
+    headSha: 'cd7b38b70da61c2883b9a1dc14b34a70a732a88a',
+    verdict: INFRA_UNKNOWN,
+    reason: 'no job executed a single step (5/5 never started)',
+    executedJobs: 0,
+    totalJobs: 5,
+    jobs: [
+      { name: 'system2-harness', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+      { name: 'jev-harness', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+      { name: 'authority-contract', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+      { name: 'convergence', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+      { name: 'core-deterministic', verdict: INFRA_UNKNOWN, steps: 0, executedSteps: 0, conclusion: 'failure', reason: 'not started' },
+    ],
+  }
+  const { markdown } = await deriveStatus({
+    run: makeRunner(),
+    readResident: offlineResident,
+    readCi: async () => realBilling,
+  })
+  assert.match(markdown, /## CI gate \(repo-invariants\) — EVIDENCE/)
+  assert.match(markdown, /- verdict: INFRA_UNKNOWN/)
+  assert.match(markdown, /- run: 35719569221/)
+  assert.match(markdown, /- jobs: 0\/5 executed at least one step/)
+  assert.match(markdown, /- job convergence: INFRA_UNKNOWN \(0\/0 executed steps, raw conclusion=failure\)/)
+  assert.match(markdown, /This run is NOT a code verdict \(issue #299\)/)
+  assert.doesNotMatch(markdown, /- verdict: FAIL/)
+  ok('the real billing run renders INFRA_UNKNOWN with the raw conclusion still visible')
+
+  // An executed FAIL must still render as FAIL — the fixture above must not have
+  // turned the section into a blanket excuse.
+  const { markdown: redMarkdown } = await deriveStatus({
+    run: makeRunner(),
+    readResident: offlineResident,
+    readCi: async () => ({ ...realBilling, verdict: FAIL, reason: '1/5 job(s) executed and failed: convergence' }),
+  })
+  assert.match(redMarkdown, /- verdict: FAIL/)
+  assert.match(redMarkdown, /This IS a code verdict/)
+  ok('an executed CI failure still renders FAIL')
+}
+
+// 2c. `readCi: false` removes the section entirely (explicit opt-out, not silence by default).
+{
+  const { markdown } = await deriveStatus({ run: makeRunner(), readResident: offlineResident, readCi: false })
+  assert.doesNotMatch(markdown, /## CI gate/)
+  ok('readCi:false omits the CI section on explicit opt-out')
 }
 
 // 3. --write writes CURRENT-STATUS.md including the evidence-commands section.

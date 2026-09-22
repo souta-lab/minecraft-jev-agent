@@ -41,21 +41,24 @@ import {
   defaultCandidateOptions,
   formatExploreRouteBlocked,
   formatMobDropSourceGap,
+  formatMobSpawnContext,
   generateGroundedCandidates,
   MOB_DROP_SOURCE_NONE,
+  MOB_SPAWN_CONTEXT,
   mobDropSourceGap,
 } from './src/candidates.ts'
-import type { Candidate, ReachabilityGateOptions } from './src/candidates.ts'
+import type { Candidate, MobDropSpawnContext, ReachabilityGateOptions } from './src/candidates.ts'
 import { Executor, defaultExecutorOptions } from './src/executor.ts'
 import { EventLogger } from './src/jev.ts'
 import type { AgentLevel } from './src/jev-legacy.ts'
 import { createRecipeIndex } from './src/crafting.ts'
-import { scannedBlockNames } from './src/state.ts'
+import { MOB_SPAWN_CONTEXTS, mobSpawnContextMet, sampleMobSpawnContext, scannedBlockNames } from './src/state.ts'
 import type {
   BlockState,
   EntityState,
   GoalState,
   InventoryState,
+  MobSpawnContextObservation,
   SelfState,
   Vec3Json,
   WorldState,
@@ -176,6 +179,8 @@ function build(input: {
   entities?: EntityState[]
   standable?: Vec3Json[]
   blocks?: BlockState[]
+  /** the sensor's spawn-context observation, as `buildWorldState` would emit it */
+  spawnContexts?: MobSpawnContextObservation[]
 }): WorldState {
   const current = queuedGoal('ender_pearl')
   const inventory: InventoryState = {
@@ -191,6 +196,7 @@ function build(input: {
     inventory,
     entities: input.entities ?? [],
     blocks: input.blocks ?? [],
+    ...(input.spawnContexts === undefined ? {} : { spawnContexts: input.spawnContexts }),
     terrain: { standable: input.standable ?? FRONTIER },
     craftingTables: [],
     furnaces: [],
@@ -815,6 +821,374 @@ addCase('(d2) a pearl goal with nothing sensed in the Nether is the same generic
       line ===
         `${MOB_DROP_SOURCE_NONE} item=ender_pearl reason=no_producer_sensed producers=["enderman"] sensed=0 offered=["explore"] next=explore`,
     detail: `moves=${moves.length} gap=${line}`,
+  }
+})
+
+// ---------------------------------------------------------------------------
+// (e) SPAWN CONTEXT: where a producer can exist, and whether the live context
+//     was actually read
+//
+// Before this existed every pearl tick read `MOB_DROP_SOURCE_NONE ... sensed=0`
+// and no layer could tell apart three different world situations:
+//   (e1) the body IS in a valid spawn context and the search is grounded on it;
+//   (e2) the context could not be measured and the search is a search FOR the
+//        context (the measured island: nothing said whether a pearl was findable
+//        where the body stood);
+//   (e3) the dimension can never host the producer, so a search here is NOT
+//        grounded and the body must be told that instead of wandering.
+// ---------------------------------------------------------------------------
+
+function spawnObservation(
+  request: {
+    mob?: string
+    dimension: string
+    verdict: MobSpawnContextObservation['verdict']
+    cell?: Vec3Json | null
+    surfaceBlock?: string | null
+    light?: number | null
+    spawnLightMax?: number | null
+    biome?: string | null
+    probeReason?: MobSpawnContextObservation['probeReason']
+  },
+): MobSpawnContextObservation {
+  return {
+    mob: request.mob ?? 'enderman',
+    dimension: request.dimension,
+    verdict: request.verdict,
+    cell: request.cell === undefined ? { x: 0, y: 60, z: 0 } : request.cell,
+    surfaceBlock: request.surfaceBlock === undefined ? 'grass_block' : request.surfaceBlock,
+    light: request.light === undefined ? 3 : request.light,
+    spawnLightMax: request.spawnLightMax === undefined ? 7 : request.spawnLightMax,
+    biome: request.biome === undefined ? 'soul_sand_valley' : request.biome,
+    probeReason: request.probeReason ?? null,
+  }
+}
+
+addCase('(e1) a valid spawn context ahead grounds the SEARCH objective and carries the producer facts', () => {
+  const grounded = generateGroundedCandidates(
+    build({
+      dimension: 'minecraft:overworld',
+      spawnContexts: [
+        spawnObservation({ dimension: 'minecraft:overworld', verdict: 'met', light: 3, biome: 'plains' }),
+      ],
+    }),
+    candidateOptions(),
+  )
+  const moves = explorationMoves(grounded.candidates)
+  const gap = grounded.mobDropGap
+  return {
+    pass:
+      moves.length >= 2 &&
+      // every offered frontier MOVE IS the producer search: the same exploration
+      // arm, declaring WHY it is being run (never a forked route)
+      moves.every(
+        (move) =>
+          move.meta.producerSearch === true &&
+          move.meta.producerItem === 'ender_pearl' &&
+          move.meta.producerMobs === '["enderman"]' &&
+          move.meta.producerSpawnContext === 'met' &&
+          move.meta.producerSpawnSearchGrounded === true,
+      ) &&
+      new Set(moves.map((move) => move.id)).size === moves.length &&
+      gap !== null &&
+      gap.spawnContext !== null &&
+      gap.spawnContext.reason === 'met' &&
+      gap.spawnContext.searchGrounded === true &&
+      gap.spawnContext.surfaceBlock === 'grass_block' &&
+      gap.spawnContext.light === 3 &&
+      gap.spawnContext.spawnLightMax === 7 &&
+      gap.spawnContext.biome === 'plains' &&
+      gap.spawnContext.cell !== null &&
+      gap.spawnContext.cell.x === 0 &&
+      gap.spawnContext.cell.y === 60 &&
+      gap.next === 'explore',
+    detail: `moves=${moves.length} meta=${JSON.stringify(moves[0]?.meta ?? {})} ctx=${gap?.spawnContext === undefined || gap.spawnContext === null ? 'none' : `${gap.spawnContext.reason}/${gap.spawnContext.searchGrounded}`}`,
+  }
+})
+
+addCase('(e2) an UNMEASURABLE context is typed as unknown and still grounds a search for the context', () => {
+  const grounded = generateGroundedCandidates(
+    build({
+      dimension: 'minecraft:overworld',
+      spawnContexts: [
+        spawnObservation({
+          dimension: 'minecraft:overworld',
+          verdict: 'context_unknown',
+          cell: null,
+          surfaceBlock: null,
+          light: null,
+          spawnLightMax: 7,
+          biome: null,
+          probeReason: 'no_sensed_surface',
+        }),
+      ],
+    }),
+    candidateOptions(),
+  )
+  const gap = grounded.mobDropGap
+  const context: MobDropSpawnContext | null = gap?.spawnContext ?? null
+  const line = gap === null ? 'none' : formatMobSpawnContext(gap.item, gap.producers, gap.spawnContext)
+  return {
+    pass:
+      gap !== null &&
+      context !== null &&
+      context.reason === 'context_unknown' &&
+      context.searchGrounded === true &&
+      context.probeReason === 'no_sensed_surface' &&
+      context.light === null &&
+      context.cell === null &&
+      gap.next === 'explore' &&
+      explorationMoves(grounded.candidates).length >= 2 &&
+      line ===
+        `${MOB_SPAWN_CONTEXT} item=ender_pearl producers=["enderman"] mobs=["enderman"] ` +
+          `dimensions=["minecraft:overworld","minecraft:the_end","minecraft:the_nether"] ` +
+          `dimension=minecraft:overworld reason=context_unknown cell=unknown light=unknown ` +
+          `spawnLightMax=7 biome=unknown probe=no_sensed_surface searchGrounded=true`,
+    detail: `line=${line} next=${gap?.next ?? 'none'} moves=${explorationMoves(grounded.candidates).length}`,
+  }
+})
+
+addCase('(e3) a dimension that cannot host the producer withholds the search and says so', () => {
+  const grounded = generateGroundedCandidates(
+    build({
+      dimension: 'minecraft:the_end',
+      spawnContexts: [
+        spawnObservation({ dimension: 'minecraft:the_end', verdict: 'dimension_unmet', light: null, spawnLightMax: null }),
+      ],
+    }),
+    candidateOptions(),
+  )
+  const gap = grounded.mobDropGap
+  const context = gap?.spawnContext ?? null
+  const line = gap === null ? 'none' : formatMobSpawnContext(gap.item, gap.producers, gap.spawnContext)
+  return {
+    pass:
+      gap !== null &&
+      context !== null &&
+      context.reason === 'dimension_unmet' &&
+      context.searchGrounded === false &&
+      // no search MOVE may claim to be a producer search here
+      grounded.candidates.every((c) => c.meta.producerSearch !== true) &&
+      line.includes('reason=dimension_unmet') &&
+      line.includes('searchGrounded=false'),
+    detail: `line=${line} searchMoves=${grounded.candidates.filter((c) => c.meta.producerSearch === true).length}`,
+  }
+})
+
+addCase('(e4) a measured light that is too high is `light_unmet`, and the search for a darker surface stays grounded', () => {
+  const grounded = generateGroundedCandidates(
+    build({
+      dimension: 'minecraft:overworld',
+      spawnContexts: [
+        spawnObservation({ dimension: 'minecraft:overworld', verdict: 'light_unmet', light: 15, biome: 'plains' }),
+      ],
+    }),
+    candidateOptions(),
+  )
+  const gap = grounded.mobDropGap
+  const context = gap?.spawnContext ?? null
+  const moves = explorationMoves(grounded.candidates)
+  return {
+    pass:
+      context !== null &&
+      context.reason === 'light_unmet' &&
+      context.searchGrounded === true &&
+      context.light === 15 &&
+      context.spawnLightMax === 7 &&
+      moves.length >= 2 &&
+      moves.every((move) => move.meta.producerSpawnContext === 'light_unmet') &&
+      gap?.next === 'explore',
+    detail: `reason=${context?.reason ?? 'none'} light=${String(context?.light)} moves=${moves.length}`,
+  }
+})
+
+addCase('(e5) the search context is producer-generic: the same rule serves a Nether blaze_rod focus', () => {
+  const state = build({
+    dimension: 'minecraft:the_nether',
+    spawnContexts: [
+      spawnObservation({
+        mob: 'blaze',
+        dimension: 'minecraft:the_nether',
+        verdict: 'met',
+        light: 0,
+        spawnLightMax: 0,
+        biome: 'nether_wastes',
+      }),
+    ],
+  })
+  state.goalQueue = queue(queuedGoal('blaze_rod', 7))
+  state.goal = goalState('blaze_rod', 7)
+  const grounded = generateGroundedCandidates(state, candidateOptions())
+  const gap = grounded.mobDropGap
+  const context = gap?.spawnContext ?? null
+  const moves = explorationMoves(grounded.candidates)
+  return {
+    pass:
+      context !== null &&
+      context.reason === 'met' &&
+      context.mobs.join(',') === 'blaze' &&
+      context.dimensions.join(',') === 'minecraft:the_nether' &&
+      // no light gate applies in this dimension: the rule's `lightGatedDimensions`
+      // is empty, so the Nether can never look unspawnable for lack of a sample
+      MOB_SPAWN_CONTEXTS['blaze']?.lightGatedDimensions.length === 0 &&
+      context.searchGrounded === true &&
+      moves.length >= 2 &&
+      moves.every(
+        (move) => move.meta.producerItem === 'blaze_rod' && move.meta.producerMobs === '["blaze"]',
+      ),
+    detail: `mobs=${context?.mobs.join(',') ?? 'none'} gated=${MOB_SPAWN_CONTEXTS['blaze']?.lightGatedDimensions.join(',') || 'none'} moves=${moves.length} ids=${ids(grounded.candidates)}`,
+  }
+})
+
+addCase('(e6) the spawn-context rule itself is deterministic data, not a mob-specific branch', () => {
+  const enderman = MOB_SPAWN_CONTEXTS['enderman']
+  const blaze = MOB_SPAWN_CONTEXTS['blaze']
+  return {
+    pass:
+      enderman !== undefined &&
+      blaze !== undefined &&
+      // the overworld half is light-gated at 7 ...
+      mobSpawnContextMet(enderman, 'minecraft:overworld', 7) === true &&
+      mobSpawnContextMet(enderman, 'minecraft:overworld', 8) === false &&
+      // ... and the SAME mob in the Nether/End is not gated at all, so a valid
+      // context there needs no light sample
+      enderman.lightGatedDimensions.join(',') === 'minecraft:overworld' &&
+      mobSpawnContextMet(enderman, 'minecraft:the_nether', null) === true &&
+      mobSpawnContextMet(enderman, 'minecraft:the_nether', 15) === true &&
+      mobSpawnContextMet(enderman, 'minecraft:the_end', null) === true &&
+      // where the rule DOES gate, an unmeasured light is never "spawnable"
+      mobSpawnContextMet(enderman, 'minecraft:overworld', null) === false &&
+      // blazes are Nether-only and never light-gated
+      blaze.lightGatedDimensions.length === 0 &&
+      mobSpawnContextMet(blaze, 'minecraft:the_nether', 15) === true &&
+      mobSpawnContextMet(blaze, 'minecraft:overworld', 0) === false,
+    detail: `enderman=${enderman === undefined ? 'missing' : `${enderman.dimensions.join('|')} gated=${enderman.lightGatedDimensions.join('|')}`} blaze=${blaze === undefined ? 'missing' : `${blaze.dimensions.join('|')} gated=${blaze.lightGatedDimensions.join('|') || 'none'}`}`,
+  }
+})
+
+addCase('(e7) the SENSOR reads the live context: block light and biome come from the world, never invented', () => {
+  const makeBot = (blocks: Record<string, { name: string; light: number | null; biome: number | null } | null>) =>
+    ({
+      blockAt: (cell: { x: number; y: number; z: number }) => blocks[`${cell.x},${cell.y},${cell.z}`] ?? null,
+      registry: { biomes: { 49: { name: 'soul_sand_valley' } } },
+    }) as never
+  const self = { x: 0.5, y: 61, z: 0.5 }
+  const dark = sampleMobSpawnContext(
+    makeBot({ '0,60,0': { name: 'soul_soil', light: 0, biome: 49 } }),
+    'enderman',
+    'minecraft:overworld',
+    self,
+  )
+  const bright = sampleMobSpawnContext(
+    makeBot({ '0,60,0': { name: 'soul_soil', light: 15, biome: 49 } }),
+    'enderman',
+    'minecraft:overworld',
+    self,
+  )
+  const noLight = sampleMobSpawnContext(
+    makeBot({ '0,60,0': { name: 'soul_soil', light: null, biome: 49 } }),
+    'enderman',
+    'minecraft:overworld',
+    self,
+  )
+  const nether = sampleMobSpawnContext(
+    makeBot({}),
+    'enderman',
+    'minecraft:the_nether',
+    self,
+  )
+  const wrongDimension = sampleMobSpawnContext(makeBot({}), 'blaze', 'minecraft:overworld', self)
+  return {
+    pass:
+      dark.verdict === 'met' &&
+      dark.light === 0 &&
+      dark.biome === 'soul_sand_valley' &&
+      dark.surfaceBlock === 'soul_soil' &&
+      dark.cell?.y === 60 &&
+      bright.verdict === 'light_unmet' &&
+      bright.light === 15 &&
+      nether.verdict === 'met' &&
+      // a Nether producer in the Nether is `met` WITHOUT a world read
+      nether.cell === null &&
+      nether.probeReason === null &&
+      wrongDimension.verdict === 'dimension_unmet' &&
+      // an unreadable light is a MISSING fact, never a silent "spawnable"
+      noLight.verdict === 'context_unknown' &&
+      noLight.light === null &&
+      noLight.probeReason === 'light_unavailable',
+    detail: `dark=${dark.verdict}/${String(dark.light)}/${dark.biome} bright=${bright.verdict} noLight=${noLight.verdict}/${String(noLight.probeReason)} nether=${nether.verdict} blazeOw=${wrongDimension.verdict}`,
+  }
+})
+
+addCase('(e8) once a producer IS sensed the hunt route replaces the search, with no stale search facts', () => {
+  const grounded = generateGroundedCandidates(
+    build({
+      dimension: 'minecraft:overworld',
+      entities: [enderman(31, 6, { x: 6, y: 61, z: 0 })],
+      spawnContexts: [
+        spawnObservation({ dimension: 'minecraft:overworld', verdict: 'met', light: 3, biome: 'plains' }),
+      ],
+    }),
+    candidateOptions(),
+  )
+  const attacks = grounded.candidates.filter((c) => c.kind === 'ATTACK')
+  return {
+    pass:
+      attacks.length === 1 &&
+      attacks[0]?.id === 'ATTACK:e31' &&
+      attacks[0]?.meta.goalDrop === 'ender_pearl' &&
+      attacks[0]?.meta.requiresKill === true &&
+      attacks[0]?.meta.dropItem === 'ender_pearl' &&
+      grounded.mobDropGap === null &&
+      grounded.candidates.every((c) => c.meta.producerSearch !== true),
+    detail: `attacks=${attacks.length} meta=${JSON.stringify(attacks[0]?.meta ?? {})} searchMoves=${grounded.candidates.filter((c) => c.meta.producerSearch === true).length}`,
+  }
+})
+
+addCase('(e9) an ordinary (non mob-drop) goal is unchanged: no spawn context, no producer search', () => {
+  const state = build({ dimension: 'minecraft:overworld' })
+  state.goalQueue = queue(queuedGoal('raw_iron', 3))
+  state.goal = goalState('raw_iron', 3)
+  const grounded = generateGroundedCandidates(state, candidateOptions())
+  return {
+    pass:
+      grounded.mobDropGap === null &&
+      grounded.candidates.every(
+        (c) => c.meta.producerSearch !== true && c.meta.producerItem === undefined,
+      ),
+    detail: `gap=${grounded.mobDropGap === null ? 'none' : 'present'} ids=${ids(grounded.candidates)}`,
+  }
+})
+
+addCase('(e10) the search is honest about NOVELTY: an exhausted frontier is typed, never re-walked', () => {
+  // The exploration arm already drops cells the body has occupied
+  // (`signals.exploredCells`, the controller's bounded LRU). With a producer
+  // search riding on those same MOVEs, a fully-explored neighbourhood must yield
+  // NO search move and a typed escalation - not the same cells offered again as
+  // "unexplored terrain", which is a search that makes no progress.
+  const state = build({
+    dimension: 'minecraft:overworld',
+    spawnContexts: [
+      spawnObservation({ dimension: 'minecraft:overworld', verdict: 'met', light: 3, biome: 'plains' }),
+    ],
+  })
+  state.signals.exploredCells = new Set(FRONTIER.map((spot) => `p${spot.x}_${spot.y}_${spot.z}`))
+  const grounded = generateGroundedCandidates(state, candidateOptions())
+  const moves = explorationMoves(grounded.candidates)
+  const gap = grounded.mobDropGap
+  return {
+    pass:
+      moves.length === 0 &&
+      grounded.candidates.every((c) => c.meta.producerSearch !== true) &&
+      gap !== null &&
+      gap.spawnContext !== null &&
+      // the context fact survives even when the movement is exhausted: the gap
+      // still says WHERE the producer could be, it just cannot offer a new cell
+      gap.spawnContext.reason === 'met' &&
+      gap.spawnContext.searchGrounded === true &&
+      gap.next === 'escalate' &&
+      gap.offered.length === 0,
+    detail: `moves=${moves.length} next=${gap?.next ?? 'none'} offered=${JSON.stringify(gap?.offered ?? null)} ctx=${gap?.spawnContext?.reason ?? 'none'}`,
   }
 })
 

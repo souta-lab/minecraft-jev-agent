@@ -381,6 +381,101 @@ ok('a run-scoped host observation upgrades a predicate; a sourceSha mismatch is 
 
 
 // ---------------------------------------------------------------------------
+// A2. the M2 chain is carried per link WITH the source that proved each link
+// ---------------------------------------------------------------------------
+// The delegated gate's stage conditions say WHAT passed; they cannot say WHICH
+// evidence source proved each link, and its structured `facts` object is not part
+// of the artifact. The gate's `m2_chain:` line is the ordered trace, and the
+// artifact must carry it as `verdicts.M2.chain` with built/lit/verified.
+{
+  assert.equal(passArtifact.schemaVersion, 5)
+  const chain = passArtifact.verdicts.M2.chain
+  assert.ok(chain !== null && typeof chain === 'object', `M2 chain missing: ${JSON.stringify(passArtifact.verdicts.M2)}`)
+  assert.equal(chain.ordered, true)
+  assert.deepEqual(chain.sources, ['log'])
+  // built: the validated frame, with the frame's OWN blocks/shape and its index.
+  assert.equal(chain.built.status, 'PASS')
+  assert.equal(chain.built.source, 'log')
+  assert.equal(chain.built.blocks, 10)
+  assert.equal(chain.built.shape, 'ok')
+  assert.equal(chain.placedIndex, 0)
+  assert.ok(chain.built.index > chain.placedIndex, 'the frame must come after the first placed block')
+  // lit: the PORTAL_LIT in the overworld.
+  assert.equal(chain.lit.status, 'PASS')
+  assert.equal(chain.lit.source, 'log')
+  assert.equal(chain.lit.dimension, 'minecraft:overworld')
+  assert.equal(chain.lit.overworld, true)
+  // verified: PORTAL_VERIFIED=true AFTER the light.
+  assert.equal(chain.verified.status, 'PASS')
+  assert.equal(chain.verified.source, 'log')
+  assert.ok(chain.verified.index > chain.lit.index, 'verification must come after the light')
+  assert.ok(chain.lit.index > chain.built.index, 'the light must come after the frame')
+  ok('the artifact carries built/lit/verified in order, each with its evidence source')
+
+  // The raw gate line is still kept verbatim beside the parsed facts.
+  assert.ok(
+    passArtifact.verdicts.M2.lines.some((entry) => /^m2_chain: source=log built=PASS lit=PASS verified=PASS ordered=true\b/.test(entry)),
+    passArtifact.verdicts.M2.lines.join('\n'),
+  )
+  ok('the raw m2_chain: gate line is preserved in verdicts.M2.lines')
+}
+
+{
+  // NEGATIVE: a built-but-unlit frame. The artifact must carry `built` PASS while
+  // `lit`/`verified` are UNKNOWN - the chain records the gap instead of filling it.
+  const unlitRun = 'run-fixture-unlit'
+  const unlitRoot = makeRoot('unlit')
+  const unlitLog = [
+    boot(0, unlitRun),
+    spawnLine(1),
+    line(10, 'INVENTORY items={"diamond":3,"diamond_pickaxe":1,"flint_and_steel":1,"obsidian":10} pos=0.5,64.0,0.5'),
+    ...PORTAL_CHAIN.slice(0, 3).map((body, index) => line(11 + index, body)),
+  ]
+  writeFixture(unlitRoot, unlitRun, { logLines: unlitLog, acceptance: false, runner: { released: true } })
+  const unlit = cli(['--run', unlitRun, '--root', unlitRoot, '--json', '--no-control-socket'])
+  const unlitArtifact = unlit.json()
+  assert.notEqual(unlitArtifact.verdicts.M2.status, 'PASS')
+  assert.equal(unlitArtifact.verdicts.M2.conditions.portal_built, 'PASS')
+  assert.equal(unlitArtifact.verdicts.M2.conditions.portal_lit, 'UNKNOWN')
+  const unlitChain = unlitArtifact.verdicts.M2.chain
+  assert.equal(unlitChain.ordered, false)
+  assert.equal(unlitChain.built.status, 'PASS')
+  assert.equal(unlitChain.lit.status, 'UNKNOWN')
+  assert.equal(unlitChain.verified.status, 'UNKNOWN')
+  assert.equal(unlitChain.lit.index, -1)
+  assert.equal(unlitChain.verified.index, -1)
+  ok('a built-but-unlit portal is carried as built=PASS lit=UNKNOWN (never a chain)')
+}
+
+{
+  // NEGATIVE: a chain-less PORTAL_VERIFIED=true (the inherited-gate shape) must
+  // never produce a PASS link, even though the strongest single fact is true.
+  const inheritedRun = 'run-fixture-inherited'
+  const inheritedRoot = makeRoot('inherited')
+  const inheritedLog = [
+    boot(0, inheritedRun),
+    spawnLine(1),
+    line(10, 'INVENTORY items={"diamond":3,"diamond_pickaxe":1,"flint_and_steel":1,"obsidian":10} pos=0.5,64.0,0.5'),
+    line(11, 'PORTAL_TRUTH verified=true reason=status source=live-world'),
+  ]
+  writeFixture(inheritedRoot, inheritedRun, { logLines: inheritedLog, acceptance: false, runner: { released: true } })
+  const inherited = cli(['--run', inheritedRun, '--root', inheritedRoot, '--json', '--no-control-socket'])
+  const inheritedArtifact = inherited.json()
+  const inheritedChain = inheritedArtifact.verdicts.M2.chain
+  assert.equal(inheritedArtifact.verdicts.M2.reason, 'inherited_portal')
+  assert.equal(inheritedChain.ordered, false)
+  // No source proved any link, so no link fact exists at all (null, never a PASS).
+  for (const link of ['built', 'lit', 'verified']) {
+    assert.equal(inheritedChain[link], null, `${link} must not exist without a chain`)
+  }
+  assert.deepEqual(inheritedChain.sources, ['log'])
+  assert.equal(inheritedChain.links.length, 1)
+  assert.equal(inheritedChain.links[0].source, 'log')
+  assert.equal(inheritedChain.links[0].built, 'UNKNOWN')
+  ok('an inherited portal carries no PASS link (the chain is the only source of built/lit/verified)')
+}
+
+// ---------------------------------------------------------------------------
 // B. FAIL-shaped run (materials complete, eyes short)
 // ---------------------------------------------------------------------------
 const failRoot = makeRoot('fail')
@@ -625,9 +720,50 @@ ok('a run with 12 eyes but no Nether transition: nether_reached UNKNOWN, artifac
   assert.match(notCorroboratedArtifact.verdicts.M2.operatorDecision.reason, /^basis_not_corroborated:inherited_portal$/)
   assert.deepEqual(notCorroboratedArtifact.operatorDecisions.applied, [])
 
-  // A decision for ANOTHER run never applies to this one.
-  const other = cli(['--run', 'run-fixture-unrelated', '--root', root, '--json', '--no-control-socket', '--operator-decisions', decisionsPath])
-  assert.equal(other.json().verdicts.M2.operatorDecision, null)
+  // A decision for ANOTHER run never applies to this one - and (schema 5) that fact
+  // is now VISIBLE per run instead of leaving the verdict with no explanation.
+  // A run that inherits a portal it did not build, while the recorded decision is
+  // scoped to a DIFFERENT runId: the exact GAP-1 situation.
+  const OTHER_RUN = 'run-fixture-unrelated'
+  const otherRoot = makeRoot('inherited-other-run')
+  writeFixture(otherRoot, OTHER_RUN, {
+    logLines: [
+      boot(0, OTHER_RUN),
+      line(10, 'INVENTORY items={"ender_pearl":0,"blaze_rod":0,"blaze_powder":0,"ender_eye":0} pos=0.5,64.0,0.5'),
+      line(11, 'PORTAL_VERIFIED=true'),
+      line(19, 'DIMENSION_TRANSITION from=minecraft:overworld to=minecraft:the_nether dimension=minecraft:the_nether reason=live-change source=live-world'),
+    ],
+  })
+  const other = cli(['--run', OTHER_RUN, '--root', otherRoot, '--json', '--no-control-socket', '--operator-decisions', decisionsPath])
+  const otherArtifact = other.json()
+  assert.equal(otherArtifact.verdicts.M2.operatorDecision, null)
+  const premise = otherArtifact.verdicts.M2.operatorDecisionPremise
+  assert.equal(premise.present, true)
+  assert.equal(premise.thisRunInherits, false)
+  assert.equal(premise.thisRunMust, 'build')
+  assert.equal(premise.decisions[0].appliesToThisRun, false)
+  assert.equal(premise.decisions[0].outcome, 'scoped_to_another_run')
+  assert.equal(premise.decisions[0].runScope, runId)
+  assert.equal(otherArtifact.operatorDecisions.considered.length, 1)
+  assert.equal(otherArtifact.operatorDecisions.considered[0].outcome, 'scoped_to_another_run')
+  assert.equal(typeof otherArtifact.operatorDecisions.sha256, 'string')
+  assert.equal(otherArtifact.operatorDecisions.sha256.length, 64)
+  // The verdict itself is untouched: the gate still says UNKNOWN inherited_portal.
+  assert.equal(otherArtifact.verdicts.M2.status, 'UNKNOWN')
+  assert.equal(otherArtifact.verdicts.M2.reason, 'inherited_portal')
+  // schema 5: the STRUCTURED gate facts behind the premise (not a regex over lines).
+  const gateFacts = premise.gateFacts
+  assert.equal(gateFacts.available, true)
+  assert.equal(gateFacts.framePass, false)
+  assert.equal(gateFacts.litPass, false)
+  assert.equal(gateFacts.inheritedPortal.detected, true)
+  assert.ok(gateFacts.inheritedPortal.observations.some((observation) => observation.kind === 'live_world_truth' || observation.kind === 'runtime_verified_without_build_chain'))
+  assert.deepEqual(gateFacts.conditions, otherArtifact.verdicts.M2.conditions)
+  // The relevant-premise gap appears on the run that must build the premise.
+  assert.ok(otherArtifact.missingEvidence.includes('premise:M2'))
+  // A decision that applies to this run states inherit instead.
+  assert.equal(appliedArtifact.verdicts.M2.operatorDecisionPremise.thisRunInherits, true)
+  assert.equal(appliedArtifact.verdicts.M2.operatorDecisionPremise.thisRunMust, 'inherit')
 }
 ok('operator decisions are corroborated, annotated without rewriting the gate, and run-scoped')
 
@@ -745,6 +881,16 @@ ok('authority markers from a different runId in the same file are never used for
   assert.equal(artifact.acceptance.record.runId, runId)
   assert.equal(artifact.acceptance.writer.symbol, 'writeAcceptance()')
   assert.match(artifact.acceptance.writer.pathPattern, /acceptance-<runId>\.json/)
+  // schema 5: the evidence CLASS is stated, and what the record does/does not assert.
+  assert.equal(artifact.acceptance.evidenceClass.status, 'PRESENT')
+  assert.equal(artifact.acceptance.evidenceClass.kind, 'host-lifecycle-attestation')
+  assert.equal(artifact.acceptance.evidenceClass.blocksMilestoneVerdict, false)
+  assert.equal(artifact.acceptance.evidenceClass.fabricatable, false)
+  assert.ok(artifact.acceptance.evidenceClass.attests.length >= 4)
+  assert.ok(artifact.acceptance.evidenceClass.safeTriggers.some((entry) => /control command `acceptance`/.test(entry)))
+  assert.match(artifact.acceptance.evidenceClass.milestoneQuestionAnsweredBy, /milestoneAcceptance/)
+  const acceptanceClass = artifact.evidenceClasses.find((entry) => entry.id === 'acceptance')
+  assert.equal(acceptanceClass.status, 'PRESENT')
   assert.equal(artifact.milestoneAcceptance.status, 'INCOMPLETE')
   assert.deepEqual(artifact.milestoneAcceptance.incompleteMilestones, ['M3'])
   assert.deepEqual(artifact.milestoneAcceptance.milestones.M3.unmetConditions, ['ender_eye_ready'])
@@ -762,6 +908,13 @@ ok('authority markers from a different runId in the same file are never used for
   assert.ok(gap, 'an absent acceptance record must stay a reasoned gap')
   assert.match(gap.reason, /writeAcceptance\(\)/)
   assert.match(gap.reason, /generation-reload-commit/)
+  // schema 5: which evidence class, why, and that it is never fabricated.
+  assert.equal(bare.acceptance.evidenceClass.status, 'MISSING')
+  assert.equal(bare.acceptance.evidenceClass.reason, 'acceptance_artifact_missing')
+  assert.equal(bare.acceptance.evidenceClass.fabricatable, false)
+  assert.ok(bare.acceptance.evidenceClass.safeTriggers.length >= 3)
+  assert.equal(bare.evidenceClasses.find((entry) => entry.id === 'acceptance').status, 'MISSING')
+  assert.equal(bare.evidenceClasses.find((entry) => entry.id === 'acceptance').reason, 'acceptance_artifact_missing')
 }
 ok('an acceptance record never turns an incomplete milestone into PASS; its absence keeps a reasoned gap')
 

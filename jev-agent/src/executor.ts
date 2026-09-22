@@ -39,6 +39,11 @@ import {
   planBridgeSpan,
 } from './bridgeRoute.ts'
 import type { BridgeDir, BridgeRefusal } from './bridgeRoute.ts'
+import {
+  declaredRoutePlaceBlocks,
+  declaredRoutePlacements,
+  formatRoutePlaceDeclared,
+} from './routePlaceDeclaration.ts'
 import type { BodySubmersion } from './state.ts'
 import {
   classifyStepLanding,
@@ -2059,7 +2064,24 @@ export class Executor {
         // it. A plain walk with no declared route still authorizes no equip.
         const routeOpening = candidate.meta.digRoute === true || candidate.meta.vertical !== undefined
         if (routeOpening) {
-          return carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix)))
+          // ...and when the route's own placement step declared a block it
+          // consumes (a VERTICAL PILLAR route's `meta.pillarPlaceName` /
+          // `meta.fallbackPillarPlaceName`, the very keys `runVerticalLeg` reads
+          // before `pillarUp` equips), that declared block is authorized too -
+          // otherwise the route's PLACE is admitted by `mayPlaceGroundedRoute`
+          // while the EQUIP of the block it is about to place is refused
+          // `equip_item_not_declared` (measured live defect at main cd7b38b:
+          // `RETRIEVE:known:blaze_rod:b35_60_-22` equipping cobblestone). The
+          // declared set is exactly what the candidate grounded: an undeclared
+          // block is still refused, and no carried placeable block is admitted
+          // just for being placeable.
+          const declared = declaredRoutePlaceBlocks(candidate)
+          return [
+            ...new Set([
+              ...carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix))),
+              ...carried.filter((name) => declared.includes(name)),
+            ]),
+          ]
         }
         if (candidate.toolName === null) return []
         const suffix = `_${candidate.toolName}`
@@ -2070,9 +2092,16 @@ export class Executor {
         // remaining cells, place the footing), so the carried route tools are
         // admissible. No station, no transfer, no attack.
         const routeOpening = candidate.meta.digRoute === true || candidate.meta.vertical !== undefined
-        return routeOpening
-          ? carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix)))
-          : []
+        if (!routeOpening) return []
+        // The entry candidate carries the same `verticalPlanMeta` a MOVE does, so
+        // its own declared pillar block is admissible by the same rule.
+        const declared = declaredRoutePlaceBlocks(candidate)
+        return [
+          ...new Set([
+            ...carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix))),
+            ...carried.filter((name) => declared.includes(name)),
+          ]),
+        ]
       }
       case 'ATTACK':
         return carried.filter((name) => WEAPON_ITEM_SUFFIXES.some((suffix) => name.endsWith(suffix)))
@@ -2140,6 +2169,33 @@ export class Executor {
     const dimension = this.observedDimension()
     const worldEpoch = readMetaNumber(candidate, 'worldEpoch', 0)
     const selectedBy = readMetaString(candidate, 'selectedBy')
+    // #436 section 5/17: the block(s) this locomotion route's own placement step
+    // declared at candidate time are what authorizes the equip below, so the
+    // declaration itself is run-scoped evidence - otherwise the only visible
+    // change after the fix is a different `SKILL_COMMIT effectEnvelopeHash=` with
+    // no named cause. Emitted once per commitment, before the action runs.
+    const declaredPlacements = declaredRoutePlacements(candidate)
+    if (declaredPlacements.length > 0) {
+      const held = this.inventoryCounts()
+      this.logger.info(
+        'agent',
+        formatRoutePlaceDeclared({
+          actionId: candidate.id,
+          skillKind: candidate.kind,
+          declarations: declaredPlacements,
+          held,
+        }),
+        {
+          actionId: candidate.id,
+          kind: candidate.kind,
+          blocks: declaredPlacements.map((entry) => entry.block),
+          sources: declaredPlacements.map((entry) => entry.source),
+          carried: declaredPlacements
+            .filter((entry) => (held[entry.block] ?? 0) > 0)
+            .map((entry) => entry.block),
+        },
+      )
+    }
     return createSkillCommitment({
       decisionEpoch: Math.floor(readMetaNumber(candidate, 'decisionEpoch', 0)),
       optionInstanceId: readMetaString(candidate, 'optionInstanceId'),
