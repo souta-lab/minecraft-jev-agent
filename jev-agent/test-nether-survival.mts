@@ -328,9 +328,15 @@ addCase('(a6) the revalidation guard is wired to the re-grounding rule, not to a
   const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const guard = text.indexOf('const reground = regroundVanishedSurvivalChoice(')
   const reject = text.indexOf('this.guardRejections += 1', guard)
+  // issue #436 section 9 + the measured DEATH 32: a bare rejection is no longer
+  // enough. The tick returns only when the re-ground failed AND no grounded
+  // control action could be executed, and a hostile IN CONTACT must execute that
+  // control action instead of ending the tick actionless.
+  const returnsOnlyWhenUngrounded = text.includes('if (reground.candidateId === null && controlId === null) return')
+  const hasControlFallback = text.includes('survivalControlFallback({')
   return {
-    pass: guard > 0 && reject > guard && text.includes('if (reground.candidateId === null) return'),
-    detail: `regroundCallAt=${guard} guardRejectAt=${reject} returnsOnlyWhenUngrounded=${text.includes('if (reground.candidateId === null) return')}`,
+    pass: guard > 0 && reject > guard && returnsOnlyWhenUngrounded && hasControlFallback,
+    detail: `regroundCallAt=${guard} guardRejectAt=${reject} returnsOnlyWhenUngrounded=${returnsOnlyWhenUngrounded} controlFallback=${hasControlFallback}`,
   }
 })
 

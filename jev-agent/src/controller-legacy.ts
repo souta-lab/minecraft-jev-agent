@@ -29,7 +29,7 @@ import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability,
 import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { MOVE_LEG_STOPPED } from './stepLanding.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
-import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
+import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, survivalControlFallback, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
 import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
@@ -3371,6 +3371,10 @@ export class JevController {
         // body standing in a fight.
         const vanishedChoice = candidates.find((candidate) => candidate.id === chosenId) ?? null
         const reground = regroundVanishedSurvivalChoice(vanishedChoice, freshCandidates)
+        // The bounded CONTROL action executed in place of an unservable survival
+        // action (see the in-contact branch below). Never a mutation, never a
+        // target choice - it re-enters the semantic decision immediately.
+        let controlId: string | null = null
         const threatEvidence = state.signals.threat ?? null
         const body = bodySurvivalFacts(state.self)
         if (reground.candidateId !== null) {
@@ -3398,10 +3402,10 @@ export class JevController {
           if (reground.kind !== null) {
             // issue #436 section 9/14 + #437 section 6: the premise of the Jev
             // answer was destroyed (the exact entity it answered is gone, or no
-            // grounded response of that kind survives). This is never a silent
-            // empty tick: the typed outcome is recorded AND the next decision is
-            // forced to be a real policy re-entry, so a cached decision cannot be
-            // replayed onto a survival action that no longer exists.
+            // grounded response of that kind survives). The typed outcome is
+            // recorded AND the next decision is forced to be a real policy
+            // re-entry, so a cached decision cannot be replayed onto a survival
+            // action that no longer exists.
             this.skillOutcomeBoundary = true
             this.logger.warn(
               'guard',
@@ -3419,6 +3423,41 @@ export class JevController {
               },
               this.tickCounter,
             )
+            // SAFE, and the measured death loop (operator report + run log: a
+            // wither skeleton at 0.57m, health 4.37, `freshOffer=1`, chosen
+            // ATTACK/RETREAT not equivalent -> candidateId=null -> NO action, then
+            // DEATH 32): a tick must never end actionless while a hostile is IN
+            // CONTACT. The chosen action cannot be served, so execute the grounded
+            // CONTROL action the restricted offer already carries
+            // (`ESCALATE`/`WAIT`) - it mutates nothing, chooses no fight/flight, and
+            // hands the semantic decision up immediately. Code still does not pick
+            // a target, a destination or a strategy.
+            const fallback = survivalControlFallback({
+              reground,
+              threatInContact: threatEvidence?.inContact === true,
+              freshCandidates,
+            })
+            if (fallback.candidateId !== null) {
+              controlId = fallback.candidateId
+              {
+                const control = { id: fallback.candidateId }
+                this.logger.warn(
+                  'guard',
+                  `SURVIVAL_CONTROL_ACTION from=${vanishedChoice?.id ?? chosenId} kind=${reground.kind} outcome=${reground.outcome} ` +
+                    `to=${control.id} reason=${fallback.reason} threat=${threatEvidence?.threatName ?? 'unknown'} contact=true health=${Math.round(body.health * 100) / 100} ` +
+                    `-> never an actionless tick with a hostile in contact`,
+                  {
+                    from: vanishedChoice?.id ?? chosenId,
+                    to: control.id,
+                    fallback: fallback.reason,
+                    outcome: reground.outcome,
+                    threat: threatEvidence?.threatName ?? null,
+                    health: body.health,
+                  },
+                  this.tickCounter,
+                )
+              }
+            }
           } else {
             this.logger.warn(
               'guard',
@@ -3429,7 +3468,11 @@ export class JevController {
           }
         }
         this.logGuardRejections()
-        if (reground.candidateId === null) return
+        if (reground.candidateId === null && controlId === null) return
+        if (controlId !== null) {
+          chosenId = controlId
+          freshIds.add(controlId)
+        }
       }
       const guarded = guardDecision(chosenId, freshCandidates, freshState, {
         phase: 'decision',
