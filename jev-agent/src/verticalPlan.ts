@@ -131,63 +131,8 @@ export function evaluatePillarStep(input: {
   return { ok: true }
 }
 
-/**
- * The horizontal cells touched by a player-sized AABB at the given center.
- * Mineflayer's physics broad-phase uses `floor(min)` through `floor(max)`;
- * matching that conservative range prevents a jump from being approved when
- * an adjacent wall overlaps the body's footprint at a fractional position.
- */
-export function footprintCells(center: { x: number; z: number }, halfWidth: number): { x: number; z: number }[] {
-  const width = Number.isFinite(halfWidth) && halfWidth > 0 ? halfWidth : 0
-  const minX = Math.floor(center.x - width)
-  const maxX = Math.floor(center.x + width)
-  const minZ = Math.floor(center.z - width)
-  const maxZ = Math.floor(center.z + width)
-  const cells: { x: number; z: number }[] = []
-  for (let x = minX; x <= maxX; x += 1) {
-    for (let z = minZ; z <= maxZ; z += 1) cells.push({ x, z })
-  }
-  return cells
-}
-
-export interface HeadroomFootprintInput {
-  center: { x: number; z: number }
-  feetY: number
-  halfWidth: number
-  isPassable: (x: number, y: number, z: number) => boolean
-}
-
-export interface HeadroomFootprintResult {
-  clear: boolean
-  /** First blocking cell in feet+1, feet+2, then stable x/z order. */
-  blocker: Vec3Json | null
-}
-
-/**
- * Check jump headroom across the whole horizontal player footprint. A single
- * column check is insufficient while the player is near a block boundary:
- * the own column can be air while an adjacent block intersects the AABB.
- */
-export function headroomAcrossFootprint(input: HeadroomFootprintInput): HeadroomFootprintResult {
-  if (
-    !Number.isFinite(input.center.x) ||
-    !Number.isFinite(input.center.z) ||
-    !Number.isFinite(input.feetY) ||
-    !Number.isFinite(input.halfWidth) ||
-    input.halfWidth < 0
-  ) {
-    return { clear: false, blocker: null }
-  }
-  const feet = Math.floor(input.feetY + 1e-4)
-  const cells = footprintCells(input.center, input.halfWidth)
-  for (const y of [feet + 1, feet + 2]) {
-    for (const cell of cells) {
-      if (input.isPassable(cell.x, y, cell.z)) continue
-      return { clear: false, blocker: { x: cell.x, y, z: cell.z } }
-    }
-  }
-  return { clear: true, blocker: null }
-}
+export { footprintCells, headroomAcrossFootprint } from './bodyGeometry.ts'
+export type { HeadroomFootprintInput, HeadroomFootprintResult } from './bodyGeometry.ts'
 
 export interface PillarStepResolution {
   /** Y of the topmost solid block under the feet: the placement reference. */

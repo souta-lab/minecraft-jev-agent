@@ -47,6 +47,7 @@ import type { LiveStructureMember } from './blockSafety.ts'
 import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
+import { headroomAcrossFootprint } from './bodyGeometry.ts'
 
 export type Vec3Json = {
   x: number
@@ -493,17 +494,19 @@ export type StepCut = {
 }
 
 /**
- * A solid block directly above the bot's feet that blocks a jump (the
- * "canopy pocket" trap: a 2-tall space under leaves where every step-up jump is
- * vetoed by the ceiling). Mining it opens the headroom the jump needs. `safe` is
- * false when the block must not be removed (unbreakable, or a fluid/hazard).
+ * A cell in the local jump-headroom envelope. Usually this is a solid ceiling
+ * block that can become a clearance MINE. A fail-closed unknown/unloaded cell is
+ * also retained with `safe=false`, so CAN never turns missing world truth into
+ * executable headroom.
  */
 export type HeadroomCut = {
-  /** the ceiling block itself (feet + 1 or feet + 2; never the feet/support) */
+  /** the blocking/clearance cell (feet + 1 or feet + 2; never support) */
   pos: Vec3Json
   name: string
   safe: boolean
   reason: string
+  /** true only when this cell blocks the CURRENT player AABB jump headroom */
+  currentFootprint?: boolean
 }
 
 /** A cardinal stair direction, plus `D` for digging straight down the bot's column. */
@@ -2256,16 +2259,32 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
   const feetZ = Math.floor(self.position.z)
   const scratch = bot.entity.position.clone()
   const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
-  const clear = (x: number, y: number, z: number): boolean => {
-    const block = at(x, y, z)
-    return block === null || block.boundingBox === 'empty'
-  }
-  if (clear(feetX, feetY + 1, feetZ) && clear(feetX, feetY + 2, feetZ)) return []
+  const halfWidth = bot.entity.width > 0 ? bot.entity.width / 2 : 0.3
+  const current = headroomAcrossFootprint({
+    center: { x: self.position.x, z: self.position.z },
+    feetY: self.position.y,
+    halfWidth,
+    // Match executor.passableAt exactly: unknown/unloaded is NOT proven clear.
+    isPassable: (x, y, z) => isPassable(at(x, y, z)),
+  })
+  if (current.clear) return []
 
-  const out: HeadroomCut[] = []
-  const consider = (x: number, y: number, z: number): void => {
+  const out = new Map<string, HeadroomCut>()
+  const consider = (x: number, y: number, z: number, currentFootprint: boolean): void => {
     const block = at(x, y, z)
-    if (block === null || block.boundingBox !== 'block') return
+    if (block === null) {
+      if (currentFootprint) {
+        out.set(`${x},${y},${z}`, {
+          pos: { x, y, z },
+          name: 'unknown',
+          safe: false,
+          reason: 'cell is unloaded/unknown',
+          currentFootprint: true,
+        })
+      }
+      return
+    }
+    if (block.boundingBox === 'empty') return
     const name = block.name
     let safe = true
     let reason = 'safe'
@@ -2279,18 +2298,19 @@ function buildHeadroomCuts(bot: Bot, options: SensorOptions, self: SelfState): H
       safe = false
       reason = `${name} would flood or burn the pocket`
     }
-    out.push({ pos: { x, y, z }, name, safe, reason })
+    const key = `${x},${y},${z}`
+    const existing = out.get(key)
+    out.set(key, { pos: { x, y, z }, name, safe, reason, currentFootprint: currentFootprint || existing?.currentFootprint === true })
   }
-  for (const dy of [1, 2]) consider(feetX, feetY + dy, feetZ)
-  // Adjacent columns are included so a clearance candidate survives the 1-block
-  // shuffle of the escape and the next decision can still execute the same dig.
+  if (current.blocker !== null) consider(current.blocker.x, current.blocker.y, current.blocker.z, true)
+  // Adjacent columns remain in the acquisition pool so the exact MINE id can
+  // survive a small body shuffle, but they are NOT evidence that current CAN is blocked.
   for (let dx = -1; dx <= 1; dx += 1) {
     for (let dz = -1; dz <= 1; dz += 1) {
-      if (dx === 0 && dz === 0) continue
-      for (const dy of [1, 2]) consider(feetX + dx, feetY + dy, feetZ + dz)
+      for (const dy of [1, 2]) consider(feetX + dx, feetY + dy, feetZ + dz, false)
     }
   }
-  return out
+  return [...out.values()]
 }
 
 /**

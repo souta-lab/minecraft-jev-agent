@@ -7915,9 +7915,18 @@ function columnFacts(state: WorldState): ColumnFacts {
     y: Math.floor(state.self.position.y),
     z: Math.floor(state.self.position.z),
   }
-  const ownCut = (state.headroomCuts ?? []).find(
-    (cut) => cut.pos.x === feet.x && cut.pos.z === feet.z && (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
-  )
+  const cuts = state.headroomCuts ?? []
+  const ownCut =
+    cuts.find((cut) => cut.currentFootprint === true) ??
+    // Backward-compatible replay fixtures written before `currentFootprint`:
+    // only the old own-column shape may stand in for the current blocker.
+    cuts.find(
+      (cut) =>
+        cut.currentFootprint === undefined &&
+        cut.pos.x === feet.x &&
+        cut.pos.z === feet.z &&
+        (cut.pos.y === feet.y + 1 || cut.pos.y === feet.y + 2),
+    )
   // The sensor reports standable FEET cells. The body's feet cell is floor(y),
   // but a body standing on a partial block (slab/path/stair, live y=34.5) has
   // its standable cell one level above the floor cell. Live starvation (main
