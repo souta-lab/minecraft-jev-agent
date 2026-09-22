@@ -24,8 +24,9 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Bot } from 'mineflayer'
 import pathfinderModule from 'mineflayer-pathfinder'
-import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
-import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { CRITICAL_COMBAT_HEALTH, CRAFT_STATION_ALREADY_KNOWN, FURNACE_PREREQUISITE_ROLE, altitudeRouteOnOffer, applyGroundedThreatRestriction, blockId, CONTACT_THREAT_KINDS, countBlockedLogs, craftIngredientPrereq, craftStationGap, defaultCandidateOptions, envHazardEscapeRoutes, envHazardEscapeSpots, envHazardReflexAction, exploredCellKey, frameBuildGrounded, frameBuildMaterialGap, formatColumnDescentRefused, formatCraftIngredientPrereq, formatCraftStationGap, formatExploreRouteBlocked, formatFoodHabitatRefused, formatFuelSatisfied, formatLogRoute, formatMobDropSourceGap, formatPlaceRefusal, formatProspectRefused, formatResourceSourceExclusion, formatResourceSourceGap, formatSmeltInputPrereq, formatSmeltRouteGap, formatSmeltStationRetry, formatSurfaceAscentRefused, fuelSatisfaction, furnacePrereqInputFromState, generateGroundedCandidates, goalCollectsFuel, goalWantsFuel, isFoodItem, logRouteOf, optionsWithWithheldStationRetirements, pickFood, KNOWN_RETRIEVE_SKILL, queuedRetrievalProxyItem, resourceDimensionMatches, restrictCandidatesAtCriticalHealth, restrictCandidatesDuringCriticalDamage, restrictCandidatesDuringEnvHazard, restrictCandidatesDuringSubmersion, selfContainedCraftCandidates, smeltInputPrereq, smeltRouteGap, smeltStationRetry, staleKnownResources, surfaceAscentRouteless, surfaceSearchKey } from './candidates.ts'
+import type { Candidate, CandidateKind, CandidateOptions, CandidateReachability, ColumnDescentRefusal, CombatKitGapEvidence, EnvHazardReflex, ExploreRouteBlocked, IgnitionRefusal, MobDropSourceGap, PlaceRefusal, PortalEntryRefusal, ProspectRefusal, ReachabilityGateOptions, ResourceSourceExclusion, ResourceSourceGap, SmeltRouteGap, SurfaceAscentRefusal, ThreatOffer } from './candidates.ts'
+import { ENV_HAZARD, ENV_HAZARD_CLEAR, ENV_HAZARD_NO_EXIT, EnvHazardTracker, envHazardDamageSource, formatEnvHazard, formatEnvHazardClear, formatEnvHazardNoExit, formatEnvHazardReflexEvidence } from './envHazard.ts'
 import { ARMOR_SLOTS } from './gearPlan.ts'
 import { bodySurvivalFacts, DEATH_CAUSE, formatDeathCause, formatSurvivalNoGroundedAction, formatSurvivalReground, formatThreatClear, formatThreatNearby, formatThreatNoEscape, formatThreatOccluded, formatThreatRangedUnanswered, GUARD_REJECTIONS, MELEE_THREAT_REACH, THREAT_MEMORY_MS, regroundVanishedSurvivalChoice, SURVIVAL_NO_GROUNDED_ACTION, SURVIVAL_REGROUND, THREAT_CLEAR, THREAT_NEARBY, THREAT_NO_ESCAPE, THREAT_OCCLUDED, THREAT_RANGED_UNANSWERED, ThreatTracker, unansweredRangedThreats, weaponFacts } from './threat.ts'
 import { formatArmorRefusal, formatCombatKitGap } from './gearPlan.ts'
@@ -112,8 +113,8 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatSkillEnd, formatSkillInterrupt, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
-import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -1214,6 +1215,7 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'SKILL_INTERRUPT',
   'SKILL_END',
   'REFLEX',
+  SKILL_POLICY_BOUNDARY,
   'PILLAR_UP',
   'PILLAR_UP_STEP',
   'PILLAR_FAIL',
@@ -1268,6 +1270,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // than only a line in the executor log.
   'BODY_SUBMERGED',
   'LOW_AIR_PREEMPT',
+  // SAFE: the body's own environmental hazard (fire/lava/burning/drowning).
+  // Measured live (`run-mucaq28q-1ftq1`) the body burned to death in the Nether
+  // with ZERO lines naming fire, lava or burning, so these must be on the
+  // mirrored path a post-mortem reads. (`REFLEX` / `SKILL_INTERRUPT` are already
+  // above: one #436 vocabulary, owned by `netherPortalPlan.ts`.)
+  ENV_HAZARD,
+  ENV_HAZARD_NO_EXIT,
+  ENV_HAZARD_CLEAR,
   'ABANDON_REASON',
   'ABANDON_REASON=retrieve_unverified',
   'PREREQ_OPTION',
@@ -1324,6 +1334,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'DIG_ROUTE',
   'DIG_ROUTE_REFUSED',
   'DIG_ROUTE_PROGRESS',
+  // #436 reflex/continuation vocabulary: a bounded mechanical continuation that is
+  // the UNIQUE binding prerequisite of the active leg (`REFLEX
+  // reason=unique_binding_prerequisite`) and the mechanical step when it runs.
+  'REFLEX',
+  'SKILL_STEP',
+  'SKILL_POLICY_BOUNDARY',
   'REACHABILITY',
   'CANDIDATE_WITHHELD',
   'CANDIDATE_STARVATION',
@@ -1988,6 +2004,10 @@ export class JevController {
   private lastColumnDescentRefusalKey: string | null = null
   /** last logged DIG_ROUTE_REFUSED signature, so one blocked terrain route is one line. */
   private lastDigRouteRefusalKey: string | null = null
+  /** last logged REFLEX signature, so one unique binding continuation is one line. */
+  private lastLegReflexKey: string | null = null
+  /** last logged SKILL_POLICY_BOUNDARY signature, so one semantic boundary is one line. */
+  private lastSkillBoundaryKey: string | null = null
   /** the current tick's typed dig-route refusals, fed into the starvation `missing` evidence. */
   private digRouteRefusalsThisTick: DigRouteRefusal[] = []
   /** the current tick's typed no-safe-descent fact, fed into the starvation `missing` evidence. */
@@ -2083,6 +2103,26 @@ export class JevController {
   private readonly criticalDamage = new CriticalDamageTracker(resolveCriticalDamageLimit())
   /** Signature of the last `BODY_STARVING`/`CRITICAL_DAMAGE` line, so it logs on a change, not per tick. */
   private lastCriticalDamageLine: string | null = null
+  /**
+   * SAFE: code-owned environmental-hazard evidence for the body's own cell (fire
+   * / lava / burning / drowning) plus the damage it attributes. Measured live
+   * (`run-mucaq28q-1ftq1`): the body burned to death in the Nether with every
+   * tick arriving as `source=null` and no marker in the whole run naming fire,
+   * lava or burning. The state itself is sensed in `state.ts`
+   * (`SelfState.envHazard`); this tracker only counts the damage that state
+   * explains and marks the moment the hazard ends.
+   */
+  private readonly envHazard = new EnvHazardTracker()
+  /** Signature of the last `ENV_HAZARD` line, so the state logs on a change. */
+  private lastEnvHazardLine: string | null = null
+  /** Signature of the last `ENV_HAZARD_NO_EXIT` line, so the gap logs on a change. */
+  private lastEnvHazardGapLine: string | null = null
+  /** Signature of the last `REFLEX` line, so a repeated reflex decision logs once. */
+  private lastReflexLine: string | null = null
+  /** Signature of the last `SKILL_POLICY_BOUNDARY` line (hazard boundaries). */
+  private lastEnvBoundaryLine: string | null = null
+  /** True when a fresh damage observation landed this tick (fed to `envHazard`). */
+  private damageObservedThisTick = false
   /**
    * SAFE: the bounded danger STATE (see `threat.ts`). Enter on the threat
    * predicate, leave only after the whole envelope has been continuously clear
@@ -2529,6 +2569,11 @@ export class JevController {
       const lastDamage = state.signals.lastDamage ?? null
       const threat = state.signals.threat ?? null
       const at = state.self.position
+      // SAFE: fire/lava/burning have no attacking entity, so an unattributed
+      // death in one is attributed to the hazard the body's own sensed state
+      // names (measured live: `killer=null` while the body burned). A real
+      // Mineflayer attribution always wins inside `formatDeathCause`.
+      const environmentalKiller = this.envHazardAttribution()
       const line = formatDeathCause({
         dimension: state.self.dimension,
         position: at,
@@ -2548,13 +2593,16 @@ export class JevController {
           return piece !== null && piece !== undefined
         }).length,
         damageAgeMs: lastDamage === null ? null : Math.max(0, Math.round(state.timestampMs - lastDamage.atMs)),
+        envHazard: environmentalKiller,
       })
       this.logger.warn(
         'agent',
         line,
         {
           dimension: state.self.dimension,
-          killer: lastDamage?.sourceName ?? null,
+          killer: lastDamage?.sourceName ?? environmentalKiller,
+          killerEvidence:
+            lastDamage?.sourceName != null ? 'mineflayer' : environmentalKiller !== null ? 'environment' : 'none',
           killerId: lastDamage?.sourceId ?? null,
           threat: threat?.threatName ?? null,
           threatDistance: threat?.threatDistance ?? null,
@@ -2692,6 +2740,7 @@ export class JevController {
       // mechanical steps with no policy event. Counted only for the packet's
       // `compressedSteps`; never model input.
       if (this.executor.current !== null) this.compressedSkillSteps += 1
+      this.damageObservedThisTick = false
       this.triggerCounts[trigger] = (this.triggerCounts[trigger] ?? 0) + 1
       if (CRITICAL_TRIGGERS.has(trigger)) this.criticalStateVersion += 1
       this.signals.maxConcurrentActions = this.executor.maxConcurrentActions
@@ -2802,6 +2851,11 @@ export class JevController {
       // the retreat grounding and the restriction all see the same state.
       this.observeThreatState(state)
       this.observeUnansweredRangedThreat(state)
+      // SAFE: the body's own environmental hazard (fire/lava/burning/drowning)
+      // is a sensor fact on THIS tick's state; mirror it, name the typed CAN gap
+      // when the world grounds no exit, and feed the tracker the damage
+      // observation so `source=null` can be attributed with evidence.
+      this.observeEnvHazard(state)
 
       const unreachableStations = this.unreachableStationKeys(state)
       const blacklistedMoveTargets = this.blacklistedMoveTargets(state)
@@ -2830,6 +2884,8 @@ export class JevController {
       this.logExploreRouteBlocked(grounded.exploreRouteBlocked)
       this.logColumnDescentRefusal(grounded.columnDescentRefusal)
       this.logDigRouteRefusals(grounded.digRefusals)
+      this.logLegReflexes(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
+      this.logSkillPolicyBoundaries(grounded.candidates, grounded.withheld.map((entry) => entry.candidate))
       this.logProspectRefusal(grounded.prospectRefusal)
       this.logResourceSourceGap(grounded.sourceGap)
       this.logFoodSourceGap(grounded.foodGap)
@@ -2880,6 +2936,12 @@ export class JevController {
       // offer). The controller-side half is `observeCriticalDamage`, which
       // proves exhaustion and wakes System2.
       candidates = restrictCandidatesDuringCriticalDamage(state, candidates)
+      // SAFE: while the body stands in fire/lava/burning, work that keeps it
+      // there is withheld and only the routes that can leave the hazard stay
+      // offered (the grounded escapes, RETREAT/DESCEND, self-care, ESCALATE).
+      // Drowning is excluded: `restrictCandidatesDuringSubmersion` above owns
+      // that question.
+      candidates = restrictCandidatesDuringEnvHazard(state, candidates)
       if (this.options.singleShotPlanner) {
         // With the planner disabled, WAIT and ESCALATE are no-ops that real Jev
         // otherwise keeps re-selecting, starving the queued plan. When a
@@ -3121,18 +3183,36 @@ export class JevController {
       }
       this.breakFailureDeadlock(candidates)
 
-      // exception: the plan ran dry -> ask the LLM for the next horizon
-      if (this.queue.isEmpty) {
-        this.summonLlm('queue_empty', 'goal queue is empty; no long-horizon goal to consume')
-      }
-
       const planGoal: CausalGoalRef | null = state.goalQueue.current
       const causalStamp = makeCausalStamp({ chainId: makeChainId(), goal: planGoal })
 
-      const decision = await this.decide(state, candidates, trigger, causalStamp.chainId)
+      // SAFE (issue #436 section B): the hard-safety reflex. When the body is in
+      // an environmental hazard and exactly ONE route out is grounded, the
+      // decision is uniquely determined - deterministic code executes it without
+      // spending a model call, and it may interrupt the in-flight skill
+      // (SKILL_INTERRUPT). With two or more grounded routes the choice is Jev's
+      // WHICH and this returns null, leaving the ordinary offered candidates.
+      const reflex = envHazardReflexAction(state, candidates)
+      // Read unconditionally: the §17 policy boundary needs to know whether a
+      // Skill was in flight even when no reflex fires.
+      const inFlightAtReflex = this.inFlight()
+
+      // exception: the plan ran dry -> ask the LLM for the next horizon. A reflex
+      // tick is a hard-safety interruption, not a new horizon, so it must not
+      // summon the planner on its way out.
+      if (reflex === null && this.queue.isEmpty) {
+        this.summonLlm('queue_empty', 'goal queue is empty; no long-horizon goal to consume')
+      }
+
+      const decision =
+        reflex === null
+          ? await this.decide(state, candidates, trigger, causalStamp.chainId)
+          : this.reflexDecision(reflex.candidate)
       // §3: a model result whose decision epoch was invalidated while the call was
       // in flight cannot authorize anything. The drop is already logged
-      // (`STALE_JEV_RESULT_DROPPED`); no commitment may be claimed from it.
+      // (`STALE_JEV_RESULT_DROPPED`); no commitment may be claimed from it. A
+      // deterministic hard-safety reflex never goes through `decide()`, so it
+      // cannot set this flag and is never blocked here.
       if (this.staleDecisionDropped) {
         this.staleDecisionDropped = false
         return
@@ -3146,10 +3226,18 @@ export class JevController {
       this.logBetaShadow(causalStamp.optionId, decision, needLlmAdopted)
 
       const rawChosenId = decisionIdFrom(decision) ?? 'WAIT'
-      const committedId = this.applyCandidateCommitment(rawChosenId, candidates, state)
-      const heldId = this.applyActionCommitment(committedId, candidates, state)
+      // SAFE: a hard-safety reflex is never held behind a skill lease or a
+      // previous model decision - it exists to interrupt them. Both commitment
+      // layers and the danger gate are model-decision machinery, so a reflex tick
+      // passes them by; the guard below still validates the candidate
+      // mechanically.
+      const committedId = reflex === null ? this.applyCandidateCommitment(rawChosenId, candidates, state) : rawChosenId
+      const heldId = reflex === null ? this.applyActionCommitment(committedId, candidates, state) : committedId
       const dangerGate = gateDanger(decision.answers.danger)
-      const gated = this.applyDangerGate(heldId, dangerGate, candidates)
+      const gated =
+        reflex === null
+          ? this.applyDangerGate(heldId, dangerGate, candidates)
+          : { chosenId: heldId, overridden: false }
       // Re-groundable: a vanished survival action is replaced below by the SAME
       // action kind from the fresh offer (see the guard at the revalidation).
       let chosenId = gated.chosenId
@@ -3219,11 +3307,14 @@ export class JevController {
       )
       const freshBeforeThreat = this.filterMoveCandidates(freshGrounded.candidates, freshState, false)
       const freshThreatOffer = applyGroundedThreatRestriction(freshState, freshBeforeThreat, freshGrounded.withheld)
-      const freshCandidates = restrictCandidatesDuringCriticalDamage(
+      const freshCandidates = restrictCandidatesDuringEnvHazard(
         freshState,
-        restrictCandidatesDuringSubmersion(
+        restrictCandidatesDuringCriticalDamage(
           freshState,
-          restrictCandidatesAtCriticalHealth(freshState, freshThreatOffer.candidates),
+          restrictCandidatesDuringSubmersion(
+            freshState,
+            restrictCandidatesAtCriticalHealth(freshState, freshThreatOffer.candidates),
+          ),
         ),
       )
       const freshIds = new Set(freshCandidates.map((candidate) => candidate.id))
@@ -3325,6 +3416,30 @@ export class JevController {
       })
 
       if (!guarded.ok) {
+        // §8/§17: a reflex the mechanical guard REFUSED is a typed failure, never
+        // a silent no-op - the reviewer sees that code tried to stabilise and the
+        // guard stopped it, with the guard's own code as the failure reason.
+        if (reflex !== null) {
+          this.logger.warn(
+            'policy',
+            formatSkillStep(
+              inFlightAtReflex?.id ?? state.currentOption?.templateId ?? this.currentGoalKey(),
+              'env_hazard_stabilize',
+              formatSkillStepAuthority(
+                'HARD_SAFETY_REFLEX',
+                formatEnvHazardReflexEvidence(this.envHazard.evidence()),
+                'none',
+                { budget: 1, failure: `guard_${guarded.code}` },
+              ),
+            ),
+            { authority: 'HARD_SAFETY_REFLEX', action: reflex.candidate.id, failure: `guard_${guarded.code}` },
+            this.tickCounter,
+          )
+          // The decision returns to the semantic controller with the boundary
+          // recorded, so a refused stabilisation cannot silently replace the
+          // Skill either.
+          this.logEnvHazardBoundary(state, candidates, inFlightAtReflex)
+        }
         this.onGuardReject(
           guarded,
           decision,
@@ -3335,9 +3450,46 @@ export class JevController {
       }
 
       if (guarded.candidate.kind === 'DESCEND') this.logDescendPlan(guarded.candidate)
+      // The reflex is logged only once the guard has accepted the candidate, so
+      // the line can never claim an action the mechanical checks refused.
+      if (reflex !== null) {
+        this.logReflex(
+          reflex,
+          state,
+          inFlightAtReflex,
+          envHazardEscapeRoutes(state, candidates)
+            .filter((route) => route.id !== reflex.candidate.id)
+            .map((route) => route.id),
+        )
+        this.lastEnvBoundaryLine = null
+      } else {
+        // §8/§17: code is NOT taking over. If a Skill is in flight inside this
+        // hazard, record the boundary and the grounded alternatives.
+        this.logEnvHazardBoundary(state, candidates, inFlightAtReflex)
+      }
       if (guarded.candidate.kind === 'RETRIEVE') this.logRetrievalAction(guarded.candidate)
       if (guarded.candidate.meta.approachLeg !== undefined) this.logApproachLeg(guarded.candidate)
-      if (guarded.candidate.meta.digRoute === true) this.logDigRoute(guarded.candidate)
+      if (guarded.candidate.meta.digRoute === true) {
+        this.logDigRoute(guarded.candidate)
+        // #436 section 17 layering: the dig route is a SEPARATE candidate of kind
+        // DESCEND (never a contract attached to a MOVE), so it is realized only
+        // after Jev selects it - a MECHANICAL_CONTINUATION of the chosen route,
+        // never the walk silently gaining dig authority.
+        this.logger.info(
+          'agent',
+          formatSkillStep(
+            typeof guarded.candidate.meta.digRouteSkill === 'string' ? guarded.candidate.meta.digRouteSkill : 'DIG_ROUTE(approach)',
+            'dig_route',
+            formatSkillStepAuthority(
+              'MECHANICAL_CONTINUATION',
+              `target=${String(guarded.candidate.meta.digRouteTarget ?? 'unknown')} cell=${String(guarded.candidate.meta.digRouteCell ?? 'unknown')} kind=${String(guarded.candidate.meta.digRouteKind ?? 'unknown')}`,
+            ),
+          ),
+          { actionId: guarded.candidate.id },
+          this.tickCounter,
+        )
+      }
+      if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
 
@@ -5419,6 +5571,76 @@ export class JevController {
   }
 
   /**
+   * The #436 `SKILL_POLICY_BOUNDARY skill=<id> reason=<reason> alternatives=[...]`
+   * facts: where the offer grounded several NON-EQUIVALENT remedies and code
+   * therefore stopped instead of ranking them (section 7 U3 / section 19 (8, 28) /
+   * section 22). Deduped like the other typed facts, and logged for WITHHELD
+   * candidates too, so the boundary is visible on the tick it exists.
+   */
+  private logSkillPolicyBoundaries(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta.legPolicyBoundary
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastSkillBoundaryKey) return
+    this.lastSkillBoundaryKey = key
+    if (key === null) return
+    for (const line of lines) this.logger.warn('agent', line, { line }, this.tickCounter)
+  }
+
+  /**
+   * The #436 `REFLEX ownerSkill=<skill> reason=unique_binding_prerequisite
+   * action=<step_up|step_over> cell=... via=... ledge=... evidence=...` facts: the
+   * bounded mechanical continuation that is the UNIQUE way the active leg can
+   * reach its waypoint from here (see `candidates.ts#pocketContinuations`).
+   * Deduped like the other typed dead-end facts, and logged for the WITHHELD
+   * candidates too, so "the only way out is this step" is visible in the resident
+   * log even while Jev is still choosing (measured run-mucbyro1-1hqhm: the body
+   * was stuck on a stuck MOVE with an empty contract and no such fact at all).
+   */
+  private logLegReflexes(offered: readonly Candidate[], withheld: readonly Candidate[]): void {
+    const lines: string[] = []
+    for (const candidate of [...offered, ...withheld]) {
+      const line = candidate.meta.legReflex
+      if (typeof line === 'string' && line.length > 0 && !lines.includes(line)) lines.push(line)
+    }
+    const key = lines.length === 0 ? null : lines.join('|')
+    if (key === this.lastLegReflexKey) return
+    this.lastLegReflexKey = key
+    if (key === null) return
+    for (const line of lines) {
+      this.logger.info('agent', line, { line }, this.tickCounter)
+    }
+  }
+
+  /**
+   * The mechanical continuation Jev selected (`SKILL_STEP action=... cell=...
+   * via=... ledge=... vertical=staircase-up`). Logged when the action is taken, so
+   * the marker means "the body is now running this step", not "a step existed";
+   * the ordinary MOVE/PATH/VERIFIED markers then report its outcome unchanged.
+   */
+  private logSkillStep(candidate: Candidate): void {
+    const line = typeof candidate.meta.legContinuationLine === 'string' ? candidate.meta.legContinuationLine : null
+    this.logger.info(
+      'agent',
+      line ??
+        `SKILL_STEP action=${String(candidate.meta.legContinuationAction ?? 'step_up')} cell=${String(candidate.meta.legContinuationCell ?? 'unknown')} vertical=${String(candidate.meta.vertical ?? 'none')}`,
+      {
+        actionId: candidate.id,
+        skill: typeof candidate.meta.legContinuationSkill === 'string' ? candidate.meta.legContinuationSkill : null,
+        action: typeof candidate.meta.legContinuationAction === 'string' ? candidate.meta.legContinuationAction : null,
+        cell: typeof candidate.meta.legContinuationCell === 'string' ? candidate.meta.legContinuationCell : null,
+        via: typeof candidate.meta.legContinuationVia === 'string' ? candidate.meta.legContinuationVia : null,
+        ledge: typeof candidate.meta.legContinuationLedge === 'string' ? candidate.meta.legContinuationLedge : null,
+        vertical: typeof candidate.meta.vertical === 'string' ? candidate.meta.vertical : null,
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
    * The selected DIG route: the travel/enter/retrieve target had no walkable
    * route, so the offer grounded a bounded dig step toward it. Logged when Jev
    * actually selects it, so the marker means "this body is now digging the route",
@@ -7321,12 +7543,27 @@ export class JevController {
       // non-damage tick that did so would erase the step before it is counted.
       const previousHealth = this.lastObservedHealth
       if (Number.isFinite(health)) this.lastObservedHealth = health
+      // The environmental-hazard tracker counts the SAME observation. A real
+      // negative health step is damage; a `damage_taken` event with no comparable
+      // step (a respawn/hot-reload boundary) is still a hit.
+      if (
+        (typeof previousHealth === 'number' && Number.isFinite(previousHealth) && health < previousHealth) ||
+        (trigger === 'damage_taken' && !(typeof previousHealth === 'number' && Number.isFinite(previousHealth)))
+      ) {
+        this.damageObservedThisTick = true
+      }
       this.criticalDamage.note({
         health,
         previousHealth,
         planKey,
         food,
-        sourceName: this.signals.lastDamage?.sourceName ?? null,
+        // SAFE: Mineflayer's attribution wins; when there is none and the body's
+        // own hazard state names a damage-dealing environmental cause, that cause
+        // is the honest source (`source=fire` instead of the measured
+        // `source=environment` while burning). `envHazardDamageSource` refuses to
+        // attribute damage to a hazard that cannot deal it (`adjacent_lava`
+        // alone).
+        sourceName: this.signals.lastDamage?.sourceName ?? this.envHazardAttribution(),
       })
     }
     // SAFE: the critical STARVING state is a durable sensor fact, not an event.
@@ -7389,6 +7626,269 @@ export class JevController {
       'progress_stall',
       `CRITICAL_DAMAGE_EXHAUSTED goal=${goalKey} health=${evidence.health} food=${evidence.food ?? 'unknown'} damage=${evidence.consecutiveDamage}/${evidence.limit} source=${evidence.sourceName ?? 'environment'}`,
     )
+  }
+
+  /**
+   * SAFE (issue #436 §8/§17): the hard-safety reflex telemetry.
+   *
+   * Three lines, all emitted only after the guard accepted the candidate so a
+   * line can never claim an action the mechanical checks refused:
+   *
+   *   SKILL_STEP ... authority=HARD_SAFETY_REFLEX budget=1
+   *     the §17 layer: this step was an immediate safety stabilisation, not a
+   *     mechanical continuation of the selected Skill;
+   *   REFLEX ownerSkill=<the interrupted skill> reason=hard_safety action=<what>
+   *     evidence=<the block/flag that proved it>
+   *     the §8 proof: code was allowed to finish exactly this action;
+   *   SKILL_INTERRUPT + SKILL_POLICY_BOUNDARY skill=... reason=hard_safety_interrupt
+   *     alternatives=[...]
+   *     the boundary: the in-flight Skill was preempted and the decision returns
+   *     to the semantic controller with the other grounded routes exposed.
+   *
+   * The REFLEX line is de-duplicated by its own facts so a persistent hazard
+   * does not re-log every tick.
+   */
+  private logReflex(
+    reflex: EnvHazardReflex,
+    state: WorldState,
+    inFlight: InFlightAction | null,
+    alternatives: readonly string[],
+  ): void {
+    const interruptReason: SkillPolicyBoundaryReason = 'hard_safety_interrupt'
+    const evidence = formatEnvHazardReflexEvidence(this.envHazard.evidence())
+    const ownerSkill = inFlight?.id ?? state.currentOption?.templateId ?? this.currentGoalKey()
+    const line = formatReflex({
+      ownerSkill,
+      reason: 'hard_safety',
+      action: reflex.candidate.id,
+      evidence,
+    })
+    if (line !== this.lastReflexLine) {
+      this.lastReflexLine = line
+      this.logger.warn(
+        'policy',
+        line,
+        {
+          ownerSkill,
+          reason: 'hard_safety',
+          action: reflex.candidate.id,
+          kind: reflex.kind,
+          escapeKind: reflex.escapeKind,
+          evidence,
+          goal: this.currentGoalKey(),
+        },
+        this.tickCounter,
+      )
+    }
+    this.logger.warn(
+      'policy',
+      formatSkillStep(
+        ownerSkill,
+        'env_hazard_stabilize',
+        formatSkillStepAuthority('HARD_SAFETY_REFLEX', evidence, 'stabilize_one_step', { budget: 1 }),
+      ),
+      {
+        ownerSkill,
+        authority: 'HARD_SAFETY_REFLEX',
+        stepKind: 'env_hazard_stabilize',
+        budget: 1,
+        action: reflex.candidate.id,
+        kind: reflex.kind,
+        target: reflex.candidate.target,
+      },
+      this.tickCounter,
+    )
+    if (inFlight === null) return
+    this.logger.warn(
+      'policy',
+      `${formatSkillInterrupt(inFlight.id, reflex.kind)} -> kind=${inFlight.kind} reflex=${reflex.candidate.id}`,
+      {
+        reason: reflex.kind,
+        interrupted: inFlight.id,
+        interruptedKind: inFlight.kind,
+        reflex: reflex.candidate.id,
+      },
+      this.tickCounter,
+    )
+    // §8: the reflex may preempt, but the decision then returns to the semantic
+    // controller - which the boundary line records with the remaining grounded
+    // routes exposed.
+    this.logger.warn(
+      'policy',
+      formatSkillPolicyBoundary({
+        skill: inFlight.id,
+        reason: interruptReason,
+        alternatives,
+      }),
+      { skill: inFlight.id, reason: 'hard_safety_interrupt', alternatives, authority: 'HARD_SAFETY_REFLEX' },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * SAFE (issue #436 §8/§17): the boundary where code must NOT take over.
+   *
+   * The body is in an environmental hazard with an in-flight Skill, and the exit
+   * is not a unique immediate stabilisation - either several grounded routes
+   * exist (Jev's WHICH) or none does (the typed `ENV_HAZARD_NO_EXIT` gap). This
+   * line names that boundary and exposes the grounded alternatives so a reviewer
+   * can see that code returned the decision instead of picking a destination.
+   */
+  private logEnvHazardBoundary(
+    state: WorldState,
+    candidates: readonly Candidate[],
+    inFlight: InFlightAction | null,
+  ): void {
+    const hazard = state.self.envHazard ?? null
+    if (hazard?.active !== true || hazard.escapeRequired !== true || inFlight === null) return
+    const routes = envHazardEscapeRoutes(state, candidates)
+    const reason: SkillPolicyBoundaryReason =
+      routes.length === 0 ? 'no_grounded_escape' : 'multiple_grounded_escapes'
+    const line = formatSkillPolicyBoundary({
+      skill: inFlight.id,
+      reason,
+      alternatives: routes.map((route) => route.id),
+    })
+    if (line === this.lastEnvBoundaryLine) return
+    this.lastEnvBoundaryLine = line
+    this.logger.warn(
+      'policy',
+      line,
+      {
+        skill: inFlight.id,
+        reason,
+        alternatives: routes.map((route) => route.id),
+        kind: hazard.kinds.join('+'),
+      },
+      this.tickCounter,
+    )
+  }
+
+  /**
+   * The synthetic decision a hard-safety reflex carries: the SAME downstream
+   * pipeline (decision record, guard, executor claim) with an explicit
+   * provenance that is neither Jev nor the deterministic fallback, and NO model
+   * call. `answers.action` is the one authoritative choice the executor reads.
+   */
+  private reflexDecision(candidate: Candidate): JevResult {
+    return {
+      callId: `reflex:${randomUUID()}`,
+      policy: 'reflex',
+      source: 'reflex',
+      model: 'hard_safety_reflex',
+      latencyMs: 0,
+      usage: null,
+      answers: {
+        action: {
+          name: 'action',
+          type: 'choice',
+          value: candidate.id,
+          probability: 1,
+          confidence: 1,
+          probabilities: null,
+          legend: null,
+          note: 'uniquely-determined hard-safety reflex (issue #436 section B)',
+        },
+      },
+    }
+  }
+
+  /**
+   * SAFE: the environmental cause an UNATTRIBUTED damage event is attributed to,
+   * or null when the body is in no damage-dealing hazard.
+   *
+   * Reads the tracker's last observation, which is one decision old by
+   * construction: `observeCriticalDamage` runs before the sensor build, and the
+   * hazard state is part of that build. A hazard the body is standing in persists
+   * across decisions, so the attribution names the cause that is actually
+   * dealing the damage; `envHazardDamageSource` still refuses to attribute to a
+   * hazard that cannot deal damage (`adjacent_lava` alone).
+   */
+  private envHazardAttribution(): string | null {
+    const evidence = this.envHazard.evidence()
+    if (!evidence.active) return null
+    return envHazardDamageSource(evidence.kinds)
+  }
+
+  /**
+   * SAFE: the body's own environmental-hazard telemetry (fire / lava / burning /
+   * drowning).
+   *
+   * Measured live (`run-mucaq28q-1ftq1`, main 99f0020): the body burned to death
+   * in the Nether, every tick arrived as `source=environment`, and a scan of the
+   * whole run found FIRE 0 | LAVA 0 | HAZARD_FIRE 0 | IN_FIRE 0 | BURN 0 - the
+   * system had NO state for it. This mirrors the sensed fact as `ENV_HAZARD`
+   * (with the exits the world actually grounds), the typed CAN gap
+   * `ENV_HAZARD_NO_EXIT` when it grounds none, and `ENV_HAZARD_CLEAR` when the
+   * body gets out. It never invents a route and never ranks one: the exits are
+   * ordinary candidates and the choice among them stays Jev's
+   * (`envHazardReflexAction` fires only when exactly one is grounded).
+   */
+  private observeEnvHazard(state: WorldState): void {
+    const hazard = state.self.envHazard ?? null
+    const evidence = this.envHazard.note({
+      atMs: state.timestampMs,
+      hazard,
+      damageObserved: this.damageObservedThisTick,
+    })
+    this.damageObservedThisTick = false
+    const goalKey = this.currentGoalKey()
+    if (evidence.active) {
+      const escapes = envHazardEscapeSpots(state, this.blacklistedMoveTargets(state))
+      const line = formatEnvHazard(goalKey, evidence, escapes)
+      if (line !== this.lastEnvHazardLine) {
+        this.lastEnvHazardLine = line
+        this.logger.warn(
+          'agent',
+          line,
+          {
+            kind: evidence.kinds.join('+'),
+            cell: evidence.cell,
+            block: evidence.block,
+            damage: evidence.damage,
+            activeMs: evidence.activeMs,
+            onFire: evidence.onFire,
+            headWet: evidence.headInWater,
+            airAbove: evidence.airAbove,
+            exits: escapes.length,
+            waterExit: escapes.some((escape) => escape.water),
+          },
+          this.tickCounter,
+        )
+      }
+      if (evidence.escapeRequired && escapes.length === 0) {
+        const gap = formatEnvHazardNoExit(goalKey, evidence, state.envHazardCells?.length ?? 0)
+        if (gap !== this.lastEnvHazardGapLine) {
+          this.lastEnvHazardGapLine = gap
+          this.logger.warn(
+            'agent',
+            gap,
+            { kind: evidence.kinds.join('+'), cell: evidence.cell, reason: 'no_safe_adjacent_cell' },
+            this.tickCounter,
+          )
+        }
+      } else {
+        this.lastEnvHazardGapLine = null
+      }
+      return
+    }
+    this.lastEnvHazardLine = null
+    this.lastEnvHazardGapLine = null
+    const cleared = this.envHazard.takeCleared()
+    if (cleared !== null) {
+      this.logger.info(
+        'agent',
+        formatEnvHazardClear(cleared),
+        {
+          lastKind: cleared.kinds.join('+'),
+          lastCell: cleared.cell,
+          lastBlock: cleared.block,
+          damage: cleared.damage,
+          activeMs: cleared.activeMs,
+        },
+        this.tickCounter,
+      )
+    }
   }
 
   /**

@@ -50,6 +50,7 @@
     "action-verify-test": "bun test ./test-action-verify.mts",
     "mob-hunt-test": "bun test ./test-mob-hunt.mts",
     "equip-affordance-test": "bun ./test-equip-affordance.mts",
+    "env-hazard-test": "bun ./test-env-hazard.mts",
     "truth-causal-test": "bun test ./test-truth-causal.mts",
     "minecraft-truth-test": "bun test ./test-minecraft-truth.mts",
     "pillar-search-test": "bun test ./test-pillar-search.mts",

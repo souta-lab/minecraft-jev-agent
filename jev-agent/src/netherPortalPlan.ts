@@ -1271,6 +1271,75 @@ export const SKILL_STEP = 'SKILL_STEP'
 export const SKILL_INTERRUPT = 'SKILL_INTERRUPT'
 export const SKILL_END = 'SKILL_END'
 export const REFLEX = 'REFLEX'
+/**
+ * The Skill stopped because continuing would require a SEMANTIC decision code
+ * does not own (#436 section 6 material policy re-entry, section 7 result clause,
+ * section 22 "no recovery trees"). The alternatives that were grounded are named
+ * so a reviewer can see code did not rank them.
+ */
+export const SKILL_POLICY_BOUNDARY = 'SKILL_POLICY_BOUNDARY'
+
+/**
+ * Which of the three deterministic layers (#436 section 17) justified a
+ * mechanical step:
+ *
+ *   MECHANICAL_CONTINUATION the selected Skill is still being realized;
+ *   MANDATORY_PREREQUISITE  the U1..U6 uniqueness contract justified exactly this
+ *                           prerequisite, so code may finish it on Jev's behalf;
+ *   HARD_SAFETY_REFLEX      immediate safety stabilization preempted execution.
+ */
+export type SkillStepAuthority = 'MECHANICAL_CONTINUATION' | 'MANDATORY_PREREQUISITE' | 'HARD_SAFETY_REFLEX'
+
+/**
+ * The `SKILL_STEP` detail half:
+ * `authority=<layer> evidence=<fact> worldDelta=<fact> [budget=<n>] [failure=<typed>]`.
+ *
+ * `budget` and `failure` are the bounded/verifiable half of the same evidence:
+ * a reflex or prerequisite declares how many steps its authority layer may spend
+ * and, when the step did NOT execute, the typed reason it did not. Both are
+ * optional so every existing call site stays byte-identical.
+ */
+export function formatSkillStepAuthority(
+  authority: SkillStepAuthority,
+  evidence: string,
+  worldDelta: string = 'none',
+  options: { budget?: number; failure?: string } = {},
+): string {
+  return (
+    `authority=${authority} evidence=${evidence} worldDelta=${worldDelta}` +
+    (options.budget === undefined ? '' : ` budget=${options.budget}`) +
+    (options.failure === undefined || options.failure.length === 0 ? '' : ` failure=${options.failure}`)
+  )
+}
+
+/**
+ * `SKILL_POLICY_BOUNDARY skill=<id> reason=<reason> alternatives=[<a>,<b>]`
+ *
+ * Emitted exactly where code reached a decision it must NOT make: several
+ * non-equivalent remedies (or several semantic targets) were grounded and the
+ * next move belongs to Jev. `alternatives` is ordered by discovery, never ranked.
+ */
+export function formatSkillPolicyBoundary(input: {
+  skill: string
+  reason: string
+  alternatives: readonly string[]
+}): string {
+  return `${SKILL_POLICY_BOUNDARY} skill=${input.skill} reason=${input.reason} alternatives=[${input.alternatives.join(',')}]`
+}
+
+/**
+ * The typed reasons a safety boundary can carry (the formatter's parameter stays
+ * `string` so other lanes can name their own without touching this union):
+ *
+ *   hard_safety_interrupt      a hard-safety reflex preempted the in-flight
+ *                              Skill and the decision returns to the controller;
+ *   multiple_grounded_escapes  several grounded remedies exist: Jev's WHICH;
+ *   no_grounded_escape         no grounded remedy exists: the typed gap.
+ */
+export type SkillPolicyBoundaryReason =
+  | 'hard_safety_interrupt'
+  | 'multiple_grounded_escapes'
+  | 'no_grounded_escape'
 
 /** The entry Skill's stable id (the `skill` / `ownerSkill` field). */
 export const PORTAL_ENTER_SKILL = 'ENTER_PORTAL(portalSite)'
@@ -1307,18 +1376,32 @@ export function formatSkillEnd(
   )
 }
 
+/**
+ * WHY code finished the already-selected action's mechanics. One vocabulary for
+ * every reflex (#436), so a reviewer never has to learn a second marker shape:
+ *
+ *   unique_binding_prerequisite - exactly one mechanically mandatory
+ *     continuation of the SELECTED target (section A: the portal entry);
+ *   hard_safety - a uniquely-determined escape from an immediate hazard, which
+ *     may interrupt the in-flight skill (section B: fire / lava / burning /
+ *     drowning; `envHazard.ts`).
+ */
+export type ReflexReason = 'unique_binding_prerequisite' | 'hard_safety'
+
 export interface ReflexInput {
   readonly ownerSkill: string
   /** what code did (a bounded mechanical continuation, never a new destination) */
   readonly action: string
   /** the block/geometry fact that proved the continuation was the only one */
   readonly evidence: string
+  /** why code was allowed to finish it; defaults to the section-A reason */
+  readonly reason?: ReflexReason
 }
 
-/** The exact `REFLEX` line: a uniquely-determined prerequisite, with its proof. */
+/** The exact `REFLEX` line: a uniquely-determined action, with its proof. */
 export function formatReflex(input: ReflexInput): string {
   return (
-    `${REFLEX} ownerSkill=${input.ownerSkill} reason=unique_binding_prerequisite` +
+    `${REFLEX} ownerSkill=${input.ownerSkill} reason=${input.reason ?? 'unique_binding_prerequisite'}` +
     ` action=${input.action} evidence=${input.evidence}`
   )
 }

@@ -48,6 +48,8 @@ import { PILLAR_PLACE_PRIORITY, selectPlaceableBlock } from './pillarSearch.ts'
 import { ARMOR_SLOT_INDEX, ARMOR_SLOTS } from './gearPlan.ts'
 import type { ArmorSlot } from './gearPlan.ts'
 import { headroomAcrossFootprint } from './bodyGeometry.ts'
+import { buildEnvHazardState, envHazardKindOfBlock } from './envHazard.ts'
+import type { EnvHazardCell, EnvHazardState } from './envHazard.ts'
 
 export type Vec3Json = {
   x: number
@@ -257,6 +259,16 @@ export type SelfState = {
   air?: number
   feetInWater?: boolean
   eyesInWater?: boolean
+  /**
+   * SAFE: the body's own environmental hazard state (fire/lava/burning/
+   * drowning), sensed from real block truth at the body's own column and the
+   * adjacent cells plus Mineflayer's own on-fire flag (see `envHazard.ts`).
+   * Optional so pure fixtures that predate the hazard facts need not restate
+   * them: `buildSelf` always populates it and consumers treat an absent value
+   * as "the sensor never observed a hazard" - which is exactly the
+   * behaviour-preserving default.
+   */
+  envHazard?: EnvHazardState
   /**
    * Worn armor per destination. Optional so pure fixtures that predate the
    * armor affordance need not restate it; `buildWorldState` always populates it
@@ -790,6 +802,16 @@ export type WorldState = {
    * behaviourally unchanged.
    */
   submergedPlacementSpots?: Vec3Json[]
+  /**
+   * SAFE: the adjacent cells the environmental hazard scan classified from real
+   * block truth (feet/head/support per cell + the water fact), populated only
+   * while `self.envHazard.active` - an inactive body carries no cells, so the
+   * non-hazard state stays exactly the shape it had. The candidate layer grounds
+   * hazard escapes from these cells; they are deliberately NOT part of `self`
+   * (the Jev snapshot keeps `self` whole, and 24 cells per tick must not grow
+   * the prompt).
+   */
+  envHazardCells?: EnvHazardCell[]
   /** complete, live-grounded Nether portal footprints; absent in old replay fixtures */
   portalFrameSites?: PortalFrameSite[]
   /** complete live frame validation, when a sensed site already has all required edges */
@@ -1241,7 +1263,25 @@ export function isStandable(bot: Bot, feet: Vec3Json): boolean {
  * landing.
  */
 export function isUsableStand(bot: Bot, feet: Vec3Json): boolean {
-  return isStandable(bot, feet) && hasUsableGroundSupport(bot, feet)
+  return isUsableStandFromBlocks(
+    bot.blockAt(toVec3(bot, feet)),
+    bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y + 1, z: feet.z })),
+    bot.blockAt(toVec3(bot, { x: feet.x, y: feet.y - 1, z: feet.z })),
+  )
+}
+
+/**
+ * `isUsableStand` over blocks the caller has ALREADY read. The environmental
+ * hazard scan samples a 3x3x3 ring around the body every tick and must not read
+ * every cell twice; both callers are the same destination rule, so a canopy top
+ * cannot be standable for one of them and not the other.
+ */
+export function isUsableStandFromBlocks(
+  feetBlock: { boundingBox: string } | null,
+  headBlock: { boundingBox: string } | null,
+  supportBlock: SupportBlockLike | null,
+): boolean {
+  return isPassable(feetBlock) && isPassable(headBlock) && isUsableGroundSupport(supportBlock)
 }
 
 /** The 8 neighbours the executor could stand on to reach a block, best first. */
@@ -1276,12 +1316,26 @@ function findAdjacentStandable(bot: Bot, target: Vec3Json): Vec3Json | null {
 }
 
 function buildSelf(bot: Bot): SelfState {
+  return buildSelfDetail(bot).self
+}
+
+/**
+ * `buildSelf` plus the hazard cell sample the world state carries separately:
+ * `self.envHazard` must stay lean (the Jev snapshot ships `self` whole), while
+ * the candidate layer needs the 24 classified neighbours. One read pass builds
+ * both.
+ */
+function buildSelfDetail(bot: Bot): { self: SelfState; envHazardCells: EnvHazardCell[] } {
   const position = vecJson(bot.entity.position)
   const eye = bot.entity.position.offset(0, EYE_HEIGHT, 0)
   const held = bot.heldItem
   const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
   const eyes = { x: Math.floor(eye.x), y: Math.floor(eye.y), z: Math.floor(eye.z) }
-  return {
+  const air = readAir(bot)
+  const feetInWater = fluidAt(bot, feet)
+  const eyesInWater = fluidAt(bot, eyes)
+  const envHazardCells = buildEnvHazardRing(bot, feet)
+  const self: SelfState = {
     username: bot.username,
     position,
     eyePosition: vecJson(eye),
@@ -1295,10 +1349,141 @@ function buildSelf(bot: Bot): SelfState {
     isDay: bot.time.isDay,
     heldItem: held ? { name: held.name, count: held.count, slot: held.slot } : null,
     armor: buildArmor(bot),
-    air: readAir(bot),
-    feetInWater: fluidAt(bot, feet),
-    eyesInWater: fluidAt(bot, eyes),
+    air,
+    feetInWater,
+    eyesInWater,
+    envHazard: buildEnvHazard(bot, {
+      feet,
+      air,
+      feetInWater,
+      eyesInWater,
+      onFire: readOnFire(bot),
+      cells: envHazardCells,
+    }),
   }
+  return { self, envHazardCells }
+}
+
+/**
+ * SAFE: Mineflayer's OWN on-fire fact.
+ *
+ * `prismarine-entity` exposes no `onFire`/`fireTicks` property, but the entity
+ * metadata it *does* keep carries the vanilla shared-flags byte at key 0
+ * (`mineflayer/lib/plugins/entities.js` writes every metadata key it receives
+ * onto `entity.metadata`), and bit 0x01 of that byte is the vanilla "entity is
+ * on fire" flag - which is how the client knows to draw a burning body, and is
+ * the only fire fact that survives leaving the fire block.
+ *
+ * `null` when the client never delivered metadata (a fixture bot, an old
+ * version): UNKNOWN is not "not burning", and no other layer may turn it into a
+ * positive fact.
+ */
+function readOnFire(bot: Bot): boolean | null {
+  const metadata = (bot.entity as { metadata?: unknown }).metadata
+  if (!Array.isArray(metadata)) return null
+  const flags = metadata[0]
+  if (typeof flags !== 'number' || !Number.isFinite(flags)) return null
+  return (flags & 0x01) !== 0
+}
+
+/**
+ * SAFE: the adjacent-cell sample the environmental hazard state is built from.
+ *
+ * The 3x3 horizontal ring at feet.y-1..feet.y+1 (24 cells, the body's own cell
+ * excluded), each read as feet + head + support so the destination rule
+ * (`isUsableStandFromBlocks`) and the hazard/water facts come from the SAME real
+ * blocks the body would occupy. An unloaded cell (`blockAt` -> null) is never
+ * standable and never a hazard: no read, no fact.
+ */
+function buildEnvHazardRing(bot: Bot, feet: Vec3Json): EnvHazardCell[] {
+  const cells: EnvHazardCell[] = []
+  const at = (x: number, y: number, z: number) => bot.blockAt(toVec3(bot, { x, y, z }))
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dz = -1; dz <= 1; dz += 1) {
+      if (dx === 0 && dz === 0) continue
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const x = feet.x + dx
+        const y = feet.y + dy
+        const z = feet.z + dz
+        const feetBlock = at(x, y, z)
+        const headBlock = at(x, y + 1, z)
+        const supportBlock = at(x, y - 1, z)
+        const hazardBlock =
+          (feetBlock !== null && envHazardKindOfBlock(feetBlock.name) !== null
+            ? feetBlock.name
+            : headBlock !== null && envHazardKindOfBlock(headBlock.name) !== null
+              ? headBlock.name
+              : supportBlock !== null && envHazardKindOfBlock(supportBlock.name) !== null
+                ? supportBlock.name
+                : null)
+        cells.push({
+          position: { x, y, z },
+          standable: isUsableStandFromBlocks(feetBlock, headBlock, supportBlock),
+          hazard: envHazardKindOfBlock(hazardBlock),
+          hazardBlock,
+          water: feetBlock !== null && PROBE_FLUIDS.has(feetBlock.name),
+        })
+      }
+    }
+  }
+  return cells
+}
+
+/**
+ * SAFE: the body's own environmental hazard state (fire/lava/burning/drowning).
+ *
+ * The measured live failure: the body burned to death in the Nether with every
+ * damage tick arriving as `source=null` and no marker in the whole run naming
+ * fire, lava or burning - nothing had ever read the block the body was standing
+ * in. This reads it, plus the adjacent cells, and nothing else: no hazard is
+ * ever inferred from damage, from a block *near* the body, or from a missing
+ * read.
+ */
+function buildEnvHazard(
+  bot: Bot,
+  input: {
+    feet: Vec3Json
+    air: number
+    feetInWater: boolean
+    eyesInWater: boolean
+    onFire: boolean | null
+    cells: EnvHazardCell[]
+  },
+): EnvHazardState {
+  const at = (y: number) => bot.blockAt(toVec3(bot, { x: input.feet.x, y, z: input.feet.z }))
+  const feetBlock = at(input.feet.y)
+  const headBlock = at(input.feet.y + 1)
+  const supportBlock = at(input.feet.y - 1)
+  // The cell a 1.8-tall body's head occupies when it rises one step: the
+  // drowning geometry ("water at the head, air immediately above").
+  const aboveHeadBlock = at(input.feet.y + 2)
+  const inWater = input.feetInWater === true || input.eyesInWater === true
+  return buildEnvHazardState({
+    self: input.feet,
+    feetBlock: feetBlock?.name ?? null,
+    headBlock: headBlock?.name ?? null,
+    supportBlock: supportBlock?.name ?? null,
+    onFire: input.onFire,
+    // The breath/water facts are `bodySubmersion`'s (one owner); the hazard
+    // state only re-expresses drowning so one marker can name it.
+    outOfAir: bodySubmersion({
+      air: input.air,
+      feetInWater: input.feetInWater,
+      eyesInWater: input.eyesInWater,
+    }).state === 'out_of_air',
+    inWater,
+    headInWater: input.eyesInWater === true,
+    // "Verified AIR immediately above" is not merely "passable above": a fluid
+    // cell is passable with an empty bounding box, so water above the head must
+    // NOT read as a breathable cell. Only air (any non-fluid passable cell)
+    // grounds the rise.
+    airAbove:
+      isPassable(aboveHeadBlock) &&
+      aboveHeadBlock !== null &&
+      !PROBE_FLUIDS.has(aboveHeadBlock.name) &&
+      envHazardKindOfBlock(aboveHeadBlock.name) === null,
+    cells: input.cells,
+  })
 }
 
 /**
@@ -3231,7 +3416,7 @@ export function buildWorldState(bot: Bot, input: SensorInput, options: SensorOpt
 }
 
 function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOptions): WorldState {
-  const self = buildSelf(bot)
+  const { self, envHazardCells } = buildSelfDetail(bot)
   const inventory = buildInventory(bot)
   const rememberedStations = input.rememberedStations ?? input.signals.knownResources ?? []
   // #14-world-proof: falsify remembered resource cells the loaded world
@@ -3281,6 +3466,10 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     inventory,
     entities,
     blocks: buildBlocks(bot, options, self, input.focusItem ?? null, inventory.counts),
+    // The hazard cell sample is carried only while a hazard is actually present:
+    // an inactive body's state keeps exactly the shape it had before this fact
+    // existed, and the candidate layer reads "no cells" as "no hazard".
+    ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
     terrain: {
       standable: buildTerrain(bot, options, self),
       escapeCells: buildEscapeCells(bot, options, self, entities),
