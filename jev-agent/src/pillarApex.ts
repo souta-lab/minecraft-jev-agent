@@ -135,17 +135,32 @@ export function pillarWorstPlaceDelta(velocityY: number, ticks: number): number 
 }
 
 /**
+ * The gap the contract is actually evaluated against. An EXPLICIT
+ * `PILLAR_PLACE_SAME_TICK` (0) is a promise that the packet shares the
+ * clearance sample's tick and is taken at face value; anything else - a
+ * positive declared bound, or an undeclared/NaN/negative value from a caller
+ * that cannot say - is resolved pessimistically to the look-handshake bound.
+ * Degrading an UNKNOWN gap to "zero ticks" is exactly the silent assumption that
+ * produced the measured refusals, so it fails closed instead.
+ */
+export function pillarPlaceHandshakeBudget(handshakeTicks: number): number {
+  if (handshakeTicks === PILLAR_PLACE_SAME_TICK) return PILLAR_PLACE_SAME_TICK
+  if (!Number.isFinite(handshakeTicks) || handshakeTicks < 0) return PILLAR_PLACE_LOOK_HANDSHAKE_TICKS
+  return Math.floor(handshakeTicks)
+}
+
+/**
  * The placement contract: the packet may be sent only when the body's own
  * bounding box does not intersect the destination cell - at the sampled moment
  * AND at the worst moment of the actuator's remaining gap.
  *
  * The body's AABB is `[feetY, feetY + 1.8]` and the destination cell is
  * `[placeCellY, placeCellY + 1]`, so no overlap is exactly
- * `feetY >= placeCellY + 1`. With `handshakeTicks = 0` (the decision and the
- * packet share a tick) this is the exact predicate the server applies; with a
- * declared gap it demands the worst-case clearance over that gap, which turns
- * "the server refused a place we could not keep" into a typed pre-attempt
- * refusal.
+ * `feetY >= placeCellY + 1`. With an explicitly declared same-tick actuator
+ * (`handshakeTicks = 0`) this is the exact predicate the server applies; with a
+ * declared or undeclared gap it demands the worst-case clearance over that gap,
+ * which turns "the server refused a place we could not keep" into a typed
+ * pre-attempt refusal.
  */
 export function pillarPlaceCellCleared(input: {
   feetY: number
@@ -153,7 +168,8 @@ export function pillarPlaceCellCleared(input: {
   placeCellY: number
   handshakeTicks: number
 }): boolean {
-  const lowestFeet = input.feetY + pillarWorstPlaceDelta(input.velocityY, input.handshakeTicks)
+  const gap = pillarPlaceHandshakeBudget(input.handshakeTicks)
+  const lowestFeet = input.feetY + pillarWorstPlaceDelta(input.velocityY, gap)
   return lowestFeet >= input.placeCellY + 1
 }
 

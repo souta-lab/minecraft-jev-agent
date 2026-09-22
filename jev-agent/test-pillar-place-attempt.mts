@@ -41,6 +41,7 @@
 import {
   formatPillarFail,
   pillarPlaceCellCleared,
+  pillarPlaceHandshakeBudget,
   pillarTrajectoryDelta,
   pillarWorstPlaceDelta,
   pillarStepUp,
@@ -497,16 +498,30 @@ addCase('FIXTURE (iii-c) the clearance contract is exact, bounded and window-awa
     placeCellY: 67,
     handshakeTicks: PILLAR_PLACE_LOOK_HANDSHAKE_TICKS,
   })
+  // An UNDECLARED gap must fail closed to the pessimistic bound, never to
+  // "zero ticks": assuming a same-tick actuator is exactly the silent
+  // assumption that produced the measured refusals.
+  const undeclared = pillarPlaceCellCleared({
+    feetY: 68.166,
+    velocityY: 0.083,
+    placeCellY: 67,
+    handshakeTicks: undefined as unknown as number,
+  })
   const required = requiredApexRise(66.4363679808445, 66)
   const pass =
     clearsOnAscent === true &&
     exactlyOnBoundary === true &&
     insideCell === false &&
     windowed === false &&
+    undeclared === false &&
+    pillarPlaceHandshakeBudget(undefined as unknown as number) === PILLAR_PLACE_LOOK_HANDSHAKE_TICKS &&
+    pillarPlaceHandshakeBudget(-1) === PILLAR_PLACE_LOOK_HANDSHAKE_TICKS &&
+    pillarPlaceHandshakeBudget(0) === 0 &&
+    pillarPlaceHandshakeBudget(2) === 2 &&
     Math.abs(required - (67 - 66.4363679808445)) < 1e-12
   return {
     pass,
-    detail: `ascent=${clearsOnAscent} boundary=${exactlyOnBoundary} inside=${insideCell} windowed=${windowed} requiredRise=${required.toFixed(3)}`,
+    detail: `ascent=${clearsOnAscent} boundary=${exactlyOnBoundary} inside=${insideCell} windowed=${windowed} undeclared=${undeclared} requiredRise=${required.toFixed(3)}`,
   }
 })
 
