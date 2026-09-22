@@ -221,6 +221,32 @@ check(
 )
 
 check(
+  '(i) COMPLEMENT: a successful-hop pacing loop trips even though a productive MOVE is offered every tick',
+  () => {
+    // The durable queue-head bound counts only decisions that present NO
+    // productive candidate (`actionable === 0`). This body always has a real MOVE
+    // and still makes no progress, so no head-scoped counter can see it: the
+    // BODY's cell envelope is the only place the loop exists.
+    const steps: Step[] = []
+    for (let index = 0; index < 40; index += 1) {
+      const cell = index % 2 === 0 ? CELL_TARGET_0 : CELL_TARGET_1
+      steps.push({
+        body: cell,
+        attempt: cell,
+        cellChanged: true,
+        semanticProgress: false,
+        inventoryChanged: false,
+        distanceClosed: false,
+      })
+    }
+    const result = run(steps)
+    const first = result.trips[0]
+    return first !== undefined && first.record.returns === LOCAL_OSCILLATION_RETURN_LIMIT_DEFAULT && first.record.cellChanges >= 8
+  },
+  () => JSON.stringify(run(Array.from({ length: 40 }, (_, index) => ({ body: index % 2 === 0 ? CELL_TARGET_0 : CELL_TARGET_1, attempt: index % 2 === 0 ? CELL_TARGET_0 : CELL_TARGET_1, cellChanged: true, semanticProgress: false, inventoryChanged: false, distanceClosed: false }))).trips),
+)
+
+check(
   '(i) DURABLE HALF: a generation change does not move the trip point',
   () => {
     const without = run(measuredSteps(40))
