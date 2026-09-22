@@ -50,6 +50,24 @@ import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput }
 import { digRouteBearing, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
 import type { DigRouteRefusal, DigRouteRefusalReason } from './digRoute.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
+import {
+  BRIDGE_AUTHORITY_META,
+  BRIDGE_BLOCK_META,
+  BRIDGE_DIR_META,
+  BRIDGE_LANDING_META,
+  BRIDGE_LINE_META,
+  BRIDGE_MAX_SPAN,
+  BRIDGE_MAY_PLACE_META,
+  BRIDGE_META,
+  BRIDGE_PLACE_META,
+  BRIDGE_REFUSED_META,
+  BRIDGE_SPAN_META,
+  BRIDGE_TARGET_META,
+  formatBridgeRefused,
+  isBridgeMove,
+  planBridgeRoute,
+} from './bridgeRoute.ts'
+import type { BridgePlan, BridgeRefusal } from './bridgeRoute.ts'
 import { fuelCountFor, loadGameData, resolveHarvest, smeltInputFor as smeltInputName, PICKAXE_TIER_ORDER, smeltInventorySufficient } from './gameData.ts'
 import { ASCEND_GAP_LIMIT, bestToolTier, capabilityKey, DESCEND_GAP_LIMIT, evaluateReachability, HAZARD_PROXIMITY, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS, interactionFaceDistance, missingToolCapability, reachabilityFingerprint } from './reachability.ts'
 import type { Capability, DigAccessRefusal, DigApproachProbe, PathProbeResult, ReachabilityAbilities, ReachabilityBarrier, ReachabilityResult, ReachabilityTarget, ReachabilityWorld, StationApproachProbe } from './reachability.ts'
@@ -898,6 +916,13 @@ export interface CandidateOptions {
   searchedSurfaceTargets?: ReadonlySet<string>
   /** failures at one MOVE/RETRIEVE target before the generator stops offering it (default 4) */
   moveFailureLimit?: number
+  /**
+   * The widest verified bridge span one BRIDGE/scaffold offer may declare, in
+   * blocks (`bridgeRoute.BRIDGE_MAX_SPAN` when absent). A bound, not a rank: a gap
+   * whose verified continuation is wider than this is refused `budget` rather than
+   * bridged on faith.
+   */
+  bridgeMaxSpan?: number
   /** failures at one DESCEND step before the generator stops offering it (default 3) */
   descendFailureLimit?: number
   /** failures at one placement spot before a fallback spot is used (default 2) */
@@ -8005,16 +8030,25 @@ function travelApproachLegs(
   // with an empty contract). A genuinely walkable leg is therefore untouched.
   const walkable = best !== null && levelWalkReachable(state, best)
   const continuations = walkable ? [] : pocketContinuations(state, spec.target)
+  // The BRIDGE/scaffold remedy: a same-level gap whose floor cell is placed while
+  // the body advances. Grounded ONLY on the sensor's own bounded forward probe
+  // (`state.bridgeProbes`) plus a held placeable block, and only when the route
+  // genuinely needs to cross a gap (the same `walkable` gate the hole
+  // step-over/step-up uses), so ordinary walkable terrain grounds nothing here.
+  const bridge = groundBridgeLeg(state, options, spec, walkable)
   // #436 section 7 (U3) / section 19 (8, 28) / section 22: the grounded remedies
   // are ENUMERATED by semantic class, never ranked. `movement` is the hole
   // step-over/step-up; `dig` is the bounded dig route, a separate DESCEND
   // candidate (never a contract on a MOVE, so a walk never silently gains dig
-  // authority); `place` (a bridge) is a third class. When more than one class is
-  // on offer the next move is Jev's, and the boundary is stated.
+  // authority); `place:bridge` is the third class, a MOVE that DECLARES
+  // `mayPlaceBlocks` and the block it consumes. When more than one class is on
+  // offer the next move is Jev's, and the boundary is stated.
   const remedyClasses = [
     ...(best !== null ? ['movement:walk'] : []),
     ...continuations.map((cont) => `movement:${cont.action}`),
     ...(dig !== null ? ['dig:route'] : []),
+    ...(bridge.plan !== null ? ['place:bridge'] : []),
+    ...(bridge.plan !== null && ascendAlternativeAvailable(state, spec.target) ? ['place:pillar'] : []),
   ]
   const boundary =
     remedyClasses.length > 1
@@ -8024,7 +8058,7 @@ function travelApproachLegs(
           alternatives: remedyClasses,
         })
       : null
-  const uniqueContinuation = continuations.length === 1 && dig === null && !walkable
+  const uniqueContinuation = continuations.length === 1 && dig === null && !walkable && bridge.plan === null
   for (const cont of continuations) {
     const reflex = uniqueContinuation
       ? formatLegReflex({
@@ -8043,13 +8077,179 @@ function travelApproachLegs(
       : null
     legs.push(continuationCandidate(state, options, spec, cont, reflex, boundary))
   }
+  if (bridge.plan !== null) {
+    // #436 section 7: when the bridge is the ONLY grounded remedy class, code may
+    // finish the already-selected leg's mechanical prerequisite, and the step says
+    // so (`authority=MANDATORY_PREREQUISITE` + the `REFLEX
+    // reason=unique_binding_prerequisite` proof). When several classes are grounded
+    // the step is only a mechanical continuation of the route Jev selected, and the
+    // boundary line names the alternatives code refused to rank.
+    const unique = remedyClasses.length === 1
+    const authority = formatSkillStepAuthority(
+      unique ? 'MANDATORY_PREREQUISITE' : 'MECHANICAL_CONTINUATION',
+      `cell=${cellText(bridge.plan.landing)} place=${cellText(bridge.plan.place)} far=${cellText(bridge.plan.far)} ` +
+        `dir=${bridge.plan.dir} block=${bridge.plan.block} span=${bridge.plan.span} probe=bounded(${bridge.plan.span})`,
+      'place_blocks=1',
+      { budget: bridge.plan.span },
+    )
+    const reflex = unique ? formatBridgeReflex(spec.skill, bridge.plan) : null
+    legs.push(bridgeLegCandidate(state, options, spec, bridge.plan, authority, reflex, boundary))
+  }
   // A boundary with no continuation candidate still has to be visible: attach it to
   // the walk leg / dig route so the operator sees that BOTH classes were grounded
   // and that code stopped.
   if (boundary !== null && legs.length > 0) {
     for (const leg of legs) leg.meta.legPolicyBoundary = boundary
   }
+  // The typed refusal is attached to the legs this offer DID ground, exactly like
+  // `legPolicyBoundary`: a reviewer reads "the bridge was needed here and refused
+  // for THIS reason" instead of inferring it from an absent candidate.
+  if (bridge.refusal !== null && legs.length > 0) {
+    const line = formatBridgeRefused(bridge.refusal)
+    for (const leg of legs) leg.meta[BRIDGE_REFUSED_META] = line
+  }
   return legs
+}
+
+/** What one bridge offer (and its candidate) is aimed at. */
+interface BridgeLegSpec {
+  target: Vec3Json
+  targetName: string | null
+  /** why this leg exists, carried into the meta (`route_spent` / `route_withheld`) */
+  reason: string
+  /** the owning Skill, or null for a route-opening offer no Skill encloses */
+  skill: string | null
+  extraMeta?: Record<string, string | number | boolean>
+}
+
+/**
+ * The bridge offer for one leg. Returns the verified plan or the typed refusal;
+ * `plan === null` NEVER becomes a candidate, so "no placeable block" and "no
+ * verified landing" can never surface as an executable action.
+ *
+ * The `walkable` gate is the same one the hole step-over/step-up uses: a leg the
+ * ordinary level walk can already express is untouched, so ordinary walkable
+ * terrain offers no bridge, attaches no marker and places nothing.
+ */
+function groundBridgeLeg(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; targetName: string | null },
+  walkable: boolean,
+): { plan: BridgePlan | null; refusal: BridgeRefusal | null } {
+  if (walkable) return { plan: null, refusal: null }
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const liveStructures = liveStructureIndexOf(state)
+  const decision = planBridgeRoute({
+    selfFeet: feet,
+    target: spec.target,
+    probes: state.bridgeProbes,
+    placeable: selectPlaceableBlock(state.inventory.counts),
+    isProtected: (cell, name) =>
+      (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell),
+    maxSpan: options.bridgeMaxSpan ?? BRIDGE_MAX_SPAN,
+  })
+  return { plan: decision.plan, refusal: decision.refusal }
+}
+
+/**
+ * #436 section 7 uniqueness proof for a bridge that is the ONLY grounded remedy:
+ * the exact geometry (landing / placement cell / verified far side) plus the
+ * distance claim, in the ONE `REFLEX` vocabulary `netherPortalPlan.ts` owns.
+ */
+function formatBridgeReflex(skill: string, plan: BridgePlan): string {
+  return formatReflex({
+    ownerSkill: skill,
+    action: 'bridge',
+    evidence:
+      `gap@${cellText(plan.landing)}:no_support;place@${cellText(plan.place)}:${plan.block};` +
+      `far@${cellText(plan.far)}:standable;dir=${plan.dir};span=${plan.span};` +
+      `d=${round2Number(plan.from)}->${round2Number(plan.to)}`,
+  })
+}
+
+/**
+ * Is an ASCENT (tower/pillar) genuinely available for this leg target? Read from
+ * the ONE vertical planner every ascend candidate already uses, so the tower is
+ * named as an alternative only when it really is one. It is deliberately used for
+ * the policy BOUNDARY only: code never selects it here, and Jev remains the only
+ * chooser between tower / bridge / dig / walk-around.
+ */
+function ascendAlternativeAvailable(state: WorldState, target: Vec3Json): boolean {
+  if (target.y - state.self.position.y <= VERTICAL_GAP) return false
+  const abilities = deriveReachabilityAbilities(state, target, columnFacts(state))
+  return abilities.ascend.available
+}
+
+/** The offered BRIDGE MOVE: the verified far side is its own postcondition. */
+function bridgeLegCandidate(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: BridgeLegSpec,
+  plan: BridgePlan,
+  authority: string,
+  reflex: string | null,
+  boundary: string | null,
+): Candidate {
+  return {
+    id: `BRIDGE:${plan.dir}:${blockId('p', plan.landing)}`,
+    kind: 'MOVE',
+    label:
+      `bridge the gap ${plan.dir}: place ${plan.block} at (${cellText(plan.place)}) against the footing and step onto ` +
+      `(${cellText(plan.landing)}), continuing to the verified stand at (${cellText(plan.far)}), toward (${cellText(spec.target)})`,
+    targetName: spec.targetName,
+    // The postcondition cell is the VERIFIED FAR SIDE: the body only claims this
+    // MOVE when it stands there (`executor.runBridge`), never when it merely
+    // placed a block somewhere.
+    target: plan.far,
+    targetEntityId: null,
+    // The effect lives in meta (`mayPlaceBlocks` + the consumed block), never in
+    // `itemName`: a MOVE is not a PLACE, and the item bookkeeping paths must not
+    // read a bridge as "a route for cobblestone".
+    itemName: null,
+    requiresTool: false,
+    toolName: null,
+    inReach: distance(plan.far, state.self.eyePosition) <= options.reach,
+    // The far side is a verified stand from the probe's own `isUsableStand` read; it
+    // may sit outside the flat 5x5x3 scan, exactly like a pillar apex that is air
+    // until the executor places the column.
+    hasStandableAdjacent: true,
+    meta: {
+      tick: state.tick,
+      x: plan.far.x,
+      y: plan.far.y,
+      z: plan.far.z,
+      [BRIDGE_META]: true,
+      [BRIDGE_DIR_META]: plan.dir,
+      [BRIDGE_BLOCK_META]: plan.block,
+      [BRIDGE_SPAN_META]: plan.span,
+      [BRIDGE_TARGET_META]: cellText(plan.far),
+      // #436 section 5 EffectEnvelope: this MOVE WILL place blocks and consume
+      // `bridgeBlock`. Declared, never implicit.
+      [BRIDGE_MAY_PLACE_META]: true,
+      [BRIDGE_LINE_META]: plan.line,
+      [BRIDGE_LANDING_META]: cellText(plan.landing),
+      [BRIDGE_PLACE_META]: cellText(plan.place),
+      bridgeFrom: round2Number(plan.from),
+      bridgeTo: round2Number(plan.to),
+      bridgeRemaining: plan.remaining,
+      [BRIDGE_AUTHORITY_META]: authority,
+      // The skill that owns this leg, in the SAME meta key the hole
+      // step-over/step-up continuation uses, so the controller's `SKILL_STEP`
+      // mirror names one skill vocabulary (never a parallel one). Null for a
+      // route-opening offer, which no enclosing Skill owns.
+      ...(spec.skill === null ? {} : { legContinuationSkill: spec.skill }),
+      approachLeg: spec.reason,
+      approachTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+      ...(reflex === null ? {} : { legReflex: reflex }),
+      ...(boundary === null ? {} : { legPolicyBoundary: boundary }),
+      ...spec.extraMeta,
+    },
+  }
 }
 
 function round2Number(value: number): number {
@@ -8929,12 +9129,14 @@ function evaluateCandidate(
   const abilities = deriveReachabilityAbilities(context.state, position, context.column)
   // A generated vertical plan owns its own route (staircase/pillar/reuse); the
   // ordinary horizontal GoalBlock probe would reject it before the executor can
-  // run that plan. Every other locomotion candidate must have a current path
-  // fact when the host provides one. A standable destination alone is not a
-  // route: the live M2 wedge showed MOVE candidates whose destination was
-  // grounded but whose pathfinder timed out and whose control-walk had no jump
-  // headroom.
-  const probe = hasVerticalPlan(candidate)
+  // run that plan. A BRIDGE leg is the same shape: the stock `canDig=false`
+  // pathfinder cannot express "place a block and step onto it", so the bridge IS
+  // the path for its own candidate (`bridgeRoute.ts`). Every other locomotion
+  // candidate must have a current path fact when the host provides one. A
+  // standable destination alone is not a route: the live M2 wedge showed MOVE
+  // candidates whose destination was grounded but whose pathfinder timed out and
+  // whose control-walk had no jump headroom.
+  const probe = hasVerticalPlan(candidate) || isBridgeMove(candidate)
     ? 'unknown'
     : context.options.reachability?.pathProbe?.(position) ?? 'unknown'
   // A `no_path` verdict from the path probe is a fact about the probe's search
@@ -9764,6 +9966,38 @@ function routeOpeningCandidates(
     digRefusals,
   )
   if (dig !== null && !out.some((candidate) => candidate.id === dig.id)) out.push(dig)
+  // The SAME blocker, the other grounded remedy: when the withheld target lies
+  // across a gap (a landing cell with no support), the bounded bridge span changes
+  // the route by PLACING a floor instead of removing rock. Grounded here as well as
+  // in `travelApproachLegs`, so the capability is a general MOVE remedy for ANY
+  // blocked locomotion target (a GOTO, a retrieve, a goalDrop approach) rather than
+  // a portal-leg-only trick. No enclosing Skill owns this offer, so it is an
+  // ordinary candidate: `MECHANICAL_CONTINUATION`, no section 7 prerequisite claim,
+  // no boundary ranking - Jev chooses, and the `moveAdvancesTowardTarget` gate below
+  // still owns the validity of every MOVE in this family.
+  const bridge = groundBridgeLeg(state, options, { target: goalTarget, targetName: null }, false)
+  if (bridge.plan !== null) {
+    const bridged = bridgeLegCandidate(
+      state,
+      options,
+      { target: goalTarget, targetName: null, reason: 'route_withheld', skill: null },
+      bridge.plan,
+      formatSkillStepAuthority(
+        'MECHANICAL_CONTINUATION',
+        `cell=${cellText(bridge.plan.landing)} place=${cellText(bridge.plan.place)} far=${cellText(bridge.plan.far)} ` +
+          `dir=${bridge.plan.dir} block=${bridge.plan.block} span=${bridge.plan.span}`,
+        'place_blocks=1',
+        { budget: bridge.plan.span },
+      ),
+      null,
+      null,
+    )
+    if (!out.some((candidate) => candidate.id === bridged.id)) out.push(bridged)
+  }
+  if (bridge.refusal !== null && out.length > 0) {
+    const line = formatBridgeRefused(bridge.refusal)
+    for (const leg of out) leg.meta[BRIDGE_REFUSED_META] = line
+  }
   // REVERTED (da7d66e): returning the unfiltered family when the advancing set is
   // empty stopped the WAIT wedge but produced a pacing loop - the operator watched
   // the body walk east/west at the same spot (live `pos` cycled 195.5 <-> 199) for

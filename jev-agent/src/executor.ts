@@ -21,7 +21,24 @@ import { digsBotSupport, formatDigDownRefused } from './candidates.ts'
 import type { ActuationPort } from './actuationPort.ts'
 import type { EventLogger } from './jev.ts'
 import type { PathStatus, Vec3Json } from './state.ts'
-import { bodySubmersion, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, resolveBlockHarvest, toVec3 } from './state.ts'
+import { bodySubmersion, formatBodySubmerged, isStandable, LOW_AIR_LEVEL, MAX_AIR, PICKAXE_RANKS, PROBE_FLUIDS, PROBE_HAZARDS, distance, isBreakableSolidBlock, isPassable, isUsableGroundSupport, probeBridgeDirection, resolveBlockHarvest, toVec3 } from './state.ts'
+import {
+  BRIDGE_BLOCK_META,
+  BRIDGE_DIR_META,
+  BRIDGE_MIN_ADVANCE,
+  BRIDGE_PROBE_DEPTH,
+  BRIDGE_SPAN_META,
+  BRIDGE_STEP_CAP,
+  bridgeDirOffset,
+  formatBridgeEnd,
+  formatBridgeRefused,
+  formatBridgeStart,
+  formatBridgeStep,
+  isBridgeDir,
+  isBridgeMove,
+  planBridgeSpan,
+} from './bridgeRoute.ts'
+import type { BridgeDir, BridgeRefusal } from './bridgeRoute.ts'
 import type { BodySubmersion } from './state.ts'
 import {
   classifyStepLanding,
@@ -1945,6 +1962,13 @@ export class Executor {
       case 'STEP':
       case 'MOVE':
       case 'RETRIEVE': {
+        // A BRIDGE MOVE declares the ONE block its own placing route consumes
+        // (`meta.bridgeBlock`), so that block - and only it - is authorized. The
+        // selection grounds the item; this never ranks one.
+        const bridgeBlock = isBridgeMove(candidate) && typeof candidate.meta[BRIDGE_BLOCK_META] === 'string'
+          ? (candidate.meta[BRIDGE_BLOCK_META] as string)
+          : null
+        if (bridgeBlock !== null) return carried.filter((name) => name === bridgeBlock)
         // A route-opening locomotion candidate may clear the cells its OWN
         // grounded route names, so the carried instances of the tool families
         // that route can require are the mechanically equivalent way to satisfy
@@ -2519,6 +2543,11 @@ export class Executor {
   ): Promise<ExecutionResult> {
     const target = candidate.target
     if (target === null) throw new ExecutorError('target_gone', `${candidate.kind} candidate has no coordinates`)
+    // A BRIDGE leg is its own route, exactly like a generated vertical plan: the
+    // stock `canDig=false` pathfinder cannot express "place a block and step onto
+    // it". It is dispatched before the vertical contract / walk because its whole
+    // mechanic is the bounded place-then-advance loop below.
+    if (isBridgeMove(candidate)) return await this.runBridge(candidate, epoch, signal, startedAt)
     const anchor = this.anchorBlock(candidate)
     this.setPhase(candidate, epoch, 'pathing')
     const before = this.distanceToFeet(target)
@@ -2679,6 +2708,352 @@ export class Executor {
         progressed: legProgressed,
       },
     )
+  }
+
+  /**
+   * The bounded BRIDGE/scaffold leg (operator proposal 2026-09-23, adopted as a
+   * general MOVE mechanic; `bridgeRoute.ts` owns the grounding rule).
+   *
+   * The motor recipe, one placement per iteration, is deliberately the SIMPLEST
+   * shape the existing motor layer supports - no packet tricks, no client mod, no
+   * physics bypass; every step is ordinary `bot.placeBlock` + ordinary walk, so the
+   * server validates all of it:
+   *
+   *   1. stand on the last VERIFIED cell (the body's own footing is the placement
+   *      reference - the human "place against the block you are standing on"
+   *      scaffold gesture, a legal vanilla side-face placement);
+   *   2. re-probe the SAME direction live (`probeBridgeDirection`) and re-run the
+   *      SAME rule (`planBridgeSpan`) the offer used: the landing column must be
+   *      open, the placement cell replaceable air, the column hazard-free, and a
+   *      verified stand must bound the span. Nothing is placed on faith;
+   *   3. equip the declared block and place it into the landing's floor cell;
+   *   4. verify the block is REALLY there (`waitForPlacedBlock` + postcondition);
+   *   5. only then advance onto it, and require the body to actually occupy the
+   *      landing cell and the distance to the leg target to strictly shrink.
+   *
+   * SAFETY (the "never strand the body" half): a placement is never followed by a
+   * step into an unverified cell, so the body only ever stands on a cell whose
+   * support was read from the live world. Any interruption (lease lost, epoch
+   * change, abort, failed advance) leaves the body standing on the previous
+   * verified cell and emits the typed `BRIDGE_END ... verified=false reason=...`,
+   * never a half-bridge the body then walks off. Lava/fire/water is refused at the
+   * placement cell and anywhere in the probed column.
+   *
+   * The budget is the offer's own verified span, hard-capped by `BRIDGE_STEP_CAP`.
+   */
+  private async runBridge(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const target = candidate.target
+    if (target === null) throw new ExecutorError('target_gone', 'BRIDGE candidate has no coordinates')
+    const dirMeta = readMetaString(candidate, BRIDGE_DIR_META)
+    const block = readMetaString(candidate, BRIDGE_BLOCK_META)
+    if (!isBridgeDir(dirMeta) || block === null) {
+      throw new ExecutorError(
+        'target_gone',
+        `${candidate.id} carries no grounded bridge contract (dir=${dirMeta ?? 'none'} block=${block ?? 'none'})`,
+      )
+    }
+    const dir = dirMeta
+    const declaredSpan = Math.floor(readMetaNumber(candidate, BRIDGE_SPAN_META, 1))
+    const budget = Math.max(1, Math.min(declaredSpan, BRIDGE_STEP_CAP))
+    const from = this.distanceToFeet(target)
+    const firstLanding = this.bridgeCell(feetCellOf(this.bot), dir, 0)
+    let placed = 0
+    let reason = 'reached'
+    // The typed `no_block` refusal at execution time: the item the offer declared
+    // may have left the inventory between the decision and the lease (a death, a
+    // drop, another placement). No block means no bridge, and it says so.
+    if (this.countHeld(block) < 1) {
+      const refusal: BridgeRefusal = {
+        reason: 'no_block',
+        cell: firstLanding,
+        target,
+        block,
+        detail: `${block} is no longer in the inventory (held=0)`,
+      }
+      this.logBridgeRefused(candidate, refusal)
+      this.logBridgeEnd(candidate, 0, false, 'no_block')
+      return this.buildResult(
+        candidate,
+        epoch,
+        startedAt,
+        'failed',
+        'bridging',
+        `bridge ${dir} refused: ${refusal.detail}`,
+        'target_gone',
+        {
+          verified: false,
+          blockRemoved: false,
+          dropObserved: false,
+          itemsGained: 0,
+          goalItemCount: this.countGoalItem(),
+          progressed: false,
+        },
+      )
+    }
+    this.setPhase(candidate, epoch, 'bridging')
+    this.logger.info(
+      'agent',
+      formatBridgeStart({
+        cell: firstLanding,
+        block,
+        span: budget,
+        remaining: Math.max(0, this.countHeld(block) - budget),
+      }),
+      {
+        actionId: candidate.id,
+        target,
+        dir,
+        span: budget,
+        held: this.countHeld(block),
+        // #436 section 5: the declared effect travels with the marker, so a
+        // reviewer reads "this leg places blocks and consumes this item".
+        mayPlaceBlocks: true,
+        consumes: block,
+      },
+    )
+    try {
+      // `budget + 1` iterations: the placements are still bounded by `budget`
+      // (checked below), and the extra iteration is what lets the crossing FINISH
+      // with the ordinary adjacent walk onto an already-verified far side instead
+      // of stopping one cell short and re-deciding.
+      for (let step = 0; step < budget + 1; step += 1) {
+        this.ensureOwned(epoch, signal)
+        const here = feetCellOf(this.bot)
+        if (sameCell(here, target)) {
+          reason = 'reached'
+          break
+        }
+        const probe = probeBridgeDirection(this.bot, here, dir, BRIDGE_PROBE_DEPTH)
+        const decision = planBridgeSpan({ probe, selfFeet: here, target })
+        if (decision.kind === 'not_a_gap') {
+          // The next cell in this direction is ALREADY a verified stand (the far
+          // side the span was planned against, or ordinary ground). When it is the
+          // leg's own target, the crossing finishes with an ordinary adjacent walk -
+          // no placement, so nothing is created on faith. Otherwise the gap is
+          // closed and the ordinary walk arms own the rest of the route from the
+          // next decision.
+          const next = probe.cells[0]
+          if (next !== undefined && next.standable && sameCell(next.cell, target)) {
+            this.setPhase(candidate, epoch, 'pathing')
+            try {
+              await this.pathTo(target, epoch, signal, 'GoalBlock', { requireLevel: true })
+            } catch (error) {
+              if (error instanceof ActionCancelled) throw error
+              reason = 'advance_failed'
+              break
+            }
+            this.ensureOwned(epoch, signal)
+            if (!sameCell(feetCellOf(this.bot), target)) {
+              reason = 'advance_failed'
+              break
+            }
+            reason = 'reached'
+            break
+          }
+          reason = 'gap_closed'
+          break
+        }
+        if (decision.kind === 'refuse') {
+          reason = decision.refusal.reason
+          this.logBridgeRefused(candidate, decision.refusal)
+          break
+        }
+        const span = decision.span
+        if (span.span > budget - placed) {
+          reason = 'budget'
+          this.logBridgeRefused(candidate, {
+            reason: 'budget',
+            cell: span.landing,
+            target,
+            block: null,
+            detail: `the live verified span (${span.span}) exceeds this leg's remaining budget (${budget - placed})`,
+          })
+          break
+        }
+        if (this.placementCellOverlapsBody(span.place)) {
+          reason = 'no_verified_landing'
+          this.logBridgeRefused(candidate, {
+            reason: 'no_verified_landing',
+            cell: span.place,
+            target,
+            block: null,
+            detail: `the placement cell (${span.place.x},${span.place.y},${span.place.z}) is inside the body`,
+          })
+          break
+        }
+        // SAFE, immediately before the side effect (the same stop a station
+        // placement takes): a body out of breath does not keep building.
+        this.requireBreath(candidate, span.place, 'placing a bridge block')
+        const reference = this.bridgeReference(here, dir, span.place)
+        if (reference === null) {
+          reason = 'no_verified_landing'
+          this.logBridgeRefused(candidate, {
+            reason: 'no_verified_landing',
+            cell: span.place,
+            target,
+            block: null,
+            detail: `no solid adjacent face to place against at (${span.place.x},${span.place.y},${span.place.z})`,
+          })
+          break
+        }
+        await this.equipPlacementItem(candidate, block, epoch, signal)
+        this.setPhase(candidate, epoch, 'placing')
+        // issue #436 section 5/27: the placement goes through the SAME
+        // effect-envelope gate (and section 17 step evidence) as every other
+        // mechanical step, so a bridge cell outside its declared span fails
+        // closed instead of silently widening the envelope.
+        this.assertEffect({ type: 'place', position: span.place, itemName: block })
+        try {
+          await this.bot.placeBlock(reference.block, reference.face)
+        } catch (error) {
+          if (error instanceof ActionCancelled || error instanceof ExecutorError) throw error
+          const observed = this.currentBlockAt(span.place)?.name ?? null
+          const message = error instanceof Error ? error.message : String(error)
+          throw new ExecutorError(
+            'place_refused',
+            `bridge placement of ${block} at (${span.place.x},${span.place.y},${span.place.z}) was rejected; observed block is ${observed ?? 'unknown'} (${message})`,
+          )
+        }
+        this.ensureOwned(epoch, signal)
+        const placedName = await this.waitForPlacedBlock(span.place, block, epoch, signal)
+        if (!isPlacePostconditionMet(placedName, block)) {
+          reason = 'unverified_place'
+          this.logBridgeRefused(candidate, {
+            reason: 'no_verified_landing',
+            cell: span.place,
+            target,
+            block,
+            detail: `placeBlock did not create ${block} at (${span.place.x},${span.place.y},${span.place.z}) (found ${placedName ?? 'air'})`,
+          })
+          break
+        }
+        const before = this.distanceToFeet(target)
+        this.setPhase(candidate, epoch, 'pathing')
+        try {
+          // The landing is one level step away over a block that is NOW there: an
+          // ordinary adjacent walk, never a jump and never a step into a hole.
+          await this.pathTo(span.landing, epoch, signal, 'GoalBlock', { requireLevel: true })
+        } catch (error) {
+          if (error instanceof ActionCancelled) throw error
+          // The block IS placed and the body is still standing on the previous
+          // verified cell: a typed partial leg, never a half-bridge it walks off.
+          reason = 'advance_failed'
+          break
+        }
+        this.ensureOwned(epoch, signal)
+        const landed = feetCellOf(this.bot)
+        if (!sameCell(landed, span.landing)) {
+          reason = 'advance_failed'
+          break
+        }
+        const after = this.distanceToFeet(target)
+        if (!(after < before)) {
+          reason = 'no_progress'
+          break
+        }
+        placed += 1
+        this.logger.info('agent', formatBridgeStep({ from: here, to: landed, block }), {
+          actionId: candidate.id,
+          target,
+          dir,
+          block,
+          mayPlaceBlocks: true,
+          placed,
+        })
+      }
+    } catch (error) {
+      // Interruption: the body stands on the last VERIFIED cell by construction.
+      this.logBridgeEnd(candidate, placed, false, error instanceof ActionCancelled ? 'interrupted' : 'aborted')
+      throw error
+    }
+    const arrived = sameCell(feetCellOf(this.bot), target)
+    const remaining = this.distanceToFeet(target)
+    const verified = arrived || (placed > 0 && remaining <= from - BRIDGE_MIN_ADVANCE)
+    this.logBridgeEnd(candidate, placed, verified, reason)
+    const detail =
+      `bridge ${dir}: placed=${placed} from_d=${round2(from)} to_d=${round2(remaining)} ` +
+      `reason=${reason} verified=${verified}`
+    // Observable change: a real placement, or a real measured distance gain. A
+    // stale candidate that was already standing on its target claims neither.
+    const closedDistance = remaining <= from - BRIDGE_MIN_ADVANCE
+    if (placed > 0 || arrived || closedDistance) {
+      return this.buildResult(candidate, epoch, startedAt, 'done', arrived ? 'arrived' : 'leg', detail, null, {
+        verified,
+        blockRemoved: false,
+        dropObserved: false,
+        itemsGained: 0,
+        goalItemCount: this.countGoalItem(),
+        // A bridge that really placed a block and advanced is observable progress
+        // even when the declared far side was not reached in this leg.
+        progressed: placed > 0 || closedDistance,
+      })
+    }
+    return this.buildResult(candidate, epoch, startedAt, 'failed', 'bridging', detail, bridgeFailureCode(reason), {
+      verified: false,
+      blockRemoved: false,
+      dropObserved: false,
+      itemsGained: 0,
+      goalItemCount: this.countGoalItem(),
+      progressed: false,
+    })
+  }
+
+  /** The block the bridge body is standing on: the face it places against. */
+  private bridgeReference(
+    feet: Vec3Json,
+    dir: BridgeDir,
+    place: Vec3Json,
+  ): { block: Block; face: ReturnType<Bot['entity']['position']['clone']> } | null {
+    const { dx, dz } = bridgeDirOffset(dir)
+    const footing = this.currentBlockAt({ x: feet.x, y: feet.y - 1, z: feet.z })
+    if (footing !== null && isUsableGroundSupport(footing)) {
+      // The human scaffold gesture: the block currently under the feet, its side
+      // face in the direction of travel. Legal vanilla placement, always in reach.
+      return { block: footing, face: this.bot.entity.position.clone().set(dx, 0, dz) }
+    }
+    // Fallback: any solid adjacent face of the placement cell.
+    return this.findPlaceReference(place)
+  }
+
+  /**
+   * The LANDING cell `offset + 1` columns ahead of `feet` in `dir` (offset 0 = the
+   * first landing the first placement creates). Used only for the `BRIDGE_START`
+   * line's `cell=`, which names the first cell the body will stand on.
+   */
+  private bridgeCell(feet: Vec3Json, dir: BridgeDir, landingOffset: number): Vec3Json {
+    const { dx, dz } = bridgeDirOffset(dir)
+    const step = landingOffset + 1
+    return { x: feet.x + dx * step, y: feet.y, z: feet.z + dz * step }
+  }
+
+  private countHeld(itemName: string): number {
+    let total = 0
+    for (const item of this.bot.inventory.items()) if (item.name === itemName) total += item.count
+    return total
+  }
+
+  private logBridgeRefused(candidate: Candidate, refusal: BridgeRefusal): void {
+    this.logger.warn('agent', formatBridgeRefused(refusal), {
+      actionId: candidate.id,
+      reason: refusal.reason,
+      cell: refusal.cell,
+      block: refusal.block,
+      target: refusal.target,
+    })
+  }
+
+  private logBridgeEnd(candidate: Candidate, placed: number, verified: boolean, reason: string): void {
+    this.logger.info('agent', formatBridgeEnd({ placed, verified, reason }), {
+      actionId: candidate.id,
+      placed,
+      verified,
+      reason,
+    })
   }
 
   private async runRetrieve(
@@ -8833,6 +9208,37 @@ export class Executor {
       return { block, face }
     }
     return null
+  }
+}
+
+/** The floored feet cell of a live body. */
+function feetCellOf(bot: Bot): Vec3Json {
+  const position = bot.entity.position
+  return { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }
+}
+
+function sameCell(a: Vec3Json, b: Vec3Json): boolean {
+  return a.x === b.x && a.y === b.y && a.z === b.z
+}
+
+/**
+ * The bridge refusal's executor-visible failure code. The bridge's own typed
+ * reason stays in the `BRIDGE_REFUSED` marker; this only tells the existing
+ * failure memory / zero-progress ledger which bounded bucket the failed leg
+ * belongs to, so a bridge that cannot proceed is spent like any other MOVE
+ * instead of being re-offered forever.
+ */
+function bridgeFailureCode(reason: string): FailureCode {
+  switch (reason) {
+    case 'no_block':
+      return 'target_gone'
+    case 'unverified_place':
+      return 'verify_failed'
+    case 'hazard':
+    case 'protected':
+      return 'place_refused'
+    default:
+      return 'path_stuck'
   }
 }
 

@@ -42,6 +42,7 @@ import {
 import type { SkillStepAuthority } from './netherPortalPlan.ts'
 import type { SkillTerminalReason } from './jevSemanticProjection.ts'
 import type { Vec3Json } from './state.ts'
+import { BRIDGE_BLOCK_META, BRIDGE_META, BRIDGE_PLACE_META } from './bridgeRoute.ts'
 
 /**
  * The committed Skill kind. This is the executor/candidate-level vocabulary
@@ -262,9 +263,11 @@ export interface EffectEnvelope {
   mayDigGroundedRoute?: boolean
   /**
    * The selected Skill's OWN contract includes placing footing/scaffold blocks
-   * along a grounded vertical route (pillar/stair build toward the selected
-   * target). Set only from the candidate's declared route contract
-   * (`meta.vertical` / pillar steps), never at runtime.
+   * along a grounded route the candidate DECLARED: a vertical plan
+   * (pillar/stair build toward the selected target) or a BRIDGE/scaffold MOVE
+   * (`meta.bridge` + `meta.bridgeBlock`, `bridgeRoute.ts`). Set only from the
+   * candidate's declared route contract, never at runtime - a WALK_TO cannot gain
+   * place authority from an obstruction it meets (section 7 U4).
    */
   mayPlaceGroundedRoute?: boolean
   /** exact cells this Skill may place into */
@@ -292,6 +295,20 @@ export type Effect =
 
 function cellKey(position: Vec3Json): string {
   return `${position.x},${position.y},${position.z}`
+}
+
+/**
+ * One `"x,y,z"` cell from candidate meta (the shape `bridgeRoute.ts` writes into
+ * `bridgePlace`), or null when the key is absent/malformed. Used so the effect
+ * envelope can name the exact first placement cell the offer verified.
+ */
+function metaCell(value: string | number | boolean | undefined): Vec3Json | null {
+  if (typeof value !== 'string' || value.length === 0) return null
+  const parts = value.split(',').map((entry) => Number(entry))
+  const [x, y, z] = parts
+  if (x === undefined || y === undefined || z === undefined) return null
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  return { x, y, z }
 }
 
 /**
@@ -435,17 +452,36 @@ export function envelopeForCandidate(
     // reach the y=60 cells. A RETRIEVE with NO declared route still gets
     // neither flag, so section 7 U4 is unchanged.
     case 'RETRIEVE':
-    case 'RETREAT':
+    case 'RETREAT': {
       // Route-opening locomotion / portal entry may clear and place along the
       // cells its OWN grounded route names (`digRoute` / a `vertical` plan); the
       // flags are set only from the candidate's contract, never at runtime. A
       // plain walk with no declared route gets neither, so a WALK_TO cannot gain
       // dig/place authority from an obstruction (section 7 U4).
+      //
+      // A BRIDGE MOVE declares its own placing route (`meta.bridge`): it places
+      // exactly the block it named (`meta.bridgeBlock`, the section 5
+      // `EffectEnvelope` half) into the floor cells of its own grounded span, and
+      // it may hold that block - nothing else. The span's cells after the first are
+      // derived live by the SAME rule that grounded the offer, so the contract
+      // carries the first verified cell plus `mayPlaceGroundedRoute`.
+      const bridge = candidate.meta[BRIDGE_META] === true
+      const bridgeBlock = typeof candidate.meta[BRIDGE_BLOCK_META] === 'string' ? (candidate.meta[BRIDGE_BLOCK_META] as string) : null
+      const firstPlaceCell = bridge ? metaCell(candidate.meta[BRIDGE_PLACE_META]) : null
       return {
         ...base,
         mayDigGroundedRoute: candidate.meta.digRoute === true || candidate.meta.vertical !== undefined,
-        mayPlaceGroundedRoute: candidate.meta.vertical !== undefined,
+        mayPlaceGroundedRoute: candidate.meta.vertical !== undefined || bridge,
+        mayPlaceBlocks:
+          bridge && firstPlaceCell !== null && bridgeBlock !== null
+            ? [{ position: firstPlaceCell, itemName: bridgeBlock }]
+            : [],
+        mayEquipItems:
+          bridge && bridgeBlock !== null
+            ? [...new Set([...(input.equipItems ?? []), bridgeBlock])]
+            : [...(input.equipItems ?? [])],
       }
+    }
     case 'CRAFT':
       return { ...base, mayMove: false, mayJump: false, maySprint: false, mayUseStations: [...(input.stations ?? [])] }
     case 'SMELT':
