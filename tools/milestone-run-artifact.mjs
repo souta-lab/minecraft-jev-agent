@@ -506,6 +506,11 @@ export function parseReloadLine(line, lineIndex = null) {
     ok,
     trigger: stringOrNull(kv.trigger),
     hash,
+    // The host names the git commit the bundle was built from (`sourceSha=` on BUILD/RELOAD).
+    // The bundle hash alone cannot attest WHICH COMMIT a hot-reloaded run is executing, which is
+    // exactly the `exact source SHA` the acceptance asks for; older markers omit it and this is
+    // then null rather than a guess.
+    sourceSha: stringOrNull(kv.sourceSha),
     generationId: stringOrNull(kv.id),
     generations: numberOrNull(kv.generations),
     durationMs: numberOrNull(kv.ms),
@@ -637,6 +642,7 @@ function reloadView(marker, count) {
   if (marker === null) return null
   return {
     hash: marker.hash,
+    sourceSha: marker.sourceSha ?? null,
     trigger: marker.trigger,
     atMs: marker.atMs,
     generationId: marker.generationId,
@@ -671,6 +677,7 @@ export function composeRunSource({ runId = null, boot = null, snapshotBuildHash 
   const bootSourceSha = boot?.sourceSha ?? null
   const latestSourceReload = window.latestSourceReload ?? null
   const reloadHash = stringOrNull(latestSourceReload?.hash)
+  const reloadSourceSha = stringOrNull(latestSourceReload?.sourceSha)
   const effectiveSourceSha = reloadHash ?? bootSourceSha ?? null
   const provenance = reloadHash !== null ? 'reload' : bootSourceSha !== null ? 'boot' : 'unknown'
   const provenanceBasis =
@@ -1080,7 +1087,16 @@ export function readEnvironmentFile(path) {
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
     const values = parsed?.values ?? parsed
     if (!isPlainObject(values)) return null
-    return { path, mtime: statSync(path).mtime.toISOString(), values }
+    // `worldChanges` is not a config value: it is the record of an environment CHANGE
+    // (who changed what, why, how it was measured, what it did to the run), which the
+    // operator's M3 rules require in the artifact. Carry it through verbatim.
+    const worldChanges = Array.isArray(parsed?.worldChanges) ? parsed.worldChanges : null
+    return {
+      path,
+      mtime: statSync(path).mtime.toISOString(),
+      values,
+      ...(worldChanges === null ? {} : { worldChanges }),
+    }
   } catch {
     return null
   }
@@ -1133,6 +1149,16 @@ function composeEnvironment({ observations, dimensions, serverProperties, enviro
       environmentFile === null
         ? null
         : { path: environmentFile.path, mtime: environmentFile.mtime, runScoped: false, values: environmentFile.values },
+    // The operator's M3 rules require an environment CHANGE (not just its configuration)
+    // to be recorded with its reason and its effect on the run. A world edit is not a
+    // config value, so it is carried verbatim from the environment record: what changed,
+    // who changed it, why, how it was measured and what it did to the run. Empty when the
+    // environment was never modified - an absent field and an empty list mean the same
+    // thing here, and neither is evidence that nothing changed.
+    worldChanges:
+      Array.isArray(environmentFile?.worldChanges) && environmentFile.worldChanges.length > 0
+        ? { source: environmentFile.path, mtime: environmentFile.mtime, runScoped: false, count: environmentFile.worldChanges.length, changes: environmentFile.worldChanges }
+        : null,
     dimensions: {
       count: (dimensions ?? []).length,
       observed: observedDimensions,

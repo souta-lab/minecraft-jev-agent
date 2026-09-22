@@ -135,6 +135,31 @@ export const NETHER_PORTAL = 'nether_portal'
 export const OVERWORLD = 'minecraft:overworld'
 export const NETHER = 'minecraft:the_nether'
 
+/**
+ * SAFE: the block names whose presence in the body's own feet/head cell realize
+ * a DIMENSION TRANSFER when stood in. This is the SAME set the executor's
+ * explicit walk-in mechanic reads (`executor.ts` `PORTAL_WALK_IN_CELLS`): the
+ * `ENTER_PORTAL` candidate walks the body into one of these and waits for the
+ * transfer.
+ *
+ * One definition, three readers: the sensor marks transfer cells from real
+ * block truth, the candidate gate refuses to realize a mechanical locomotion leg
+ * into one (or along a route that crosses one), and both must agree with the
+ * entry mechanic about what a transfer block is. The name set is world truth (a
+ * portal block IS the transfer trigger); WHICH transfer the body takes stays a
+ * semantic decision, taken only by the explicit entry candidate.
+ */
+export const DIMENSION_TRANSFER_BLOCKS: ReadonlySet<string> = new Set([
+  NETHER_PORTAL,
+  'end_portal',
+  'end_gateway',
+])
+
+/** True when standing in this block transfers the body to another dimension. */
+export function isDimensionTransferBlock(name: string | null | undefined): boolean {
+  return name !== null && name !== undefined && DIMENSION_TRANSFER_BLOCKS.has(name)
+}
+
 /** Runtime rank of a diamond pickaxe (PICKAXE_TIER0: diamond=4). */
 export const DIAMOND_PICKAXE_RANK = 4
 /** Runtime rank of an iron pickaxe (PICKAXE_TIER0: iron=3). */

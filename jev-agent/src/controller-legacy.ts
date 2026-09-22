@@ -35,7 +35,7 @@ import type { ArmorRefusal } from './gearPlan.ts'
 import { FOOD_SOURCE_NONE, formatFoodSourceGap } from './foodSources.ts'
 import type { FoodSourceGap } from './foodSources.ts'
 import { capabilityKey, formatCandidateWithheld, formatDigAccessRetired, formatReachability, formatStationUnreachable } from './reachability.ts'
-import type { DigApproachFact, DigApproachProbe, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
+import type { DigApproachFact, DigApproachProbe, DimensionTransferRoute, StationApproachFact, StationApproachProbe, StationApproachRefusal } from './reachability.ts'
 import { completeCausalChain, causalRecord, formatCausalLine, makeCausalStamp, makeChainId, optionIdForGoal, planRevisionForGoal } from './causal.ts'
 import type { CausalGoalRef } from './causal.ts'
 import {
@@ -127,8 +127,10 @@ import type { DominatedPrerequisiteDecision, GoalQueueSnapshot, GoalQueueState, 
 import { compilePlannedGoal, evaluatePredicates, makeOptionSnapshot, queuedToPlanned } from './optionSpec.ts'
 import type { OptionWorldSnapshot, Predicate } from './optionSpec.ts'
 import { PICKAXE_TIER_ORDER, smeltInputFor } from './gameData.ts'
-import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
+import { FLINT_AND_STEEL, IRON_INGOT, NETHER, NETHER_PORTAL, OBSIDIAN, OVERWORLD, PORTAL_ENTERED_PREDICATE, PORTAL_LIT_PREDICATE, PORTAL_OBSIDIAN_REQUIRED, PRECONDITION_MISSING, SKILL_END, SKILL_INTERRUPT, SKILL_POLICY_BOUNDARY, formatPortalEntryNoKnownSite, formatPortalFrameSiteRejected, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStep, formatSkillStepAuthority, isDimensionTransferBlock, isPortalIgnitionPostconditionMet, planPortalEntry, portalFrameLayout } from './netherPortalPlan.ts'
 import type { PortalEntryPlan, PortalFrameSite, PortalFrameValidation, SkillPolicyBoundaryReason } from './netherPortalPlan.ts'
+import { GOAL_RETIRED_PREDICATE, GOAL_SUCCESS_PROBE_ERROR, evaluateGoalSuccess, recordedPortalSitesFromKnownResources, verifiedBlockRecordsFromKnownResources } from './goalSuccess.ts'
+import type { GoalSuccessWorldProbe, RecordedPortalSite } from './goalSuccess.ts'
 import { abandonRequested, betaShadowDecision, createJevPolicy, decisionIdFrom, EventLogger, formatBetaShadow, JsonlWriter, questionNamesFor, resolveBetaAuthority, writeOutcome } from './jev.ts'
 import type { AgentLevel } from './jev.ts'
 import { FatalModelError, describeFailure, failLoud } from './modelFailure.ts'
@@ -226,6 +228,7 @@ import {
 } from './zeroProgressRoute.ts'
 import type { ZeroProgressRoutes } from './zeroProgressRoute.ts'
 import { formatDigRouteProgress, formatDigRouteRefused } from './digRoute.ts'
+import { formatLevelScanStep } from './levelScan.ts'
 import { BRIDGE_AUTHORITY_META, BRIDGE_REFUSED_META, isBridgeMove } from './bridgeRoute.ts'
 import type { DigRouteRefusal } from './digRoute.ts'
 import { StubSystem2 } from './system2.ts'
@@ -1214,6 +1217,20 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // standing above its own lit gate).
   'DESCENT_REFUSED',
   'DESCENT_CHUNK',
+  // The WALL ENTRY (`wallEntry.ts`): the tunnel a body opens when every walk step
+  // around it is refused. Without this in the mirrored list the live sink DROPS the
+  // one line that says which wall was opened, on which heading, at which level, and
+  // that no fluid could reach the pocket - and "the body mined the wall because the
+  // pocket is provably dry" cannot be told apart from an ordinary tunnel step.
+  'DIG_ROUTE_ENTRY',
+  // The BOUNDED LEVEL SCAN (`levelScan.ts`): the descent a body takes when NOTHING at its
+  // own level can ground a route and the rock below can. Without these in the mirrored
+  // list the live sink DROPS the two lines that say which level the body descended to, which
+  // lateral continuation and material the route ends at, the per-level flood verdict, and
+  // the distance change - and a descent that is the first step of a route that ends closer
+  // cannot be told apart from a blind search descent.
+  'LEVEL_SCAN',
+  'LEVEL_SCAN_STEP',
   'PORTAL_ENTRY_UNVERIFIED',
   // The bounded direct walk into a non-solid portal cell: the live run needs
   // both the measured motion (`PORTAL_WALK_IN ... transferred=`) and the typed
@@ -1350,6 +1367,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   'RETRIEVE_RETIRED',
   'RETRIEVE_ROUTE_BLOCKED',
   'APPROACH_LEG',
+  // #predicate-retire: a row retired because its OWN success predicate already
+  // held in world truth is a DONE decision, and the queue transition it causes
+  // (the head moving to the next row) is exactly what the measured M3 blocker
+  // turned on. Unmirrored it would be invisible in `buddy.log`: the run would
+  // show a queue that silently advanced from an M2 row to the `blaze_rods` work
+  // with no named reason.
+  GOAL_RETIRED_PREDICATE,
+  GOAL_SUCCESS_PROBE_ERROR,
   // The dig-route family: the target a travel/enter/retrieve goal could not walk
   // to, the bounded terrain route the offer grounded toward it, the typed cause
   // when even that could not be grounded, and the measured distance gain of a
@@ -1439,6 +1464,14 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   BETA_ABANDON_DEFERRED_MARKER,
   BETA_ABANDON_RELEASED_MARKER,
   'BETA_DEFERRED',
+  // Issue #436 section 17: three evidence lines were EMITTED but never mirrored, so the live
+  // sink dropped them and a reviewer saw only the downstream outcome (`failure=effect_envelope_violation`
+  // without WHICH effect or WHY). The envelope refusal is the fail-closed boundary itself, and the
+  // invalidation/selection lines are the rest of the commitment lifecycle; all three belong in the
+  // live record.
+  'SKILL_ENVELOPE_VIOLATION',
+  'SKILL_INVALIDATED',
+  'SKILL_SELECTED',
 ])
 
 /**
@@ -2249,6 +2282,7 @@ export class JevController {
     this.goal = makeGoal(this.options.goalItem, this.options.goalCount)
     this.queue = new GoalQueue()
     this.installDominatedPrerequisiteReason()
+    this.installGoalSuccessProbe()
     this.recipeIndex = createRecipeIndex(bot.registry)
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
@@ -2385,6 +2419,7 @@ export class JevController {
     this.lastStateFingerprint = ''
     this.queue = new GoalQueue()
     this.installDominatedPrerequisiteReason()
+    this.installGoalSuccessProbe()
     this.runWriter = new JsonlWriter(join(this.options.logDir, 'run.jsonl'))
     this.jevWriter = new JsonlWriter(join(this.options.logDir, 'jev-calls.jsonl'))
     this.decisionWriter = new JsonlWriter(join(this.options.logDir, 'decisions.jsonl'))
@@ -3615,6 +3650,9 @@ export class JevController {
         )
       }
       if (guarded.candidate.meta.legContinuation === true) this.logSkillStep(guarded.candidate)
+      // The BOUNDED LEVEL SCAN descent (`levelScan.ts`): its own mirrored `LEVEL_SCAN` line
+      // plus the §7 layer half, logged only once the guard has accepted the step.
+      if (guarded.candidate.meta.levelScan === true) this.logLevelScan(guarded.candidate)
       if (isBridgeMove(guarded.candidate)) this.logBridgeAuthority(guarded.candidate)
       this.checkUnreachableMove(guarded.candidate, state)
       this.rememberMoveTarget(guarded.candidate)
@@ -5550,6 +5588,9 @@ export class JevController {
       // to the goal's target, so a settled step re-measures the distance. Only a
       // real decrease is reported.
       if (candidate.meta.digRoute === true) this.logDigRouteProgress(result, candidate)
+      // The level-scan descent's own measured half: the level actually reached and the
+      // distance to the target after the step. Only a real downward move is reported.
+      if (candidate.meta.levelScan === true) this.logLevelScanStep(result, candidate)
       if (result.kind === 'RETRIEVE') {
         if (result.blockRemoved) this.onRetrievalDescent(candidate)
         // Only a COMPLETED retrieval - the target actually arrived or the item
@@ -5995,6 +6036,86 @@ export class JevController {
   }
 
   /**
+   * The selected LEVEL SCAN descent (`levelScan.ts`): nothing at the body's own level could
+   * ground a route toward the travel/enter/retrieve target, so the bounded level scan offered
+   * the own-column descent that STARTS a composed route ending strictly closer to the target.
+   *
+   * Logged when Jev actually selects it, so the marker means "this body is now descending
+   * toward the scanned level", not "a route was enumerated". The line names the level, the
+   * continuation cell and material, whether it is a dig or a walk, the pre-existing floor, the
+   * per-level flood verdict (`levels=`) and the distance change; the §7 layer half rides the
+   * same mirrored `SKILL_STEP` channel the wall entry uses.
+   */
+  private logLevelScan(candidate: Candidate): void {
+    const line = typeof candidate.meta.levelScanLine === 'string' ? candidate.meta.levelScanLine : null
+    if (line === null) return
+    this.logger.info(
+      'agent',
+      line,
+      {
+        actionId: candidate.id,
+        target: typeof candidate.meta.levelScanTarget === 'string' ? candidate.meta.levelScanTarget : null,
+        level: typeof candidate.meta.levelScanLevel === 'number' ? candidate.meta.levelScanLevel : null,
+        depth: typeof candidate.meta.levelScanDepth === 'number' ? candidate.meta.levelScanDepth : null,
+        dir: typeof candidate.meta.levelScanDir === 'string' ? candidate.meta.levelScanDir : null,
+        via: typeof candidate.meta.levelScanVia === 'string' ? candidate.meta.levelScanVia : null,
+        cell: typeof candidate.meta.levelScanCell === 'string' ? candidate.meta.levelScanCell : null,
+        block: typeof candidate.meta.levelScanBlock === 'string' ? candidate.meta.levelScanBlock : null,
+        fromD: typeof candidate.meta.levelScanFrom === 'number' ? candidate.meta.levelScanFrom : null,
+        toD: typeof candidate.meta.levelScanTo === 'number' ? candidate.meta.levelScanTo : null,
+        alternatives:
+          typeof candidate.meta.levelScanAlternatives === 'string' ? candidate.meta.levelScanAlternatives : null,
+        evidence: typeof candidate.meta.levelScanEvidence === 'string' ? candidate.meta.levelScanEvidence : null,
+      },
+      this.tickCounter,
+    )
+    const authorityLine =
+      typeof candidate.meta.levelScanAuthorityLine === 'string' ? candidate.meta.levelScanAuthorityLine : null
+    if (authorityLine !== null) {
+      this.logger.info('agent', authorityLine, { actionId: candidate.id, step: 'level_scan' }, this.tickCounter)
+    }
+  }
+
+  /**
+   * The settled level-scan descent measured against the world: the level the body actually
+   * reached, how many own-column steps still separate it from the continuation's level, and
+   * the distance to the target before/after. Emitted only when the descent measurably moved
+   * the body DOWN toward the scanned level, so "the scan descended toward a route" is a
+   * measured fact instead of an assumption, and a descent that did nothing is not reported.
+   */
+  private logLevelScanStep(result: ExecutionResult, candidate: Candidate): void {
+    if (candidate.meta.levelScan !== true) return
+    const targetText = typeof candidate.meta.levelScanTarget === 'string' ? candidate.meta.levelScanTarget : null
+    const targetLevel = typeof candidate.meta.levelScanLevel === 'number' ? candidate.meta.levelScanLevel : null
+    const fromD = typeof candidate.meta.levelScanFrom === 'number' ? candidate.meta.levelScanFrom : null
+    if (targetText === null || targetLevel === null || fromD === null) return
+    const parts = targetText.split(',').map((value) => Number(value))
+    const [x, y, z] = parts
+    if (x === undefined || y === undefined || z === undefined) return
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return
+    const feet = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    }
+    const started = {
+      x: typeof candidate.meta.wallX === 'number' ? candidate.meta.wallX : feet.x,
+      y: typeof candidate.meta.wallY === 'number' ? candidate.meta.wallY : feet.y + 1,
+      z: typeof candidate.meta.wallZ === 'number' ? candidate.meta.wallZ : feet.z,
+    }
+    // The measured claim: the body is one level LOWER than it was. A descent that did not
+    // change the level is not progress and emits nothing.
+    if (!(feet.y < started.y)) return
+    const toD = Math.round(distance(feet, { x, y, z }) * 100) / 100
+    this.logger.info(
+      'agent',
+      formatLevelScanStep({ from: started, to: feet, targetLevel, fromDistance: fromD, toDistance: toD }),
+      { actionId: result.actionId, kind: result.kind, status: result.status, level: feet.y, targetLevel, fromD, toD },
+      this.tickCounter,
+    )
+  }
+
+  /**
    * The selected DIG route: the travel/enter/retrieve target had no walkable
    * route, so the offer grounded a bounded dig step toward it. Logged when Jev
    * actually selects it, so the marker means "this body is now digging the route",
@@ -6020,9 +6141,43 @@ export class JevController {
         skipped: typeof candidate.meta.digRouteSkipped === 'string' ? candidate.meta.digRouteSkipped : null,
         skippedBlock:
           typeof candidate.meta.digRouteSkippedBlock === 'string' ? candidate.meta.digRouteSkippedBlock : null,
+        entry: candidate.meta.digRouteEntry === true,
+        entryMode: typeof candidate.meta.digRouteEntryMode === 'string' ? candidate.meta.digRouteEntryMode : null,
+        entryLevel: typeof candidate.meta.digRouteEntryLevel === 'number' ? candidate.meta.digRouteEntryLevel : null,
+        entryEvidence:
+          typeof candidate.meta.digRouteEntryEvidence === 'string' ? candidate.meta.digRouteEntryEvidence : null,
       },
       this.tickCounter,
     )
+    // The WALL ENTRY's own line (`DIG_ROUTE_ENTRY`): the same fact in the wall-entry
+    // vocabulary - the cell the body came from, the heading, the tunnel level, the
+    // pre-existing floor and how many alternatives were grounded. Emitted only for an
+    // entry, so an ordinary dig route logs exactly what it logged before.
+    const entryLine = typeof candidate.meta.digRouteEntryLine === 'string' ? candidate.meta.digRouteEntryLine : null
+    if (entryLine !== null) {
+      this.logger.info(
+        'agent',
+        entryLine,
+        {
+          actionId: candidate.id,
+          dir: typeof candidate.meta.digRouteBearing === 'string' ? candidate.meta.digRouteBearing : null,
+          mode: typeof candidate.meta.digRouteEntryMode === 'string' ? candidate.meta.digRouteEntryMode : null,
+          level: typeof candidate.meta.digRouteEntryLevel === 'number' ? candidate.meta.digRouteEntryLevel : null,
+          floorBlock: typeof candidate.meta.digRouteEntryFloorBlock === 'string' ? candidate.meta.digRouteEntryFloorBlock : null,
+          alternatives:
+            typeof candidate.meta.digRouteEntryAlternatives === 'string' ? candidate.meta.digRouteEntryAlternatives : null,
+        },
+        this.tickCounter,
+      )
+    }
+    // #436 section 17 for the entry: the same mirrored `SKILL_STEP` channel the bridge
+    // uses, so the layer half (`authority=MANDATORY_PREREQUISITE` when the entry was the
+    // only grounded remedy / `MECHANICAL_CONTINUATION` when Jev had alternatives) is
+    // live-visible for the action the body actually took.
+    const authorityLine = typeof candidate.meta.digRouteAuthorityLine === 'string' ? candidate.meta.digRouteAuthorityLine : null
+    if (authorityLine !== null) {
+      this.logger.info('agent', authorityLine, { actionId: candidate.id, step: 'wall_entry' }, this.tickCounter)
+    }
   }
 
   /**
@@ -6927,6 +7082,55 @@ export class JevController {
       return
     }
     this.queue.setDominatedPrerequisiteReason((goal) => reason(goal, this.inventorySnapshot()))
+  }
+
+  /**
+   * #predicate-retire: wire the code-owned "does this row's success already hold
+   * in the world?" probe into the queue. The closure reads LIVE world truth at
+   * evaluation time (the queue runs it on every lifecycle transition, including
+   * restore), so a row whose postcondition is already true - the measured
+   * built/lit/verified Nether gate in front of a restored `place nether_portal`
+   * row - retires as DONE instead of holding the queue head forever and starving
+   * the ladder's M3 work.
+   *
+   * It answers CAN/TRUE/DONE only: it never adds, reorders or replaces a goal,
+   * and a predicate it cannot evaluate is UNKNOWN, which is never satisfaction.
+   */
+  private installGoalSuccessProbe(): void {
+    this.queue.setGoalSuccessProbe(
+      (goal) => evaluateGoalSuccess(goal, this.goalWorldProbe()),
+      (line, detail) => this.logger?.warn('queue', line, detail, this.tickCounter),
+    )
+  }
+
+  /** The live world facts the success-predicate probe may read. Plain reads only. */
+  private goalWorldProbe(): GoalSuccessWorldProbe {
+    const scratch = this.bot.entity?.position?.clone()
+    return {
+      dimension: this.bot.game?.dimension ?? null,
+      blockAt: (cell) => {
+        if (scratch === undefined) return null
+        try {
+          return this.bot.blockAt(scratch.set(cell.x, cell.y, cell.z))?.name ?? null
+        } catch {
+          // An unreadable cell is unobservable world truth, never absence.
+          return null
+        }
+      },
+      recordedPortalSites: this.recordedPortalSites(),
+      verifiedBlockRecords: verifiedBlockRecordsFromKnownResources(this.options.knownResources),
+    }
+  }
+
+  /**
+   * The run's durable verified-portal records, in the geometry envelope the
+   * world memory already carries (`KnownResource` kind `portal`: origin +
+   * widthAxis + recorded frame cells). The records are minted and revoked by the
+   * world-memory sync from LIVE block truth (`syncKnownPortalSites` /
+   * `PORTAL_VERIFIED`); this reader neither adds nor revokes one.
+   */
+  private recordedPortalSites(): RecordedPortalSite[] {
+    return recordedPortalSitesFromKnownResources(this.options.knownResources)
   }
 
   /**
@@ -10283,18 +10487,24 @@ export class JevController {
   /** Gate facts, shared by both candidate generations in one tick. */
   private reachabilityGateOptions(): ReachabilityGateOptions {
     if (this.gateOptions !== null && this.gateOptionsTick === this.tickCounter) return this.gateOptions
-    const pathCache = new Map<string, 'reachable' | 'no_path'>()
+    // One plan per destination, two facts out of it: whether the body can walk
+    // there at all, and whether the route it would walk stands it in a
+    // dimension-transfer cell. Computing the plan twice would double the
+    // pathfinder cost of the whole gate.
+    const pathCache = new Map<string, { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute }>()
     const attackPathCache = new Map<string, 'reachable' | 'no_path'>()
+    const pathFacts = (position: Vec3Json) => {
+      const key = `${position.x},${position.y},${position.z}`
+      const cached = pathCache.get(key)
+      if (cached !== undefined) return cached
+      const result = this.computePathFacts(position)
+      pathCache.set(key, result)
+      return result
+    }
     this.gateOptions = {
       memory: this.reachabilityProofs,
-      pathProbe: (position) => {
-        const key = `${position.x},${position.y},${position.z}`
-        const cached = pathCache.get(key)
-        if (cached !== undefined) return cached
-        const result = this.canComputePath(position) ? 'reachable' : 'no_path'
-        pathCache.set(key, result)
-        return result
-      },
+      pathProbe: (position) => pathFacts(position).probe,
+      dimensionTransferProbe: (position) => pathFacts(position).transfer,
       attackPathProbe: (position) => {
         const key = `${position.x},${position.y},${position.z}`
         const cached = attackPathCache.get(key)
@@ -10308,6 +10518,49 @@ export class JevController {
     }
     this.gateOptionsTick = this.tickCounter
     return this.gateOptions
+  }
+
+  /**
+   * SAFE/CAN: the route facts for one destination, from ONE plan.
+   *
+   * `probe` keeps the exact semantics `canComputePath` had (a `timeout` is not a
+   * usable route fact, an exception is `no_path`), so no existing verdict moves.
+   * `transfer` is the route-side half of the dimension-transfer invariant: does
+   * the path the body would actually walk stand it in a lit portal block?
+   * `unknown` when no plan exists (nothing is refused on an unavailable probe).
+   */
+  private computePathFacts(position: Vec3Json): { probe: 'reachable' | 'no_path'; transfer: DimensionTransferRoute } {
+    if (this.bot.pathfinder === undefined) return { probe: 'no_path', transfer: 'unknown' }
+    try {
+      const goal = new goals.GoalBlock(position.x, position.y, position.z)
+      const plan = this.bot.pathfinder.getPathTo(this.bot.pathfinder.movements, goal, PATH_PROBE_TIMEOUT_MS)
+      if (plan.status !== 'success') return { probe: 'no_path', transfer: 'unknown' }
+      return { probe: 'reachable', transfer: this.routeCrossesDimensionTransfer(plan.path) }
+    } catch {
+      return { probe: 'no_path', transfer: 'unknown' }
+    }
+  }
+
+  /**
+   * Does this planned route stand the body in a dimension-transfer cell? Every
+   * path node is a cell the executor will occupy (feet), so the body's feet or
+   * head being portal material at any node is exactly the transfer condition the
+   * executor's own walk-in mechanic waits for.
+   */
+  private routeCrossesDimensionTransfer(path: readonly { x: number; y: number; z: number }[]): DimensionTransferRoute {
+    for (const node of path) {
+      if (this.botStandsInDimensionTransfer({ x: node.x, y: node.y, z: node.z })) return 'crosses'
+    }
+    return 'clear'
+  }
+
+  /** Live block truth: would standing with the feet at this cell transfer the body? */
+  private botStandsInDimensionTransfer(feet: Vec3Json): boolean {
+    const scratch = this.bot.entity.position.clone()
+    const feetBlock = this.bot.blockAt(scratch.set(feet.x, feet.y, feet.z))
+    if (isDimensionTransferBlock(feetBlock?.name)) return true
+    const headBlock = this.bot.blockAt(scratch.set(feet.x, feet.y + 1, feet.z))
+    return isDimensionTransferBlock(headBlock?.name)
   }
 
   /**

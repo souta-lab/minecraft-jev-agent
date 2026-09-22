@@ -1359,6 +1359,21 @@ export function evaluateLedgerRestoreBasis(
   return { accept: reasons.length === 0, reasons }
 }
 
+/**
+ * The restore basis must describe the frontier computed from the current live
+ * ladder, not the inventory-only resume hint used to seed that ladder.
+ */
+export function ledgerBasisForLiveFrontier(
+  worldKey: string,
+  frontier: { rungId: string; rungIndex: number },
+): LedgerBasis {
+  return {
+    worldKey,
+    frontierRungId: frontier.rungId,
+    frontierRungIndex: frontier.rungIndex,
+  }
+}
+
 interface LedgerReconciliationDecision {
   usablePath: string | null
   reason: string | null
@@ -2477,11 +2492,12 @@ export function createGeneration(ctx: GenerationContext): ResidentGeneration {
   // stone/iron goal whose only productive candidate is a descent step WAITs
   // forever and wedges. Hazards from death are excluded here.
   installDescendAwarePolicy(controller, world.hazards, (event, detail) => ctx.log(event, detail))
-  const liveLedgerBasis: LedgerBasis = {
-    worldKey: liveWorldKey,
-    frontierRungId: resume.rungId,
-    frontierRungIndex: resume.rungIndex,
-  }
+  // #426: the restore basis describes the frontier computed from the CURRENT live
+  // ladder, not the inventory-only resume hint (`resume.rungId`) used to seed it -
+  // otherwise a run that reached a rung through durable progress restores against
+  // a stale floor. `liveWorldKey` is the same key the durable-progress read above
+  // already uses, so there is one spelling of it.
+  const liveLedgerBasis: LedgerBasis = ledgerBasisForLiveFrontier(liveWorldKey, ladder)
   restoreLedgerIntoController(controller, ctx.ledgerSnapshot, ledgerPath, counts, world, liveLedgerBasis, ctx.log)
   const brain = new PlannerBrain({
     bot,

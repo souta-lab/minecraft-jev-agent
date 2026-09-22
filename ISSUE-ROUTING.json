@@ -1,26 +1,62 @@
 {
   "schemaVersion": 1,
-  "asOf": "2026-09-21",
-  "policy": {
-    "wipLimit": 3,
-    "unclassified": "backlog",
-    "newIssueRule": "Search existing open/closed issues first. Prefer updating, reopening, or adding acceptance to an existing issue over creating a new issue. Create a new issue only when the acceptance boundary is genuinely distinct.",
-    "selectionRule": "Workers select only from NOW unless the orchestrator explicitly promotes a NEXT item. WAITING_LIVE, RESEARCH, FUTURE, REFERENCE_ONLY, and unclassified BACKLOG are not normal coding work.",
-    "completionRule": "Before starting another NOW item, land or explicitly block the current lane, update evidence state, and reconcile the issue. Do not maximize issue count or commit count.",
-    "authorityResetRule": "Do not add deterministic semantic-ranking/retry/goal-ordering policy to advance M2/M3. Preserve deterministic truth, safety, mechanics and verification; semantic WHICH belongs to Jev and strategic WHAT NEXT belongs to System2. Deterministic semantic policy is an explicit baseline only. Fresh live acceptance must prove the effective model-authoritative path rather than inherit the historical fallback-only failure."
-  },
-  "now": [80, 221, 11],
-  "next": [128, 107, 121, 56, 295, 296, 297, 299, 308],
-  "waitingLive": [226, 3, 13, 136],
-  "research": [130],
-  "future": [37, 35, 41, 52],
+  "asOf": "2026-09-23",
+  "policy": "Consolidated on 2026-09-23: the backlog was triaged against the current source (three lanes, file:line evidence) and folded into ten umbrellas by root cause, because the ~71 open issues were genuinely live defects rather than stale backlog. Every absorbed issue's acceptance is preserved as a checklist row on its umbrella (#11, #421, #366, #416, #436, #440) and in the issues' own closing comments. Routing now points only at the umbrellas; closed issues are not routed.",
+  "now": [
+    421,
+    11
+  ],
+  "next": [
+    436,
+    440
+  ],
+  "waitingLive": [
+    366,
+    416
+  ],
+  "research": [
+    365,
+    308
+  ],
+  "future": [
+    37,
+    35,
+    41,
+    52
+  ],
   "referenceOnly": [],
   "clusters": {
-    "PORTAL_CONVERGENCE": [80],
-    "AUTHORITY_RESET": [226, 221, 11, 128, 107, 121, 56, 130, 297, 308],
-    "GOVERNANCE_HYGIENE": [295, 296, 299],
-    "RESIDENT_CORRECTNESS": [3, 13, 136],
-    "FUTURE_CAPABILITIES": [37, 35, 41, 52]
+    "PORTAL_CONVERGENCE": [
+      80
+    ],
+    "AUTHORITY_RESET": [
+      226,
+      221,
+      11,
+      128,
+      107,
+      121,
+      56,
+      130,
+      297,
+      308
+    ],
+    "GOVERNANCE_HYGIENE": [
+      295,
+      296,
+      299
+    ],
+    "RESIDENT_CORRECTNESS": [
+      3,
+      13,
+      136
+    ],
+    "FUTURE_CAPABILITIES": [
+      37,
+      35,
+      41,
+      52
+    ]
   },
   "notes": {
     "80": "NOW failure-frontier lane. The typed portal path is implemented and recent exact-RC live runs reached frame placement. Current main 3c83c69 contains the latest packet-waypoint normalization after prior RC 0485a04 failed in portal approach locomotion. Do not add another portal semantic policy patch until this exact source is re-run; next evidence is fresh run-scoped build/light/verify or a newly classified mechanical boundary.",

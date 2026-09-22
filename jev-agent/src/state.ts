@@ -32,6 +32,7 @@ import { PICKAXE_TIER0, resolveHarvest } from './gameData.ts'
 import type { GameDataRegistry } from './gameData.ts'
 import {
   detectPortalVerification,
+  isDimensionTransferBlock,
   isPortalIgnitionPostconditionMet,
   NETHER_PORTAL,
   OBSIDIAN,
@@ -52,6 +53,10 @@ import { buildEnvHazardState, envHazardKindOfBlock } from './envHazard.ts'
 import type { EnvHazardCell, EnvHazardState } from './envHazard.ts'
 import { BRIDGE_DIRS, BRIDGE_PROBE_DEPTH, bridgeDirOffset, isBridgeUnsafeBlockName } from './bridgeRoute.ts'
 import type { BridgeDir, BridgeProbe, BridgeProbeCell } from './bridgeRoute.ts'
+import { WALL_DIRS, floodEvidence, isTunnelFloodBlockName } from './wallEntry.ts'
+import type { WallBlockLike, WallCell, WallProbe } from './wallEntry.ts'
+import { LEVEL_SCAN_MAX_LEVELS } from './levelScan.ts'
+import type { LevelLateralFacts, LevelScanProbe } from './levelScan.ts'
 
 export type Vec3Json = {
   x: number
@@ -567,6 +572,17 @@ export type DescentOption = {
   /** lava/water is inside the 3x3x3 neighbourhood of one of this step's cells */
   hazardNearby?: boolean
   /**
+   * SAFE: the cell the body would stand in after this step (or its head cell) is a
+   * DIMENSION TRANSFER block (a lit portal plane). A mechanical dig/locomotion
+   * realization never crosses a dimension - the measured Nether arrival stands beside
+   * exactly such a plane, and a body that "tunnelled" into it would be teleported back
+   * to the overworld. The sensor owns this block truth (the same
+   * `isDimensionTransferBlock` the transfer cells come from), the dig route refuses to
+   * make such a step its route, and `policy.ts#guardDescend` denies it as a last
+   * boundary; the explicit `ENTER_PORTAL` candidate is the one route that may cross.
+   */
+  transfersDimension?: boolean
+  /**
    * Every cell this step must remove for the landing cell to be ENTERABLE as a
    * 1x2 profile, with the per-cell harvest truth the tool gate needs.
    *
@@ -788,6 +804,27 @@ export type WorldState = {
      * inside 0.8 m. Absent in old replay fixtures means "no threat escape scan".
      */
     escapeCells?: Vec3Json[]
+    /**
+     * SAFE/CAN: cells from the same wider scan whose sight line to the nearest
+     * dangerous hostile is BLOCKED by solid geometry (see
+     * `KeepDistanceInput.occludedCells`). This is the fact that makes a ranged
+     * attacker answerable: stepping out of an arrow's firing line is a genuine
+     * keep-distance destination even when the room gives the body no separation.
+     * Carried only while non-empty, so a body with no threat keeps exactly the
+     * state shape it had before this fact existed.
+     */
+    threatCoverCells?: Vec3Json[]
+    /**
+     * SAFE: cells where standing realizes a DIMENSION TRANSFER (a lit portal
+     * block; `netherPortalPlan.isDimensionTransferBlock`). Real block truth from
+     * the scans the sensor already runs. A mechanical locomotion realization
+     * (MOVE / RETRIEVE / RETREAT) must never stand the body in one - crossing a
+     * dimension is a semantic disengage, and in a portal room a "retreat" into
+     * the portal is the measured `the_nether -> overworld -> the_nether` loop.
+     * Only the explicit `ENTER_PORTAL` candidate may cross. Carried only while
+     * non-empty, so a body with no portal nearby keeps its previous state shape.
+     */
+    portalWalkInCells?: Vec3Json[]
   }
   /** placed crafting_table stations: sensed near-field first, then remembered */
   craftingTables: StationEntry[]
@@ -845,6 +882,26 @@ export type WorldState = {
   knownResourceEvidence?: KnownResourceEvidence[]
   /** pre-computed staircase / tunnel steps around the bot (M2 descent) */
   descent?: DescentOption[]
+  /**
+   * The cardinal WALL ENTRY probes: the adjacent 1x2 profile the body could mine
+   * open (`wallEntry.ts`), with the pre-existing floor it would stand on and the
+   * six-neighbourhood that decides whether the dig could be flooded. Populated only
+   * while a sensed step is refused by `hazard`/`no_support` - i.e. only where a walk
+   * step is genuinely refused - so ordinary terrain carries no probe and the offer is
+   * byte-identical there. Absent in old replay fixtures means "no probe", which
+   * grounds no entry (never a false capability).
+   */
+  wallProbes?: WallProbe[]
+  /**
+   * The bounded LEVEL SCAN probes (`levelScan.ts`): the own-column descent into each of the
+   * next `LEVEL_SCAN_MAX_LEVELS` levels below the body, plus the four same-level lateral
+   * continuations AT each of them, with their pre-existing floors and the per-cell flood
+   * verdict of every pocket. Populated under exactly the same gate as `wallProbes` (a sensed
+   * step refused by the body's own local geology), so ordinary terrain carries no probe and
+   * the offer is byte-identical there. Absent in old replay fixtures means "no scan", which
+   * grounds no route (never a false capability).
+   */
+  levelScan?: LevelScanProbe[]
   /** pre-computed stair-cuts that open a 1-block step in a 2-block face */
   stepCuts?: StepCut[]
   /** ceiling blocks above the bot that block a jump (canopy pocket) */
@@ -902,6 +959,14 @@ export interface SensorOptions {
   /** Upper bound on escape cells kept, so the offer cannot be crowded. */
   maxEscapeCells: number
   /**
+   * Upper bound on threat-cover rays per sensor tick. A cover cell is a
+   * keep-distance destination the attacker cannot see (`KeepDistanceInput.
+   * occludedCells`); proving it costs one sight-line ray from the threat's eye.
+   * The bound keeps the escape scan's cost proportional to the cells it would
+   * already consider, so a hostile cannot make a tick unbounded.
+   */
+  maxThreatCoverRays: number
+  /**
    * Exact world-mutation revision (see `DecisionScheduler.worldRevision`), or
    * absent/null when the caller cannot prove one. Only when it is a finite
    * number may `buildWorldState` reuse a `findBlocks` position list across
@@ -924,6 +989,7 @@ export const defaultSensorOptions: SensorOptions = {
   maxPlacementSpots: 6,
   escapeRadius: 6,
   maxEscapeCells: 12,
+  maxThreatCoverRays: 48,
 }
 
 export interface SensorInput {
@@ -2640,6 +2706,13 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
     }
     const primary = mode === 'down' ? (floorSolid ? floor : wall) : wallSolid ? wall : head
     const primaryBlock = at(primary.x, primary.y, primary.z)
+    // The body's 1x2 profile at the landing: the cell it stands in and the cell above it.
+    // A transfer block in either one means this step is not a locomotion step but a
+    // dimension change, whatever the tool gate says.
+    const landingHead = { x: step.x, y: step.y + 1, z: step.z }
+    const transfersDimension =
+      isDimensionTransferBlock(at(step.x, step.y, step.z)?.name) ||
+      isDimensionTransferBlock(at(landingHead.x, landingHead.y, landingHead.z)?.name)
     const primaryHarvest =
       primaryBlock === null
         ? { yield: null, harvestTool: null, harvestTier: null }
@@ -2681,6 +2754,7 @@ function buildDescent(bot: Bot, options: SensorOptions, self: SelfState): Descen
       floorSolid,
       supportSolid,
       hazardNearby,
+      ...(transfersDimension ? { transfersDimension: true } : {}),
       digs,
       safe: reason === 'safe',
       reason,
@@ -3372,23 +3446,49 @@ export function liveStructureMembersForSites(sites: readonly PortalFrameSite[]):
   return members
 }
 
-function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Json[] {
+/**
+ * The local terrain scan, plus the DIMENSION-TRANSFER cells it walked over.
+ *
+ * The transfer set is the same block truth the executor's walk-in mechanic
+ * reads (`isDimensionTransferBlock`): standing with the feet or the head in a lit
+ * portal block transfers the body. A cell is recorded when EITHER its feet or
+ * its head block is transfer material, so the recorded cell is exactly "feet
+ * here transfers". The candidate gate refuses to realize a mechanical locomotion
+ * leg into one, and the keep-distance solver refuses to offer one; the explicit
+ * `ENTER_PORTAL` candidate is the only route that may cross.
+ */
+function buildTerrain(
+  bot: Bot,
+  options: SensorOptions,
+  self: SelfState,
+): { standable: Vec3Json[]; portalWalkInCells: Vec3Json[] } {
   const found: Vec3Json[] = []
+  const transfer: Vec3Json[] = []
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
+  const scratch = bot.entity.position.clone()
+  const at = (p: Vec3Json) => bot.blockAt(scratch.set(p.x, p.y, p.z))
   for (let dx = -2; dx <= 2; dx += 1) {
     for (let dz = -2; dz <= 2; dz += 1) {
       for (let dy = -1; dy <= 1; dy += 1) {
         const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
+        // The same three blocks `isUsableStand` reads, read once: the standable
+        // verdict below must stay byte-identical to it.
+        const feetBlock = at(feet)
+        const headBlock = at({ x: feet.x, y: feet.y + 1, z: feet.z })
+        const supportBlock = at({ x: feet.x, y: feet.y - 1, z: feet.z })
+        if (isDimensionTransferBlock(feetBlock?.name) || isDimensionTransferBlock(headBlock?.name)) {
+          transfer.push(feet)
+        }
         // A canopy top is collidable but is not a destination: terrain cells are
         // the standable set every MOVE/explore/retreat/placement solve picks
         // from, so a leaf-supported cell here became "walk onto the treetop".
-        if (!isUsableStand(bot, feet)) continue
+        if (!isUsableStandFromBlocks(feetBlock, headBlock, supportBlock)) continue
         found.push(feet)
       }
     }
   }
   found.sort((a, b) => distance(a, self.position) - distance(b, self.position))
-  return found.slice(0, options.maxTerrain)
+  return { standable: found.slice(0, options.maxTerrain), portalWalkInCells: transfer }
 }
 
 /**
@@ -3477,6 +3577,232 @@ function buildBridgeProbes(bot: Bot, self: SelfState): BridgeProbe[] {
 }
 
 /**
+ * The cardinal WALL ENTRY probes: what the body could mine open beside itself, and
+ * whether the pocket it would open could be flooded.
+ *
+ * WHY THIS IS A SEPARATE FACT FROM `descent` (measured, live, the operator's flooded
+ * Nether arrival): `buildDescent`'s `safe` verdict is a 3x3x3 PROXIMITY rule, so a
+ * body standing beside a lava band has every step refused `hazard` even where the
+ * cell to be mined is dry solid rock whose new pocket no fluid can reach. The step
+ * vocabulary cannot express "this dig is safe because of WHICH cell is mined and what
+ * touches it"; this probe does, per cell, from the same live blocks:
+ *
+ *   * each probe carries the sensor's OWN `DescentOption` for that direction and mode
+ *     (`level` and `down`), so the profile, the primary cell, the dig plan, the route
+ *     identity and the executor are all reused, never recomputed;
+ *   * `pocket` is the 1x2 profile the body will occupy: `[landing, landing + 1]` -
+ *     for `level` those are the sensor's `wall`/`head`, for `down` its `floor`/`wall`;
+ *   * `floor` is `landing.y - 1` and is NEVER mined: the tunnel's floor is pre-existing
+ *     rock, which is why this step is safe where a walk step over lava is not;
+ *   * `flood` is `wallEntry.ts#floodEvidence`: a fluid FACE-ADJACENT to a pocket cell
+ *     would pour in, and a fluid two cells away (with the solid cell between them
+ *     still solid) cannot.
+ *
+ * Reads are direct chunk lookups and bounded (4 directions x 2 modes x [2 profile
+ * cells + 1 floor + the pocket's six-neighbourhood]), and the caller only builds the
+ * probe while a walk step is actually refused, so ordinary terrain reads nothing extra.
+ *
+ * Exported for the same reason `probeBridgeDirection` is: the facts it classifies are
+ * the input of a load-bearing safety rule (`wallEntry.ts#groundWallEntries`), so a
+ * fixture must be able to drive the REAL classification from a modelled world instead
+ * of re-implementing it.
+ */
+export function buildWallProbes(
+  bot: Bot,
+  self: SelfState,
+  descent: readonly DescentOption[],
+): WallProbe[] {
+  const scratch = bot.entity.position.clone()
+  const read = (cell: Vec3Json): WallBlockLike | null => {
+    const block = bot.blockAt(scratch.set(cell.x, cell.y, cell.z))
+    return block === null
+      ? null
+      : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
+  }
+  const classify = (cell: Vec3Json): WallCell => {
+    const block = read(cell)
+    const open = block !== null && block.boundingBox === 'empty'
+    const solid = block !== null && block.boundingBox !== 'empty'
+    return {
+      cell,
+      name: block?.name ?? null,
+      open,
+      solid,
+      breakable: solid && block?.diggable === true && !isTunnelFloodBlockName(block.name),
+      observed: block !== null,
+    }
+  }
+  const probes: WallProbe[] = []
+  for (const dir of WALL_DIRS) {
+    for (const mode of ['level', 'down'] as const) {
+      const step = descent.find((option) => option.dir === dir && option.mode === mode)
+      if (step === undefined) continue
+      const landing = step.step
+      const head = { x: landing.x, y: landing.y + 1, z: landing.z }
+      const floor = { x: landing.x, y: landing.y - 1, z: landing.z }
+      // The pocket the dig makes open: the body's own 1x2 profile at the landing, and
+      // a fluid face-adjacent to either cell can pour into it.
+      const flood = floodEvidence([landing, head], read)
+      probes.push({
+        dir,
+        mode,
+        dx: step.dx,
+        dz: step.dz,
+        landing,
+        pocket: [classify(landing), classify(head)],
+        floor: classify(floor),
+        flood: flood !== null,
+        floodCell: flood?.cell ?? null,
+        floodBlock: flood?.block ?? null,
+        step,
+      })
+    }
+  }
+  return probes
+}
+
+/**
+ * Should this tick sense the wall-entry probes at all?
+ *
+ * ONLY when a sensed step is refused by `hazard` or `no_support` - the two refusals
+ * whose cause is the body's own local geology rather than its tools, its goal or a
+ * protected block. That is the exact precondition `wallEntry.ts` answers, and it keeps
+ * the sensor (and therefore the offer) byte-identical on ordinary terrain: there every
+ * cardinal step is either `safe` or refused for a reason no dig could change.
+ */
+function shouldProbeWallEntry(descent: readonly DescentOption[]): boolean {
+  return descent.some((option) => option.refusal === 'hazard' || option.refusal === 'no_support')
+}
+
+/**
+ * The BOUNDED LEVEL SCAN probes (`levelScan.ts`): the controlled own-column descent into
+ * each of the next `LEVEL_SCAN_MAX_LEVELS` levels below the body, plus the four same-level
+ * lateral continuations AT each of them.
+ *
+ * WHY IT IS A SEPARATE FACT: the measured Nether arrival (run-muchajde-1qhat, the operator's
+ * flooded-island case) has every step at the body's OWN level refused or useless (the portal
+ * plane is `portal_plane`, the frame is `protected`, the rest is already open air), while the
+ * rock BELOW is solid and a dry tunnel east exists two levels down. `buildDescent` only ever
+ * computes the body's own level, so nothing in the offer can name that level; this probe
+ * reads exactly the cells the composed route needs and hands them to the ONE rule
+ * (`levelScan.ts#groundLevelScan`), which judges each pocket with the SAME per-cell function
+ * the adjacent wall entry uses (`wallEntry.ts#wallPocketRefusal`).
+ *
+ * BOUNDED BY CONSTRUCTION: `LEVEL_SCAN_MAX_LEVELS` levels x (1 own-column shaft + 4 cardinal
+ * laterals) = `LEVEL_SCAN_MAX_PROBES` probes, each a 1x2 profile + its floor + the pocket's
+ * six-neighbourhood (direct chunk lookups only, no block scan, no pathfinder probe), i.e.
+ * <= ~225 cell reads while the gate is open. `maxLevels` is clamped to the declared constant
+ * so a caller cannot widen the window.
+ *
+ * The depth-1 shaft carries the SENSOR's own verdict for the body's own-column step
+ * (`state.descent`'s `D/down`), because that is the step the offer will execute and the guard
+ * will re-read: a verdict the per-cell rule cannot supersede (an open floor, no support)
+ * breaks the chain, so what is offered and what the guard accepts cannot disagree.
+ *
+ * Exported for the same reason `buildWallProbes` is: a fixture must be able to drive the REAL
+ * classification from a modelled world instead of re-implementing it.
+ */
+export function buildLevelScanProbes(
+  bot: Bot,
+  self: SelfState,
+  descent: readonly DescentOption[],
+  maxLevels: number = LEVEL_SCAN_MAX_LEVELS,
+): LevelScanProbe[] {
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  const scratch = bot.entity.position.clone()
+  const read = (cell: Vec3Json): WallBlockLike | null => {
+    const block = bot.blockAt(scratch.set(cell.x, cell.y, cell.z))
+    return block === null
+      ? null
+      : { name: block.name, boundingBox: block.boundingBox, diggable: block.diggable === true }
+  }
+  const classify = (cell: Vec3Json): WallCell => {
+    const block = read(cell)
+    const open = block !== null && block.boundingBox === 'empty'
+    const solid = block !== null && block.boundingBox !== 'empty'
+    return {
+      cell,
+      name: block?.name ?? null,
+      open,
+      solid,
+      breakable: solid && block?.diggable === true && !isTunnelFloodBlockName(block.name),
+      observed: block !== null,
+    }
+  }
+  const ownColumn = descent.find((option) => option.dir === 'D' && option.mode === 'down')
+  const window = Math.max(0, Math.min(LEVEL_SCAN_MAX_LEVELS, Math.floor(maxLevels)))
+  const probes: LevelScanProbe[] = []
+  for (let depth = 1; depth <= window; depth += 1) {
+    const y = feet.y - depth
+    // The own-column shaft: the body digs the floor cell (x,y,z) and stands in it, so its
+    // 1x2 profile is that cell plus the cell above, and the pre-existing floor is (x,y-1,z).
+    const shaftLanding = { x: feet.x, y, z: feet.z }
+    const shaftHead = { x: feet.x, y: y + 1, z: feet.z }
+    const shaftFloor = { x: feet.x, y: y - 1, z: feet.z }
+    const shaftFlood = floodEvidence([shaftLanding, shaftHead], read)
+    const laterals: LevelLateralFacts[] = []
+    for (const dir of WALL_DIRS) {
+      const dx = dir === 'E' ? 1 : dir === 'W' ? -1 : 0
+      const dz = dir === 'S' ? 1 : dir === 'N' ? -1 : 0
+      const cell = { x: feet.x + dx, y, z: feet.z + dz }
+      const head = { x: cell.x, y: y + 1, z: cell.z }
+      const floor = { x: cell.x, y: y - 1, z: cell.z }
+      const feetCell = classify(cell)
+      const headCell = classify(head)
+      const floorCell = classify(floor)
+      // A WALK continuation is an already-open, already-supported, dry 1x2 passage that does
+      // not transfer the body: nothing is mined, so there is no new pocket to flood and the
+      // ordinary MOVE/landing guards own the step. Everything else is judged as a DIG by the
+      // shared per-cell rule.
+      const transfers =
+        (feetCell.observed && isDimensionTransferBlock(feetCell.name)) ||
+        (headCell.observed && isDimensionTransferBlock(headCell.name))
+      const walk =
+        feetCell.open &&
+        headCell.open &&
+        floorCell.observed &&
+        floorCell.solid &&
+        !isTunnelFloodBlockName(floorCell.name) &&
+        !transfers
+      const flood = walk ? null : floodEvidence([cell, head], read)
+      laterals.push({
+        dir,
+        dx,
+        dz,
+        cell,
+        landing: cell,
+        pocket: [feetCell, headCell],
+        floor: floorCell,
+        flood: flood !== null,
+        floodCell: flood?.cell ?? null,
+        floodBlock: flood?.block ?? null,
+        walk,
+      })
+    }
+    probes.push({
+      y,
+      depth,
+      shaft: {
+        landing: shaftLanding,
+        pocket: [classify(shaftLanding), classify(shaftHead)],
+        floor: classify(shaftFloor),
+        flood: shaftFlood !== null,
+        floodCell: shaftFlood?.cell ?? null,
+        floodBlock: shaftFlood?.block ?? null,
+        // Only the body's own level has a sensor verdict: it is the step the guard re-reads.
+        ...(depth === 1 ? { sensorRefusal: ownColumn?.refusal ?? null } : {}),
+      },
+      laterals,
+    })
+  }
+  return probes
+}
+
+/**
  * SAFE: keep-distance destinations for an active threat.
  *
  * The measured retreat failure is a SENSING failure as much as a policy one:
@@ -3491,40 +3817,124 @@ function buildBridgeProbes(bot: Bot, self: SelfState): BridgeProbe[] {
  * destination), and keeps only cells that genuinely gain separation from the
  * nearest dangerous hostile. The result is a CAN fact; Jev still chooses
  * whether to take one.
+ *
+ * It also owns the two facts a keep-distance destination cannot be grounded
+ * without:
+ *   * `coverCells` - cells the threat's own sight line cannot reach (real block
+ *     truth from one bounded ray per candidate). This is what answers a RANGED
+ *     attacker: the body cannot outrun an arrow, but it can step out of the
+ *     firing line. A cell the ray cannot be computed for is simply absent;
+ *     unknown never counts as cover.
+ *   * `portalWalkInCells` - cells where standing realizes a DIMENSION TRANSFER.
+ *     They are sampled here as well as in `buildTerrain` because this wider scan
+ *     is where a "retreat" destination comes from, and a keep-distance leg must
+ *     never be realized as a dimension change.
  */
 function buildEscapeCells(
   bot: Bot,
   options: SensorOptions,
   self: SelfState,
   entities: readonly EntityState[],
-): Vec3Json[] {
+): { cells: Vec3Json[]; coverCells: Vec3Json[]; portalWalkInCells: Vec3Json[] } {
   const threat = nearestDangerousThreat(entities as readonly ThreatEntityLike[])
-  if (threat === null) return []
+  if (threat === null) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const radius = Math.max(0, Math.floor(options.escapeRadius))
-  if (radius === 0) return []
+  if (radius === 0) return { cells: [], coverCells: [], portalWalkInCells: [] }
   const standoff = threatStandoffRange(threat.name)
   const current = distance(threat.position, self.position)
   const base = { x: Math.floor(self.position.x), y: Math.floor(self.position.y), z: Math.floor(self.position.z) }
   const found: Vec3Json[] = []
+  const cover: Vec3Json[] = []
+  const transfer: Vec3Json[] = []
+  let coverRays = 0
+  const maxCoverRays = Math.max(0, Math.floor(options.maxThreatCoverRays ?? 0))
+  const scratch = bot.entity.position.clone()
+  const at = (p: Vec3Json) => bot.blockAt(scratch.set(p.x, p.y, p.z))
   for (let dx = -radius; dx <= radius; dx += 1) {
     for (let dz = -radius; dz <= radius; dz += 1) {
       for (let dy = -THREAT_ESCAPE_DY; dy <= THREAT_ESCAPE_DY; dy += 1) {
         const feet: Vec3Json = { x: base.x + dx, y: base.y + dy, z: base.z + dz }
         const separation = distance(feet, threat.position)
         const gain = separation - current
-        // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
-        // standing outside the threat's reach without moving closer.
-        if (gain < MIN_KEEP_DISTANCE_GAIN && !(separation >= standoff && gain > 0)) continue
+        const feetBlock = at(feet)
+        const headBlock = at({ x: feet.x, y: feet.y + 1, z: feet.z })
+        if (isDimensionTransferBlock(feetBlock?.name) || isDimensionTransferBlock(headBlock?.name)) {
+          transfer.push(feet)
+          // A transfer cell is never a keep-distance destination, so it cannot
+          // become a covered one either: do not spend a ray proving cover for a
+          // cell the solver will refuse.
+          continue
+        }
+        // A keep-distance destination never moves CLOSER to the threat, so only
+        // the not-closer half of the sphere is worth a ray at all.
+        if (gain <= 0) continue
         // Destination rule, shared with `buildTerrain`: a canopy top is not a
         // place the body may be sent to keep distance from a mob.
-        if (!isUsableStand(bot, feet)) continue
-        found.push(feet)
+        if (!isUsableStandFromBlocks(feetBlock, headBlock, at({ x: feet.x, y: feet.y - 1, z: feet.z }))) continue
+        // Same qualification rule as `selectKeepDistanceSpots`: a real gain, or
+        // standing outside the threat's reach without moving closer.
+        if (gain >= MIN_KEEP_DISTANCE_GAIN || (separation >= standoff && gain > 0)) found.push(feet)
+        // Cover is the third way to genuinely keep distance from a RANGED
+        // attacker: a cell its sight line cannot reach. Bounded by
+        // `maxThreatCoverRays`, and only ever credited on positive block truth.
+        if (coverRays < maxCoverRays) {
+          coverRays += 1
+          if (threatSightLineBlocked(bot, threat.position, feet)) cover.push(feet)
+        }
       }
     }
   }
   found.sort((a, b) => distance(b, threat.position) - distance(a, threat.position))
   const cap = Math.max(0, Math.floor(options.maxEscapeCells ?? THREAT_ESCAPE_MAX_CELLS))
-  return found.slice(0, cap)
+  return { cells: found.slice(0, cap), coverCells: cover, portalWalkInCells: transfer }
+}
+
+/**
+ * SAFE/CAN: is the hostile at `from` (its feet) BLOCKED from seeing a body
+ * standing at `cell`? True means the cell is genuine cover.
+ *
+ * The threat's eye is its feet plus the same eye height the body's own
+ * `SelfState.eyePosition` uses, and the target is the body's chest. One ray, no
+ * guessing: `bot.world.raycast` is the synchronous world raycast mineflayer's
+ * own `canSeeBlock` uses, and it reports the first SOLID block on the segment
+ * (non-solid blocks such as the portal itself do not stop it).
+ *
+ * False unless there is positive evidence: a bot without a world raycast, a
+ * degenerate segment, or a throwing raycast all yield false, so "unknown" is
+ * never handed to the solver as a covered destination.
+ */
+function threatSightLineBlocked(bot: Bot, from: Vec3Json, cell: Vec3Json): boolean {
+  const world = bot.world as unknown as
+    | { raycast?: (origin: unknown, direction: unknown, range: number, matcher: null) => unknown }
+    | undefined
+  if (world === undefined || typeof world.raycast !== 'function') return false
+  try {
+    const eye = bot.entity.position.clone().set(from.x, from.y + EYE_HEIGHT, from.z)
+    const target = bot.entity.position.clone().set(cell.x + 0.5, cell.y + 1, cell.z + 0.5)
+    const dx = target.x - eye.x
+    const dy = target.y - eye.y
+    const dz = target.z - eye.z
+    const range = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    if (!Number.isFinite(range) || range <= 0) return false
+    const direction = bot.entity.position.clone().set(dx / range, dy / range, dz / range)
+    const hit = world.raycast(eye, direction, range, null)
+    return hit !== null && hit !== undefined
+  } catch {
+    return false
+  }
+}
+
+/** Positional dedupe for the cell facts, preserving first-seen order. */
+function dedupeCells(cells: readonly Vec3Json[]): Vec3Json[] {
+  const seen = new Set<string>()
+  const out: Vec3Json[] = []
+  for (const cell of cells) {
+    const key = `${cell.x},${cell.y},${cell.z}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(cell)
+  }
+  return out
 }
 
 /**
@@ -3587,6 +3997,16 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       .find((validation): validation is PortalFrameValidation => validation?.shape === 'ok') ?? null
   const placementSpots = buildPlacementSpots(bot, options, self)
   const entities = buildEntities(bot, options, self.position, input.signals.lastDamage)
+  const terrain = buildTerrain(bot, options, self)
+  const escape = buildEscapeCells(bot, options, self, entities)
+  // Both transfer-cell sources are unioned: the local terrain window is where an
+  // ordinary MOVE destination can come from, the wider escape scan is where a
+  // keep-distance destination comes from, and the gate must see both.
+  const portalWalkInCells = dedupeCells([...terrain.portalWalkInCells, ...escape.portalWalkInCells])
+  // The descent vocabulary is sensed ONCE and read by both the dig route and the
+  // wall-entry probes (`buildWallProbes` carries the very steps it produces, so the
+  // offered entry and the sensor's own step cannot disagree).
+  const descent = buildDescent(bot, options, self)
   return {
     schemaVersion: 1,
     tick: input.tick,
@@ -3599,9 +4019,13 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     // an inactive body's state keeps exactly the shape it had before this fact
     // existed, and the candidate layer reads "no cells" as "no hazard".
     ...(envHazardCells.length > 0 && self.envHazard?.active === true ? { envHazardCells } : {}),
+    // Both new terrain facts follow the same rule: a body with no portal and no
+    // cover nearby keeps exactly the state shape it had before they existed.
     terrain: {
-      standable: buildTerrain(bot, options, self),
-      escapeCells: buildEscapeCells(bot, options, self, entities),
+      standable: terrain.standable,
+      escapeCells: escape.cells,
+      ...(escape.coverCells.length === 0 ? {} : { threatCoverCells: dedupeCells(escape.coverCells) }),
+      ...(portalWalkInCells.length === 0 ? {} : { portalWalkInCells }),
     },
     craftingTables: buildStations(bot, options, self, CRAFT_STATIONS, rememberedStations),
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
@@ -3618,7 +4042,14 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
       underConstructionMembers(portalFrameSites, input.goalQueue?.current ?? null),
     ),
     knownResourceEvidence,
-    descent: buildDescent(bot, options, self),
+    descent,
+    // The wall-entry probes exist only where a step is refused by the body's own
+    // local geology: on ordinary terrain this adds nothing at all. The bounded LEVEL
+    // SCAN rides the same gate (the measured island is exactly this shape): a body
+    // whose own level offers nothing gets the levels below it read too.
+    ...(shouldProbeWallEntry(descent)
+      ? { wallProbes: buildWallProbes(bot, self, descent), levelScan: buildLevelScanProbes(bot, self, descent) }
+      : {}),
     stepCuts: buildStepCuts(bot, options, self),
     headroomCuts: buildHeadroomCuts(bot, options, self),
     goal: input.goal,

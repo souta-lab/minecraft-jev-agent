@@ -722,7 +722,10 @@ async function loadGenerationModule(force: boolean): Promise<GenerationModule | 
       generationModule = mod
       currentBundle = built.outfile
       generationHash = built.hash
-      log('BUILD', { hash: built.hash, bytes: built.bytes, ms: built.ms, outfile: built.outfile })
+      // The bundle hash attests WHICH bundle; the git commit attests WHICH SOURCE it was built from.
+      // Without this a hot-reloaded run could prove its bundle but not its commit, which is exactly what the
+      // acceptance asks for (`exact source SHA`).
+      log('BUILD', { hash: built.hash, sourceSha: gitCommit(), bytes: built.bytes, ms: built.ms, outfile: built.outfile })
       return mod
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1810,7 +1813,7 @@ async function performReload(trigger: string): Promise<void> {
       currentBundle = built.outfile
       generationHash = built.hash
       stats.reloadsChangedHash += 1
-      log('RELOAD', { ok: true, trigger, deferred: 'frozen', ms: Date.now() - started, hash: built.hash, contractVersion: mod.CONTRACT_VERSION })
+      log('RELOAD', { ok: true, trigger, deferred: 'frozen', ms: Date.now() - started, hash: built.hash, sourceSha: gitCommit(), contractVersion: mod.CONTRACT_VERSION })
       return
     }
     state.reloads += 1
@@ -1870,6 +1873,7 @@ async function performReload(trigger: string): Promise<void> {
       trigger,
       ms: Date.now() - started,
       hash: built.hash,
+      sourceSha: gitCommit(),
       id: outcome.generationId,
       generations: state.generations,
       listeners: counts,
