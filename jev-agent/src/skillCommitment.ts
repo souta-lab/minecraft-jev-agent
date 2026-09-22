@@ -424,6 +424,18 @@ export function envelopeForCandidate(
     case 'STEP':
     case 'MOVE':
     case 'ENTER_PORTAL':
+    // A RETRIEVE/RETREAT is the same kind of locomotion contract: its own
+    // candidate meta carries the grounded `vertical`/`digRoute` route it was
+    // offered with (`candidates.ts` spreads `verticalPlanMeta` into a RETRIEVE's
+    // meta exactly as it does for a MOVE). Without them here a RETRIEVE whose
+    // route is a pillar - live case `RETRIEVE:known:blaze_rod:b35_60_-24`,
+    // routeSig `RETRIEVE:pillar:57->60` - had its own pillar step refused
+    // `effect_envelope_violation`, which spent the route and produced
+    // ACTION_ZERO_PROGRESS 51 times while the body stood at y=57 unable to
+    // reach the y=60 cells. A RETRIEVE with NO declared route still gets
+    // neither flag, so section 7 U4 is unchanged.
+    case 'RETRIEVE':
+    case 'RETREAT':
       // Route-opening locomotion / portal entry may clear and place along the
       // cells its OWN grounded route names (`digRoute` / a `vertical` plan); the
       // flags are set only from the candidate's contract, never at runtime. A
@@ -448,9 +460,6 @@ export function envelopeForCandidate(
       return { ...base, mayMove: false, mayLook: false, mayJump: false, maySprint: false }
     case 'ESCALATE':
       return { ...base, mayMove: false, mayLook: false, mayJump: false, maySprint: false }
-    case 'RETREAT':
-    case 'RETRIEVE':
-      return base
   }
 }
 
