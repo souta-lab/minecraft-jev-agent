@@ -272,6 +272,43 @@ export const PLAN_IDENTITY_CHANGED = 'PLAN_IDENTITY_CHANGED'
 export const PLAN_ROW_RETIRED = 'PLAN_ROW_RETIRED'
 export const ROW_NOT_EXECUTABLE_HERE = 'ROW_NOT_EXECUTABLE_HERE'
 export const ROW_DEFERRED_NOT_EXECUTABLE_HERE = 'ROW_DEFERRED_NOT_EXECUTABLE_HERE'
+/**
+ * #plan-reconciliation: the head row System2 was EXPLICITLY asked about
+ * (`action_impossible` / `no_progress`) was replaced by the plan it authored.
+ * This is the one retirement that does not need the authoring-frontier proof,
+ * because the model's own answer IS the statement that the old plan is over.
+ */
+export const PLAN_HEAD_REPLACED = 'PLAN_HEAD_REPLACED'
+
+/** The bounded, per-request authority to replace the head System2 answered about. */
+export interface HeadAnswerWarrant {
+  /** the request whose answer may replace the head */
+  requestId: string
+  /** the head row the request was about */
+  headId: string
+  headKey: string
+  /** the summon reason (`action_impossible`, `no_progress`, ...) */
+  reason: string
+}
+
+export interface HeadReplacementOptions {
+  /** the row must still be the head; any other row leaves this a no-op */
+  headId: string
+  requestId: string
+  /** the summon reason that asked the question */
+  reason: string
+  /** the answering plan's own note/op, for the audit line */
+  note?: string
+  onReplaced?: (line: string, detail: Record<string, unknown>) => void
+  now?: number
+}
+
+export function formatPlanHeadReplaced(goal: QueuedGoal, options: HeadReplacementOptions): string {
+  return (
+    `${PLAN_HEAD_REPLACED} id=${goal.id} goal=${goalKeyOf(goal)} reason=${options.reason}` +
+    ` requestId=${options.requestId} note="${(options.note ?? '').slice(0, 80)}"`
+  )
+}
 
 /** A code-owned proof that a row authored under a superseded plan is obsolete. */
 export interface PlanObsoleteProof {
@@ -852,6 +889,12 @@ export class GoalQueue {
    * baselines keep the previous behaviour byte for byte).
    */
   private planIdentity: PlanIdentity | null = null
+  /**
+   * #plan-reconciliation: the head row retired on the strength of a System2 answer
+   * (`replaceAnsweredHead`). It is preserved as durable `impossible` history by the
+   * next `applyPlan`, so the ledger keeps naming what the answer replaced.
+   */
+  private answeredHeadAuditId: string | null = null
   /** Most recent plan's audit sink, reused by later lifecycle transitions. */
   private lifecycleSink: ((line: string) => void) | undefined
   /**
@@ -1051,12 +1094,24 @@ export class GoalQueue {
       if (effectiveOp === 'patch') {
         // Keep completed history and the active goal, except for an optional
         // food recovery row that a new semantic route is explicitly replacing.
+        // #plan-reconciliation: a head replaced on the strength of System2's own
+        // answer is kept as `impossible` audit history, not erased (the same reason
+        // `abandon` keeps `abandonedCurrentId`), so a reload cannot resurrect it as
+        // fresh work and the ledger still names what the answer replaced.
         this.goals = this.goals.filter(
-          (goal) => goal.status === 'done' || (goal.status === 'active' && !isReplaceableOptionalFoodGoal(goal)) || retiredIds.has(goal.id),
+          (goal) =>
+            goal.status === 'done' ||
+            goal.id === this.answeredHeadAuditId ||
+            (goal.status === 'active' && !isReplaceableOptionalFoodGoal(goal)) ||
+            retiredIds.has(goal.id),
         )
       } else {
         this.goals = this.goals.filter(
-          (goal) => goal.status === 'done' || goal.id === abandonedCurrentId || retiredIds.has(goal.id),
+          (goal) =>
+            goal.status === 'done' ||
+            goal.id === abandonedCurrentId ||
+            goal.id === this.answeredHeadAuditId ||
+            retiredIds.has(goal.id),
         )
       }
       const keptIds = new Set(this.goals.map((goal) => goal.id))
@@ -1629,6 +1684,48 @@ export class GoalQueue {
       adoptedLegacy,
       headSuperseded,
     }
+  }
+
+  /**
+   * #plan-reconciliation: replace the head row that System2 was EXPLICITLY asked
+   * about, on the strength of the answer it authored.
+   *
+   * Measured live (`run-mucqgrdo-21plr`): the starvation bound fired, System2 was
+   * summoned with `reason=action_impossible`, the model DID author a Nether/blaze
+   * plan (`op=patch`), and the queue head was unchanged - `patch` deliberately keeps
+   * the active row - so the row survived the very escalation that was about it and
+   * the cycle could repeat forever.
+   *
+   * Authority: System2 owns WHAT, so its answer to "this head is impossible" is the
+   * authoritative statement that the old WHAT is over. Code's job is to apply that
+   * boundedly: ONLY the exact row the request was about, only while it is still the
+   * head, never human intent, and with typed evidence naming the row and the
+   * request. Every other row keeps the conservative rule (`reconcilePlanIdentity`
+   * retires only with a code-owned proof).
+   */
+  replaceAnsweredHead(options: HeadReplacementOptions): QueuedGoal | null {
+    const goal = this.nextRef()
+    if (goal === undefined) return null
+    if (goal.id !== options.headId) return null
+    if (goal.origin === 'human') return null
+    const now = options.now ?? Date.now()
+    goal.status = 'impossible'
+    goal.detail =
+      `replaced by System2 answer: reason=${options.reason} requestId=${options.requestId}` +
+      `${options.note === undefined || options.note.length === 0 ? '' : ` note="${options.note.slice(0, 160)}"`}`
+    goal.updatedAt = now
+    const clone = { ...goal }
+    this.answeredHeadAuditId = goal.id
+    this.queueRevision += 1
+    ;(options.onReplaced ?? this.lifecycleSink)?.(formatPlanHeadReplaced(goal, options), {
+      id: goal.id,
+      goalKey: goalKeyOf(goal),
+      reason: options.reason,
+      requestId: options.requestId,
+      note: options.note ?? null,
+    })
+    this.activate()
+    return clone
   }
 
   /**

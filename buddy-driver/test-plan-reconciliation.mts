@@ -41,6 +41,7 @@
 import {
   GoalQueue,
   PLAN_IDENTITY_CHANGED,
+  PLAN_HEAD_REPLACED,
   PLAN_ROW_RETIRED,
   ROW_DEFERRED_NOT_EXECUTABLE_HERE,
   ROW_NOT_EXECUTABLE_HERE,
@@ -710,6 +711,8 @@ addCase('(vii) every new marker is MIRRORED, so it reaches buddy.log', () => {
   const markers = [
     PLAN_IDENTITY_CHANGED,
     PLAN_ROW_RETIRED,
+    PLAN_HEAD_REPLACED,
+    'PLAN_HEAD_REPLACEMENT_APPLIED',
     'PLAN_IDENTITY_ADOPTED',
     'PLAN_IDENTITY_UNAVAILABLE',
     ROW_NOT_EXECUTABLE_HERE,
@@ -863,6 +866,213 @@ addCase('(viii) the controller uses the durable row bound and never resets it on
   const leftover = forbidden.filter((needle) => source.includes(needle))
   const pass = missing.length === 0 && leftover.length === 0
   return { pass, detail: `missing=[${missing.join(' | ')}] leftover=[${leftover.join(' | ')}]` }
+})
+
+// ---------------------------------------------------------------------------
+// (ix) the measured end-to-end shape: the bound fires, System2 answers the head
+//      it was asked about, and the answer replaces that head
+// ---------------------------------------------------------------------------
+// Live (`run-mucqgrdo-21plr`, main 5397bd8): the bound fired, System2 was summoned
+// with reason=action_impossible and DID author a Nether/blaze plan, but its op was
+// `patch` - which deliberately keeps the active row - so
+// `queue: g2:collect:log done | g3:collect:raw_iron done | g1:descend:raw_iron ACTIVE`
+// was unchanged and the starved row survived the escalation that was about it.
+function measuredLedger(): GoalQueueSnapshot {
+  return {
+    counter: 3,
+    revision: 3,
+    planIdentity: staleIdentity(),
+    goals: [
+      row({ id: 'g2:collect:log', kind: 'collect', targetItem: 'log', requiredCount: 3, status: 'done', haveCount: 3 }),
+      row({ id: 'g3:collect:raw_iron', kind: 'collect', targetItem: 'raw_iron', requiredCount: 3, status: 'done', haveCount: 3 }),
+      staleDescendRow(),
+    ],
+  }
+}
+
+/** The measured System2 answer: a Nether plan for the same objective, op=patch. */
+function system2NetherAnswer() {
+  return {
+    op: 'patch' as const,
+    note: 'Explore Nether caves for blaze rods since overworld raw_iron is unreachable',
+    goals: [
+      {
+        kind: 'collect' as const,
+        description: 'collect 7 x blaze_rod',
+        targetItem: 'blaze_rod',
+        requiredCount: 7,
+        dimension: NETHER,
+      },
+    ],
+  }
+}
+
+addCase('(ix) the bound fires, System2 answers, and the answered head is replaced by the new plan', () => {
+  const queue = new GoalQueue()
+  queue.restore(measuredLedger())
+  const headBefore = queue.current?.id ?? 'none'
+  // 1) the durable bound reaches its limit on this row
+  for (let i = 0; i < 3; i += 1) queue.noteStarvedHead()
+  const bound = evaluateStarvedHeadBound({ count: queue.starvedHeadCount, limit: 3 })
+  // 2) the answer arrives (op=patch, with goals) and the warrant replaces THAT row
+  const answer = system2NetherAnswer()
+  const lines: string[] = []
+  const replaced = queue.replaceAnsweredHead({
+    headId: 'g1:descend:raw_iron',
+    requestId: 'req-measured-1',
+    reason: 'action_impossible',
+    note: answer.note,
+    onReplaced: (line) => lines.push(line),
+  })
+  queue.resetStarvedHead()
+  const added = queue.applyPlan(answer.goals, 'llm', answer.op, { reason: answer.note })
+  const headAfter = queue.current?.id ?? 'none'
+  const stale = queue.state.goals.find((goal) => goal.id === 'g1:descend:raw_iron')
+  const marker = lines.find((line) => line.startsWith(PLAN_HEAD_REPLACED))
+  const pass =
+    headBefore === 'g1:descend:raw_iron' &&
+    bound.action === 'wake' &&
+    replaced?.id === 'g1:descend:raw_iron' &&
+    replaced.status === 'impossible' &&
+    replaced.detail?.includes('replaced by System2 answer') === true &&
+    replaced.detail?.includes('reason=action_impossible') === true &&
+    replaced.detail?.includes('requestId=req-measured-1') === true &&
+    marker !== undefined &&
+    marker.includes('id=g1:descend:raw_iron') &&
+    marker.includes('requestId=req-measured-1') &&
+    stale?.status === 'impossible' &&
+    // the replaced row is kept as durable audit history, not erased
+    queue.state.goals.some((goal) => goal.id === 'g1:descend:raw_iron') &&
+    added.length === 1 &&
+    headAfter === 'g4:collect:blaze_rod' &&
+    queue.current?.kind === 'collect' &&
+    queue.current?.targetItem === 'blaze_rod' &&
+    queue.starvedHeadCount === 0
+  return {
+    pass,
+    detail: `bound=${bound.action} replaced=${replaced?.status} head=${headBefore}->${headAfter} marker=${marker ?? 'none'}`,
+  }
+})
+
+addCase('(ix) a reload after the answer does not resurrect the replaced head', () => {
+  const queue = new GoalQueue()
+  queue.restore(measuredLedger())
+  const answer = system2NetherAnswer()
+  queue.replaceAnsweredHead({
+    headId: 'g1:descend:raw_iron',
+    requestId: 'req-measured-2',
+    reason: 'action_impossible',
+    note: answer.note,
+  })
+  queue.applyPlan(answer.goals, 'llm', answer.op, { reason: answer.note })
+  const snapshotBefore = queue.snapshot()
+  // Reload: the host round-trip + JSON + restore, as the resident does.
+  const hostPath = goalQueueSnapshotFromState(queue.state)
+  const restored = new GoalQueue()
+  restored.restore(JSON.parse(JSON.stringify(hostPath)) as GoalQueueSnapshot)
+  const stale = restored.state.goals.find((goal) => goal.id === 'g1:descend:raw_iron')
+  const reference = new GoalQueue()
+  reference.restore(JSON.parse(JSON.stringify(snapshotBefore)) as GoalQueueSnapshot)
+  const referenceStale = reference.state.goals.find((goal) => goal.id === 'g1:descend:raw_iron')
+  const pass =
+    stale?.status === 'impossible' &&
+    stale.detail?.includes('replaced by System2 answer') === true &&
+    referenceStale?.status === 'impossible' &&
+    restored.current?.id === 'g4:collect:blaze_rod' &&
+    restored.starvedHeadCount === 0 &&
+    restored.state.depth === 1
+  return {
+    pass,
+    detail: `hostPath=${stale?.status ?? 'missing'} snapshot=${referenceStale?.status ?? 'missing'} head=${restored.current?.id ?? 'none'} depth=${restored.state.depth}`,
+  }
+})
+
+addCase('(ix) the warrant is bounded: a different head, a human head, or a valueless answer replaces nothing', () => {
+  // (a) a stale answer whose headId is no longer the head
+  const moved = new GoalQueue()
+  moved.restore(measuredLedger())
+  const staleAnswer = moved.replaceAnsweredHead({
+    headId: 'g0:collect:log',
+    requestId: 'req-stale',
+    reason: 'action_impossible',
+  })
+  const movedHead = moved.current?.id ?? 'none'
+  // (b) human intent owns WHAT until it is cleared
+  const human = new GoalQueue()
+  human.restore({
+    counter: 1,
+    revision: 1,
+    goals: [
+      row({
+        id: 'g1:descend:raw_iron',
+        kind: 'descend',
+        targetItem: 'raw_iron',
+        requiredCount: 1,
+        targetY: 32,
+        dimension: OVERWORLD,
+        status: 'active',
+        origin: 'human',
+        planIdentity: staleIdentity(),
+      }),
+    ],
+  })
+  const humanAnswer = human.replaceAnsweredHead({
+    headId: 'g1:descend:raw_iron',
+    requestId: 'req-human',
+    reason: 'action_impossible',
+  })
+  // (c) the row the model was NOT asked about keeps the conservative rule: an
+  //     unrelated unfinished row stays pending through the same patch
+  const tail = new GoalQueue()
+  tail.restore({
+    counter: 5,
+    revision: 5,
+    planIdentity: staleIdentity(),
+    goals: [
+      staleDescendRow(),
+      row({
+        id: 'g5:collect:obsidian',
+        kind: 'collect',
+        targetItem: 'obsidian',
+        requiredCount: 10,
+        dimension: OVERWORLD,
+        status: 'pending',
+        planIdentity: staleIdentity(),
+      }),
+    ],
+  })
+  tail.replaceAnsweredHead({ headId: 'g1:descend:raw_iron', requestId: 'req-tail', reason: 'action_impossible' })
+  // The answered row was retired; the row the model was NOT asked about keeps the
+  // conservative rule - it stays live work (`active`, no retirement detail) and
+  // simply becomes the head.
+  const untouched = tail.state.goals.find((goal) => goal.id === 'g5:collect:obsidian')
+  const pass =
+    staleAnswer === null &&
+    movedHead === 'g1:descend:raw_iron' &&
+    humanAnswer === null &&
+    human.current?.id === 'g1:descend:raw_iron' &&
+    human.current?.status === 'active' &&
+    untouched?.status === 'active' &&
+    untouched?.detail === null
+  return {
+    pass,
+    detail: `stale=${staleAnswer === null ? 'noop' : 'REPLACED'} movedHead=${movedHead} human=${human.current?.status ?? 'none'} tail=${untouched?.status ?? 'missing'}`,
+  }
+})
+
+addCase('(ix) the controller arms the warrant only for a head-about summon and applies it only to a real plan', async () => {
+  const source = await Bun.file(new URL('./../jev-agent/src/controller-legacy.ts', import.meta.url)).text()
+  const required = [
+    "reason === 'action_impossible' || reason === 'no_progress'",
+    'this.queue.replaceAnsweredHead({',
+    'plan.goals.length > 0',
+    "plan.op === 'patch' || plan.op === 'replace'",
+    'const humanOwnsWhat = this.queue.state.goals.some(',
+    'PLAN_HEAD_REPLACEMENT_APPLIED',
+  ]
+  const missing = required.filter((needle) => !source.includes(needle))
+  const pass = missing.length === 0
+  return { pass, detail: `missing=[${missing.join(' | ')}]` }
 })
 
 // ---------------------------------------------------------------------------
