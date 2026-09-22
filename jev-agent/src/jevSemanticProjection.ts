@@ -1406,11 +1406,29 @@ export function formatSkillCommit(input: {
   selectedIdentity: string
   skillKind: string | null
   projectionHash: string
+  /**
+   * #436 Phase 1: the DECLARED CONTRACT of the commitment this epoch authorized,
+   * appended when the executor built one (`SkillCommitment`). Optional so a lease
+   * claimed with no commitment (bootstrap / pre-Phase-1 path) keeps the exact
+   * shape above. These are hashes/ids of what was authorized, never a decision:
+   * the envelope hash is what a later fail-closed violation is measured against.
+   */
+  targetIdentity?: string | null
+  postconditionHash?: string | null
+  effectEnvelopeHash?: string | null
+  selectedBy?: string | null
+  budgetMs?: number | null
 }): string {
+  const contract =
+    input.targetIdentity === undefined || input.targetIdentity === null
+      ? ''
+      : ` targetIdentity=[${input.targetIdentity}] selectedBy=${input.selectedBy ?? 'unknown'}` +
+        ` postconditionHash=${input.postconditionHash ?? 'none'} effectEnvelopeHash=${input.effectEnvelopeHash ?? 'none'}` +
+        ` budgetMs=${input.budgetMs ?? 'runner'}`
   return (
     `${SKILL_COMMIT} epoch=${input.epoch} commitmentId=${input.commitmentId} lease=${input.leaseEpoch} ` +
     `skill=${input.skillKind ?? 'unknown'} candidate=${input.candidateId} identity=${input.selectedIdentity} ` +
-    `projectionHash=${input.projectionHash}`
+    `projectionHash=${input.projectionHash}${contract}`
   )
 }
 

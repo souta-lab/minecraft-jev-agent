@@ -62,6 +62,14 @@ export const BRIDGE_SPAN_META = 'bridgeSpan'
 /** The verified standable far side this leg must reach (equals `candidate.target`). */
 export const BRIDGE_TARGET_META = 'bridgeTarget'
 /**
+ * The FIRST verified placement cell (`"x,y,z"`): the one cell the offer grounded,
+ * and the exact cell the effect envelope may name. The rest of the span's cells
+ * are derived live by the same rule under `mayPlaceGroundedRoute`.
+ */
+export const BRIDGE_PLACE_META = 'bridgePlace'
+/** The first landing cell (`"x,y,z"`) the first placement creates. */
+export const BRIDGE_LANDING_META = 'bridgeLanding'
+/**
  * #436 section 5: a Skill declares an `EffectEnvelope`. A MOVE that may place
  * blocks must DECLARE it, so this key is the machine-readable half of the
  * declaration and `BRIDGE_BLOCK_META` names the block it will consume.

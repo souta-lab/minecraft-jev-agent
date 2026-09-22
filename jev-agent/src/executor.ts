@@ -40,6 +40,12 @@ import {
 } from './bridgeRoute.ts'
 import type { BridgeDir, BridgeRefusal } from './bridgeRoute.ts'
 import type { BodySubmersion } from './state.ts'
+import {
+  classifyStepLanding,
+  formatMoveLegStopped,
+  STEP_SUPPORT_UNKNOWN,
+} from './stepLanding.ts'
+import type { StepLandingBlock, StepLandingReads } from './stepLanding.ts'
 import { faceDistanceFromEye, interactionFaceDistance, INTERACTION_STAND_DY, INTERACTION_STAND_OFFSETS } from './reachability.ts'
 import { selectDigTool, toolLabel } from './toolChoice.ts'
 import type { DigBlockInfo, ToolChoice } from './toolChoice.ts'
@@ -60,9 +66,35 @@ import type { ArmorSlot } from './gearPlan.ts'
 import { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 export { isProtectedStationBlock, PROTECTED_STATION_BLOCKS } from './blockSafety.ts'
 import { formatFurnaceReady } from './placementGuard.ts'
-import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome } from './actionPostcondition.ts'
-import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, PORTAL_OPEN_FACE_MAX_DISTANCE, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
-import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource } from './netherPortalPlan.ts'
+import { isPlacePostconditionMet, isIgnitePostconditionMet, isSmeltPostconditionMet, isMinePostconditionMet, isMobHuntPostconditionMet, describeActionPostcondition, isUnverifiedOutcome, classifyActionOutcome } from './actionPostcondition.ts'
+import {
+  committedSkillKind,
+  commitmentInvalidation,
+  createSkillCommitment,
+  declaredPostconditions,
+  effectViolation,
+  envelopeForCandidate,
+  formatCommittedEnd,
+  formatCommittedStep,
+  formatSkillInvalidated,
+  isPolicyBoundaryOutcome,
+  skillOutcomeForFailure,
+  skillTerminalReasonFor,
+  targetIdentityKey,
+  targetIdentityOf,
+} from './skillCommitment.ts'
+import type { SkillTerminalReason } from './jevSemanticProjection.ts'
+import type {
+  Effect,
+  EffectEnvelope,
+  InventoryTransferSpec,
+  SkillCommitment,
+  SkillEndEvidence,
+  SkillOutcome,
+  StepAuthority,
+} from './skillCommitment.ts'
+import { FLINT_AND_STEEL, NETHER, NETHER_PORTAL, PORTAL_ENTER_SKILL, PORTAL_OPEN_FACE_LEVEL_TOLERANCE, PORTAL_OPEN_FACE_MAX_DISTANCE, PRECONDITION_MISSING, formatPortalApproachLeg, formatPortalApproachRefused, formatPortalEntered, formatPortalEntryRouteBlocked, formatPortalLit, formatPortalWalkIn, formatPortalWalkInRefused, formatReflex, formatSkillEnd, formatSkillInterrupt, formatSkillPolicyBoundary, formatSkillStart, formatSkillStep, formatSkillStepAuthority, normalizePortalDimension, parsePortalCells, portalOpenFaceCells, verifyPortal } from './netherPortalPlan.ts'
+import type { PortalApproachRefusal, PortalEntryRouteBlockedReason, PortalWalkInRefusal, SkillSelectionSource, SkillStepAuthority } from './netherPortalPlan.ts'
 import {
   classifyHeadroomBlocker,
   evaluatePillarStep,
@@ -177,8 +209,23 @@ export type FailureCode =
   | 'frame_build_blocked'
   /** the placement mechanism rejected: the server refused it / never answered */
   | 'place_refused'
-  /** SAFE: the body is out of breath, so the mechanical action stops */
+  /**
+   * SAFE: the body is out of breath, so the mechanical action stops
+   */
   | 'submerged'
+  /**
+   * The per-step landing guard stopped the locomotion leg BEFORE the step: the
+   * step's landing cell is a hazard (`hazard_between`) or has no real support
+   * within the movement policy's own drop bound (`unsafe_landing`). Both are
+   * typed refusals of the LEG, never a re-planned route: the body keeps standing
+   * where it is and the decision returns to the policy (`stepLanding.ts`).
+   */
+  | 'hazard_between'
+  | 'unsafe_landing'
+  /** issue #436 section 5/27: the step was outside the commitment's effect envelope */
+  | 'effect_envelope_violation'
+  /** issue #436 section 14/23: the world this commitment was grounded in changed */
+  | 'world_changed'
   | 'cancelled'
   | 'unknown_event'
 
@@ -236,6 +283,20 @@ export interface ExecutionResult {
   /** the target's last OBSERVED position during the hunt (the only bearing a teleport leaves) */
   huntLastKnown?: Vec3Json
   /**
+   * issue #436 section 4/17: the identity of the SkillCommitment this result
+   * belongs to, so the outcome joins to the selection that authorized it.
+   */
+  commitmentId?: string
+  /** issue #436 section 6: the typed lifecycle outcome of the commitment. */
+  skillOutcome?: SkillOutcome
+  /**
+   * issue #437 section 2: the §2 terminal reason of that outcome, so the packet
+   * builder maps the commitment outcome through ONE pure function.
+   */
+  skillTerminalReason?: SkillTerminalReason
+  /** the committed `CausalTargetIdentity` key (the packet's target identity). */
+  skillTargetIdentityKey?: string
+  /**
    * A RETRIEVE proved the remaining feet-distance to the remembered target
    * shrank by the meaningful epsilon. This is completion evidence the truth
    * layer may trust; `progressed` (a vertical chunk step) never is.
@@ -262,6 +323,11 @@ export interface CurrentAction {
   status: 'running' | 'done' | 'failed' | 'cancelled'
   detail: string
   completion: Promise<ExecutionResult>
+  /**
+   * issue #436 section 4: the first-class SkillCommitment this action realizes.
+   * Persisted for the whole action lifetime and carried into the evidence.
+   */
+  commitment?: SkillCommitment
 }
 
 export interface ClaimResult {
@@ -352,6 +418,19 @@ export interface ExecutorOptions {
   huntReacquireMs?: number
   /** The local action envelope a hunt re-acquires inside (`HUNT_REACQUIRE_RADIUS`). */
   huntReacquireRadius?: number
+  /**
+   * issue #436 section 5/27 fixture hook: replace the derived effect envelope so
+   * a fixture can prove a step outside the declared envelope FAILS CLOSED. Never
+   * set in production; production envelopes come from the selected candidate.
+   */
+  effectEnvelopeOverride?: EffectEnvelope
+  /**
+   * issue #436 section 14/23: the LIVE world epoch, injected by the host layer
+   * that owns it. When absent (standalone/fixture) only the observable dimension
+   * is revalidated; the lease itself is owned by the HOST and reaches this class
+   * through the action epoch (`ensureOwned`) exactly as before.
+   */
+  observedWorldEpoch?: () => number
   hooks?: ExecutorHooks
 }
 
@@ -418,6 +497,28 @@ const PORTAL_WALK_IN_STEP_MS = 45
  * tried before the ordinary typed failure.
  */
 const PORTAL_FACE_LEG_BUDGET_MS = 1200
+/** One class, several equivalent faces: at most two attempts, each bounded. */
+const PORTAL_FACE_LEG_MAX_ATTEMPTS = 2
+/** One forward-push tick of the face leg, and its livelock bound. */
+const PORTAL_FACE_LEG_STEP_MS = 45
+const PORTAL_FACE_LEG_NO_PROGRESS_MS = 600
+/**
+ * The entry Skill's DECLARED effect envelope (issue #436 §5/U4): realization of
+ * a selected portal entry is LOCOMOTION ONLY. The skill may move, look, jump and
+ * sprint; it may NOT dig, place, equip or use a station - so a wall that appears
+ * between the body and the gate can never grant it dig/place authority. Any
+ * remedy outside this envelope (mine the blocker, pillar, bridge) is a semantic
+ * recovery and must go back to Jev as a `SKILL_POLICY_BOUNDARY` alternative.
+ *
+ * The TYPED `EffectEnvelope` and the `SKILL_COMMIT ... effectEnvelopeHash=` line
+ * are owned by lane task/skill-commitment-phase1 (`skillCommitment.ts`): this
+ * skill states the same fact in the Phase-1 vocabulary (the `envelope=` field of
+ * its own start/step lines) instead of forking a second commitment formatter.
+ */
+const PORTAL_ENTER_EFFECT_ENVELOPE = 'movement-only(no_dig,no_place)'
+/** The entry Skill's declared postcondition identity (stable, code-owned). */
+const PORTAL_ENTER_POSTCONDITION = 'portal_entered:dimension=minecraft:the_nether'
+
 /**
  * Non-solid cells a body may walk INTO. The same shape covers every portal-like
  * traversal target, so the direct walk is not nether-specific.
@@ -473,6 +574,23 @@ export function headroomSufficient(above1Empty: boolean, above2Empty: boolean): 
 
 /** How far ahead the terrain-contact probe reads the facing column (blocks). */
 const FACE_PROBE_DIST = 0.8
+
+/**
+ * How far ahead one locomotion STEP looks for its landing cell (blocks): one
+ * cell along the travel heading, so the guard reads the column the body is about
+ * to enter and never the one it already stands in.
+ */
+const MOVE_STEP_PROBE_DISTANCE = 1
+/**
+ * The bounded window the per-step landing guard reads UNDER the landing cell.
+ * The live bound is the movement policy's own `maxDropDown` (8, pinned in
+ * `ensureMovements`), so the guard can never refuse a drop the `canDig=false`
+ * planner itself would have planned; these are only the fallback/clamp used when
+ * the plugin's movements are unreadable, so a hostile value cannot turn one step
+ * into a world scan.
+ */
+const MOVE_STEP_LANDING_WINDOW_DEFAULT = 8
+const MOVE_STEP_LANDING_WINDOW_MAX = 16
 
 export type ClimbManeuver = 'pre-contact-jump' | 'vertical-hop' | 'continue'
 
@@ -1141,6 +1259,12 @@ export interface SmeltExecutionDeps {
   ensureOwned(): void
   timeoutMs: number
   log(event: string, detail: Record<string, unknown>): void
+  /**
+   * issue #436 section 5: the executor's effect-envelope check, injected because
+   * this runner is a free function. Every GUI slot transfer/collection goes
+   * through it, so a smelt step outside the selected recipe/station fails closed.
+   */
+  assertEffect?(effect: Effect): void
 }
 
 export interface SmeltExecutionParams {
@@ -1337,10 +1461,22 @@ export async function executeFurnaceSmelt(
     try {
       if (inputToPlace > 0) {
         inputTransferAttempted = true
+        deps.assertEffect?.({
+          type: 'transfer',
+          itemName: params.inputItem,
+          count: inputToPlace,
+          container: 'furnace_input',
+        })
         await furnace.putInput(input!.type, null, inputToPlace)
         inputTransferred = true
       }
       if (fuelToPlace > 0) {
+        deps.assertEffect?.({
+          type: 'transfer',
+          itemName: params.fuelItem,
+          count: fuelToPlace,
+          container: 'furnace_fuel',
+        })
         await furnace.putFuel(fuel!.type, null, fuelToPlace)
       }
     } catch (error) {
@@ -1389,6 +1525,7 @@ export async function executeFurnaceSmelt(
       const output = furnace.outputItem()
       if (output !== null) {
         harvested += Math.max(1, Math.floor(output.count))
+        deps.assertEffect?.({ type: 'transfer', itemName: params.outputItem, count: null, container: 'furnace_output' })
         await furnace.takeOutput()
         await deps.wait(250)
         lastHarvestAt = Date.now()
@@ -1406,6 +1543,7 @@ export async function executeFurnaceSmelt(
       const output = furnace.outputItem()
       if (output !== null) {
         harvested += Math.max(1, Math.floor(output.count))
+        deps.assertEffect?.({ type: 'transfer', itemName: params.outputItem, count: null, container: 'furnace_output' })
         await furnace.takeOutput()
         await deps.wait(250)
       }
@@ -1552,6 +1690,14 @@ export class Executor {
   private maxConcurrent = 0
   private movementsReady = false
   private lastResultValue: ExecutionResult | null = null
+  /** issue #436 section 4: the commitment of the running action, or null */
+  private activeCommitment: SkillCommitment | null = null
+  /**
+   * issue #436 section 17: mechanical-step evidence is aggregated per step kind,
+   * so a walk that toggles controls every physics tick cannot flood the log while
+   * still proving that code performed mechanical continuation.
+   */
+  private stepLog = new Map<string, { count: number; lastEmitMs: number }>()
   private pathStatus: PathStatus = 'idle'
   /** the last dig's mechanism schedule/budget, for the typed `DIG_FAILED` marker */
   private lastDigPlan: DigTimePlan | null = null
@@ -1658,6 +1804,11 @@ export class Executor {
       resolveCompletion = resolve
     })
 
+    // issue #436 section 4: a Jev selection becomes a first-class commitment for
+    // the whole bounded lifetime of the action - identity, target, declared
+    // postconditions, effect envelope, budget, interrupt policy, and the
+    // provenance (who selected it, at which state fingerprint).
+    const commitment = this.buildCommitment(candidate)
     const action: CurrentAction = {
       id: candidate.id,
       kind: candidate.kind,
@@ -1667,8 +1818,16 @@ export class Executor {
       status: 'running',
       detail: '',
       completion,
+      commitment,
     }
     this.action = action
+    this.activeCommitment = commitment
+    this.stepLog.clear()
+    // NOTE (§17 single owner): `SKILL_COMMIT` is NOT emitted here. The controller
+    // owns it, because section 3 makes the ACTIVE decision epoch the thing that
+    // authorizes a commitment; it reads this commitment's id + contract hashes
+    // from `executor.current.commitment` at the authorize site, so one line
+    // carries both the epoch and the envelope identity.
     this.own(epoch)
     this.controller = controller
 
@@ -1747,6 +1906,10 @@ export class Executor {
     this.owned = 0
     this.action = null
     this.controller = null
+    // The commitment dies with its action: a late/stale completion can never
+    // resurrect it (section 25), and the next selection builds a new one.
+    this.activeCommitment = null
+    this.stepLog.clear()
   }
 
   private ensureOwned(epoch: number, signal: AbortSignal): void {
@@ -1757,10 +1920,410 @@ export class Executor {
   }
 
   // -------------------------------------------------------------------------
+  // issue #436: SkillCommitment construction, evidence, effect envelope
+  // -------------------------------------------------------------------------
+
+  /**
+   * The equipment a SELECTED candidate authorizes putting in hand. This is the
+   * grounded input to the effect envelope; it never ranks items (section 11).
+   *
+   *   - a PLACE/IGNITE/HOLD_ITEM/EQUIP/EAT selection names its exact item;
+   *   - a dig-ish selection names a tool FAMILY (`toolName`), and the physical
+   *     instances of that family already in the inventory are the mechanically
+   *     equivalent way to satisfy it;
+   *   - an ATTACK may put a carried weapon in hand because the fight's damage is
+   *     the held item's - the exact list is the carried weapons, and Phase 4
+   *     narrows it to one weapon or a policy boundary per section 11.
+   */
+  private groundedEquipItems(candidate: Candidate): string[] {
+    const carried = Object.keys(this.inventoryCounts()).filter((name) => (this.inventoryCounts()[name] ?? 0) > 0)
+    switch (candidate.kind) {
+      case 'PLACE': {
+        if (candidate.itemName === null) return []
+        const items = [candidate.itemName]
+        // A multi-cell FRAME build also places its verified support/scaffold
+        // block, so the carried scaffold materials are admissible.
+        if ((candidate.placementCells ?? []).length > 0) {
+          items.push(...carried.filter((name) => PILLAR_PLACE_PRIORITY.includes(name)))
+          items.push(...carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix))))
+        }
+        return [...new Set(items)]
+      }
+      case 'IGNITE':
+      case 'EQUIP':
+      case 'EAT':
+        return candidate.itemName === null ? [] : [candidate.itemName]
+      case 'MINE': {
+        if (candidate.toolName === null) return []
+        const suffix = `_${candidate.toolName}`
+        return carried.filter((name) => name.endsWith(suffix))
+      }
+      case 'DESCEND':
+      case 'STEP':
+      case 'MOVE':
+      case 'RETRIEVE': {
+        // A BRIDGE MOVE declares the ONE block its own placing route consumes
+        // (`meta.bridgeBlock`), so that block - and only it - is authorized. The
+        // selection grounds the item; this never ranks one.
+        const bridgeBlock = isBridgeMove(candidate) && typeof candidate.meta[BRIDGE_BLOCK_META] === 'string'
+          ? (candidate.meta[BRIDGE_BLOCK_META] as string)
+          : null
+        if (bridgeBlock !== null) return carried.filter((name) => name === bridgeBlock)
+        // A route-opening locomotion candidate may clear the cells its OWN
+        // grounded route names, so the carried instances of the tool families
+        // that route can require are the mechanically equivalent way to satisfy
+        // it. A plain walk with no declared route still authorizes no equip.
+        const routeOpening = candidate.meta.digRoute === true || candidate.meta.vertical !== undefined
+        if (routeOpening) {
+          return carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix)))
+        }
+        if (candidate.toolName === null) return []
+        const suffix = `_${candidate.toolName}`
+        return carried.filter((name) => name.endsWith(suffix))
+      }
+      case 'ENTER_PORTAL': {
+        // The portal-entry contract owns its grounded approach route (dig the
+        // remaining cells, place the footing), so the carried route tools are
+        // admissible. No station, no transfer, no attack.
+        const routeOpening = candidate.meta.digRoute === true || candidate.meta.vertical !== undefined
+        return routeOpening
+          ? carried.filter((name) => ROUTE_TOOL_SUFFIXES.some((suffix) => name.endsWith(suffix)))
+          : []
+      }
+      case 'ATTACK':
+        return carried.filter((name) => WEAPON_ITEM_SUFFIXES.some((suffix) => name.endsWith(suffix)))
+      case 'CRAFT':
+      case 'SMELT':
+      case 'RETREAT':
+      case 'WAIT':
+      case 'ESCALATE':
+        return []
+    }
+  }
+
+  /**
+   * The exact inventory transfers a selected candidate authorizes. Only the
+   * already-selected SMELT recipe/station has any: its input, its fuel, and the
+   * collection of its own output item (issue #436 section 12).
+   */
+  private groundedTransfers(candidate: Candidate): InventoryTransferSpec[] {
+    if (candidate.kind !== 'SMELT') return []
+    const inputItem = readMetaString(candidate, 'inputItem')
+    const fuelItem = readMetaString(candidate, 'fuelItem')
+    const transfers: InventoryTransferSpec[] = []
+    if (inputItem !== null) transfers.push({ itemName: inputItem, count: null, container: 'furnace_input' })
+    if (fuelItem !== null) transfers.push({ itemName: fuelItem, count: null, container: 'furnace_fuel' })
+    if (candidate.itemName !== null) {
+      transfers.push({ itemName: candidate.itemName, count: null, container: 'furnace_output' })
+    }
+    return transfers
+  }
+
+  /** The exact stations a selected candidate authorizes opening. */
+  private groundedStations(candidate: Candidate): string[] {
+    switch (candidate.kind) {
+      case 'CRAFT':
+        return ['crafting_table']
+      case 'SMELT':
+        return ['furnace', 'blast_furnace', 'smoker']
+      default:
+        return []
+    }
+  }
+
+  /** The declared wall-clock budget of the selection, when the runner has one. */
+  private budgetMsFor(candidate: Candidate): number | null {
+    switch (candidate.kind) {
+      case 'ATTACK':
+        return readMetaString(candidate, 'goalDrop') === null ? ATTACK_LEASE_MS : GOAL_HUNT_LEASE_MS
+      case 'MINE':
+      case 'DESCEND':
+      case 'STEP':
+        return this.options.digTimeoutMs
+      case 'MOVE':
+      case 'RETREAT':
+      case 'RETRIEVE':
+        return this.options.pathTimeoutMs
+      case 'SMELT':
+        return this.options.smeltTimeoutMs
+      default:
+        return null
+    }
+  }
+
+  /** Build the first-class commitment for one policy-selected candidate. */
+  private buildCommitment(candidate: Candidate): SkillCommitment {
+    const dimension = this.observedDimension()
+    const worldEpoch = readMetaNumber(candidate, 'worldEpoch', 0)
+    const selectedBy = readMetaString(candidate, 'selectedBy')
+    return createSkillCommitment({
+      decisionEpoch: Math.floor(readMetaNumber(candidate, 'decisionEpoch', 0)),
+      optionInstanceId: readMetaString(candidate, 'optionInstanceId'),
+      decisionId: readMetaString(candidate, 'decisionId'),
+      candidate,
+      target: targetIdentityOf(candidate, { dimension, worldEpoch }),
+      expectedPostconditions: declaredPostconditions(candidate),
+      allowedEffects: envelopeForCandidate(candidate, {
+        equipItems: this.groundedEquipItems(candidate),
+        stations: this.groundedStations(candidate),
+        transfers: this.groundedTransfers(candidate),
+      }),
+      budget: { ms: this.budgetMsFor(candidate), steps: null, retries: 0 },
+      selectedBy: selectedBy === 'hard_safety' ? 'hard_safety' : 'jev_pi',
+      selectedAtStateFingerprint: readMetaString(candidate, 'stateFingerprint'),
+      params: {
+        candidateId: candidate.id,
+        targetName: candidate.targetName,
+        itemName: candidate.itemName,
+        toolName: candidate.toolName,
+        goalDrop: readMetaString(candidate, 'goalDrop'),
+      },
+    })
+  }
+
+  /**
+   * Section 14/23: revalidate the live commitment against the world it was
+   * grounded in before any further mutation. This is fail-closed truth, never a
+   * recovery: a commitment whose dimension/worldEpoch changed cannot be
+   * mechanically repaired, and code may not substitute a new target for it
+   * (section 14/16). Called from every mutation choke point via `assertEffect`.
+   *
+   * `enter_portal` is the deliberate exception: its declared postcondition IS
+   * the dimension change, so it carries its own bounded transfer verification.
+   */
+  private assertCommitmentValid(): void {
+    const commitment = this.activeCommitment
+    if (commitment === null) return
+    const observedDimension = this.observedDimension()
+    const observedWorldEpoch = this.options.observedWorldEpoch?.() ?? null
+    const reason = commitmentInvalidation({
+      commitment,
+      observedDimension,
+      // With no live epoch provider the committed epoch is what is observed, so
+      // only the observable dimension is revalidated (never a false verdict).
+      observedWorldEpoch: observedWorldEpoch ?? committedWorldEpoch(commitment),
+      // The lease is the HOST's: a revoked lease aborts this action through
+      // `ensureOwned`, which settles it LEASE_REVOKED. Not re-derived here.
+      leaseHeld: true,
+    })
+    if (reason === null) return
+    this.logger.error(
+      'executor',
+      formatSkillInvalidated({
+        commitmentId: commitment.commitmentId,
+        decisionEpoch: commitment.decisionEpoch,
+        skillKind: commitment.skillKind,
+        candidateId: commitment.candidateId,
+        reason,
+        targetKey: targetIdentityKey(commitment.target),
+        observedDimension,
+        observedWorldEpoch: observedWorldEpoch ?? committedWorldEpoch(commitment),
+        detail: `live revalidation at a mutation choke point (${reason})`,
+      }),
+      {
+        actionId: commitment.candidateId,
+        commitmentId: commitment.commitmentId,
+        reason,
+        observedDimension,
+      },
+    )
+    throw new ExecutorError(
+      reason === 'LEASE_REVOKED' ? 'cancelled' : 'world_changed',
+      `commitment ${commitment.commitmentId} is invalid (${reason}); failing closed`,
+    )
+  }
+
+  /** The live dimension the body is in, or 'unknown' when the game state is absent. */
+  private observedDimension(): string {
+    const dimension = (this.bot.game as { dimension?: unknown } | undefined)?.dimension
+    return typeof dimension === 'string' ? dimension : 'unknown'
+  }
+
+  /**
+   * Section 5/27: every mechanical step goes through here while a commitment is
+   * active. A step outside the declared envelope FAILS CLOSED - it is never a
+   * reason to widen the envelope (section 16).
+   */
+  private assertEffect(effect: Effect): void {
+    const commitment = this.activeCommitment
+    if (commitment === null) return
+    this.assertCommitmentValid()
+    const envelope = this.options.effectEnvelopeOverride ?? commitment.allowedEffects
+    const violation = effectViolation(envelope, effect)
+    if (violation !== null) {
+      this.logger.error(
+        'executor',
+        `SKILL_ENVELOPE_VIOLATION commitmentId=${commitment.commitmentId} skillKind=${commitment.skillKind} ` +
+          `effect=${effect.type} reason=${violation} candidateId=${commitment.candidateId}`,
+        { actionId: commitment.candidateId, commitmentId: commitment.commitmentId, effect, violation },
+      )
+      throw new ExecutorError(
+        'effect_envelope_violation',
+        `${effect.type} is outside the ${commitment.skillKind} effect envelope (${violation}); failing closed`,
+      )
+    }
+    this.noteMechanicalStep(commitment, effect)
+  }
+
+  /**
+   * Section 17: the aggregated MECHANICAL_CONTINUATION evidence for a step that
+   * realizes the committed selection. Aggregated because a walk toggles controls
+   * every physics tick; the count still proves the mechanical work happened.
+   */
+  private noteMechanicalStep(commitment: SkillCommitment, effect: Effect): void {
+    const now = Date.now()
+    const entry = this.stepLog.get(effect.type)
+    const count = (entry?.count ?? 0) + 1
+    const alwaysReport =
+      effect.type === 'attack' ||
+      effect.type === 'dig' ||
+      effect.type === 'place' ||
+      effect.type === 'equip' ||
+      effect.type === 'station' ||
+      effect.type === 'transfer'
+    const due = entry === undefined || alwaysReport || now - entry.lastEmitMs >= SKILL_STEP_REPORT_MS
+    this.stepLog.set(effect.type, { count, lastEmitMs: due ? now : entry?.lastEmitMs ?? now })
+    if (!due) return
+    this.logger.info(
+      'executor',
+      formatCommittedStep({
+        commitmentId: commitment.commitmentId,
+        decisionEpoch: commitment.decisionEpoch,
+        skillKind: commitment.skillKind,
+        stepKind: effect.type,
+        authority: 'MECHANICAL_CONTINUATION',
+        evidence: describeEffect(effect),
+        worldDelta: this.bodyDelta(),
+        count,
+      }),
+      { actionId: commitment.candidateId, commitmentId: commitment.commitmentId, stepKind: effect.type, count },
+    )
+  }
+
+  /**
+   * Section 17: let a prerequisite-closure or safety-reflex layer record its own
+   * authority step against the active commitment. The layer that performs the
+   * step owns the claim; this only formats it into the shared evidence channel.
+   */
+  noteAuthorityStep(stepKind: string, authority: StepAuthority, evidence: string): void {
+    const commitment = this.activeCommitment
+    if (commitment === null) return
+    this.logger.info(
+      'executor',
+      formatCommittedStep({
+        commitmentId: commitment.commitmentId,
+        decisionEpoch: commitment.decisionEpoch,
+        skillKind: commitment.skillKind,
+        stepKind,
+        authority,
+        evidence,
+        worldDelta: this.bodyDelta(),
+      }),
+      { actionId: commitment.candidateId, commitmentId: commitment.commitmentId, stepKind, authority },
+    )
+  }
+
+  private bodyDelta(): string {
+    const position = this.bot.entity?.position
+    const health = this.bot.health
+    const where =
+      position === undefined
+        ? 'pos=unknown'
+        : `pos=${Math.round(position.x * 10) / 10},${Math.round(position.y * 10) / 10},${Math.round(position.z * 10) / 10}`
+    return `${where} health=${typeof health === 'number' ? health : 'unknown'}`
+  }
+
+  /**
+   * All direct control-state writes go through here so `move`/`jump`/`sprint`
+   * are inside the envelope check (section 5). The stock pathfinder drives the
+   * body through the movement entry points, which assert `move` themselves.
+   */
+  private setControlState(state: 'forward' | 'back' | 'left' | 'right' | 'jump' | 'sprint' | 'sneak', value: boolean): void {
+    if (value) {
+      if (state === 'jump') this.assertEffect({ type: 'jump' })
+      else if (state === 'sprint') this.assertEffect({ type: 'sprint' })
+      else this.assertEffect({ type: 'move' })
+    }
+    this.bot.setControlState(state, value)
+  }
+
+  /** Section 6/17: close the commitment evidence with its typed outcome. */
+  private logSkillEnd(
+    commitment: SkillCommitment | null,
+    result: ExecutionResult,
+    thrown: { failure: string | null; status: string } | null,
+  ): void {
+    if (commitment === null) return
+    const taxonomy = classifyActionOutcome({
+      kind: result.kind,
+      status: result.status,
+      verified: result.verified,
+      itemsGained: result.itemsGained,
+      blockRemoved: result.blockRemoved,
+      progressed: result.progressed,
+      entityDefeated: result.entityDefeated,
+      damageObserved: result.damageObserved,
+      failureCode: result.failure,
+    })
+    const failure = result.failure ?? thrown?.failure ?? null
+    const outcome = skillOutcomeForFailure(failure, result.status)
+    const evidence: SkillEndEvidence = {
+      commitmentId: commitment.commitmentId,
+      decisionEpoch: commitment.decisionEpoch,
+      skillKind: commitment.skillKind,
+      candidateId: commitment.candidateId,
+      execution: taxonomy.execution,
+      verification: taxonomy.verification,
+      progress: taxonomy.progress,
+      failureCode: failure,
+      outcome,
+      targetIdentityKey: targetIdentityKey(commitment.target),
+      ms: Date.now() - (this.action?.startedAt ?? Date.now()),
+    }
+    this.logger.info('executor', formatCommittedEnd(evidence), {
+      actionId: commitment.candidateId,
+      commitmentId: commitment.commitmentId,
+      outcome,
+      failure,
+      policyBoundary: isPolicyBoundaryOutcome(outcome),
+    })
+  }
+
+  // -------------------------------------------------------------------------
   // action runners
   // -------------------------------------------------------------------------
 
+  /**
+   * issue #436 section 17: the evidence wrapper for every action. It adds the
+   * commitmentId + typed lifecycle outcome to the settled result and closes the
+   * commitment evidence with SKILL_END. It never changes execution: the body is
+   * byte-for-byte the existing runner dispatch.
+   */
   private async runAction(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    startedAt: number,
+  ): Promise<ExecutionResult> {
+    const commitment = this.activeCommitment
+    const result = await this.runActionBody(candidate, epoch, signal, startedAt)
+    if (commitment !== null) {
+      // issue #436 section 6 + #437 section 2: the settled action carries the
+      // identity of the commitment it closes and the §6 lifecycle outcome. The
+      // #437 handoff PACKET is built by the controller (`jevSemanticProjection`),
+      // which owns the decision epoch; it reads this commitment's real
+      // `commitmentId` + `CausalTargetIdentity` instead of re-deriving them.
+      const outcome = skillOutcomeForFailure(result.failure, result.status)
+      result.commitmentId = commitment.commitmentId
+      result.skillOutcome = outcome
+      result.skillTargetIdentityKey = targetIdentityKey(commitment.target)
+      result.skillTerminalReason = skillTerminalReasonFor(outcome)
+      this.logSkillEnd(commitment, result, null)
+    }
+    return result
+  }
+
+  private async runActionBody(
     candidate: Candidate,
     epoch: number,
     signal: AbortSignal,
@@ -1798,7 +2361,7 @@ export class Executor {
             })
             this.logger.warn(
               'agent',
-              formatSkillEnd(PORTAL_ENTER_SKILL, 'failed', 'unverified', code),
+              `${formatSkillEnd(PORTAL_ENTER_SKILL, 'failed', 'unverified', code, code)} progress=none failureCode=${code} commitmentId=${candidate.id}#${epoch} targetIdentity=${this.portalTargetIdentity(this.portalEntryCellOf(candidate), this.portalEntryDimensionOf(candidate))}`,
               { actionId: candidate.id, failure: code },
             )
             throw error
@@ -2340,6 +2903,11 @@ export class Executor {
         }
         await this.equipPlacementItem(candidate, block, epoch, signal)
         this.setPhase(candidate, epoch, 'placing')
+        // issue #436 section 5/27: the placement goes through the SAME
+        // effect-envelope gate (and section 17 step evidence) as every other
+        // mechanical step, so a bridge cell outside its declared span fails
+        // closed instead of silently widening the envelope.
+        this.assertEffect({ type: 'place', position: span.place, itemName: block })
         try {
           await this.bot.placeBlock(reference.block, reference.face)
         } catch (error) {
@@ -3140,6 +3708,7 @@ export class Executor {
     const budget = decidePillarStepBudget(toY - Math.floor(this.bot.entity.position.y), PILLAR_SEARCH_POLICY)
     this.logger.info('agent', formatPillarSearch(budget), { actionId: candidate.id })
     this.setPhase(candidate, epoch, 'equipping')
+    this.assertEffect({ type: 'equip', itemName: item.name, destination: 'hand' })
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
     const solidAt: SolidAt = (x, y, z) => this.solidSupportAt(x, y, z)
@@ -3297,6 +3866,7 @@ export class Executor {
           const held = this.bot.inventory.items().find((entry) => entry.name === placeName)
           if (held === undefined) break
           this.setPhase(candidate, epoch, 'equipping')
+          this.assertEffect({ type: 'equip', itemName: held.name, destination: 'hand' })
           await this.bot.equip(held, 'hand')
           this.ensureOwned(epoch, signal)
         }
@@ -3367,7 +3937,10 @@ export class Executor {
             sleep: (ms) => delay(ms, signal),
             now: Date.now,
             ensureOwned: () => this.ensureOwned(epoch, signal),
-            place: (face) => this.bot.placeBlock(liveFooting, toVec3(this.bot, face)),
+            place: (face) => {
+              this.assertEffect({ type: 'place', position: face, itemName: placeName })
+              return this.bot.placeBlock(liveFooting, toVec3(this.bot, face))
+            },
             blockPlaced: () => this.currentBlockAt(placeCell)?.boundingBox === 'block',
           },
           { feetCell: feet, placeCell, support: liveFooting.position },
@@ -3552,7 +4125,7 @@ export class Executor {
     } finally {
       uninstallGroundCorrection()
       this.bot.physicsEnabled = savedPhysics
-      this.bot.setControlState('jump', false)
+      this.setControlState('jump', false)
     }
   }
 
@@ -3840,6 +4413,84 @@ export class Executor {
   }
 
   /**
+   * The bounded landing window: the movement policy's OWN `maxDropDown`, so this
+   * guard refuses exactly the steps the `canDig=false` planner would never have
+   * planned and leaves every legal drop untouched.
+   */
+  private moveStepLandingWindow(): number {
+    const movements = (
+      this.bot.pathfinder as unknown as { movements?: { maxDropDown?: number } } | undefined
+    )?.movements
+    const configured = movements?.maxDropDown
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1) {
+      return Math.min(Math.floor(configured), MOVE_STEP_LANDING_WINDOW_MAX)
+    }
+    return MOVE_STEP_LANDING_WINDOW_DEFAULT
+  }
+
+  /** Read the landing cell, its head cell and the bounded column under it. */
+  private readStepLanding(landing: Vec3Json): StepLandingReads {
+    const at = (y: number): StepLandingBlock | null => {
+      const block = this.currentBlockAt({ x: landing.x, y, z: landing.z })
+      return block === null ? null : { name: block.name, boundingBox: block.boundingBox }
+    }
+    const below: Array<StepLandingBlock | null> = []
+    for (let depth = 1; depth <= this.moveStepLandingWindow(); depth += 1) below.push(at(landing.y - depth))
+    return { landing: at(landing.y), head: at(landing.y + 1), below }
+  }
+
+  /**
+   * THE PER-STEP LANDING GUARD (measured defect run-mucdemk5-1kg6b).
+   *
+   * Asked once per step, BEFORE the body is actuated: does the step's landing
+   * column hold real ground within the movement policy's own drop bound, and is
+   * the landing cell itself free of a hazard? Reads only already-sensed cells
+   * (`bot.blockAt`), runs no A*, and never re-plans: a refusal logs the typed
+   * `MOVE_LEG_STOPPED` line, throws the same typed `ExecutorError`, and leaves
+   * the body standing exactly where it is, so the decision returns to the policy
+   * layer that owns WHICH destination/action comes next (#436).
+   */
+  private guardStepLanding(target: Vec3Json, landing: Vec3Json): void {
+    const feet = this.bot.entity.position
+    const from = {
+      x: Math.floor(feet.x),
+      y: Math.floor(feet.y + 0.1),
+      z: Math.floor(feet.z),
+    }
+    // A probe that resolves to the body's own column is not a step (a near-zero
+    // or backward heading): the body's own support is not this guard's question.
+    if (from.x === landing.x && from.z === landing.z && from.y === landing.y) return
+    const verdict = classifyStepLanding(this.readStepLanding(landing))
+    if (verdict.reason === null) return
+    const detail = {
+      actionId: this.action?.id ?? 'unknown',
+      target,
+      reason: verdict.reason,
+      from,
+      to: landing,
+      block: verdict.block ?? STEP_SUPPORT_UNKNOWN,
+      support: verdict.support,
+    }
+    this.logger.warn(
+      'executor',
+      formatMoveLegStopped({
+        reason: verdict.reason,
+        from,
+        to: landing,
+        block: verdict.block,
+        support: verdict.support,
+      }),
+      detail,
+    )
+    throw new ExecutorError(
+      verdict.reason,
+      `${verdict.reason} before the step to (${landing.x},${landing.y},${landing.z}): block=${
+        verdict.block ?? STEP_SUPPORT_UNKNOWN
+      } support=${verdict.support}`,
+    )
+  }
+
+  /**
    * Control-state actuator: the pathfinder plans (`getPathTo`, canDig=false) and
    * Mineflayer physics actuates. This ports the proven vertical-movement recipe
    * from `mcbot/movement-test/vertical.mjs#navigateTo`:
@@ -3863,6 +4514,9 @@ export class Executor {
     signal: AbortSignal,
     options: ControlWalkOptions,
   ): Promise<boolean> {
+    // issue #436 section 5: this control-walk is locomotion toward the SELECTED
+    // destination; it is inside `mayMove` for any Skill that declares it.
+    this.assertEffect({ type: 'move' })
     const pathfinder = this.bot.pathfinder
     if (pathfinder === undefined) return false
     const horizontalOnly = options.horizontalOnly === true
@@ -3931,13 +4585,13 @@ export class Executor {
         }
 
         if (Date.now() < backUntil) {
-          this.bot.setControlState('forward', false)
-          this.bot.setControlState('jump', false)
-          this.bot.setControlState('back', true)
+          this.setControlState('forward', false)
+          this.setControlState('jump', false)
+          this.setControlState('back', true)
           await delay(50, signal)
           continue
         }
-        this.bot.setControlState('back', false)
+        this.setControlState('back', false)
 
         if (Date.now() >= nextReplanAt && options.directBearing !== true) {
           nextReplanAt = Date.now() + 1500
@@ -3968,7 +4622,24 @@ export class Executor {
         const ux = dx / (horizontal || 1)
         const uz = dz / (horizontal || 1)
         if (horizontal > 0.05) {
+          this.assertEffect({ type: 'look' })
           await this.bot.lookAt(this.bot.entity.position.offset(dx, 0, dz), true).catch(() => undefined)
+          // PER-WAYPOINT PRE-STEP GUARD (measured defect run-mucecx3h-1ljqz /
+          // run-mucdemk5-1kg6b): the committed leg's own next step is validated
+          // BEFORE any control state is set. `noPath` from the canDig=false
+          // pathfinder routinely hands the leg to this control walker, which then
+          // held `forward` with physics on and walked the body off a fortress
+          // walkway into the lava lake below; `policy.guardMove` had only
+          // validated the FINAL target cell and this walker only headroom. A
+          // refusal stops the leg where the body stands (the `finally` below
+          // releases every control state) and returns the typed reason to the
+          // policy - the guard never re-plans a route, pillars or digs (that is
+          // Jev's WHICH).
+          this.guardStepLanding(target, {
+            x: Math.floor(position.x + ux * MOVE_STEP_PROBE_DISTANCE),
+            y: Math.floor(position.y + 0.1),
+            z: Math.floor(position.z + uz * MOVE_STEP_PROBE_DISTANCE),
+          })
         }
 
         const step = this.scanAhead(position, ux, uz)
@@ -4055,12 +4726,12 @@ export class Executor {
             `control locomotion pre-contact jump#${jumps} ${climb.source} rise=${round2(climb.top + 1 - position.y)} dist=${round2(climb.source === 'ray' ? step?.dist ?? climbDist : horizontal)} at y=${round2(position.y)} →(${climb.x},${climb.top},${climb.z}) headroom=[cur=${currentHeadroom} land=${landingHeadroom}]`,
             { target, anchor },
           )
-          this.bot.setControlState('back', false)
-          this.bot.setControlState('forward', true)
-          this.bot.setControlState('jump', true)
+          this.setControlState('back', false)
+          this.setControlState('forward', true)
+          this.setControlState('jump', true)
           const beforeJump = this.bot.entity.position.clone()
           await delay(110, signal)
-          this.bot.setControlState('jump', false)
+          this.setControlState('jump', false)
           await delay(180, signal)
           if (this.bot.entity.position.distanceTo(beforeJump) < 0.05) {
             jumpStreak += 1
@@ -4114,13 +4785,13 @@ export class Executor {
           // rejects a blocked forward push combined with a jump.
           const hopPlan = planVerticalHop(pinned)
           this.logger.info('agent', formatHopPlan(hopPlan), { target, anchor, pinned, recoveries })
-          this.bot.setControlState('forward', hopPlan.holdForward)
-          this.bot.setControlState('jump', true)
+          this.setControlState('forward', hopPlan.holdForward)
+          this.setControlState('jump', true)
           await delay(hopPlan.riseMs, signal)
-          this.bot.setControlState('jump', false)
-          this.bot.setControlState('forward', true)
+          this.setControlState('jump', false)
+          this.setControlState('forward', true)
           await delay(hopPlan.pushMs, signal)
-          this.bot.setControlState('forward', false)
+          this.setControlState('forward', false)
           const afterHop = this.bot.entity.position
           const hop = evaluateHop(beforeHop, afterHop, node)
           const { dy, occupiedTarget, hopOk } = hop
@@ -4155,15 +4826,15 @@ export class Executor {
           if (this.isPinned()) {
             // Back off to create room for the next pre-contact jump; a depression
             // gets a longer back-off so the bot clears the pit wall first.
-            this.bot.setControlState('back', true)
+            this.setControlState('back', true)
             backUntil = Date.now() + (depressionEscape ? 450 : 300)
           }
           lastPosition = this.bot.entity.position.clone()
           lastProgressAt = Date.now() - 300
           continue
         } else {
-          this.bot.setControlState('forward', true)
-          this.bot.setControlState('jump', false)
+          this.setControlState('forward', true)
+          this.setControlState('jump', false)
           await delay(45, signal)
         }
 
@@ -4186,9 +4857,9 @@ export class Executor {
       return false
     } finally {
       uninstallGroundCorrection()
-      this.bot.setControlState('forward', false)
-      this.bot.setControlState('jump', false)
-      this.bot.setControlState('back', false)
+      this.setControlState('forward', false)
+      this.setControlState('jump', false)
+      this.setControlState('back', false)
       this.bot.physicsEnabled = savedPhysics
     }
   }
@@ -4258,6 +4929,7 @@ export class Executor {
     const item = this.bot.inventory.items().find((entry) => entry.name === itemName)
     if (item === undefined) throw new ExecutorError('target_gone', `${itemName} left the inventory`)
     this.setPhase(candidate, epoch, 'equipping')
+    this.assertEffect({ type: 'equip', itemName: item.name, destination: 'hand' })
     await this.bot.equip(item, 'hand')
     this.ensureOwned(epoch, signal)
     this.setPhase(candidate, epoch, 'consuming')
@@ -4563,8 +5235,10 @@ export class Executor {
 
         stopFollowing()
         this.setPhase(candidate, epoch, goalDrop === null ? 'attacking' : `hunting-for-${goalDrop}`)
+        this.assertEffect({ type: 'look' })
         await this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0), true)
         this.ensureOwned(epoch, signal)
+        this.assertEffect({ type: 'attack', entityId: entity.id, mobType: entity.name ?? null })
         this.bot.attack(entity)
         attacks += 1
         lastSwingAt = Date.now()
@@ -5031,6 +5705,7 @@ export class Executor {
       // the healthy path.
       if (table === null) {
         try {
+          this.assertEffect({ type: 'station', station: 'inventory_crafting_grid' })
           await this.bot.craft(recipe, craftCount)
         } finally {
           await this.closeAbandonedCraftWindow()
@@ -5047,6 +5722,7 @@ export class Executor {
         this.ensureOwned(epoch, signal)
         const face = deriveInteractionFace(stand, station)
         const faceVec = this.bot.entity.position.clone().set(face.x, face.y, face.z)
+        this.assertEffect({ type: 'station', station: 'crafting_table' })
         await craftAtTable(this.bot, table, recipe as unknown as CraftRecipeLike, faceVec)
       }
       this.ensureOwned(epoch, signal)
@@ -5130,9 +5806,11 @@ export class Executor {
       furnaceSource,
     })
     this.setPhase(candidate, epoch, 'smelting')
+    this.assertEffect({ type: 'station', station: block.name })
     const outcome = await executeFurnaceSmelt(
       {
         openFurnace: () => this.bot.openFurnace(block),
+        assertEffect: (effect) => this.assertEffect(effect),
         inventoryItems: () => this.bot.inventory.items().map((entry) => ({ name: entry.name, type: entry.type, count: entry.count })),
         countItem: (name) => this.countItem(name),
         wait: (ms) => delay(ms, signal),
@@ -5340,6 +6018,7 @@ export class Executor {
     epoch: number,
     signal: AbortSignal,
   ): Promise<void> {
+    this.assertEffect({ type: 'equip', itemName: item.name, destination })
     if (this.options.actuationPort !== undefined) {
       await this.options.actuationPort.equip(item, destination)
     } else {
@@ -5401,6 +6080,11 @@ export class Executor {
     await this.equipPlacementItem(candidate, itemName, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
     try {
+      this.assertEffect({
+        type: 'place',
+        position: { x: target.x, y: target.y, z: target.z },
+        itemName,
+      })
       await this.bot.placeBlock(reference.block, reference.face)
     } catch (error) {
       // The placement mechanism's own rejection was previously an untyped
@@ -5844,6 +6528,11 @@ export class Executor {
     this.setPhase(candidate, epoch, 'equipping')
     await this.equipPlacementItem(candidate, supportItem.name, epoch, signal)
     this.setPhase(candidate, epoch, 'placing')
+    this.assertEffect({
+      type: 'place',
+      position: { x: scaffold.x, y: scaffold.y, z: scaffold.z },
+      itemName: supportItem.name,
+    })
     await this.bot.placeBlock(reference.block, reference.face)
     this.ensureOwned(epoch, signal)
     const placedName = await this.waitForPlacedBlock(scaffold, supportItem.name, epoch, signal)
@@ -5936,6 +6625,7 @@ export class Executor {
     }
 
     this.setPhase(candidate, epoch, 'equipping')
+    this.assertEffect({ type: 'equip', itemName: held.name, destination: 'hand' })
     if (this.options.actuationPort !== undefined) {
       await this.options.actuationPort.equip(held, 'hand')
     } else {
@@ -6050,13 +6740,20 @@ export class Executor {
 
     // Issue #436: the entry Skill states its own boundary up front - the target
     // is the SELECTED portal site, and everything after this is code finishing
-    // that choice mechanically.
+    // that choice mechanically. The commitment identity, the declared
+    // postcondition and the declared effect envelope travel with it, so every
+    // later SKILL_STEP/SKILL_POLICY_BOUNDARY/SKILL_END line can be tied to this
+    // one Jev decision (§17). The `SKILL_COMMIT` line itself is emitted by the
+    // canonical commitment module (lane task/skill-commitment-phase1), not here.
     this.logger.info(
       'agent',
       formatSkillStart(
         PORTAL_ENTER_SKILL,
         this.portalEntrySelectionSource(candidate),
-        `site=${this.portalSiteOrigin(expectedCells, enterCell)} enter=${enterCell.x},${enterCell.y},${enterCell.z} dimension=${dimension}`,
+        `site=${this.portalSiteOrigin(expectedCells, enterCell)} enter=${enterCell.x},${enterCell.y},${enterCell.z} dimension=${dimension}` +
+          ` commitmentId=${this.portalCommitmentId(candidate, epoch)}` +
+          ` targetIdentity=${this.portalTargetIdentity(enterCell, dimension)}` +
+          ` postcondition=${PORTAL_ENTER_POSTCONDITION} envelope=${PORTAL_ENTER_EFFECT_ENVELOPE}`,
       ),
       { actionId: candidate.id, target: enterCell, dimension },
     )
@@ -6091,10 +6788,13 @@ export class Executor {
     // portal-specific mechanic. Standing inside a portal block is a world
     // mechanic, not a skill.
     this.setPhase(candidate, epoch, 'pathing')
-    this.logger.info(
-      'agent',
-      formatSkillStep(PORTAL_ENTER_SKILL, 'path', `target=${enterCell.x},${enterCell.y},${enterCell.z}`),
-      { actionId: candidate.id, target: enterCell },
+    this.logPortalStep(
+      candidate,
+      epoch,
+      'path',
+      'MECHANICAL_CONTINUATION',
+      `target=${enterCell.x},${enterCell.y},${enterCell.z}`,
+      'none',
     )
     // Abort the generic path the moment the server transfers us, so no fallback
     // keeps steering a body that is already in the other dimension.
@@ -6337,10 +7037,13 @@ export class Executor {
       // Standing in the lit portal block is the transfer trigger; wait out the
       // server-side portal delay under a bounded deadline.
       this.setPhase(candidate, epoch, 'entering')
-      this.logger.info(
-        'agent',
-        formatSkillStep(PORTAL_ENTER_SKILL, 'enter', `cell=${enterCell.x},${enterCell.y},${enterCell.z}`),
-        { actionId: candidate.id, target: enterCell },
+      this.logPortalStep(
+        candidate,
+        epoch,
+        'enter',
+        'MECHANICAL_CONTINUATION',
+        `cell=${enterCell.x},${enterCell.y},${enterCell.z}`,
+        'none',
       )
       const deadline = Date.now() + timeoutMs
       while (!this.dimensionMatches(dimension) && Date.now() < deadline) {
@@ -6418,8 +7121,18 @@ export class Executor {
     if (stepUp && !this.solidSupportAt(enterCell.x, enterCell.y - 1, enterCell.z)) return refuse('no_support')
     // A frame column between the body and the interior is an unsteppable face:
     // the straight walk can never get in, and the caller grounds the step-aside
-    // leg onto an open face instead.
-    if (this.portalApproachOccluded(enterCell, feetY)) return refuse('approach_occluded')
+    // leg onto an open face instead. U2: the refusal carries the EXACT blocking
+    // cells, not "something is in the way".
+    const blockers = this.portalApproachBlockers(enterCell, feetY)
+    if (blockers.length > 0) {
+      const refusal = refuse('approach_occluded')
+      this.logger.warn('agent', `PORTAL_WALK_IN_BLOCKED blocker=${this.portalBlockerEvidence(blockers)}`, {
+        actionId: candidate.id,
+        target: enterCell,
+        blocker: this.portalBlockerEvidence(blockers),
+      })
+      return refusal
+    }
     // Already in the interior's own cell space: the server's transfer is the only
     // thing left, so do not push the body out the far side.
     if (this.portalInsideInterior(enterCell)) {
@@ -6441,10 +7154,13 @@ export class Executor {
       }),
       { actionId: candidate.id, target: enterCell },
     )
-    this.logger.info(
-      'agent',
-      formatSkillStep(PORTAL_ENTER_SKILL, 'walk_in', `cell=${enterCell.x},${enterCell.y},${enterCell.z} from_d=${round2(fromD)}`),
-      { actionId: candidate.id, target: enterCell },
+    this.logPortalStep(
+      candidate,
+      epoch,
+      'walk_in',
+      'MECHANICAL_CONTINUATION',
+      `cell=${enterCell.x},${enterCell.y},${enterCell.z} from_d=${round2(fromD)} step_up=${stepUp}`,
+      'none',
     )
     const savedPhysics = this.bot.physicsEnabled
     const uninstallGroundCorrection = installGroundCorrection(this.bot, (x, y, z) => this.solidSupportAt(x, y, z))
@@ -6470,7 +7186,7 @@ export class Executor {
         }
         if (Date.now() - lastProgressAt > PORTAL_WALK_IN_NO_PROGRESS_MS) break
         if (!this.portalCellTraversable(enterCell)) break
-        this.bot.setControlState('back', false)
+        this.setControlState('back', false)
         // Face the cell CENTRE (the measured recipe; the pathfinder steers at the
         // node corner and rubs the frame instead).
         await this.bot
@@ -6484,27 +7200,30 @@ export class Executor {
           const hop = planVerticalHop(pinned)
           hops += 1
           this.logger.info('agent', formatHopPlan(hop), { target: enterCell, actionId: candidate.id, pinned, hops })
-          this.logger.info(
-            'agent',
-            formatSkillStep(PORTAL_ENTER_SKILL, 'hop', `n=${hops} cell=${enterCell.x},${enterCell.y},${enterCell.z} pinned=${pinned}`),
-            { actionId: candidate.id, target: enterCell, pinned },
+          this.logPortalStep(
+            candidate,
+            epoch,
+            'hop',
+            'MECHANICAL_CONTINUATION',
+            `n=${hops} cell=${enterCell.x},${enterCell.y},${enterCell.z} pinned=${pinned}`,
+            'none',
           )
-          this.bot.setControlState('forward', hop.holdForward)
-          this.bot.setControlState('jump', true)
+          this.setControlState('forward', hop.holdForward)
+          this.setControlState('jump', true)
           await delay(hop.riseMs, signal)
-          this.bot.setControlState('jump', false)
-          this.bot.setControlState('forward', true)
+          this.setControlState('jump', false)
+          this.setControlState('forward', true)
           await delay(hop.pushMs, signal)
         } else {
-          this.bot.setControlState('forward', true)
+          this.setControlState('forward', true)
           await delay(PORTAL_WALK_IN_STEP_MS, signal)
         }
       }
     } finally {
       uninstallGroundCorrection()
-      this.bot.setControlState('forward', false)
-      this.bot.setControlState('jump', false)
-      this.bot.setControlState('back', false)
+      this.setControlState('forward', false)
+      this.setControlState('jump', false)
+      this.setControlState('back', false)
       this.bot.physicsEnabled = savedPhysics
     }
     const transferred = this.dimensionMatches(dimension)
@@ -6520,6 +7239,131 @@ export class Executor {
       hops,
     })
     return { attempted: true, inside, transferred, fromD, toD, refusal: null }
+  }
+
+  /** The SELECTED entry cell as carried by the candidate (never re-derived). */
+  private portalEntryCellOf(candidate: Candidate): Vec3Json {
+    const target = candidate.target ?? { x: 0, y: 0, z: 0 }
+    return {
+      x: readMetaNumber(candidate, 'enterX', target.x),
+      y: readMetaNumber(candidate, 'enterY', target.y),
+      z: readMetaNumber(candidate, 'enterZ', target.z),
+    }
+  }
+
+  private portalEntryDimensionOf(candidate: Candidate): string {
+    return readMetaString(candidate, 'dimension') ?? NETHER
+  }
+
+  /** The stable commitment identity of this entry attempt (issue #436 §17). */
+  private portalCommitmentId(candidate: Candidate, epoch: number): string {
+    return `${candidate.id}#${epoch}`
+  }
+
+  /** The selected target's identity string (never re-derived from the world). */
+  private portalTargetIdentity(enterCell: Vec3Json, dimension: string): string {
+    return `enter=${enterCell.x},${enterCell.y},${enterCell.z}|dimension=${dimension}`
+  }
+
+  /**
+   * One `SKILL_STEP` under the commitment. `authority` separates the three
+   * deterministic layers issue #436 §17 requires: ordinary realization
+   * (MECHANICAL_CONTINUATION), a U1..U6-justified prerequisite
+   * (MANDATORY_PREREQUISITE) and safety stabilization (HARD_SAFETY_REFLEX,
+   * never used by this skill).
+   */
+  private logPortalStep(
+    candidate: Candidate,
+    epoch: number,
+    stepKind: string,
+    authority: SkillStepAuthority,
+    evidence: string,
+    worldDelta: string,
+  ): void {
+    this.logger.info(
+      'agent',
+      formatSkillStep(
+        PORTAL_ENTER_SKILL,
+        stepKind,
+        `${formatSkillStepAuthority(authority, evidence, worldDelta)} commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
+      ),
+      { actionId: candidate.id, stepKind, authority },
+    )
+  }
+
+  /**
+   * U2: the EXACT blocking cells of the straight approach, with block names -
+   * "obsidian@25,67,9+25,68,9 is solid at the feet and the head", never
+   * "something is in the way".
+   */
+  private portalBlockerEvidence(blockers: readonly Vec3Json[]): string {
+    return blockers
+      .map((cell) => `${this.currentBlockAt(cell)?.name ?? 'unknown'}@${cell.x},${cell.y},${cell.z}`)
+      .join('+')
+  }
+
+  /**
+   * The portal's own structure (U5): the interior cells and the FRAME RING - a
+   * cell holding portal material (`nether_portal`/`obsidian`, the frame's own
+   * blocks) one step outside an interior cell, at the interior's level or the
+   * ring rows above/below it. A player-placed dirt/leaf wall next to the gate is
+   * NOT the structure and may be reported as a dig alternative.
+   */
+  private isPortalStructureCell(cell: Vec3Json, expectedCells: readonly Vec3Json[]): boolean {
+    const interiors = expectedCells.length > 0 ? expectedCells : [cell]
+    if (interiors.some((other) => other.x === cell.x && other.y === cell.y && other.z === cell.z)) return true
+    const block = this.currentBlockAt(cell)
+    if (block === null || (block.name !== NETHER_PORTAL && block.name !== OBSIDIAN)) return false
+    return interiors.some(
+      (other) =>
+        Math.abs(other.x - cell.x) <= 1 &&
+        Math.abs(other.z - cell.z) <= 1 &&
+        cell.y >= other.y - 1 &&
+        cell.y <= other.y + 2,
+    )
+  }
+
+  /**
+   * U3/U4/U5: the grounded remedy classes OTHER than the in-envelope walk-around,
+   * each named with the exact cell/block and its availability. A DIG remedy is
+   * never available on the portal's own structure (protected, U5) and is only
+   * "available" when the body could actually harvest it; a vertical route counts
+   * only when it has not already been spent inside this commitment.
+   */
+  private portalRemedyAlternatives(
+    enterCell: Vec3Json,
+    expectedCells: readonly Vec3Json[],
+    blockers: readonly Vec3Json[],
+    verticalKind: string,
+    verticalSpent: boolean,
+  ): string[] {
+    const alternatives: string[] = []
+    for (const cell of blockers) {
+      const block = this.currentBlockAt(cell)
+      if (block === null) continue
+      if (this.isPortalStructureCell(cell, expectedCells)) {
+        alternatives.push(`dig@${cell.x},${cell.y},${cell.z}(${block.name},protected:portal_structure)`)
+        continue
+      }
+      // Grounded availability from the SAME harvest truth MINE uses: a block the
+      // body could actually harvest is a real alternative class (Jev's), one it
+      // cannot (obsidian with bare hands) is not. `harvestTool === null` means the
+      // block needs no tool at all (dirt/leaves), so it is hand-harvestable.
+      const harvest = resolveBlockHarvest(this.bot, block.name)
+      const tool =
+        harvest.harvestTool === null
+          ? 'hand'
+          : (this.bot.inventory.items().find((item) => item.name.endsWith(`_${harvest.harvestTool}`))?.name ?? null)
+      alternatives.push(
+        tool !== null
+          ? `dig@${cell.x},${cell.y},${cell.z}(${block.name},available:${tool})`
+          : `dig@${cell.x},${cell.y},${cell.z}(${block.name},unavailable:no_tool)`,
+      )
+    }
+    if (verticalKind !== 'none') {
+      alternatives.push(`vertical:${verticalKind}(${verticalSpent ? 'spent' : 'grounded'})`)
+    }
+    return alternatives
   }
 
   /**
@@ -6547,6 +7391,14 @@ export class Executor {
   private portalCellDistance(cell: Vec3Json): number {
     const position = this.bot.entity.position
     return Math.hypot(position.x - (cell.x + 0.5), position.z - (cell.z + 0.5))
+  }
+
+  /** Is the body standing on this exact cell (its footprint + level)? */
+  private portalInsideFace(cell: Vec3Json): boolean {
+    return (
+      this.portalCellDistance(cell) <= PORTAL_WALK_IN_INSIDE_RADIUS &&
+      Math.abs(this.bot.entity.position.y - cell.y) <= PORTAL_OPEN_FACE_LEVEL_TOLERANCE
+    )
   }
 
   /**
@@ -6609,6 +7461,7 @@ export class Executor {
     }
     const only = vias[0]
     return vias.length === 1 && only !== undefined ? only : null
+
   }
 
   /** Is the body's own cell space the portal interior (its footprint + level)? */
@@ -6653,16 +7506,132 @@ export class Executor {
    * jump), a solid cell at the feet AND at the head is a wall. Sampled along the
    * same segment the walk would take, so the answer is about THIS body.
    */
-  private portalApproachOccluded(cell: Vec3Json, feetY: number): boolean {
+  private portalApproachBlockers(cell: Vec3Json, feetY: number): Vec3Json[] {
     const position = this.bot.entity.position
+    const blockers: Vec3Json[] = []
+    const seen = new Set<string>()
     const steps = 6
     for (let index = 1; index <= steps; index += 1) {
       const t = index / steps
       const x = Math.floor(position.x + (cell.x + 0.5 - position.x) * t)
       const z = Math.floor(position.z + (cell.z + 0.5 - position.z) * t)
-      if (this.solidSupportAt(x, feetY, z) && this.solidSupportAt(x, feetY + 1, z)) return true
+      if (!this.solidSupportAt(x, feetY, z) || !this.solidSupportAt(x, feetY + 1, z)) continue
+      for (const y of [feetY, feetY + 1]) {
+        const key = `${x},${y},${z}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        blockers.push({ x, y, z })
+      }
+      if (blockers.length >= 4) break
     }
-    return false
+    return blockers
+  }
+
+  /**
+   * ONE bounded planned push onto an open face of the portal.
+   *
+   * WHY NOT `walkByControls`: the measured leg called that motor and it reported
+   * `unreachable` for a face that WAS routable - it steers a straight bearing at
+   * the target (into the frame column corner) and its 2-block-face veto fires on
+   * any tall wall inside its scan cone even when the plan routes around it. The
+   * face leg needs the same three things the direct walk proved: follow the
+   * ordinary pathfinder plan when one exists, face the current waypoint CENTRE,
+   * and push - the server's own collision resolution slides the body along a face
+   * it cannot pass (the measured live body slid along the frame column). Bounded
+   * by a hard budget AND a no-progress break; the hops reuse the audited
+   * `planVerticalHop` recipe and the ground correction the walk uses.
+   */
+  private async walkToPortalFace(
+    candidate: Candidate,
+    epoch: number,
+    signal: AbortSignal,
+    face: Vec3Json,
+  ): Promise<boolean> {
+    const savedPhysics = this.bot.physicsEnabled
+    const uninstallGroundCorrection = installGroundCorrection(this.bot, (x, y, z) => this.solidSupportAt(x, y, z))
+    this.bot.physicsEnabled = true
+    const deadline = Date.now() + PORTAL_FACE_LEG_BUDGET_MS
+    let plan: Vec3Json[] = []
+    let lastProgressAt = Date.now()
+    let hops = 0
+    try {
+      const pathfinder = this.bot.pathfinder
+      if (pathfinder !== undefined) {
+        try {
+          const computed = pathfinder.getPathTo(pathfinder.movements, new goals.GoalBlock(face.x, face.y, face.z), 800)
+          if (computed.status !== 'noPath') {
+            plan = computed.path
+              .slice(1)
+              .map((node) => ({ x: Math.floor(node.x), y: node.y, z: Math.floor(node.z) }))
+          }
+        } catch {
+          plan = []
+        }
+      }
+      let index = 0
+      let lastPosition = this.bot.entity.position.clone()
+      while (Date.now() < deadline) {
+        this.ensureOwned(epoch, signal)
+        if (this.portalInsideFace(face)) return true
+        const position = this.bot.entity.position
+        while (index < plan.length) {
+          const node = plan[index]
+          if (node === undefined) break
+          if (
+            Math.hypot(node.x + 0.5 - position.x, node.z + 0.5 - position.z) <= 0.6 &&
+            Math.abs(node.y - position.y) <= 0.6
+          ) {
+            index += 1
+            continue
+          }
+          break
+        }
+        const node = plan[index] ?? face
+        const dx = node.x + 0.5 - position.x
+        const dz = node.z + 0.5 - position.z
+        if (Math.hypot(dx, dz) > 0.05) {
+          await this.bot
+            .lookAt(this.bot.entity.position.offset(dx, 0, dz), true)
+            .catch(() => undefined)
+        }
+        if (node.y - this.bot.entity.position.y > 0.5) {
+          const pinned = this.isPinned()
+          const hop = planVerticalHop(pinned)
+          hops += 1
+          this.logger.info('agent', formatHopPlan(hop), {
+            target: face,
+            actionId: candidate.id,
+            pinned,
+            hops,
+            leg: 'approach_leg',
+          })
+          this.bot.setControlState('forward', hop.holdForward)
+          this.bot.setControlState('jump', true)
+          await delay(hop.riseMs, signal)
+          this.bot.setControlState('jump', false)
+          this.bot.setControlState('forward', true)
+          await delay(hop.pushMs, signal)
+        } else {
+          this.bot.setControlState('back', false)
+          this.bot.setControlState('forward', true)
+          await delay(PORTAL_FACE_LEG_STEP_MS, signal)
+        }
+        const moved = this.bot.entity.position
+        if (moved.distanceTo(lastPosition) > 0.03) {
+          lastPosition = moved.clone()
+          lastProgressAt = Date.now()
+        } else if (Date.now() - lastProgressAt > PORTAL_FACE_LEG_NO_PROGRESS_MS) {
+          break
+        }
+      }
+      return this.portalInsideFace(face)
+    } finally {
+      uninstallGroundCorrection()
+      this.bot.setControlState('forward', false)
+      this.bot.setControlState('jump', false)
+      this.bot.setControlState('back', false)
+      this.bot.physicsEnabled = savedPhysics
+    }
   }
 
   /**
@@ -6683,55 +7652,99 @@ export class Executor {
   ): Promise<{ moved: boolean; cell: Vec3Json | null; fromD: number; toD: number }> {
     const fromD = this.portalCellDistance(enterCell)
     const interiors = expectedCells.length > 0 ? expectedCells : [enterCell]
+    const bodyCell = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    }
+    const feetY = Math.floor(this.bot.entity.position.y)
+    const blockers = this.portalApproachBlockers(enterCell, feetY)
+    const blockerEvidence = blockers.length > 0 ? this.portalBlockerEvidence(blockers) : 'none'
+    const verticalKind = readMetaString(candidate, 'vertical') ?? 'none'
     const faces = portalOpenFaceCells(
       interiors,
       enterCell.y,
       (spot) => isStandable(this.bot, spot),
-      {
-        x: Math.floor(this.bot.entity.position.x),
-        y: Math.floor(this.bot.entity.position.y),
-        z: Math.floor(this.bot.entity.position.z),
-      },
+      bodyCell,
       PORTAL_OPEN_FACE_MAX_DISTANCE,
-    ).filter((spot) => !this.portalInsideInterior(spot)) // a face the body already stands on is not a step aside
+    )
+      // a face the body already stands on is not a step aside
+      .filter((spot) => !this.portalInsideInterior(spot))
+      // reachable from THIS body: at most one block up/down (a further level is a
+      // climb the walk must not invent)
+      .filter((spot) => Math.abs(spot.y - feetY) <= PORTAL_OPEN_FACE_LEVEL_TOLERANCE)
+      // NOTE: no straight-line occlusion filter here. The measured leg walked a
+      // DIRECT bearing into the frame column corner and reported `unreachable`
+      // while the face itself was reachable AROUND it, so reachability is decided
+      // by the planned walk below (which routes), not by a straight ray.
+    const faceNames = faces.map((face) => `walk_face@${face.x},${face.y},${face.z}`)
+    // U3: DETOUR (walk around the frame) is the only remedy class this Skill's
+    // envelope may execute. Any OTHER genuinely available class - mining the
+    // exact blocker, a vertical/place route that is still grounded - is a
+    // different semantic recovery, so code must stop and surface it instead.
+    // Every class that was grounded is named below, INCLUDING one that this
+    // commitment already spent (the vertical leg it ran before this fallback):
+    // dropping it from the evidence would hide a class a reviewer needs to see.
+    const remedyClasses = this.portalRemedyAlternatives(
+      enterCell,
+      interiors,
+      blockers,
+      verticalKind,
+      verticalKind !== 'none',
+    )
+    const otherRemedies = remedyClasses.filter((entry) => entry.includes('available:') || entry.includes('(grounded)'))
+    const boundary = (reason: string, alternatives: readonly string[]): void => {
+      this.logger.warn(
+        'agent',
+        `${formatSkillPolicyBoundary({ skill: PORTAL_ENTER_SKILL, reason, alternatives })} commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
+        { actionId: candidate.id, reason, target: enterCell },
+      )
+    }
     if (faces.length === 0) {
       this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'no_open_face'), {
         actionId: candidate.id,
         target: enterCell,
+        blocker: blockerEvidence,
       })
       this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, 'no_open_face'), {
         actionId: candidate.id,
         target: enterCell,
       })
+      boundary('no_in_envelope_remedy', remedyClasses)
       return { moved: false, cell: null, fromD, toD: fromD }
     }
-    // The governing rule (#436): code may execute a uniquely-determined
-    // safety/mechanical prerequisite; if several semantically meaningful
-    // alternatives remain, they stay policy-visible candidates for Jev. Two open
-    // faces are two different ways in, so the skill does NOT pick one - the
-    // candidate layer already offers each face as an ordinary MOVE leg.
-    if (faces.length > 1) {
+    // U3 is a test over semantic REMEDY CLASSES, not over cells: every open face
+    // is the same recovery (walk around the frame - a DETOUR), and which face is
+    // used is a mechanical refinement like which path segment to follow. A
+    // different class (mining the exact blocker, a still-grounded vertical/place
+    // route) is a different recovery, so the skill stops and surfaces it. All
+    // faces stay policy-visible: they are offered by the candidate layer AND
+    // named in the step evidence below.
+    if (otherRemedies.length > 0) {
       this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'multiple_open_faces'), {
         actionId: candidate.id,
         target: enterCell,
-        faces: faces.map((face) => `${face.x},${face.y},${face.z}`).join(';'),
+        faces: `${faces[0]?.x ?? '?'},${faces[0]?.y ?? '?'},${faces[0]?.z ?? '?'}`,
+        blocker: blockerEvidence,
+        alternatives: otherRemedies.join(';'),
       })
-      this.logger.warn('agent', formatSkillInterrupt(PORTAL_ENTER_SKILL, 'multiple_open_faces'), {
-        actionId: candidate.id,
-        target: enterCell,
-        faces: faces.length,
-      })
+      boundary('several_remedy_classes', [...faceNames, ...remedyClasses])
       return { moved: false, cell: null, fromD, toD: fromD }
     }
-    for (const face of faces) {
+    // one class, several equivalent instances: refine by nearest reachable face,
+    // bounded to two attempts, and say so in the evidence
+    const attempts = faces.slice(0, PORTAL_FACE_LEG_MAX_ATTEMPTS)
+    this.logPortalStep(
+      candidate,
+      epoch,
+      'approach_leg',
+      'MANDATORY_PREREQUISITE',
+      `blocker=${blockerEvidence} class=DETOUR faces=[${faceNames.join(';')}] ` +
+        `refined_by=nearest_reachable chosen=${attempts.map((face) => `${face.x},${face.y},${face.z}`).join(';')}`,
+      'none',
+    )
+    for (const face of attempts) {
       if (this.dimensionMatches(dimension)) break
-      const arrived = (): boolean => {
-        const position = this.bot.entity.position
-        return (
-          Math.hypot(position.x - (face.x + 0.5), position.z - (face.z + 0.5)) <= 0.7 &&
-          Math.abs(position.y - face.y) <= PORTAL_WALK_IN_LEVEL_TOLERANCE
-        )
-      }
       // REFLEX (#436): exactly ONE standable open face exists, so stepping onto
       // it is the mechanically unique prerequisite of the selected entry.
       this.logger.info(
@@ -6746,30 +7759,27 @@ export class Executor {
         }),
         { actionId: candidate.id, cell: face, target: enterCell },
       )
-      this.logger.info(
-        'agent',
-        formatSkillStep(PORTAL_ENTER_SKILL, 'approach_leg', `cell=${face.x},${face.y},${face.z}`),
-        { actionId: candidate.id, cell: face },
-      )
-      let reached = await this.walkByControls(face, epoch, signal, {
-        directBearing: true,
-        budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
-        arrivedAt: arrived,
-      })
+      let reached = await this.walkToPortalFace(candidate, epoch, signal, face)
       if (!reached) {
-        // THE BOUNDED STEP-OVER CONTINUATION (#436): the face is standable but the
-        // body cannot walk to it because a verified 1-block hole lies between them.
-        // Dropping into that hole floor and then climbing the ledge is the
-        // mechanically unique prerequisite, so code may execute it - inside the
-        // SAME skill/lease, so the click-through stays one semantic choice (Jev
-        // chose the entry), with the bounded body change reported as a durable
-        // chunk. Several floors would be several ways in and stay policy-visible
-        // candidates: `portalFaceStepOverVia` returns null then and the skill
-        // refuses typed exactly as before.
+        // Same remedy class, one refinement deeper: the face may sit behind a
+        // 1-block hole, and the mechanical route is drop-then-step-up. The via is
+        // used only when exactly ONE verified floor exists (several are several
+        // ways in, and that boundary is already emitted).
         const via = this.portalFaceStepOverVia(face)
         if (via !== null) {
-          const from = this.bot.entity.position
-          const feetCell = { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) }
+          const feetCell = {
+            x: Math.floor(this.bot.entity.position.x),
+            y: Math.floor(this.bot.entity.position.y),
+            z: Math.floor(this.bot.entity.position.z),
+          }
+          // §17: the prerequisite states the exact geometry it proved unique (the
+          // hole floor and the face it climbs to, WITH their y), the exact blocker
+          // (U2), that it never left the declared envelope (U4) and that it had
+          // not changed the world yet (worldDelta - the bounded walk below is what
+          // moves the body, and the face is re-observed before progress is
+          // claimed, U6). The `REFLEX ... reason=unique_binding_prerequisite`
+          // line above is the same fact in the pre-rewrite vocabulary, and the
+          // shared `commitmentId` ties this step to the one Jev decision.
           this.logger.info(
             'agent',
             formatReflex({
@@ -6777,10 +7787,10 @@ export class Executor {
               action: 'step_over',
               evidence:
                 `the only standable open face (${face.x},${face.y},${face.z}) is not walk reachable from ` +
-                `(${feetCell.x},${feetCell.y},${feetCell.z}); the bounded continuation is the verified hole floor ` +
-                `(${via.x},${via.y},${via.z}) and then one step up onto the ledge (d=${round2(fromD)})`,
+                `(${feetCell.x},${feetCell.y},${feetCell.z}) at this stage; the bounded continuation is the ` +
+                `verified hole floor (${via.x},${via.y},${via.z}) and then one step up onto the ledge (d=${round2(fromD)})`,
             }),
-            { actionId: candidate.id, cell: via, target: enterCell },
+            { actionId: candidate.id, cell: via, target: face },
           )
           this.logger.info(
             'agent',
@@ -6789,27 +7799,35 @@ export class Executor {
               'step_over',
               formatSkillStepAuthority(
                 'MANDATORY_PREREQUISITE',
-                `cell=${via.x},${via.y},${via.z} face=${face.x},${face.y},${face.z} ` +
-                  `envelope=movement-only(no_dig,no_place)`,
-                `feet=(${feetCell.x},${feetCell.y},${feetCell.z})->(${via.x},${via.y},${via.z})`,
-              ),
+                `via=${via.x},${via.y},${via.z} to=${face.x},${face.y},${face.z} blocker=${blockerEvidence} ` +
+                  `from_feet=${feetCell.x},${feetCell.y},${feetCell.z} envelope=${PORTAL_ENTER_EFFECT_ENVELOPE}`,
+                'none',
+              ) + ` commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
             ),
-            { actionId: candidate.id, cell: via, face },
+            { actionId: candidate.id, cell: via, target: face },
           )
-          const reachedVia = await this.walkByControls(via, epoch, signal, {
-            directBearing: true,
-            budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
-          })
-          if (reachedVia) {
-            reached = await this.walkByControls(face, epoch, signal, {
-              directBearing: true,
-              budgetMs: PORTAL_FACE_LEG_BUDGET_MS,
-              arrivedAt: arrived,
-            })
-          }
+          const dropped = await this.walkToPortalFace(candidate, epoch, signal, via)
+          if (dropped) reached = await this.walkToPortalFace(candidate, epoch, signal, face)
         }
       }
+
       if (!reached) continue
+      // U6: re-observe the postcondition. The leg claims progress only if the
+      // body is standing on a face that is STILL standable right now; a face that
+      // vanished under the body is not assumed to have worked.
+      if (!isStandable(this.bot, face) || !this.portalInsideFace(face)) {
+        this.logger.warn(
+          'agent',
+          `${formatSkillPolicyBoundary({ skill: PORTAL_ENTER_SKILL, reason: 'face_unverified', alternatives: faceNames })} commitmentId=${this.portalCommitmentId(candidate, epoch)}`,
+          { actionId: candidate.id, cell: face, target: enterCell },
+        )
+        this.logger.warn('agent', formatPortalApproachRefused(enterCell, fromD, 'unreachable'), {
+          actionId: candidate.id,
+          target: enterCell,
+          detail: 'face_unverified_after_execution',
+        })
+        return { moved: false, cell: null, fromD, toD: this.portalCellDistance(enterCell) }
+      }
       const toD = this.portalCellDistance(enterCell)
       this.logger.info(
         'agent',
@@ -6823,6 +7841,7 @@ export class Executor {
       target: enterCell,
       faces: faces.length,
     })
+    boundary('face_unreachable', [...faceNames, ...remedyClasses])
     return { moved: false, cell: null, fromD, toD: fromD }
   }
 
@@ -6843,7 +7862,7 @@ export class Executor {
     // stays open for the next decision (never a silent completion).
     this.logger.info(
       'agent',
-      formatSkillEnd(PORTAL_ENTER_SKILL, 'progress', 'unverified', 'portal_not_entered'),
+      `${formatSkillEnd(PORTAL_ENTER_SKILL, 'progress', 'unverified', 'portal_not_entered')} progress=body_chunk failureCode=none commitmentId=${this.portalCommitmentId(candidate, epoch)} targetIdentity=${this.portalTargetIdentity(this.portalEntryCellOf(candidate), this.portalEntryDimensionOf(candidate))}`,
       { actionId: candidate.id },
     )
     return this.buildResult(candidate, epoch, startedAt, 'done', 'approaching', detail, null, {
@@ -6959,7 +7978,7 @@ export class Executor {
     })
     this.logger.info(
       'agent',
-      formatSkillEnd(PORTAL_ENTER_SKILL, 'entered', 'dimension', `portal_entered dimension=${dimension}`),
+      `${formatSkillEnd(PORTAL_ENTER_SKILL, 'entered', 'dimension', `portal_entered dimension=${dimension}`)} progress=portal_entered failureCode=none commitmentId=${this.portalCommitmentId(candidate, epoch)} targetIdentity=${this.portalTargetIdentity(enterCell, dimension)}`,
       { actionId: candidate.id, target: enterCell, dimension },
     )
     return this.buildResult(
@@ -7109,6 +8128,7 @@ export class Executor {
     signal: AbortSignal,
     goalKind: 'GoalGetToBlock' | 'GoalBlock',
   ): Promise<void> {
+    this.assertEffect({ type: 'move' })
     const goal =
       goalKind === 'GoalGetToBlock'
         ? new goals.GoalGetToBlock(target.x, target.y, target.z)
@@ -7131,6 +8151,7 @@ export class Executor {
     signal: AbortSignal,
     options: { requireLevel?: boolean } = {},
   ): Promise<void> {
+    this.assertEffect({ type: 'move' })
     if (this.options.actuation === 'pathfinder') {
       try {
         const goal = options.requireLevel === true
@@ -7436,6 +8457,7 @@ export class Executor {
       )
       const tool = this.bot.inventory.items().find((item) => ids.has(item.type))
       if (tool !== undefined) {
+        this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
         await this.bot.equip(tool, 'hand')
         this.ensureOwned(epoch, signal)
       }
@@ -7543,6 +8565,17 @@ export class Executor {
 
         const next = this.chooseStep(position, target)
         if (next === null) return false
+        // The same per-step landing guard the control walker uses. `chooseStep`
+        // already proves SOLID support for its own step levels, so this cannot
+        // refuse ordinary packet terrain; what it adds is the HAZARD landing cell
+        // the stepper was blind to (a fire block over netherrack is passable over
+        // solid support, so it was a legal packet step). A refusal stops the leg
+        // here, before the pose is written.
+        this.guardStepLanding(target, {
+          x: Math.floor(next.x),
+          y: Math.floor(next.y + 0.1),
+          z: Math.floor(next.z),
+        })
         const moveX = next.x - position.x
         const moveZ = next.z - position.z
         const yaw = Math.atan2(-moveX, moveZ)
@@ -7717,6 +8750,12 @@ export class Executor {
     if (!this.bot.canDigBlock(block)) {
       throw new ExecutorError('dig_error', `canDigBlock() returned false for ${block.name}`)
     }
+    this.assertEffect({
+      type: 'dig',
+      position: { x: block.position.x, y: block.position.y, z: block.position.z },
+      blockName: block.name,
+    })
+    this.assertEffect({ type: 'look' })
     await this.bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true)
     this.ensureOwned(epoch, signal)
 
@@ -8115,6 +9154,7 @@ export class Executor {
           throw new ExecutorError('dig_no_tool', `no ${toolName} in the inventory`)
         }
       } else {
+        this.assertEffect({ type: 'equip', itemName: tool.name, destination: 'hand' })
         await this.bot.equip(tool, 'hand')
         this.ensureOwned(epoch, signal)
       }
@@ -8199,6 +9239,51 @@ function bridgeFailureCode(reason: string): FailureCode {
       return 'place_refused'
     default:
       return 'path_stuck'
+  }
+}
+
+/**
+ * issue #436 section 17: how often an aggregated mechanical step of the same kind
+ * is reported again (attack/dig/place/equip/station/transfer always report).
+ */
+const SKILL_STEP_REPORT_MS = 1_000
+
+/** Carried item families a fight may put in hand (the damage is the held item's). */
+const WEAPON_ITEM_SUFFIXES: readonly string[] = ['_sword', '_axe']
+
+/**
+ * The world epoch a commitment's target identity was grounded in, or 0 when the
+ * target kind carries none (item/none). Used only to revalidate the LIVE epoch
+ * when the host injects one (`ExecutorOptions.observedWorldEpoch`).
+ */
+function committedWorldEpoch(commitment: SkillCommitment): number {
+  const target = commitment.target
+  return target.kind === 'item' || target.kind === 'none' ? 0 : target.worldEpoch
+}
+
+/** Carried tool families a grounded route-opening contract may require. */
+const ROUTE_TOOL_SUFFIXES: readonly string[] = ['_pickaxe', '_axe', '_shovel']
+
+/** Plain, greppable description of one mechanical effect for the SKILL_STEP line. */
+function describeEffect(effect: Effect): string {
+  switch (effect.type) {
+    case 'move':
+    case 'look':
+    case 'jump':
+    case 'sprint':
+      return effect.type
+    case 'attack':
+      return `attack=e${effect.entityId}`
+    case 'dig':
+      return `dig=${effect.position.x},${effect.position.y},${effect.position.z} block=${effect.blockName ?? 'unknown'}`
+    case 'place':
+      return `place=${effect.position.x},${effect.position.y},${effect.position.z} item=${effect.itemName}`
+    case 'equip':
+      return `equip=${effect.itemName} destination=${effect.destination}`
+    case 'station':
+      return `station=${effect.station}`
+    case 'transfer':
+      return `transfer=${effect.itemName} count=${effect.count ?? 'any'} container=${effect.container}`
   }
 }
 

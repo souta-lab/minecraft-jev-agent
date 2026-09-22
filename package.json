@@ -5,6 +5,7 @@
   "description": "Minecraft Jev agent: resident orchestrator, tools, and evidence gates",
   "packageManager": "bun@1.4.2",
   "workspaces": [
+    "jev-harness",
     "jev-agent",
     "buddy-driver",
     "mcbot",

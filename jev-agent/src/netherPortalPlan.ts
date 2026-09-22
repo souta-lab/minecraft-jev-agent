@@ -1385,6 +1385,15 @@ export function formatSkillEnd(
  *   hard_safety - a uniquely-determined escape from an immediate hazard, which
  *     may interrupt the in-flight skill (section B: fire / lava / burning /
  *     drowning; `envHazard.ts`).
+ *
+ * The COMMITMENT shape (`SKILL_COMMIT ... skillKind= ... effectEnvelopeHash=`) is
+ * deliberately NOT declared here: it is a semantic-identity vocabulary owned by
+ * the controller/Jev boundary (`formatSkillCommit` in `jevSemanticProjection.ts`)
+ * and by lane task/skill-commitment-phase1 (`SkillCommitment`, `EffectEnvelope`,
+ * which also enforces #436 §5's "the envelope MUST NOT expand dynamically").
+ * This module keeps only the per-Skill layer vocabulary, and call sites name
+ * WHICH commitment a step belongs to with the additive `commitmentId=` /
+ * `targetIdentity=` fields, so there is exactly one formatter per marker.
  */
 export type ReflexReason = 'unique_binding_prerequisite' | 'hard_safety'
 
@@ -1423,31 +1432,48 @@ export function portalOpenFaceCells(
   maxDistance: number,
 ): PortalBlockPosition[] {
   const found = new Map<string, PortalBlockPosition>()
-  for (const interior of interiorCells) {
-    if (interior.y !== standingLevel) continue
-    for (const dir of [
-      { x: 1, z: 0 },
-      { x: -1, z: 0 },
-      { x: 0, z: 1 },
-      { x: 0, z: -1 },
-    ]) {
-      const spot: PortalBlockPosition = { x: interior.x + dir.x, y: interior.y, z: interior.z + dir.z }
-      const key = formatPos(spot)
-      if (found.has(key)) continue
-      // The interior itself is never an approach cell, and a cell outside the
-      // body's reach of the gate is not a step aside.
-      if (interiorCells.some((cell) => formatPos(cell) === key)) continue
-      if (Math.hypot(spot.x + 0.5 - (from.x + 0.5), spot.z + 0.5 - (from.z + 0.5)) > maxDistance) continue
-      if (!isStandable(spot)) continue
-      found.set(key, spot)
+  // MEASURED (run-mucbyro1-1hqhm): the terrain on the open side of a gate is
+  // often NOT at the interior's standing level - the corridor south of this gate
+  // is one block lower, so the standable cell beside the interior is
+  // (26,66,10) and the search that only looked at y=67 named air and then
+  // refused its own leg (`faces=1 ... unreachable`). A face is therefore any
+  // standable cell orthogonally beside an interior cell at the interior's level
+  // OR exactly one level below OR one above (the 3-tall interior makes the level
+  // above a legitimate walk-in: the body steps DOWN into the portal block).
+  // Anything further away is a climb the walk must not invent.
+  for (const level of [standingLevel, standingLevel - 1, standingLevel + 1]) {
+    for (const interior of interiorCells) {
+      if (interior.y !== standingLevel) continue
+      for (const dir of [
+        { x: 1, z: 0 },
+        { x: -1, z: 0 },
+        { x: 0, z: 1 },
+        { x: 0, z: -1 },
+      ]) {
+        const spot: PortalBlockPosition = { x: interior.x + dir.x, y: level, z: interior.z + dir.z }
+        const key = formatPos(spot)
+        if (found.has(key)) continue
+        // The interior itself is never an approach cell, and a cell outside the
+        // body's reach of the gate is not a step aside.
+        if (interiorCells.some((cell) => formatPos(cell) === key)) continue
+        if (Math.hypot(spot.x + 0.5 - (from.x + 0.5), spot.z + 0.5 - (from.z + 0.5)) > maxDistance) continue
+        if (!isStandable(spot)) continue
+        found.set(key, spot)
+      }
     }
   }
-  return [...found.values()].sort(
-    (left, right) =>
+  return [...found.values()].sort((left, right) => {
+    const distance =
       Math.hypot(left.x + 0.5 - (from.x + 0.5), left.z + 0.5 - (from.z + 0.5)) -
-      Math.hypot(right.x + 0.5 - (from.x + 0.5), right.z + 0.5 - (from.z + 0.5)),
-  )
+      Math.hypot(right.x + 0.5 - (from.x + 0.5), right.z + 0.5 - (from.z + 0.5))
+    if (Math.abs(distance) > 0.001) return distance
+    // equal distance: prefer the interior's own level, then one below, then one above
+    return Math.abs(left.y - standingLevel) - Math.abs(right.y - standingLevel)
+  })
 }
+
+/** A face may be one block below/above the interior; further is a climb. */
+export const PORTAL_OPEN_FACE_LEVEL_TOLERANCE = 1
 
 /** The exact `PORTAL_ENTRY_UNVERIFIED` line: a remembered-site route, no lit claim. */
 export function formatPortalEntryUnverified(

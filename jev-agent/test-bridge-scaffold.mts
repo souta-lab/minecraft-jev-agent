@@ -47,6 +47,7 @@ import type { GuardContext } from './src/policy.ts'
 import type { PortalEntryPlan } from './src/netherPortalPlan.ts'
 import { NETHER, PORTAL_ENTERED_PREDICATE } from './src/netherPortalPlan.ts'
 import { cellKey, observeZeroProgressRoute, routeSignature } from './src/zeroProgressRoute.ts'
+import { effectViolation, envelopeForCandidate } from './src/skillCommitment.ts'
 import { Executor, EventLogger, defaultExecutorOptions } from './src/index.ts'
 import type { JsonlWriter } from './src/jev-legacy.ts'
 import { MIRRORED_MARKERS } from './src/controller.ts'
@@ -1103,6 +1104,8 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
       bridgeBlock: plan.block,
       bridgeSpan: plan.span,
       bridgeTarget: key(plan.far),
+      bridgeLanding: key(plan.landing),
+      bridgePlace: key(plan.place),
       mayPlaceBlocks: true,
       bridgeLine: formatBridgeStart({ cell: plan.landing, block: plan.block, span: plan.span, remaining: plan.remaining }),
     },
@@ -1213,6 +1216,68 @@ function bridgeCandidateFor(plan: { dir: BridgeDir; landing: Vec3Json; far: Vec3
       key(bodyCell) === '1,64,0' &&
       support === 'cobblestone',
     `steps=${steps} end="${end}" body=${key(bodyCell)} support=${support}`,
+  )
+}
+
+// ===========================================================================
+// (ix) section 5 EffectEnvelope: the SELECTION declares the bridge's place/equip
+//      authority, and a plain walk still declares neither (fail closed)
+// ===========================================================================
+{
+  const world = ledgeTerrain(3)
+  const counts = { cobblestone: 381 }
+  const state = worldState({ feet: world.feet, terrain: world.terrain, counts, enterCell: world.far })
+  const bridge = bridgeCandidateFor(
+    {
+      dir: 'E',
+      landing: { x: 1, y: 64, z: 0 },
+      place: { x: 1, y: 63, z: 0 },
+      far: world.far,
+      span: 3,
+      block: 'cobblestone',
+      remaining: 378,
+    },
+    state.tick,
+  )
+  // every declared meta key the envelope reads comes from the real offer path too
+  const offered = (() => {
+    const options = optionsFor({ feet: world.feet, terrain: world.terrain, enterCell: world.far })
+    const spent = spendEntryRoute(state, options, world.far)
+    const tick = worldState({ feet: world.feet, terrain: world.terrain, counts, enterCell: world.far, routes: spent })
+    return bridgeCandidates(entryCandidates(tick, options).candidates)[0]
+  })()
+  const envelope = envelopeForCandidate(bridge, { equipItems: [] })
+  const offeredEnvelope = offered === undefined ? null : envelopeForCandidate(offered, { equipItems: [] })
+  const placed = { x: 1, y: 63, z: 0 }
+  check(
+    '(ix) the selected bridge declares mayPlaceGroundedRoute + the exact first cell and block to equip',
+    envelope.mayPlaceGroundedRoute === true &&
+      (envelope.mayPlaceBlocks ?? []).some((entry) => entry.itemName === 'cobblestone' && key(entry.position) === '1,63,0') &&
+      (envelope.mayEquipItems ?? []).includes('cobblestone') &&
+      (envelope.mayDigBlocks ?? []).length === 0 &&
+      effectViolation(envelope, { type: 'place', position: placed, itemName: 'cobblestone' }) === null &&
+      effectViolation(envelope, { type: 'equip', itemName: 'cobblestone', destination: 'hand' }) === null &&
+      offeredEnvelope !== null &&
+      offeredEnvelope.mayPlaceGroundedRoute === true &&
+      (offeredEnvelope.mayEquipItems ?? []).includes('cobblestone'),
+    `placeRoute=${String(envelope.mayPlaceGroundedRoute)} cells=${JSON.stringify(envelope.mayPlaceBlocks)} equip=${JSON.stringify(envelope.mayEquipItems)} offeredRoute=${String(offeredEnvelope?.mayPlaceGroundedRoute)}`,
+  )
+  const plain: Candidate = {
+    ...bridge,
+    id: 'MOVE:p2_64_0',
+    meta: { tick: state.tick, x: 2, y: 64, z: 0 },
+  }
+  const plainEnvelope = envelopeForCandidate(plain, { equipItems: [] })
+  check(
+    '(ix) a plain walk still declares no place authority and fails closed on a placement',
+    plainEnvelope.mayPlaceGroundedRoute !== true &&
+      (plainEnvelope.mayPlaceBlocks ?? []).length === 0 &&
+      (plainEnvelope.mayEquipItems ?? []).length === 0 &&
+      effectViolation(plainEnvelope, { type: 'place', position: placed, itemName: 'cobblestone' }) ===
+        'place_cell_not_declared:1,63,0' &&
+      effectViolation(plainEnvelope, { type: 'equip', itemName: 'cobblestone', destination: 'hand' }) ===
+        'equip_item_not_declared:cobblestone',
+    `placeRoute=${String(plainEnvelope.mayPlaceGroundedRoute)} placeViolation=${effectViolation(plainEnvelope, { type: 'place', position: placed, itemName: 'cobblestone' })} equipViolation=${effectViolation(plainEnvelope, { type: 'equip', itemName: 'cobblestone', destination: 'hand' })}`,
   )
 }
 
