@@ -1214,6 +1214,12 @@ export const MIRRORED_MARKERS: ReadonlySet<string> = new Set([
   // standing above its own lit gate).
   'DESCENT_REFUSED',
   'DESCENT_CHUNK',
+  // The WALL ENTRY (`wallEntry.ts`): the tunnel a body opens when every walk step
+  // around it is refused. Without this in the mirrored list the live sink DROPS the
+  // one line that says which wall was opened, on which heading, at which level, and
+  // that no fluid could reach the pocket - and "the body mined the wall because the
+  // pocket is provably dry" cannot be told apart from an ordinary tunnel step.
+  'DIG_ROUTE_ENTRY',
   'PORTAL_ENTRY_UNVERIFIED',
   // The bounded direct walk into a non-solid portal cell: the live run needs
   // both the measured motion (`PORTAL_WALK_IN ... transferred=`) and the typed
@@ -6020,9 +6026,43 @@ export class JevController {
         skipped: typeof candidate.meta.digRouteSkipped === 'string' ? candidate.meta.digRouteSkipped : null,
         skippedBlock:
           typeof candidate.meta.digRouteSkippedBlock === 'string' ? candidate.meta.digRouteSkippedBlock : null,
+        entry: candidate.meta.digRouteEntry === true,
+        entryMode: typeof candidate.meta.digRouteEntryMode === 'string' ? candidate.meta.digRouteEntryMode : null,
+        entryLevel: typeof candidate.meta.digRouteEntryLevel === 'number' ? candidate.meta.digRouteEntryLevel : null,
+        entryEvidence:
+          typeof candidate.meta.digRouteEntryEvidence === 'string' ? candidate.meta.digRouteEntryEvidence : null,
       },
       this.tickCounter,
     )
+    // The WALL ENTRY's own line (`DIG_ROUTE_ENTRY`): the same fact in the wall-entry
+    // vocabulary - the cell the body came from, the heading, the tunnel level, the
+    // pre-existing floor and how many alternatives were grounded. Emitted only for an
+    // entry, so an ordinary dig route logs exactly what it logged before.
+    const entryLine = typeof candidate.meta.digRouteEntryLine === 'string' ? candidate.meta.digRouteEntryLine : null
+    if (entryLine !== null) {
+      this.logger.info(
+        'agent',
+        entryLine,
+        {
+          actionId: candidate.id,
+          dir: typeof candidate.meta.digRouteBearing === 'string' ? candidate.meta.digRouteBearing : null,
+          mode: typeof candidate.meta.digRouteEntryMode === 'string' ? candidate.meta.digRouteEntryMode : null,
+          level: typeof candidate.meta.digRouteEntryLevel === 'number' ? candidate.meta.digRouteEntryLevel : null,
+          floorBlock: typeof candidate.meta.digRouteEntryFloorBlock === 'string' ? candidate.meta.digRouteEntryFloorBlock : null,
+          alternatives:
+            typeof candidate.meta.digRouteEntryAlternatives === 'string' ? candidate.meta.digRouteEntryAlternatives : null,
+        },
+        this.tickCounter,
+      )
+    }
+    // #436 section 17 for the entry: the same mirrored `SKILL_STEP` channel the bridge
+    // uses, so the layer half (`authority=MANDATORY_PREREQUISITE` when the entry was the
+    // only grounded remedy / `MECHANICAL_CONTINUATION` when Jev had alternatives) is
+    // live-visible for the action the body actually took.
+    const authorityLine = typeof candidate.meta.digRouteAuthorityLine === 'string' ? candidate.meta.digRouteAuthorityLine : null
+    if (authorityLine !== null) {
+      this.logger.info('agent', authorityLine, { actionId: candidate.id, step: 'wall_entry' }, this.tickCounter)
+    }
   }
 
   /**

@@ -115,6 +115,25 @@ export type DigRouteRefusalReason =
   | 'arrived'
   /** every step that would reduce the distance is already spent at this stand cell */
   | 'spent'
+  /**
+   * WALL ENTRY (`wallEntry.ts`): mining the adjacent solid block would pour a
+   * neighbouring fluid into the pocket the dig opens. The mechanics rule is
+   * face-adjacency of a fluid to a cell of the new pocket - a fluid two cells away
+   * with the solid cell between them still solid cannot reach it, which is why this
+   * is a per-cell verdict and not the sensor's 3x3x3 proximity one.
+   */
+  | 'would_flood'
+  /**
+   * WALL ENTRY: nothing to open in this direction - the 1x2 profile is already open
+   * passage, so the ordinary walk machinery owns the step (a `walk` step, not a dig).
+   */
+  | 'no_wall'
+  /**
+   * WALL ENTRY: no adjacent wall can be opened at all - every neighbour is open
+   * air/fluid, unobserved, unbreakable, floorless, spent, protected, undiggable or
+   * not measurably closer to the target. `detail` carries the per-direction ledger.
+   */
+  | 'no_grounded_route'
 
 /**
  * How much closer to the target a step must land before it counts as advancing.
@@ -170,6 +189,16 @@ export interface DigRouteStep {
   detour: boolean
   /** Why the best-closing step was stepped around (null when it was taken). */
   skipped: DigRouteSkip | null
+  /**
+   * TRUE when this route is a WALL ENTRY: the same 1x2 level profile, but grounded
+   * by the per-cell rule in `wallEntry.ts` because the sensor's proximity `hazard`
+   * verdict refused that step even though the pocket the dig opens is provably dry.
+   * The mechanical action, the dig plan, the step cell, the executor and the route
+   * identity are identical to an ordinary level tunnel - only the evidence differs.
+   */
+  entry?: boolean
+  /** the wall/head/floor/flood evidence of an entry route (absent otherwise) */
+  entryEvidence?: string
 }
 
 export interface DigRouteSkip {
@@ -411,10 +440,17 @@ export function formatDigRoute(route: DigRouteStep, reason: string, target: Vec3
     route.detour && route.skipped !== null
       ? ` detour=true skipped=${route.skipped.dir}:${route.skipped.reason}`
       : ''
+  // A WALL ENTRY says so on its own line, with the evidence the per-cell rule used:
+  // the line is the one a reviewer greps to tell "the body mined the wall because the
+  // pocket is provably dry" from "the body took an ordinary tunnel step".
+  const entry =
+    route.entry === true
+      ? ` entry=true kind_detail=wall_entry evidence=${route.entryEvidence ?? 'none'}`
+      : ''
   return (
     `DIG_ROUTE reason=${reason} target=${cell(target)} bearing=${route.dir} ` +
     `cell=${cell(route.cell)} block=${route.block ?? 'unknown'} kind=${route.kind} mode=${route.mode} ` +
-    `from_d=${round2(route.fromDistance)} to_d=${round2(route.toDistance)}${detour}`
+    `from_d=${round2(route.fromDistance)} to_d=${round2(route.toDistance)}${detour}${entry}`
   )
 }
 

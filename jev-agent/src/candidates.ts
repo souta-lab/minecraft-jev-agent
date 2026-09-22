@@ -47,8 +47,10 @@ import { FURNACE_STONE_COST, knownStationKey, planPrereqOptions, prereqSubjectFo
 import type { KnownStationLike, PrereqInput, PrereqPath, PrereqRankPolicy } from './prereqOption.ts'
 import { descentHeadingObstruction, formatDescentHeading, pickBestDescendStep, resolveDescentHeading } from './descendPlan.ts'
 import type { DescentHeadingObstruction, DescentHeadingPlan, DescendScoreInput } from './descendPlan.ts'
-import { digRouteBearing, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
-import type { DigRouteRefusal, DigRouteRefusalReason } from './digRoute.ts'
+import { digRouteBearing, DIG_ROUTE_ARRIVE_DISTANCE, DIG_ROUTE_MIN_ADVANCE, formatDigRoute, formatDigRouteRefused, planDigRoute } from './digRoute.ts'
+import type { DigRouteRefusal, DigRouteRefusalReason, DigRouteStep } from './digRoute.ts'
+import { formatWallEntry, groundWallEntries } from './wallEntry.ts'
+import type { WallEntryRefusal, WallEntryRoute, WallProbe } from './wallEntry.ts'
 import { DIG_PATH_CAP } from './worldMemory.ts'
 import {
   BRIDGE_AUTHORITY_META,
@@ -7710,43 +7712,8 @@ function digRouteCandidate(
     // whole arm - the measured pocket is exactly this shape (the best-closing east
     // step is the gate's own obsidian column, needing pickaxe tier 4).
     stepRefusal: (step) => {
-      const profile = strictStepDigProfile(state, step)
-      // #436 U5 (SAFE / protected resources): a step whose profile would break a
-      // protected station block or a member of a LIVE structure is never a route,
-      // whatever the tool gate says. The measured case is the portal frame's own
-      // obsidian: the bearing route into the interior runs THROUGH frame cells, and
-      // no route may dismantle the asset the trip is for.
-      const liveStructures = liveStructureIndexOf(state)
-      for (const cell of profile.digPlan) {
-        const name = cell.name ?? ''
-        if (name.length > 0 && isProtectedStationBlock(name)) {
-          return {
-            dir: step.dir,
-            mode: step.mode,
-            reason: 'protected' as DigRouteRefusalReason,
-            block: name,
-            detail: `${name} at (${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a protected station`,
-          }
-        }
-        if (isLiveStructureMember(liveStructures, cell.cell)) {
-          return {
-            dir: step.dir,
-            mode: step.mode,
-            reason: 'protected' as DigRouteRefusalReason,
-            block: name.length > 0 ? name : (step.digName ?? null),
-            detail: `(${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a member of a live structure`,
-          }
-        }
-      }
-      if (profile.choice.ok) return null
-      const requirement = profile.requirement
-      return {
-        dir: step.dir,
-        mode: step.mode,
-        reason: 'no_tool',
-        block: requirement?.name ?? step.digName ?? null,
-        detail: `${requirement?.name ?? 'the binding block'} needs ${requirement?.harvestTool ?? 'a tool'} tier ${requirement?.harvestTier ?? 0}`,
-      }
+      const refusal = stepGateRefusal(state, step)
+      return refusal === null ? null : { dir: step.dir, mode: step.mode, ...refusal }
     },
   })
   if (decision.kind === 'refuse') {
@@ -7806,6 +7773,268 @@ function digRouteCandidate(
   return {
     ...built.candidate,
     id: `DIG_ROUTE:${route.mode}:${route.dir}:${blockId('b', route.dig)}`,
+  }
+}
+
+/**
+ * The ONE gate a dig step's whole 1x2 profile must pass before it may be a route:
+ * #436 U5 (a protected station / a live structure's member is never mined as a route)
+ * and the STRICT tool gate (a profile the held tools cannot finish is refused with
+ * `no_tool`). Shared by the descent dig route and the wall entry so a step the
+ * builder would refuse can never be the route either - the disagreement that arm
+ * exists to prevent.
+ */
+function stepGateRefusal(
+  state: WorldState,
+  step: DescentOption,
+): { reason: 'protected' | 'no_tool'; block: string | null; detail: string } | null {
+  const profile = strictStepDigProfile(state, step)
+  // #436 U5 (SAFE / protected resources): a step whose profile would break a
+  // protected station block or a member of a LIVE structure is never a route,
+  // whatever the tool gate says. The measured case is the portal frame's own
+  // obsidian: the bearing route into the interior runs THROUGH frame cells, and
+  // no route may dismantle the asset the trip is for.
+  const liveStructures = liveStructureIndexOf(state)
+  for (const cell of profile.digPlan) {
+    const name = cell.name ?? ''
+    if (name.length > 0 && isProtectedStationBlock(name)) {
+      return {
+        reason: 'protected',
+        block: name,
+        detail: `${name} at (${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a protected station`,
+      }
+    }
+    if (isLiveStructureMember(liveStructures, cell.cell)) {
+      return {
+        reason: 'protected',
+        block: name.length > 0 ? name : (step.digName ?? null),
+        detail: `(${cell.cell.x},${cell.cell.y},${cell.cell.z}) is a member of a live structure`,
+      }
+    }
+  }
+  if (profile.choice.ok) return null
+  const requirement = profile.requirement
+  return {
+    reason: 'no_tool',
+    block: requirement?.name ?? step.digName ?? null,
+    detail: `${requirement?.name ?? 'the binding block'} needs ${requirement?.harvestTool ?? 'a tool'} tier ${requirement?.harvestTier ?? 0}`,
+  }
+}
+
+/**
+ * The WALL ENTRY family: the tunnel a player opens when the terrain around them is
+ * unsurvivable to walk on.
+ *
+ * MEASURED (live, the operator's flooded Nether arrival at (2.7,59,-2.5) on main
+ * a0bc3d6): `MOVE_LEG_STOPPED x4`, `BRIDGE_REFUSED reason=no_verified_landing`,
+ * `DIG_ROUTE_REFUSED reason=hazard` x765 - every walk step, the level bridge and the
+ * ordinary dig route all refused, each for its own correct reason, and the body
+ * pinned. The missing affordance is the one a human uses: mine the SOLID wall beside
+ * you, because the pocket you open has a pre-existing rock floor (so there is no fall
+ * column to fall into) and no fluid can reach it.
+ *
+ * `state.ts#buildWallProbes` senses exactly that (the adjacent 1x2 profile, its
+ * pre-existing floor and the pocket's six-neighbourhood); `wallEntry.ts#groundWallEntries`
+ * is the ONE rule that decides which directions may be opened; this arm turns each
+ * grounded direction into an ORDINARY DESCEND candidate through the SAME
+ * `descendCandidateFromStep` every other dig step uses.
+ *
+ * IT IS AN OFFER, NEVER A SUBSTITUTION (#436 section 22): the entry is only
+ * enumerated when the ordinary dig route REFUSED (the caller runs this after
+ * `digRouteCandidate` returned null) and only from a sensor probe that exists only
+ * while a walk step is refused. Nothing is removed, re-aimed or force-selected; when
+ * two or more directions ground, every one of them is offered and the section 7 U3
+ * boundary is stated with the alternatives, so Jev chooses the direction.
+ */
+function wallEntryCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: {
+    target: Vec3Json
+    targetName: string | null
+    reason: string
+    extraMeta?: Record<string, string | number | boolean>
+  },
+  refusals: DigRouteRefusalSink,
+): { candidates: Candidate[]; classes: string[] } {
+  const walls = state.wallProbes
+  if (walls === undefined || walls.length === 0) return { candidates: [], classes: [] }
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  // The arrival rule the dig route itself uses: inside the arrival radius the ordinary
+  // walk / vertical approach owns the last block, and a dig there would be tunnelling
+  // into the destination. The entry is never consulted at arrival.
+  if (distance(feet, spec.target) <= DIG_ROUTE_ARRIVE_DISTANCE) return { candidates: [], classes: [] }
+  const standKey = cellKey(state.self.position)
+  const liveStructures = liveStructureIndexOf(state)
+  const decision = groundWallEntries({
+    selfPosition: state.self.position,
+    target: spec.target,
+    walls,
+    minAdvance: DIG_ROUTE_MIN_ADVANCE,
+    isProtected: (cell, name) =>
+      (name !== null && isProtectedStationBlock(name)) || isLiveStructureMember(liveStructures, cell),
+    // The entry's spend identity is the ordinary DESCEND route identity of the very
+    // sensor step it executes, so a step that already proved zero observable change
+    // from this stand cell is withheld here exactly as it is for the dig route.
+    isSpent: (probe) =>
+      isZeroProgressRouteRepeat(state.signals.zeroProgressRoutes, {
+        kind: 'DESCEND',
+        targetKey: cellKey(descentPrimaryCell(probe.step)),
+        standKey,
+        routeSig: descendStepRouteSignature(probe.step),
+        nowMs: state.timestampMs,
+      }),
+    stepRefusal: (probe) => stepGateRefusal(state, probe.step),
+  })
+  if (decision.kind === 'refuse') {
+    refusals.push(asDigRouteRefusal(decision.refusal, spec.target, feet))
+    return { candidates: [], classes: [] }
+  }
+  const alternatives = decision.routes.map((route) => `${route.dir}:${route.mode}`)
+  const out: Candidate[] = []
+  for (const route of decision.routes) {
+    const built = descendCandidateFromStep(state, options, route.probe.step, {
+      focusItem: spec.targetName,
+      descendTargetY: null,
+      // The step is the sensor's own profile and it strictly reduces the distance to
+      // the goal's target: a grounded route, never a blind search step.
+      grounded: true,
+      staircase: route.mode === 'down',
+      extraMeta: {
+        digRoute: true,
+        digRouteReason: spec.reason,
+        digRouteKind: 'tunnel',
+        digRouteEntry: true,
+        digRouteTarget: cellText(spec.target),
+        digRouteCell: cellText(route.cell),
+        digRouteBlock: route.block ?? 'unknown',
+        digRouteFrom: round2Number(route.fromDistance),
+        digRouteTo: round2Number(route.toDistance),
+        digRouteBearing: route.dir,
+        digRouteEntryMode: route.mode,
+        digRouteEntryLevel: route.cell.y,
+        digRouteEntryFloor: cellText(route.probe.floor.cell),
+        digRouteEntryFloorBlock: route.probe.floor.name ?? 'unknown',
+        digRouteEntryEvidence: route.evidence,
+        digRouteEntryAlternatives: alternatives.join(','),
+        digRouteLine: formatDigRoute(wallEntryStep(route), spec.reason, spec.target),
+        digRouteEntryLine: formatWallEntry({
+          route,
+          target: spec.target,
+          reason: spec.reason,
+          alternativeCount: alternatives.length,
+        }),
+        ...(spec.extraMeta ?? {}),
+      },
+      // The STRICT tool gate: an entry the body cannot finish is refused with
+      // `no_tool`, never offered and then re-aimed forever.
+      escape: false,
+    })
+    if (built === null) {
+      refusals.push({
+        reason: 'no_tool',
+        target: spec.target,
+        bearing: route.dir,
+        cell: route.dig,
+        block: route.block,
+        detail: `${route.block ?? 'the wall'} cannot be finished with the held tools`,
+      })
+      continue
+    }
+    // Its OWN id namespace (`WALL_ENTRY:<mode>:<dir>:<cell>`): a reviewer can tell
+    // which arm produced the step, while the SPEND identity stays the shared DESCEND
+    // identity of the sensor step, so a spent step is spent for both arms.
+    out.push({ ...built.candidate, id: `WALL_ENTRY:${route.mode}:${route.dir}:${blockId('b', route.dig)}` })
+  }
+  return { candidates: out, classes: out.length === 0 ? [] : ['dig:wall_entry'] }
+}
+
+/**
+ * The VERTICAL remedy for a locomotion target that sits ABOVE the body and has no
+ * walkable route.
+ *
+ * MEASURED (live, overworld, `JEV_CANDIDATE_SET offered=9` IDENTICAL tick after tick
+ * at (28.5,61,6.5)): the body sat on the floor of a ~6-block shaft whose only wall was
+ * x=27 while the Nether gate stood at y67. The offer held `SKILL_STEP:step_up:p29_62_6`
+ * and six surface MOVEs at y67-68 - none of which can lift a body out of a pit - and
+ * the only vertical candidate in the whole log was `ASCEND:habitat:p28_62_6`, whose two
+ * owners are goal-kind-keyed: `surfaceAscentCandidates` (candidates.ts:4173) returns
+ * nothing unless the active goal kind is `surface`, and `foodHabitatAscent` refuses at
+ * or above `ANIMAL_HABITAT_SEA_LEVEL` (candidates.ts:4243) because it answers the food
+ * goal. A `place:nether_portal` goal whose target is six blocks up therefore had NO
+ * vertical remedy at all, while the machinery that could produce one already exists.
+ *
+ * The rule here is the GEOMETRY of the locomotion target, never a goal kind or a place:
+ * the committed target is more than `VERTICAL_GAP` above the body, the ordinary walk
+ * cannot express the route, and the ONE vertical planner every ascent already uses
+ * (`planVerticalApproachDetailed` through `ascentRouteTo`: reuse a remembered tunnel,
+ * cut an up-staircase, or pillar with a held placeable block) grounds a plan to that
+ * level. The existing `surface`/`habitat` arms are untouched - they keep their own
+ * refusals, which record their own measured incidents.
+ */
+function verticalRemedyCandidates(
+  state: WorldState,
+  options: CandidateOptions,
+  spec: { target: Vec3Json; reason: string; skill: string },
+): { candidates: Candidate[]; classes: string[] } {
+  const dy = spec.target.y - state.self.position.y
+  if (!(dy > VERTICAL_GAP)) return { candidates: [], classes: [] }
+  const targetY = Math.floor(spec.target.y)
+  const feet = {
+    x: Math.floor(state.self.position.x),
+    y: Math.floor(state.self.position.y),
+    z: Math.floor(state.self.position.z),
+  }
+  const ascent = ascentRouteTo(state, options, {
+    targetY,
+    goalId: spec.skill,
+    idPrefix: 'ASCEND:target:',
+    label: `ascend toward the ${spec.reason} target`,
+    extraMeta: {
+      ascentForLocomotionTarget: `${spec.target.x},${spec.target.y},${spec.target.z}`,
+      ascentReason: spec.reason,
+      ascentFromY: feet.y,
+    },
+  })
+  if (ascent.candidates.length === 0) return { candidates: [], classes: [] }
+  return { candidates: ascent.candidates, classes: ['ascent:vertical'] }
+}
+
+/** The `DigRouteStep` an entry route is, for the shared `DIG_ROUTE` line. */
+function wallEntryStep(route: WallEntryRoute): DigRouteStep {
+  return {
+    kind: 'tunnel',
+    dir: route.dir,
+    mode: route.mode,
+    cell: route.cell,
+    dig: route.dig,
+    block: route.block,
+    harvestTool: route.probe.step.digHarvestTool ?? null,
+    harvestTier: route.probe.step.digHarvestTier ?? null,
+    digCells: descentDigPlan(route.probe.step).map((entry) => entry.cell),
+    fromDistance: route.fromDistance,
+    toDistance: route.toDistance,
+    step: route.probe.step,
+    detour: false,
+    skipped: null,
+    entry: true,
+    entryEvidence: route.evidence,
+  }
+}
+
+/** The wall-entry refusal in the dig route's own typed vocabulary. */
+function asDigRouteRefusal(refusal: WallEntryRefusal, target: Vec3Json, feet: Vec3Json): DigRouteRefusal {
+  return {
+    reason: refusal.reason,
+    target,
+    bearing: digRouteBearing(feet, target),
+    cell: refusal.cell,
+    block: refusal.block,
+    detail: refusal.detail,
   }
 }
 
@@ -8207,6 +8436,21 @@ function travelApproachLegs(
     refusals,
   )
   if (dig !== null) legs.push(dig)
+  // The other grounded way the terrain can change when the walk steps are refused:
+  // mine the adjacent SOLID wall open (`wallEntryCandidates`). Enumerated only when
+  // the dig route above could not be grounded at all - the entry is an additional
+  // ORDINARY candidate for exactly that shape (an offer Jev may take or ignore),
+  // never a replacement for a route that exists and never a `if stuck then dig` step.
+  const entries =
+    dig === null
+      ? wallEntryCandidates(
+          state,
+          options,
+          { target: spec.target, targetName: spec.targetName, reason: 'no_walkable_route', extraMeta: spec.extraMeta },
+          refusals,
+        )
+      : { candidates: [], classes: [] }
+  for (const entry of entries.candidates) legs.push(entry)
   // The last grounded route change: a bounded, sensor-derived continuation onto a
   // verified ledge when no sensed standable cell can walk to the waypoint at all
   // (see `pocketContinuations`). A continuation is a DIFFERENT stand cell, so the
@@ -8226,20 +8470,44 @@ function travelApproachLegs(
   // genuinely needs to cross a gap (the same `walkable` gate the hole
   // step-over/step-up uses), so ordinary walkable terrain grounds nothing here.
   const bridge = groundBridgeLeg(state, options, spec, walkable)
+  // The VERTICAL remedy when the target itself is above the body: the same grounded
+  // ascent every other arm uses (`planVerticalApproachDetailed`), hung off the
+  // locomotion target's GEOMETRY instead of a goal kind (see
+  // `verticalRemedyCandidates`). Gated on the ordinary walk being unable to express
+  // the route, exactly like the continuations and the bridge.
+  const vertical =
+    walkable || (best === null && continuations.length === 0 && bridge.plan === null)
+      ? { candidates: [], classes: [] }
+      : verticalRemedyCandidates(state, options, { target: spec.target, reason: spec.reason, skill: spec.skill })
+  for (const ascent of vertical.candidates) legs.push(ascent)
   // #436 section 7 (U3) / section 19 (8, 28) / section 22: the grounded remedies
   // are ENUMERATED by semantic class, never ranked. `movement` is the hole
-  // step-over/step-up; `dig` is the bounded dig route, a separate DESCEND
-  // candidate (never a contract on a MOVE, so a walk never silently gains dig
-  // authority); `place:bridge` is the third class, a MOVE that DECLARES
-  // `mayPlaceBlocks` and the block it consumes. When more than one class is on
-  // offer the next move is Jev's, and the boundary is stated.
+  // step-over/step-up; `dig:route` is the bounded dig route and `dig:wall_entry` the
+  // tunnel into the adjacent solid wall, both separate DESCEND candidates (never a
+  // contract on a MOVE, so a walk never silently gains dig authority);
+  // `ascent:vertical` is the grounded climb to a target above; `place:bridge` is a
+  // MOVE that DECLARES `mayPlaceBlocks` and the block it consumes. When more than one
+  // class is on offer the next move is Jev's, and the boundary is stated.
   const remedyClasses = [
     ...(best !== null ? ['movement:walk'] : []),
     ...continuations.map((cont) => `movement:${cont.action}`),
     ...(dig !== null ? ['dig:route'] : []),
+    ...entries.classes,
+    ...vertical.classes,
     ...(bridge.plan !== null ? ['place:bridge'] : []),
     ...(bridge.plan !== null && ascendAlternativeAvailable(state, spec.target) ? ['place:pillar'] : []),
   ]
+  // #436 section 7 U3 / section 19 (8, 28) / section 22: several grounded remedies are
+  // several routes for Jev and code stops. When the alternatives are whole remedy
+  // CLASSES the boundary names the classes; when the classes agree but several WALL
+  // ENTRY directions/modes grounded, it names those instead - either way the line
+  // says which alternatives code refused to rank.
+  const entryAlternatives =
+    entries.candidates.length > 1
+      ? entries.candidates.map(
+          (candidate) => `dig:wall_entry:${String(candidate.meta.digRouteBearing ?? '?')}:${String(candidate.meta.digRouteEntryMode ?? '?')}`,
+        )
+      : []
   const boundary =
     remedyClasses.length > 1
       ? formatSkillPolicyBoundary({
@@ -8247,8 +8515,20 @@ function travelApproachLegs(
           reason: 'multiple_non_equivalent_recoveries',
           alternatives: remedyClasses,
         })
-      : null
-  const uniqueContinuation = continuations.length === 1 && dig === null && !walkable && bridge.plan === null
+      : entryAlternatives.length > 1
+        ? formatSkillPolicyBoundary({
+            skill: spec.skill,
+            reason: 'multiple_grounded_wall_entries',
+            alternatives: entryAlternatives,
+          })
+        : null
+  const uniqueContinuation =
+    continuations.length === 1 &&
+    dig === null &&
+    !walkable &&
+    bridge.plan === null &&
+    entries.classes.length === 0 &&
+    vertical.classes.length === 0
   for (const cont of continuations) {
     const reflex = uniqueContinuation
       ? formatLegReflex({
@@ -8290,6 +8570,40 @@ function travelApproachLegs(
   // and that code stopped.
   if (boundary !== null && legs.length > 0) {
     for (const leg of legs) leg.meta.legPolicyBoundary = boundary
+  }
+  // #436 section 17 for every WALL ENTRY leg: the layer half says whether code finished
+  // a UNIQUE prerequisite or merely realized the route Jev selected. The line is
+  // carried in meta exactly like the bridge's authority line, and the controller logs
+  // it through the same mirrored `SKILL_STEP` marker when the entry is selected.
+  for (const leg of legs) {
+    if (leg.meta.digRouteEntry !== true) continue
+    // §7's unique-remedy test: ONE grounded remedy in total (this entry) is a
+    // prerequisite code may finish; several (another class, or another entry
+    // direction) means the step only realizes the route Jev selected.
+    const unique = remedyClasses.length === 1 && entries.candidates.length === 1
+    leg.meta.digRouteAuthorityLine = formatSkillStep(
+      spec.skill,
+      'wall_entry',
+      formatSkillStepAuthority(
+        unique ? 'MANDATORY_PREREQUISITE' : 'MECHANICAL_CONTINUATION',
+        `target=${cellText(spec.target)} dir=${String(leg.meta.digRouteBearing ?? 'unknown')} ` +
+          `mode=${String(leg.meta.digRouteEntryMode ?? 'unknown')} cell=${String(leg.meta.digRouteCell ?? 'unknown')} ` +
+          `floor=${String(leg.meta.digRouteEntryFloor ?? 'unknown')}:${String(leg.meta.digRouteEntryFloorBlock ?? 'unknown')} ` +
+          `evidence=${String(leg.meta.digRouteEntryEvidence ?? 'none')} alternatives=${String(leg.meta.digRouteEntryAlternatives ?? 'none')}`,
+        'dig_blocks=1',
+        { budget: 1 },
+      ),
+    )
+    if (unique) {
+      leg.meta.legReflex = formatReflex({
+        ownerSkill: spec.skill,
+        action: 'wall_entry',
+        evidence:
+          `no_walkable_route;wall@${String(leg.meta.digRouteCell ?? 'unknown')}:` +
+          `${String(leg.meta.digRouteBlock ?? 'unknown')};floor:${String(leg.meta.digRouteEntryFloorBlock ?? 'unknown')};` +
+          `d=${String(leg.meta.digRouteFrom ?? 'unknown')}->${String(leg.meta.digRouteTo ?? 'unknown')}`,
+      })
+    }
   }
   // The typed refusal is attached to the legs this offer DID ground, exactly like
   // `legPolicyBoundary`: a reviewer reads "the bridge was needed here and refused
@@ -10302,6 +10616,36 @@ function routeOpeningCandidates(
     digRefusals,
   )
   if (dig !== null && !out.some((candidate) => candidate.id === dig.id)) out.push(dig)
+  // The same precondition as above, in the recovery family: when the dig route could
+  // not be grounded at all, the adjacent WALL ENTRY is the other grounded way the
+  // terrain can change. Ordinary MOVE-family candidates, offered beside everything
+  // else - Jev chooses, and the `moveAdvancesTowardTarget` gate below never applies to
+  // a DESCEND (it is a real terrain change, not a lateral walk).
+  else if (dig === null) {
+    const entries = wallEntryCandidates(
+      state,
+      options,
+      { target: goalTarget, targetName: null, reason: 'route_withheld' },
+      digRefusals,
+    )
+    for (const entry of entries.candidates) {
+      if (!out.some((candidate) => candidate.id === entry.id)) out.push(entry)
+    }
+  }
+  // No enclosing Skill owns this recovery family, so the vertical remedy here is an
+  // ordinary candidate like every other: `MECHANICAL_CONTINUATION`, no section 7
+  // prerequisite claim, no boundary ranking - Jev chooses. The walk to the advancing
+  // cell above is still owned by the ordinary reachability/path machinery.
+  {
+    const vertical = verticalRemedyCandidates(state, options, {
+      target: goalTarget,
+      reason: 'route_withheld',
+      skill: 'ROUTE_CONTINUATION',
+    })
+    for (const ascent of vertical.candidates) {
+      if (!out.some((candidate) => candidate.id === ascent.id)) out.push(ascent)
+    }
+  }
   // The SAME blocker, the other grounded remedy: when the withheld target lies
   // across a gap (a landing cell with no support), the bounded bridge span changes
   // the route by PLACING a floor instead of removing rock. Grounded here as well as
