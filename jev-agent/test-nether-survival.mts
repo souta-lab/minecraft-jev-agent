@@ -324,13 +324,26 @@ addCase('(a5) a non-survival choice is still a hard guard rejection (no new reta
   }
 })
 
-addCase('(a6) the revalidation guard is wired to the re-grounding rule, not to a bare rejection', () => {
+addCase('(a6) the revalidation guard re-grounds first, and an un-re-groundable SURVIVAL choice asks again instead of ending the tick idle', () => {
+  // Intent unchanged: the guard tries the re-grounding rule before it rejects.
+  // Strengthened after a measured live death: the old code ended the tick with
+  // NO action when the re-ground failed (`if (reground.candidateId === null) return`)
+  // while a wither skeleton was in contact at 0.57 m with health 4.36, even though
+  // the fresh offer still held a reachable ATTACK on that same mob. Ending the tick
+  // idle is what killed the body, so the ungrounded branch must also queue the fresh
+  // offer for the next decision (`damage_taken`) - code still does not choose
+  // fight-vs-flight (section 8), it only declines to stand still.
   const text = readFileSync(new URL('./src/controller-legacy.ts', import.meta.url), 'utf8')
   const guard = text.indexOf('const reground = regroundVanishedSurvivalChoice(')
   const reject = text.indexOf('this.guardRejections += 1', guard)
+  const ungrounded = text.indexOf('if (reground.candidateId === null) {', reject)
+  const requeue = text.indexOf("this.requestDecision('damage_taken'", ungrounded)
+  const tagged = text.indexOf("source: 'survival_reground_failed'", ungrounded)
   return {
-    pass: guard > 0 && reject > guard && text.includes('if (reground.candidateId === null) return'),
-    detail: `regroundCallAt=${guard} guardRejectAt=${reject} returnsOnlyWhenUngrounded=${text.includes('if (reground.candidateId === null) return')}`,
+    pass: guard > 0 && reject > guard && ungrounded > reject && requeue > ungrounded && tagged > ungrounded,
+    detail:
+      `regroundCallAt=${guard} guardRejectAt=${reject} ungroundedBlockAt=${ungrounded} ` +
+      `requeuesDecisionAt=${requeue} tagged=${tagged > ungrounded}`,
   }
 })
 

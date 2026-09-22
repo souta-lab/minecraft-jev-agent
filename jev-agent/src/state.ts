@@ -50,6 +50,8 @@ import type { ArmorSlot } from './gearPlan.ts'
 import { headroomAcrossFootprint } from './bodyGeometry.ts'
 import { buildEnvHazardState, envHazardKindOfBlock } from './envHazard.ts'
 import type { EnvHazardCell, EnvHazardState } from './envHazard.ts'
+import { BRIDGE_DIRS, BRIDGE_PROBE_DEPTH, bridgeDirOffset, isBridgeUnsafeBlockName } from './bridgeRoute.ts'
+import type { BridgeDir, BridgeProbe, BridgeProbeCell } from './bridgeRoute.ts'
 
 export type Vec3Json = {
   x: number
@@ -793,6 +795,14 @@ export type WorldState = {
   furnaces?: StationEntry[]
   /** reachable air positions with solid support where a block could be placed */
   placementSpots: Vec3Json[]
+  /**
+   * The bounded cardinal forward probes a BRIDGE/scaffold grounding reads: for
+   * each of the four horizontal faces, the live truth of the next
+   * `BRIDGE_PROBE_DEPTH` columns (open / placeable / supported / standable /
+   * hazard). Absent in old replay fixtures means "no probe", so every existing
+   * caller and fixture is behaviourally unchanged (no probe grounds no bridge).
+   */
+  bridgeProbes?: BridgeProbe[]
   /**
    * The subset of `placementSpots` whose only body access is a fluid column:
    * placing there means the body stands in water. A station must not be placed
@@ -2863,7 +2873,16 @@ function buildPlacementSpots(bot: Bot, options: SensorOptions, self: SelfState):
   const botBody = { x: self.position.x, y: self.position.y, z: self.position.z }
   for (let dx = -2; dx <= 2; dx += 1) {
     for (let dz = -2; dz <= 2; dz += 1) {
-      for (let dy = 0; dy <= 1; dy += 1) {
+      // `dy = -1` is the FLOOR cell of a hole beside the body: the cell a
+      // same-level bridge/scaffold places into (`bridgeRoute.ts`). The scan used
+      // to start at `dy = 0`, so a hole's floor was never a sensed placement spot
+      // and a bridge could not be grounded at all (measured: the Nether fortress
+      // edge over the lava basin had no candidate of any kind for the gap).
+      // On ordinary terrain this adds NOTHING: there the adjacent column's floor
+      // cell is already solid, so `isReplaceableAir(atFeet)` rejects it and the
+      // sensed spot set is byte-identical. The body-overlap rule below still
+      // excludes the cell directly under the feet (distance exactly 1.0).
+      for (let dy = -1; dy <= 1; dy += 1) {
         const candidate = { x: feet.x + dx, y: feet.y + dy, z: feet.z + dz }
         // A placement target must not be inside the bot's own body.
         const nearBody = distance(
@@ -3348,6 +3367,91 @@ function buildTerrain(bot: Bot, options: SensorOptions, self: SelfState): Vec3Js
 }
 
 /**
+ * ONE cardinal direction's bounded forward probe: the live block truth a
+ * BRIDGE/scaffold grounding needs (`bridgeRoute.planBridgeSpan`).
+ *
+ * The flat terrain scan (`buildTerrain`, 5x5x3) and the cardinal step sample
+ * (`buildDescent`, one cell per direction) between them cannot answer the two
+ * questions a bridge must answer - "is the FAR side still standable?" and "is
+ * every cell between here and there bridgeable?" - so the gap was named by the
+ * sensor (`DescentOption.refusal === 'no_support'`) with nothing able to act on
+ * the name. This reads at most `BRIDGE_PROBE_DEPTH` columns ahead per direction
+ * and classifies each with the SAME predicates the rest of the sensor uses
+ * (`isPassable` / `isSolidSupport` / `isUsableGroundSupport` / `isUsableStand`),
+ * so a probed cell cannot disagree with `terrain.standable` about standability.
+ *
+ * Exported because the executor re-probes the SAME direction live immediately
+ * before each placement: the offered span and the executed span then come from
+ * one implementation instead of two.
+ */
+export function probeBridgeDirection(
+  bot: Bot,
+  feet: Vec3Json,
+  dir: BridgeDir,
+  depth: number = BRIDGE_PROBE_DEPTH,
+): BridgeProbe {
+  const scratch = bot.entity.position.clone()
+  const at = (x: number, y: number, z: number) => bot.blockAt(scratch.set(x, y, z))
+  const { dx, dz } = bridgeDirOffset(dir)
+  const cells: BridgeProbeCell[] = []
+  for (let step = 1; step <= Math.max(1, Math.floor(depth)); step += 1) {
+    const cell = { x: feet.x + dx * step, y: feet.y, z: feet.z + dz * step }
+    const floor = { x: cell.x, y: cell.y - 1, z: cell.z }
+    const feetBlock = at(cell.x, cell.y, cell.z)
+    const headBlock = at(cell.x, cell.y + 1, cell.z)
+    const floorBlock = at(cell.x, floor.y, cell.z)
+    // An unloaded cell (`null`) is never a hazard - the same rule the
+    // environmental hazard scan uses - so a chunk that has not arrived can only
+    // make a bridge REFUSE (open/placeable are false), never look safe.
+    const belowFloorBlock = at(cell.x, floor.y - 1, cell.z)
+    const hazard = [feetBlock, headBlock, floorBlock, belowFloorBlock].some(
+      (block) => block !== null && isBridgeUnsafeBlockName(block.name),
+    )
+    cells.push({
+      cell,
+      floor,
+      open: isPassable(feetBlock),
+      headOpen: isPassable(headBlock),
+      placeable: isReplaceableAir(floorBlock),
+      supported: isSolidSupport(floorBlock),
+      standable: isUsableStandFromBlocks(feetBlock, headBlock, floorBlock),
+      hazard,
+      cellName: feetBlock?.name ?? null,
+      floorName: floorBlock?.name ?? null,
+    })
+  }
+  return {
+    dir,
+    dx,
+    dz,
+    cells,
+    // The body's own footing: the face a bridge placement is made against
+    // (`placeBlock(footing, face=<dir>)`), exactly the human scaffold gesture.
+    footing: isUsableGroundSupport(at(feet.x, feet.y - 1, feet.z)),
+  }
+}
+
+/**
+ * The four cardinal probes one sensor tick seeds for the bridge grounding.
+ *
+ * Bounded and constant: 4 directions x `BRIDGE_PROBE_DEPTH` columns of direct
+ * chunk lookups (no block scan, no pathfinder probe), skipped entirely while the
+ * body holds nothing it could place - a body that cannot bridge cannot lose a
+ * refusal by not being sensed, because `bridgeRoute.planBridgeRoute` answers
+ * `no_block` from the inventory fact BEFORE it reads any probe.
+ */
+function buildBridgeProbes(bot: Bot, self: SelfState): BridgeProbe[] {
+  const feet = {
+    x: Math.floor(self.position.x),
+    y: Math.floor(self.position.y),
+    z: Math.floor(self.position.z),
+  }
+  // Cardinally adjacent only: a bridge is a same-level 4-neighbour step, and the
+  // probe is bounded so a sensor tick cannot grow with the terrain.
+  return BRIDGE_DIRS.map((dir) => probeBridgeDirection(bot, feet, dir))
+}
+
+/**
  * SAFE: keep-distance destinations for an active threat.
  *
  * The measured retreat failure is a SENSING failure as much as a policy one:
@@ -3478,6 +3582,10 @@ function buildWorldStateUncached(bot: Bot, input: SensorInput, options: SensorOp
     furnaces: buildFurnaces(bot, options, self, rememberedStations),
     placementSpots,
     submergedPlacementSpots: submergedPlacementSpots(bot, placementSpots),
+    // Sensing is gated on the material possibility (a bridge needs a block to
+    // place), never on a decision: the typed `no_block` refusal is derived from the
+    // inventory fact alone, so an empty-handed body still reads its gap.
+    ...(selectPlaceableBlock(inventory.counts) === null ? {} : { bridgeProbes: buildBridgeProbes(bot, self) }),
     portalFrameSites,
     portalFrame,
     liveStructureMembers: mergeLiveStructureMembers(
